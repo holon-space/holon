@@ -76,6 +76,81 @@ pub fn soak_reseed_reason() -> ReseedLeakReason {
     }
 }
 
+/// What the navigation-latency soak rung (`soak_nav_latency`) should assert.
+/// Parse-don't-validate target for `HOLON_SOAK_NAV` (`None` = unset = rung
+/// skips). Sibling of [`SoakReseedExpect`], for the ORTHOGONAL latency axis:
+/// the cold focus-descendant matview materialization cliff (BugFunnel row 78 —
+/// `navigate focus` = 2674ms @4000 blocks), not the CRDT reseed leak.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SoakNavExpect {
+    /// RED-FIRST proof: assert the cold-matview navigation cliff REPRODUCES —
+    /// first-visit navigations to a fresh focus root are dramatically slower
+    /// than warm revisits AND breach a generous absolute floor. Fails loud as a
+    /// HEADLINE FINDING if the cliff does NOT reproduce at scale (e.g. the
+    /// harness pre-warmed the descendant matviews at boot ⇒ make it colder to
+    /// match prod, per CLAUDE.md's "make E2E and prod more similar" rule).
+    Reproduce,
+    /// Post-fix guard: assert EVERY navigation (cold included) settles under
+    /// the [`soak_nav_budget_ms`] wall-clock budget.
+    Zero,
+}
+
+/// Parse `HOLON_SOAK_NAV` at the boundary. Unset or empty ⇒ `None` (rung
+/// skips). Any other non-empty value fails loud — no silent default.
+pub fn soak_nav_expect() -> Option<SoakNavExpect> {
+    match std::env::var("HOLON_SOAK_NAV") {
+        Err(_) => None,
+        Ok(s) if s.trim().is_empty() => None,
+        Ok(s) => match s.trim() {
+            "reproduce" => Some(SoakNavExpect::Reproduce),
+            "zero" => Some(SoakNavExpect::Zero),
+            other => {
+                panic!("HOLON_SOAK_NAV must be 'reproduce' or 'zero' (or unset), got {other:?}")
+            }
+        },
+    }
+}
+
+/// The per-navigation wall-clock budget (ms) the `zero`-mode guard and the
+/// opt-in [`soak_nav_hard_assert`] enforce against p95. Default `2000`
+/// (generous, sized for a RELEASE-profile run) so CI never flakes on a slow
+/// host. Override with `HOLON_SOAK_NAV_BUDGET_MS`; fails loud on garbage.
+pub fn soak_nav_budget_ms() -> u64 {
+    match std::env::var("HOLON_SOAK_NAV_BUDGET_MS") {
+        Err(_) => 2000,
+        Ok(s) if s.trim().is_empty() => 2000,
+        Ok(s) => s.trim().parse().unwrap_or_else(|e| {
+            panic!("HOLON_SOAK_NAV_BUDGET_MS must be a u64 millisecond value, got {s:?}: {e}")
+        }),
+    }
+}
+
+/// Whether the opt-in hard p95<budget assertion is on
+/// (`HOLON_SOAK_NAV_ASSERT=1` or `=true`). Off by default so wall-clock timing
+/// (host-dependent) is an OBSERVATION unless a run explicitly opts into
+/// enforcing it — mirrors the reseed rung's `HOLON_SOAK_ASSERT_P95_MS`.
+pub fn soak_nav_hard_assert() -> bool {
+    matches!(
+        std::env::var("HOLON_SOAK_NAV_ASSERT").ok().as_deref(),
+        Some("1") | Some("true")
+    )
+}
+
+/// The deterministic set of navigable focus roots the nav rung drives: the
+/// synthetic soak DOC pages `block:soak-doc-0 .. block:soak-doc-{n-1}`, where
+/// `n = ceil(HOLON_SOAK_SEED_BLOCKS / HOLON_SOAK_BLOCKS_PER_DOC)`. Each is a
+/// real ingested page in the SUT store (`#+ID: soak-doc-K`, `#+TITLE: Soak Page
+/// K` — see [`soak_org_files`]) that renders in the LeftSidebar, so a
+/// first-visit `NavigateFocus` to it registers a fresh focus-descendant watch =
+/// the cold materialization under test. `0` when the soak is off.
+pub fn soak_doc_count() -> usize {
+    let total = soak_block_count();
+    if total == 0 {
+        return 0;
+    }
+    total.div_ceil(blocks_per_doc())
+}
+
 /// Total number of extra vault blocks to seed. `HOLON_SOAK_SEED_BLOCKS`
 /// (default `0` — soak off, keystone behaviour unchanged).
 pub fn soak_block_count() -> usize {
