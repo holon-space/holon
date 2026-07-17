@@ -204,4 +204,122 @@ mod tests {
         let adapter = OrgFormatAdapter::new();
         assert_eq!(adapter.extensions(), &["org"]);
     }
+
+    /// `content_differs` is the sole gate that decides whether a file-parsed
+    /// block gets written back over the persisted one. A false negative
+    /// silently DROPS a user's edit (worst bug class); a mangled comparison
+    /// operator or an `||`→`&&` in the OR chain produces exactly that. This
+    /// pins the two required behaviours: identity ⇒ no diff, and a change
+    /// in ANY single compared dimension ⇒ diff. Each variant isolates one
+    /// clause, so together they kill the whole-function `-> true`/`->
+    /// false`, every `!= -> ==`, and every `|| -> &&` mutant in
+    /// `content_differs`.
+    #[test]
+    fn content_differs_flags_each_compared_field_and_not_identity() {
+        use holon_api::types::ContentType;
+        use holon_api::types::Priority;
+        use holon_api::types::SourceLanguage;
+        use holon_api::types::Tags;
+        use holon_api::types::TaskState;
+        use holon_api::types::Timestamp;
+
+        let adapter = OrgFormatAdapter::new();
+        let path = PathBuf::from("/vault/doc.org");
+        let root = PathBuf::from("/vault");
+        let parent = EntityUri::no_parent();
+        let parsed = adapter
+            .parse(&path, "* Base headline\nBody line\n", &parent, &root)
+            .unwrap();
+        let base = parsed.blocks[0].clone();
+
+        // Identity ⇒ not different (kills `content_differs -> true`).
+        assert!(
+            !adapter.content_differs(&base, &base),
+            "a block must not differ from itself"
+        );
+
+        let mut v;
+
+        v = base.clone();
+        v.content = "Different content".into();
+        assert!(
+            adapter.content_differs(&base, &v),
+            "content change undetected"
+        );
+
+        v = base.clone();
+        v.parent_id = EntityUri::block("other-parent");
+        assert!(
+            adapter.content_differs(&base, &v),
+            "parent_id change undetected"
+        );
+
+        v = base.clone();
+        v.content_type = ContentType::Source;
+        assert!(
+            adapter.content_differs(&base, &v),
+            "content_type change undetected"
+        );
+
+        v = base.clone();
+        v.source_language = Some(SourceLanguage::Other("python".into()));
+        assert!(
+            adapter.content_differs(&base, &v),
+            "source_language change undetected"
+        );
+
+        v = base.clone();
+        v.source_name = Some("snippet".into());
+        assert!(
+            adapter.content_differs(&base, &v),
+            "source_name change undetected"
+        );
+
+        v = base.clone();
+        v.set_task_state(Some(TaskState::from_keyword("TODO")));
+        assert!(
+            adapter.content_differs(&base, &v),
+            "task_state change undetected"
+        );
+
+        v = base.clone();
+        v.set_priority(Some(Priority::from_int(1).unwrap()));
+        assert!(
+            adapter.content_differs(&base, &v),
+            "priority change undetected"
+        );
+
+        v = base.clone();
+        v.set_tags(Tags::from_tag_iter(["urgent".to_string()]));
+        assert!(adapter.content_differs(&base, &v), "tags change undetected");
+
+        v = base.clone();
+        v.set_scheduled(Some(Timestamp::parse("<2026-02-21>").unwrap()));
+        assert!(
+            adapter.content_differs(&base, &v),
+            "scheduled change undetected"
+        );
+
+        v = base.clone();
+        v.set_deadline(Some(Timestamp::parse("<2026-03-01>").unwrap()));
+        assert!(
+            adapter.content_differs(&base, &v),
+            "deadline change undetected"
+        );
+
+        v = base.clone();
+        v.properties
+            .insert("Custom".into(), holon_api::Value::String("x".into()));
+        assert!(
+            adapter.content_differs(&base, &v),
+            "drawer property change undetected"
+        );
+
+        v = base.clone();
+        v.set_sequence(base.sequence() + 1);
+        assert!(
+            adapter.content_differs(&base, &v),
+            "sequence change undetected"
+        );
+    }
 }

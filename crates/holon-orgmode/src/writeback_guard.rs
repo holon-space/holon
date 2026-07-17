@@ -630,4 +630,94 @@ Command palette body.
             "veto must loudly name the dropped block; got: {msg}"
         );
     }
+
+    /// Content-only grounding: a source block whose id changed in the
+    /// projection but whose (normalized) content is unchanged is preserved, NOT
+    /// loss. This exercises the `contents` arm of the surviving set — the
+    /// `from_rendered` filter `!c.is_empty()` must KEEP non-empty contents.
+    /// Deleting that `!` empties the content set, so this honest edit reads as
+    /// data loss and the guard falsely vetoes.
+    #[test]
+    fn content_match_with_changed_id_passes() {
+        let source = "\
+#+ID: doc
+
+* Heading
+:PROPERTIES:
+:ID: old-id
+:END:
+Shared body text.
+";
+        let projection = "\
+#+ID: doc
+
+* Heading
+:PROPERTIES:
+:ID: new-id
+:END:
+Shared body text.
+";
+        ensure_ingest_lossless(
+            &path(),
+            source,
+            &surviving(projection),
+            &no_removals(),
+            &root(),
+        )
+        .expect("a block grounded only by unchanged content must pass");
+    }
+
+    /// Sibling content-only grounding: a block de-inlined into a sibling file
+    /// (new id there) is grounded by the sibling's CONTENT folded in via
+    /// `union_rendered`. Deleting the `!` in that method's
+    /// `!content.is_empty()` drops the sibling's non-empty contents from
+    /// the union, so the moved block reads as loss and the guard falsely
+    /// vetoes.
+    #[test]
+    fn sibling_union_content_grounding_passes() {
+        let source = "\
+#+ID: main-doc
+
+* Main heading
+:PROPERTIES:
+:ID: main-block
+:END:
+Main body.
+
+* Child heading
+:PROPERTIES:
+:ID: child-in-main
+:END:
+Child page body.
+";
+        // Main projection: the child block is gone (de-inlined out).
+        let main_projection = "\
+#+ID: main-doc
+
+* Main heading
+:PROPERTIES:
+:ID: main-block
+:END:
+Main body.
+";
+        // Sibling projection: same child CONTENT under a NEW id.
+        let sibling_projection = "\
+#+ID: child-doc
+
+* Child heading
+:PROPERTIES:
+:ID: child-relocated
+:END:
+Child page body.
+";
+        let mut surviving =
+            SurvivingProjection::from_rendered(&path(), main_projection, &root()).unwrap();
+        let sibling_path = PathBuf::from("/vault/Child.org");
+        surviving
+            .union_rendered(&sibling_path, sibling_projection, &root())
+            .unwrap();
+
+        ensure_ingest_lossless(&path(), source, &surviving, &no_removals(), &root())
+            .expect("a block grounded only by sibling content must pass");
+    }
 }
