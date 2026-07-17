@@ -88,6 +88,33 @@ The action-to-visible time, broken into stages. This is the first tool for any
   `list_tables` / matview definitions, `execute_raw_sql` (run `EXPLAIN` by hand).
 - Reads: the actual SQL and plan behind a slow query or a misbehaving matview.
 
+### Matview-maintenance cost probe (live, read-only)
+`execute_raw_sql` returns `duration_ms` in its result — use it as a precise,
+zero-instrumentation stopwatch. This is the fastest way to catch an
+IVM-hostile matview (the class behind the 2026-07-18 "5–10s navigation" find:
+`watch_view_*` recursive descendant view cold-materialized in **11894ms** on a
+1038-block vault, vs 6.9ms for the non-recursive `block` matview).
+Procedure (run each SEQUENTIALLY — the DatabaseActor is single-threaded; a heavy
+compute blocks every following query and makes the app itself unresponsive, so
+firing these concurrently just yields `Transport error: no pending response`):
+1. `SELECT count(*) FROM <matview>` for each `watch_view_*` / named matview from
+   `list_tables`. The **first** read pays cold IVM materialization; a **second**
+   read that drops to <1ms proves the cost was maintenance, not the read.
+2. A `duration_ms` in the thousands on the first read = that matview's
+   maintenance is the suspect. Recursive-CTE matviews (`WITH RECURSIVE`, a
+   `visited || ',' || id` string cycle-guard, `NOT LIKE '%,'||id||',%'`) are the
+   usual offender — especially when the recursive **seed enumerates every block
+   as a root** (`FROM block AS _v1`) and filters to the focused root only at the
+   end, making the walk O(N×subtree) instead of O(subtree). Scope the seed to
+   `focus_roots` to fix.
+3. Confirm it lands on the interaction path with the wall-clock chrome-trace
+   (see below) during a real navigation — navigation is NOT covered by the
+   `holon_latency` `stage="e2e"` oracle (that instrument fires only on the write
+   path: `interaction_dispatched` has 3 callers, all edits), and the
+   `LatencySloLayer` is `#[cfg(debug_assertions)]` so it is compiled out of
+   release builds. A release + warm-boot log therefore shows NO latency line for
+   a slow navigation — absence of signal there is not evidence of speed.
+
 ## Logs — triage from a running/finished session
 Point these at `/tmp/holon.log` (or a `tee`'d run log). Cheapest first:
 - `python3 scripts/normalize-log.py` — coarse GROUP-BY (16k→~1k lines): "what is
