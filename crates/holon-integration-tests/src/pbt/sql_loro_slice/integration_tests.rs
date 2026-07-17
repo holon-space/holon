@@ -74,14 +74,18 @@ async fn sql_loro_slice_task_state_coherent_across_stores() {
     seed_block(&sql, &loro, &uri("block:c"), "gamma", None).await;
 
     let sut = sql_loro_wide(sql, LoroBackendComponent::new(loro));
-    let report = run_selected(&composed_invariant_catalog(), &sut, &CapMap::new()).await;
+    // The invariant was re-anchored (F4) to compare BOTH SUT stores against
+    // `RefTaskState`, so the ref cap is a real selection dependency. Seed it
+    // with the same canonical task_state both stores hold (block:c has none).
+    let ref_ = ref_task_state(vec![(uri("block:a"), "TODO"), (uri("block:b"), "DONE")]);
+    let report = run_selected(&composed_invariant_catalog(), &sut, &ref_).await;
 
     assert!(
         report
             .ran_ids()
             .contains(&"inv-task-state-storage-coherence"),
-        "the combined slice wires both SutSqlProjection and SutLoroTaskState, so the coherence \
-         invariant must be selected; ran={:?} deselected={:?}",
+        "the combined slice wires both SutSqlProjection and SutLoroTaskState (+ ref \
+         RefTaskState), so the coherence invariant must be selected; ran={:?} deselected={:?}",
         report.ran_ids(),
         report.deselected,
     );
@@ -116,7 +120,11 @@ async fn sql_loro_slice_catches_task_state_divergence() {
         .expect("loro update_block_properties");
 
     let sut = sql_loro_wide(sql, LoroBackendComponent::new(loro));
-    let report = run_selected(&composed_invariant_catalog(), &sut, &CapMap::new()).await;
+    // The re-anchored (F4) invariant compares BOTH SUT stores against
+    // `RefTaskState`. Ref says `TODO` (matching SQL); Loro says `DONE`, so the
+    // Loro store diverges from the canonical task_state and the anchor catches it.
+    let ref_ = ref_task_state(vec![(a.clone(), "TODO")]);
+    let report = run_selected(&composed_invariant_catalog(), &sut, &ref_).await;
 
     let failures = report.failures();
     assert!(
