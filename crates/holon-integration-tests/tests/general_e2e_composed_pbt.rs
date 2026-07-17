@@ -359,3 +359,315 @@ fn soak_reseed_reproduction() {
         }
     }
 }
+
+/// **Vault-scale NAVIGATION-LATENCY soak rung — reproduce the cold
+/// focus-descendant matview cliff (BugFunnel row 78) at ~2000-block scale.**
+///
+/// The keystone boots a 3-block focus doc, so the whole-vault projection cost
+/// of a page navigation never manifests — Martin only meets it by hand at real
+/// vault scale (`navigate focus` measured 2674ms @4000 blocks; the cold
+/// focus-descendant `watch_view` seeds its recursive descendant traversal from
+/// ALL blocks and applies the focus filter LAST, so the first visit to any root
+/// pays an O(vault) materialization: ~11.9s @1038 live blocks). This rung
+/// inflates the SUT boot to soak scale (`HOLON_SOAK_SEED_BLOCKS`) and drives
+/// REAL page navigations through the EXACT keystone drivers, measuring
+/// wall-clock dispatch→settled per navigation as TWO steps:
+///   1. `SutFocusWrite::apply_navigate_focus` — the sidebar click-to-focus path
+///      (`click_entity(left_sidebar) -> navigation.focus intent -> nav SQL
+///      write
+///      + focus-matview settle`). This writes `focus_roots`/`current_focus` — a
+///      ~sub-second focus write, the "warm" baseline.
+///   2. `SutWatchRegister::register_watch` (the `SetupWatch` transition, driven
+///      through the SAME production `ReactiveEngine::watch_query_live` path the
+///      real UI's main panel uses) — registers the main-panel focus-descendant
+///      CONTENT watch and settles it. This is the O(vault) content
+///      materialization = the RC5 cliff locus.
+///
+/// **Why step 2 is required.** `settle_focus_matviews` (inside NavigateFocus)
+/// polls ONLY the lightweight `current_focus`/`focus_roots` tables; the
+/// headless harness never registers the main-panel descendant watch (boot
+/// registers only the sidebar page-list watch), so a bare NavigateFocus is
+/// STRUCTURALLY BLIND to the cold materialization — the "make E2E and prod more
+/// similar" coldness gap. Step 2 closes it by registering the exact watch the
+/// main panel does.
+///
+/// Focus roots: the deterministic synthetic soak DOC pages
+/// (`block:soak-doc-0 .. block:soak-doc-{n-1}`, `n = soak_doc_count()`), each a
+/// real ingested page that renders in the LeftSidebar. "First navigation after
+/// boot" is cold by construction: boot seeds focus on `block:journals`, so the
+/// user's first navigation to any soak page is a never-visited root that must
+/// materialize its descendant content from scratch.
+///
+/// Gated on `HOLON_SOAK_NAV` (`reproduce` | `zero`) AND `HOLON_SOAK_SEED_BLOCKS
+/// > 0`: unset ⇒ this SKIPS cleanly (disclosed), so it is NEVER part of the
+/// default `cargo nextest` run. Hand-rolled (not `prop_state_machine!`) for a
+/// runtime skip + deterministic FIXED navigation plan.
+///
+/// **INVOCATION (RELEASE profile — wall-clock is meaningless un-optimized).**
+/// The `--test general_e2e_composed_pbt` filter is REQUIRED — without it every
+/// integration-test binary in the package release-compiles (minutes of wasted
+/// CPU). `pbt` is a DEFAULT feature of `holon-integration-tests`, so no
+/// `--features` flag is needed for this headless rung (`holon-gpui/pbt` is not
+/// a feature of this package and would error).
+/// Red-first proof (reports the breach; PASS = cliff reproduced):
+/// ```text
+/// HOLON_SOAK_NAV=reproduce HOLON_SOAK_SEED_BLOCKS=2000 HOLON_SOAK_SETTLE_MS=30000 \
+///   cargo nextest run -p holon-integration-tests --test general_e2e_composed_pbt \
+///   --release --no-capture -E 'test(soak_nav_latency)' 2>&1 | tee /tmp/soak-nav.log
+/// ```
+/// Demonstrate the guard going RED on current main (hard-assert p95<budget):
+/// add `HOLON_SOAK_NAV_ASSERT=1`. Post-fix regression guard:
+/// `HOLON_SOAK_NAV=zero`.
+///
+/// @pbt kind soak
+/// @pbt covers cold-focus-descendant-matview-latency — first-visit navigation
+/// pays O(vault) materialization
+#[test]
+fn soak_nav_latency() {
+    use std::time::Instant;
+
+    use holon_api::EntityUri;
+    use holon_api::QueryLanguage;
+    use holon_api::Region;
+    use holon_integration_tests::pbt::composed::soak_seed;
+    use holon_integration_tests::pbt::composed::soak_seed::SoakNavExpect;
+    use holon_integration_tests::pbt::composed::wide_e2e::WideE2E;
+    use holon_integration_tests::pbt::composed::wide_e2e::wide_e2e_ref;
+    use holon_integration_tests::pbt::query::QuerySource;
+    use holon_integration_tests::pbt::query::QueryTable;
+    use holon_integration_tests::pbt::query::TestQuery;
+    use holon_integration_tests::pbt::transitions::E2ETransition;
+    use holon_integration_tests::pbt::transitions::NavigateFocus;
+    use holon_integration_tests::pbt::transitions::SetupWatch;
+    use proptest_state_machine::StateMachineTest;
+
+    // Reproduction bar for the RC5 cliff: the focus-descendant matview
+    // materialization p95 must be multi-second to count as "the cliff
+    // reproduced". Prod measured ~11.9s @1038 live blocks; 1500ms is a generous,
+    // host-robust floor well above the sub-second materialization the harness
+    // shows at 2000 blocks but far below the prod cliff — so it distinguishes
+    // "cliff present" from "materialization is fast here" without host flakiness.
+    const CLIFF_FLOOR_MS: u128 = 1500;
+    // Cap on how many distinct soak pages to drive as cold roots (keeps a
+    // 2000-block release run to a few minutes — ~10 cold materializations).
+    const MAX_ROOTS: usize = 12;
+
+    let Some(expect) = soak_seed::soak_nav_expect() else {
+        eprintln!(
+            "[soak-nav] SKIP soak_nav_latency: set HOLON_SOAK_NAV=reproduce (or =zero) AND \
+             HOLON_SOAK_SEED_BLOCKS=2000 to reproduce/guard the cold focus-descendant matview \
+             navigation cliff (BugFunnel row 78) at vault scale. Unset ⇒ not part of the default \
+             run. RELEASE profile only (wall-clock)."
+        );
+        return;
+    };
+    let blocks = soak_seed::soak_block_count();
+    let doc_count = soak_seed::soak_doc_count();
+    if blocks == 0 || doc_count == 0 {
+        eprintln!(
+            "[soak-nav] SKIP soak_nav_latency: HOLON_SOAK_NAV is set but HOLON_SOAK_SEED_BLOCKS \
+             is 0 — a soak-scale boot is the whole point. Set HOLON_SOAK_SEED_BLOCKS=2000 \
+             (≥2000, yielding ≥1 navigable soak page)."
+        );
+        return;
+    }
+
+    let roots = doc_count.min(MAX_ROOTS);
+    let budget = soak_seed::soak_nav_budget_ms();
+    let hard_assert = soak_seed::soak_nav_hard_assert();
+    // Post-boot floor: the soak seeder emits exactly `blocks` block ids draining
+    // into `block_raw`; allow 10% slack for the flat boot settle. A gross
+    // under-seed (boot ended unsettled) means we'd be measuring an empty vault —
+    // fail loud below.
+    let min_live = blocks * 9 / 10;
+
+    eprintln!(
+        "[soak-nav] mode={expect:?} blocks={blocks} navigable_roots={roots} budget_ms={budget} \
+         hard_assert={hard_assert} (deterministic sidebar-click nav via SutFocusWrite)"
+    );
+
+    // Boot ONE soak-scale SUT. The oracle is static: `NavigateFocus` mints no
+    // blocks, so the harness per-tick reconcile is a 0==0 no-op regardless of
+    // the oracle state, and the soak pages need not be modelled by it (the SUT
+    // store holds them as real ingested pages; the sidebar-click driver targets
+    // them directly). We drive the SUT, not the oracle — this rung measures
+    // latency, it does not run the invariant catalog.
+    let boot_start = Instant::now();
+    let ref_state = wide_e2e_ref();
+    let mut sut = <ComposedSut<WideE2E> as StateMachineTest>::init_test(&ref_state);
+    let live = sut.sut_block_count();
+    eprintln!(
+        "[soak-nav] booted live_blocks={live} in {:?} (floor {min_live})",
+        boot_start.elapsed()
+    );
+    assert!(
+        live >= min_live,
+        "[soak-nav] boot under-seeded — live_blocks={live} < floor {min_live} for \
+         HOLON_SOAK_SEED_BLOCKS={blocks}. The boot ended unsettled / the vault never drained; the \
+         reproduction would be measuring an empty vault. THIS IS A FINDING (raise \
+         HOLON_SOAK_SETTLE_MS or investigate the boot drain)."
+    );
+
+    let soak_page = |k: usize| -> EntityUri {
+        EntityUri::parse(&format!("block:soak-doc-{k}")).expect("valid soak page id")
+    };
+
+    // The PROD main-panel content query (`assets/default/index.org`,
+    // `block:default-main-panel`): the navigation-aware recursive descendant of
+    // the current `focus_roots(region=main)`. `settle_focus_matviews` (inside
+    // NavigateFocus) polls ONLY the lightweight `current_focus`/`focus_roots`
+    // tables — it NEVER materializes this main-panel content watch, so a bare
+    // NavigateFocus is structurally BLIND to the cold materialization. So after
+    // each nav we register the SAME watch the real UI's main panel registers,
+    // through the production `ReactiveEngine::watch_query_live` path (the
+    // `SutWatchRegister` cap the `SetupWatch` transition binds), and measure its
+    // register→settle wall-clock. NB the prod holon_sql form correctly SEEDS
+    // from `focus_roots`; the all-blocks recursive scan is introduced by Turso
+    // IVM's recursive-CTE compilation of `focus_descendants`. `TestQuery::to_sql`
+    // has no recursive surface, so we register the equivalent GQL form
+    // (`MATCH (fr:focus_root),(root:block)<-[:CHILD_OF*0..N]-(d) …`), which the
+    // query-equivalence PBT proves selects the identical row set and which IVM
+    // compiles to the same recursive descendant matview — the cliff locus.
+    let main_panel_watch = || TestQuery {
+        table: QueryTable::Blocks,
+        columns: vec!["id".to_string()],
+        predicates: vec![],
+        source: QuerySource::FocusRootDescendants {
+            region: "main".to_string(),
+            max_depth: 64,
+            stop_at_pages: false,
+        },
+    };
+
+    // Per fresh root: NavigateFocus (the focus write — the ~sub-second baseline)
+    // THEN register the main-panel descendant watch (the O(vault) content
+    // materialization). "cold" = the full nav→content-visible latency
+    // (nav + descendant materialization); "warm" = the focus-write-only baseline
+    // (what a revisit with a cached view costs). `watch_ms` isolates the pure
+    // descendant materialization — the RC5 cliff, if present.
+    let mut cold_ms: Vec<u128> = Vec::new(); // nav + descendant materialization
+    let mut warm_ms: Vec<u128> = Vec::new(); // nav (focus write) only
+    let mut watch_ms: Vec<u128> = Vec::new(); // descendant materialization only
+    let mut all_ms: Vec<u128> = Vec::new();
+
+    for k in 0..roots {
+        let root = soak_page(k);
+        let nav = E2ETransition::NavigateFocus(NavigateFocus {
+            region: Region::Main,
+            block_id: root.clone(),
+        });
+        let s = Instant::now();
+        sut = <ComposedSut<WideE2E> as StateMachineTest>::apply(sut, &ref_state, nav);
+        let nav_ms = s.elapsed().as_millis();
+
+        let watch = E2ETransition::SetupWatch(SetupWatch {
+            query_id: format!("main-panel-{k}"),
+            query: main_panel_watch(),
+            language: QueryLanguage::HolonGql,
+        });
+        let s = Instant::now();
+        sut = <ComposedSut<WideE2E> as StateMachineTest>::apply(sut, &ref_state, watch);
+        let w_ms = s.elapsed().as_millis();
+
+        let content_ms = nav_ms + w_ms;
+        warm_ms.push(nav_ms);
+        watch_ms.push(w_ms);
+        cold_ms.push(content_ms);
+        all_ms.push(content_ms);
+        eprintln!(
+            "[soak-nav] nav #{k} root={root} nav_ms={nav_ms} descendant_watch_ms={w_ms} \
+             content_ms={content_ms}"
+        );
+    }
+
+    // p50/p95 (nearest-rank), ALWAYS disclosed.
+    let pct = |data: &[u128], p: f64| -> u128 {
+        if data.is_empty() {
+            return 0;
+        }
+        let mut d = data.to_vec();
+        d.sort_unstable();
+        let rank = ((d.len() as f64) * p).ceil() as usize;
+        d[rank.clamp(1, d.len()) - 1]
+    };
+    // `warm_ms` holds the per-nav focus-write (NavigateFocus) times; `watch_ms`
+    // the per-nav focus-descendant materialization (the cliff locus); `cold_ms`
+    // / `all_ms` the full nav→content-visible latency (nav + descendant).
+    let nav_p50 = pct(&warm_ms, 0.50);
+    let nav_p95 = pct(&warm_ms, 0.95);
+    let watch_p50 = pct(&watch_ms, 0.50);
+    let watch_p95 = pct(&watch_ms, 0.95);
+    let watch_max = watch_ms.iter().copied().max().unwrap_or(0);
+    let content_p50 = pct(&all_ms, 0.50);
+    let content_p95 = pct(&all_ms, 0.95);
+    let content_max = all_ms.iter().copied().max().unwrap_or(0);
+
+    eprintln!(
+        "[soak-nav] SUMMARY blocks={blocks} roots={roots} n_nav={} \
+         | FOCUS-WRITE(nav) p50={nav_p50}ms p95={nav_p95}ms \
+         | DESCENDANT-MATVIEW(cliff locus) p50={watch_p50}ms p95={watch_p95}ms max={watch_max}ms \
+         | CONTENT(nav→visible) p50={content_p50}ms p95={content_p95}ms max={content_max}ms \
+         | budget={budget}ms cliff_floor={CLIFF_FLOOR_MS}ms",
+        all_ms.len(),
+    );
+    eprintln!(
+        "[soak-nav] content_ms_per_root={cold_ms:?} descendant_matview_ms_per_root={watch_ms:?}"
+    );
+
+    // Opt-in hard assertion (mode-independent): the user-facing content p95
+    // (nav→visible) must clear the budget. This is the SLO guard; RED whenever a
+    // navigation breaches, GREEN otherwise.
+    if hard_assert {
+        assert!(
+            content_p95 < budget as u128,
+            "[soak-nav] HOLON_SOAK_NAV_ASSERT: p95 nav→content-visible latency {content_p95}ms ≥ \
+             budget {budget}ms at {blocks} blocks (descendant-matview p95={watch_p95}ms). A \
+             navigation breaches the SLO."
+        );
+    }
+
+    match expect {
+        SoakNavExpect::Reproduce => {
+            // The RC5 cliff lives in the focus-descendant matview materialization
+            // (prod: ~11.9s @1038 live blocks). "Reproduced" = that materialization
+            // is multi-second (≥ CLIFF_FLOOR). Keyed on the descendant matview, NOT
+            // the nav-dominated content total, so it tests the actual cliff locus.
+            let reproduced = watch_p95 >= CLIFF_FLOOR_MS;
+            assert!(
+                reproduced,
+                "[soak-nav] REPRODUCTION FAILED: the cold focus-descendant matview cliff did NOT \
+                 reproduce at {blocks} blocks across {roots} fresh roots. The main-panel descendant \
+                 watch (registered through the SAME production `watch_query_live` path the real UI \
+                 uses) materialized in p95={watch_p95}ms / max={watch_max}ms — FAR below the \
+                 multi-second floor ({CLIFF_FLOOR_MS}ms) and ~2 orders of magnitude below the prod \
+                 ~11.9s @1038 blocks. This is a HEADLINE FINDING, NOT a bug in this rung: the cliff \
+                 is NOT explained by vault scale alone under settle-to-quiescence. Like the reseed \
+                 soak rung (BugFunnel row 78/71), the live-vault cost is almost certainly \
+                 concurrency-specific (CRDT reprojection / IVM under concurrent readers / real \
+                 many-file boot O(N²)), which the serialized harness does not exercise. Do NOT \
+                 weaken this assertion — the next probe needs a concurrent-reader-during-navigation \
+                 lever or a live-vault measurement, not more blocks. \
+                 (descendant_matview_ms_per_root={watch_ms:?})"
+            );
+            eprintln!(
+                "[soak-nav] REPRODUCED: focus-descendant matview p95={watch_p95}ms ≥ \
+                 {CLIFF_FLOOR_MS}ms at {blocks} blocks — the O(vault) cold materialization cliff is \
+                 live. The rung is a non-vacuous guard for the fix (scope the recursive CTE to the \
+                 focus subtree)."
+            );
+        }
+        SoakNavExpect::Zero => {
+            assert!(
+                content_p95 < budget as u128,
+                "[soak-nav] EXPECTED FAST NAV (post-fix guard) but nav→content-visible \
+                 p95={content_p95}ms ≥ budget {budget}ms at {blocks} blocks (descendant-matview \
+                 p95={watch_p95}ms, max={watch_max}ms). A first-visit navigation regressed into \
+                 O(vault) materialization. (content_ms_per_root={cold_ms:?})"
+            );
+            eprintln!(
+                "[soak-nav] GUARD GREEN: nav→content-visible p95={content_p95}ms < budget \
+                 {budget}ms — navigation (incl. focus-descendant materialization) stays under SLO."
+            );
+        }
+    }
+}
