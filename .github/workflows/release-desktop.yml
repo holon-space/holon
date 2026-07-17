@@ -102,17 +102,16 @@ jobs:
         with:
           toolchain: nightly
 
-      - name: Cache Rust dependencies
-        uses: actions/cache@v4
+      # rust-cache restores the newest target/ for this platform via a
+      # lock-independent prefix (cargo's fingerprinting then recompiles only
+      # changed deps), prunes stale artifacts before saving so entries stay
+      # small under the repo's ~10 GB cache budget, and keys on the rustc
+      # version so a toolchain bump doesn't reuse a stale-compiler cache.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-release-
+          key: ${{ matrix.platform }}
+          cache-on-failure: true
 
       - name: Install GPUI Linux build deps
         if: matrix.platform == 'linux'
@@ -279,17 +278,15 @@ jobs:
           toolchain: nightly
           targets: aarch64-linux-android
 
-      - name: Cache Rust dependencies
-        uses: actions/cache@v4
+      # shared-key `android-release` is intentionally the SAME as the Play
+      # job in release-mobile.yml: both cross-compile the identical
+      # aarch64-linux-android target from the same root Cargo.lock, so a
+      # mobile-v* build warms this v* sideload build and vice-versa.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-release-android-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-release-android-
+          shared-key: android-release
+          cache-on-failure: true
 
       - name: Install Android SDK components (pinned versions from build script)
         run: |

@@ -104,17 +104,11 @@ jobs:
         with:
           toolchain: nightly
 
-      - name: Cache Rust dependencies
-        uses: actions/cache@v4
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-release-ios-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-release-ios-
+          shared-key: ios-release
+          cache-on-failure: true
 
       - name: Install xcodegen
         run: brew install xcodegen
@@ -214,17 +208,14 @@ jobs:
           toolchain: nightly
           targets: aarch64-linux-android
 
-      - name: Cache Rust dependencies
-        uses: actions/cache@v4
+      # shared-key `android-release` — SAME as the sideload-APK job in
+      # release-desktop.yml (identical aarch64-linux-android build), so the
+      # two release workflows warm each other's cache.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-release-android-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-release-android-
+          shared-key: android-release
+          cache-on-failure: true
 
       - name: Install Android SDK components (pinned versions from build script)
         run: |
