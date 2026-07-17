@@ -2,9 +2,11 @@
 //! between the **SQL projection** (`SutSqlProjection::block_task_state`, a
 //! `json_extract(properties,'$.task_state')` read) and the **Loro projection**
 //! (`SutLoroTaskState::loro_task_state_of`, the same `properties["task_state"]`
-//! scalar off the live CRDT tree). No reference side — both truths come from
-//! the SUT, so this catches a Loro↔SQL desync at the data layer before any
-//! render bug surfaces. It selects only in a slice that wires **both** caps
+//! scalar off the live CRDT tree). Since F4 both SUT reads are cross-checked
+//! against the reference `task_state` (`RefTaskState`, declared in `Needs`), so
+//! a divergence in EITHER store is attributed against the known-good truth —
+//! this catches a Loro↔SQL desync at the data layer before any render bug
+//! surfaces. It selects only in a slice that wires **both** caps
 //! (the combined SQL+Loro slice), the only non-redundant consumer of
 //! `SutLoroTaskState`.
 
