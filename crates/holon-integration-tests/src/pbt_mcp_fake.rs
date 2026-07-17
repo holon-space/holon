@@ -273,7 +273,8 @@ impl PbtMcpIntegration {
         let token_store: Arc<dyn SyncTokenStore> = Arc::new(InMemorySyncTokenStore::new());
 
         let sync_engine = Arc::new(McpSyncEngine::new(
-            client_peer,
+            Arc::new(client_peer.clone()),
+            Some(client_peer),
             strategies,
             caches,
             token_store,

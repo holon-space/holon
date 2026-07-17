@@ -68,6 +68,14 @@ pub struct RestTransport {
     /// Named endpoints, keyed by the tool name referenced from
     /// `sync.list_tool`.
     pub calls: HashMap<String, RestCallConfig>,
+    /// Default poll cadence for sync entities that declare no per-entity
+    /// `sync.interval`. REST has no subscription freshness, so every sync
+    /// entity polls; this sets the transport-wide default (per-entity
+    /// `sync.interval` still overrides it, and an unset value falls to the
+    /// 300s built-in). Accepts an integer (seconds) or a humantime-style
+    /// string (`"5m"`).
+    #[serde(default)]
+    pub poll_interval: Option<crate::mcp_sidecar::SyncInterval>,
 }
 
 /// A single auth header, e.g. `{ header: Authorization, value: "Bearer
@@ -233,11 +241,14 @@ impl IntegrationFileConfig {
                     },
                 );
             }
-            McpTransport::Rest(crate::rest_transport::RestManual {
-                base_url: expand_vars(&rest.base_url, lookup)?,
-                auth_header,
-                calls,
-            })
+            McpTransport::Rest {
+                manual: crate::rest_transport::RestManual {
+                    base_url: expand_vars(&rest.base_url, lookup)?,
+                    auth_header,
+                    calls,
+                },
+                poll_interval: rest.poll_interval,
+            }
         } else {
             anyhow::bail!("TransportConfig must set exactly one of child_process, http, or rest");
         };

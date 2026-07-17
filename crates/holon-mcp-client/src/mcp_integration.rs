@@ -32,9 +32,18 @@ use crate::mcp_resource_discovery::parse_resource_template_meta;
 use crate::mcp_sidecar::EntityConfig;
 use crate::mcp_sidecar::McpSidecar;
 use crate::mcp_sidecar::SyncConfig;
+use crate::mcp_sidecar::SyncInterval;
 use crate::mcp_sync_engine::McpSyncEngine;
 use crate::mcp_sync_strategy::SyncStrategy;
+use crate::rest_transport::RestCallSurface;
+use crate::rest_transport::RestManual;
 use crate::sync_freshness::ProbedResourceCapabilities;
+
+/// Default poll cadence for a `rest` integration whose sync entities declare
+/// no per-entity `sync.interval` and whose `transport.rest.poll_interval` is
+/// unset. REST has no subscription freshness, so an unset interval must not
+/// mean "never refresh" — five minutes bounds staleness without hammering.
+const DEFAULT_REST_POLL_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Transport configuration for connecting to a data source.
 ///
@@ -52,7 +61,12 @@ pub enum McpTransport {
         args: Vec<String>,
         env: HashMap<String, String>,
     },
-    Rest(crate::rest_transport::RestManual),
+    Rest {
+        manual: RestManual,
+        /// Default poll cadence for sync entities that declare no per-entity
+        /// `sync.interval`. `None` falls to [`DEFAULT_REST_POLL_INTERVAL`].
+        poll_interval: Option<SyncInterval>,
+    },
 }
 
 /// Authentication mode for MCP HTTP transport.
@@ -334,21 +348,27 @@ pub async fn build_mcp_integration(
             .await?;
             Ok(McpConnectionResult::Connected(integration))
         }
-        McpTransport::Rest(_manual) => {
-            // The `rest` transport's read path is exercised through the shared
-            // `SyncStrategy`/`McpCallSurface` seam (see
-            // `crate::rest_transport::RestCallSurface`), but the production
-            // background runner is built around MCP resource *subscriptions*
-            // (`Peer::subscribe`), which a plain HTTP API cannot serve. Wiring
-            // rest into a poll-only background runner — and the leases /
-            // read-write question — are the remaining steps. Fail loud rather
-            // than silently registering an integration that never syncs.
-            anyhow::bail!(
-                "provider '{}': the `rest` transport is not yet wired into the background \
-                 integration runner (poll-only runner + lease/read-write are the open steps). Its \
-                 read path is available directly via RestCallSurface + SyncStrategy.",
-                config.provider_name
+        McpTransport::Rest {
+            manual,
+            poll_interval,
+        } => {
+            // The `rest` transport shares the whole connector read path
+            // (`SyncStrategy`/`McpCallSurface`) with MCP, but has no peer and no
+            // resource subscriptions — it is driven by a poll-only background
+            // runner. Leases / read-write / vtable-write-through are out of
+            // scope and fail loud inside `finish_rest_integration`.
+            let integration = finish_rest_integration(
+                manual.clone(),
+                *poll_interval,
+                sidecar,
+                db_handle,
+                cache_factory,
+                token_store,
+                config.provider_name,
+                sync_gate,
             )
+            .await?;
+            Ok(McpConnectionResult::Connected(integration))
         }
     }
 }
@@ -591,26 +611,7 @@ async fn finish_integration(
     }
 
     // Build caches and strategies.
-    // Table names and ID schemes use prefixed names (e.g. "cc_session"),
-    // but internal keys use original entity names (e.g. "session").
-    let mut caches: HashMap<String, Arc<dyn EntityCache<DynamicEntity>>> = HashMap::new();
-    let mut entity_readers: HashMap<String, Arc<dyn EntityFieldReader>> = HashMap::new();
-
-    for (entity_name, entity_config) in &sidecar.entities {
-        let entity = sidecar.prefixed_name(entity_name);
-        let table_name = entity.table_name();
-        if let Some(td) = entity_config.to_type_definition(&table_name) {
-            let cache = cache_factory
-                .create_dynamic_cache(td)
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            entity_readers.insert(
-                entity_name.clone(),
-                Arc::new(DynamicEntityFieldReader(cache.clone())) as Arc<dyn EntityFieldReader>,
-            );
-            caches.insert(entity_name.clone(), cache);
-        }
-    }
+    let (caches, entity_readers) = build_entity_caches(&sidecar, &cache_factory).await?;
 
     // Build sync strategies with disclosed degradation: one entity whose
     // `SyncConfig` cannot form a strategy is skipped and reported loudly, so a
@@ -699,27 +700,8 @@ async fn finish_integration(
     }
 
     // Sidecar-declared derived views (generic): the cache tables they select
-    // from were just created by the CacheFactory above. A view that fails DDL
-    // is a hard, loud config error naming the view and the provider — never
-    // skip-and-continue (parse, don't validate, at connect).
-    for view in &sidecar.views {
-        let view_name = sidecar.prefixed_name(&view.name).table_name();
-        holon_turso::matview_manager::reconcile_named_view(&db_handle, &view_name, &view.sql)
-            .await
-            .with_context(|| {
-                format!(
-                    "sidecar view '{}' of provider '{provider_name}': CREATE MATERIALIZED VIEW \
-                     '{view_name}' failed — fix the `views:` SQL in the provider's sidecar YAML \
-                     (IVM dialect: single-level GROUP BY aggregates incl. substr(MAX(ts || '|' || \
-                     col), N); no correlated subqueries, self-joins, or non-equijoin LEFT JOINs)",
-                    view.name
-                )
-            })?;
-        info!(
-            "[finish_integration] Sidecar view '{}' ready as matview '{}'",
-            view.name, view_name
-        );
-    }
+    // from were just created by the CacheFactory above.
+    reconcile_sidecar_views(&sidecar, &db_handle, &provider_name).await?;
 
     let operation_provider =
         McpOperationProvider::from_peer_shared(peer.clone(), sidecar.clone(), entity_readers)
@@ -764,7 +746,8 @@ async fn finish_integration(
         .collect();
 
     let sync_engine = Arc::new(McpSyncEngine::new(
-        peer,
+        Arc::new(peer.clone()),
+        Some(peer),
         strategies,
         caches,
         token_store,
@@ -803,6 +786,96 @@ async fn finish_integration(
         }
     }
 
+    Ok(spawn_runner(
+        operation_provider,
+        sync_engine,
+        service,
+        resource_capabilities,
+        fdw_backed_tables,
+        poll_entities,
+        Some(receiver),
+        sync_gate,
+    ))
+}
+
+/// Build the per-entity caches and their field readers from the sidecar. Table
+/// names and ID schemes use prefixed names (e.g. "cc_session"); the returned
+/// maps are keyed by original entity name (e.g. "session"). Shared by the MCP
+/// and `rest` finalizers.
+async fn build_entity_caches(
+    sidecar: &McpSidecar,
+    cache_factory: &Arc<dyn CacheFactory>,
+) -> anyhow::Result<(
+    HashMap<String, Arc<dyn EntityCache<DynamicEntity>>>,
+    HashMap<String, Arc<dyn EntityFieldReader>>,
+)> {
+    let mut caches: HashMap<String, Arc<dyn EntityCache<DynamicEntity>>> = HashMap::new();
+    let mut entity_readers: HashMap<String, Arc<dyn EntityFieldReader>> = HashMap::new();
+
+    for (entity_name, entity_config) in &sidecar.entities {
+        let entity = sidecar.prefixed_name(entity_name);
+        let table_name = entity.table_name();
+        if let Some(td) = entity_config.to_type_definition(&table_name) {
+            let cache = cache_factory
+                .create_dynamic_cache(td)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            entity_readers.insert(
+                entity_name.clone(),
+                Arc::new(DynamicEntityFieldReader(cache.clone())) as Arc<dyn EntityFieldReader>,
+            );
+            caches.insert(entity_name.clone(), cache);
+        }
+    }
+    Ok((caches, entity_readers))
+}
+
+/// Reconcile every sidecar-declared derived view into a materialized view. A
+/// view that fails DDL is a hard, loud config error naming the view and the
+/// provider — never skip-and-continue (parse, don't validate, at connect).
+/// Shared by the MCP and `rest` finalizers.
+async fn reconcile_sidecar_views(
+    sidecar: &McpSidecar,
+    db_handle: &DbHandle,
+    provider_name: &str,
+) -> anyhow::Result<()> {
+    for view in &sidecar.views {
+        let view_name = sidecar.prefixed_name(&view.name).table_name();
+        holon_turso::matview_manager::reconcile_named_view(db_handle, &view_name, &view.sql)
+            .await
+            .with_context(|| {
+                format!(
+                    "sidecar view '{}' of provider '{provider_name}': CREATE MATERIALIZED VIEW \
+                     '{view_name}' failed — fix the `views:` SQL in the provider's sidecar YAML \
+                     (IVM dialect: single-level GROUP BY aggregates incl. substr(MAX(ts || '|' || \
+                     col), N); no correlated subqueries, self-joins, or non-equijoin LEFT JOINs)",
+                    view.name
+                )
+            })?;
+        info!(
+            "[finish_integration] Sidecar view '{}' ready as matview '{}'",
+            view.name, view_name
+        );
+    }
+    Ok(())
+}
+
+/// Wire the serialized sync-event loop, notification forwarder, and poll
+/// tickers into a finished [`McpIntegration`]. Shared tail of both finalizers:
+/// the MCP path passes `Some(receiver)` (server pushes `resources/updated`);
+/// the poll-only `rest` path passes `None` (no subscriptions, no
+/// notifications).
+#[allow(clippy::too_many_arguments)] // assembles the finished integration from its already-built parts
+fn spawn_runner(
+    operation_provider: McpOperationProvider,
+    sync_engine: Arc<McpSyncEngine>,
+    service: McpRunningService,
+    resource_capabilities: ProbedResourceCapabilities,
+    fdw_backed_tables: Vec<String>,
+    poll_entities: Vec<(String, Duration)>,
+    notification_receiver: Option<ResourceUpdateReceiver>,
+    sync_gate: SyncGate,
+) -> McpIntegration {
     // One serialized consumer per integration: initial sync, notification
     // resyncs, and poll ticks all flow through the same channel, so per-entity
     // sync work never overlaps.
@@ -817,9 +890,9 @@ async fn finish_integration(
     let mut background_tasks = Vec::new();
 
     // Notification forwarder: resource-updated URIs -> serialized consumer.
-    {
+    // Only for transports that push notifications (MCP); `rest` polls instead.
+    if let Some(mut receiver) = notification_receiver {
         let tx = sync_event_tx.clone();
-        let mut receiver = receiver;
         background_tasks.push(tokio::spawn(async move {
             while let Some(uri) = receiver.0.recv().await {
                 if tx.send(SyncEvent::NotificationUri(uri)).is_err() {
@@ -846,7 +919,7 @@ async fn finish_integration(
         }));
     }
 
-    Ok(McpIntegration {
+    McpIntegration {
         operation_provider,
         sync_engine,
         service,
@@ -855,7 +928,134 @@ async fn finish_integration(
         resource_capabilities,
         fdw_backed_tables,
         sync_event_tx,
-    })
+    }
+}
+
+/// Reject sidecar shapes that the `rest` transport cannot serve: `vtable`
+/// (needs an MCP peer to back the FDW cursor) and `sync.list_resource` (REST
+/// serves GET *calls*, not MCP resources). Pure so it is unit-testable without
+/// standing up a DbHandle/CacheFactory.
+fn reject_rest_out_of_scope(sidecar: &McpSidecar, provider_name: &str) -> anyhow::Result<()> {
+    for (entity_name, entity_config) in &sidecar.entities {
+        if let Some(vtable) = &entity_config.vtable {
+            anyhow::bail!(
+                "provider '{provider_name}': entity '{entity_name}' declares a `vtable` on the \
+                 `rest` transport, but REST has no MCP peer to back an FDW cursor \
+                 (write_through={}). vtable/write-through are out of scope for `rest`.",
+                vtable.write_through
+            );
+        }
+        if let Some(sync) = &entity_config.sync
+            && sync.list_resource.is_some()
+        {
+            anyhow::bail!(
+                "provider '{provider_name}': entity '{entity_name}' syncs via `list_resource` on \
+                 the `rest` transport, but REST serves GET *calls*, not MCP resources — use \
+                 `sync.list_tool` naming a `transport.rest.calls` entry instead."
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Finalize a `rest`-transport integration: a poll-only background runner over
+/// the shared connector read path, with no MCP peer and no resource
+/// subscriptions.
+///
+/// Out of scope (fails loud): leases, read-write operations, and
+/// `vtable.write_through`. The `rest` transport serves *calls*, not MCP
+/// resources, so an entity that syncs via `list_resource` is also rejected.
+#[allow(clippy::too_many_arguments)] // mirrors finish_integration; each arg is a distinct subsystem
+async fn finish_rest_integration(
+    manual: RestManual,
+    poll_interval: Option<SyncInterval>,
+    sidecar: McpSidecar,
+    db_handle: DbHandle,
+    cache_factory: Arc<dyn CacheFactory>,
+    token_store: Arc<dyn SyncTokenStore>,
+    provider_name: String,
+    sync_gate: SyncGate,
+) -> anyhow::Result<McpIntegration> {
+    // Reject the out-of-scope shapes up front (parse, don't validate): the REST
+    // runner is read-only and poll-based, so vtable/write_through and
+    // resource-based sync are configuration errors, not degraded modes.
+    reject_rest_out_of_scope(&sidecar, &provider_name)?;
+
+    let surface: Arc<dyn crate::mcp_call_surface::McpCallSurface> =
+        Arc::new(RestCallSurface::new(manual));
+
+    // Build caches + readers, then strategies (disclosed degradation on a bad
+    // entity, same as the MCP path).
+    let (caches, entity_readers) = build_entity_caches(&sidecar, &cache_factory).await?;
+    let (strategies, strategy_failures) = build_entity_strategies(&sidecar.entities);
+    for (entity_name, err) in &strategy_failures {
+        error!(
+            "[finish_rest_integration] Entity '{entity_name}' will NOT sync — failed to build \
+             strategy: {err:#}. Integration '{provider_name}' still connects (disclosed \
+             degradation)."
+        );
+    }
+
+    reconcile_sidecar_views(&sidecar, &db_handle, &provider_name).await?;
+
+    // REST exposes no write operations: a read-only provider whose
+    // `execute_operation` fails loud, but whose entity readers still back
+    // cache reads.
+    let operation_provider = McpOperationProvider::read_only(sidecar.clone(), entity_readers);
+
+    // REST has no MCP peer and cannot subscribe.
+    let resource_capabilities = ProbedResourceCapabilities::from_server(None);
+
+    // Poll cadence per REST sync entity: per-entity `sync.interval` wins, then
+    // the transport-wide `poll_interval`, then the built-in default. REST has no
+    // subscription freshness, so every sync entity MUST poll — unbounded
+    // staleness must never be silent.
+    let default_interval = poll_interval
+        .map(|i| i.duration())
+        .unwrap_or(DEFAULT_REST_POLL_INTERVAL);
+    let poll_entities: Vec<(String, Duration)> = sidecar
+        .entities
+        .iter()
+        .filter(|(_, config)| config.sync.is_some())
+        .map(|(name, config)| {
+            let every = config
+                .sync
+                .as_ref()
+                .and_then(|s| s.interval)
+                .map(|i| i.duration())
+                .unwrap_or(default_interval);
+            (name.clone(), every)
+        })
+        .collect();
+
+    let sync_engine = Arc::new(McpSyncEngine::new(
+        surface,
+        None,
+        strategies,
+        caches,
+        token_store,
+        provider_name.clone(),
+        sidecar.clone(),
+        Vec::new(),
+        Some(db_handle),
+    ));
+
+    info!(
+        "provider '{provider_name}': rest transport connected — poll-only runner over {} sync \
+         entit(ies)",
+        poll_entities.len()
+    );
+
+    Ok(spawn_runner(
+        operation_provider,
+        sync_engine,
+        McpRunningService::inert(),
+        resource_capabilities,
+        Vec::new(),
+        poll_entities,
+        None,
+        sync_gate,
+    ))
 }
 
 /// The sync operations the serialized loop drives. Abstracted from
@@ -1200,6 +1400,51 @@ mod integration_resilience_tests {
         assert_eq!(failures[0].0, "plan");
         // The sync-less entity contributes neither a strategy nor a failure.
         assert!(!strategies.contains_key("message"));
+    }
+
+    #[test]
+    fn rest_rejects_vtable_entity() {
+        // vtable needs an MCP peer to back the FDW cursor — out of scope for
+        // the peerless `rest` transport.
+        let sidecar: McpSidecar = serde_yaml::from_str(
+            "entities:\n  thing:\n    id_column: id\n    vtable:\n      list_resource: \"x://y\"\n      write_through: true\n",
+        )
+        .expect("sidecar parses");
+        let err = reject_rest_out_of_scope(&sidecar, "p").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("vtable"),
+            "expected vtable rejection, got: {msg}"
+        );
+        assert!(
+            msg.contains("write_through=true"),
+            "should disclose write_through: {msg}"
+        );
+    }
+
+    #[test]
+    fn rest_rejects_list_resource_sync() {
+        // REST serves GET *calls*, not MCP resources — `list_resource` sync is
+        // a config error naming the wrong mechanism.
+        let sidecar: McpSidecar = serde_yaml::from_str(
+            "entities:\n  thing:\n    id_column: id\n    sync:\n      list_resource: \"x://y\"\n",
+        )
+        .expect("sidecar parses");
+        let err = reject_rest_out_of_scope(&sidecar, "p").unwrap_err();
+        assert!(
+            err.to_string().contains("list_resource"),
+            "expected list_resource rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rest_accepts_list_tool_sync() {
+        // The in-scope shape (GET call via list_tool) passes the guard.
+        let sidecar: McpSidecar = serde_yaml::from_str(
+            "entities:\n  thing:\n    id_column: id\n    sync:\n      list_tool: list-things\n",
+        )
+        .expect("sidecar parses");
+        reject_rest_out_of_scope(&sidecar, "p").expect("list_tool sync is in scope for rest");
     }
 }
 
