@@ -20,6 +20,7 @@ use holon_api::Value;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::traits::DeltaFingerprint;
 use crate::traits::FieldDelta;
 
 /// Read the current value of a projected (entity, field) so a stored
@@ -90,6 +91,7 @@ impl Precondition {
         Self {
             fields: changes
                 .iter()
+                .filter(|d| d.fingerprint == DeltaFingerprint::Readable)
                 .map(|d| FieldFingerprint {
                     entity_id: d.entity_id.clone(),
                     field: d.field.clone(),
@@ -105,6 +107,7 @@ impl Precondition {
         Self {
             fields: changes
                 .iter()
+                .filter(|d| d.fingerprint == DeltaFingerprint::Readable)
                 .map(|d| FieldFingerprint {
                     entity_id: d.entity_id.clone(),
                     field: d.field.clone(),
@@ -429,6 +432,45 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+
+    /// A `HistoryOnly` delta (edge/junction field, e.g. `tags`) must be
+    /// EXCLUDED from both preconditions — otherwise the `SqlUndoStateReader`
+    /// would generate an invalid `SELECT tags FROM block_raw` (no such column).
+    /// A `Readable` delta on the same batch is still fingerprinted.
+    #[test]
+    fn history_only_deltas_are_excluded_from_preconditions() {
+        let changes = vec![
+            FieldDelta::history_only(
+                "block:x",
+                "tags",
+                Value::Null,
+                Value::String("todo".to_string()),
+            ),
+            FieldDelta::new(
+                "block:x",
+                "content",
+                Value::String("a".to_string()),
+                Value::String("b".to_string()),
+            ),
+        ];
+        let fwd = Precondition::forward(&changes);
+        let inv = Precondition::inverse(&changes);
+        assert_eq!(fwd.fields.len(), 1, "only the Readable content delta");
+        assert_eq!(fwd.fields[0].field, "content");
+        assert_eq!(fwd.fields[0].expected, Value::String("b".to_string()));
+        assert_eq!(inv.fields.len(), 1);
+        assert_eq!(inv.fields[0].expected, Value::String("a".to_string()));
+
+        // A batch of only history_only deltas yields an empty precondition.
+        let only_edge = vec![FieldDelta::history_only(
+            "block:x",
+            "tags",
+            Value::Null,
+            Value::String("todo".to_string()),
+        )];
+        assert!(Precondition::forward(&only_edge).is_empty());
+        assert!(Precondition::inverse(&only_edge).is_empty());
+    }
 
     fn set_field_op(id: &str, field: &str, value: &str) -> Operation {
         let mut p = HashMap::new();

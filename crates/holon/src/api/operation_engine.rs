@@ -1382,12 +1382,7 @@ mod provenance_stamp_tests {
     }
 
     fn delta(entity: &str, field: &str, new_value: Value) -> holon_core::FieldDelta {
-        holon_core::FieldDelta {
-            entity_id: entity.to_string(),
-            field: field.to_string(),
-            old_value: Value::Null,
-            new_value,
-        }
+        holon_core::FieldDelta::new(entity, field, Value::Null, new_value)
     }
 
     #[test]
@@ -1415,6 +1410,25 @@ mod provenance_stamp_tests {
         assert_eq!(events[0].effect_id, None, "reserved until effects dispatch");
         // Non-string values render for query matching.
         assert_eq!(events[1].new_value.as_deref(), Some("7"));
+    }
+
+    /// An `add_tag`'s `history_only` `tags` delta is still recorded as a
+    /// history event (the fingerprint only excludes it from undo preconditions,
+    /// never from the history relation) — so a real add_tag produces a
+    /// `block_history` op_group just like a scalar `set_field`.
+    #[test]
+    fn history_only_tag_delta_still_produces_a_history_event() {
+        let changes = vec![holon_core::FieldDelta::history_only(
+            "block:x",
+            "tags",
+            Value::Null,
+            Value::String("todo".into()),
+        )];
+        let events = history_events_for("block", "add_tag", &OpOrigin::User, &changes, 42);
+        assert_eq!(events.len(), 1, "the tag delta must record one event");
+        assert_eq!(events[0].op_name, "add_tag");
+        assert_eq!(events[0].field.as_deref(), Some("tags"));
+        assert_eq!(events[0].new_value.as_deref(), Some("todo"));
     }
 
     #[test]

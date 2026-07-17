@@ -127,7 +127,7 @@ pub trait OperationProvider: Send + Sync {
     ///   structural-ops providers, test stubs, and the Loro CRUD provider
     ///   today). Callers MUST treat `None` as UNKNOWN and fail safe: never null
     ///   a block's marks on the strength of an unreadable prior state.
-    async fn read_block_content_marks(&self, _id: &str) -> Result<Option<(String, Value)>> {
+    async fn read_block_content_marks(&self, _: &str) -> Result<Option<(String, Value)>> {
         Ok(None)
     }
 }
@@ -264,6 +264,28 @@ impl From<Option<Operation>> for UndoAction {
     }
 }
 
+/// Whether a [`FieldDelta`] names a scalar (entity, field) the undo staleness
+/// reader can `SELECT` back from the projection table (`Readable`), or an
+/// edge/junction write that has NO readable column so it must be excluded from
+/// [`Precondition`](crate::undo::Precondition) fingerprints while still flowing
+/// into the history relation (`HistoryOnly`).
+///
+/// Parse-don't-validate: the delta itself carries the proof of which
+/// fingerprinting is legal, so `Precondition::forward`/`inverse` never emit a
+/// `SELECT <edge-field> FROM block_raw` the row table cannot answer (the edge
+/// lives in a junction table). `#[serde(default)]` on the field keeps this
+/// backward-compatible — a persisted delta with no fingerprint reads back as
+/// `Readable`, the historical behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum DeltaFingerprint {
+    /// The (entity, field) is a real projected scalar column: fingerprint it.
+    #[default]
+    Readable,
+    /// The change is an edge/junction write with no readable column: record it
+    /// in history, but never put it in a staleness precondition.
+    HistoryOnly,
+}
+
 /// Represents a single field change with old and new values.
 /// Used for change propagation (cache/sync), NOT for undo.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -272,6 +294,11 @@ pub struct FieldDelta {
     pub field: String,
     pub old_value: Value,
     pub new_value: Value,
+    /// Whether this delta may be fingerprinted for undo staleness. Defaults to
+    /// [`DeltaFingerprint::Readable`] (both for `FieldDelta::new` and for
+    /// deserialization of pre-fingerprint persisted entries).
+    #[serde(default)]
+    pub fingerprint: DeltaFingerprint,
 }
 
 impl FieldDelta {
@@ -286,6 +313,26 @@ impl FieldDelta {
             field: field.into(),
             old_value,
             new_value,
+            fingerprint: DeltaFingerprint::Readable,
+        }
+    }
+
+    /// A delta over an edge/junction field with no readable projection column
+    /// (e.g. `tags`): recorded in history, but excluded from undo staleness
+    /// preconditions so no invalid `SELECT <field> FROM block_raw` is
+    /// generated.
+    pub fn history_only(
+        entity_id: impl Into<String>,
+        field: impl Into<String>,
+        old_value: Value,
+        new_value: Value,
+    ) -> Self {
+        Self {
+            entity_id: entity_id.into(),
+            field: field.into(),
+            old_value,
+            new_value,
+            fingerprint: DeltaFingerprint::HistoryOnly,
         }
     }
 }
@@ -916,7 +963,10 @@ where
         // identically. This is the WRITE-side guard; `name_chain` (writeback) is the
         // downstream READ-side tripwire. Fail loud rather than let the prohibited
         // topology land and surface deep in writeback.
-        if block.is_page() && !parent.is_page() {
+        if crate::block_op_catalog::page_under_non_page_prohibited(
+            block.is_page(),
+            Some(parent.is_page()),
+        ) {
             return Err(anyhow::anyhow!(
                 "move_block: refusing to reparent page block '{}' under non-page parent '{}' — \
                  pages under non-pages are prohibited (interim ruling 2026-07-13); a page may only \
