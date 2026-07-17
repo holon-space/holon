@@ -101,6 +101,12 @@ fn is_composed_minted_synthetic_id(id: &EntityUri) -> bool {
         // reconcile pairs 1:1 with it. Composed-local (not the global split-only
         // `is_synthetic_ref_id`) for the same reason `ref-doc-` is.
         || id.as_str().starts_with("block::create-")
+        // `CreateBlockUnderFocus`'s born-equal arm mints `block:gen-N` directly on
+        // both oracle and SUT (identity, no uuid). Treated like `ref-doc-` born-equal
+        // doc pages so the born-equal self-map loop retains it in the reconcile map
+        // (hence in `history_ever_created`), keeping the append-only SUT create row
+        // covered after a later delete/join — otherwise it looks like a false phantom.
+        || id.as_str().starts_with("block:gen-")
 }
 
 /// Ids of peer-created blocks (`block:peer-HHHH-LLLL-IIII-SSSS`, minted by
