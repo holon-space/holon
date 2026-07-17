@@ -296,4 +296,103 @@ mod tests {
         assert_eq!(value_to_header_arg_string(&Value::Boolean(true)), "yes");
         assert_eq!(value_to_header_arg_string(&Value::Boolean(false)), "no");
     }
+
+    #[test]
+    fn format_header_args_from_values_renders_inline_params() {
+        let mut args = HashMap::new();
+        args.insert("connection".to_string(), Value::String("main".to_string()));
+        assert_eq!(format_header_args_from_values(&args), ":connection main");
+    }
+
+    /// Exact serialized shape of a source block: the `#+NAME:` line, the
+    /// `#+BEGIN_SRC <lang>` header with NO trailing space when there are no
+    /// header args, a newline before the body, a synthesized newline after a
+    /// body that lacks one, and a final trailing newline. The three `delete !`
+    /// mutants (empty-args space, body-newline, trailing-newline) each corrupt
+    /// this byte-exact form.
+    #[test]
+    fn format_api_source_block_exact_shape() {
+        let block = SourceBlock::new("python", "print(1)").with_name("demo");
+        assert_eq!(
+            format_api_source_block(&block),
+            "#+NAME: demo\n#+BEGIN_SRC python\nprint(1)\n#+END_SRC\n"
+        );
+    }
+
+    #[test]
+    fn format_org_source_block_matches_to_org() {
+        let block = SourceBlock::new("python", "print(1)");
+        assert_eq!(format_org_source_block(&block), block.to_org());
+    }
+
+    #[test]
+    fn format_block_result_text_exact_shape() {
+        let result = BlockResult::text("hello");
+        assert_eq!(format_block_result(&result, None), "#+RESULTS:\n: hello");
+    }
+
+    fn src() -> SourceBlock {
+        SourceBlock::new("python", "print(1)")
+    }
+
+    fn formatted() -> String {
+        src().to_org()
+    }
+
+    /// Byte-exact insertion at three boundary positions (start, between two
+    /// non-newline chars, at end-after-newline). Together these pin every
+    /// newline-guard operator in `insert_source_block` — the `>`/`<` position
+    /// comparisons, the `&&` conjunctions, and the two `!starts/ends_with`
+    /// negations — since each mutant flips the leading/trailing newline in at
+    /// least one case.
+    #[test]
+    fn insert_source_block_newline_boundaries() {
+        // pos = 0, empty content: no leading, no trailing newline.
+        assert_eq!(insert_source_block("", 0, &src()).unwrap(), formatted());
+        // pos = 1, between "A" and "B" (neither side a newline): both guards fire.
+        assert_eq!(
+            insert_source_block("AB", 1, &src()).unwrap(),
+            format!("A\n{}\nB", formatted())
+        );
+        // pos = len, right after a newline: neither guard fires.
+        assert_eq!(
+            insert_source_block("A\n", 2, &src()).unwrap(),
+            format!("A\n{}", formatted())
+        );
+    }
+
+    /// Updating a block replaces its byte range AND strips a preceding
+    /// `#+NAME:` line so the new block's own name is authoritative. The
+    /// `actual_start = byte_start - name_prefix.len()` arithmetic (mutated to
+    /// `+`/`/`) and the name-detection in `find_and_strip_name_before_block`
+    /// both corrupt the splice offset, dropping or duplicating file content.
+    #[test]
+    fn update_source_block_strips_name_prefix() {
+        let new = SourceBlock::new("python", "y").with_name("new");
+        let new_org = new.to_org();
+
+        // #+NAME: line is the whole `before` (no preceding line).
+        let content = "#+NAME: old\n#+BEGIN_SRC python\nx\n#+END_SRC\n";
+        let start = "#+NAME: old\n".len();
+        let out = update_source_block(content, start, content.len(), &new).unwrap();
+        assert_eq!(out, new_org, "old #+NAME: line must be replaced, not kept");
+
+        // #+NAME: line preceded by a heading (exercises the rfind branch).
+        let content2 = "* Heading\n#+NAME: old\n#+BEGIN_SRC python\nx\n#+END_SRC\n";
+        let start2 = "* Heading\n#+NAME: old\n".len();
+        let out2 = update_source_block(content2, start2, content2.len(), &new).unwrap();
+        assert_eq!(out2, format!("* Heading\n{new_org}"));
+    }
+
+    /// Deleting a block removes its byte range plus a preceding `#+NAME:` line
+    /// and collapses leading blank lines after it. The `byte_start -
+    /// name_prefix.len()` offset (mutated to `+`/`/`) corrupts what is removed.
+    #[test]
+    fn delete_source_block_strips_name_prefix() {
+        let content = "#+NAME: old\n#+BEGIN_SRC python\nx\n#+END_SRC\nAfter\n";
+        let start = "#+NAME: old\n".len();
+        let end = "#+NAME: old\n#+BEGIN_SRC python\nx\n#+END_SRC\n".len();
+        let out = delete_source_block(content, start, end).unwrap();
+        assert_eq!(out, "After\n");
+    }
 }

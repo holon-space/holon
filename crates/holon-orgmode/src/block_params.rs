@@ -330,4 +330,85 @@ mod tests {
             "writeback must be byte-stable across repeated render/parse cycles"
         );
     }
+
+    fn base_source_block() -> Block {
+        let parent_dir_id = EntityUri::no_parent();
+        let path = std::path::Path::new("/vault/doc.org");
+        let root = std::path::Path::new("/vault");
+        let parsed = parse_org_file(path, "* Base\n", &parent_dir_id, root).expect("parse fixture");
+        let mut b = parsed.blocks[0].clone();
+        b.content_type = ContentType::Source;
+        b.source_language = Some(holon_api::types::SourceLanguage::Other("python".into()));
+        b.source_name = Some("snippet".into());
+        b
+    }
+
+    /// The `block.content_type == ContentType::Source` gate must admit source
+    /// blocks so their `source_language`/`source_name` reach the store. If the
+    /// comparison flips (`== -> !=`), Source blocks silently lose their
+    /// language and name on write — a data-integrity regression for every
+    /// code block.
+    #[test]
+    fn source_block_params_carry_language_and_name() {
+        let block = base_source_block();
+        let parent = EntityUri::block("parent-1");
+        let params = build_block_params(&block, &parent, &parent);
+        assert_eq!(
+            params.get("source_language").and_then(|v| v.as_string()),
+            Some("python"),
+            "Source block dropped source_language: {params:?}"
+        );
+        assert_eq!(
+            params.get("source_name").and_then(|v| v.as_string()),
+            Some("snippet"),
+            "Source block dropped source_name: {params:?}"
+        );
+    }
+
+    /// A Source block with NO header args must omit `source_header_args`
+    /// entirely (NULL), not emit an empty-map JSON. Deleting the `!` in
+    /// `if !header_args.is_empty()` would serialize `{}` and pollute the
+    /// column, producing spurious writeback churn on every save.
+    #[test]
+    fn source_block_without_header_args_omits_the_column() {
+        let block = base_source_block();
+        let parent = EntityUri::block("parent-1");
+        let params = build_block_params(&block, &parent, &parent);
+        assert!(
+            params.get("source_header_args").is_none(),
+            "empty header args must not emit source_header_args, got {:?}",
+            params.get("source_header_args")
+        );
+    }
+
+    /// `created_at` must be PRESERVED when the block already carries one
+    /// (`> 0`), and only defaulted to `now` when absent (`0`). The comparison
+    /// mutants (`> -> ==`, `> -> <`, `> -> >=`) each corrupt one of these arms:
+    /// a real creation timestamp gets overwritten with `now`, or a `0` sentinel
+    /// gets persisted verbatim.
+    #[test]
+    fn created_at_is_preserved_when_present_and_defaulted_when_zero() {
+        let parent = EntityUri::block("parent-1");
+
+        let mut with_ts = base_source_block();
+        with_ts.created_at = 12345;
+        let params = build_block_params(&with_ts, &parent, &parent);
+        assert_eq!(
+            params.get("created_at").and_then(|v| v.as_i64()),
+            Some(12345),
+            "existing created_at must be preserved verbatim: {params:?}"
+        );
+
+        let mut without_ts = base_source_block();
+        without_ts.created_at = 0;
+        let params = build_block_params(&without_ts, &parent, &parent);
+        let created = params
+            .get("created_at")
+            .and_then(|v| v.as_i64())
+            .expect("created_at must be present");
+        assert!(
+            created > 0,
+            "absent created_at must be defaulted to a positive `now`, got {created}"
+        );
+    }
 }
