@@ -18,13 +18,19 @@
 //! executable, loud known-divergence that flips RED the day the fork is fixed.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use holon_api::Value;
 use holon_api::computation::ArithOp;
 use holon_api::computation::Computation;
 use holon_api::computation::DerivedField;
 use holon_api::computation::DerivedFieldPlan;
+use holon_turso::derived_reconciler::spawn_derived_field_reconciler;
+use holon_turso::matview_manager::MatviewManager;
 use holon_turso::matview_manager::reconcile_named_view;
+use holon_turso::schema_module::SchemaModule;
+use holon_turso::schema_modules::BlockDerivedSchemaModule;
 use holon_turso::turso::DbHandle;
 use holon_turso::turso::TursoBackend;
 
@@ -174,6 +180,88 @@ async fn matview_whole_float_literal_bug_is_pinned() {
         Value::Integer(4),
         "fork bug: int-col / whole-float-lit"
     );
+}
+
+/// THIRD LEG persisted: the value the SIDECAR watcher lands in `block_derived`
+/// must equal BOTH `Computation::eval` and the SQL-planted matview value. The
+/// watcher evaluates in Rust (so sidecar == eval holds by construction); this
+/// test makes the full triangle explicit end-to-end, including the persisted
+/// round-trip through `block_derived.value_json`.
+///
+/// Fractional literal (`* 1.5`) keeps REAL affinity, so the planted leg is
+/// fork-CORRECT. TODO(pin-bump): once `fix/matview-whole-float-affinity` is
+/// pinned, add a whole-float case here (its planted leg is wrong today — see
+/// `matview_whole_float_literal_bug_is_pinned`).
+#[tokio::test]
+async fn sidecar_value_matches_eval_and_planted_sql() {
+    let handle = setup().await;
+    BlockDerivedSchemaModule
+        .ensure_schema(&handle)
+        .await
+        .expect("block_derived table");
+    let mgr = MatviewManager::new(handle.clone(), Arc::new(tokio::sync::Mutex::new(())));
+
+    // `d = xf * 1.5` over the seeded row (xf = 5.0) → 7.5. Plantable (seat A)
+    // AND fractional-literal (fork-correct).
+    let comp = Computation::Arith {
+        op: ArithOp::Mul,
+        lhs: field("xf"),
+        rhs: flit(1.5),
+    };
+
+    // Leg 1 — eval.
+    let ctx: HashMap<String, Value> = HashMap::from([("xf".to_string(), Value::Float(5.0))]);
+    let eval_val = comp.eval(&ctx).expect("eval");
+
+    // Leg 2 — planted SQL matview column.
+    let planted_val = plant_and_read(&handle, "v_sidecar_planted", comp.clone()).await;
+
+    // Leg 3 — sidecar, maintained by the CDC watcher.
+    let _guard = spawn_derived_field_reconciler(
+        &mgr,
+        handle.clone(),
+        "SELECT id, xf FROM t",
+        vec![DerivedField::new("d", comp)],
+    )
+    .await
+    .expect("spawn reconciler");
+
+    let sidecar_val = await_sidecar(&handle, "r1", "d").await;
+
+    assert!(
+        approx_eq(&sidecar_val, &eval_val),
+        "sidecar={sidecar_val:?} eval={eval_val:?}"
+    );
+    assert!(
+        approx_eq(&sidecar_val, &planted_val),
+        "sidecar={sidecar_val:?} planted={planted_val:?}"
+    );
+}
+
+/// Poll `block_derived` for one field's persisted value, decoding the stored
+/// JSON back into a [`Value`].
+async fn await_sidecar(handle: &DbHandle, block_id: &str, field: &str) -> Value {
+    for _ in 0..100 {
+        let rows = handle
+            .query_positional(
+                "SELECT value_json FROM block_derived WHERE block_id = ? AND field_name = ?",
+                vec![
+                    turso::Value::Text(block_id.into()),
+                    turso::Value::Text(field.into()),
+                ],
+            )
+            .await
+            .expect("query block_derived");
+        if let Some(row) = rows.first() {
+            let json = match row.get("value_json") {
+                Some(Value::String(s)) => s.clone(),
+                other => panic!("value_json: unexpected {other:?}"),
+            };
+            return serde_json::from_str::<Value>(&json).expect("decode sidecar value_json");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("sidecar {block_id}.{field} never appeared");
 }
 
 /// DOCUMENTED DIVERGENCE (not silent): an absent field.

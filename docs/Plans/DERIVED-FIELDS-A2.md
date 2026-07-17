@@ -218,3 +218,81 @@ The binding choice is settled — json_extract inline, not promoted columns.
 1. Fix the Turso-fork whole-float-literal matview mis-typing (turso-fix
    workstream) — else planted float arithmetic over integer inputs is wrong.
 2. Reconcile the absent-field divergence (eval fail-loud vs `json_extract` NULL).
+
+## 8. Sidecar increment — `block_derived` table + CDC watcher (DELIVERED)
+
+Ruling (2026-07-16): *"C4 = A2 subset parser + sidecar `block_derived` + CDC
+watcher."* A2 (§1–7) was the parser half; this is the storage + reactivity half.
+
+**Shape.** Derived values live in a NARROW sidecar table, NOT as inline columns
+on the `block` matview. This decouples the value store from the DECLARATION set:
+adding/removing a derived-field declaration never forces a DROP+CREATE of the
+`block` matview.
+
+```sql
+CREATE TABLE block_derived (
+  block_id   TEXT NOT NULL,
+  field_name TEXT NOT NULL,
+  value_json TEXT NOT NULL,   -- serde_json of the computed holon_api::Value
+  provenance TEXT NOT NULL,   -- hash of the field's Computation (staleness key)
+  PRIMARY KEY (block_id, field_name)
+)
+```
+
+**Boot** (done-criteria 1). `BlockDerivedSchemaModule`
+(`crates/holon-turso/src/schema_modules.rs`) creates the table, registered at
+boot via `DbReady<BlockDerivedTable>` in `crates/holon/src/di/schema_providers.rs`
+and added to `all_schema_roots()` (no DDL deps — the watcher binds to the block
+matview at *runtime*, not DDL time). Mirrors the `HistorySchemaModule` (C2 INC1)
+pattern.
+
+**Maintenance** (done-criteria 2). `spawn_derived_field_reconciler`
+(`crates/holon-turso/src/derived_reconciler.rs`) is a CDC watcher built on the
+SAME template as the advice weaver (`holon::sync::advice_reconciler`): a drainer
+task maps `matview_manager.watch(source_view)` CDC deltas to events off the
+broadcast path; a reconciler task owns the `DbHandle` and writes. On a
+Created/Updated delta it recomputes that block's declared fields via
+`Computation::eval` and UPSERTs them in one `db_handle.transaction()`; on a
+Deleted delta it retracts the block's rows. **O(delta)**: the CDC stream carries
+only changed rows, so a one-block edit rewrites only that block's sidecar rows —
+proven decisively by `derived_field_sidecar.rs` (hand-corrupt a sibling's row,
+edit an unrelated block, assert the corruption survives → no full-table sweep).
+
+**Differential** (done-criteria 3). `sidecar_value_matches_eval_and_planted_sql`
+(`derived_field_eval_vs_sql.rs`) closes the triangle END-TO-END through the
+persisted row: `block_derived.value_json` == `Computation::eval` == planted-SQL
+matview value. Fractional literal (`* 1.5`) keeps the planted leg fork-correct; a
+`TODO(pin-bump)` marks where a whole-float case belongs once
+`fix/matview-whole-float-affinity` is pinned. The pin-test
+`matview_whole_float_literal_bug_is_pinned` stays armed.
+
+**Seat routing.** The watcher evaluates in Rust, uniform across seat A
+(SQL-plantable) and seat B (`Script`) — so `sidecar == eval` holds by
+construction and `Script` fields need no special path. The "prefer IVM when
+plantable" optimization (source an already-planted column's IVM value instead of
+re-evaluating it) is a deferred PERF refinement, not a correctness change: seat A
+already proves planted == eval (`derived_field_matview.rs`).
+
+**No FK to `block_raw`.** The sidecar is a rebuildable cache; the watcher retracts
+on the block-Deleted CDC event. An FK would drag every write into the fork's
+deferred-FK autocommit-no-rollback hazard for no integrity gain.
+
+### Remaining for item 1 (Martin's ESCALATED declaration surface)
+
+`spawn_derived_field_reconciler` takes its `Vec<DerivedField>` and the
+`source_view` SELECT as parameters — it does NOT invent a declaration UX. Two
+things remain, both gated on Martin's ruling for the declaration surface:
+
+1. **Declaration source + reconcile trigger.** Where the per-type derived-field
+   set comes from (prototype-block header-args parsed by the A2 parser, à la the
+   `rank_tasks`/`enrich` plumbing) and what re-`plan`s + re-spawns the watcher
+   when a prototype's declaration set changes. Until then the production caller
+   must inject a fixed `Vec<DerivedField>` + a `source_view` at wiring time.
+2. **`Field` → `json_extract(properties, '$.name')` lowering** so declarations
+   read block *properties* (not bare columns), reconciling the absent-field
+   divergence (§ item 2 above). The eval path already reads a `Context`, so only
+   the SQL-plant leg and the source-view projection need the json_extract shape.
+
+Provenance is a within-build content hash (`DefaultHasher` over the
+`Computation`'s `Debug`); adequate for in-process staleness detection, not
+cross-build stable — fine for a rebuildable cache.

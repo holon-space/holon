@@ -742,6 +742,55 @@ impl SchemaModule for HistorySchemaModule {
     }
 }
 
+/// C4 derived-field SIDECAR table (`block_derived`).
+///
+/// Narrow, normalized store of computed field values keyed by
+/// `(block_id, field_name)` — deliberately NOT inline columns on the `block`
+/// matview (the wide seat-A path), so a change to a prototype's derived-field
+/// *declarations* never forces a DROP+CREATE of the `block` matview. Rows are
+/// maintained reactively by [`crate::derived_reconciler`] (a CDC watcher over a
+/// source view), which recomputes only the delta.
+///
+/// Each row carries a `provenance` string (a hash of the field's
+/// [`holon_api::computation::Computation`]) so a value produced by an outdated
+/// declaration is detectable (its provenance differs from the current
+/// declaration's). The relation is a rebuildable cache — never authoritative —
+/// so `CREATE TABLE IF NOT EXISTS` is the whole story; there is no FK to
+/// `block_raw` (the watcher retracts rows on the block-Deleted CDC event, and
+/// an FK would drag every sidecar write into the fork's deferred-FK
+/// autocommit-no-rollback hazard).
+pub struct BlockDerivedSchemaModule;
+
+#[async_trait]
+impl SchemaModule for BlockDerivedSchemaModule {
+    fn name(&self) -> &str {
+        "block_derived"
+    }
+
+    fn provides(&self) -> Vec<Resource> {
+        vec![Resource::schema("block_derived")]
+    }
+
+    fn requires(&self) -> Vec<Resource> {
+        vec![]
+    }
+
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+        db_handle
+            .execute_ddl(
+                "CREATE TABLE IF NOT EXISTS block_derived (\
+                 block_id TEXT NOT NULL, \
+                 field_name TEXT NOT NULL, \
+                 value_json TEXT NOT NULL, \
+                 provenance TEXT NOT NULL, \
+                 PRIMARY KEY (block_id, field_name))",
+            )
+            .await?;
+        tracing::info!("[BlockDerivedSchemaModule] block_derived sidecar table ready");
+        Ok(())
+    }
+}
+
 /// The C2 automation-journal matview (ADR 0024 P8): `block_history` effects
 /// grouped by `(origin, transition_id, day)` with a per-group count. IVM
 /// maintains it O(delta) over the `block_history` base TABLE — a rule watching
