@@ -729,6 +729,106 @@ impl BlockOrdering for SqlBlockOperations {
         Ok(())
     }
 
+    /// Apply a whole file's ingest ops in ONE transaction (BugFunnel row 32).
+    ///
+    /// The historic boot loop applied each block through
+    /// [`update_in_tree`](Self::update_in_tree) / `delete_in_tree`, so every
+    /// single-row write drove a matview IVM maintenance pass over the live
+    /// watch-views — cost scaling with the accumulated block table (O(N²) cold
+    /// boot). SqlOnly is the SQL store's own keyspace, so the whole file's ops
+    /// route through `SqlOperationProvider::execute_batch_with_origin` — ONE
+    /// `db_handle.transaction()`, hence ONE maintenance pass per file.
+    ///
+    /// Creates are born carrying a strictly-increasing per-parent
+    /// document-order `sort_key`, minted in-memory (seeded once per parent from
+    /// the current sibling set — empty on cold boot). That matches what the
+    /// downstream SqlOnly `place_all` totalizer expects, so it finds every new
+    /// child already ordered and issues ZERO single-row `set_field("sort_key")`
+    /// rewrites — otherwise the per-block cost merely migrates into
+    /// `place_all`.
+    ///
+    /// In Upstream (Loro) mode field writes route through the cell registry
+    /// (Loro owns order), NOT this SQL batch sink, so the per-op default is
+    /// kept verbatim — the O(N²) this fixes was measured SqlOnly only.
+    async fn apply_ingest_batch(&self, ops: Vec<(String, StorageEntity)>) -> Result<()> {
+        if matches!(self.consolidator(), Consolidator::Upstream) {
+            for (op, params) in ops {
+                match op.as_str() {
+                    "create" | "update" => self.update_in_tree(params).await?,
+                    "delete" => self.delete_in_tree(params).await?,
+                    other => {
+                        return Err(format!("apply_ingest_batch: unknown op {other:?}").into());
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        let entity = EntityName::new(Block::entity_name());
+        let mut batch: Vec<(String, StorageEntity)> = Vec::with_capacity(ops.len());
+        // Per-parent last-assigned sort_key cursor, seeded lazily from the DB
+        // sibling set the first time a parent is touched.
+        let mut parent_cursor: HashMap<String, Option<String>> = HashMap::new();
+        for (op, mut params) in ops {
+            let id = params
+                .get("id")
+                .and_then(|v| v.as_string())
+                .map(str::to_string)
+                .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
+                    "apply_ingest_batch: op missing 'id' param".into()
+                })?;
+            match op.as_str() {
+                "create" | "update" => {
+                    // Re-derive create vs update from the SQL cache — the same
+                    // classification `update_in_tree` makes, so the CDC op kind
+                    // matches the row's prior presence.
+                    let real_op = if self.cache.get_by_id(&id).await?.is_some() {
+                        "update"
+                    } else {
+                        "create"
+                    };
+                    if real_op == "create"
+                        && let Some(parent) = params
+                            .get("parent_id")
+                            .and_then(|v| v.as_string())
+                            .map(str::to_string)
+                    {
+                        let cursor = match parent_cursor.entry(parent.clone()) {
+                            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                            std::collections::hash_map::Entry::Vacant(e) => {
+                                let existing = self.sibling_keys(&parent).await?;
+                                e.insert(existing.last().map(|(_, k)| k.clone()))
+                            }
+                        };
+                        // SqlOnly `Store` order owner — the sanctioned mint site
+                        // (Replication.md §5): batched form of `new_child_anchor`'s
+                        // append path with an in-memory per-parent cursor.
+                        // ALLOW(order_minting): SqlOnly order owner, batched mint.
+                        let key = gen_key_between(cursor.as_deref(), None).map_err(
+                            |e| -> Box<dyn std::error::Error + Send + Sync> {
+                                format!("apply_ingest_batch mint for {id}: {e:#}").into()
+                            },
+                        )?;
+                        *cursor = Some(key.clone());
+                        params.insert("sort_key".into(), Value::String(key));
+                    }
+                    batch.push((real_op.to_string(), params));
+                }
+                "delete" => batch.push(("delete".to_string(), params)),
+                other => {
+                    return Err(format!("apply_ingest_batch: unknown op {other:?}").into());
+                }
+            }
+        }
+        self.sql_ops
+            .execute_batch_with_origin(&entity, batch, EventOrigin::Org)
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                format!("apply_ingest_batch execute_batch_with_origin: {e:#}").into()
+            })?;
+        Ok(())
+    }
+
     fn has_upstream_consolidator(&self) -> bool {
         self.caps.profile().has_downstream_projection()
     }
@@ -990,6 +1090,7 @@ mod tests {
     use holon_core::__operations_block_operations;
     use holon_core::OperationRegistry;
     use holon_core::block_ordering::BlockOrdering;
+    use holon_core::storage::types::StorageEntity;
     use holon_turso::schema_modules::BlockMatviewSchemaModule;
     use holon_turso::schema_modules::BlockSchemaModule;
 
@@ -1247,6 +1348,155 @@ mod tests {
         assert!(
             key1 < key2,
             "second create must sort strictly after the first: {key1:?} vs {key2:?}"
+        );
+    }
+
+    /// Insert a parent row directly and return its full URI.
+    async fn seed_parent(handle: &crate::storage::turso::DbHandle, bare: &str) -> String {
+        let id = format!("block:{bare}");
+        handle
+            .execute(
+                &format!(
+                    "INSERT INTO block_raw (id, parent_id, sort_key, content, content_type, \
+                     created_at, updated_at) VALUES ('{id}', 'sentinel:no_parent', 'V', 'parent', \
+                     'text', 0, 0)"
+                ),
+                vec![],
+            )
+            .await
+            .expect("insert parent");
+        id
+    }
+
+    fn child_create_op(parent: &str, i: usize, after: Option<&str>) -> (String, StorageEntity) {
+        use holon_api::Value;
+        let mut p: StorageEntity = std::collections::HashMap::new();
+        p.insert("id".into(), Value::String(format!("block:c{i}")));
+        p.insert("parent_id".into(), Value::String(parent.to_string()));
+        p.insert("content".into(), Value::String(format!("child {i}")));
+        p.insert("content_type".into(), Value::String("text".to_string()));
+        if let Some(a) = after {
+            p.insert(
+                crate::sync::event_bus::POSITION_AFTER_BLOCK_ID_PARAM.into(),
+                Value::String(a.to_string()),
+            );
+        }
+        ("create".to_string(), p)
+    }
+
+    /// Count matview-maintenance passes = broadcast batches on the `block`
+    /// matview CDC channel. Turso emits CDC per matview per transaction commit
+    /// (base tables emit none — see `cdc_base_vs_matview_repro`), so one batch
+    /// == one IVM maintenance pass. Waits up to `first` for the first pass,
+    /// then drains until the channel stays quiet for `quiet`.
+    async fn count_matview_passes(
+        cdc: &mut tokio::sync::broadcast::Receiver<
+            holon_api::streaming::WithMetadata<
+                holon_api::streaming::Batch<crate::storage::turso::RowChange>,
+                holon_api::streaming::BatchMetadata,
+            >,
+        >,
+        first: std::time::Duration,
+        quiet: std::time::Duration,
+    ) -> usize {
+        let mut n = 0usize;
+        if tokio::time::timeout(first, cdc.recv()).await.is_ok() {
+            n += 1;
+        } else {
+            return n;
+        }
+        while tokio::time::timeout(quiet, cdc.recv()).await.is_ok() {
+            n += 1;
+        }
+        n
+    }
+
+    const FIRST_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+    const QUIET: std::time::Duration = std::time::Duration::from_millis(300);
+
+    /// BugFunnel row 32 fix. Applying a whole file's ingest through
+    /// `apply_ingest_batch` drives the live watch-view matview IVM maintenance
+    /// exactly ONCE — one transaction commit per file — regardless of the block
+    /// count, instead of once per block (the O(N²) cold-boot cost whose
+    /// per-block price scaled with the accumulated table). The born-correct
+    /// per-parent sort_keys are strictly increasing, so the downstream
+    /// `place_all` totalizer would rewrite nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn batched_ingest_runs_matview_maintenance_once_per_file() {
+        let (_backend, ops, handle) = setup_sql_block_ops().await;
+        let parent = seed_parent(&handle, "p").await;
+
+        let mut cdc = handle
+            .subscribe_cdc("block")
+            .await
+            .expect("subscribe block matview cdc");
+        // Clear the parent-insert pass so the count reflects only the ingest.
+        let _ = count_matview_passes(&mut cdc, FIRST_WAIT, QUIET).await;
+
+        let n = 16usize;
+        let mut prev: Option<String> = None;
+        let ops_vec: Vec<(String, StorageEntity)> = (0..n)
+            .map(|i| {
+                let op = child_create_op(&parent, i, prev.as_deref());
+                prev = Some(format!("block:c{i}"));
+                op
+            })
+            .collect();
+
+        ops.apply_ingest_batch(ops_vec)
+            .await
+            .expect("batched ingest");
+
+        let passes = count_matview_passes(&mut cdc, FIRST_WAIT, QUIET).await;
+        assert_eq!(
+            passes, 1,
+            "one matview IVM maintenance pass per FILE (row 32 O(N²) fix); got {passes} passes for \
+             {n} blocks in one batch"
+        );
+
+        // Born-correct order: strictly increasing per-parent keys ⇒ place_all
+        // no-op (never re-mints a single row).
+        let mut keys = Vec::new();
+        for i in 0..n {
+            keys.push(read_sort_key(&handle, &format!("block:c{i}")).await);
+        }
+        for w in keys.windows(2) {
+            assert!(
+                w[0] < w[1],
+                "batched creates must be born strictly increasing so place_all rewrites nothing: \
+                 {keys:?}"
+            );
+        }
+    }
+
+    /// Baseline that the fix removes: the historic per-op apply drove ONE
+    /// matview maintenance pass per block (N passes for N blocks).
+    /// Documents that the batch count above is a real collapse, not an
+    /// artifact of the metric.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn per_op_ingest_runs_one_matview_pass_per_block() {
+        let (_backend, ops, handle) = setup_sql_block_ops().await;
+        let parent = seed_parent(&handle, "p").await;
+
+        let mut cdc = handle
+            .subscribe_cdc("block")
+            .await
+            .expect("subscribe block matview cdc");
+        let _ = count_matview_passes(&mut cdc, FIRST_WAIT, QUIET).await;
+
+        let n = 8usize;
+        let mut prev: Option<String> = None;
+        for i in 0..n {
+            let (_op, params) = child_create_op(&parent, i, prev.as_deref());
+            ops.update_in_tree(params).await.expect("per-op create");
+            prev = Some(format!("block:c{i}"));
+        }
+
+        let passes = count_matview_passes(&mut cdc, FIRST_WAIT, QUIET).await;
+        assert_eq!(
+            passes, n,
+            "the per-op path runs one matview maintenance pass per block ({n} expected); this is \
+             the O(N²) cost the batch path collapses to 1"
         );
     }
 }

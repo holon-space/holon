@@ -1621,26 +1621,18 @@ impl FileSyncController {
         );
         let t_write = std::time::Instant::now();
         if !operations.is_empty() {
-            for (op, params) in operations {
-                match op.as_str() {
-                    "create" | "update" => {
-                        self.ordering.update_in_tree(params).await.map_err(|e| {
-                            anyhow::anyhow!("update_in_tree for {}: {e:#}", path.display())
-                        })?;
-                    }
-                    "delete" => {
-                        self.ordering.delete_in_tree(params).await.map_err(|e| {
-                            anyhow::anyhow!("delete_in_tree for {}: {e:#}", path.display())
-                        })?;
-                    }
-                    other => {
-                        anyhow::bail!(
-                            "on_file_changed: unknown block op {other:?} for {}",
-                            path.display()
-                        );
-                    }
-                }
-            }
+            // One batched apply per file: in SqlOnly mode the whole op-vector is
+            // one `db_handle.transaction()`, so the live-watch matview IVM
+            // maintenance runs once per file instead of once per block (the O(N²)
+            // cold-boot ingest, BugFunnel row 32). In Loro mode `apply_ingest_batch`
+            // falls back to the per-op seam (Loro owns order). Document order is
+            // preserved — the vector is already creates→updates→deletes in
+            // parse order, and rows-then-edges + deferred FK settle parents at
+            // COMMIT regardless of intra-batch row order.
+            self.ordering
+                .apply_ingest_batch(operations)
+                .await
+                .map_err(|e| anyhow::anyhow!("apply_ingest_batch for {}: {e:#}", path.display()))?;
             tracing::debug!(
                 target: "holon_latency",
                 stage = "boot_write",

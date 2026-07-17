@@ -184,6 +184,34 @@ pub trait BlockOrdering: Send + Sync {
     /// SqlOnly impls delete the SQL row directly.
     async fn delete_in_tree(&self, params: holon_api::StorageEntity) -> Result<()>;
 
+    /// Apply a whole file's worth of ordered ingest ops in one shot.
+    ///
+    /// `ops` is the org reconciler's `(op, params)` vector in **document
+    /// order**: `create`/`update` (both routed through the update seam) then
+    /// `delete`. The default implementation applies them one at a time via
+    /// [`update_in_tree`](Self::update_in_tree) /
+    /// [`delete_in_tree`](Self::delete_in_tree) — byte-identical to the
+    /// historic boot loop, so Loro-backed and test impls need no override.
+    ///
+    /// The SqlOnly store overrides this to collapse the whole file's writes
+    /// into ONE `db_handle.transaction()` so the live-watch matview IVM
+    /// maintenance runs once per file instead of once per block. That is
+    /// the fix for the O(N²) cold-boot ingest (BugFunnel row 32):
+    /// per-single-row-write matview maintenance whose cost scales with the
+    /// accumulated block table.
+    async fn apply_ingest_batch(&self, ops: Vec<(String, holon_api::StorageEntity)>) -> Result<()> {
+        for (op, params) in ops {
+            match op.as_str() {
+                "create" | "update" => self.update_in_tree(params).await?,
+                "delete" => self.delete_in_tree(params).await?,
+                other => {
+                    return Err(format!("apply_ingest_batch: unknown op {other:?}").into());
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// All children of `parent_id` in positional order (low → high
     /// sort_key in SqlOnly mode; Loro tree order in Loro mode).
     /// Returns an empty Vec when there are no children.
@@ -215,6 +243,9 @@ pub trait OrderKeyMinting: Send + Sync {
     /// `parent_id`, immediately after `after_id`, to persist verbatim in
     /// `block.sort_key`. Implemented only by the `Store` consolidator's order
     /// owner (the sole minter of fractional indices for its sibling sets).
+    // Defining-module trait declaration (excluded at repo root; the exclude
+    // glob misses the `.claude/worktrees/...` prefix, so annotate inline).
+    // ALLOW(order_minting): trait-method declaration, not a mint call site.
     async fn new_child_anchor(
         &self,
         parent_id: &EntityUri,
