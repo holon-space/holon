@@ -17,6 +17,11 @@
 transport:
   rest:
     base_url: https://jsonplaceholder.typicode.com
+    # rest has no push notifications, so entities are refreshed by polling. This
+    # sidecar sets no cadence, so its sync entities fall to the built-in 300s
+    # default. To override, uncomment `poll_interval` (transport-wide) and/or set
+    # a per-entity `sync.interval` (which wins). Accepts seconds or "30s"/"5m"/"1h".
+    # poll_interval: 5m
     calls:
       list-posts:
         method: GET

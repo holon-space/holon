@@ -151,8 +151,20 @@ fn default_client_info() -> rmcp::model::ClientInfo {
 /// Opaque handle that keeps the MCP connection alive. Drop to disconnect.
 pub struct McpRunningService(#[allow(dead_code)] Box<dyn std::any::Any + Send + Sync>);
 
+impl McpRunningService {
+    /// An inert keep-alive handle for transports that own no MCP connection
+    /// (the `rest` transport serves calls over plain HTTP, with nothing to hold
+    /// open). The `service` field on `McpIntegration` is mandatory; this fills
+    /// it without pretending there is a live MCP service.
+    pub fn inert() -> Self {
+        McpRunningService(Box::new(()))
+    }
+}
+
 pub struct McpOperationProvider {
-    peer: Peer<RoleClient>,
+    /// The MCP peer used to call tools. `None` for a read-only provider (the
+    /// `rest` transport exposes no write operations).
+    peer: Option<Peer<RoleClient>>,
     descriptors: Vec<OperationDescriptor>,
     /// Maps normalized op_name (snake_case) -> original MCP tool name
     /// (kebab-case)
@@ -294,13 +306,32 @@ impl McpOperationProvider {
         }
 
         Ok(Self {
-            peer,
+            peer: Some(peer),
             descriptors,
             tool_name_map,
             sidecar,
             entity_readers,
             _connection: None,
         })
+    }
+
+    /// Build a read-only provider for a transport that exposes no write
+    /// operations (the `rest` transport). It carries no peer, no operation
+    /// descriptors, and an empty tool map, so `operations()` is empty and any
+    /// `execute_operation` call fails loud. The entity readers still back
+    /// cache reads for the sync path.
+    pub fn read_only(
+        sidecar: McpSidecar,
+        entity_readers: HashMap<String, Arc<dyn EntityFieldReader>>,
+    ) -> Self {
+        Self {
+            peer: None,
+            descriptors: Vec::new(),
+            tool_name_map: HashMap::new(),
+            sidecar,
+            entity_readers,
+            _connection: None,
+        }
     }
 
     /// Capture old field values from cache for mirror undo.
@@ -461,6 +492,19 @@ impl OperationProvider for McpOperationProvider {
         op_name: &str,
         params: StorageEntity,
     ) -> Result<OperationResult> {
+        let peer =
+            self.peer
+                .as_ref()
+                .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
+                    format!(
+                "provider '{}' is read-only: the `rest` integration exposes no write operations \
+                 (attempted '{op_name}' on entity '{}')",
+                self.sidecar.entity_prefix.as_deref().unwrap_or("<unprefixed>"),
+                entity_name.as_str()
+            )
+            .into()
+                })?;
+
         let original_name = self
             .tool_name_map
             .get(op_name)
@@ -475,8 +519,7 @@ impl OperationProvider for McpOperationProvider {
             .map(|(k, v)| (k.to_string(), to_json_value(v)))
             .collect();
 
-        let result = self
-            .peer
+        let result = peer
             .call_tool(CallToolRequestParam {
                 name: Cow::Owned(original_name.clone()),
                 arguments: Some(json_params),

@@ -199,6 +199,41 @@ Worked read-only example: **`jsonplaceholder.yaml`** — the public
 end-to-end against a local mock server in
 `crates/holon-mcp-client/tests/rest_transport_mock.rs`.
 
+#### Freshness: `rest` polls (no subscriptions)
+
+A plain HTTP API cannot push `resources/updated` notifications, so the `rest`
+transport runs a **poll-only** background runner: every sync entity is refreshed
+on a fixed cadence, and each poll **diffs** against the engine's in-memory
+mirror, so an unchanged response applies nothing (no needless cache churn). The
+cadence resolves per entity, most specific first:
+
+1. the entity's own `sync.interval` (e.g. `sync: { interval: 60s }`),
+2. the transport-wide `transport.rest.poll_interval`,
+3. the built-in default (**300s**).
+
+```yaml
+transport:
+  rest:
+    base_url: https://api.example.com
+    poll_interval: 5m          # transport-wide default cadence for rest sync entities
+    calls:
+      list-things: { method: GET, path: /things }
+
+entities:
+  ex_things:
+    id_column: id
+    schema: [ { name: id, sql_type: TEXT, primary_key: true }, ... ]
+    sync:
+      list_tool: list-things
+      extract_path: things
+      interval: 60s            # overrides poll_interval for THIS entity
+```
+
+Both accept an integer (seconds) or a humantime-style string (`"30s"`, `"5m"`,
+`"1h"`). REST has no subscription freshness, so leaving both unset does **not**
+mean "never refresh" — the 300s default bounds staleness rather than silently
+letting the replica go stale.
+
 #### Response formats: `json` | `atom` | `rss` (feeds)
 
 A `rest` call decodes its response body per a `format:` codec (default `json`,
@@ -265,11 +300,12 @@ the dependency tree).
   only). Write-back — and the general **lease-governed external-effect** model
   (diffed intent against the replica's own base, ADR 0024 Phase 4 place-kind
   taxonomy) — is unresolved and out of scope. Non-GET methods fail loud today.
-- **`rest` background runner.** The read path runs through the shared
-  `SyncStrategy`/`McpCallSurface` seam, but the production background runner is
-  built around MCP resource *subscriptions* (`Peer::subscribe`), which a plain
-  HTTP API cannot serve. Wiring `rest` into a **poll-only** background runner is
-  the remaining production step; `build_mcp_integration` fails loud for a `rest`
-  sidecar until then.
+- **`rest` background runner.** ✅ Done — `build_mcp_integration` now wires a
+  `rest` sidecar into a **poll-only** background runner (`finish_rest_integration`:
+  no MCP peer, no subscriptions, one poll ticker per sync entity; see
+  [Freshness](#freshness-rest-polls-no-subscriptions) above). It rejects the
+  out-of-scope shapes loudly at connect: `vtable`/`write_through` (needs an MCP
+  peer to back the FDW cursor) and `sync.list_resource` (REST serves GET *calls*,
+  not MCP resources).
 - **Further transports.** `graphql` (and richer UTCP manuals: POST bodies,
   pagination cursors for `rest`) are natural extensions of the same seam.

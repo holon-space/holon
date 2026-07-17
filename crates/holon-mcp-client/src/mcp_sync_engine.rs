@@ -25,6 +25,7 @@ use tracing::info_span;
 use tracing::warn;
 
 use crate::entity_mirror::EntityMirror;
+use crate::mcp_call_surface::McpCallSurface;
 use crate::mcp_sidecar::McpSidecar;
 use crate::mcp_sync_strategy::SyncStrategy;
 use crate::mcp_sync_strategy::expand_uri_template;
@@ -255,7 +256,14 @@ pub struct VtableSubscription {
 /// Uses `SyncStrategy` to abstract over tool-based and resource-based fetching.
 /// Also handles vtable-backed entities via FDW cache refresh on notifications.
 pub struct McpSyncEngine {
-    peer: Peer<RoleClient>,
+    /// The call surface used on the fetch hot path. For MCP transports this is
+    /// the `Peer`; for the `rest` transport it is a `RestCallSurface`.
+    /// Decoupled from `peer` so the poll-only REST runner shares the same
+    /// sync pipeline.
+    surface: Arc<dyn McpCallSurface>,
+    /// The MCP peer, present only for MCP transports. `None` for `rest`, which
+    /// serves calls but cannot subscribe to resources or expose typed sources.
+    peer: Option<Peer<RoleClient>>,
     strategies: HashMap<String, Box<dyn SyncStrategy>>,
     caches: HashMap<String, Arc<dyn EntityCache<DynamicEntity>>>,
     token_store: Arc<dyn SyncTokenStore>,
@@ -278,7 +286,8 @@ pub struct McpSyncEngine {
 impl McpSyncEngine {
     #[allow(clippy::too_many_arguments)] // wires up the full sync pipeline; each arg is a distinct subsystem
     pub fn new(
-        peer: Peer<RoleClient>,
+        surface: Arc<dyn McpCallSurface>,
+        peer: Option<Peer<RoleClient>>,
         strategies: HashMap<String, Box<dyn SyncStrategy>>,
         caches: HashMap<String, Arc<dyn EntityCache<DynamicEntity>>>,
         token_store: Arc<dyn SyncTokenStore>,
@@ -313,6 +322,7 @@ impl McpSyncEngine {
             .collect();
 
         Self {
+            surface,
             peer,
             strategies,
             caches,
@@ -362,11 +372,7 @@ impl McpSyncEngine {
         let token_key = format!("{}.{}", self.provider_name, entity_name);
 
         let fetch_result = strategy
-            .fetch_records(
-                &self.peer as &dyn crate::mcp_call_surface::McpCallSurface,
-                self.token_store.as_ref(),
-                &token_key,
-            )
+            .fetch_records(self.surface.as_ref(), self.token_store.as_ref(), &token_key)
             .await
             .map_err(|e| format!("sync_entity '{entity_name}': {e}"))?;
 
@@ -431,13 +437,30 @@ impl McpSyncEngine {
     /// Subscribe to resource update notifications for all sync + vtable
     /// entities.
     pub async fn subscribe_all(&self) -> anyhow::Result<()> {
+        // Subscriptions require an MCP peer. A `rest` integration has no peer and
+        // must never declare subscribe-based syncs (that is enforced upstream in
+        // `finish_rest_integration`); reaching here with subscriptions but no
+        // peer is a wiring bug, so fail loud rather than silently no-op.
+        let Some(peer) = &self.peer else {
+            if self.has_subscriptions() {
+                anyhow::bail!(
+                    "provider '{}': subscribe_all called with no MCP peer but {} resource \
+                     subscription(s) and {} vtable subscription(s) are configured — the `rest` \
+                     transport cannot subscribe (wiring bug)",
+                    self.provider_name,
+                    self.uri_to_entity.len(),
+                    self.vtable_subscriptions.len()
+                );
+            }
+            return Ok(());
+        };
+
         for (uri, entity_name) in &self.uri_to_entity {
             info!(
                 "[McpSyncEngine] Subscribing to '{}' for entity '{}'",
                 uri, entity_name
             );
-            self.peer
-                .subscribe(SubscribeRequestParam { uri: uri.clone() })
+            peer.subscribe(SubscribeRequestParam { uri: uri.clone() })
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!("Failed to subscribe to '{uri}' for '{entity_name}': {e}")
@@ -453,14 +476,13 @@ impl McpSyncEngine {
                     "[McpSyncEngine] Subscribing to vtable resource '{}'",
                     sub.uri_template
                 );
-                self.peer
-                    .subscribe(SubscribeRequestParam {
-                        uri: sub.uri_template.clone(),
-                    })
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!("Failed to subscribe to vtable '{}': {e}", sub.uri_template)
-                    })?;
+                peer.subscribe(SubscribeRequestParam {
+                    uri: sub.uri_template.clone(),
+                })
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to subscribe to vtable '{}': {e}", sub.uri_template)
+                })?;
             } else {
                 info!(
                     "[McpSyncEngine] Vtable '{}' has dynamic params {:?} — relying on broadcast \
@@ -598,14 +620,26 @@ impl McpSyncEngine {
 
     /// Access the underlying MCP peer (e.g. to build additional typed
     /// sources like `McpClaudeSessionSource` over the same connection).
-    pub fn peer(&self) -> &Peer<RoleClient> {
-        &self.peer
+    /// `None` for the `rest` transport, which has no MCP peer.
+    pub fn peer(&self) -> Option<&Peer<RoleClient>> {
+        self.peer.as_ref()
     }
 
     /// Subscribe to a specific resource URI for change notifications.
+    ///
+    /// Only reachable for MCP transports with FDW vtable subscriptions; the
+    /// `rest` transport has no peer and no vtable subs, so a missing peer here
+    /// is a wiring bug — disclose it loudly.
     async fn subscribe_to_resource(&self, uri: &str) {
-        match self
-            .peer
+        let Some(peer) = &self.peer else {
+            warn!(
+                "[McpSyncEngine] subscribe_to_resource('{uri}') on provider '{}' has no MCP peer \
+                 (rest transport cannot subscribe) — ignoring",
+                self.provider_name
+            );
+            return;
+        };
+        match peer
             .subscribe(SubscribeRequestParam {
                 uri: uri.to_string(),
             })

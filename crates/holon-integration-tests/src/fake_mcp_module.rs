@@ -276,7 +276,8 @@ async fn build_handle(db_handle: DbHandle) -> anyhow::Result<FakeMcpHandle> {
     });
 
     let sync_engine = Arc::new(McpSyncEngine::new(
-        client_peer,
+        Arc::new(client_peer.clone()),
+        Some(client_peer),
         strategies,
         caches,
         token_store,
