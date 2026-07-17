@@ -21,11 +21,18 @@ Tree-verified sweep (scout, 2026-07-17):
 - **C8 increment 3 — LANDED** (no `activate_perspective` op by design — switching is ordinary
   `set_field` on `ACTIVE_PERSPECTIVE_PROPERTY`); both render arms resolve the active
   perspective (`block_domain::render_root_slot`, `loro_ui_watcher::derive_render_expr`).
-- **Remaining open**: C7 dictionary-as-blocks (verb dict still hardcoded,
-  `crates/holon-petri/src/parser.rs` — `parse_with_dict` seam exists) and C1 rest
-  background runner (fail-loud stub at `crates/holon-mcp-client/src/mcp_integration.rs:346`;
-  poll-only runner missing) + leases/read-write (ruling still needed). Both in flight
-  2026-07-17.
+- **C7 dictionary-as-blocks — LANDED 2026-07-17.** `VerbDict` (owned, lowercased-surface-keyed,
+  user-wins-per-surface) + `resolve_verb_dict` block loader in holon-petri; verb-dict blocks
+  (`verb_op` marker + `verb_surface`) discovered via `task_blocks_for_petri.sql`. DEFERRED
+  (revisitable): production `materialize` does not yet consume `ParsedTask.verb`, so no live
+  parse path re-resolves the dictionary from vault blocks end-to-end — the seam is fully
+  tested but awaits its consumer (the already-deferred materialization-wiring step).
+- **C1 rest background runner — LANDED 2026-07-17.** `transport: rest` sidecars now drive a
+  poll-only runner sharing the MCP sync loop (`finish_rest_integration`; `McpSyncEngine`
+  decoupled from concrete `Peer`; per-entity `sync.interval` → `transport.rest.poll_interval`
+  → 300s default; unchanged polls are near-free via `EntityMirror` diff; fixed-cadence retry
+  is the backoff, disclosed). STILL OPEN: leases/read-write (ruling needed); adaptive
+  exponential backoff (revisitable fork, fixed-cadence shipped).
 
 ## Status (2026-07-16)
 
