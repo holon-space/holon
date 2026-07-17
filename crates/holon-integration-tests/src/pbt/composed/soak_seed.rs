@@ -18,6 +18,64 @@
 
 use std::time::Duration;
 
+use super::reseed_observer::ReseedLeakReason;
+
+/// What the soak reseed-reproduction rung should assert about steady-state
+/// full-reseed leaks. Parse-don't-validate target for
+/// `HOLON_SOAK_RESEED_EXPECT` (`None` = unset = rung skips).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SoakReseedExpect {
+    /// Assert the reproduction fires: at least one steady-state leak of the
+    /// TARGET reason across the fixed seeds (else fail loud with the full
+    /// per-reason summary).
+    Reproduce,
+    /// Assert the leak is GONE: zero steady-state leaks of any reason (the
+    /// guard after the reseed Inc 1-4 fixes land).
+    Zero,
+}
+
+/// Parse `HOLON_SOAK_RESEED_EXPECT` at the boundary. Unset or empty ⇒ `None`
+/// (rung skips). Any other non-empty value fails loud — no silent default.
+pub fn soak_reseed_expect() -> Option<SoakReseedExpect> {
+    match std::env::var("HOLON_SOAK_RESEED_EXPECT") {
+        Err(_) => None,
+        Ok(s) if s.trim().is_empty() => None,
+        Ok(s) => match s.trim() {
+            "reproduce" => Some(SoakReseedExpect::Reproduce),
+            "zero" => Some(SoakReseedExpect::Zero),
+            other => panic!(
+                "HOLON_SOAK_RESEED_EXPECT must be 'reproduce' or 'zero' (or unset), got {other:?}"
+            ),
+        },
+    }
+}
+
+/// Parse `HOLON_SOAK_ASSERT_P95_MS` at the boundary: `Some(ms)` hard-asserts
+/// the observed p95 wall-clock is under `ms`; unset/empty ⇒ `None` (p95 is an
+/// observation only). Fails loud on non-numeric garbage.
+pub fn soak_assert_p95_ms() -> Option<u64> {
+    match std::env::var("HOLON_SOAK_ASSERT_P95_MS") {
+        Err(_) => None,
+        Ok(s) if s.trim().is_empty() => None,
+        Ok(s) => Some(s.trim().parse().unwrap_or_else(|e| {
+            panic!("HOLON_SOAK_ASSERT_P95_MS must be a u64 millisecond value, got {s:?}: {e}")
+        })),
+    }
+}
+
+/// Parse `HOLON_SOAK_RESEED_REASON` at the boundary: the TARGET reason the
+/// `Reproduce` mode asserts fires. Unset/empty ⇒ the default lever
+/// [`ReseedLeakReason::EmptyPendingMovedFrontier`]. Fails loud on an unknown
+/// reason.
+pub fn soak_reseed_reason() -> ReseedLeakReason {
+    match std::env::var("HOLON_SOAK_RESEED_REASON") {
+        Err(_) => ReseedLeakReason::EmptyPendingMovedFrontier,
+        Ok(s) if s.trim().is_empty() => ReseedLeakReason::EmptyPendingMovedFrontier,
+        Ok(s) => ReseedLeakReason::parse(s.trim())
+            .unwrap_or_else(|e| panic!("HOLON_SOAK_RESEED_REASON invalid: {e}")),
+    }
+}
+
 /// Total number of extra vault blocks to seed. `HOLON_SOAK_SEED_BLOCKS`
 /// (default `0` — soak off, keystone behaviour unchanged).
 pub fn soak_block_count() -> usize {

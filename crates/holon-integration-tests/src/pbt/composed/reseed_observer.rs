@@ -95,6 +95,48 @@ fn is_leak_reason(reason: &str) -> bool {
     LEAK_REASONS.contains(&reason)
 }
 
+/// The four steady-state full-reseed LEAK reasons, as a typed mirror of the
+/// (private) `FullReason` leak arms in `holon_loro::loro_sync_controller`.
+/// Parse-don't-validate target for `HOLON_SOAK_RESEED_REASON` and the
+/// reason-scoped [`ReseedSummary::steady_leak_count_for`] query — so the soak
+/// rung asks "how many `EmptyPendingMovedFrontier` leaks fired?" against a
+/// type, not a stringly-typed reason.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReseedLeakReason {
+    EmptyPendingMovedFrontier,
+    Unsettled,
+    Orphan,
+    Oversized,
+}
+
+impl ReseedLeakReason {
+    /// The on-wire reason string emitted by `holon_latency` (must match the
+    /// `FullReason::as_str` arms the observer records).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReseedLeakReason::EmptyPendingMovedFrontier => "empty_pending_moved_frontier",
+            ReseedLeakReason::Unsettled => "unsettled",
+            ReseedLeakReason::Orphan => "orphan",
+            ReseedLeakReason::Oversized => "oversized",
+        }
+    }
+
+    /// Parse an on-wire reason string. Fails loud (`Err`) on any non-leak
+    /// reason so the boundary env parser can panic with a clear message rather
+    /// than silently defaulting.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "empty_pending_moved_frontier" => Ok(ReseedLeakReason::EmptyPendingMovedFrontier),
+            "unsettled" => Ok(ReseedLeakReason::Unsettled),
+            "orphan" => Ok(ReseedLeakReason::Orphan),
+            "oversized" => Ok(ReseedLeakReason::Oversized),
+            other => Err(format!(
+                "unknown reseed leak reason {other:?}; expected one of {LEAK_REASONS:?}"
+            )),
+        }
+    }
+}
+
 /// Per-case accumulation of projection-mode attribution.
 #[derive(Default)]
 struct ReseedInner {
@@ -123,6 +165,16 @@ pub struct ReseedSummary {
 }
 
 impl ReseedSummary {
+    /// Count the steady-state leaks attributed to one specific reason (the
+    /// reason-scoped query the soak rung asserts on: "did the TARGET reason —
+    /// default `EmptyPendingMovedFrontier` — fire at least once?").
+    pub fn steady_leak_count_for(&self, reason: ReseedLeakReason) -> usize {
+        self.steady_leaks
+            .iter()
+            .filter(|(_, r)| r == reason.as_str())
+            .count()
+    }
+
     pub fn report(&self) -> String {
         let full: usize = self.full_by_reason.values().sum();
         let reasons: Vec<String> = self
