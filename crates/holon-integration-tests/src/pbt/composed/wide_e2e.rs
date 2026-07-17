@@ -1271,6 +1271,20 @@ pub fn wide_e2e_ref() -> ReferenceState {
 /// generator-narrowing hint — is irrelevant to them.
 pub fn frontend_wired(mut state: ReferenceState) -> ReferenceState {
     state.harness.wiring = ComponentSet::full_headless().wiring.clone();
+    // Journals boot auto-create closure (dogfood #4): `frontend_wired` pins the
+    // `full_headless` (Turso frontend) wiring, and `boot_and_seed_wide` fires the
+    // seeded daily-journal rule once on EVERY frontend boot (ClockScheduler +
+    // action watchers run unconditionally on any non-wasm Turso boot), minting one
+    // journal day-block under `block:journals` and keeping its
+    // `keystone_boot_journal_id` COMPARED (not scaffold-filtered, see the `tree`
+    // set there). So the oracle must model it too — the SAME seed
+    // `wide_e2e_ref_for` applies for a frontend draw. Without it the SUT-fired
+    // day-block is a spurious `+1` block that false-diverges
+    // `inv-blocks-match-ref/{org,loro,block_raw, matview}` and surfaces as an
+    // `inv-history-no-phantom-rows` phantom (its id is unknown to the ref
+    // universe). The hand-driven teeth build their oracle through this helper
+    // rather than `wide_e2e_ref_for`, so seed it here for symmetry.
+    seed_boot_journal(&mut state);
     state
 }
 

@@ -2009,6 +2009,35 @@ mod teeth {
         .await;
         let mut caps = bundle.caps;
 
+        // The oracle models the boot-fired journal day-block (`frontend_wired` →
+        // `seed_boot_journal`): every full_headless (Turso) boot fires the seeded
+        // daily-journal rule once, minting a day-block under `block:journals`. As a
+        // REAL ref block it enters `all_block_ids` → the phantom-history universe,
+        // so its `block_history` create is no longer a phantom. This probe seeds no
+        // `Journals.org`, so the day-block never reaches the `/org` snapshot; it
+        // folds into `scaffold` below (seed-classified via `inject_scaffold_seed`),
+        // which excludes it from the block-set comparison exactly as before — while
+        // still counting for the history universe (`all_block_ids` reads `blocks`
+        // regardless of seed classification).
+        let oracle = frontend_wired(wide_ref());
+
+        // The rule fires ASYNC off the clock CDC; the boot settle can return before
+        // it lands. Await the day-block before the scaffold snapshot / checks so a
+        // not-yet-fired journal does not false-diverge; fail loud on timeout.
+        let journal_id = crate::pbt::frontend_slice::components::keystone_boot_journal_id();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            tokio::time::sleep(SETTLE).await;
+            if sut_ids(&caps).await.contains(&journal_id) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "[full_headless probe] boot journal {journal_id} did not fire within budget"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
         let ids = fixed_ids();
         let tree: BTreeSet<EntityUri> = [ids.parent.clone(), ids.c1.clone(), ids.c2.clone()]
             .into_iter()
@@ -2016,7 +2045,6 @@ mod teeth {
         let booted = sut_ids(&caps).await;
         let scaffold: BTreeSet<EntityUri> = booted.difference(&tree).cloned().collect();
 
-        let oracle = wide_ref();
         TransitionImpl::apply_to_sut(
             &NavigateFocus {
                 region: Region::Main,
