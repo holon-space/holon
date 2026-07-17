@@ -6,5 +6,6 @@ SELECT
 FROM block
 WHERE json_extract(properties, '$.task_state') IS NOT NULL
    OR json_extract(properties, '$.prototype_for') IS NOT NULL
+   OR json_extract(properties, '$.verb_op') IS NOT NULL
    OR json_extract(properties, '$.is_self') = true
 ORDER BY parent_id, sort_key

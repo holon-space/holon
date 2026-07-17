@@ -58,7 +58,9 @@ pub use parser::DEFAULT_VERB_DICT;
 pub use parser::Executor;
 pub use parser::ParsedTask;
 pub use parser::Verb;
+pub use parser::VerbDict;
 pub use parser::VerbOp;
+pub use parser::VerbOpParseError;
 pub use parser::ViaRoute;
 
 // ---------------------------------------------------------------------------
@@ -676,6 +678,83 @@ pub fn is_prototype_block(block: &Block) -> bool {
     block.properties.contains_key("prototype_for")
 }
 
+/// Returns true if `block` is a verb-dictionary block — one that extends the
+/// task-syntax verb dictionary at runtime. The marker is the presence of a
+/// `verb_op` property (its companion `verb_surface` names the lemma to match).
+pub fn is_verb_dict_block(block: &Block) -> bool {
+    block.properties.contains_key("verb_op")
+}
+
+/// Parse one verb-dictionary block into a `(surface, VerbOp)` entry.
+///
+/// Disclosed skip semantics (fail-loud, never silent): an unknown `verb_op`
+/// keyword, or a missing / empty / non-string `verb_surface`, yields a
+/// `tracing::warn!` naming the block id and the defect and returns `None`. It
+/// never panics and never silently drops a malformed block.
+fn verb_entry_from_block(block: &Block) -> Option<(String, VerbOp)> {
+    use holon_api::Value as HValue;
+
+    let op = match block.properties.get("verb_op") {
+        Some(HValue::String(kw)) => match VerbOp::from_keyword(kw) {
+            Ok(op) => op,
+            Err(e) => {
+                tracing::warn!(block_id = %block.id, error = %e, "skipping verb-dict block: {e}");
+                return None;
+            }
+        },
+        Some(other) => {
+            tracing::warn!(
+                block_id = %block.id,
+                "skipping verb-dict block: 'verb_op' is not a string ({other:?})"
+            );
+            return None;
+        }
+        None => return None,
+    };
+
+    let surface = match block.properties.get("verb_surface") {
+        Some(HValue::String(s)) if !s.trim().is_empty() => s.clone(),
+        Some(HValue::String(_)) => {
+            tracing::warn!(
+                block_id = %block.id,
+                "skipping verb-dict block: 'verb_surface' is empty"
+            );
+            return None;
+        }
+        Some(other) => {
+            tracing::warn!(
+                block_id = %block.id,
+                "skipping verb-dict block: 'verb_surface' is not a string ({other:?})"
+            );
+            return None;
+        }
+        None => {
+            tracing::warn!(
+                block_id = %block.id,
+                "skipping verb-dict block: missing 'verb_surface'"
+            );
+            return None;
+        }
+    };
+
+    Some((surface, op))
+}
+
+/// Resolve the runtime verb dictionary from a slice of blocks: the built-in
+/// baseline overlaid with every well-formed verb-dictionary block (marked by
+/// [`is_verb_dict_block`]). This is the ONLY way to obtain a runtime
+/// [`VerbDict`] — the live "dictionary-as-blocks" extension seam. Malformed
+/// entries are skipped with a disclosed warning (see
+/// [`verb_entry_from_block`]); well-formed siblings and the built-ins are
+/// unaffected.
+pub fn resolve_verb_dict(blocks: &[Block]) -> VerbDict {
+    let user_entries = blocks
+        .iter()
+        .filter(|b| is_verb_dict_block(b))
+        .filter_map(verb_entry_from_block);
+    VerbDict::resolve(user_entries)
+}
+
 // ---------------------------------------------------------------------------
 // Parsing
 // ---------------------------------------------------------------------------
@@ -688,7 +767,9 @@ pub fn is_prototype_block(block: &Block) -> bool {
 /// and executor while preserving the full (possibly multi-line) content body
 /// verbatim, so the existing `wiki_links` extraction path is unaffected. The
 /// reference-role classification, verb dictionary, `via:` routes and recurrence
-/// live on [`ParsedTask`] for the next materialization-wiring step.
+/// live on [`ParsedTask`]. The dictionary is now runtime-extensible via
+/// [`resolve_verb_dict`] (verb-dictionary blocks); the still-deferred step is
+/// having `materialize` consume [`ParsedTask::verb`] to shape the net.
 pub fn parse_content_prefixes(raw: &str) -> (String, bool, Executor, bool) {
     let mut content = raw.trim().to_string();
     let mut has_sequential_dep = false;
@@ -1673,5 +1754,142 @@ mod tests {
             err.to_lowercase().contains("operations"),
             "error must name the operations limit, got: {err}"
         );
+    }
+
+    fn verb_dict_block(id: &EntityUri, verb_op: &str, verb_surface: &str) -> Block {
+        let mut b = Block::new_text(id.clone(), EntityUri::block("dict-parent"), "verb entry");
+        b.set_property("verb_op", holon_api::Value::String(verb_op.to_string()));
+        b.set_property(
+            "verb_surface",
+            holon_api::Value::String(verb_surface.to_string()),
+        );
+        b
+    }
+
+    #[test]
+    fn is_verb_dict_block_marker() {
+        let dict = verb_dict_block(&EntityUri::block_random(), "research", "recensire");
+        assert!(is_verb_dict_block(&dict));
+
+        let task = task_block(&EntityUri::block_random(), "a task", "TODO");
+        assert!(!is_verb_dict_block(&task));
+    }
+
+    #[test]
+    fn resolve_verb_dict_from_blocks() {
+        let blocks = vec![
+            verb_dict_block(&EntityUri::block_random(), "research", "recensire"),
+            // Re-point a built-in surface: "prüfen" is Check by default.
+            verb_dict_block(&EntityUri::block_random(), "research", "prüfen"),
+        ];
+        let dict = resolve_verb_dict(&blocks);
+
+        let novel = ParsedTask::parse_with_dict("recensire [[Report]]", &dict);
+        assert_eq!(novel.verb.map(|v| v.op), Some(VerbOp::Research));
+
+        let repointed = ParsedTask::parse_with_dict("prüfen [[Report]]", &dict);
+        assert_eq!(repointed.verb.map(|v| v.op), Some(VerbOp::Research));
+
+        // Built-ins that no block touched survive.
+        let builtin = ParsedTask::parse_with_dict("check [[Report]]", &dict);
+        assert_eq!(builtin.verb.map(|v| v.op), Some(VerbOp::Check));
+    }
+
+    #[test]
+    fn malformed_verb_block_is_skipped_disclosed() {
+        // Unknown verb_op keyword — skipped, so its unique surface never lands.
+        let bad_keyword = verb_dict_block(&EntityUri::block_random(), "frobnicate", "brokenverb");
+
+        // Missing verb_surface (marker present so it is still discovered) — skipped.
+        let mut missing_surface = Block::new_text(
+            EntityUri::block_random(),
+            EntityUri::block("dict-parent"),
+            "verb entry",
+        );
+        missing_surface.set_property("verb_op", holon_api::Value::String("order".to_string()));
+
+        let good = verb_dict_block(&EntityUri::block_random(), "research", "recensire");
+
+        let dict = resolve_verb_dict(&[bad_keyword, missing_surface, good]);
+
+        // The good sibling still lands.
+        assert_eq!(
+            ParsedTask::parse_with_dict("recensire [[X]]", &dict)
+                .verb
+                .map(|v| v.op),
+            Some(VerbOp::Research)
+        );
+        // Built-ins remain intact.
+        assert_eq!(
+            ParsedTask::parse_with_dict("check [[X]]", &dict)
+                .verb
+                .map(|v| v.op),
+            Some(VerbOp::Check)
+        );
+        // The bad-keyword block's unique surface was NOT added.
+        assert!(
+            ParsedTask::parse_with_dict("brokenverb [[X]]", &dict)
+                .verb
+                .is_none(),
+            "a block with an unknown verb_op keyword must not register its surface"
+        );
+    }
+
+    #[test]
+    fn user_surface_is_lowercased_at_insert() {
+        // A2: a mixed-case verb_surface must match lowercased task words.
+        let blocks = vec![verb_dict_block(
+            &EntityUri::block_random(),
+            "research",
+            "ReCeNsIrE",
+        )];
+        let dict = resolve_verb_dict(&blocks);
+        let parsed = ParsedTask::parse_with_dict("recensire [[Report]]", &dict);
+        assert_eq!(parsed.verb.map(|v| v.op), Some(VerbOp::Research));
+    }
+
+    #[test]
+    fn vault_verb_block_changes_parse_output() {
+        // End-to-end: a vault Vec<Block> resolves to a dict that recognizes a
+        // novel lemma the built-in dictionary does not.
+        let raw = "recensire [[Report]]";
+
+        let builtin = ParsedTask::parse(raw);
+        assert!(
+            builtin.verb.is_none(),
+            "built-in dict must not know the lemma"
+        );
+        assert!(builtin.objects.is_empty());
+
+        let blocks = vec![verb_dict_block(
+            &EntityUri::block_random(),
+            "research",
+            "recensire",
+        )];
+        let dict = resolve_verb_dict(&blocks);
+        let parsed = ParsedTask::parse_with_dict(raw, &dict);
+        assert_eq!(parsed.verb.map(|v| v.op), Some(VerbOp::Research));
+        assert_eq!(parsed.objects, vec!["Report".to_string()]);
+    }
+
+    /// A1: verb-dictionary blocks arrive in the `rank_tasks` slice (the SQL now
+    /// selects them) but must NOT be ranked/materialized as tasks. Exclusion is
+    /// implicit — `TaskInfo::from_block` returns `Ok(None)` for any block
+    /// without a `task_state`, exactly as it does for prototype blocks.
+    /// This pins it.
+    #[test]
+    fn verb_dict_block_is_not_ranked_as_task() {
+        let task_id = EntityUri::block_random();
+        let task = task_block(&task_id, "a real task", "TODO");
+        let dict = verb_dict_block(&EntityUri::block_random(), "research", "recensire");
+
+        let result = rank_tasks(&[task, dict]).expect("rank_tasks must succeed");
+
+        assert_eq!(
+            result.ranked.len(),
+            1,
+            "only the task_state block is ranked; the verb-dict block is excluded"
+        );
+        assert_eq!(result.ranked[0].block_id, task_id.to_string());
     }
 }
