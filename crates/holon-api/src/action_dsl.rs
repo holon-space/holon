@@ -122,3 +122,35 @@ impl std::fmt::Display for EntityRef {
         write!(f, "EntityRef({})", self.0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `build_action_engine` must register the action operations on the
+    /// `EntityRef` custom type. A `Default::default()` Rhai engine lacks
+    /// both the type and the `create`/`set_field`/... functions, so parsing
+    /// `block.create(#{...})` would fail. Probe a registered fn end-to-end.
+    #[test]
+    fn build_action_engine_registers_action_ops() {
+        let parsed = parse_action_dsl(r#"block.create(#{ content: "hi" })"#)
+            .expect("registered `create` op must parse");
+        assert_eq!(parsed.entity, "block");
+        assert_eq!(parsed.operation, "create");
+        assert_eq!(parsed.params.len(), 1);
+        assert_eq!(parsed.params[0].name.as_deref(), Some("content"));
+
+        // A second registered op, to pin more than one registration.
+        let parsed = parse_action_dsl(r#"block.set_field(#{ done: true })"#)
+            .expect("registered `set_field` op must parse");
+        assert_eq!(parsed.operation, "set_field");
+    }
+
+    /// `Display for EntityRef` must format the wrapped id, not the empty
+    /// default string.
+    #[test]
+    fn entity_ref_display_formats_content() {
+        let r = EntityRef("block".to_string());
+        assert_eq!(format!("{r}"), "EntityRef(block)");
+    }
+}

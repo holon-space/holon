@@ -795,6 +795,79 @@ mod tests {
         let v = Value::Array(arr.clone());
         assert_eq!(v.as_array(), Some(&arr));
     }
+
+    /// Behavioral lockdown for the `Value` accessors that mutation testing
+    /// found unguarded. Each assertion pins the exact returned payload so a
+    /// replacement with `None`, `Some(Default)`, a stubbed literal, or a
+    /// deleted match arm is caught.
+    #[test]
+    fn value_accessor_payloads_are_exact() {
+        // as_json_value: real parse on the Json variant, None otherwise.
+        let jv = Value::Json(r#"{"a":1}"#.to_string());
+        assert_eq!(
+            jv.as_json_value(),
+            Some(serde_json::json!({"a": 1})),
+            "must actually parse the Json string, not None/Default",
+        );
+        assert_eq!(Value::Integer(1).as_json_value(), None);
+
+        // as_string_owned: clones the actual string, None otherwise.
+        assert_eq!(
+            Value::String("hello".to_string()).as_string_owned(),
+            Some("hello".to_string()),
+        );
+        assert_eq!(Value::Integer(1).as_string_owned(), None);
+
+        // as_datetime_string: returns the stored RFC3339 text verbatim.
+        let dt_str = "2020-01-02T03:04:05+00:00";
+        assert_eq!(
+            Value::DateTime(dt_str.to_string()).as_datetime_string(),
+            Some(dt_str),
+        );
+        assert_eq!(Value::Integer(1).as_datetime_string(), None);
+
+        // as_datetime: parses to the corresponding chrono instant.
+        let expected = chrono::DateTime::parse_from_rfc3339(dt_str)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            Value::DateTime(dt_str.to_string()).as_datetime(),
+            Some(expected),
+        );
+        assert_eq!(Value::Integer(1).as_datetime(), None);
+
+        // as_object: returns the real map (non-empty), None otherwise.
+        let mut m = std::collections::HashMap::new();
+        m.insert("k".to_string(), Value::Integer(7));
+        let obj = Value::Object(m.clone());
+        assert_eq!(obj.as_object(), Some(&m));
+        assert_eq!(obj.as_object().map(|o| o.len()), Some(1));
+        assert_eq!(Value::Integer(1).as_object(), None);
+    }
+
+    /// Behavioral lockdown for the `TryFrom<Value>` conversions flagged by
+    /// mutation testing. Pins both the success payload and the boolean
+    /// integer-truthiness comparison.
+    #[test]
+    fn tryfrom_value_conversions_are_exact() {
+        // bool: Boolean arm and the `!= 0` truthiness of the Integer arm.
+        assert_eq!(bool::try_from(Value::Boolean(true)).unwrap(), true);
+        assert_eq!(bool::try_from(Value::Boolean(false)).unwrap(), false);
+        assert_eq!(bool::try_from(Value::Integer(0)).unwrap(), false);
+        assert_eq!(bool::try_from(Value::Integer(5)).unwrap(), true);
+        assert!(bool::try_from(Value::String("x".into())).is_err());
+
+        // i32: real value, not Default.
+        assert_eq!(i32::try_from(Value::Integer(42)).unwrap(), 42);
+
+        // f64: real value, not Default.
+        assert_eq!(f64::try_from(Value::Float(3.5)).unwrap(), 3.5);
+
+        // Vec<T>: real contents, not Default (empty).
+        let v: Vec<i64> =
+            Vec::try_from(Value::Array(vec![Value::Integer(1), Value::Integer(2)])).unwrap();
+        assert_eq!(v, vec![1, 2]);
+    }
 }
 
 /// Structured error types for API operations.
