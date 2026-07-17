@@ -226,9 +226,13 @@ verified against GitHub's Sigstore instance. Also compare
   Linux/Windows archives place `assets/` beside the binary; the macOS bundle
   puts them in `Contents/Resources/assets` with a symlink from
   `Contents/MacOS/assets` (codesign forbids non-code files in `MacOS/`).
-  Packaging copies assets with `cp -RL` (**dereference**): `assets/queries/*.prql`
-  are symlinks into `crates/*/queries`, so a plain `cp -R` would ship dangling
-  links (broken queries at runtime; on Windows it fails the build outright).
+  Packaging copies assets via `scripts/stage-assets.sh` (real files copied,
+  symlinks dereferenced, dangling links dropped with a loud warning).
+  `assets/queries/*.prql` are three vestigial links into `crates/*/queries`
+  that resolve only through the `frontends/gpui/assets` → `../../assets`
+  indirection and never in a flat package, so all three are dropped. A plain
+  `cp -R` would ship them as dangling links (broken at runtime) and fails the
+  Windows build outright (`cp: cannot create symbolic link …`).
 - **Linux packaging**: two artifacts per release — a portable **AppImage**
   (bundles the GUI shared libs so users need no `-dev`/runtime packages) and a
   plain **`.tar.gz`** (kept as a fallback; needs the system GUI libs present).

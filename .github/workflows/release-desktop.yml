@@ -214,10 +214,10 @@ jobs:
           name="Holon-$VERSION-linux-x86_64"
           mkdir -p "dist/$name"
           cp target/release/holon-gpui "dist/$name/"
-          # -L dereferences symlinks: assets/queries/*.prql are symlinks INTO
-          # crates/*/queries, so a plain -R would ship dangling links that
-          # break those queries on the user's machine. Copy the real files.
-          cp -RL assets "dist/$name/assets"
+          # Copy assets dereferencing symlinks and dropping dangling ones
+          # (assets/queries/*.prql are dead out-of-tree links); a plain cp -R
+          # would ship dangling links / fail on Windows. See the script.
+          bash scripts/stage-assets.sh assets "dist/$name/assets"
           tar -czf "dist/$name.tar.gz" -C dist "$name"
           rm -rf "dist/${name:?}"
           (cd dist && sha256sum "$name.tar.gz" > SHA256SUMS-linux.txt)
@@ -237,7 +237,7 @@ jobs:
           rm -rf "$APPDIR"
           mkdir -p "$APPDIR/usr/bin"
           cp target/release/holon-gpui "$APPDIR/usr/bin/"
-          cp -RL assets "$APPDIR/usr/bin/assets"   # deref, as above
+          bash scripts/stage-assets.sh assets "$APPDIR/usr/bin/assets"
           # linuxdeploy requires a desktop file + icon. Reuse the app icon
           # (iOS asset is a clean single-frame PNG; the canonical .icns is
           # multi-frame and fiddlier to convert).
@@ -277,10 +277,10 @@ jobs:
           name="Holon-$VERSION-windows-x86_64"
           mkdir -p "dist/staging"
           cp target/release/holon-gpui.exe dist/staging/
-          # -L dereferences the assets/queries/*.prql symlinks — cp -R fails
-          # outright on Windows trying to recreate them (this was the v0.0.1
-          # Windows-build failure).
-          cp -RL assets dist/staging/assets
+          # cp -R fails on Windows trying to recreate the assets/queries/*.prql
+          # symlinks (the v0.0.1 Windows-build failure); stage-assets copies
+          # real files and drops the dead links.
+          bash scripts/stage-assets.sh assets dist/staging/assets
           (cd dist/staging && 7z a "../$name.zip" .)
           rm -rf dist/staging
           (cd dist && sha256sum "$name.zip" > SHA256SUMS-windows.txt)
