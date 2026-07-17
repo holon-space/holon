@@ -29,6 +29,9 @@
 //! Otherwise it is **context** — a tag, never an arc. This prevents a task like
 //! `Überlegen, was ich [[Kat]] schenke` from being falsely blocked on Kat.
 
+use std::collections::BTreeMap;
+use std::sync::LazyLock;
+
 use holon_api::clock::Recurrence;
 
 /// Who performs the transition (PetriNet.md §"The Executor Model"). The `@`
@@ -92,12 +95,60 @@ impl VerbOp {
     pub fn produces_knowledge(self) -> bool {
         matches!(self, VerbOp::Check | VerbOp::Ask)
     }
+
+    /// The canonical keyword for this operation — the stable string a
+    /// dictionary block's `verb_op` property carries. Round-trips with
+    /// [`VerbOp::from_keyword`].
+    pub fn keyword(self) -> &'static str {
+        match self {
+            VerbOp::Create => "create",
+            VerbOp::Research => "research",
+            VerbOp::Order => "order",
+            VerbOp::Pay => "pay",
+            VerbOp::Send => "send",
+            VerbOp::Discuss => "discuss",
+            VerbOp::Check => "check",
+            VerbOp::Ask => "ask",
+        }
+    }
+
+    /// Parse the canonical keyword a dictionary block carries in its `verb_op`
+    /// property into a typed [`VerbOp`]. Fails loudly on an unknown keyword —
+    /// the caller decides how to disclose the skip (never silently defaults).
+    pub fn from_keyword(keyword: &str) -> Result<VerbOp, VerbOpParseError> {
+        match keyword {
+            "create" => Ok(VerbOp::Create),
+            "research" => Ok(VerbOp::Research),
+            "order" => Ok(VerbOp::Order),
+            "pay" => Ok(VerbOp::Pay),
+            "send" => Ok(VerbOp::Send),
+            "discuss" => Ok(VerbOp::Discuss),
+            "check" => Ok(VerbOp::Check),
+            "ask" => Ok(VerbOp::Ask),
+            other => Err(VerbOpParseError {
+                keyword: other.to_string(),
+            }),
+        }
+    }
 }
 
-/// The default verb dictionary (~30 German + English lemmas → [`VerbOp`]).
+/// An unrecognized `verb_op` keyword reached [`VerbOp::from_keyword`]. Carries
+/// the offending value so the boundary can name it in a disclosed skip.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "unknown verb_op keyword {keyword:?} (expected one of create|research|order|pay|send|discuss|check|ask)"
+)]
+pub struct VerbOpParseError {
+    pub keyword: String,
+}
+
+/// The built-in verb dictionary (~30 German + English lemmas → [`VerbOp`]).
 /// Matched case-insensitively against whole words of the task text. This is the
-/// built-in baseline; making it user-extensible via dictionary blocks is a
-/// later step (PetriNet.md calls the dictionary "extensible per user").
+/// baseline source of truth for [`VerbDict::builtin`]; users extend it at
+/// runtime with dictionary blocks — see `resolve_verb_dict` in the crate root
+/// (PetriNet.md calls the dictionary "extensible per user"). That is the live
+/// extension seam. Consuming the recognized [`ParsedTask::verb`] during
+/// materialization is a separate, still-deferred step.
 ///
 /// Kept deliberately as lemmas plus the most common surface forms actually
 /// typed; full morphological lemmatization is out of scope for the
@@ -156,6 +207,50 @@ pub struct Verb {
     pub op: VerbOp,
 }
 
+/// An owned verb dictionary: surface form (lowercased) → [`VerbOp`]. This is
+/// the runtime-resolvable counterpart of the `'static` [`DEFAULT_VERB_DICT`] —
+/// it lets user-defined dictionary blocks extend or re-point the built-in
+/// surfaces (see `resolve_verb_dict` at the crate root). Keys are always
+/// lowercased at insert, so [`Self::lookup`] compares against an
+/// already-lowercased word directly.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerbDict(BTreeMap<String, VerbOp>);
+
+impl VerbDict {
+    /// The built-in dictionary, built once from [`DEFAULT_VERB_DICT`] and
+    /// cached so [`ParsedTask::parse`] does not rebuild the map per call.
+    pub fn builtin() -> &'static VerbDict {
+        static BUILTIN: LazyLock<VerbDict> = LazyLock::new(|| {
+            VerbDict(
+                DEFAULT_VERB_DICT
+                    .iter()
+                    .map(|&(surface, op)| (surface.to_lowercase(), op))
+                    .collect(),
+            )
+        });
+        &BUILTIN
+    }
+
+    /// Build a dictionary from the built-in baseline overlaid with
+    /// `user_entries`. User surfaces are lowercased on insert and overwrite
+    /// any built-in (or earlier user) entry for the same surface — last
+    /// write per surface wins, with user entries applied after the
+    /// built-ins.
+    pub fn resolve(user_entries: impl IntoIterator<Item = (String, VerbOp)>) -> VerbDict {
+        let mut map = Self::builtin().0.clone();
+        for (surface, op) in user_entries {
+            map.insert(surface.to_lowercase(), op);
+        }
+        VerbDict(map)
+    }
+
+    /// Look up an already-lowercased whole word. Returns the operation it
+    /// denotes, if the surface is in the dictionary.
+    fn lookup(&self, lowercased_word: &str) -> Option<VerbOp> {
+        self.0.get(lowercased_word).copied()
+    }
+}
+
 /// A question-resolution route (PetriNet.md §"Questions and Information
 /// Tokens").
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -194,16 +289,17 @@ pub struct ParsedTask {
 }
 
 impl ParsedTask {
-    /// Parse raw task text against the built-in [`DEFAULT_VERB_DICT`].
+    /// Parse raw task text against the cached built-in dictionary
+    /// ([`VerbDict::builtin`], sourced from [`DEFAULT_VERB_DICT`]).
     pub fn parse(raw: &str) -> Self {
-        Self::parse_with_dict(raw, DEFAULT_VERB_DICT)
+        Self::parse_with_dict(raw, VerbDict::builtin())
     }
 
-    /// Parse raw task text against a caller-supplied verb dictionary. The
-    /// dictionary seam is what a later "dictionaries-as-blocks" step feeds
-    /// a runtime-loaded dictionary into; the built-in one is
-    /// [`DEFAULT_VERB_DICT`].
-    pub fn parse_with_dict(raw: &str, verb_dict: &[(&str, VerbOp)]) -> Self {
+    /// Parse raw task text against a caller-supplied verb dictionary. This is
+    /// the runtime extension seam: `resolve_verb_dict` (crate root) turns
+    /// user-authored dictionary blocks into the [`VerbDict`] fed here; the
+    /// built-in baseline is [`VerbDict::builtin`].
+    pub fn parse_with_dict(raw: &str, verb_dict: &VerbDict) -> Self {
         // Grammar is line-oriented: the first line is the task; any following lines
         // are opaque body kept out of the label.
         let first_line = raw.trim().lines().next().unwrap_or("").trim();
@@ -286,13 +382,13 @@ fn extract_via_routes(text: &str) -> (String, Vec<ViaRoute>) {
         out.push_str(&rest[..pos]);
         let after = rest[pos + 4..].trim_start();
         let consumed_from = rest.len() - after.len(); // absolute end of "via:" + ws
-        if let Some(inner) = after.strip_prefix("[[") {
-            if let Some(close) = inner.find("]]") {
-                routes.push(ViaRoute::Source(inner[..close].trim().to_string()));
-                rest = &after[close + 4..]; // skip "[[" .. "]]"
-                let _ = consumed_from;
-                continue;
-            }
+        if let Some(inner) = after.strip_prefix("[[")
+            && let Some(close) = inner.find("]]")
+        {
+            routes.push(ViaRoute::Source(inner[..close].trim().to_string()));
+            rest = &after[close + 4..]; // skip "[[" .. "]]"
+            let _ = consumed_from;
+            continue;
         }
         if let Some(agent_rest) = after.strip_prefix('@') {
             let end = agent_rest
@@ -334,19 +430,14 @@ fn extract_recurrence(text: &str) -> (String, Option<Recurrence>) {
 }
 
 /// Find the first dictionary verb appearing as a whole word (case-insensitive).
-fn find_verb(text: &str, verb_dict: &[(&str, VerbOp)]) -> Option<Verb> {
+fn find_verb(text: &str, verb_dict: &VerbDict) -> Option<Verb> {
     for word in text.split(|c: char| !c.is_alphabetic()) {
         if word.is_empty() {
             continue;
         }
         let lower = word.to_lowercase();
-        for &(lemma, op) in verb_dict {
-            if lower == lemma {
-                return Some(Verb {
-                    lemma: lemma.to_string(),
-                    op,
-                });
-            }
+        if let Some(op) = verb_dict.lookup(&lower) {
+            return Some(Verb { lemma: lower, op });
         }
     }
     None
@@ -541,5 +632,71 @@ mod tests {
         );
         assert!(VerbOp::Check.produces_knowledge());
         assert!(!VerbOp::Create.produces_knowledge());
+    }
+
+    #[test]
+    fn verb_op_keyword_roundtrips() {
+        for op in [
+            VerbOp::Create,
+            VerbOp::Research,
+            VerbOp::Order,
+            VerbOp::Pay,
+            VerbOp::Send,
+            VerbOp::Discuss,
+            VerbOp::Check,
+            VerbOp::Ask,
+        ] {
+            assert_eq!(VerbOp::from_keyword(op.keyword()), Ok(op));
+        }
+        assert!(VerbOp::from_keyword("nonsense").is_err());
+    }
+
+    #[test]
+    fn builtin_dict_matches_default_slice() {
+        let builtin = VerbDict::builtin();
+        for &(surface, op) in DEFAULT_VERB_DICT {
+            assert_eq!(builtin.lookup(&surface.to_lowercase()), Some(op));
+        }
+    }
+
+    #[test]
+    fn user_entry_overrides_default_surface() {
+        // "prüfen" is a built-in Check surface; re-point it to Research.
+        let dict = VerbDict::resolve([("prüfen".to_string(), VerbOp::Research)]);
+        assert_eq!(dict.lookup("prüfen"), Some(VerbOp::Research));
+        // Untouched built-ins survive.
+        assert_eq!(dict.lookup("check"), Some(VerbOp::Check));
+    }
+
+    #[test]
+    fn user_entry_adds_new_surface() {
+        let dict = VerbDict::resolve([("recensire".to_string(), VerbOp::Research)]);
+        assert_eq!(dict.lookup("recensire"), Some(VerbOp::Research));
+        assert_eq!(dict.lookup("check"), Some(VerbOp::Check));
+    }
+
+    #[test]
+    fn parse_with_resolved_dict_changes_output() {
+        // A novel lemma unknown to the built-in dictionary.
+        let raw = "recensire [[Report]]";
+
+        let builtin = ParsedTask::parse(raw);
+        assert!(builtin.verb.is_none());
+        // Without a verb, the bracketed reference is context, not an object.
+        assert!(builtin.objects.is_empty());
+        assert_eq!(builtin.tags, vec!["Report".to_string()]);
+
+        let dict = VerbDict::resolve([("recensire".to_string(), VerbOp::Research)]);
+        let resolved = ParsedTask::parse_with_dict(raw, &dict);
+        assert_eq!(
+            resolved.verb,
+            Some(Verb {
+                lemma: "recensire".to_string(),
+                op: VerbOp::Research,
+            })
+        );
+        // With the verb recognized, the reference is promoted to an object arc.
+        assert_eq!(resolved.objects, vec!["Report".to_string()]);
+        assert!(resolved.tags.is_empty());
     }
 }
