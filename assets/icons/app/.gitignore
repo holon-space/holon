@@ -1,0 +1,2 @@
+# app-icon SVGs are generated + tracked (parent .gitignore ignores *.svg)
+!*.svg
