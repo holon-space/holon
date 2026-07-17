@@ -160,6 +160,155 @@ impl LoroBlockOperations {
         self.save_doc(&doc_path).await?;
         Ok(OperationResult::irreversible(vec![]))
     }
+
+    /// Element-wise `add_tag`: append one `tag` to a block's `tags` set
+    /// (idempotent, invertible). Mirrors the SqlOperationProvider arm — same
+    /// `OperationResult` shape so both authorities behave identically.
+    ///
+    /// CRDT caveat (honest): the Loro tag set is a **whole-array LWW meta key**
+    /// ([`LoroBackend::set_block_tags`]), so two concurrent `add_tag`s of
+    /// DIFFERENT tags on the same block can lose one on merge (last-writer-wins
+    /// over the array). Per-element tag keys (H3-properties nested map, one LWW
+    /// key per tag) are deferred — the SQL junction's per-row PK has no such
+    /// limitation.
+    async fn add_tag(&self, params: &StorageEntity) -> Result<OperationResult> {
+        let id = params
+            .get("id")
+            .and_then(|v| v.as_string())
+            .ok_or("add_tag: missing 'id' parameter")?;
+        let tag = params
+            .get("tag")
+            .and_then(|v| v.as_string())
+            .ok_or("add_tag: missing 'tag' parameter")?;
+
+        let (doc_path, backend) = self.find_doc_for_block(id).await?;
+        // Fail loud on a missing block — never silently write a fresh set.
+        let block = backend
+            .get_block(id)
+            .await
+            .map_err(|e| format!("add_tag: block {id:?} not found: {e}"))?;
+
+        // No-pages-under-non-pages (interim ruling 2026-07-13): marking a block
+        // Page turns it into a page, so its immediate parent must also be a page
+        // (or be `no_parent` — seed/root pages stay legal). The immediate-parent
+        // check suffices by induction: an existing tree already honours the rule.
+        if tag == holon_api::PAGE_TAG {
+            let parent_is_page = match block.parent_id.as_block_id() {
+                Some(parent_id) => {
+                    let parent = backend.get_block(parent_id).await.map_err(|e| {
+                        format!("add_tag: parent block {parent_id:?} not found: {e}")
+                    })?;
+                    Some(parent.is_page())
+                }
+                None => None,
+            };
+            if holon_core::block_op_catalog::page_under_non_page_prohibited(true, parent_is_page) {
+                return Err(holon_core::block_op_catalog::add_page_tag_rejection(
+                    id,
+                    block.parent_id.as_str(),
+                )
+                .into());
+            }
+        }
+
+        let mut tags = block.tags.clone();
+        let newly_added = tags.insert(tag);
+        let inverse = block_op(
+            "remove_tag",
+            HashMap::from([
+                ("id".to_string(), Value::String(id.to_string())),
+                ("tag".to_string(), Value::String(tag.to_string())),
+            ]),
+        );
+        if !newly_added {
+            // Idempotent no-op: report a VACUOUS delta (old == new) so the
+            // engine never journals an undo entry. Inverse-correctness: undoing
+            // an idempotent re-add must not strip a tag that was already there.
+            let changes = vec![FieldDelta::history_only(
+                id,
+                "tags",
+                Value::String(tag.to_string()),
+                Value::String(tag.to_string()),
+            )];
+            return Ok(OperationResult::new(changes, inverse));
+        }
+        backend
+            .set_block_tags(id, &tags.to_vec())
+            .await
+            .map_err(|e| format!("add_tag: {e}"))?;
+        self.save_doc(&doc_path).await?;
+        // `tags` is a junction/meta field the column-only staleness reader
+        // cannot fingerprint, so the delta is `history_only` — recorded in the
+        // history relation but excluded from the undo precondition.
+        let changes = vec![FieldDelta::history_only(
+            id,
+            "tags",
+            Value::Null,
+            Value::String(tag.to_string()),
+        )];
+        Ok(OperationResult::new(changes, inverse))
+    }
+
+    /// Element-wise `remove_tag`: drop one `tag` from a block's `tags` set
+    /// (idempotent, invertible). Symmetric to [`Self::add_tag`].
+    async fn remove_tag(&self, params: &StorageEntity) -> Result<OperationResult> {
+        let id = params
+            .get("id")
+            .and_then(|v| v.as_string())
+            .ok_or("remove_tag: missing 'id' parameter")?;
+        let tag = params
+            .get("tag")
+            .and_then(|v| v.as_string())
+            .ok_or("remove_tag: missing 'tag' parameter")?;
+
+        let (doc_path, backend) = self.find_doc_for_block(id).await?;
+        let block = backend
+            .get_block(id)
+            .await
+            .map_err(|e| format!("remove_tag: block {id:?} not found: {e}"))?;
+
+        // Unmarking a Page whose direct children are themselves pages would
+        // leave those children as pages under a non-page block. Reject loud
+        // (cascade-unmark is a surprising bulk mutation — deliberately not done).
+        if tag == holon_api::PAGE_TAG && block.is_page() {
+            let child_ids = backend.list_children(id).await?;
+            let children = backend.get_blocks(child_ids).await?;
+            if children.iter().any(|c| c.is_page()) {
+                return Err(holon_core::block_op_catalog::remove_page_tag_rejection(id).into());
+            }
+        }
+
+        let mut tags = block.tags.clone();
+        let was_present = tags.remove(tag);
+        let inverse = block_op(
+            "add_tag",
+            HashMap::from([
+                ("id".to_string(), Value::String(id.to_string())),
+                ("tag".to_string(), Value::String(tag.to_string())),
+            ]),
+        );
+        if !was_present {
+            let changes = vec![FieldDelta::history_only(
+                id,
+                "tags",
+                Value::Null,
+                Value::Null,
+            )];
+            return Ok(OperationResult::new(changes, inverse));
+        }
+        backend
+            .set_block_tags(id, &tags.to_vec())
+            .await
+            .map_err(|e| format!("remove_tag: {e}"))?;
+        self.save_doc(&doc_path).await?;
+        let changes = vec![FieldDelta::history_only(
+            id,
+            "tags",
+            Value::String(tag.to_string()),
+            Value::Null,
+        )];
+        Ok(OperationResult::new(changes, inverse))
+    }
 }
 
 #[async_trait]
@@ -884,6 +1033,17 @@ impl OperationProvider for LoroBlockOperations {
             short_name,
         ));
 
+        // Element-wise tag ops (idempotent, invertible) — bespoke shared
+        // descriptors, single-sourced from the catalog like dismiss_advice.
+        ops.push(holon_core::block_op_catalog::add_tag_descriptor(
+            &EntityName::from(entity_name),
+            short_name,
+        ));
+        ops.push(holon_core::block_op_catalog::remove_tag_descriptor(
+            &EntityName::from(entity_name),
+            short_name,
+        ));
+
         ops
     }
 
@@ -957,6 +1117,15 @@ impl OperationProvider for LoroBlockOperations {
         // `advice_suppressed` set. Not a macro-trait op — dispatched by hand here.
         if op_name == "dismiss_advice" {
             return self.dismiss_advice(&params).await;
+        }
+
+        // Element-wise tag mutation (idempotent, invertible) — bespoke
+        // hand-dispatched ops, like dismiss_advice, not macro-trait ops.
+        if op_name == "add_tag" {
+            return self.add_tag(&params).await;
+        }
+        if op_name == "remove_tag" {
+            return self.remove_tag(&params).await;
         }
 
         // Try block operations
@@ -1400,5 +1569,185 @@ mod intent_boundary_tests {
                 "rejection must name the invariant, got: {err}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tag_op_tests {
+    use std::collections::HashMap;
+
+    use holon_api::PAGE_TAG;
+    use holon_api::block::BlockContent;
+    use holon_api::repository::CoreOperations;
+    use holon_core::traits::UndoAction;
+
+    use super::*;
+
+    /// Ops over a temp store with a root, returning ops + the backend.
+    async fn ops_and_backend() -> (LoroBlockOperations, tempfile::TempDir, LoroBackend) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(RwLock::new(LoroDocumentStore::new(
+            dir.path().to_path_buf(),
+        )));
+        let ops = LoroBlockOperations::new(store);
+        let backend = ops.get_backend("").await.expect("backend");
+        backend.create_placeholder_root("root").await.expect("root");
+        (ops, dir, backend)
+    }
+
+    /// Create a block with an explicit id under `parent`.
+    async fn make_block(backend: &LoroBackend, id: &str, parent: EntityUri) {
+        backend
+            .create_block(parent, BlockContent::text(id), Some(EntityUri::block(id)))
+            .await
+            .unwrap_or_else(|e| panic!("create {id}: {e}"));
+    }
+
+    async fn run(ops: &LoroBlockOperations, op: &str, id: &str, tag: &str) -> OperationResult {
+        let mut params: StorageEntity = HashMap::new();
+        params.insert("id".into(), Value::String(id.to_string()));
+        params.insert("tag".into(), Value::String(tag.to_string()));
+        ops.execute_operation(&EntityName::new("block"), op, params)
+            .await
+            .unwrap_or_else(|e| panic!("{op} failed: {e}"))
+    }
+
+    async fn tags_of(backend: &LoroBackend, id: &str) -> Vec<String> {
+        backend
+            .get_block(id)
+            .await
+            .expect("get_block")
+            .tags
+            .to_vec()
+    }
+
+    fn is_vacuous(r: &OperationResult) -> bool {
+        !r.changes.is_empty() && r.changes.iter().all(|d| d.old_value == d.new_value)
+    }
+
+    #[tokio::test]
+    async fn add_tag_is_idempotent() {
+        let (ops, _dir, backend) = ops_and_backend().await;
+        make_block(&backend, "x", EntityUri::no_parent()).await;
+        ops.save_doc("").await.expect("save");
+
+        let first = run(&ops, "add_tag", "block:x", "todo").await;
+        assert_eq!(tags_of(&backend, "block:x").await, vec!["todo".to_string()]);
+        assert!(!is_vacuous(&first));
+
+        let second = run(&ops, "add_tag", "block:x", "todo").await;
+        assert_eq!(tags_of(&backend, "block:x").await, vec!["todo".to_string()]);
+        assert!(is_vacuous(&second), "re-add of a present tag is vacuous");
+    }
+
+    #[tokio::test]
+    async fn remove_tag_is_targeted_and_idempotent() {
+        let (ops, _dir, backend) = ops_and_backend().await;
+        make_block(&backend, "x", EntityUri::no_parent()).await;
+        ops.save_doc("").await.expect("save");
+        run(&ops, "add_tag", "block:x", "a").await;
+        run(&ops, "add_tag", "block:x", "b").await;
+
+        run(&ops, "remove_tag", "block:x", "a").await;
+        assert_eq!(tags_of(&backend, "block:x").await, vec!["b".to_string()]);
+
+        let noop = run(&ops, "remove_tag", "block:x", "a").await;
+        assert!(is_vacuous(&noop));
+        assert_eq!(tags_of(&backend, "block:x").await, vec!["b".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn add_tag_inverse_round_trips() {
+        let (ops, _dir, backend) = ops_and_backend().await;
+        make_block(&backend, "x", EntityUri::no_parent()).await;
+        ops.save_doc("").await.expect("save");
+
+        let result = run(&ops, "add_tag", "block:x", "todo").await;
+        let inverse = match result.undo {
+            UndoAction::Undo(op) => op,
+            other => panic!("add_tag must be reversible, got {other:?}"),
+        };
+        assert_eq!(inverse.op_name, "remove_tag");
+        let mut params: StorageEntity = HashMap::new();
+        for (k, v) in &inverse.params {
+            params.insert(k.as_str().into(), v.clone());
+        }
+        ops.execute_operation(&EntityName::new("block"), &inverse.op_name, params)
+            .await
+            .expect("replay inverse");
+        assert!(tags_of(&backend, "block:x").await.is_empty());
+    }
+
+    /// Page guard: marking a block Page under a non-page parent is rejected;
+    /// a block at no_parent (seed page) is allowed; a page under a page
+    /// allowed.
+    #[tokio::test]
+    async fn add_page_tag_nesting_guard() {
+        let (ops, _dir, backend) = ops_and_backend().await;
+        make_block(&backend, "parent", EntityUri::no_parent()).await;
+        make_block(&backend, "child", EntityUri::block("parent")).await;
+        ops.save_doc("").await.expect("save");
+
+        // Parent is a non-page block → reject.
+        let mut params: StorageEntity = HashMap::new();
+        params.insert("id".into(), Value::String("block:child".to_string()));
+        params.insert("tag".into(), Value::String(PAGE_TAG.to_string()));
+        let err = ops
+            .execute_operation(&EntityName::new("block"), "add_tag", params)
+            .await
+            .expect_err("page under non-page must be rejected");
+        assert!(
+            err.to_string().contains("pages under non-pages"),
+            "got: {err}"
+        );
+
+        // Seed page at no_parent → allowed; then child under the now-page parent.
+        run(&ops, "add_tag", "block:parent", PAGE_TAG).await;
+        assert!(
+            tags_of(&backend, "block:parent")
+                .await
+                .contains(&PAGE_TAG.to_string())
+        );
+        run(&ops, "add_tag", "block:child", PAGE_TAG).await;
+        assert!(
+            tags_of(&backend, "block:child")
+                .await
+                .contains(&PAGE_TAG.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_page_tag_with_page_child_rejected() {
+        let (ops, _dir, backend) = ops_and_backend().await;
+        make_block(&backend, "parent", EntityUri::no_parent()).await;
+        make_block(&backend, "child", EntityUri::block("parent")).await;
+        ops.save_doc("").await.expect("save");
+        run(&ops, "add_tag", "block:parent", PAGE_TAG).await;
+        run(&ops, "add_tag", "block:child", PAGE_TAG).await;
+
+        let mut params: StorageEntity = HashMap::new();
+        params.insert("id".into(), Value::String("block:parent".to_string()));
+        params.insert("tag".into(), Value::String(PAGE_TAG.to_string()));
+        let err = ops
+            .execute_operation(&EntityName::new("block"), "remove_tag", params)
+            .await
+            .expect_err("removing Page with a page child must be rejected");
+        assert!(
+            err.to_string().contains("page under a non-page"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_tag_on_missing_block_fails_loud() {
+        let (ops, _dir, _backend) = ops_and_backend().await;
+        let mut params: StorageEntity = HashMap::new();
+        params.insert("id".into(), Value::String("block:ghost".to_string()));
+        params.insert("tag".into(), Value::String("todo".to_string()));
+        let err = ops
+            .execute_operation(&EntityName::new("block"), "add_tag", params)
+            .await
+            .expect_err("add_tag on a missing block must fail loud");
+        assert!(err.to_string().contains("not found"), "got: {err}");
     }
 }

@@ -13,6 +13,7 @@ use holon_api::EntityUri;
 use holon_api::Operation;
 use holon_api::OperationDescriptor;
 use holon_api::OperationParam;
+use holon_api::PAGE_TAG;
 use holon_api::ParentNotFound;
 use holon_api::TypeHint;
 use holon_api::Value;
@@ -496,6 +497,80 @@ impl SqlOperationProvider {
             .await
             .map_err(|e| format!("block_row_exists({id}): {e}"))?
             .is_empty())
+    }
+
+    /// A block's real parent id, or `None` when it has no parent (NULL column
+    /// or the `sentinel:no_parent` root — where seed pages legally live). Used
+    /// by the `add_tag("Page")` nesting guard.
+    async fn read_real_parent_id(&self, id: &str) -> Result<Option<String>> {
+        let sql = format!(
+            "SELECT parent_id FROM {} WHERE id = '{}'",
+            self.table_name,
+            id.replace('\'', "''"),
+        );
+        let rows = self
+            .db_handle
+            .query(&sql, HashMap::new())
+            .await
+            .map_err(|e| format!("read_real_parent_id({id}): {e}"))?;
+        let pid = rows
+            .into_iter()
+            .next()
+            .and_then(|mut r| r.remove("parent_id"));
+        Ok(match pid {
+            Some(Value::String(s)) if !s.is_empty() && s != EntityUri::no_parent().as_str() => {
+                Some(s)
+            }
+            _ => None,
+        })
+    }
+
+    /// Whether `id` carries the `Page` tag (mirrors the `tag='Page'` join
+    /// precedent used by `resolve_page_name`).
+    async fn block_is_page(&self, id: &str) -> Result<bool> {
+        let sql = format!(
+            "SELECT 1 FROM block_tags WHERE block_id = '{}' AND tag = '{}' LIMIT 1",
+            id.replace('\'', "''"),
+            PAGE_TAG,
+        );
+        Ok(!self
+            .db_handle
+            .query(&sql, HashMap::new())
+            .await
+            .map_err(|e| format!("block_is_page({id}): {e}"))?
+            .is_empty())
+    }
+
+    /// Whether `id` has any DIRECT child carrying the `Page` tag — the
+    /// `remove_tag("Page")` guard: unmarking a page with page children would
+    /// leave those children as pages under a non-page block.
+    async fn has_page_child(&self, id: &str) -> Result<bool> {
+        let sql = format!(
+            "SELECT 1 FROM block_raw c JOIN block_tags t ON t.block_id = c.id AND t.tag = '{}' \
+             WHERE c.parent_id = '{}' LIMIT 1",
+            PAGE_TAG,
+            id.replace('\'', "''"),
+        );
+        Ok(!self
+            .db_handle
+            .query(&sql, HashMap::new())
+            .await
+            .map_err(|e| format!("has_page_child({id}): {e}"))?
+            .is_empty())
+    }
+
+    /// The inverse [`Operation`] of an element-wise tag op: `remove_tag` undoes
+    /// `add_tag` and vice-versa, same `{id, tag}` params.
+    fn tag_inverse(&self, inverse_op: &str, id: &str, tag: &str) -> Operation {
+        Operation::from_params(
+            EntityName::new(&self.entity_name),
+            inverse_op,
+            inverse_op,
+            [
+                ("id".to_string(), Value::String(id.to_string())),
+                ("tag".to_string(), Value::String(tag.to_string())),
+            ],
+        )
     }
 
     /// The shared typed rejection for a block write whose parent FK failed.
@@ -1256,6 +1331,20 @@ impl OperationProvider for SqlOperationProvider {
         if self.edge_fields.contains_key("advice_suppressed") {
             let entity: EntityName = self.entity_name.clone().into();
             ops.push(holon_core::block_op_catalog::dismiss_advice_descriptor(
+                &entity,
+                &self.entity_short_name,
+            ));
+        }
+        // Element-wise tag ops: only advertise when this provider owns the
+        // `tags` edge field (the `block` entity), mirroring the row-26 lesson
+        // that gated `dismiss_advice` on `advice_suppressed`.
+        if self.edge_fields.contains_key("tags") {
+            let entity: EntityName = self.entity_name.clone().into();
+            ops.push(holon_core::block_op_catalog::add_tag_descriptor(
+                &entity,
+                &self.entity_short_name,
+            ));
+            ops.push(holon_core::block_op_catalog::remove_tag_descriptor(
                 &entity,
                 &self.entity_short_name,
             ));
@@ -2030,6 +2119,153 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     .map_err(|e| format!("dismiss_advice: {e}"))?;
                 Ok(OperationResult::irreversible(Vec::new()))
             }
+            "add_tag" => {
+                let id = params
+                    .get("id")
+                    .and_then(|v| v.as_string())
+                    .ok_or("add_tag: missing 'id' parameter")?;
+                let tag = params
+                    .get("tag")
+                    .and_then(|v| v.as_string())
+                    .ok_or("add_tag: missing 'tag' parameter")?;
+                let descriptor = self
+                    .edge_fields
+                    .get("tags")
+                    .ok_or("add_tag: 'tags' edge field is not registered on this provider")?;
+
+                // Fail loud on a missing block with a clean message (the raw FK
+                // violation from INSERT names no constraint).
+                if !self.block_row_exists(id).await? {
+                    return Err(format!("add_tag: block '{id}' not found").into());
+                }
+
+                // No-pages-under-non-pages guard (interim ruling 2026-07-13):
+                // marking a block Page makes it a page, so its immediate parent
+                // must be a page too (or `no_parent` — seed pages stay legal).
+                if tag == PAGE_TAG {
+                    let parent = self.read_real_parent_id(id).await?;
+                    let parent_is_page = match &parent {
+                        Some(pid) => Some(self.block_is_page(pid).await?),
+                        None => None,
+                    };
+                    if holon_core::block_op_catalog::page_under_non_page_prohibited(
+                        true,
+                        parent_is_page,
+                    ) {
+                        return Err(holon_core::block_op_catalog::add_page_tag_rejection(
+                            id,
+                            parent.as_deref().unwrap_or(""),
+                        )
+                        .into());
+                    }
+                }
+
+                // Atomic element-wise insert against the (block_id, tag) PK.
+                // `affected == 1` ⇒ the tag was ABSENT (a real change);
+                // `affected == 0` ⇒ already present (idempotent no-op). Because
+                // this is a single atomic statement (not a read-then-write),
+                // two concurrent same-tag adds cannot both observe "absent" and
+                // double-journal — closing that window.
+                let stmt = format!(
+                    "INSERT OR IGNORE INTO {jt} ({sc}, {tc}) VALUES ('{b}', '{t}')",
+                    jt = descriptor.join_table,
+                    sc = Self::quote_identifier(&descriptor.source_col),
+                    tc = Self::quote_identifier(&descriptor.target_col),
+                    b = id.replace('\'', "''"),
+                    t = tag.replace('\'', "''"),
+                );
+                let affected = self
+                    .db_handle
+                    .execute(&stmt, vec![])
+                    .await
+                    .map_err(|e| format!("add_tag: {e}"))?;
+
+                let inverse = self.tag_inverse("remove_tag", id, tag);
+                // `tags` is a junction field the column-only staleness reader
+                // cannot fingerprint, so deltas are `history_only`: recorded in
+                // history, excluded from the undo precondition. A no-op re-add
+                // reports a VACUOUS delta (old == new) so the engine journals no
+                // undo entry — undoing an idempotent re-add must never strip a
+                // tag that was already present.
+                let changes = if affected >= 1 {
+                    vec![FieldDelta::history_only(
+                        id,
+                        "tags",
+                        Value::Null,
+                        Value::String(tag.to_string()),
+                    )]
+                } else {
+                    vec![FieldDelta::history_only(
+                        id,
+                        "tags",
+                        Value::String(tag.to_string()),
+                        Value::String(tag.to_string()),
+                    )]
+                };
+                Ok(OperationResult::new(changes, inverse))
+            }
+            "remove_tag" => {
+                let id = params
+                    .get("id")
+                    .and_then(|v| v.as_string())
+                    .ok_or("remove_tag: missing 'id' parameter")?;
+                let tag = params
+                    .get("tag")
+                    .and_then(|v| v.as_string())
+                    .ok_or("remove_tag: missing 'tag' parameter")?;
+                let descriptor = self
+                    .edge_fields
+                    .get("tags")
+                    .ok_or("remove_tag: 'tags' edge field is not registered on this provider")?;
+
+                if !self.block_row_exists(id).await? {
+                    return Err(format!("remove_tag: block '{id}' not found").into());
+                }
+
+                // Unmarking a Page whose direct children are pages would orphan
+                // them as pages under a non-page block — reject loud (cascade
+                // unmark is a surprising bulk mutation, deliberately not done).
+                if tag == PAGE_TAG
+                    && self.block_is_page(id).await?
+                    && self.has_page_child(id).await?
+                {
+                    return Err(holon_core::block_op_catalog::remove_page_tag_rejection(id).into());
+                }
+
+                // Targeted atomic delete. `affected == 1` ⇒ tag was present
+                // (a real change); `affected == 0` ⇒ absent (idempotent no-op).
+                let stmt = format!(
+                    "DELETE FROM {jt} WHERE {sc} = '{b}' AND {tc} = '{t}'",
+                    jt = descriptor.join_table,
+                    sc = Self::quote_identifier(&descriptor.source_col),
+                    tc = Self::quote_identifier(&descriptor.target_col),
+                    b = id.replace('\'', "''"),
+                    t = tag.replace('\'', "''"),
+                );
+                let affected = self
+                    .db_handle
+                    .execute(&stmt, vec![])
+                    .await
+                    .map_err(|e| format!("remove_tag: {e}"))?;
+
+                let inverse = self.tag_inverse("add_tag", id, tag);
+                let changes = if affected >= 1 {
+                    vec![FieldDelta::history_only(
+                        id,
+                        "tags",
+                        Value::String(tag.to_string()),
+                        Value::Null,
+                    )]
+                } else {
+                    vec![FieldDelta::history_only(
+                        id,
+                        "tags",
+                        Value::Null,
+                        Value::Null,
+                    )]
+                };
+                Ok(OperationResult::new(changes, inverse))
+            }
             _ => Err(format!("Unknown operation: {}", op_name).into()),
         }
     }
@@ -2468,5 +2704,269 @@ mod two_phase_fk_tests {
             .await
             .expect("query junction");
         assert_eq!(junction.len(), 1, "the requires edge must be persisted");
+    }
+}
+
+#[cfg(test)]
+mod tag_op_tests {
+    use holon_core::traits::UndoAction;
+
+    use super::*;
+
+    fn tags_edge() -> EdgeFieldDescriptor {
+        EdgeFieldDescriptor {
+            entity: "block".to_string(),
+            field: "tags".to_string(),
+            join_table: "block_tags".to_string(),
+            source_col: "block_id".to_string(),
+            target_col: "tag".to_string(),
+        }
+    }
+
+    async fn provider() -> (crate::storage::turso::DbHandle, SqlOperationProvider) {
+        let (_backend, db) = crate::storage::turso::TursoBackend::new_in_memory()
+            .await
+            .expect("in-memory turso");
+        db.execute(
+            "CREATE TABLE block_raw (id TEXT PRIMARY KEY, parent_id TEXT, content TEXT, sort_key \
+             TEXT, depth INTEGER, properties TEXT, created_at INTEGER, updated_at INTEGER)",
+            vec![],
+        )
+        .await
+        .expect("block_raw");
+        db.execute(
+            "CREATE TABLE block_tags (block_id TEXT NOT NULL, tag TEXT NOT NULL, PRIMARY \
+             KEY(block_id, tag), FOREIGN KEY (block_id) REFERENCES block_raw(id) ON DELETE CASCADE)",
+            vec![],
+        )
+        .await
+        .expect("block_tags");
+        let provider = SqlOperationProvider::with_edge_fields(
+            db.clone(),
+            "block_raw".to_string(),
+            "block".to_string(),
+            "block".to_string(),
+            vec![tags_edge()],
+        );
+        std::mem::forget(_backend);
+        (db, provider)
+    }
+
+    async fn seed_block(db: &crate::storage::turso::DbHandle, id: &str, parent_id: &str) {
+        db.execute(
+            &format!(
+                "INSERT INTO block_raw (id, parent_id, content) VALUES ('{id}', '{parent_id}', \
+                 'c-{id}')"
+            ),
+            vec![],
+        )
+        .await
+        .expect("seed block");
+    }
+
+    async fn run(
+        provider: &SqlOperationProvider,
+        op: &str,
+        id: &str,
+        tag: &str,
+    ) -> OperationResult {
+        let mut params = StorageEntity::new();
+        params.insert("id".into(), Value::String(id.to_string()));
+        params.insert("tag".into(), Value::String(tag.to_string()));
+        provider
+            .execute_operation_with_origin(
+                &EntityName::new("block"),
+                op,
+                params,
+                EventOrigin::Other("test".to_string()),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{op} failed: {e}"))
+    }
+
+    async fn tags_of(db: &crate::storage::turso::DbHandle, id: &str) -> Vec<String> {
+        let rows = db
+            .query(
+                &format!("SELECT tag FROM block_tags WHERE block_id = '{id}' ORDER BY tag"),
+                HashMap::new(),
+            )
+            .await
+            .expect("query tags");
+        rows.iter()
+            .map(|r| {
+                r.get("tag")
+                    .and_then(|v| v.as_string())
+                    .unwrap()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn is_vacuous(r: &OperationResult) -> bool {
+        !r.changes.is_empty() && r.changes.iter().all(|d| d.old_value == d.new_value)
+    }
+
+    /// A second add of a present tag is an idempotent no-op: the junction still
+    /// has exactly one row, and the result reports a VACUOUS delta so the
+    /// engine journals no undo entry. (This also verifies the fork's INSERT
+    /// OR IGNORE affected-row count — a broken count would surface the
+    /// second add as non-vacuous.)
+    #[tokio::test]
+    async fn add_tag_is_idempotent() {
+        let (db, p) = provider().await;
+        seed_block(&db, "block:x", "block:root").await;
+
+        let first = run(&p, "add_tag", "block:x", "todo").await;
+        assert_eq!(tags_of(&db, "block:x").await, vec!["todo".to_string()]);
+        assert!(!is_vacuous(&first), "first add is a real change");
+        assert_eq!(first.changes[0].old_value, Value::Null);
+        assert_eq!(first.changes[0].new_value, Value::String("todo".into()));
+
+        let second = run(&p, "add_tag", "block:x", "todo").await;
+        assert_eq!(
+            tags_of(&db, "block:x").await,
+            vec!["todo".to_string()],
+            "re-adding must not duplicate"
+        );
+        assert!(is_vacuous(&second), "re-add of a present tag is vacuous");
+    }
+
+    /// remove_tag deletes only the named tag; siblings survive. Removing an
+    /// absent tag is a vacuous no-op.
+    #[tokio::test]
+    async fn remove_tag_is_targeted_and_idempotent() {
+        let (db, p) = provider().await;
+        seed_block(&db, "block:x", "block:root").await;
+        run(&p, "add_tag", "block:x", "a").await;
+        run(&p, "add_tag", "block:x", "b").await;
+
+        let removed = run(&p, "remove_tag", "block:x", "a").await;
+        assert_eq!(tags_of(&db, "block:x").await, vec!["b".to_string()]);
+        assert!(!is_vacuous(&removed));
+        assert_eq!(removed.changes[0].old_value, Value::String("a".into()));
+        assert_eq!(removed.changes[0].new_value, Value::Null);
+
+        let noop = run(&p, "remove_tag", "block:x", "a").await;
+        assert!(is_vacuous(&noop), "removing an absent tag is vacuous");
+        assert_eq!(tags_of(&db, "block:x").await, vec!["b".to_string()]);
+    }
+
+    /// add_tag's inverse is remove_tag of the same {id, tag}; executing it
+    /// undoes the add. Round-trip leaves the junction empty.
+    #[tokio::test]
+    async fn add_tag_inverse_round_trips() {
+        let (db, p) = provider().await;
+        seed_block(&db, "block:x", "block:root").await;
+        let result = run(&p, "add_tag", "block:x", "todo").await;
+
+        let inverse = match result.undo {
+            UndoAction::Undo(op) => op,
+            other => panic!("add_tag must be reversible, got {other:?}"),
+        };
+        assert_eq!(inverse.op_name, "remove_tag");
+        let mut inv_params = StorageEntity::new();
+        for (k, v) in &inverse.params {
+            inv_params.insert(k.as_str().into(), v.clone());
+        }
+        p.execute_operation_with_origin(
+            &EntityName::new("block"),
+            &inverse.op_name,
+            inv_params,
+            EventOrigin::Other("test".to_string()),
+        )
+        .await
+        .expect("replay inverse");
+        assert!(tags_of(&db, "block:x").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn add_tag_on_missing_block_fails_loud() {
+        let (_db, p) = provider().await;
+        let mut params = StorageEntity::new();
+        params.insert("id".into(), Value::String("block:ghost".to_string()));
+        params.insert("tag".into(), Value::String("todo".to_string()));
+        let err = p
+            .execute_operation_with_origin(
+                &EntityName::new("block"),
+                "add_tag",
+                params,
+                EventOrigin::Other("test".to_string()),
+            )
+            .await
+            .expect_err("add_tag on a missing block must fail loud");
+        assert!(err.to_string().contains("not found"), "got: {err}");
+    }
+
+    /// Page guard: marking a block Page under a non-page parent is rejected;
+    /// under a Page parent it is allowed; a block at `no_parent` (seed page) is
+    /// allowed.
+    #[tokio::test]
+    async fn add_page_tag_nesting_guard() {
+        let (db, p) = provider().await;
+        seed_block(&db, "block:parent", "sentinel:no_parent").await;
+        seed_block(&db, "block:child", "block:parent").await;
+
+        // Parent is non-page → reject.
+        let err = {
+            let mut params = StorageEntity::new();
+            params.insert("id".into(), Value::String("block:child".to_string()));
+            params.insert("tag".into(), Value::String(PAGE_TAG.to_string()));
+            p.execute_operation_with_origin(
+                &EntityName::new("block"),
+                "add_tag",
+                params,
+                EventOrigin::Other("test".to_string()),
+            )
+            .await
+            .expect_err("page under non-page must be rejected")
+        };
+        assert!(
+            err.to_string().contains("pages under non-pages"),
+            "got: {err}"
+        );
+
+        // Seed page at no_parent → allowed.
+        run(&p, "add_tag", "block:parent", PAGE_TAG).await;
+        assert!(
+            tags_of(&db, "block:parent")
+                .await
+                .contains(&PAGE_TAG.to_string())
+        );
+
+        // Now the parent IS a page → tagging the child Page is allowed.
+        run(&p, "add_tag", "block:child", PAGE_TAG).await;
+        assert!(
+            tags_of(&db, "block:child")
+                .await
+                .contains(&PAGE_TAG.to_string())
+        );
+    }
+
+    /// remove_tag("Page") is rejected when a direct child is itself a page.
+    #[tokio::test]
+    async fn remove_page_tag_with_page_child_rejected() {
+        let (db, p) = provider().await;
+        seed_block(&db, "block:parent", "sentinel:no_parent").await;
+        seed_block(&db, "block:child", "block:parent").await;
+        run(&p, "add_tag", "block:parent", PAGE_TAG).await;
+        run(&p, "add_tag", "block:child", PAGE_TAG).await;
+
+        let err = {
+            let mut params = StorageEntity::new();
+            params.insert("id".into(), Value::String("block:parent".to_string()));
+            params.insert("tag".into(), Value::String(PAGE_TAG.to_string()));
+            p.execute_operation_with_origin(
+                &EntityName::new("block"),
+                "remove_tag",
+                params,
+                EventOrigin::Other("test".to_string()),
+            )
+            .await
+            .expect_err("removing Page with a page child must be rejected")
+        };
+        assert!(
+            err.to_string().contains("page under a non-page"),
+            "got: {err}"
+        );
     }
 }

@@ -94,10 +94,11 @@ async fn both_block_providers_source_catalog_descriptors_identically() {
     // Every descriptor the catalog owns must appear byte-identical in BOTH
     // providers. Adding a catalog entry (increments 1-2) extends this list.
     let entity = EntityName::from(ENTITY);
-    let catalog: Vec<OperationDescriptor> =
-        vec![holon_core::block_op_catalog::dismiss_advice_descriptor(
-            &entity, SHORT,
-        )];
+    let catalog: Vec<OperationDescriptor> = vec![
+        holon_core::block_op_catalog::dismiss_advice_descriptor(&entity, SHORT),
+        holon_core::block_op_catalog::add_tag_descriptor(&entity, SHORT),
+        holon_core::block_op_catalog::remove_tag_descriptor(&entity, SHORT),
+    ];
 
     for canonical in &catalog {
         let sql_desc = find_op(&sql_ops, &canonical.name);
