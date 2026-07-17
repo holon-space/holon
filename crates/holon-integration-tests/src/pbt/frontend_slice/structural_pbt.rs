@@ -46,6 +46,7 @@ use std::time::Duration;
 
 use holon_api::Block;
 use holon_api::EntityUri;
+use holon_api::PAGE_TAG;
 use holon_api::Region;
 use holon_orgmode::OrgBlockExt;
 use holon_pbt_core::ComponentSet;
@@ -268,6 +269,12 @@ async fn boot_and_seed(resolver: &IdResolver) -> (CapMap, BTreeSet<EntityUri>) {
     seeder
         .create_block(&page_root(), &EntityUri::no_parent(), "structural-page")
         .await;
+    // The oracle models `structural-page` as a genuine page doc-root
+    // (`set_page(true)` → tag `Page`); the raw `create` op above never derives
+    // the Page tag for a `no_parent` root. Tag it through the production
+    // element-wise `add_tag` op so the SUT's `is_page()` matches the oracle
+    // (legal: the page-under-non-page guard exempts `no_parent` roots).
+    seeder.add_tag(&page_root(), PAGE_TAG).await;
     seeder.create_block(&ids.parent, &page_root(), PARENT).await;
     seeder.create_block(&ids.c1, &page_root(), C1).await;
     seeder.create_block(&ids.c2, &page_root(), C2).await;
