@@ -226,6 +226,20 @@ verified against GitHub's Sigstore instance. Also compare
   Linux/Windows archives place `assets/` beside the binary; the macOS bundle
   puts them in `Contents/Resources/assets` with a symlink from
   `Contents/MacOS/assets` (codesign forbids non-code files in `MacOS/`).
+  Packaging copies assets with `cp -RL` (**dereference**): `assets/queries/*.prql`
+  are symlinks into `crates/*/queries`, so a plain `cp -R` would ship dangling
+  links (broken queries at runtime; on Windows it fails the build outright).
+- **Linux packaging**: two artifacts per release — a portable **AppImage**
+  (bundles the GUI shared libs so users need no `-dev`/runtime packages) and a
+  plain **`.tar.gz`** (kept as a fallback; needs the system GUI libs present).
+  Built on **Ubuntu 22.04** so the glibc floor is 2.35 (covers 22.04 / Debian
+  12 / etc.) rather than 24.04's 2.39. glibc itself can't be bundled, so that
+  floor is the hard minimum; a Vulkan-capable GPU driver is also required at
+  runtime. Further options (`.deb`/Flatpak, or an even older glibc via a
+  manylinux container) are follow-ups.
+- **Windows CRT**: built with `-C target-feature=+crt-static`, so the `.exe`
+  has no VC++ redistributable (`vcruntime140.dll`) dependency — it runs on a
+  clean Windows install. x86_64 only; no ARM64 Windows build.
 - **APK, not AAB**: the Android build is a direct aapt2/zipalign/apksigner
   pipeline (no Gradle). Google Play requires an **AAB** for a new app's
   *production* track; the internal testing track accepts APKs, which is all
@@ -234,11 +248,10 @@ verified against GitHub's Sigstore instance. Also compare
 - **Play track**: uploads go to `internal` as `draft`, never auto-promoted.
 - **Windows signing**: skipped in v1 by decision. Follow-up if SmartScreen
   friction matters: an OV/EV cert or Azure Trusted Signing.
-- **Windows build is unproven**: `gpui_windows` (holon-space/zed fork) has
-  never been built by CI before this workflow; the first `v*` tag is its
-  first real compile. A failure there is a finding, not a pipeline bug.
-- **Linux packaging**: plain `.tar.gz` only. AppImage/`.deb`/Flatpak are
-  follow-ups.
+- **Windows build**: `gpui_windows` (holon-space/zed fork) compiles in CI
+  (proven by the `v0.0.1` run, ~48 min). The AppImage and (first-run) Windows
+  artifact are still freshly minted — a runtime failure on a specific machine
+  is a finding, not a pipeline bug.
 - **No automated version bumping** and no changelog generation in v1.
 - **Nightly is unpinned**: `rust-toolchain.toml` says `channel = "nightly"`
   (no date). Releases build with whatever nightly is current that day; pin a

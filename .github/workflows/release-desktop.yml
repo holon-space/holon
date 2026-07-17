@@ -46,8 +46,8 @@ jobs:
           ## Signing status
 
           $macos_line
-          - **Windows**: unsigned (no code-signing certificate for v1) — Windows SmartScreen will show a "protected your PC" prompt once; choose "More info" → "Run anyway".
-          - **Linux**: tarball, no OS-level signing applies.
+          - **Windows**: unsigned (no code-signing certificate for v1) — Windows SmartScreen will show a "protected your PC" prompt once; choose "More info" → "Run anyway". The \`.exe\` is statically linked (no VC++ redistributable needed).
+          - **Linux**: two artifacts — a portable \`.AppImage\` (chmod +x and run; bundles the GUI libraries) and a plain \`.tar.gz\` (extract and run \`./holon-gpui\`). Both need glibc ≥ 2.35 and a Vulkan-capable GPU driver. No OS-level signing applies.
           $android_line
 
           ## Verify build provenance (recommended)
@@ -84,7 +84,12 @@ jobs:
         include:
           - os: macos-latest
             platform: macos
-          - os: ubuntu-latest
+          # 22.04 (glibc 2.35), not ubuntu-latest (24.04 = glibc 2.39): a
+          # dynamically-linked binary only runs on glibc >= the one it was
+          # built against, so building on the older image lowers the floor
+          # (covers Ubuntu 22.04 / Debian 12 / etc.). The AppImage below
+          # bundles the GUI libs on top; glibc itself can't be bundled.
+          - os: ubuntu-22.04
             platform: linux
           - os: windows-latest
             platform: windows
@@ -209,19 +214,73 @@ jobs:
           name="Holon-$VERSION-linux-x86_64"
           mkdir -p "dist/$name"
           cp target/release/holon-gpui "dist/$name/"
-          cp -R assets "dist/$name/assets"
+          # -L dereferences symlinks: assets/queries/*.prql are symlinks INTO
+          # crates/*/queries, so a plain -R would ship dangling links that
+          # break those queries on the user's machine. Copy the real files.
+          cp -RL assets "dist/$name/assets"
           tar -czf "dist/$name.tar.gz" -C dist "$name"
           rm -rf "dist/${name:?}"
           (cd dist && sha256sum "$name.tar.gz" > SHA256SUMS-linux.txt)
 
+      # Portable AppImage: bundles the GUI shared libs (Wayland/X11/xkbcommon/
+      # xcb/…) so users don't need -dev/runtime packages installed. Vulkan/GL
+      # drivers and glibc still come from the host (the 22.04 build floor sets
+      # the glibc requirement). The raw .tar.gz above is kept as a fallback.
+      - name: Package Linux AppImage
+        if: matrix.platform == 'linux'
+        env:
+          RUST_FONTCONFIG_DLOPEN: on
+        run: |
+          name="Holon-$VERSION-linux-x86_64"
+          sudo apt-get install -y imagemagick libfuse2
+          APPDIR="$PWD/AppDir"
+          rm -rf "$APPDIR"
+          mkdir -p "$APPDIR/usr/bin"
+          cp target/release/holon-gpui "$APPDIR/usr/bin/"
+          cp -RL assets "$APPDIR/usr/bin/assets"   # deref, as above
+          # linuxdeploy requires a desktop file + icon. Reuse the app icon
+          # (iOS asset is a clean single-frame PNG; the canonical .icns is
+          # multi-frame and fiddlier to convert).
+          convert frontends/gpui/ios/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png \
+            -resize 256x256 "$APPDIR/holon.png"
+          cat > "$APPDIR/holon.desktop" <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=Holon
+          Exec=holon-gpui
+          Icon=holon
+          Categories=Office;Utility;
+          Terminal=false
+          EOF
+          curl -fsSL -o linuxdeploy \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy
+          # Runners lack FUSE; run the linuxdeploy AppImage by self-extracting.
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          export OUTPUT="$name.AppImage"
+          ./linuxdeploy --appdir "$APPDIR" \
+            --executable "$APPDIR/usr/bin/holon-gpui" \
+            --desktop-file "$APPDIR/holon.desktop" \
+            --icon-file "$APPDIR/holon.png" \
+            --output appimage
+          mv "$name.AppImage" dist/
+          (cd dist && sha256sum "$name.AppImage" >> SHA256SUMS-linux.txt)
+
       - name: Build + package (Windows)
         if: matrix.platform == 'windows'
+        env:
+          # Static CRT so the .exe doesn't depend on the VC++ redistributable
+          # (vcruntime140.dll), which isn't present on a clean Windows install.
+          RUSTFLAGS: -C target-feature=+crt-static
         run: |
           cargo build --release --locked -p holon-gpui
           name="Holon-$VERSION-windows-x86_64"
           mkdir -p "dist/staging"
           cp target/release/holon-gpui.exe dist/staging/
-          cp -R assets dist/staging/assets
+          # -L dereferences the assets/queries/*.prql symlinks — cp -R fails
+          # outright on Windows trying to recreate them (this was the v0.0.1
+          # Windows-build failure).
+          cp -RL assets dist/staging/assets
           (cd dist/staging && 7z a "../$name.zip" .)
           rm -rf dist/staging
           (cd dist && sha256sum "$name.zip" > SHA256SUMS-windows.txt)

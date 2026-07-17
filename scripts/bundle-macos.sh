@@ -34,7 +34,13 @@ cp "$ROOT/frontends/gpui/macos/Info.plist" "$APP/Contents/Info.plist"
 cp "$BIN" "$APP/Contents/MacOS/holon-gpui"
 chmod +x "$APP/Contents/MacOS/holon-gpui"
 cp "$ROOT/assets/images/holon.icns" "$APP/Contents/Resources/holon.icns"
-cp -R "$ROOT/assets" "$APP/Contents/Resources/assets"
+# -L dereferences symlinks: assets/queries/*.prql are symlinks INTO
+# crates/*/queries, so a plain -R would copy dangling links into the bundle
+# (broken queries at runtime). Copy the real files.
+cp -RL "$ROOT/assets" "$APP/Contents/Resources/assets"
+# This second symlink is intentional and internal to the bundle (the binary
+# resolves assets next to the executable); it resolves within Contents/, so
+# it is fine to keep as a link.
 ln -s ../Resources/assets "$APP/Contents/MacOS/assets"
 
 echo "Bundle ready: $APP"
