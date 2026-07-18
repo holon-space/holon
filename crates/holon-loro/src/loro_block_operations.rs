@@ -1709,9 +1709,9 @@ mod advice_dismiss_tests {
 
     /// A rich `set_field("content", Object{text, marks})` write must carry an
     /// EXACT inverse: replaying it restores BOTH the prior text and the prior
-    /// mark set byte-for-byte. A prior PLAIN block (marks `None`) must come back
-    /// plain — the whole-set restore strips the marks the forward write added,
-    /// never leaving a Peritext mark pinned to surviving text.
+    /// mark set byte-for-byte. A prior PLAIN block (marks `None`) must come
+    /// back plain — the whole-set restore strips the marks the forward
+    /// write added, never leaving a Peritext mark pinned to surviving text.
     #[tokio::test]
     async fn set_field_object_content_is_reversible_text_and_marks() {
         let (ops, _dir, anchor) = ops_with_anchor().await;
@@ -1724,7 +1724,11 @@ mod advice_dismiss_tests {
 
         // Rich write: change text AND add a Bold mark.
         let result = ops
-            .set_field(&anchor, "content", object_content("bold text", &[bold(0, 4)]))
+            .set_field(
+                &anchor,
+                "content",
+                object_content("bold text", &[bold(0, 4)]),
+            )
             .await
             .expect("set_field content Object");
 

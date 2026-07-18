@@ -1084,6 +1084,163 @@ impl SqlOperationProvider {
         }))
     }
 
+    /// The origin's DIRECT children in the SAME order the tree presents them
+    /// (`sort_key`, id as the stable tiebreak). The block→page transform
+    /// re-homes each under the new page; the order is captured so the
+    /// forward `move_block`s (and their exact inverses) reproduce sibling
+    /// order on both the transform and its undo.
+    async fn read_ordered_children(&self, parent_id: &str) -> Result<Vec<String>> {
+        let sql = format!(
+            "SELECT id FROM {} WHERE parent_id = '{}' ORDER BY sort_key, id",
+            self.table_name,
+            parent_id.replace('\'', "''"),
+        );
+        let rows = self
+            .db_handle
+            .query(&sql, HashMap::new())
+            .await
+            .map_err(|e| format!("read_ordered_children({parent_id}): {e}"))?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                r.get("id")
+                    .and_then(|v| v.as_string())
+                    .map(|s| s.to_string())
+            })
+            .collect())
+    }
+
+    /// The block's stored `depth` (tree level; a top-level page is 0). A missing
+    /// or NULL depth reads as 0 — the root level — rather than failing, matching
+    /// how a freshly-seeded page with no explicit depth behaves.
+    async fn read_block_depth(&self, id: &str) -> Result<i64> {
+        match self.read_field_old_value(id, "depth").await? {
+            Value::Integer(d) => Ok(d),
+            Value::Null => Ok(0),
+            other => Err(format!("read_block_depth({id}): depth is not an integer: {other:?}").into()),
+        }
+    }
+
+    /// The nearest ancestor of `id` that carries the `Page` tag, walking the
+    /// real parent chain upward. `None` when the chain reaches the root with no
+    /// page — the block→page transform then defaults to the vault root.
+    async fn nearest_page_ancestor(&self, id: &str) -> Result<Option<String>> {
+        let mut cursor = self.read_real_parent_id(id).await?;
+        let mut guard = 0usize;
+        while let Some(pid) = cursor {
+            guard += 1;
+            if guard > 1024 {
+                return Err(format!("nearest_page_ancestor({id}): parent chain too deep").into());
+            }
+            if self.block_is_page(&pid).await? {
+                return Ok(Some(pid));
+            }
+            cursor = self.read_real_parent_id(&pid).await?;
+        }
+        Ok(None)
+    }
+
+    /// The `/`-joined page path (root→leaf) of an existing page, reconstructed
+    /// by walking its page-ancestor chain and collecting each page's
+    /// `content` title. Used to seed the transform's DEFAULT destination
+    /// from the origin's nearest page ancestor, so `PageId::for_path`
+    /// computes the new page's id against the same path string the
+    /// destination page was minted with.
+    async fn page_path_of(&self, page_id: &str) -> Result<String> {
+        let mut segments: Vec<String> = Vec::new();
+        let mut cursor = Some(page_id.to_string());
+        let mut guard = 0usize;
+        while let Some(id) = cursor {
+            guard += 1;
+            if guard > 1024 {
+                return Err(format!("page_path_of({page_id}): parent chain too deep").into());
+            }
+            if !self.block_is_page(&id).await? {
+                break;
+            }
+            let title = match self.read_field_old_value(&id, "content").await? {
+                Value::String(s) => s.trim().to_string(),
+                _ => break,
+            };
+            segments.push(title);
+            cursor = self.read_real_parent_id(&id).await?;
+        }
+        segments.reverse();
+        Ok(segments.join("/"))
+    }
+
+    /// Resolve the destination page chain for a block→page transform WITHOUT
+    /// writing anything. Walks the `/`-joined `destination_path` segment by
+    /// segment: an existing `Page` block is reused; a missing one is recorded
+    /// (with the deterministic id `PageId::for_path` will assign) so the engine
+    /// can create it as an invertible `create`. Returns the leaf parent id plus
+    /// the ordered list of pages the engine must mint first.
+    ///
+    /// An empty `destination_path` targets the vault root
+    /// (`sentinel:no_parent`).
+    /// Returns `(destination_parent_id, destination_parent_depth, missing)`.
+    /// A top-level page has `depth = 0`, so the vault-root base depth is `-1`
+    /// (its first child page is `-1 + 1 = 0`). Each created segment and the
+    /// final new page thus get a tree-consistent `depth = parent.depth + 1`.
+    async fn resolve_destination_chain(
+        &self,
+        destination_path: &str,
+    ) -> Result<(String, i64, Vec<crate::core::block_to_page_plan::PlanSegment>)> {
+        use crate::core::block_to_page_plan::PlanSegment;
+
+        let trimmed_path = destination_path.trim();
+        if trimmed_path.is_empty() {
+            return Ok((EntityUri::no_parent().as_str().to_string(), -1, Vec::new()));
+        }
+
+        let mut parent_id = EntityUri::no_parent().as_str().to_string();
+        let mut parent_depth: i64 = -1;
+        let mut accumulated = String::new();
+        let mut missing: Vec<PlanSegment> = Vec::new();
+
+        for seg in trimmed_path.split('/') {
+            let name = seg.trim();
+            if name.is_empty() {
+                return Err(format!(
+                    "block_to_page_plan: empty segment in destination_path '{destination_path}'"
+                )
+                .into());
+            }
+            let seg_path = if accumulated.is_empty() {
+                name.to_string()
+            } else {
+                format!("{accumulated}/{name}")
+            };
+            let hint = if accumulated.is_empty() {
+                name.to_string()
+            } else {
+                format!("{accumulated}/{name}")
+            };
+            match self.resolve_page_name(&hint).await? {
+                Some(existing) => {
+                    parent_depth = self.read_block_depth(&existing).await?;
+                    parent_id = existing;
+                }
+                None => {
+                    let id = holon_api::link_parser::PageId::for_path(&seg_path)?
+                        .as_str()
+                        .to_string();
+                    let depth = parent_depth + 1;
+                    missing.push(PlanSegment {
+                        id: id.clone(),
+                        name: name.to_string(),
+                        parent_id: parent_id.clone(),
+                        depth,
+                    });
+                    parent_id = id;
+                    parent_depth = depth;
+                }
+            }
+            accumulated = seg_path;
+        }
+        Ok((parent_id, parent_depth, missing))
+    }
+
     /// One-shot, BOUNDED repair of already-duplicated pages: collapse every
     /// group of `Page` blocks sharing `(content, parent_id)` onto a single
     /// deterministic survivor, re-home the losers' children and inbound links
@@ -1098,8 +1255,8 @@ impl SqlOperationProvider {
     /// Bounded and fail-loud — this is a repair for stray duplicates, never a
     /// silent mass-rewrite:
     /// - `Err` if any `(content, parent)` group exceeds
-    ///   [`Self::MAX_DUPES_PER_GROUP`] — a large cluster signals a systemic mint
-    ///   bug that must be investigated, not steamrolled;
+    ///   [`Self::MAX_DUPES_PER_GROUP`] — a large cluster signals a systemic
+    ///   mint bug that must be investigated, not steamrolled;
     /// - `Err` if more than [`Self::MAX_DUP_GROUPS`] distinct groups are
     ///   duplicated — the same guard at vault scale;
     /// - `Err` if the ancestor walk from a survivor hits a loser or fails to
@@ -1186,7 +1343,9 @@ impl SqlOperationProvider {
                     vec![],
                 ));
                 stmts.push((
-                    format!("UPDATE block_links SET resolved_id = '{sv}' WHERE resolved_id = '{lv}'"),
+                    format!(
+                        "UPDATE block_links SET resolved_id = '{sv}' WHERE resolved_id = '{lv}'"
+                    ),
                     vec![],
                 ));
                 // Drop the loser's OUTBOUND links too — a duplicate-content page's
@@ -1217,7 +1376,8 @@ impl SqlOperationProvider {
 
     /// Walk `descendant`'s parent chain and fail loud if it reaches `forbidden`
     /// (re-homing under it would build a cycle) or fails to terminate within
-    /// [`Self::MAX_ANCESTOR_DEPTH`] (a pre-existing cycle — never silently loop).
+    /// [`Self::MAX_ANCESTOR_DEPTH`] (a pre-existing cycle — never silently
+    /// loop).
     async fn assert_not_ancestor(&self, forbidden: &str, descendant: &str) -> Result<()> {
         let mut cursor = descendant.to_string();
         for _ in 0..Self::MAX_ANCESTOR_DEPTH {
@@ -1283,9 +1443,9 @@ impl SqlOperationProvider {
     /// Capture the `block_links` rows currently resolved to `resolved_id`, as
     /// the row objects `restore_link_resolution` replays to undo a
     /// `rewrite_link_resolution`. Each object carries the full PRIMARY KEY
-    /// (`source_block_id`, `target`, `kind`) plus the prior `resolved_id` — here
-    /// always equal to the queried id, but captured verbatim so the restore is
-    /// self-describing (no reliance on the forward `from`).
+    /// (`source_block_id`, `target`, `kind`) plus the prior `resolved_id` —
+    /// here always equal to the queried id, but captured verbatim so the
+    /// restore is self-describing (no reliance on the forward `from`).
     async fn capture_links_resolved_to(&self, resolved_id: &str) -> Result<Vec<Value>> {
         let sql = format!(
             "SELECT source_block_id, target, kind, resolved_id FROM block_links WHERE \
@@ -1303,19 +1463,21 @@ impl SqlOperationProvider {
             .collect())
     }
 
-    /// Build the `UPDATE block_links` statements that restore each captured row's
-    /// prior `resolved_id`, keyed on the junction PRIMARY KEY. A `Null`
-    /// `resolved_id` restores to `NULL` (dangling). Fails loud on a malformed
-    /// captured row (missing/typed-wrong key) rather than silently skipping it.
+    /// Build the `UPDATE block_links` statements that restore each captured
+    /// row's prior `resolved_id`, keyed on the junction PRIMARY KEY. A
+    /// `Null` `resolved_id` restores to `NULL` (dangling). Fails loud on a
+    /// malformed captured row (missing/typed-wrong key) rather than
+    /// silently skipping it.
     fn restore_links_statements(rows: &[Value]) -> Result<Vec<String>> {
         let mut stmts = Vec::with_capacity(rows.len());
         for row in rows {
             let obj = match row {
                 Value::Object(o) => o,
                 other => {
-                    return Err(
-                        format!("restore_link_resolution: row is not an Object: {other:?}").into(),
-                    );
+                    return Err(format!(
+                        "restore_link_resolution: row is not an Object: {other:?}"
+                    )
+                    .into());
                 }
             };
             let field = |name: &str| -> Result<String> {
@@ -1576,8 +1738,7 @@ impl OperationProvider for SqlOperationProvider {
                 entity_short_name: self.entity_short_name.clone(),
                 name: "rewrite_link_resolution".to_string(),
                 display_name: "Rewrite Link Resolution".to_string(),
-                description: "Re-point block_links resolved from one id to another"
-                    .to_string(),
+                description: "Re-point block_links resolved from one id to another".to_string(),
                 required_params: vec![
                     OperationParam {
                         name: "from".to_string(),
@@ -1604,6 +1765,19 @@ impl OperationProvider for SqlOperationProvider {
                     name: "rows".to_string(),
                     type_hint: TypeHint::String,
                     description: "Captured block_links rows to restore".to_string(),
+                }],
+                ..Default::default()
+            },
+            OperationDescriptor {
+                entity_name: self.entity_name.clone().into(),
+                entity_short_name: self.entity_short_name.clone(),
+                name: "block_to_page_plan".to_string(),
+                display_name: "Block To Page Plan".to_string(),
+                description: "Read-only planner for the convert_block_to_page compound".to_string(),
+                required_params: vec![OperationParam {
+                    name: "target".to_string(),
+                    type_hint: TypeHint::String,
+                    description: "Origin block id to convert".to_string(),
                 }],
                 ..Default::default()
             },
@@ -2451,6 +2625,93 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     "restore_link_resolution — internal inverse of rewrite_link_resolution",
                 ))
             }
+            "block_to_page_plan" => {
+                // READ-ONLY planner for the engine-level `convert_block_to_page`
+                // compound (BlockToPageTransform Option B). Reads the origin's
+                // content+marks, its ordered children, and resolves (but does NOT
+                // create) the destination page chain — the engine executes each
+                // constituent write as an ordinary dispatched op so it collects
+                // the op-level inverse of each, assembling ONE composite
+                // `UndoEntry`. This op writes nothing, so it is honestly
+                // `declared_irreversible`.
+                use crate::core::block_to_page_plan::BlockToPagePlan;
+
+                let origin_id = params
+                    .get("target")
+                    .and_then(|v| v.as_string())
+                    .ok_or("block_to_page_plan: missing 'target' parameter")?
+                    .to_string();
+
+                let (origin_content, origin_marks) = self
+                    .read_block_content_marks(&origin_id)
+                    .await?
+                    .ok_or_else(|| {
+                        format!("block_to_page_plan: origin block '{origin_id}' not found")
+                    })?;
+
+                // Fail loud: converting a page to a page is meaningless, and the
+                // no-pages-under-non-pages interim rule means the ORIGIN's own
+                // page-hood is not what we are establishing here (Option B mints a
+                // NEW page; the origin stays a non-page link).
+                if self.block_is_page(&origin_id).await? {
+                    return Err(format!(
+                        "block_to_page_plan: origin '{origin_id}' is already a page"
+                    )
+                    .into());
+                }
+                let leaf_name = origin_content.trim();
+                if leaf_name.is_empty() {
+                    return Err(format!(
+                        "block_to_page_plan: origin '{origin_id}' has empty content — a page needs \
+                         a title"
+                    )
+                    .into());
+                }
+
+                // Destination: an explicit `destination_path` (from the picker /
+                // MCP) wins; otherwise PRE-SELECT the origin's nearest page
+                // ancestor (transform doc sub-ruling 3). No page ancestor ⇒ the
+                // vault root.
+                let destination_path =
+                    match params.get("destination_path").and_then(|v| v.as_string()) {
+                        Some(p) => p.to_string(),
+                        None => match self.nearest_page_ancestor(&origin_id).await? {
+                            Some(anc) => self.page_path_of(&anc).await?,
+                            None => String::new(),
+                        },
+                    };
+
+                let (destination_parent_id, destination_parent_depth, missing_segments) =
+                    self.resolve_destination_chain(&destination_path).await?;
+
+                let full_page_path = if destination_path.trim().is_empty() {
+                    leaf_name.to_string()
+                } else {
+                    format!("{}/{leaf_name}", destination_path.trim())
+                };
+                let page_id = holon_api::link_parser::PageId::for_path(&full_page_path)?
+                    .as_str()
+                    .to_string();
+                let page_depth = destination_parent_depth + 1;
+
+                let child_ids = self.read_ordered_children(&origin_id).await?;
+
+                let plan = BlockToPagePlan {
+                    origin_id,
+                    origin_content,
+                    origin_marks,
+                    page_id,
+                    page_depth,
+                    destination_parent_id,
+                    missing_segments,
+                    child_ids,
+                };
+                Ok(OperationResult::declared_irreversible(
+                    Vec::new(),
+                    "block_to_page_plan is read-only",
+                )
+                .with_response(plan.to_value()))
+            }
             "dismiss_advice" => {
                 // Append the lesson to the anchor's `advice_suppressed` set
                 // (ADR 0021/0022). A SINGLE per-row `INSERT OR IGNORE` against
@@ -3056,9 +3317,7 @@ mod link_resolution_rewrite_tests {
     async fn resolved_of(db: &crate::storage::turso::DbHandle, source: &str) -> Value {
         let rows = db
             .query(
-                &format!(
-                    "SELECT resolved_id FROM block_links WHERE source_block_id = '{source}'"
-                ),
+                &format!("SELECT resolved_id FROM block_links WHERE source_block_id = '{source}'"),
                 HashMap::new(),
             )
             .await
@@ -3069,11 +3328,7 @@ mod link_resolution_rewrite_tests {
             .expect("one row")
     }
 
-    async fn rewrite(
-        provider: &SqlOperationProvider,
-        from: &str,
-        to: &str,
-    ) -> OperationResult {
+    async fn rewrite(provider: &SqlOperationProvider, from: &str, to: &str) -> OperationResult {
         let mut params = StorageEntity::new();
         params.insert("from".into(), Value::String(from.to_string()));
         params.insert("to".into(), Value::String(to.to_string()));
@@ -3106,7 +3361,8 @@ mod link_resolution_rewrite_tests {
     }
 
     /// The forward rewrite re-points every row resolved to `origin` onto `P`,
-    /// and its inverse restores each affected row's prior `resolved_id` exactly.
+    /// and its inverse restores each affected row's prior `resolved_id`
+    /// exactly.
     #[tokio::test]
     async fn rewrite_and_undo_restores_prior_resolved_ids() {
         let (db, provider) = provider_with_links().await;
@@ -3118,8 +3374,14 @@ mod link_resolution_rewrite_tests {
         let result = rewrite(&provider, "block:origin", "block:P").await;
 
         // Inbound origin-links now resolve to P; unrelated rows untouched.
-        assert_eq!(resolved_of(&db, "block:src1").await, Value::String("block:P".into()));
-        assert_eq!(resolved_of(&db, "block:src2").await, Value::String("block:P".into()));
+        assert_eq!(
+            resolved_of(&db, "block:src1").await,
+            Value::String("block:P".into())
+        );
+        assert_eq!(
+            resolved_of(&db, "block:src2").await,
+            Value::String("block:P".into())
+        );
         assert_eq!(
             resolved_of(&db, "block:src3").await,
             Value::String("block:other".into())

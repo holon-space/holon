@@ -2190,6 +2190,20 @@ pub trait RefLayoutMutate {
     /// SUT dispatches the same id, so both sides born-equal — no
     /// synthetic→real reconcile.
     fn create_block_under_with_id(&mut self, parent: &EntityUri, content: &str, id: EntityUri);
+
+    /// `BlockToPage` (Option B): mint a NEW page block `page_id` (Page-tagged,
+    /// its own document) as the last child of `destination_parent`, re-home
+    /// `origin`'s direct children (and their non-page subtrees) under it, and
+    /// leave `origin` in place as a non-page carrying a full-span `[[page_id]]`
+    /// Link mark. Mirrors the engine-level `convert_block_to_page` compound so
+    /// the born-equal page id / reparented children / origin marks all match
+    /// the SUT for the block-comparison invariants.
+    fn apply_block_to_page(
+        &mut self,
+        origin: &EntityUri,
+        page_id: EntityUri,
+        destination_parent: &EntityUri,
+    );
 }
 
 /// Reference-side arrow-key navigation surface (`ArrowNavigate`). The
@@ -2597,4 +2611,18 @@ pub trait SutTemplateInstantiate {
         context_key: &str,
         bindings: &[(String, String)],
     );
+}
+
+/// SUT capability: turn an existing non-page block into a page via the
+/// production `block.convert_block_to_page` compound (BlockToPageTransform,
+/// Option B). Mints a NEW page under the destination, re-homes the origin's
+/// children under it, and leaves the origin in place as a `[[page]]` link
+/// (the origin itself stays a NON-page). `target` is the origin block id;
+/// an EMPTY `destination_path` means "use the backend default" (the origin's
+/// nearest page ancestor — the op's `destination_path`-absent branch), so the
+/// new page lands under a page and `inv-no-page-under-non-page` stays
+/// satisfied. Dispatched through the op-floor `DirectUserDriver`.
+#[holon_macros::capmap_adapter]
+pub trait SutBlockToPage {
+    async fn convert_block_to_page(&self, target: &EntityUri, destination_path: &str);
 }

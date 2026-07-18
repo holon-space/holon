@@ -7,13 +7,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::*;
-use holon_frontend::FrontendSession;
-use holon_frontend::HolonConfig;
-use holon_frontend::SessionConfig;
-
 use holon_app::BootComponent;
 use holon_app::BootError;
 use holon_app::BootStage;
+use holon_frontend::FrontendSession;
+use holon_frontend::HolonConfig;
+use holon_frontend::SessionConfig;
 
 use crate::geometry::BoundsRegistry;
 

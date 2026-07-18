@@ -137,6 +137,21 @@ pub struct DispatchingOperationEngine {
 /// Single spelling shared with the frontend picker (`holon_api::template`).
 use holon_api::INSTANTIATE_TEMPLATE_OP;
 
+/// The engine-level compound that turns a block into a page (Option B,
+/// `docs/Plans/BlockToPageTransform-Options-2026-07-17.md`): mint a new page,
+/// move the origin's content + children onto it, leave a `[[page]]` link
+/// behind, and re-point inbound backlinks. Composed from ordinary invertible
+/// ops so the whole thing is ONE reversible [`UndoEntry`].
+const CONVERT_BLOCK_TO_PAGE_OP: &str = "convert_block_to_page";
+
+/// Re-parse a plan's `page_id` string into an `EntityUri` for the `[[P]]` link
+/// mark. The id crosses the dispatch boundary as a plan `Value` string (the
+/// planner minted it via `PageId::for_path`), so this is a genuine boundary.
+fn convert_page_uri(page_id: &str) -> EntityUri {
+    // ALLOW(entity_uri_from_raw): page_id arrives as a plan Value string across the dispatch boundary
+    EntityUri::from_raw(page_id)
+}
+
 /// Op names whose params are a block field-map written to `block_raw`, so an
 /// injected `_provenance` property lands in the row's `properties` JSON through
 /// the existing "unknown fields pack into properties" provider path (zero
@@ -495,6 +510,273 @@ impl DispatchingOperationEngine {
         Ok(Some(Value::String(plan.root_id)))
     }
 
+    /// Dispatch ONE constituent write of the block→page compound through the
+    /// normal dispatcher path (exactly as the UI would), returning the stored
+    /// FORWARD op (for redo), its exact op-level INVERSE (for undo), and the
+    /// field deltas it produced. Fails loud if the constituent cannot describe
+    /// an inverse — sub-ruling 5: a partial-undo transform is never shipped.
+    async fn dispatch_constituent(
+        &self,
+        op_name: &str,
+        params: StorageEntity,
+    ) -> Result<(Operation, Operation, Vec<FieldDelta>)> {
+        let block = EntityName::new("block");
+        let forward = Operation::new(
+            block.clone(),
+            op_name,
+            op_name,
+            params
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+        );
+        let result = self
+            .dispatcher
+            .execute_operation(&block, op_name, params)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("convert_block_to_page: constituent '{op_name}' failed: {e}")
+            })?;
+        let inverse = match result.undo {
+            UndoAction::Undo(inv) => inv,
+            UndoAction::DeclaredIrreversible(reason) => bail!(
+                "convert_block_to_page: constituent '{op_name}' is irreversible ({reason}) — \
+                 refusing to ship a partial-undo transform (sub-ruling 5)"
+            ),
+            UndoAction::Undeclared => bail!(
+                "convert_block_to_page: constituent '{op_name}' returned an Undeclared undo \
+                 classification"
+            ),
+        };
+        Ok((forward, inverse, result.changes))
+    }
+
+    /// Execute the block → page transform (Option B). See
+    /// [`CONVERT_BLOCK_TO_PAGE_OP`]. Params: `target` (origin block id) and
+    /// optional `destination_path` (`/`-joined page path; empty = vault root,
+    /// missing segments are created). Returns the new page id.
+    async fn run_convert_block_to_page(
+        &self,
+        params: &StorageEntity,
+        origin: &OpOrigin,
+    ) -> Result<Option<Value>> {
+        use holon_api::PAGE_TAG;
+        use holon_api::inline_mark::EntityRef;
+        use holon_api::inline_mark::InlineMark;
+        use holon_api::inline_mark::MarkSpan;
+        use holon_api::inline_mark::marks_to_json;
+
+        use crate::core::block_to_page_plan::BlockToPagePlan;
+
+        let block = EntityName::new("block");
+
+        // 1. Plan (read-only): origin content+marks, ordered children, resolved
+        //    destination chain. Provider-side because it needs DB reads.
+        let plan_result = self
+            .dispatcher
+            .execute_operation(&block, "block_to_page_plan", params.clone())
+            .await
+            .map_err(|e| anyhow::anyhow!("convert_block_to_page: planning failed: {e}"))?;
+        let plan_value = plan_result.response.ok_or_else(|| {
+            anyhow::anyhow!("convert_block_to_page: planner returned no plan payload")
+        })?;
+        let plan = BlockToPagePlan::from_value(&plan_value)
+            .map_err(|e| anyhow::anyhow!("convert_block_to_page: {e}"))?;
+
+        // Inverses are bucketed per step, NOT blanket-reversed: the undo order
+        // must reverse the STEPS while keeping the child re-homes in FORWARD
+        // order (each child's move-back anchors on its original predecessor, so
+        // C1 must land before C2), and delete the hierarchy leaf→root.
+        let page_tag = || Value::Array(vec![Value::String(PAGE_TAG.to_string())]);
+        let mut forwards: Vec<Operation> = Vec::new();
+        let mut seg_invs: Vec<Operation> = Vec::new();
+        let mut child_invs: Vec<Operation> = Vec::new();
+        let mut all_changes: Vec<FieldDelta> = Vec::new();
+
+        // 2. Create any missing destination-hierarchy pages, root→leaf. Each is an
+        //    invertible `create` (inverse: delete).
+        for seg in &plan.missing_segments {
+            let mut p = StorageEntity::new();
+            p.insert("id".into(), Value::String(seg.id.clone()));
+            p.insert("content".into(), Value::String(seg.name.clone()));
+            p.insert("parent_id".into(), Value::String(seg.parent_id.clone()));
+            p.insert("depth".into(), Value::Integer(seg.depth));
+            p.insert("tags".into(), page_tag());
+            let p = self.stamp_provenance("create", p, origin);
+            let (fwd, inv, ch) = self.dispatch_constituent("create", p).await?;
+            forwards.push(fwd);
+            seg_invs.push(inv);
+            all_changes.extend(ch);
+        }
+
+        // 3. Create the new page P, moving the origin's content (+ marks) onto it.
+        //    `create` inverse = delete(P) (leaf-exact: its children are re-homed BACK
+        //    before P is deleted on undo).
+        let mut pc = StorageEntity::new();
+        pc.insert("id".into(), Value::String(plan.page_id.clone()));
+        pc.insert("content".into(), Value::String(plan.origin_content.clone()));
+        pc.insert(
+            "parent_id".into(),
+            Value::String(plan.destination_parent_id.clone()),
+        );
+        pc.insert("depth".into(), Value::Integer(plan.page_depth));
+        pc.insert("tags".into(), page_tag());
+        if let Value::String(marks) = &plan.origin_marks {
+            if !marks.is_empty() && marks != "[]" {
+                pc.insert("marks".into(), Value::String(marks.clone()));
+            }
+        }
+        let pc = self.stamp_provenance("create", pc, origin);
+        let (fwd, p_inv, ch) = self.dispatch_constituent("create", pc).await?;
+        forwards.push(fwd);
+        all_changes.extend(ch);
+
+        // 4. Re-home each child under P, preserving sibling order (after_block_id = the
+        //    previous child). move_block inverse restores the child's original parent +
+        //    predecessor exactly.
+        let mut prev: Option<String> = None;
+        for child in &plan.child_ids {
+            let mut mp = StorageEntity::new();
+            mp.insert("id".into(), Value::String(child.clone()));
+            mp.insert("parent_id".into(), Value::String(plan.page_id.clone()));
+            match &prev {
+                Some(pid) => {
+                    mp.insert("after_block_id".into(), Value::String(pid.clone()));
+                }
+                None => {
+                    mp.insert("after_block_id".into(), Value::Null);
+                }
+            }
+            let (fwd, inv, ch) = self.dispatch_constituent("move_block", mp).await?;
+            forwards.push(fwd);
+            child_invs.push(inv);
+            all_changes.extend(ch);
+            prev = Some(child.clone());
+        }
+
+        // 5. Leave a `[[P]]` link behind. The origin's TEXT is unchanged; only its
+        //    marks gain a full-span Link to P. A DIRECT `set_field(marks=…)` (not a
+        //    `content=Object` write, whose dispatcher-split marks follow-up drops the
+        //    marks inverse) yields the exact `set_field(marks=old)` inverse — so undo
+        //    restores the origin's original marks faithfully.
+        let label = plan.origin_content.clone();
+        let link_mark = MarkSpan::new(
+            0,
+            label.chars().count(),
+            InlineMark::Link {
+                target: EntityRef::Internal {
+                    id: convert_page_uri(&plan.page_id),
+                },
+                label: label.clone(),
+            },
+        );
+        let mut sf = StorageEntity::new();
+        sf.insert("id".into(), Value::String(plan.origin_id.clone()));
+        sf.insert("field".into(), Value::String("marks".into()));
+        sf.insert("value".into(), Value::String(marks_to_json(&[link_mark])));
+        let (fwd, marks_inv, ch) = self.dispatch_constituent("set_field", sf).await?;
+        forwards.push(fwd);
+        all_changes.extend(ch);
+
+        // 6. Re-point inbound backlinks origin → P (exact capture-based inverse
+        //    `restore_link_resolution`).
+        let mut rw = StorageEntity::new();
+        rw.insert("from".into(), Value::String(plan.origin_id.clone()));
+        rw.insert("to".into(), Value::String(plan.page_id.clone()));
+        let (fwd, rewrite_inv, ch) = self
+            .dispatch_constituent("rewrite_link_resolution", rw)
+            .await?;
+        forwards.push(fwd);
+        all_changes.extend(ch);
+
+        // Compose ONE undo entry. Redo re-executes the forward constituents in
+        // order. Undo replays the STEPS in reverse: restore inbound links →
+        // restore origin marks (drops the link) → re-home children to origin (in
+        // FORWARD order, so predecessors land first) → delete P → delete the
+        // minted hierarchy leaf→root.
+        if origin.is_user() {
+            let mut inverse_ops: Vec<Operation> = Vec::new();
+            inverse_ops.push(rewrite_inv);
+            inverse_ops.push(marks_inv);
+            inverse_ops.extend(child_invs);
+            inverse_ops.push(p_inv);
+            seg_invs.reverse();
+            inverse_ops.extend(seg_invs);
+            // Staleness fingerprint: guard the LITERALLY-restored fields
+            // (parent_id, content, marks, resolved link state) and EXCLUDE the
+            // derived positional columns `depth`/`sort_key`. Structural ops
+            // RECOMPUTE those from the live tree rather than restoring the
+            // captured value, so their post-undo value is a function of the
+            // current parent chain, not the pre-op value — fingerprinting them
+            // makes a legitimate undo→redo trip spuriously "stale". (The moved
+            // blocks' parent_id — the field that actually defines the re-home —
+            // is still fingerprinted, so real external edits are caught.)
+            let fp_changes: Vec<FieldDelta> = all_changes
+                .iter()
+                .filter(|d| d.field != "depth" && d.field != "sort_key")
+                .cloned()
+                .collect();
+            let entry = UndoEntry {
+                ops: forwards,
+                inverse_ops,
+                origin: OpOrigin::User,
+                group_id: 0,
+                precondition: Precondition::forward(&fp_changes),
+                redo_precondition: Precondition::inverse(&fp_changes),
+            };
+            self.undo_stack.write().await.push(entry);
+            self.persist().await?;
+        }
+
+        if let Some(history) = &self.history {
+            self.record_history(
+                history.as_ref(),
+                "block",
+                CONVERT_BLOCK_TO_PAGE_OP,
+                origin,
+                &all_changes,
+            )
+            .await?;
+        }
+
+        Ok(Some(Value::String(plan.page_id)))
+    }
+
+    /// The synthetic descriptor advertising the engine-level
+    /// `convert_block_to_page` op so MCP / the slash menu discover it like any
+    /// provider op.
+    fn convert_block_to_page_descriptor() -> OperationDescriptor {
+        use holon_api::render_types::TypeHint;
+        OperationDescriptor {
+            entity_name: EntityName::new("block"),
+            entity_short_name: "block".to_string(),
+            id_column: "id".to_string(),
+            name: CONVERT_BLOCK_TO_PAGE_OP.to_string(),
+            display_name: "Turn into page".to_string(),
+            description: "Turn this block into a page: move its content and children onto a new \
+                          page and leave a link behind."
+                .to_string(),
+            required_params: vec![holon_api::OperationParam {
+                name: "target".to_string(),
+                type_hint: TypeHint::String,
+                description: "Origin block id to convert".to_string(),
+            }],
+            // Resolve `target` from the focused block's `id` (the only key live
+            // context_params reliably carries), so a plain slash-menu click on a
+            // block turns THAT block into a page. `destination_path` is optional
+            // and defaults, backend-side, to the nearest page ancestor.
+            param_mappings: vec![holon_api::render_types::ParamMapping {
+                from: "id".to_string(),
+                provides: vec!["target".to_string()],
+                defaults: Default::default(),
+            }],
+            trigger: None,
+            bound_params: Default::default(),
+            affected_fields: vec![],
+            precondition: None,
+        }
+    }
+
     /// The synthetic descriptor advertising the engine-level
     /// `instantiate_template` op so MCP/UI discover it like any provider op.
     fn instantiate_template_descriptor() -> OperationDescriptor {
@@ -848,6 +1130,15 @@ impl OperationEngine for DispatchingOperationEngine {
             return self.run_instantiate_template(&params, &origin).await;
         }
 
+        // Engine-level compound: block → page (Option B). Composed from ordinary
+        // invertible ops (create / move_block / set_field(marks) /
+        // rewrite_link_resolution) whose op-level inverses assemble into ONE
+        // composite `UndoEntry`. Intercepted here (like `instantiate_template`)
+        // so undo/redo replay the CONSTITUENTS, never the compound name.
+        if op_name == CONVERT_BLOCK_TO_PAGE_OP && entity_name.as_str() == "block" {
+            return self.run_convert_block_to_page(&params, &origin).await;
+        }
+
         // Provenance stamping (ADR 0024 P8 / C2a): the dispatcher drops `origin`
         // before the write, so this is the last place holding it. For authoring
         // ops we inject a `_provenance` property into the params; it travels as
@@ -954,6 +1245,9 @@ impl OperationEngine for DispatchingOperationEngine {
         if entity_name == "block" && self.template_source.is_some() {
             ops.push(Self::instantiate_template_descriptor());
         }
+        if entity_name == "block" {
+            ops.push(Self::convert_block_to_page_descriptor());
+        }
         ops
     }
 
@@ -962,6 +1256,9 @@ impl OperationEngine for DispatchingOperationEngine {
             && op_name == INSTANTIATE_TEMPLATE_OP
             && self.template_source.is_some()
         {
+            return true;
+        }
+        if entity_name == "block" && op_name == CONVERT_BLOCK_TO_PAGE_OP {
             return true;
         }
         self.dispatcher

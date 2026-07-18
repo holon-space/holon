@@ -509,7 +509,8 @@ impl<T> FrontendSession<T> {
         self.holon_config.lock().unwrap().ui.clone()
     }
 
-    /// The config directory (where `holon.toml` and other app-local state live).
+    /// The config directory (where `holon.toml` and other app-local state
+    /// live).
     pub fn config_dir(&self) -> &std::path::Path {
         &self.config_dir
     }

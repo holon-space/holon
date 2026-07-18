@@ -123,7 +123,10 @@ impl BootError {
         } else if msg.contains("OrgModeModule") {
             (BootComponent::OrgSync, BootStage::ContainerConfigure)
         } else if msg.contains("McpIntegrationsModule") {
-            (BootComponent::McpIntegrations, BootStage::ContainerConfigure)
+            (
+                BootComponent::McpIntegrations,
+                BootStage::ContainerConfigure,
+            )
         } else {
             // GpuiModule/HolonFrontendModule wrap `on_start` (FrontendSession
             // resolution) and anything not attributable to a named storage

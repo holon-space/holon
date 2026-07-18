@@ -142,7 +142,10 @@ impl PageId {
     /// Hash already-trimmed segments into a `block:<hash>` id.
     fn from_segments(segments: &[&str]) -> Self {
         let canonical = segments.join("/");
-        PageId(deterministic_entity_id("block", &normalize_for_hash(&canonical)))
+        PageId(deterministic_entity_id(
+            "block",
+            &normalize_for_hash(&canonical),
+        ))
     }
 
     /// Mint the deterministic id for a NEW page whose full path (root→leaf,

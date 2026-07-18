@@ -82,6 +82,7 @@ pub fn model_chord_click_focus<
 mod advance_day;
 pub mod apply_mutation;
 mod arrow_navigate;
+mod block_to_page;
 pub mod bulk_external_add;
 pub mod click_block;
 mod concurrent_schema_init;
@@ -136,6 +137,7 @@ mod toggle_drawer;
 pub use advance_day::AdvanceDay;
 pub use apply_mutation::ApplyMutation;
 pub use arrow_navigate::ArrowNavigate;
+pub use block_to_page::BlockToPage;
 pub use bulk_external_add::BulkExternalAdd;
 pub use click_block::ClickBlock;
 pub use concurrent_schema_init::ConcurrentSchemaInit;
@@ -203,6 +205,7 @@ crate::declare_e2e_transitions! {
         AdvanceDay(AdvanceDay),
         ApplyMutation(ApplyMutation),
         ArrowNavigate(ArrowNavigate),
+        BlockToPage(BlockToPage),
         NavigateBack(NavigateBack),
         BulkExternalAdd(BulkExternalAdd),
         ClickBlock(ClickBlock),

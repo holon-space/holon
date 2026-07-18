@@ -227,7 +227,10 @@ impl FrontendInjectorExt for Injector {
             // a different filename (notes.org).
             if !root.exists() {
                 std::fs::create_dir_all(&root).map_err(|e| {
-                    anyhow::anyhow!("Failed to create org root directory {}: {e}", root.display())
+                    anyhow::anyhow!(
+                        "Failed to create org root directory {}: {e}",
+                        root.display()
+                    )
                 })?;
             }
 
@@ -448,13 +451,10 @@ impl FrontendInjectorExt for Injector {
                             // Copy the outcome out and drop the non-`Send`
                             // `watch::Ref` BEFORE any `.await` below.
                             let scan_error: Option<String> = {
-                                let result = signal
-                                    .wait_for(|v| v.is_some())
-                                    .await
-                                    .expect(
-                                        "boot [component=org-sync stage=session-resolve]: \
+                                let result = signal.wait_for(|v| v.is_some()).await.expect(
+                                    "boot [component=org-sync stage=session-resolve]: \
                                          FileWatcherReadySignal sender dropped",
-                                    );
+                                );
                                 match result.as_ref().unwrap() {
                                     Ok(()) => None,
                                     Err(msg) => Some(msg.clone()),
