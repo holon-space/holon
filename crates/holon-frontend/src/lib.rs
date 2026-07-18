@@ -196,6 +196,7 @@ pub mod headless_editor_mirror;
 pub mod input;
 pub mod input_trigger;
 pub(crate) mod link_provider;
+pub mod link_segments;
 pub mod logging;
 pub mod memory_monitor;
 pub mod mutable_tree;
