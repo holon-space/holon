@@ -8,6 +8,7 @@
 //!
 //! Catalogue and rationale: `docs/Plans/McpMockE2E.md`.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use rmcp::ErrorData as McpError;
@@ -19,6 +20,8 @@ use tokio::sync::Mutex;
 
 /// The single tool the mock exposes for tool-based sync scenarios.
 pub const LIST_TOOL: &str = "list-items";
+/// The write tool the mock exposes for write scenarios.
+pub const WRITE_TOOL: &str = "write-item";
 /// The single resource URI for resource-based sync scenarios.
 pub const RESOURCE_URI: &str = "mock://items";
 
@@ -45,6 +48,16 @@ pub enum Scenario {
     Stateful,
     /// Advertises `resources.subscribe` and pushes an `updated` notification.
     SubscribePush,
+    /// Write tool accepts the call and acks success (well-formed write).
+    WriteHappy,
+    /// Write tool dedups on the idempotency key: the first call with a key
+    /// applies (bumps `applied_count`); repeats echo `deduped: true` and leave
+    /// `applied_count` unchanged. The dedup authority for retry-storm tests.
+    WriteDuplicateDetected,
+    /// Write tool returns a CAS/precondition failure (`isError: true`).
+    WriteConflict,
+    /// Write tool accepts but delays its ack (slow-acking server).
+    WriteSlowAck,
 }
 
 impl Scenario {
@@ -60,6 +73,10 @@ impl Scenario {
             "tool_error" => Self::ToolError,
             "stateful" => Self::Stateful,
             "subscribe_push" => Self::SubscribePush,
+            "write_happy" => Self::WriteHappy,
+            "write_duplicate_detected" => Self::WriteDuplicateDetected,
+            "write_conflict" => Self::WriteConflict,
+            "write_slow_ack" => Self::WriteSlowAck,
             other => anyhow::bail!("unknown MOCK_MCP_SCENARIO '{other}'"),
         })
     }
@@ -69,6 +86,18 @@ impl Scenario {
         let raw = std::env::var("MOCK_MCP_SCENARIO")
             .map_err(|_| anyhow::anyhow!("MOCK_MCP_SCENARIO env var not set"))?;
         Self::parse(&raw)
+    }
+
+    /// Whether this scenario exercises the write tool (advertises `write-item`
+    /// instead of `list-items`).
+    pub fn is_write(&self) -> bool {
+        matches!(
+            self,
+            Self::WriteHappy
+                | Self::WriteDuplicateDetected
+                | Self::WriteConflict
+                | Self::WriteSlowAck
+        )
     }
 }
 
@@ -89,6 +118,10 @@ pub struct MockServer {
     read_count: Arc<Mutex<u64>>,
     /// Live resource state for `SubscribePush` (mutated by the push task).
     items: Arc<Mutex<Vec<serde_json::Value>>>,
+    /// Idempotency keys already applied (`WriteDuplicateDetected` dedup set).
+    seen_keys: Arc<Mutex<HashSet<String>>>,
+    /// Count of non-deduped writes actually applied (retry-storm assertion).
+    applied_count: Arc<Mutex<u64>>,
 }
 
 impl MockServer {
@@ -97,6 +130,8 @@ impl MockServer {
             scenario,
             read_count: Arc::new(Mutex::new(0)),
             items: Arc::new(Mutex::new(vec![item(1)])),
+            seen_keys: Arc::new(Mutex::new(HashSet::new())),
+            applied_count: Arc::new(Mutex::new(0)),
         }
     }
 }
@@ -131,10 +166,15 @@ impl ServerHandler for MockServer {
         _: Option<PaginatedRequestParam>,
         _: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
+        let (name, description) = if self.scenario.is_write() {
+            (WRITE_TOOL, "Write a mock item")
+        } else {
+            (LIST_TOOL, "List mock items")
+        };
         let tool = Tool {
-            name: LIST_TOOL.into(),
+            name: name.into(),
             title: None,
-            description: Some("List mock items".into()),
+            description: Some(description.into()),
             input_schema: Arc::new(serde_json::Map::new()),
             output_schema: None,
             annotations: None,
@@ -150,7 +190,27 @@ impl ServerHandler for MockServer {
         _: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
         let scenario = self.scenario;
+        let seen_keys = self.seen_keys.clone();
+        let applied_count = self.applied_count.clone();
         async move {
+            if scenario.is_write() {
+                if request.name != WRITE_TOOL {
+                    return Err(McpError::invalid_params(
+                        format!("unknown write tool '{}'", request.name),
+                        None,
+                    ));
+                }
+                if scenario == Scenario::WriteSlowAck {
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                }
+                return Ok(write_response(
+                    scenario,
+                    request.arguments.as_ref(),
+                    &seen_keys,
+                    &applied_count,
+                )
+                .await);
+            }
             if request.name != LIST_TOOL {
                 return Err(McpError::invalid_params(
                     format!("unknown tool '{}'", request.name),
@@ -279,10 +339,64 @@ fn tool_response(
         Scenario::ToolError => CallToolResult::error(vec![Content::text(
             "domain error: rate limit exceeded".to_string(),
         )]),
-        // Resource-based scenarios never reach call_tool.
-        Scenario::Stateful | Scenario::SubscribePush => CallToolResult::error(vec![Content::text(
-            "call_tool not supported for resource-based scenario".to_string(),
+        // Resource-based and write scenarios never reach this read helper.
+        Scenario::Stateful
+        | Scenario::SubscribePush
+        | Scenario::WriteHappy
+        | Scenario::WriteDuplicateDetected
+        | Scenario::WriteConflict
+        | Scenario::WriteSlowAck => CallToolResult::error(vec![Content::text(
+            "tool_response is read-only; this scenario is handled elsewhere".to_string(),
         )]),
+    }
+}
+
+/// Build the write-tool response for a write scenario. `WriteDuplicateDetected`
+/// is the dedup authority: it keys off the incoming `idempotency_key` argument,
+/// applying once and echoing `deduped: true` on repeats so a retry storm of N
+/// identical dispatches yields exactly one applied effect.
+async fn write_response(
+    scenario: Scenario,
+    args: Option<&serde_json::Map<String, serde_json::Value>>,
+    seen_keys: &Mutex<HashSet<String>>,
+    applied_count: &Mutex<u64>,
+) -> CallToolResult {
+    match scenario {
+        Scenario::WriteHappy | Scenario::WriteSlowAck => {
+            let mut c = applied_count.lock().await;
+            *c += 1;
+            CallToolResult::success(vec![Content::text(
+                serde_json::json!({ "ok": true, "applied_count": *c }).to_string(),
+            )])
+        }
+        Scenario::WriteDuplicateDetected => {
+            let key = args
+                .and_then(|a| a.get("idempotency_key"))
+                .and_then(|v| v.as_str())
+                .expect("WriteDuplicateDetected requires an idempotency_key argument")
+                .to_string();
+            let deduped = !seen_keys.lock().await.insert(key.clone());
+            let applied = {
+                let mut c = applied_count.lock().await;
+                if !deduped {
+                    *c += 1;
+                }
+                *c
+            };
+            CallToolResult::success(vec![Content::text(
+                serde_json::json!({
+                    "ok": true,
+                    "deduped": deduped,
+                    "applied_count": applied,
+                    "key": key,
+                })
+                .to_string(),
+            )])
+        }
+        Scenario::WriteConflict => CallToolResult::error(vec![Content::text(
+            "precondition failed: CAS conflict — resource changed since read".to_string(),
+        )]),
+        _ => unreachable!("write_response called for non-write scenario {scenario:?}"),
     }
 }
 

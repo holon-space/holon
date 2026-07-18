@@ -1,0 +1,22 @@
+# Keyed-write sidecar: writes enabled, `write-item` classified `keyed` so the
+# connector mints and injects an idempotency key. The test overrides `command`
+# and inserts `MOCK_MCP_SCENARIO` (write_happy | write_duplicate_detected |
+# write_conflict | write_slow_ack).
+transport:
+  child_process:
+    command: /bin/false
+entity_prefix: "mock_"
+writes: enabled
+entities:
+  items:
+    short_name: item
+    id_column: id
+    schema:
+      - { name: id,    sql_type: TEXT, primary_key: true }
+      - { name: title, sql_type: TEXT }
+      - { name: body,  sql_type: TEXT }
+tools:
+  write-item:
+    entity: items
+    effect: keyed
+    key_param: idempotency_key

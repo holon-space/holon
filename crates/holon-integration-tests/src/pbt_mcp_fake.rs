@@ -245,6 +245,7 @@ impl PbtMcpIntegration {
         let sidecar = McpSidecar {
             entity_prefix: Some("pbt_".to_string()),
             entities,
+            writes: Default::default(),
             tools: HashMap::new(),
             views: vec![],
         };

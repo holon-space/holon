@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use holon_api::EntityName;
@@ -27,7 +28,9 @@ use tracing::info;
 
 use crate::mcp_schema_mapping::input_schema_to_params;
 use crate::mcp_sidecar::McpSidecar;
+use crate::mcp_sidecar::ToolEffect;
 use crate::mcp_sidecar::UndoConfig;
+use crate::mcp_sidecar::WritesPolicy;
 
 /// Type-erased entity field reader — reads entity fields as HashMap<String,
 /// Value>. Allows McpOperationProvider to capture old state without knowing
@@ -177,6 +180,11 @@ pub struct McpOperationProvider {
     /// None when the caller holds the connection externally (e.g.,
     /// McpIntegration).
     _connection: Option<McpRunningService>,
+    /// Sent-intents ledger for `keyed` writes: minted idempotency key → number
+    /// of times we have dispatched it. STRICTLY retry bookkeeping (ADR 0024 P4:
+    /// an execution log is not a cross-replica dedup mechanism). The remote is
+    /// the dedup authority; this only lets a retry observe "already sent".
+    sent_intents: Arc<Mutex<HashMap<String, u32>>>,
 }
 
 impl McpOperationProvider {
@@ -312,6 +320,7 @@ impl McpOperationProvider {
             sidecar,
             entity_readers,
             _connection: None,
+            sent_intents: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -331,6 +340,7 @@ impl McpOperationProvider {
             sidecar,
             entity_readers,
             _connection: None,
+            sent_intents: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -510,14 +520,95 @@ impl OperationProvider for McpOperationProvider {
             .get(op_name)
             .unwrap_or_else(|| panic!("unknown MCP operation: {op_name}"));
 
+        // Write-policy gate — the single dispatch chokepoint (leases/read-write
+        // ruling). A tool with no explicit effect is `read` (validated at load:
+        // write-shaped tools must classify themselves).
+        let effect = self
+            .sidecar
+            .tools
+            .get(original_name)
+            .and_then(|tc| tc.effect)
+            .unwrap_or(ToolEffect::Read);
+        if effect != ToolEffect::Read {
+            match self.sidecar.writes {
+                WritesPolicy::Disabled => {
+                    return Err(format!(
+                        "connector write blocked: tool '{original_name}' (effect: {}) needs \
+                         `writes: enabled` in the provider sidecar — writes are disabled \
+                         (attempted on entity '{}')",
+                        effect.as_str(),
+                        entity_name.as_str()
+                    )
+                    .into());
+                }
+                WritesPolicy::Enabled if effect == ToolEffect::OnceOnly => {
+                    return Err(format!(
+                        "connector write blocked: tool '{original_name}' is `effect: once_only` \
+                         — write authority (writer designation) is not yet configured, pending \
+                         increment 4 of the leases/read-write ruling"
+                    )
+                    .into());
+                }
+                WritesPolicy::Enabled => {}
+            }
+        }
+
+        // `keyed` writes carry a deterministic idempotency key so a retry storm
+        // collapses to one remote effect (ADR 0024 P4). Minted BEFORE params are
+        // consumed and before the key is injected, so the fingerprint is stable
+        // across retries.
+        let idempotency: Option<(String, String)> = if effect == ToolEffect::Keyed {
+            let key_param = self
+                .sidecar
+                .tools
+                .get(original_name)
+                .and_then(|tc| tc.key_param.clone())
+                .expect("keyed effect implies key_param (validated at load)");
+            let id_col = self
+                .sidecar
+                .entities
+                .get(entity_name.as_str())
+                .map(|e| e.id_column_or_default())
+                .unwrap_or_else(|| "id".to_string());
+            let entity_id = match params.get(id_col.as_str()) {
+                Some(Value::String(s)) => s.as_str(),
+                _ => "",
+            };
+            let fingerprint = holon_api::effect_id::FiringKey::from_row(&params);
+            let connector = self.sidecar.entity_prefix.as_deref().unwrap_or("");
+            let key = holon_api::effect_id::deterministic_intent_key(
+                connector,
+                original_name,
+                entity_id,
+                &fingerprint,
+            )
+            .to_string();
+            let dispatch = {
+                let mut ledger = self.sent_intents.lock().unwrap();
+                let c = ledger.entry(key.clone()).or_insert(0);
+                *c += 1;
+                *c
+            };
+            tracing::debug!(
+                tool = %original_name, key = %key, dispatch,
+                "keyed connector write: minted idempotency key (retry bookkeeping)"
+            );
+            Some((key_param, key))
+        } else {
+            None
+        };
+
         let undo_action = self
             .build_undo_action(original_name, entity_name.as_str(), &params)
             .await;
 
-        let json_params: serde_json::Map<String, serde_json::Value> = params
+        let mut json_params: serde_json::Map<String, serde_json::Value> = params
             .into_iter()
             .map(|(k, v)| (k.to_string(), to_json_value(v)))
             .collect();
+        if let Some((param_name, key)) = idempotency {
+            json_params.insert(param_name, serde_json::Value::String(key));
+        }
 
         let result = peer
             .call_tool(CallToolRequestParam {
@@ -588,6 +679,7 @@ entities:
 tools:
   update-tasks:
     entity: todoist_tasks
+    effect: idempotent
     affected_fields: [content, description]
     undo:
       tool: update-tasks
@@ -595,6 +687,7 @@ tools:
   delete-object:
     entity: todoist_tasks
     display_name: Delete
+    effect: once_only
     undo:
       reversible: false
   find-tasks:
