@@ -114,6 +114,41 @@ pbt name='general' cases='64' *FLAGS:
             ;;
     esac
 
+# In-lane agent gate: single-sequence keystone smoke. Agents run THIS, never the
+# full sweep (it exceeds the 600s foreground cap under parallel-lane load); the
+# full sweep is the orchestrator's weave-time gate (keystone-full).
+keystone-smoke:
+    just pbt general 1
+
+# Weave-time full keystone sweep (orchestrator-run, typically in background)
+keystone-full cases='16':
+    just pbt general {{cases}}
+
+# Launch the app for live MCP-driven verification: throwaway config+vault, own
+# MCP port (registry: 8710/8720/8730/... — pick one per verifier). Leaves the
+# app running in the background; caller drives it over http://127.0.0.1:PORT/mcp
+# and kills the printed pid when done.
+live-verify port='8710' dir='/tmp/holon-live-verify':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rm -rf "{{dir}}"
+    mkdir -p "{{dir}}/config" "{{dir}}/vault"
+    HOLON_CONFIG_DIR="{{dir}}/config" HOLON_VAULT_ROOT="{{dir}}/vault" \
+        MCP_SERVER_PORT={{port}} cargo run -p holon-gpui \
+        > "{{dir}}/app.log" 2>&1 &
+    app_pid=$!
+    echo "launched holon-gpui pid=${app_pid}, waiting for /health ..."
+    for _ in $(seq 1 150); do
+        if curl -sf "http://127.0.0.1:{{port}}/health" > /dev/null; then
+            echo "READY pid=${app_pid} port={{port}} state-dir={{dir}}"
+            exit 0
+        fi
+        sleep 2
+    done
+    echo "app failed to become healthy; log tail:"; tail -20 "{{dir}}/app.log"
+    kill "${app_pid}" 2> /dev/null || true
+    exit 1
+
 # Run all PBTs sequentially
 pbt-all cases='32':
     just pbt general {{cases}}
