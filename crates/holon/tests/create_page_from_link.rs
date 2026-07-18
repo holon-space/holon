@@ -360,13 +360,25 @@ async fn create_page_from_link_empty_target_is_error() {
 // (sql_operation_provider.rs), so the two peers diverge and the property
 // fails, shrinking to a minimal one-character name.
 
-/// A well-formed single-segment page name: non-empty, no path separator, no
-/// SQL-hostile quote, printable. The bug is name-independent, so the shape only
-/// needs to be a legal page name — shrinking drives it to the minimal witness.
+/// A well-formed page path: 1–3 non-empty segments joined by a `/` that may
+/// carry surrounding spaces (`"Areas / Sub"`). The multi-segment + spaced-
+/// separator shapes exercise the H2 canonicalization case — the parser trims
+/// segments (`normalize_for_hash` alone would not) so its optimistic id agrees
+/// with the id the writer mints. Shrinking still drives to a minimal witness.
 fn page_name_strategy() -> impl Strategy<Value = String> {
-    "[A-Za-z][A-Za-z0-9 ]{0,15}"
+    let segment = "[A-Za-z][A-Za-z0-9 ]{0,7}"
         .prop_map(|s| s.trim().to_string())
-        .prop_filter("name must be non-empty after trimming", |s| !s.is_empty())
+        .prop_filter("segment must be non-empty after trimming", |s| {
+            !s.is_empty()
+        });
+    let separator = prop_oneof![
+        Just("/".to_string()),
+        Just(" / ".to_string()),
+        Just("/ ".to_string()),
+        Just(" /".to_string()),
+    ];
+    (proptest::collection::vec(segment, 1..=3), separator)
+        .prop_map(|(segments, sep)| segments.join(&sep))
 }
 
 /// Create page `name` via the production `create_page_from_link` op on a fresh,
@@ -391,19 +403,130 @@ async fn create_page_on_fresh_peer(name: &str) -> String {
     }
 }
 
+/// Create a `Page`-tagged block with an explicit id/content/parent.
+async fn create_page(
+    provider: &SqlOperationProvider,
+    entity: &EntityName,
+    id: &str,
+    content: &str,
+    parent: &str,
+) {
+    let mut p: holon_api::StorageEntity = HashMap::new();
+    p.insert("id".into(), Value::String(id.to_string()));
+    p.insert("content".into(), Value::String(content.to_string()));
+    p.insert("parent_id".into(), Value::String(parent.to_string()));
+    p.insert(
+        "tags".into(),
+        Value::Array(vec![Value::String("Page".to_string())]),
+    );
+    provider
+        .execute_operation(entity, "create", p)
+        .await
+        .expect("create page");
+}
+
+/// The bounded `(name, parent)` repair pass collapses pre-existing duplicate
+/// pages onto the lowest-id survivor, re-homing children and inbound links.
+#[tokio::test(flavor = "multi_thread")]
+async fn dedup_pages_collapses_duplicates_onto_lowest_id_survivor() {
+    let (_backend, handle) = TursoBackend::new_in_memory()
+        .await
+        .expect("in-memory turso");
+    setup_schema(&handle).await;
+    let provider = provider(handle.clone());
+    let entity: EntityName = ENTITY.to_string().into();
+
+    // Two "Areas" pages under the same (sentinel) parent — the duplicate the
+    // user saw. `block:aaa` < `block:zzz`, so `aaa` is the survivor.
+    let survivor = "block:aaa";
+    let loser = "block:zzz";
+    create_page(&provider, &entity, survivor, "Areas", "sentinel:no_parent").await;
+    create_page(&provider, &entity, loser, "Areas", "sentinel:no_parent").await;
+    // A child page living under the LOSER — must be re-homed to the survivor.
+    create_page(&provider, &entity, "block:child", "Sub", loser).await;
+    // An inbound link resolved to the LOSER — must be rewritten to the survivor.
+    // Plus an OUTBOUND link FROM the loser — redundant with the survivor's, must
+    // be deleted so it isn't orphaned when the loser's block_raw row is removed.
+    handle
+        .transaction(vec![
+            (
+                format!(
+                    "INSERT INTO block_links (source_block_id, target, kind, resolved_id) VALUES \
+                     ('block:src', 'Areas', 'page', '{loser}')"
+                ),
+                vec![],
+            ),
+            (
+                format!(
+                    "INSERT INTO block_links (source_block_id, target, kind, resolved_id) VALUES \
+                     ('{loser}', 'Elsewhere', 'page', NULL)"
+                ),
+                vec![],
+            ),
+        ])
+        .await
+        .expect("seed inbound + outbound links");
+
+    let removed = provider.dedup_pages().await.expect("dedup_pages");
+    assert_eq!(removed, 1, "exactly one loser page removed");
+
+    // Survivor kept, loser gone.
+    assert!(
+        block_has_page_tag(&handle, survivor).await,
+        "survivor must remain Page-tagged"
+    );
+    assert_eq!(
+        block_content(&handle, loser).await,
+        None,
+        "loser page row must be deleted"
+    );
+    assert!(
+        !block_has_page_tag(&handle, loser).await,
+        "loser Page tag must be deleted"
+    );
+    // Child re-homed and inbound link rewritten onto the survivor.
+    assert_eq!(
+        block_parent(&handle, "block:child").await.as_deref(),
+        Some(survivor),
+        "child must be re-homed under the survivor"
+    );
+    assert_eq!(
+        link_resolved(&handle, "src").await.as_deref(),
+        Some(survivor),
+        "inbound link must resolve to the survivor"
+    );
+    // The loser's outbound link row is gone (not orphaned).
+    let orphan_rows = handle
+        .query(
+            &format!("SELECT 1 FROM block_links WHERE source_block_id = '{loser}'"),
+            HashMap::new(),
+        )
+        .await
+        .expect("query outbound links");
+    assert!(
+        orphan_rows.is_empty(),
+        "loser's outbound block_links rows must be deleted, not orphaned"
+    );
+
+    // Idempotent: a second pass finds no duplicates and removes nothing.
+    assert_eq!(
+        provider.dedup_pages().await.expect("second dedup_pages"),
+        0,
+        "second pass must be a no-op"
+    );
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 24, ..ProptestConfig::default() })]
 
     /// inv-page-name-unique: independent peers that each create the same-named
     /// page must converge on one page identity, so a merge yields no duplicate.
     ///
-    /// KNOWN-RED GUARD. Ignored so the suite stays green while the fix awaits a
-    /// ruling: making page identity deterministic intersects unruled forks
-    /// (row-25 name-vs-(name,parent) dedupe key; vault-compat O1-O5 org-ingest
-    /// id scheme; page-hierarchy PARKED). See docs/Plans/PageIdentityDeterminism.md.
-    /// Remove `#[ignore]` when the deterministic-page-id fix lands; the stored
-    /// regression (create_page_from_link.proptest-regressions) then replays.
-    #[ignore = "known-red duplicate-page guard; deterministic-page-id fix blocked on ruling — see docs/Plans/PageIdentityDeterminism.md"]
+    /// Page identity is now a deterministic function of the normalized path
+    /// (`PageId::for_path`, minted by every write path), so two independent
+    /// peers that each create page `name` mint the SAME block id and a merge
+    /// yields ONE page. RULING: path-hash for new writes + bounded
+    /// `(name,parent)` repair — see docs/Plans/PageIdentityDeterminism.md.
     #[test]
     fn inv_page_name_unique_converges_across_peers(name in page_name_strategy()) {
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -426,5 +549,28 @@ proptest! {
              random UUID.",
             name, id_a, id_b, name
         );
+
+        // H2 guard: the link PARSER's optimistic target id for the same raw
+        // target must equal the id the WRITER minted. Otherwise a click's
+        // healed `resolved_id` would point at a different id than the page that
+        // gets created — divergence that only the name-based re-resolve trigger
+        // papers over. This directly exercises spaced separators ("Areas / Sub")
+        // where the parser trims segments to converge with the writer.
+        if let holon_api::link_parser::LinkTarget::CreationIntent {
+            scheme, target_id, ..
+        } = holon_api::link_parser::classify_link(&name)
+        {
+            if scheme == "block" {
+                prop_assert_eq!(
+                    target_id.as_str(),
+                    id_a.as_str(),
+                    "parser/writer page-id divergence for target {:?}: parser optimistic id {} != \
+                     writer-minted id {}",
+                    name,
+                    target_id.as_str(),
+                    id_a
+                );
+            }
+        }
     }
 }

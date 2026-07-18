@@ -273,8 +273,14 @@ pub trait DocumentManager: Send + Sync {
 
         let mut current_parent_id = EntityUri::no_parent();
         let mut current_doc: Option<Block> = None;
+        let mut accumulated = String::new();
 
         for segment in chain {
+            accumulated = if accumulated.is_empty() {
+                segment.to_string()
+            } else {
+                format!("{accumulated}/{segment}")
+            };
             match self
                 .find_by_parent_and_name(&current_parent_id, segment)
                 .await?
@@ -284,11 +290,17 @@ pub trait DocumentManager: Send + Sync {
                     current_doc = Some(existing);
                 }
                 None => {
-                    let mut new_doc = Block::new_text(
-                        EntityUri::block_random(),
-                        current_parent_id.clone(),
-                        segment.to_string(),
-                    );
+                    // DETERMINISTIC page id keyed on the accumulated name-chain
+                    // path (`Life/Areas`), minted through the single `PageId`
+                    // constructor the link-create op also uses. An org file page
+                    // and a `[[Areas]]` link-created page for the same path now
+                    // converge on one CRDT merge key (inv-page-name-unique)
+                    // instead of each peer minting a random UUID.
+                    let page_id = holon_api::link_parser::PageId::for_path(&accumulated)
+                        .map_err(anyhow::Error::msg)?
+                        .into_entity_uri();
+                    let mut new_doc =
+                        Block::new_text(page_id, current_parent_id.clone(), segment.to_string());
                     new_doc.set_page(true);
                     let created = self.create(new_doc).await?;
                     current_parent_id = created.id.clone();
