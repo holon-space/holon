@@ -105,21 +105,19 @@ pub fn journals_page_blocks() -> Vec<holon_api::block::Block> {
     let mut page = Block::new_text(journals.clone(), EntityUri::no_parent(), "Journals");
     page.set_page(true);
 
-    // holon_sql (not prql): the recursive descendant expansion and the
-    // `expand_default` marker are simplest expressed in SQL. Only `Page`-tagged
-    // day-entries (via the block_tags junction), newest-first. `1 AS
-    // expand_default` tags every feed row so `render_entity` routes it to the
-    // `embedded_page_expanded` profile variant (default-expanded), not the
-    // collapsed `embedded_page`.
+    // holon_sql read off the boot-owned `journal_feed` matview (the journal-feed
+    // chain: block matview → `journal_day_pages` detection → `journal_feed`; see
+    // docs/Plans/JournalFeed-2026-07-18.md). Day-page detection and the
+    // `expand_default` marker (which routes every feed row to the
+    // `embedded_page_expanded` default-expanded profile variant) are maintained
+    // O(delta) by IVM in the chain, so this read is just a projection + order.
+    // Newest-first via `content DESC` (ordering is the read's job, not the
+    // matview's).
     let src = Block::new_source(
         uri(JOURNALS_SRC_ID),
         journals.clone(),
         "holon_sql",
-        concat!(
-            "SELECT b.*, 1 AS expand_default FROM block b ",
-            "JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' ",
-            "WHERE b.parent_id = 'block:journals' ORDER BY b.content DESC",
-        ),
+        "SELECT * FROM journal_feed ORDER BY content DESC",
     );
 
     // LogSeq-style feed: each day-entry rendered as a default-EXPANDED embedded
@@ -892,9 +890,18 @@ mod journals_seed_tests {
                 "{id} is a direct child of block:journals"
             );
         }
+        let src = find(&blocks, JOURNALS_SRC_ID);
         assert_eq!(
-            find(&blocks, JOURNALS_SRC_ID).source_language,
+            src.source_language,
             Some(SourceLanguage::Query(holon_api::QueryLanguage::HolonSql))
+        );
+        // The feed surface reads the boot-owned `journal_feed` matview (the
+        // journal-feed chain), not an inline JOIN — so day-page detection is
+        // IVM-maintained and reliable on every platform (ruling 2026-07-18).
+        assert!(
+            src.content.contains("FROM journal_feed"),
+            "journals feed reads the journal_feed matview: {:?}",
+            src.content
         );
         assert!(matches!(
             find(&blocks, JOURNALS_RENDER_ID).source_language,
