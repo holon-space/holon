@@ -25,6 +25,7 @@ pub mod share_ui;
 
 pub mod user_driver;
 pub mod views;
+pub mod window_state;
 
 use std::sync::Arc;
 
@@ -1334,7 +1335,7 @@ fn launch_holon_window_impl(
         .ui_settings()
         .glass_background
         .unwrap_or(false);
-    let initial_bounds = std::env::var("HOLON_INITIAL_WINDOW_SIZE")
+    let env_bounds = std::env::var("HOLON_INITIAL_WINDOW_SIZE")
         .ok()
         .and_then(|s| {
             let (w, h) = s.split_once('x')?;
@@ -1347,6 +1348,28 @@ fn launch_holon_window_impl(
                 size: gpui::size(px(w), px(h)),
             })
         });
+    // Restore persisted window bounds for the real production window only. PBT /
+    // custom-title windows run against temp config dirs and set their own bounds,
+    // and the dev HOLON_INITIAL_WINDOW_SIZE override always wins when present.
+    let persisted_bounds = if custom_title.is_none() && env_bounds.is_none() {
+        window_state::load(session.config_dir()).map(|state| {
+            let displays = window_state::connected_displays(cx);
+            tracing::info!(
+                mode = ?state.mode,
+                displays = displays.len(),
+                "restoring persisted window bounds"
+            );
+            state.to_window_bounds(&displays)
+        })
+    } else {
+        None
+    };
+    let restored_window_bounds =
+        persisted_bounds.or_else(|| env_bounds.map(gpui::WindowBounds::Windowed));
+    // Config dir to persist window state into — `None` for PBT / custom-title
+    // windows so they never write over the user's real window_state.json.
+    let persist_config_dir: Option<std::path::PathBuf> =
+        custom_title.is_none().then(|| session.config_dir().to_path_buf());
     let window_options = WindowOptions {
         titlebar: Some(TitlebarOptions {
             title: Some(
@@ -1363,7 +1386,7 @@ fn launch_holon_window_impl(
         } else {
             WindowBackgroundAppearance::Opaque
         },
-        window_bounds: initial_bounds.map(gpui::WindowBounds::Windowed),
+        window_bounds: restored_window_bounds,
         ..Default::default()
     };
 
@@ -1446,7 +1469,16 @@ fn launch_holon_window_impl(
     let entity_cache_for_view = entity_cache.clone();
     let window_result = cx.open_window(window_options, move |window, cx| {
         tracing::debug!("[GPUI] Inside open_window callback — building root view");
-        window.on_window_should_close(cx, |_window, cx| {
+        let close_persist_dir = persist_config_dir.clone();
+        window.on_window_should_close(cx, move |window, cx| {
+            // Final save on clean shutdown — captures the last position/size
+            // even if it changed within the resize debounce window.
+            if let Some(dir) = close_persist_dir.as_deref() {
+                let state = window_state::PersistedWindowState::from_window(window, cx);
+                if let Err(e) = window_state::save(dir, &state) {
+                    tracing::warn!(error = %e, "persisting window state on close failed");
+                }
+            }
             cx.quit();
             true
         });
@@ -1534,6 +1566,7 @@ fn launch_holon_window_impl(
         });
         model_slot.set(app_model.clone()).ok();
         let app_model_for_view = app_model.clone();
+        let bounds_persist_dir = persist_config_dir.clone();
         let view = cx.new(|cx| {
             cx.observe(&app_model, |_this, _model, cx| cx.notify())
                 .detach();
@@ -1544,9 +1577,26 @@ fn launch_holon_window_impl(
             // and the root ReactiveView's `space` Mutable. The reactive
             // cascade rebuilds only affected subtrees — no full rebuild,
             // transient widget state is preserved in untouched branches.
+            let mut last_bounds_save: Option<std::time::Instant> = None;
             cx.observe_window_bounds(window, move |_this, window, cx| {
                 let vp = viewport_info_from_window(window.viewport_size(), window.scale_factor());
                 app_model_for_view.update(cx, |m, _cx| m.apply_viewport(vp));
+                // Debounced persistence: this fires per pixel during a drag /
+                // resize, so throttle disk writes. The on-close handler covers
+                // whatever change lands inside the trailing window.
+                if let Some(dir) = bounds_persist_dir.as_deref() {
+                    let now = std::time::Instant::now();
+                    let due = last_bounds_save
+                        .map(|t| now.duration_since(t) >= std::time::Duration::from_millis(800))
+                        .unwrap_or(true);
+                    if due {
+                        last_bounds_save = Some(now);
+                        let state = window_state::PersistedWindowState::from_window(window, cx);
+                        if let Err(e) = window_state::save(dir, &state) {
+                            tracing::warn!(error = %e, "persisting window state failed");
+                        }
+                    }
+                }
             })
             .detach();
 
