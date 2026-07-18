@@ -1,22 +1,24 @@
-//! Seed-shape + deletion-stickiness guards for the left-sidebar **Integrations**
-//! discovery section.
+//! Seed-shape + deletion-stickiness guards for the left-sidebar
+//! **Integrations** discovery section.
 //!
 //! Martin's ruling: synced MCP-integration data must be observable via an
-//! Integrations section in the LEFT sidebar, BELOW the page hierarchy, separated
-//! by a divider — and it must be ordinary, user-editable layout DATA (seeded by
-//! default), NOT hardcoded UI. The section is expressed inside the seeded
-//! left-sidebar render block (`assets/default/index.org`): the page-hierarchy
-//! `tree(...)` is wrapped in a `column(...)` followed by `divider()`, an
-//! "Integrations" header, and a `live_query` over the `sync_states` table
-//! (the Turso surface that records which providers have synced and when).
+//! Integrations section in the LEFT sidebar, BELOW the page hierarchy,
+//! separated by a divider — and it must be ordinary, user-editable layout DATA
+//! (seeded by default), NOT hardcoded UI. The section is expressed inside the
+//! seeded left-sidebar render block (`assets/default/index.org`): the
+//! page-hierarchy `tree(...)` is wrapped in a `column(...)` followed by
+//! `divider()`, an "Integrations" header, and a `live_query` over the
+//! `sync_states` table (the Turso surface that records which providers have
+//! synced and when).
 //!
 //! Two guards:
 //!  1. `fresh_seed_places_integrations_section_below_hierarchy` — after a fresh
 //!     seed the left-sidebar render carries the page hierarchy, THEN a divider,
-//!     THEN the Integrations section (header + sync_states query), in that order.
-//!  2. `deleted_integrations_section_does_not_resurrect_on_reseed` — deleting the
-//!     render block and re-seeding (the non-fresh boot path) does NOT bring it
-//!     back: layout is seeded fresh-only, so a user deletion sticks.
+//!     THEN the Integrations section (header + sync_states query), in that
+//!     order.
+//!  2. `deleted_integrations_section_does_not_resurrect_on_reseed` — deleting
+//!     the render block and re-seeding (the non-fresh boot path) does NOT bring
+//!     it back: layout is seeded fresh-only, so a user deletion sticks.
 //!
 //! @pbt kind harness
 //! @pbt covers integrations-section-seed — left-sidebar Integrations discovery
@@ -234,9 +236,10 @@ fn integrations_query_lists_synced_providers_in_order() {
     });
 }
 
-/// A user who deletes the Integrations-bearing render block must have that stick:
-/// the layout is seeded ONLY on a fresh boot (root layout absent), so re-running
-/// the seed on an already-seeded DB (the every-boot path) never resurrects it.
+/// A user who deletes the Integrations-bearing render block must have that
+/// stick: the layout is seeded ONLY on a fresh boot (root layout absent), so
+/// re-running the seed on an already-seeded DB (the every-boot path) never
+/// resurrects it.
 #[test]
 fn deleted_integrations_section_does_not_resurrect_on_reseed() {
     let rt = runtime();

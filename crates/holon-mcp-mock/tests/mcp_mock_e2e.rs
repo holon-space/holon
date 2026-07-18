@@ -13,9 +13,9 @@ use std::time::Duration;
 use std::time::Instant;
 
 use holon::di::DbHandleCacheFactory;
+use holon_api::EntityName;
 use holon_api::StreamPosition;
 use holon_api::Value;
-use holon_api::EntityName;
 use holon_core::OperationProvider;
 use holon_core::SyncTokenStore;
 use holon_mcp_client::IntegrationFileConfig;
@@ -410,14 +410,19 @@ async fn write_happy_is_accepted() {
     let integ = write_provider("write_keyed.yaml", "write_happy", &db).await;
     let res = integ
         .operation_provider
-        .execute_operation(&EntityName::from("items"), "write_item", storage("buy milk"))
+        .execute_operation(
+            &EntityName::from("items"),
+            "write_item",
+            storage("buy milk"),
+        )
         .await
         .expect("well-formed keyed write should be accepted");
     let resp = res.response.expect("write response present");
     assert!(is_true(&resp, "ok"), "server should ack ok=true: {resp:?}");
 }
 
-// Increment 1: writes disabled (no `writes:` key) denies loud, naming the policy.
+// Increment 1: writes disabled (no `writes:` key) denies loud, naming the
+// policy.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_denied_when_writes_disabled() {
     let db = setup_db().await;
@@ -495,7 +500,11 @@ async fn keyed_retry_storm_yields_one_effect() {
     let mut last_applied = 0;
     for _ in 0..5 {
         let res = provider
-            .execute_operation(&EntityName::from("items"), "write_item", storage("buy milk"))
+            .execute_operation(
+                &EntityName::from("items"),
+                "write_item",
+                storage("buy milk"),
+            )
             .await
             .expect("each keyed dispatch should be accepted");
         let resp = res.response.expect("response present");

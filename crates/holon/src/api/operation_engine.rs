@@ -148,7 +148,8 @@ const CONVERT_BLOCK_TO_PAGE_OP: &str = "convert_block_to_page";
 /// mark. The id crosses the dispatch boundary as a plan `Value` string (the
 /// planner minted it via `PageId::for_path`), so this is a genuine boundary.
 fn convert_page_uri(page_id: &str) -> EntityUri {
-    // ALLOW(entity_uri_from_raw): page_id arrives as a plan Value string across the dispatch boundary
+    // ALLOW(entity_uri_from_raw): page_id arrives as a plan Value string across the
+    // dispatch boundary
     EntityUri::from_raw(page_id)
 }
 
@@ -468,9 +469,7 @@ impl DispatchingOperationEngine {
         // a half-instantiated orphan subtree behind.
         if let Some(replace_id) = &request.replace_block {
             if !source.exists(replace_id).await? {
-                bail!(
-                    "instantiate_template: replace_block '{replace_id}' does not exist"
-                );
+                bail!("instantiate_template: replace_block '{replace_id}' does not exist");
             }
         }
         let nodes = source.load_subtree(&request.template_id).await?;

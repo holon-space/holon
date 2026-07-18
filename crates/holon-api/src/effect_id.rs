@@ -302,11 +302,25 @@ mod tests {
     fn intent_key_distinct_across_components() {
         let fp = FiringKey::from_row(&row(&[("id", Value::String("t1".into()))]));
         let base = deterministic_intent_key("todoist", "update-tasks", "t1", &fp);
-        assert_ne!(base, deterministic_intent_key("gmail", "update-tasks", "t1", &fp));
-        assert_ne!(base, deterministic_intent_key("todoist", "add-tasks", "t1", &fp));
-        assert_ne!(base, deterministic_intent_key("todoist", "update-tasks", "t2", &fp));
-        let fp2 = FiringKey::from_row(&row(&[("id", Value::String("t1".into())),
-            ("content", Value::String("x".into()))]));
-        assert_ne!(base, deterministic_intent_key("todoist", "update-tasks", "t1", &fp2));
+        assert_ne!(
+            base,
+            deterministic_intent_key("gmail", "update-tasks", "t1", &fp)
+        );
+        assert_ne!(
+            base,
+            deterministic_intent_key("todoist", "add-tasks", "t1", &fp)
+        );
+        assert_ne!(
+            base,
+            deterministic_intent_key("todoist", "update-tasks", "t2", &fp)
+        );
+        let fp2 = FiringKey::from_row(&row(&[
+            ("id", Value::String("t1".into())),
+            ("content", Value::String("x".into())),
+        ]));
+        assert_ne!(
+            base,
+            deterministic_intent_key("todoist", "update-tasks", "t1", &fp2)
+        );
     }
 }

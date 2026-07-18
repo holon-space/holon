@@ -1110,14 +1110,17 @@ impl SqlOperationProvider {
             .collect())
     }
 
-    /// The block's stored `depth` (tree level; a top-level page is 0). A missing
-    /// or NULL depth reads as 0 — the root level — rather than failing, matching
-    /// how a freshly-seeded page with no explicit depth behaves.
+    /// The block's stored `depth` (tree level; a top-level page is 0). A
+    /// missing or NULL depth reads as 0 — the root level — rather than
+    /// failing, matching how a freshly-seeded page with no explicit depth
+    /// behaves.
     async fn read_block_depth(&self, id: &str) -> Result<i64> {
         match self.read_field_old_value(id, "depth").await? {
             Value::Integer(d) => Ok(d),
             Value::Null => Ok(0),
-            other => Err(format!("read_block_depth({id}): depth is not an integer: {other:?}").into()),
+            other => {
+                Err(format!("read_block_depth({id}): depth is not an integer: {other:?}").into())
+            }
         }
     }
 
@@ -1185,7 +1188,11 @@ impl SqlOperationProvider {
     async fn resolve_destination_chain(
         &self,
         destination_path: &str,
-    ) -> Result<(String, i64, Vec<crate::core::block_to_page_plan::PlanSegment>)> {
+    ) -> Result<(
+        String,
+        i64,
+        Vec<crate::core::block_to_page_plan::PlanSegment>,
+    )> {
         use crate::core::block_to_page_plan::PlanSegment;
 
         let trimmed_path = destination_path.trim();

@@ -13,19 +13,18 @@ use std::sync::Arc;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
+// Property keys live in `holon_api::template` (single spelling shared with the
+// frontend picker); re-exported here so existing `TEMPLATE_MARKER_PROPERTY`
+// references and `{TEMPLATE_MARKER_PROPERTY}` format strings keep resolving.
+pub use holon_api::INSTANCE_OF_PROPERTY;
 use holon_api::MarkSpan;
+pub use holon_api::TEMPLATE_MARKER_PROPERTY;
+pub use holon_api::TEMPLATE_VARS_PROPERTY;
 use holon_api::Value;
 use holon_api::effect_id::deterministic_instance_id;
 use holon_api::marks_from_json;
 use holon_api::marks_to_json;
 use holon_core::storage::types::StorageEntity;
-
-// Property keys live in `holon_api::template` (single spelling shared with the
-// frontend picker); re-exported here so existing `TEMPLATE_MARKER_PROPERTY`
-// references and `{TEMPLATE_MARKER_PROPERTY}` format strings keep resolving.
-pub use holon_api::INSTANCE_OF_PROPERTY;
-pub use holon_api::TEMPLATE_MARKER_PROPERTY;
-pub use holon_api::TEMPLATE_VARS_PROPERTY;
 
 /// The org identity property (`:ID:` drawer entry, lifted into `properties` by
 /// the org parser). It DERIVES the block's id — so it must never be copied.
@@ -43,8 +42,7 @@ const ORG_ID_PROPERTY: &str = "ID";
 /// Template MARKER properties (`template`/`template_vars`) are handled
 /// separately (stripped from the instantiated ROOT only, so nested templates
 /// still round-trip verbatim per the proposal).
-const NON_COPYABLE_PROPERTIES: &[&str] =
-    &[ORG_ID_PROPERTY, holon_api::PROVENANCE_PROPERTY];
+const NON_COPYABLE_PROPERTIES: &[&str] = &[ORG_ID_PROPERTY, holon_api::PROVENANCE_PROPERTY];
 
 /// One declared template variable: a name and an optional default.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -120,11 +118,12 @@ pub struct InstantiateRequest {
     /// re-fires converge; manual callers pass a fresh key per instantiation.
     pub context_key: String,
     pub bindings: BTreeMap<String, String>,
-    /// Optional: an *empty* block the instance supersedes (the frontend picker's
-    /// empty→in-place placement, docs/Proposals/Templating-2026-07-12.md §8).
-    /// When set, the engine deletes it AFTER the instance is created, so a
-    /// failed instantiation never destroys the target. Empty blocks carry no
-    /// content, so this never mutates existing content.
+    /// Optional: an *empty* block the instance supersedes (the frontend
+    /// picker's empty→in-place placement,
+    /// docs/Proposals/Templating-2026-07-12.md §8). When set, the engine
+    /// deletes it AFTER the instance is created, so a failed instantiation
+    /// never destroys the target. Empty blocks carry no content, so this
+    /// never mutates existing content.
     pub replace_block: Option<String>,
 }
 

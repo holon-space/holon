@@ -17,9 +17,10 @@ pub struct McpSidecar {
     pub entity_prefix: Option<String>,
     pub entities: HashMap<String, EntityConfig>,
     /// Master write switch (leases/read-write ruling). Absent = `disabled` =
-    /// today's fail-loud behaviour: every non-`read` tool is denied at dispatch.
-    /// `enabled` lets `idempotent`/`keyed` tools through; `once_only` tools stay
-    /// blocked until a writer/lease is configured (increment 4).
+    /// today's fail-loud behaviour: every non-`read` tool is denied at
+    /// dispatch. `enabled` lets `idempotent`/`keyed` tools through;
+    /// `once_only` tools stay blocked until a writer/lease is configured
+    /// (increment 4).
     #[serde(default)]
     pub writes: WritesPolicy,
     #[serde(default)]
@@ -257,7 +258,8 @@ pub struct ToolConfig {
     /// the dispatch chokepoint lets this tool through under the connector's
     /// `writes` policy. A write-shaped tool (has `affected_fields` or `undo`)
     /// MUST declare this — an absent `effect` on such a tool is a loud config
-    /// error at load. Absent on a non-write-shaped tool means [`ToolEffect::Read`].
+    /// error at load. Absent on a non-write-shaped tool means
+    /// [`ToolEffect::Read`].
     #[serde(default)]
     pub effect: Option<ToolEffect>,
     /// For `effect: keyed` tools, names the tool argument that carries the
@@ -311,8 +313,9 @@ impl ToolEffect {
 }
 
 impl ToolConfig {
-    /// A tool is write-shaped if it declares mutation metadata. Such a tool MUST
-    /// carry an explicit `effect` — see [`McpSidecar::from_yaml`] validation.
+    /// A tool is write-shaped if it declares mutation metadata. Such a tool
+    /// MUST carry an explicit `effect` — see [`McpSidecar::from_yaml`]
+    /// validation.
     fn is_write_shaped(&self) -> bool {
         self.affected_fields.is_some() || self.undo.is_some()
     }
@@ -479,8 +482,8 @@ impl McpSidecar {
 
     /// Fail loud at load if the write policy is under-specified — the same
     /// discipline as a failing `views:` reconcile. A write-shaped tool with no
-    /// `effect`, or a `keyed` tool with no `key_param`, is a config error, not a
-    /// silently-defaulted setting (parse, don't validate).
+    /// `effect`, or a `keyed` tool with no `key_param`, is a config error, not
+    /// a silently-defaulted setting (parse, don't validate).
     fn validate_write_policy(&self) -> anyhow::Result<()> {
         for (name, tool) in &self.tools {
             match tool.effect {
@@ -860,7 +863,10 @@ tools:
 "#;
         let sidecar = McpSidecar::from_yaml(yaml).unwrap();
         assert_eq!(sidecar.writes, WritesPolicy::Enabled);
-        assert_eq!(sidecar.tools["set-thing"].effect, Some(ToolEffect::Idempotent));
+        assert_eq!(
+            sidecar.tools["set-thing"].effect,
+            Some(ToolEffect::Idempotent)
+        );
         assert_eq!(sidecar.tools["send-thing"].effect, Some(ToolEffect::Keyed));
     }
 
