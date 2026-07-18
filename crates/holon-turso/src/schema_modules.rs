@@ -832,6 +832,75 @@ impl SchemaModule for AutomationsJournalSchemaModule {
     }
 }
 
+/// The DAY-PAGE DETECTION layer of the journal-feed chain
+/// (`docs/Plans/JournalFeed-2026-07-18.md`): `journal_day_pages` — one row per
+/// journal day page (a block tagged `Page` under `block:journals`). Chained on
+/// the `block` matview JOINed against the `block_tags` junction, the same
+/// matview-JOIN-junction shape IVM maintains for `focus_roots`. IVM-maintained
+/// O(delta) as day pages are created / edited / deleted.
+pub struct JournalDayPagesSchemaModule;
+
+#[async_trait]
+impl SchemaModule for JournalDayPagesSchemaModule {
+    fn name(&self) -> &str {
+        "journal_day_pages"
+    }
+
+    fn provides(&self) -> Vec<Resource> {
+        vec![Resource::schema("journal_day_pages")]
+    }
+
+    fn requires(&self) -> Vec<Resource> {
+        vec![Resource::schema("block"), Resource::schema("block_tags")]
+    }
+
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+        tracing::info!("[JournalDayPagesSchemaModule] Reconciling journal_day_pages matview");
+        reconcile_named_view(
+            db_handle,
+            "journal_day_pages",
+            include_str!("../sql/schema/journal_day_pages_matview.sql"),
+        )
+        .await
+        .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+}
+
+/// The FEED layer of the journal-feed chain: `journal_feed` — a matview chained
+/// on the `journal_day_pages` detection matview (matview-on-matview, supported
+/// on the pinned Turso rev). Adds `expand_default = 1` so `render_entity()`
+/// shows each day's children inline; the seam where feed windowing/LIMIT will
+/// live (increment 2). Ordering is the read query's job.
+pub struct JournalFeedSchemaModule;
+
+#[async_trait]
+impl SchemaModule for JournalFeedSchemaModule {
+    fn name(&self) -> &str {
+        "journal_feed"
+    }
+
+    fn provides(&self) -> Vec<Resource> {
+        vec![Resource::schema("journal_feed")]
+    }
+
+    fn requires(&self) -> Vec<Resource> {
+        vec![Resource::schema("journal_day_pages")]
+    }
+
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+        tracing::info!("[JournalFeedSchemaModule] Reconciling journal_feed matview");
+        reconcile_named_view(
+            db_handle,
+            "journal_feed",
+            include_str!("../sql/schema/journal_feed_matview.sql"),
+        )
+        .await
+        .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+}
+
 /// Link schema module providing the block_link table.
 ///
 /// Indexes wiki-style `[[...]]` links extracted from block content.
