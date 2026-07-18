@@ -403,6 +403,16 @@ fn soak_reseed_reproduction() {
 /// default `cargo nextest` run. Hand-rolled (not `prop_state_machine!`) for a
 /// runtime skip + deterministic FIXED navigation plan.
 ///
+/// **THE LEVER IS DEPTH, NOT COUNT.** RC5 is driven by the recursive-CTE cycle
+/// guard (`','||visited||',' NOT LIKE '%,'||id||',%'`) — an O(path-length)
+/// string scan PER recursion step, so cost is ~quadratic in tree DEPTH.
+/// Measured (release): `wide` (2000 shallow blocks, depth ≤4) = 271ms cold
+/// descendant-matview (does NOT reproduce); `deep` (1000 blocks, 5 chains ×
+/// depth 200) = **19,029ms** cold (reproduces, worse than the prod
+/// ~11.9s@1038); `mixed` = 1,556ms. So the reproducing invocation MUST set
+/// `HOLON_SOAK_SHAPE=deep` (see
+/// [`crate::pbt::composed::soak_seed::SoakShape`]).
+///
 /// **INVOCATION (RELEASE profile — wall-clock is meaningless un-optimized).**
 /// The `--test general_e2e_composed_pbt` filter is REQUIRED — without it every
 /// integration-test binary in the package release-compiles (minutes of wasted
@@ -411,13 +421,14 @@ fn soak_reseed_reproduction() {
 /// a feature of this package and would error).
 /// Red-first proof (reports the breach; PASS = cliff reproduced):
 /// ```text
-/// HOLON_SOAK_NAV=reproduce HOLON_SOAK_SEED_BLOCKS=2000 HOLON_SOAK_SETTLE_MS=30000 \
+/// HOLON_SOAK_NAV=reproduce HOLON_SOAK_SHAPE=deep HOLON_SOAK_SEED_BLOCKS=1000 \
+///   HOLON_SOAK_DEPTH=200 HOLON_SOAK_SETTLE_MS=30000 \
 ///   cargo nextest run -p holon-integration-tests --test general_e2e_composed_pbt \
 ///   --release --no-capture -E 'test(soak_nav_latency)' 2>&1 | tee /tmp/soak-nav.log
 /// ```
-/// Demonstrate the guard going RED on current main (hard-assert p95<budget):
-/// add `HOLON_SOAK_NAV_ASSERT=1`. Post-fix regression guard:
-/// `HOLON_SOAK_NAV=zero`.
+/// Demonstrate the guard going RED (SLO breach, content p95 ≈ 19s ≫ 2s): add
+/// `HOLON_SOAK_NAV_ASSERT=1` to the `deep` invocation. Post-fix regression
+/// guard: `HOLON_SOAK_NAV=zero`.
 ///
 /// @pbt kind soak
 /// @pbt covers cold-focus-descendant-matview-latency — first-visit navigation
@@ -533,8 +544,10 @@ fn soak_nav_latency() {
         columns: vec!["id".to_string()],
         predicates: vec![],
         source: QuerySource::FocusRootDescendants {
+            // Deep enough to fully descend the `deep`-shape chains (the prod
+            // main-panel CTE is unbounded); 512 covers HOLON_SOAK_DEPTH ≤ 512.
             region: "main".to_string(),
-            max_depth: 64,
+            max_depth: 512,
             stop_at_pages: false,
         },
     };
