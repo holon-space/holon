@@ -136,6 +136,11 @@ pub struct EditorView {
     /// driver observe the popup state via `wait_for_widget_kind` instead
     /// of poking the EditorViewModel directly.
     bounds_registry: BoundsRegistry,
+    /// Persistent scroll state for the slash/link popup overlay. Kept on the
+    /// view (not rebuilt per render) so `scroll_to_item` can keep the
+    /// keyboard-selected entry in view and the user's manual scroll survives
+    /// re-renders while the menu is open.
+    popup_scroll: ScrollHandle,
     /// Last window-focus state observed by the render-path reconcile gate
     /// (`focus_transition`). Used to detect the frame where focus first arrives
     /// (false→true) so the NO-CELL builder backstop can re-sync a stale
@@ -653,6 +658,7 @@ impl EditorView {
             services,
             nav,
             bounds_registry,
+            popup_scroll: ScrollHandle::new(),
             _data_subscription,
             _focus_subscription,
             previous_text,
@@ -1034,8 +1040,9 @@ impl Render for EditorView {
         let editor_entity_id = self.input.entity_id();
         let popup_overlay = {
             let ctrl = self.controller.lock().unwrap();
+            let max_h = popup_max_height_px(window.viewport_size().height.into());
             ctrl.popup_state()
-                .map(|s| render_popup(&s, &self.bounds_registry, cx))
+                .map(|s| render_popup(&s, &self.bounds_registry, &self.popup_scroll, max_h, cx))
         };
 
         let window_handle = window.window_handle();
@@ -1532,7 +1539,35 @@ fn handle_cross_block_nav(
 /// instead of poking the EditorViewModel directly. The currently-
 /// highlighted item is also tagged `widget_type="popup_item_selected"`
 /// so a precondition can confirm Enter would fire the expected op.
-fn render_popup(state: &PopupState, bounds_registry: &BoundsRegistry, cx: &App) -> Deferred {
+/// Preferred content height of the slash/link popup, in px, when the window
+/// is tall enough (see [`POPUP_MARGIN_PX`]).
+const POPUP_DESIRED_HEIGHT_PX: f32 = 240.0;
+/// Smallest content height we will ever cap the popup to. A window shorter
+/// than this shows a popup that overruns it, but that is degenerate (the popup
+/// is still scrollable and snaps into the window via `anchored`).
+const POPUP_MIN_HEIGHT_PX: f32 = 48.0;
+/// Gap kept between the popup and the window edge so it never sits flush.
+const POPUP_MARGIN_PX: f32 = 16.0;
+
+/// Cap the popup's max content height so it fits within the window viewport.
+///
+/// The popup opens below (or, via `anchored`, above) the caret and scrolls
+/// internally once entries exceed this height. Bounding the height to the
+/// viewport is what stops the menu from running past the window bottom with
+/// its lower entries unreachable — the reported truncation bug.
+///
+/// Pure so the height policy is unit-tested without a live gpui window.
+fn popup_max_height_px(viewport_height: f32) -> f32 {
+    (viewport_height - POPUP_MARGIN_PX).clamp(POPUP_MIN_HEIGHT_PX, POPUP_DESIRED_HEIGHT_PX)
+}
+
+fn render_popup(
+    state: &PopupState,
+    bounds_registry: &BoundsRegistry,
+    scroll: &ScrollHandle,
+    max_height_px: f32,
+    cx: &App,
+) -> Deferred {
     use gpui::div;
     use gpui::prelude::*;
     use gpui::px;
@@ -1547,12 +1582,11 @@ fn render_popup(state: &PopupState, bounds_registry: &BoundsRegistry, cx: &App) 
     let muted = theme.muted_foreground;
 
     let mut container = div()
-        .absolute()
-        .left_0()
-        .top(px(20.0))
+        .id("popup-scroll")
         .w(px(280.0))
-        .max_h(px(240.0))
-        .overflow_y_hidden()
+        .max_h(px(max_height_px))
+        .overflow_y_scroll()
+        .track_scroll(scroll)
         .bg(bg)
         .border_1()
         .border_color(border)
@@ -1617,7 +1651,21 @@ fn render_popup(state: &PopupState, bounds_registry: &BoundsRegistry, cx: &App) 
         }
     }
 
-    deferred(container).with_priority(1)
+    // Keep the keyboard-selected entry inside the scroll viewport as the user
+    // arrows through a list longer than `max_height_px`.
+    scroll.scroll_to_item(state.selected_index);
+
+    // `anchored` positions the popup one line below the caret and, when that
+    // would overrun the window bottom, flips it above / snaps it back inside
+    // the viewport (default `SwitchAnchor` fit) — so lower entries are never
+    // clipped off-screen and unreachable.
+    deferred(
+        anchored()
+            .anchor(Corner::TopLeft)
+            .offset(point(px(0.0), px(20.0)))
+            .child(container),
+    )
+    .with_priority(1)
 }
 
 /// Save clipboard image bytes to the org attachments directory.
@@ -1694,6 +1742,45 @@ fn execute_action<T: 'static>(
         // UpdatePopup, Dismissed, InsertText, None, Propagate — no action needed
         // in the no-window context (subscribe callbacks). The caller handles cx.notify().
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod popup_layout {
+    //! Height policy for the slash/link popup overlay. The layout/scroll wiring
+    //! itself (`overflow_y_scroll` + `track_scroll` + `anchored` flip) needs a
+    //! live gpui window to exercise and is structurally invisible to the
+    //! headless keystone PBT — see docs/Testing/BugFunnel.md. What *is* pure
+    //! and testable is the cap that stops the menu running past the window
+    //! bottom.
+
+    use super::POPUP_DESIRED_HEIGHT_PX;
+    use super::POPUP_MARGIN_PX;
+    use super::POPUP_MIN_HEIGHT_PX;
+    use super::popup_max_height_px;
+
+    #[test]
+    fn tall_window_caps_at_desired_height() {
+        // A roomy window must not let the popup grow unbounded; it caps at the
+        // preferred height and scrolls internally beyond that.
+        assert_eq!(popup_max_height_px(1000.0), POPUP_DESIRED_HEIGHT_PX);
+    }
+
+    #[test]
+    fn short_window_shrinks_to_fit_minus_margin() {
+        // The regression: a window shorter than the desired height must shrink
+        // the popup to the available space (leaving a margin) instead of
+        // overrunning the bottom edge with unreachable entries.
+        let vh = 150.0;
+        assert_eq!(popup_max_height_px(vh), vh - POPUP_MARGIN_PX);
+        assert!(popup_max_height_px(vh) < POPUP_DESIRED_HEIGHT_PX);
+    }
+
+    #[test]
+    fn degenerate_tiny_window_floors_at_min() {
+        // Below the floor we stop shrinking (a popup with no usable rows is
+        // useless); `anchored` still snaps it into the window.
+        assert_eq!(popup_max_height_px(10.0), POPUP_MIN_HEIGHT_PX);
     }
 }
 
