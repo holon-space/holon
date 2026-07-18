@@ -13,20 +13,36 @@ use std::sync::Arc;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
+// Property keys live in `holon_api::template` (single spelling shared with the
+// frontend picker); re-exported here so existing `TEMPLATE_MARKER_PROPERTY`
+// references and `{TEMPLATE_MARKER_PROPERTY}` format strings keep resolving.
+pub use holon_api::INSTANCE_OF_PROPERTY;
 use holon_api::MarkSpan;
+pub use holon_api::TEMPLATE_MARKER_PROPERTY;
+pub use holon_api::TEMPLATE_VARS_PROPERTY;
 use holon_api::Value;
 use holon_api::effect_id::deterministic_instance_id;
 use holon_api::marks_from_json;
 use holon_api::marks_to_json;
 use holon_core::storage::types::StorageEntity;
 
-/// Property marking a block as a template root (value = human-readable name).
-pub const TEMPLATE_MARKER_PROPERTY: &str = "template";
-/// Property declaring the template's variables: `name` or `name=default`,
-/// comma-separated.
-pub const TEMPLATE_VARS_PROPERTY: &str = "template_vars";
-/// Provenance property stamped on the instance root, pointing at the template.
-pub const INSTANCE_OF_PROPERTY: &str = "instance_of";
+/// The org identity property (`:ID:` drawer entry, lifted into `properties` by
+/// the org parser). It DERIVES the block's id — so it must never be copied.
+const ORG_ID_PROPERTY: &str = "ID";
+
+/// Identity/meta properties that must NEVER propagate from a template node into
+/// its instance (parse-don't-validate: an explicit denylist, not ad-hoc
+/// per-key `remove`s). Copying any of these corrupts data:
+/// - `ID`: the instance would claim the TEMPLATE's org id. On writeback+reload
+///   the duplicate `:ID:` collides on the derived block id — observed to EMPTY
+///   the template's org file and turn the template into an instance of itself
+///   (BugFunnel: org-roundtrip destruction).
+/// - `_provenance`: the engine's authorship stamp, re-minted fresh per create.
+///
+/// Template MARKER properties (`template`/`template_vars`) are handled
+/// separately (stripped from the instantiated ROOT only, so nested templates
+/// still round-trip verbatim per the proposal).
+const NON_COPYABLE_PROPERTIES: &[&str] = &[ORG_ID_PROPERTY, holon_api::PROVENANCE_PROPERTY];
 
 /// One declared template variable: a name and an optional default.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,6 +118,13 @@ pub struct InstantiateRequest {
     /// re-fires converge; manual callers pass a fresh key per instantiation.
     pub context_key: String,
     pub bindings: BTreeMap<String, String>,
+    /// Optional: an *empty* block the instance supersedes (the frontend
+    /// picker's empty→in-place placement,
+    /// docs/Proposals/Templating-2026-07-12.md §8). When set, the engine
+    /// deletes it AFTER the instance is created, so a failed instantiation
+    /// never destroys the target. Empty blocks carry no content, so this
+    /// never mutates existing content.
+    pub replace_block: Option<String>,
 }
 
 impl InstantiateRequest {
@@ -118,6 +141,14 @@ impl InstantiateRequest {
         let template_id = required("template_id")?;
         let target_parent = required("target_parent")?;
         let context_key = required("context_key")?;
+        let replace_block = match params.get("replace_block") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
+            Some(other) => bail!(
+                "instantiate_template: param 'replace_block' must be a non-empty string, got \
+                 {other:?}"
+            ),
+        };
 
         let mut bindings = BTreeMap::new();
         match params.get("bindings") {
@@ -147,6 +178,7 @@ impl InstantiateRequest {
             target_parent,
             context_key,
             bindings,
+            replace_block,
         })
     }
 }
@@ -313,9 +345,12 @@ pub fn plan_instantiation(
         };
 
         let mut props = parse_properties(node)?;
-        // Never inherit the template's own authoring stamp — every created
-        // node gets a fresh C2a `_provenance` from the executing engine.
-        props.remove(holon_api::PROVENANCE_PROPERTY);
+        // Strip identity/meta properties that must not propagate (the `ID`
+        // copy is the org-roundtrip destruction bug; `_provenance` is
+        // re-minted per create). Denylist, not ad-hoc removes.
+        for key in NON_COPYABLE_PROPERTIES {
+            props.remove(*key);
+        }
         for value in props.values_mut() {
             if let serde_json::Value::String(s) = value {
                 let (substituted, _) = substitute(s, &effective)?;
@@ -392,15 +427,17 @@ fn parse_properties(node: &TemplateNode) -> Result<BTreeMap<String, serde_json::
     }
 }
 
-/// Case-insensitive lookup for template-marker keys. The org parser
-/// writes `:TEMPLATE:` / `:TEMPLATE_VARS:` drawer properties with the
-/// exact casing from the org file; direct programmatic creation uses
-/// lowercase. Both must resolve.
+/// Case-insensitive lookup for template-marker keys. Delegates the casing rule
+/// to the shared authority in `holon_api::template` so the planner and the
+/// frontend picker can never diverge on `:TEMPLATE:` (org, uppercase) vs
+/// `template` (programmatic, lowercase).
 fn template_marker_key<'a>(
     props: &'a BTreeMap<String, serde_json::Value>,
     marker: &str,
 ) -> Option<&'a String> {
-    props.keys().find(|k| k.eq_ignore_ascii_case(marker))
+    let matched =
+        holon_api::template::find_template_marker_key(props.keys().map(String::as_str), marker)?;
+    props.get_key_value(matched).map(|(k, _)| k)
 }
 
 fn template_marker_value<'a>(
@@ -554,6 +591,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
+            replace_block: None,
         }
     }
 
@@ -605,6 +643,33 @@ mod tests {
             get_str(root_params, "id"),
             "child hangs under the new instance root"
         );
+    }
+
+    #[test]
+    fn plan_excludes_org_identity_property_from_every_instance() {
+        // Org-parsed template blocks carry their `:ID:` as an "ID" property
+        // (block_params.rs). Copying it makes the instance claim the TEMPLATE's
+        // id — on org writeback+reload the duplicate collides and destroys the
+        // template file. The denylist must strip "ID" from EVERY node.
+        let mut root = template_root("block:tpl", "hi", "");
+        root.properties = Some(
+            r#"{"template":"t","template_vars":"","ID":"tpl-daily","keep":"yes"}"#.to_string(),
+        );
+        let mut child = node("block:c1", "block:tpl", "child");
+        child.properties = Some(r#"{"ID":"tpl-daily-child","keep":"yes"}"#.to_string());
+        let plan = plan_instantiation(&[root, child], &request(&[])).unwrap();
+
+        for params in &plan.creates {
+            let props: serde_json::Value =
+                serde_json::from_str(get_str(params, "properties")).unwrap();
+            assert!(
+                props.get("ID").is_none(),
+                "ID must NEVER propagate to an instance (org-roundtrip destruction)"
+            );
+            assert_eq!(props["keep"], "yes", "non-identity properties still copy");
+        }
+        // The instance id is the deterministic mint, never the template's "ID".
+        assert_ne!(get_str(&plan.creates[0], "id"), "tpl-daily");
     }
 
     #[test]

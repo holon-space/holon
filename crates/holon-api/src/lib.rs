@@ -55,6 +55,7 @@ pub mod render_types;
 pub mod repository;
 pub mod storage_error;
 pub mod streaming;
+pub mod template;
 pub mod types;
 pub mod ui_watcher;
 pub mod widget_meta;
@@ -85,6 +86,10 @@ pub use provenance::ProvenanceStamp;
 pub use query_engine::QueryEngine;
 pub use storage_error::ParentNotFound;
 pub use storage_error::ProjectionInvariantViolated;
+pub use template::INSTANCE_OF_PROPERTY;
+pub use template::INSTANTIATE_TEMPLATE_OP;
+pub use template::TEMPLATE_MARKER_PROPERTY;
+pub use template::TEMPLATE_VARS_PROPERTY;
 pub use ui_watcher::UiWatcher;
 
 /// Fixed root layout block ID — must match `:ID:` property on the root heading

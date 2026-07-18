@@ -233,6 +233,19 @@ pub trait BuilderServices: Send + Sync {
         Box::pin(std::future::ready(Ok(())))
     }
 
+    /// Like [`Self::dispatch_intent`] but returns a `'static` future resolving
+    /// to the op's result, so a caller (e.g. the GPUI editor) can await it and
+    /// surface a BACKEND failure — template-not-found, missing bindings — as a
+    /// visible toast instead of only a log line. Default fire-and-forget + `Ok`
+    /// (stub/headless has no backend result to await).
+    fn dispatch_intent_awaitable(
+        &self,
+        intent: crate::operations::OperationIntent,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'static>> {
+        self.dispatch_intent(intent);
+        Box::pin(std::future::ready(Ok(())))
+    }
+
     /// Follow a click on a *dangling* wiki-link — a `[[Name]]` mark whose
     /// target does not yet resolve to a block. Creates the page chain for
     /// `target` (via the `create_page_from_link` op), then navigates `region`
@@ -470,6 +483,23 @@ pub trait BuilderServices: Send + Sync {
     /// once and don't need live updates.
     fn try_runtime_handle(&self) -> Option<tokio::runtime::Handle> {
         Some(self.runtime_handle())
+    }
+
+    /// Enumerate the vault's templates (blocks carrying the `template`
+    /// property) for the slash-command picker. Default empty — a stub/headless
+    /// service without a block projection offers no templates. The engine impl
+    /// reads the block snapshot; the result feeds `CommandProvider`'s
+    /// per-template entries.
+    fn list_templates(&self) -> Vec<crate::template_placement::TemplateChoice> {
+        Vec::new()
+    }
+
+    /// Resolve a single block's fields (content, parent) by id, out of the
+    /// block projection — the picker's placement decision needs the REAL block,
+    /// not the editor's id-only `context_params`. Default `None` (stub/headless
+    /// service without a projection). The engine impl reads the snapshot.
+    fn resolve_block(&self, _: &str) -> Option<holon_api::block::Block> {
+        None
     }
 
     /// Search entities matching `filter` for the `[[` link-autocomplete
@@ -2591,6 +2621,44 @@ impl BuilderServices for ReactiveEngine {
         })
     }
 
+    fn dispatch_intent_awaitable(
+        &self,
+        intent: crate::operations::OperationIntent,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'static>> {
+        maybe_mirror_navigation_focus(&self.ui_state, &intent);
+        maybe_clear_focus_on_delete(&self.ui_state, &intent);
+        let session = self.session.clone();
+        let (focused_block, caret_seed) = self.ui_state.focus_handles();
+        let entity_name = intent.entity_name.clone();
+        let op_name = intent.op_name.clone();
+        let params = intent.params;
+        if let Some(target) = params.get("id").and_then(|v| v.as_string()) {
+            holon_api::latency_e2e::interaction_dispatched(
+                &op_name,
+                target,
+                holon_api::latency_e2e::write_seq_from_params(&params),
+            );
+        }
+        Box::pin(async move {
+            match session
+                .execute_operation(&entity_name, &op_name, params)
+                .await
+            {
+                Ok(response) => {
+                    apply_structural_focus(&focused_block, &caret_seed, &op_name, &response);
+                    Ok(())
+                }
+                Err(e) => {
+                    // Disclose the failed write (same seam as `dispatch_intent`);
+                    // the caller ALSO surfaces it as a visible toast.
+                    session.error_tracker().record_error();
+                    tracing::error!("dispatch_intent_awaitable: {entity_name}.{op_name}: {e:#}");
+                    Err(e)
+                }
+            }
+        })
+    }
+
     fn follow_dangling_link(&self, target: String, region: String) {
         let session = self.session.clone();
         let (focused_block, main_nav) = self.ui_state.nav_focus_handles();
@@ -2713,6 +2781,58 @@ impl BuilderServices for ReactiveEngine {
 
     fn runtime_handle(&self) -> tokio::runtime::Handle {
         self.runtime_handle.clone()
+    }
+
+    fn list_templates(&self) -> Vec<crate::template_placement::TemplateChoice> {
+        use crate::template_placement::TemplateChoice;
+        let session = self.session.clone();
+        let rt = self.runtime_handle.clone();
+        // Bridge the async snapshot from a fresh thread — same pattern as
+        // `watch_query` — so this stays callable from the GPUI main thread
+        // whether or not it is itself a tokio worker.
+        let snapshot = std::thread::scope(|s| {
+            s.spawn(|| rt.block_on(session.block_query().snapshot()))
+                .join()
+                .unwrap()
+        });
+        let snapshot = match snapshot {
+            Ok(snap) => snap,
+            Err(e) => {
+                // Fail loud in the log — an unreadable projection means the
+                // picker silently offers nothing, which we disclose rather
+                // than pretend is "no templates exist".
+                tracing::error!("list_templates: block snapshot failed: {e}");
+                return Vec::new();
+            }
+        };
+        // Enumeration logic is a pure, unit-tested function driven over the
+        // real block snapshot — its case-insensitive marker lookup is what
+        // makes org-authored templates (uppercase `:TEMPLATE:`) appear.
+        crate::template_placement::templates_from_blocks(snapshot.iter_blocks())
+    }
+
+    fn resolve_block(&self, id: &str) -> Option<holon_api::block::Block> {
+        let session = self.session.clone();
+        let rt = self.runtime_handle.clone();
+        // Same fresh-thread snapshot bridge as `list_templates`.
+        let snapshot = std::thread::scope(|s| {
+            s.spawn(|| rt.block_on(session.block_query().snapshot()))
+                .join()
+                .unwrap()
+        });
+        let snapshot = match snapshot {
+            Ok(snap) => snap,
+            Err(e) => {
+                tracing::error!("resolve_block('{id}'): block snapshot failed: {e}");
+                return None;
+            }
+        };
+        for block in snapshot.iter_blocks() {
+            if block.id.as_str() == id {
+                return Some(block.clone());
+            }
+        }
+        None
     }
 
     fn search_link_candidates(
