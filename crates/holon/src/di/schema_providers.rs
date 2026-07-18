@@ -27,6 +27,8 @@ use holon_turso::schema_modules::BlockSchemaModule;
 use holon_turso::schema_modules::CoreSchemaModule;
 use holon_turso::schema_modules::HistorySchemaModule;
 use holon_turso::schema_modules::IdentitySchemaModule;
+use holon_turso::schema_modules::JournalDayPagesSchemaModule;
+use holon_turso::schema_modules::JournalFeedSchemaModule;
 use holon_turso::schema_modules::LinkSchemaModule;
 use holon_turso::schema_modules::NavigationSchemaModule;
 use holon_turso::schema_modules::OperationsSchemaModule;
@@ -103,6 +105,16 @@ impl DbResource for AutomationsJournalView {}
 /// `block_requires`, `block_tags` junction tables (FK to `block_raw`).
 pub struct BlockTables;
 impl DbResource for BlockTables {}
+
+/// `journal_day_pages` matview — journal day-page detection, chained on the
+/// `block` matview + `block_tags` junction (journal-feed chain, stage 1).
+pub struct JournalDayPagesView;
+impl DbResource for JournalDayPagesView {}
+
+/// `journal_feed` matview — the journal feed, chained on `journal_day_pages`
+/// (journal-feed chain, stage 2).
+pub struct JournalFeedView;
+impl DbResource for JournalFeedView {}
 
 /// `block_link` table (depends on `block`).
 pub struct LinkTables;
@@ -286,6 +298,36 @@ pub fn register_schema_providers(injector: &Injector) {
         .with_dependency::<DbReady<HistoryTables>>(),
     );
 
+    // -- JournalDayPagesView (journal-feed chain stage 1: `block` matview JOIN
+    // `block_tags` — depends on BlockMatviewView + BlockTables) --
+    injector.provide::<DbReady<JournalDayPagesView>>(
+        Provider::root_async(|inj| async move {
+            let _bm = inj.resolve_async::<DbReady<BlockMatviewView>>().await;
+            let _bt = inj.resolve_async::<DbReady<BlockTables>>().await;
+            let db = inj.resolve::<dyn DbHandleProvider>();
+            run_schema_module(&JournalDayPagesSchemaModule, &db.handle())
+                .await
+                .expect("JournalDayPagesView schema init failed");
+            Shared::new(DbReady::<JournalDayPagesView>::new())
+        })
+        .with_dependency::<DbReady<BlockMatviewView>>()
+        .with_dependency::<DbReady<BlockTables>>(),
+    );
+
+    // -- JournalFeedView (journal-feed chain stage 2: matview chained on
+    // `journal_day_pages` — depends on JournalDayPagesView) --
+    injector.provide::<DbReady<JournalFeedView>>(
+        Provider::root_async(|inj| async move {
+            let _jdp = inj.resolve_async::<DbReady<JournalDayPagesView>>().await;
+            let db = inj.resolve::<dyn DbHandleProvider>();
+            run_schema_module(&JournalFeedSchemaModule, &db.handle())
+                .await
+                .expect("JournalFeedView schema init failed");
+            Shared::new(DbReady::<JournalFeedView>::new())
+        })
+        .with_dependency::<DbReady<JournalDayPagesView>>(),
+    );
+
     // -- BlockTables (depends on CoreTables: junction FKs reference block_raw.id)
     // --
     injector.provide::<DbReady<BlockTables>>(
@@ -369,6 +411,8 @@ pub fn all_schema_roots() -> Vec<std::any::TypeId> {
         TypeId::of::<DbReady<GraphEavSchema>>(),
         TypeId::of::<DbReady<TrustProposalsView>>(),
         TypeId::of::<DbReady<AutomationsJournalView>>(),
+        TypeId::of::<DbReady<JournalDayPagesView>>(),
+        TypeId::of::<DbReady<JournalFeedView>>(),
         TypeId::of::<DbReady<BlockDerivedTable>>(),
     ]
 }
