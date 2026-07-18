@@ -375,7 +375,7 @@ jobs:
           # libfontconfig at runtime). Mirrors frontends/gpui/justfile.
           RUST_FONTCONFIG_DLOPEN: on
         run: |
-          # rust-toolchain.toml pins nightly-2026-07-15; the dtolnay `targets:` input
+          # rust-toolchain.toml pins nightly-2026-07-17; the dtolnay `targets:` input
           # added the Android std to plain `nightly`, not the pin, so cargo ndk (on the
           # pinned toolchain) could not find std for aarch64-linux-android (E0463). Add
           # it to the active toolchain here, like the macOS job installs its targets.

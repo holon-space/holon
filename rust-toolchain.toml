@@ -5,4 +5,4 @@
 # CI job's "Check formatting" step to drift out from under the repo).
 # Bump deliberately, not via a stray CI re-run picking up a new date.
 [toolchain]
-channel = "nightly-2026-07-15"
+channel = "nightly-2026-07-17"
