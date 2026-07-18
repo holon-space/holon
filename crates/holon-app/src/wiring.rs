@@ -226,7 +226,9 @@ impl FrontendInjectorExt for Injector {
             // deliberately excluded from the sidebar query, so the seed uses
             // a different filename (notes.org).
             if !root.exists() {
-                std::fs::create_dir_all(&root).expect("Failed to create org root directory");
+                std::fs::create_dir_all(&root).map_err(|e| {
+                    anyhow::anyhow!("Failed to create org root directory {}: {e}", root.display())
+                })?;
             }
 
             let mut org_config = OrgModeConfig::new(root);
@@ -358,7 +360,10 @@ impl FrontendInjectorExt for Injector {
                     };
                     crate::seed::seed_default_layout(&engine, ordering, user_index_org_exists)
                         .await
-                        .expect("Failed to seed default layout");
+                        .expect(
+                            "boot [component=session stage=session-resolve]: \
+                             seed_default_layout failed",
+                        );
                 }
                 .instrument(tracing::info_span!(
                     "di.factory.FrontendSession.seed_default_layout"
@@ -415,7 +420,10 @@ impl FrontendInjectorExt for Injector {
                 async {
                     holon::api::action_watcher::start_action_watchers(engine.clone())
                         .await
-                        .expect("Failed to start action watchers");
+                        .expect(
+                            "boot [component=session stage=session-resolve]: \
+                             start_action_watchers failed",
+                        );
                 }
                 .instrument(tracing::info_span!(
                     "di.factory.FrontendSession.start_action_watchers"
@@ -443,7 +451,10 @@ impl FrontendInjectorExt for Injector {
                                 let result = signal
                                     .wait_for(|v| v.is_some())
                                     .await
-                                    .expect("FileWatcherReadySignal sender dropped");
+                                    .expect(
+                                        "boot [component=org-sync stage=session-resolve]: \
+                                         FileWatcherReadySignal sender dropped",
+                                    );
                                 match result.as_ref().unwrap() {
                                     Ok(()) => None,
                                     Err(msg) => Some(msg.clone()),
@@ -527,8 +538,9 @@ impl FrontendInjectorExt for Injector {
                     )
                     .await
                     .expect(
-                        "FrontendSession factory: TursoBlockQuerySource::watch_default failed \
-                         (the `block` + `focus_roots` matviews must exist by this point)",
+                        "boot [component=turso stage=session-resolve]: FrontendSession factory: \
+                         TursoBlockQuerySource::watch_default failed (the `block` + `focus_roots` \
+                         matviews must exist by this point)",
                     ),
                 )
                     as Arc<dyn holon_core::storage::BlockQuerySource>;

@@ -1,5 +1,8 @@
 use anyhow::Result;
 use gpui::*;
+use holon_app::BootComponent;
+use holon_app::BootError;
+use holon_app::BootStage;
 use holon_frontend::FrontendSession;
 use holon_frontend::cli;
 use holon_frontend::reactive::ReactiveEngine;
@@ -34,7 +37,7 @@ fn main() -> Result<()> {
 
     let runtime = tokio::runtime::Runtime::new()?;
 
-    let mut app = runtime.block_on(async {
+    let boot_result = runtime.block_on(async {
         tracing::info!("Starting GPUI frontend...");
 
         let mut app = fluxdi::Application::new(GpuiModule {
@@ -44,14 +47,30 @@ fn main() -> Result<()> {
             locked_keys: locked,
         });
         let timeout = std::time::Duration::from_secs(180);
-        tokio::time::timeout(timeout, app.bootstrap())
-            .await
-            .map_err(|_| anyhow::anyhow!("Bootstrap timed out after {timeout:?}"))?
-            .map_err(|e| anyhow::anyhow!("Bootstrap failed: {e}"))?;
+        match tokio::time::timeout(timeout, app.bootstrap()).await {
+            Err(_) => Err(BootError::new(
+                BootComponent::Session,
+                BootStage::SessionResolve,
+                anyhow::anyhow!("Bootstrap timed out after {timeout:?}"),
+            )),
+            Ok(Err(e)) => Err(BootError::from_bootstrap_error(e)),
+            Ok(Ok(())) => {
+                tracing::info!("Session ready");
+                Ok(app)
+            }
+        }
+    });
 
-        tracing::info!("Session ready");
-        Ok::<_, anyhow::Error>(app)
-    })?;
+    // Boot failed: emit a structured, component-attributed report (which
+    // component, which stage, and the full source chain) and exit non-zero.
+    // Increment 2 replaces this terminal exit with the recovery shell.
+    let mut app = match boot_result {
+        Ok(app) => app,
+        Err(boot_err) => {
+            eprint!("{}", boot_err.structured_report());
+            std::process::exit(1);
+        }
+    };
 
     let injector = app.injector();
     let session = injector.resolve::<FrontendSession>();

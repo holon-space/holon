@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::Context;
 use anyhow::Result;
 use fluxdi::Injector;
 use fluxdi::Module;
@@ -62,25 +63,30 @@ const CLOCK_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(
 /// post-1970 date. Proves the clock scheduler ran on this embedder's boot path
 /// (ENVIRONMENT is the top BugFunnel escape category — every embedder must
 /// seed).
-async fn assert_clock_seeded(db_handle: &DbHandle) {
+async fn assert_clock_seeded(db_handle: &DbHandle) -> Result<()> {
     let rows = db_handle
         .query(
             "SELECT epoch_day FROM clock WHERE grain = 'day'",
             HashMap::new(),
         )
         .await
-        .expect("[DI] boot guard: reading the clock day row failed");
+        .context("[DI] boot guard: reading the clock day row failed")?;
     let epoch_day = rows
         .first()
-        .expect("[DI] boot guard: clock day row missing — schema seed or scheduler did not run")
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "[DI] boot guard: clock day row missing — schema seed or scheduler did not run"
+            )
+        })?
         .get("epoch_day")
         .and_then(|v| v.as_i64())
-        .expect("[DI] boot guard: clock.epoch_day is not an integer");
-    assert!(
+        .ok_or_else(|| anyhow::anyhow!("[DI] boot guard: clock.epoch_day is not an integer"))?;
+    anyhow::ensure!(
         epoch_day > 0,
         "[DI] boot guard: clock day row still holds the 1970 placeholder (epoch_day={epoch_day}) \
          — the clock scheduler did not seed the real date"
     );
+    Ok(())
 }
 
 /// Build the default set of SQL-level transformers (applied after compilation).
@@ -160,7 +166,7 @@ async fn create_initialized_engine(
     graph_schema_registry: GraphSchemaRegistry,
     type_registry: &TypeRegistry,
     clock: Arc<dyn holon_api::Clock>,
-) -> BackendEngine {
+) -> Result<BackendEngine> {
     let backend_guard = backend.read().await;
     let db_handle = backend_guard.handle().clone();
     drop(backend_guard);
@@ -187,7 +193,7 @@ async fn create_initialized_engine(
         build_sql_transformers(),
         graph_schema_registry,
     )
-    .expect("Failed to create BackendEngine");
+    .context("Failed to create BackendEngine")?;
 
     // Undo substrate: back the per-session undo stack with the replica DB
     // (`undo_log` snapshot + live-state precondition reader) so history survives
@@ -195,7 +201,7 @@ async fn create_initialized_engine(
     engine
         .enable_undo_persistence()
         .await
-        .expect("Failed to enable undo persistence");
+        .context("Failed to enable undo persistence")?;
 
     // Local, non-syncing UI state (C8 ruling): the `local_ui_state` table
     // backs per-device view choices; slot queries COALESCE it over the
@@ -203,7 +209,7 @@ async fn create_initialized_engine(
     engine
         .ensure_local_state()
         .await
-        .expect("Failed to create local_ui_state table");
+        .context("Failed to create local_ui_state table")?;
 
     // Advice-rule reconciler (ADR 0022): discover `holon_advice_rule_yaml` blocks
     // and keep their `advice_rule_{slug}` matviews synthesized/diffed/torn-down
@@ -239,29 +245,30 @@ async fn create_initialized_engine(
         CLOCK_TICK_INTERVAL,
     )
     .await
-    .expect("[DI] clock scheduler failed to seed the clock relation at boot");
+    .context("[DI] clock scheduler failed to seed the clock relation at boot")?;
     engine.install_clock_scheduler(clock_scheduler);
 
     // Boot guard: the `clock` day row must be seeded and hold a real (post-1970)
     // date, proving the scheduler actually ran on this embedder's boot path.
-    assert_clock_seeded(&db_handle).await;
+    assert_clock_seeded(&db_handle).await?;
 
     // Preload startup matviews (reuses existing ones from previous sessions).
     preload_startup_views(&engine, None)
         .await
-        .expect("Failed to preload startup views");
+        .context("Failed to preload startup views")?;
 
     let live_entities = create_live_entities(&matview_mgr).await;
     profile_resolver.set_live_entities(live_entities);
 
-    engine
+    Ok(engine)
 }
 
 /// Register services shared between `register_core_services` and
 /// `register_core_services_with_backend`: TypeRegistry, OperationObserver,
 /// NavigationProvider, OperationProvider (nav), OperationModule.
 fn register_shared_services(injector: &Injector) -> Result<()> {
-    let type_registry = create_default_registry().expect("Failed to create default TypeRegistry");
+    let type_registry =
+        create_default_registry().context("Failed to create default TypeRegistry")?;
     injector.provide::<TypeRegistry>(Provider::root(move |_| type_registry.clone()));
 
     injector.provide_into_set::<dyn OperationObserver>(Provider::root_async(
@@ -306,7 +313,8 @@ pub fn register_core_services_no_turso(injector: &Injector, db_path: PathBuf) ->
         Shared::new(DatabasePathConfig::new(db_path.clone()))
     }));
 
-    let type_registry = create_default_registry().expect("Failed to create default TypeRegistry");
+    let type_registry =
+        create_default_registry().context("Failed to create default TypeRegistry")?;
     injector.provide::<TypeRegistry>(Provider::root(move |_| type_registry.clone()));
 
     Ok(())
@@ -585,7 +593,18 @@ pub fn register_core_services_with_backend(
                         &type_registry,
                         clock,
                     )
-                    .await,
+                    .await
+                    // fluxdi async providers return `T`, not `Result<T>`, and
+                    // bootstrap installs no `catch_unwind` — so this is the
+                    // terminal boundary for the engine spine. Every failable
+                    // step inside `create_initialized_engine` now propagates
+                    // here as one enriched, attributed error instead of N bare
+                    // panics. Increment 4 (BootReport-carrying engine) replaces
+                    // this last `.expect` with true Result propagation.
+                    .expect(
+                        "boot [component=turso stage=engine-resolve]: \
+                         BackendEngine initialization failed",
+                    ),
                 )
             }
         })
