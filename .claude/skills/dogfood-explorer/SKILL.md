@@ -49,6 +49,14 @@ Verified in code (re-check if these files changed):
 
 ## 1. Launch protocol (verified working 2026-07-07)
 
+**Mac sanctioned launch path:** `just live-verify port=<8710..> dir=<throwaway>` (justfile) is the
+supported one-shot launcher — it wipes `dir`, creates `dir/config` + `dir/vault`, runs
+`holon-gpui` with `HOLON_CONFIG_DIR`/`HOLON_VAULT_ROOT`/`MCP_SERVER_PORT` all pointed inside the
+throwaway dir, and health-gates `/health` before printing `READY pid=… port=… state-dir=…`. Use a
+port ≥ 8710 and a `/tmp` throwaway `dir` so you never touch the live 8520 instance. The manual
+`nohup` recipe below stays useful when you need latency logging (`RUST_LOG`) or reset
+(`HOLON_MCP_ALLOW_RESET`) knobs the recipe doesn't set.
+
 ```bash
 WS=<absolute path to your holon worktree>
 PORT=8620                                    # >=8620; check: lsof -iTCP:$PORT -sTCP:LISTEN
@@ -145,6 +153,53 @@ piping to a JSON parser, or read stdout only with `2>/dev/null`.
   without one — a SILENT failure is a finding).
 - Invocation surface once loaded: `execute_operation` with the MCP entity name
   (`OperationDispatcher` → `McpOperationProvider`); discover via `list_operations`.
+
+## 1c. Android via adb (proven recipe, 2026-07-18)
+
+Driving the real GPUI app on an Android device over `adb`. The MCP server runs inside the app on
+the device; forward its port to the host and drive it exactly like the desktop MCP.
+
+**USB mode — the silent killer.** The USB connection MUST be in a **DATA** mode (File Transfer /
+MTP). A charge-only cable/mode silently kills all `adb` traffic — no error, just dead forwards.
+Verify the device shows in `adb devices` before anything else.
+
+**Port forward — re-run before EVERY request.** Forwards drop **silently** on every USB
+re-enumeration (screen lock, cable jiggle, app restart), and the drop is invisible until a request
+hangs. Re-run the forward immediately before each MCP call, not once at setup:
+```bash
+adb forward tcp:8620 tcp:8520      # host:8620 → device:8520 (the in-app MCP port)
+```
+
+**Launch:**
+```bash
+adb shell am start -n space.holon.gpui/android.app.NativeActivity
+```
+
+**Health-gate** (through the forward) before driving:
+```bash
+curl -s 127.0.0.1:8620/health      # expect OK
+```
+
+**MCP handshake** (streamable-HTTP, same as desktop): POST `initialize`, then the
+`notifications/initialized` notification. Send the `mcp-session-id` header returned by
+`initialize` on every subsequent request, and `Accept: application/json, text/event-stream`.
+Responses come back as SSE `data:` lines — parse the `data:` payload, not a bare JSON body.
+
+**Screenshots — use adb, not the MCP tool:**
+```bash
+adb exec-out screencap -p > shot.png
+```
+The MCP `screenshot` tool is **macOS-only** until the gpu-readback adoption lands, so it does not
+work on-device — capture via `screencap`.
+
+**Backgrounding is fine.** The MCP server keeps serving with the app backgrounded — you can drive
+it while the app is not foreground.
+
+**Hazard — jammed accept queue.** After many dead retries (e.g. hammering a dropped forward) the
+in-app server's accept queue jams: the port stays in `LISTEN` but `/health` is dead and never
+recovers on its own. Recover with `adb shell am force-stop space.holon.gpui` then relaunch via
+`am start`. **Cap your retries** (a few, not dozens) so you notice the jam early instead of
+deepening it.
 
 ## 2. Session protocol (per exploratory step)
 
