@@ -121,6 +121,11 @@ pub enum DegradedKind {
     /// undo/redo must never look like a silent no-op when it actually blew
     /// up, so this is always surfaced instead of just logged.
     UndoFailed,
+    /// Red — a slash-menu command was selected but failed (e.g. a template
+    /// insert whose target block couldn't be resolved, or an empty page-root
+    /// placement). Fail-loud: the selection consumed the key, so it must never
+    /// look like a silent no-op or a stray block-split.
+    CommandFailed,
     /// A plain info-style toast (used for "ticket copied").
     Info,
 }
@@ -279,6 +284,33 @@ impl ShareTrigger {
 }
 
 impl gpui::Global for ShareTrigger {}
+
+/// GPUI global that lets any view surface a [`DegradedToast`] without plumbing
+/// the `ShareUiState` entity through every intermediate builder — mirrors
+/// [`ShareTrigger`]. Installed in `launch_holon_window_impl`.
+#[derive(Clone)]
+pub struct DegradedToastSink(Arc<dyn Fn(DegradedToast, &mut gpui::App) + Send + Sync>);
+
+impl DegradedToastSink {
+    pub fn new(f: impl Fn(DegradedToast, &mut gpui::App) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(f))
+    }
+
+    /// Surface `toast`. If the sink global is missing (a wiring bug), fail loud
+    /// in the log rather than silently dropping the failure notice.
+    pub fn push(toast: DegradedToast, cx: &mut gpui::App) {
+        if let Some(sink) = cx.try_global::<DegradedToastSink>().cloned() {
+            (sink.0)(toast, cx);
+        } else {
+            tracing::error!(
+                "[degraded-toast] sink global missing; toast dropped: {}",
+                toast.detail
+            );
+        }
+    }
+}
+
+impl gpui::Global for DegradedToastSink {}
 
 // ─── Degraded bus bridge ────────────────────────────────────────────────────
 
@@ -1091,6 +1123,7 @@ fn render_toast_stack(
                 "File sync degraded (bad org file)",
             ),
             DegradedKind::UndoFailed => (gpui::rgba(0xef4444ff), "⛔", "Undo/redo failed"),
+            DegradedKind::CommandFailed => (gpui::rgba(0xef4444ff), "⛔", "Command failed"),
             DegradedKind::Info => (gpui::rgba(0x60a5faff), "i", "Info"),
         };
         let close_state = share_state.clone();

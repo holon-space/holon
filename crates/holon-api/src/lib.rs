@@ -51,6 +51,7 @@ pub mod reactive;
 /// flutter_rust_bridge:ignore
 pub mod render_dsl;
 pub mod render_eval;
+pub mod template;
 pub mod render_types;
 pub mod repository;
 pub mod storage_error;
@@ -82,6 +83,10 @@ pub use proposal::ProposalStatus;
 pub use proposal::REJECT_PROPOSAL_OP;
 pub use provenance::PROVENANCE_PROPERTY;
 pub use provenance::ProvenanceStamp;
+pub use template::INSTANCE_OF_PROPERTY;
+pub use template::INSTANTIATE_TEMPLATE_OP;
+pub use template::TEMPLATE_MARKER_PROPERTY;
+pub use template::TEMPLATE_VARS_PROPERTY;
 pub use query_engine::QueryEngine;
 pub use storage_error::ParentNotFound;
 pub use storage_error::ProjectionInvariantViolated;

@@ -128,14 +128,29 @@ impl ViewEventHandler {
             } => match action.as_str() {
                 "command_menu" => {
                     if !self.popup.is_active() {
-                        let provider = Arc::new(
-                            CommandProvider::new(
-                                self.operations.clone(),
-                                self.context_params.clone(),
-                            )
-                            .with_prefix_start(prefix_start),
-                        );
-                        let signal = self.popup.activate(provider, &filter_text);
+                        // Enumerate templates once per menu-open so the picker
+                        // offers a per-template entry for each vault template.
+                        let templates = self
+                            .services
+                            .as_ref()
+                            .map(|s| s.list_templates())
+                            .unwrap_or_default();
+                        let mut provider = CommandProvider::new(
+                            self.operations.clone(),
+                            self.context_params.clone(),
+                        )
+                        .with_prefix_start(prefix_start)
+                        .with_templates(templates);
+                        // Resolve the picked block's REAL content/parent at
+                        // execute time (not from the id-only context_params).
+                        if let Some(services) = self.services.as_ref() {
+                            provider = provider.with_resolver(Arc::new(
+                                crate::command_provider::ServicesBlockResolver::new(
+                                    services.clone(),
+                                ),
+                            ));
+                        }
+                        let signal = self.popup.activate(Arc::new(provider), &filter_text);
                         HandleResult::Activated { signal }
                     } else {
                         // `filter_text` is the text between the matched "/"

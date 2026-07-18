@@ -1747,6 +1747,26 @@ fn launch_holon_window_impl(
         );
     }
 
+    // Install the DegradedToastSink global so any view (e.g. a failed
+    // slash-command) can surface a toast without plumbing the ShareUiState
+    // entity through every builder. Unconditional — the share_ui entity always
+    // exists, independent of the (optional) iroh share backend.
+    {
+        let toast_ui_entity = app_model.read(cx).share_ui.clone();
+        let toast_window_handle: AnyWindowHandle = window_handle.into();
+        cx.set_global(share_ui::DegradedToastSink::new(
+            move |toast, cx: &mut App| {
+                let _ = toast_window_handle.update(cx, |_, _window, cx| {
+                    toast_ui_entity.update(cx, |s, cx| {
+                        s.push_toast(toast);
+                        cx.emit(share_ui::NotifyShareUi);
+                        cx.notify();
+                    });
+                });
+            },
+        ));
+    }
+
     // Wire the share-subtree degraded-bus bridge + ShareTrigger global. If
     // `share_backend` is `None` (iroh-sync disabled or PBT) no bridge is
     // spawned and ShareTrigger is not installed — the share context menu

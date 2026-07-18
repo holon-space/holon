@@ -87,6 +87,16 @@ pub enum EditorAction {
     /// Let the parent handle this key (popup is not active).
     /// E.g., MoveUp/MoveDown should propagate to cross-block navigation.
     Propagate,
+
+    /// A popup selection was handled but FAILED. The frontend must surface
+    /// `message` visibly (toast/banner), strip the typed command text if
+    /// `strip_prefix_start` is `Some`, and consume the key WITHOUT falling
+    /// through to a structural op (split_block). Fail-loud: a failed command
+    /// must never read as a silent no-op or a stray split.
+    CommandFailed {
+        message: String,
+        strip_prefix_start: Option<usize>,
+    },
 }
 
 impl std::fmt::Debug for EditorAction {
@@ -116,6 +126,14 @@ impl std::fmt::Debug for EditorAction {
                 )
             }
             Self::Propagate => write!(f, "Propagate"),
+            Self::CommandFailed {
+                message,
+                strip_prefix_start,
+            } => write!(
+                f,
+                "CommandFailed {{ message: {:?}, strip_prefix_start: {:?} }}",
+                message, strip_prefix_start
+            ),
         }
     }
 }
@@ -484,6 +502,13 @@ impl EditorViewModel {
             } => EditorAction::InsertText {
                 replacement,
                 prefix_start,
+            },
+            PopupResult::Failed {
+                message,
+                strip_prefix_start,
+            } => EditorAction::CommandFailed {
+                message,
+                strip_prefix_start,
             },
         }
     }

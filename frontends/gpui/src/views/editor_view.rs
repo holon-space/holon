@@ -1184,7 +1184,90 @@ impl Render for EditorView {
                                 });
                             })
                             .detach();
-                            services.dispatch_intent(intent);
+                            // `instantiate_template` can fail in the BACKEND
+                            // (template not found, missing bindings). Await the
+                            // result on the tokio runtime and surface a failure
+                            // as a visible toast — fail-loud, not just a log
+                            // line. Other slash commands keep the fire-and-forget
+                            // dispatch (unchanged hot path).
+                            if intent.op_name == holon_api::INSTANTIATE_TEMPLATE_OP {
+                                let services_for_dispatch = services.clone();
+                                let rt = services.runtime_handle();
+                                let (tx, rx) = tokio::sync::oneshot::channel::<Option<String>>();
+                                rt.spawn(async move {
+                                    let outcome = services_for_dispatch
+                                        .dispatch_intent_awaitable(intent)
+                                        .await
+                                        .err()
+                                        .map(|e| format!("{e:#}"));
+                                    let _ = tx.send(outcome);
+                                });
+                                cx.spawn(async move |cx| {
+                                    if let Ok(Some(detail)) = rx.await {
+                                        let _ =
+                                            cx.update_window(window_handle, |_, _window, cx| {
+                                                crate::share_ui::DegradedToastSink::push(
+                                                    crate::share_ui::DegradedToast {
+                                                        kind:
+                                                            crate::share_ui::DegradedKind::CommandFailed,
+                                                        shared_tree_id: "command".into(),
+                                                        detail,
+                                                    },
+                                                    cx,
+                                                );
+                                            });
+                                    }
+                                })
+                                .detach();
+                            } else {
+                                services.dispatch_intent(intent);
+                            }
+                            cx.stop_propagation();
+                            cx.notify(editor_entity_id);
+                        }
+                        EditorAction::CommandFailed {
+                            message,
+                            strip_prefix_start,
+                        } => {
+                            // A menu selection was handled but failed. Fail-loud:
+                            // (1) strip the typed "/command" text (same span
+                            // arithmetic as ExecuteAndStripCommand), (2) surface a
+                            // visible toast, (3) consume the Enter so it does NOT
+                            // fall through to split_block (the selection already
+                            // consumed the key — a stray split would be silent
+                            // corruption). This is the fix for the live-drive
+                            // regression where a failed template insert split the
+                            // block instead of reporting the failure.
+                            if let Some(strip_prefix_start) = strip_prefix_start {
+                                let text = input.read(cx).value().to_string();
+                                let cursor = input.read(cx).cursor();
+                                let line_start =
+                                    text[..cursor].rfind('\n').map(|p| p + 1).unwrap_or(0);
+                                let abs_start = line_start + strip_prefix_start;
+                                let mut new_text = String::with_capacity(text.len());
+                                new_text.push_str(&text[..abs_start]);
+                                new_text.push_str(&text[cursor..]);
+                                let input = input.clone();
+                                cx.spawn(async move |cx| {
+                                    let _ = cx.update_window(window_handle, |_, window, cx| {
+                                        input.update(cx, |state, cx| {
+                                            state.set_value(&new_text, window, cx);
+                                            let pos =
+                                                state.text().offset_to_position(abs_start);
+                                            state.set_cursor_position(pos, window, cx);
+                                        });
+                                    });
+                                })
+                                .detach();
+                            }
+                            crate::share_ui::DegradedToastSink::push(
+                                crate::share_ui::DegradedToast {
+                                    kind: crate::share_ui::DegradedKind::CommandFailed,
+                                    shared_tree_id: "command".into(),
+                                    detail: message,
+                                },
+                                cx,
+                            );
                             cx.stop_propagation();
                             cx.notify(editor_entity_id);
                         }
