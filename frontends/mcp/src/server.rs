@@ -124,12 +124,29 @@ pub enum InteractionEvent {
     /// reports `handled=false` when no scrollable list is reachable, so the
     /// driver can fail loud instead of faking success.
     ScrollList { entity_id: String, dx: f32, dy: f32 },
+    /// Capture the window's last rendered frame as an RGBA image via the
+    /// platform's `render_to_image` (offscreen wgpu readback on Android). Backs
+    /// the `screenshot` MCP tool on platforms with no OS-level window-capture
+    /// path. The pump answers with [`InteractionResponse::screenshot`] set.
+    CaptureScreenshot,
+}
+
+/// Raw pixel readback of the GPUI window, produced by
+/// [`InteractionEvent::CaptureScreenshot`]. `rgba` is tightly packed
+/// `width * height * 4` bytes; the MCP `screenshot` tool PNG-encodes it.
+pub struct CapturedImage {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
 }
 
 /// Result of dispatching an interaction event through the GPUI window.
 pub struct InteractionResponse {
     pub handled: bool,
     pub detail: Option<String>,
+    /// Present only for [`InteractionEvent::CaptureScreenshot`]; `None` for
+    /// every input event.
+    pub screenshot: Option<CapturedImage>,
 }
 
 /// Optional services for debug/inspection tools.
