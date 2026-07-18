@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::Context;
 use anyhow::Result;
 use fluxdi::Injector;
 use fluxdi::Module;
@@ -37,11 +38,9 @@ pub async fn preload_startup_views(
         .map(|prql| {
             engine
                 .compile_to_sql(prql, holon_api::QueryLanguage::HolonPrql)
-                .unwrap_or_else(|e| {
-                    panic!("Failed to compile startup PRQL query: {e}\nQuery: {prql}")
-                })
+                .with_context(|| format!("Failed to compile startup PRQL query: {prql}"))
         })
-        .collect();
+        .collect::<Result<Vec<String>>>()?;
     let compiled_refs: Vec<&str> = compiled.iter().map(|s| s.as_str()).collect();
     engine.preload_views(&compiled_refs).await?;
 
@@ -76,14 +75,17 @@ pub fn open_and_register_core(
     match storage {
         StorageSelector::Turso => {
             tracing::debug!("[DI] Opening database at {:?}...", db_path);
-            let db = TursoBackend::open_database(&db_path).expect("Failed to open database");
+            let db = TursoBackend::open_database(&db_path).map_err(|e| {
+                anyhow::anyhow!("Failed to open Turso database at {}: {e}", db_path.display())
+            })?;
             tracing::debug!("[DI] Database opened successfully");
 
             let (cdc_tx, _) = tokio::sync::broadcast::channel(1024);
 
             tracing::debug!("[DI] Creating TursoBackend...");
-            let (backend_inner, db_handle) =
-                TursoBackend::new(db, cdc_tx).expect("Failed to create TursoBackend");
+            let (backend_inner, db_handle) = TursoBackend::new(db, cdc_tx).map_err(|e| {
+                anyhow::anyhow!("Failed to create TursoBackend for {}: {e}", db_path.display())
+            })?;
             tracing::debug!("[DI] TursoBackend created");
 
             let backend = Arc::new(RwLock::new(backend_inner));
