@@ -1,0 +1,17 @@
+# Resource-based sync sidecar. The test overrides `command` and inserts
+# `MOCK_MCP_SCENARIO` (stateful | subscribe_push) into `env`.
+transport:
+  child_process:
+    command: /bin/false
+entity_prefix: "mock_"
+entities:
+  items:
+    short_name: item
+    id_column: id
+    schema:
+      - { name: id,    sql_type: TEXT, primary_key: true }
+      - { name: title, sql_type: TEXT }
+      - { name: body,  sql_type: TEXT }
+    sync:
+      list_resource: mock://items
+tools: {}
