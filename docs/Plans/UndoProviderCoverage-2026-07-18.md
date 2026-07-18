@@ -54,8 +54,8 @@ is where they split** (see table).
 | Op (dispatched name) | Provider (inverse) | Exactness | Notes / file:line |
 |---|---|---|---|
 | `set_field(content=String)` | `set_field` restoring prior text | **exact** | `loro_block_operations.rs:397-417` |
-| `set_field(content=Object{marks})` | — | **absent** | rich/marked content stays irreversible — `loro_block_operations.rs:390` |
-| `set_field(marks)` | — | **absent** | mark-only edit irreversible — `loro_block_operations.rs:390,449` |
+| `set_field(content=Object{marks})` | `set_field(content, Object{prior text+marks})` | **exact** *(NEW)* | whole-set restore via `update_block_marked`; text delta arms the guard only when text changed (else empty, single-writer) — `loro_block_operations.rs` (this change) |
+| `set_field(marks)` | `set_field(content, Object{prior text+marks})` | **exact** *(NEW)* | atomic text+marks restore; empty precond (text unchanged) — `loro_block_operations.rs` (this change) |
 | `set_field(task_state)` | `set_field(task_state, old)` | **exact** | empty precond (property blob, single-writer) — `:418-431` |
 | `set_field(edge: tags/requires/…)` | `set_field(field, prior_set)` | **exact** | whole-set restore — `:433-447` |
 | `set_field(other property: DEADLINE/PRIORITY/generic)` | — | **absent** | `_ => (None, empty)` — `loro_block_operations.rs:449` |
@@ -83,24 +83,32 @@ is where they split** (see table).
 | `add_tag` | `remove_tag` | **exact** | element-wise, idempotent — `loro_block_operations.rs:216-249` |
 | `remove_tag` | `add_tag` | **exact** | symmetric — `:283-310` |
 | `dismiss_advice` | — | **absent** | append-only suppression, irreversible — `:161` |
+| `rewrite_link_resolution` | `restore_link_resolution(captured rows)` | **exact** *(NEW)* | junction inverse for block→page inbound re-point; captures prior `(source_block_id, target, kind, resolved_id)` PK tuples, restores each (capture-based, NOT a `to→from` swap) — `sql_operation_provider.rs` (this change) |
 
 ### Coverage stats (post-implementation)
 
-- **N = 24 dispatched operations** (`set_field` and `delete` are field/mode-
-  sensitive — counted once as an op, with the sub-cases spelled out above).
-- **Exact:** 14 ops unconditionally exact — `move_block`, `indent`, `outdent`,
-  `move_up`, `move_down`, `embed_entity`, `insert_text` (NEW), `delete_text`
-  (NEW), `cycle_task_state`, `set_state`, `set_title`, `add_tag`, `remove_tag`,
-  plus `set_field` on its covered fields (content-String / task_state / edge).
+- **N = 25 dispatched operations** (`set_field` and `delete` are field/mode-
+  sensitive — counted once as an op, with the sub-cases spelled out above;
+  `rewrite_link_resolution` is the new junction surface. Its internal inverse
+  twin `restore_link_resolution` is inverse-only and not counted.)
+- **Exact:** 16 ops unconditionally exact — `move_block`, `indent`, `outdent`,
+  `move_up`, `move_down`, `embed_entity`, `insert_text`, `delete_text`,
+  `cycle_task_state`, `set_state`, `set_title`, `add_tag`, `remove_tag`,
+  `rewrite_link_resolution` (NEW), plus `set_field` on its covered fields
+  (content-String / **content-Object+marks (NEW)** / **marks (NEW)** /
+  task_state / edge).
 - **Conditional (M, exact-in-common-case, fail-loud otherwise):** 5 —
   `create`, `delete` (SqlOnly), `update`, `split_block`, `join_block`.
 - **Absent (J):** 5 ops — `apply_mark`, `remove_mark`, `set_due_date`,
-  `set_priority`, `dismiss_advice` — **plus** the two systemic sub-gaps:
-  `delete` under the **default Loro authority**, and `set_field` on
-  **marks / rich-content / arbitrary properties**.
+  `set_priority`, `dismiss_advice` — **plus** ONE remaining systemic sub-gap:
+  `delete` under the **default Loro authority**. The prior
+  `set_field(marks / rich-content)` sub-gap is now CLOSED (this change); the
+  arbitrary-property sub-gap remains (folded into `set_due_date`/`set_priority`
+  above).
 
-Before this change `insert_text`/`delete_text` were also absent; they are now
-exact (2 gaps closed).
+Before this change `insert_text`/`delete_text` were absent (closed earlier);
+`set_field(marks / Object content)` and the junction rewrite were absent — this
+change closes both (Option-B's two blockers).
 
 ## Block→page transform — gate verdict
 
@@ -111,16 +119,15 @@ to the table:
 | Option | Constituent ops | Undo-gate |
 |---|---|---|
 | **A** — in-place retag | `add_tag("Page")` (+ ancestor `add_tag`s) [+ `move_block` if re-anchored] | **PASSES** — every op is exact (`add_tag`↔`remove_tag`, `move_block` exact). De-inlining is a write-back side effect, not an op. |
-| **B** — page + link | `create` (page) + N×`move_block` (children) + rewrite origin content to `[[P]]` + backlink `resolved_id` rewrite | **BLOCKED** — `create`/`move_block` are exact, but the origin-becomes-link write is **marked content** (a `Link` Peritext mark) → `set_field(Object/marks)` is **absent**; and the `block_links` junction rewrite has no operation-level inverse (no FK cascade — transform doc §backlinks). |
+| **B** — page + link | `create` (page) + N×`move_block` (children) + rewrite origin content to `[[P]]` + backlink `resolved_id` rewrite | **CLEARED** *(NEW)* — `create`/`move_block` exact; the origin-becomes-link marked-content write now has an exact `set_field(Object/marks)` inverse; and the `block_links` junction rewrite now has an operation-level inverse (`rewrite_link_resolution` ↔ `restore_link_resolution`). Every constituent op is invertible ⇒ one composite `UndoEntry`. |
 | **C** — page + move + delete | `create` + N×`move_block` + `delete` origin | **BLOCKED** — `delete` under the **default Loro authority is absent**. Confirms the transform doc's "delete is irreversible under today's providers." |
 
-**Verdict:** With today's providers, **only Option A clears the composite-undo
-gate.** This is a genuine input to the still-pending block→page ruling: if the
-ruling wants B (the LogSeq-style recommended default) or C to be undoable as one
-entry, it is **gated on building the missing providers below** — B on the
-marks/rich-content content inverse **and** a junction-rewrite inverse; C on a
-Loro `delete` inverse. (Option A being the undo-cleanest dovetails with the undo
-ruling's "A shaped for C" framing.)
+**Verdict:** With this change, **Options A and B both clear the composite-undo
+gate**; only **C** remains gated — on a Loro-authority `delete` inverse (the
+last systemic sub-gap, shortlist #1). If the block→page ruling selects B (the
+LogSeq-style recommended default), it is now undoable as one entry. (Option A
+being the undo-cleanest still dovetails with the undo ruling's "A shaped for C"
+framing.)
 
 ## Ranked shortlist — which missing providers to build first
 
@@ -132,9 +139,11 @@ Ranked by *user-facing frequency first, then transform-prerequisite weight*.
    delete → `create` inverse; cascade stays `DeclaredIrreversible`. Larger than
    a quick-win (needs Loro-side subtree/edge capture) → **shortlist**.
 
-2. **`set_field(marks)` / `set_field(Object content)`** *(high — every bold /
-   italic / link / rich-text edit is irreversible today, and it is Option-B's
-   blocker).* Capture prior `(text, marks)` → inverse restores both. Medium.
+2. ~~**`set_field(marks)` / `set_field(Object content)`**~~ **DONE (this
+   change).** Captures prior `(text, marks)` and restores both atomically via a
+   `content=Object` inverse routed through `update_block_marked` (whole-set
+   mark replace) — so an originally-plain block genuinely restores plain rather
+   than leaving Peritext marks pinned to surviving scalars.
 
 3. **`apply_mark` / `remove_mark`** *(high — incremental toolbar mark ops).*
    `apply_mark`'s inverse cannot be a blind `remove_mark` (would strip
@@ -146,19 +155,52 @@ Ranked by *user-facing frequency first, then transform-prerequisite weight*.
    (`loro_block_operations.rs:418-431`): capture prior property value → inverse
    `set_field(field, old)`. Easy-medium; a near-mechanical extension.
 
-5. **Junction / backlink `resolved_id` rewrite inverse** *(medium — strictly an
-   Option-B prerequisite, no standalone user op today).* Only build if the
-   block→page ruling selects B. **`dismiss_advice`** (append-only suppression)
-   is intentionally *lowest* priority — low undo value.
+5. ~~**Junction / backlink `resolved_id` rewrite inverse**~~ **DONE (this
+   change).** Introduced the operation-level surface `rewrite_link_resolution`
+   `{from, to}` (re-point every `block_links` row resolved to `from` onto `to`)
+   with an exact capture-based inverse `restore_link_resolution` that restores
+   each affected PK row's prior `resolved_id`. Scoped to the block→page
+   transform's inbound re-point; NOT a generic SQL-undo framework.
+   **`dismiss_advice`** (append-only suppression) is intentionally *lowest*
+   priority — low undo value.
 
 ## What this change landed
 
-- `insert_text` and `delete_text` in `LoroBlockOperations` now return **exact**
-  inverses (previously `irreversible`): `insert_text`→`delete_text(pos,
-  scalar_count)`, `delete_text`→`insert_text(pos, captured_substring)`. Both arm
-  the `content` stale-guard with a real `FieldDelta`. Unit tests
-  (`insert_text_is_reversible_with_exact_delete_inverse`,
-  `delete_text_is_reversible_with_exact_insert_inverse`) assert the inverse shape
-  **and** round-trip the block content byte-for-byte.
+- `insert_text` and `delete_text` in `LoroBlockOperations` return **exact**
+  inverses (earlier change): `insert_text`→`delete_text(pos, scalar_count)`,
+  `delete_text`→`insert_text(pos, captured_substring)`.
+- **`set_field(content=Object{marks})` and `set_field(marks)`** in
+  `LoroBlockOperations` now return **exact** inverses (previously
+  `irreversible`). Prior `(content, marks)` is captured up front (already read
+  for the fingerprint) and the inverse is a single
+  `set_field(content, Object{prior text, prior marks})` — routed through
+  `update_block_marked`, which unmarks every key over the full range before
+  re-applying, so text AND marks restore atomically and an originally-plain
+  block comes back plain. The `content` stale-guard is armed with a real
+  `FieldDelta` only when the text changed (a marks-only edit reports empty
+  `changes`, single-writer-safe, so the engine's vacuous-write filter does not
+  drop the entry). Unit tests: `set_field_object_content_is_reversible_text_and_marks`,
+  `set_field_marks_only_is_reversible`, `set_field_object_content_multibyte_roundtrip`.
+- **`rewrite_link_resolution` / `restore_link_resolution`** in
+  `SqlOperationProvider` — the junction inverse Option B needs. The forward op
+  re-points every `block_links` row resolved to `from` onto `to`; the inverse
+  captures the affected rows' prior `(source_block_id, target, kind,
+  resolved_id)` PK tuples and restores each exactly (capture-based, so a row
+  that already resolved to `to` before the rewrite is left untouched by undo).
+  Both descriptors are registered so the dispatcher routes them. Unit tests:
+  `rewrite_and_undo_restores_prior_resolved_ids`,
+  `undo_does_not_touch_rows_preexisting_at_target`.
+- Test-harness fix: `delete_inverse_classification_tests::provider_with_rows`
+  now creates `block_links` (via the canonical `LinkSchemaModule`, plus a
+  `content_type` column the `backlinks` matview requires) — the `delete`
+  cascade's `block_links` cleanup previously failed with "no such table:
+  block_links", so both delete-inverse tests were red pre-existing.
+
+### DeclaredIrreversible sub-cases (none)
+
+Both providers are exact for every sub-case in scope. `restore_link_resolution`
+returns `DeclaredIrreversible` by design — it is an inverse-only surface (redo
+re-runs the forward `rewrite_link_resolution`), and its classification is
+ignored on inverse replay. No lossy fallbacks were introduced.
 </content>
 </invoke>

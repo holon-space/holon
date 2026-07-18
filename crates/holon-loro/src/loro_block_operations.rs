@@ -352,6 +352,23 @@ fn block_op(op_name: &str, params: HashMap<String, Value>) -> Operation {
     Operation::new(EntityName::from("block"), op_name, "", params)
 }
 
+/// Build the `set_field("content", Object{text, marks})` payload that restores
+/// a block's rich content (text AND marks) as ONE atomic value. Routed through
+/// the `content=Object` write path (`update_block_marked`), which clears every
+/// mark key over the full range before re-applying — so restoring an
+/// originally-plain block (empty `marks`) genuinely strips the marks a rich
+/// write added, rather than leaving them pinned to surviving scalars (the
+/// Peritext trap a text-only restore would fall into).
+fn rich_content_restore_value(text: &str, marks: &[holon_api::MarkSpan]) -> Value {
+    let mut obj = HashMap::new();
+    obj.insert("text".to_string(), Value::String(text.to_string()));
+    obj.insert(
+        "marks".to_string(),
+        Value::String(holon_api::marks_to_json(marks)),
+    );
+    Value::Object(obj)
+}
+
 /// Parse an edge-field write value (`Value::Array` of strings, or `Value::Null`
 /// for the empty set) into owned strings. Fails loud on any non-string entry.
 fn edge_string_targets(value: &Value, field: &str) -> std::result::Result<Vec<String>, String> {
@@ -444,6 +461,57 @@ impl CrudOperations<Block> for LoroBlockOperations {
                 params.insert("id".to_string(), Value::String(id.to_string()));
                 params.insert("field".to_string(), Value::String(f.to_string()));
                 params.insert("value".to_string(), edge.param_value(&prior));
+                (Some(block_op("set_field", params)), Vec::new())
+            }
+            "content" if matches!(value, Value::Object(_)) => {
+                // Rich content write (text + marks). The exact inverse restores
+                // BOTH prior text and prior marks atomically as one `content`
+                // Object value (see `rich_content_restore_value`). The `content`
+                // FieldDelta arms the stale-guard ONLY when the text actually
+                // changed: a marks-only edit under an Object write leaves the
+                // projected `content` column untouched, so a real delta would be
+                // vacuous (old == new) and the engine would refuse to journal the
+                // entry. In that case fall back to empty `changes`
+                // (single-writer-safe), matching the `marks` arm below.
+                let prior_marks = prior.marks.clone().unwrap_or_default();
+                let old = rich_content_restore_value(&prior.content, &prior_marks);
+                let new_text = match &value {
+                    Value::Object(obj) => obj
+                        .get("text")
+                        .and_then(|v| v.as_string())
+                        .unwrap_or_default()
+                        .to_string(),
+                    _ => unreachable!("guarded by matches!(value, Value::Object(_))"),
+                };
+                let mut params = HashMap::new();
+                params.insert("id".to_string(), Value::String(id.to_string()));
+                params.insert("field".to_string(), Value::String("content".to_string()));
+                params.insert("value".to_string(), old);
+                let changes = if new_text != prior.content {
+                    vec![FieldDelta::new(
+                        id.to_string(),
+                        "content",
+                        Value::String(prior.content.clone()),
+                        Value::String(new_text),
+                    )]
+                } else {
+                    Vec::new()
+                };
+                (Some(block_op("set_field", params)), changes)
+            }
+            "marks" => {
+                // Mark-only write: keep the text, replace the mark set. The exact
+                // inverse restores prior (text, marks) atomically via the same
+                // `content=Object` whole-set-restore path. The text never
+                // changes, so the projected `content` column can't fingerprint a
+                // marks-only edit — empty `changes` (single-writer-safe), while
+                // the inverse is still a real, provably-correct restore.
+                let prior_marks = prior.marks.clone().unwrap_or_default();
+                let old = rich_content_restore_value(&prior.content, &prior_marks);
+                let mut params = HashMap::new();
+                params.insert("id".to_string(), Value::String(id.to_string()));
+                params.insert("field".to_string(), Value::String("content".to_string()));
+                params.insert("value".to_string(), old);
                 (Some(block_op("set_field", params)), Vec::new())
             }
             _ => (None, Vec::new()),
@@ -1610,6 +1678,156 @@ mod advice_dismiss_tests {
             backend.get_block(&anchor).await.expect("read").content,
             "a äöü😀task"
         );
+    }
+
+    /// Build a `set_field("content", Object{text, marks})` value payload.
+    fn object_content(text: &str, marks: &[holon_api::MarkSpan]) -> Value {
+        let mut obj = HashMap::new();
+        obj.insert("text".to_string(), Value::String(text.to_string()));
+        obj.insert(
+            "marks".to_string(),
+            Value::String(holon_api::marks_to_json(marks)),
+        );
+        Value::Object(obj)
+    }
+
+    fn bold(start: usize, end: usize) -> holon_api::MarkSpan {
+        holon_api::MarkSpan::new(start, end, holon_api::InlineMark::Bold)
+    }
+
+    async fn replay_inverse(ops: &LoroBlockOperations, inverse: &Operation) {
+        let params: StorageEntity = inverse
+            .params
+            .clone()
+            .into_iter()
+            .map(|(k, v)| (k.into(), v))
+            .collect();
+        ops.execute_operation(&EntityName::new("block"), &inverse.op_name, params)
+            .await
+            .expect("replay inverse");
+    }
+
+    /// A rich `set_field("content", Object{text, marks})` write must carry an
+    /// EXACT inverse: replaying it restores BOTH the prior text and the prior
+    /// mark set byte-for-byte. A prior PLAIN block (marks `None`) must come back
+    /// plain — the whole-set restore strips the marks the forward write added,
+    /// never leaving a Peritext mark pinned to surviving text.
+    #[tokio::test]
+    async fn set_field_object_content_is_reversible_text_and_marks() {
+        let (ops, _dir, anchor) = ops_with_anchor().await;
+        let backend = ops.get_backend("").await.expect("backend");
+
+        // Prior state: plain "a task", marks None.
+        let prior = backend.get_block(&anchor).await.expect("read");
+        assert_eq!(prior.content, "a task");
+        assert_eq!(prior.marks, None);
+
+        // Rich write: change text AND add a Bold mark.
+        let result = ops
+            .set_field(&anchor, "content", object_content("bold text", &[bold(0, 4)]))
+            .await
+            .expect("set_field content Object");
+
+        let after = backend.get_block(&anchor).await.expect("read");
+        assert_eq!(after.content, "bold text");
+        assert_eq!(after.marks, Some(vec![bold(0, 4)]));
+
+        // Inverse shape: set_field on `content`, an Object restoring prior text.
+        let inverse = match &result.undo {
+            UndoAction::Undo(op) => op.clone(),
+            other => panic!("rich content write must be reversible, got {other:?}"),
+        };
+        assert_eq!(inverse.op_name, "set_field");
+        assert_eq!(
+            inverse.params.get("field").and_then(|v| v.as_string()),
+            Some("content")
+        );
+        assert!(
+            matches!(inverse.params.get("value"), Some(Value::Object(_))),
+            "inverse value must be a rich Object payload"
+        );
+
+        // Replay ⇒ back to plain "a task" with marks None (byte + mark exact).
+        replay_inverse(&ops, &inverse).await;
+        let restored = backend.get_block(&anchor).await.expect("read");
+        assert_eq!(restored.content, "a task");
+        assert_eq!(restored.marks, None, "plain prior must restore plain");
+    }
+
+    /// A mark-only `set_field("marks", ...)` write must be reversible: the
+    /// inverse restores the prior mark set (and text) exactly. Starting from an
+    /// already-rich block, replacing its marks and undoing returns the original
+    /// marks.
+    #[tokio::test]
+    async fn set_field_marks_only_is_reversible() {
+        let (ops, _dir, anchor) = ops_with_anchor().await;
+        let backend = ops.get_backend("").await.expect("backend");
+
+        // Make the block rich first: "a task" with Bold over [0,1).
+        ops.set_field(&anchor, "content", object_content("a task", &[bold(0, 1)]))
+            .await
+            .expect("seed rich");
+        assert_eq!(
+            backend.get_block(&anchor).await.expect("read").marks,
+            Some(vec![bold(0, 1)])
+        );
+
+        // Mark-only write: replace marks with Bold over [2,6) ("task").
+        let new_marks = holon_api::marks_to_json(&[bold(2, 6)]);
+        let result = ops
+            .set_field(&anchor, "marks", Value::String(new_marks))
+            .await
+            .expect("set_field marks");
+        let after = backend.get_block(&anchor).await.expect("read");
+        assert_eq!(after.content, "a task", "marks-only write keeps text");
+        assert_eq!(after.marks, Some(vec![bold(2, 6)]));
+
+        let inverse = match &result.undo {
+            UndoAction::Undo(op) => op.clone(),
+            other => panic!("marks-only write must be reversible, got {other:?}"),
+        };
+        assert_eq!(inverse.op_name, "set_field");
+        assert_eq!(
+            inverse.params.get("field").and_then(|v| v.as_string()),
+            Some("content"),
+            "inverse restores via the atomic content=Object path"
+        );
+
+        replay_inverse(&ops, &inverse).await;
+        let restored = backend.get_block(&anchor).await.expect("read");
+        assert_eq!(restored.content, "a task");
+        assert_eq!(
+            restored.marks,
+            Some(vec![bold(0, 1)]),
+            "undo restores the prior mark set exactly"
+        );
+    }
+
+    /// Multibyte round-trip: a rich write over content with non-ASCII scalars
+    /// (mark ranges are Unicode-scalar offsets) must restore byte-for-byte.
+    #[tokio::test]
+    async fn set_field_object_content_multibyte_roundtrip() {
+        let (ops, _dir, anchor) = ops_with_anchor().await;
+        let backend = ops.get_backend("").await.expect("backend");
+
+        // "äöü😀 tail" — Bold over the 4 leading multibyte scalars [0,4).
+        let text = "äöü😀 tail";
+        let result = ops
+            .set_field(&anchor, "content", object_content(text, &[bold(0, 4)]))
+            .await
+            .expect("rich multibyte write");
+        let after = backend.get_block(&anchor).await.expect("read");
+        assert_eq!(after.content, text);
+        assert_eq!(after.marks, Some(vec![bold(0, 4)]));
+
+        let inverse = match &result.undo {
+            UndoAction::Undo(op) => op.clone(),
+            other => panic!("must be reversible, got {other:?}"),
+        };
+        replay_inverse(&ops, &inverse).await;
+        let restored = backend.get_block(&anchor).await.expect("read");
+        assert_eq!(restored.content, "a task");
+        assert_eq!(restored.marks, None);
     }
 
     fn dismiss_params(anchor_id: &str, lesson_id: &str) -> StorageEntity {
