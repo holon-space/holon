@@ -5549,6 +5549,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "holon-mcp-mock"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "holon",
+ "holon-api",
+ "holon-core",
+ "holon-mcp-client",
+ "holon-turso",
+ "rmcp",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
 name = "holon-oracles"
 version = "0.1.0"
 dependencies = [

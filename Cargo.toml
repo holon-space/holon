@@ -21,6 +21,7 @@ members = [
     "crates/holon-pbt-core",
     "crates/holon-integration-tests",
     "crates/holon-mcp-client",
+    "crates/holon-mcp-mock",
     "crates/holon-macros",
     "crates/holon-macros-test",
     "crates/holon-petri",

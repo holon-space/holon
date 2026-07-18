@@ -1,0 +1,35 @@
+[package]
+name = "holon-mcp-mock"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "holon_mcp_mock"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mock-mcp-server"
+path = "src/bin/mock_mcp_server.rs"
+
+[[bin]]
+name = "mock-mcp-raw"
+path = "src/bin/mock_mcp_raw.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "io-std", "io-util"] }
+tracing.workspace = true
+rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", tag = "rmcp-v0.12.0", features = ["server", "transport-io"] }
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+
+[dev-dependencies]
+holon = { workspace = true, features = ["test-helpers", "testing"] }
+holon-api.workspace = true
+holon-core.workspace = true
+holon-turso.workspace = true
+holon-mcp-client.workspace = true
+async-trait.workspace = true
+serde_yaml.workspace = true
+tempfile.workspace = true
