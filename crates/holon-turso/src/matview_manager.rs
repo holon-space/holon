@@ -106,13 +106,17 @@ pub async fn reconcile_named_view(
     // table and/or its `__turso_internal_dbsp_state_*` tables behind WITHOUT a
     // committed view row. A plain `CREATE MATERIALIZED VIEW` then dies with
     // "table <name> already exists" and the app boot-loops (on Android the only
-    // escape was `pm clear` = user data loss). Recover instead: clean the
-    // orphaned DBSP state, `CREATE ... IF NOT EXISTS`, and on a residual
-    // collision drop the orphaned backing objects and retry ONCE. This is
-    // data-safe: a matview is a pure projection over its base tables (e.g.
-    // `block` over `block_raw`), which are never touched here, so the source of
-    // truth survives. If the retry still fails we surface a clear error rather
-    // than looping forever.
+    // escape was `pm clear` = user data loss). Recover instead: `CREATE ... IF
+    // NOT EXISTS` — Turso's create path itself reclaims a current-epoch orphaned
+    // DBSP state table — and on a residual name collision drop the orphaned
+    // *view-named* backing object (NOT the system-prefixed DBSP table, which
+    // Turso forbids dropping) and retry ONCE. `cleanup_orphaned_dbsp_state`
+    // only DISCLOSES any surviving DBSP residue; it never issues the forbidden
+    // `DROP TABLE __turso_internal_*` that was itself the Android boot panic.
+    // This is data-safe: a matview is a pure projection over its base tables
+    // (e.g. `block` over `block_raw`), which are never touched here, so the
+    // source of truth survives. If the retry still fails we surface a clear
+    // error rather than looping forever.
     cleanup_orphaned_dbsp_state(db_handle, view_name).await?;
     let create_idempotent = format!(
         "CREATE MATERIALIZED VIEW IF NOT EXISTS {} AS {}",
@@ -203,28 +207,39 @@ async fn drop_dependent_views(db_handle: &DbHandle, view_name: &str) -> Result<(
     Ok(())
 }
 
-/// Drop the `__turso_internal_dbsp_state_v*_{view_name}` tables left orphaned
-/// by a crash mid-DDL. These are Turso IVM internal state, NOT user data — the
-/// matview is rebuilt from its base tables on recreate. Mirrors
-/// [`MatviewManager::cleanup_orphaned_dbsp_tables`] but as a free function so
-/// the boot-time [`reconcile_named_view`] (which has no `MatviewManager`) can
-/// share the recovery path.
+/// Disclose (never DROP) `__turso_internal_dbsp_state_v*_{view_name}` tables
+/// left behind by a crash mid-DDL or an older DBSP-circuit epoch.
+///
+/// These are Turso IVM internal state, NOT user data. The `__turso_internal_`
+/// prefix is reserved: a user `DROP TABLE` on it bails `Cannot drop system
+/// table ...` — which on Android surfaced as a stale-DB boot panic (this
+/// function's previous `DROP TABLE` was itself the crash). Disposal is Turso's
+/// own responsibility:
+///   - `CREATE MATERIALIZED VIEW` cleans a **current**-version orphan as part
+///     of (re)creation (see turso `translate_create_materialized_view`), so no
+///     `already exists` collision survives the create;
+///   - `DROP VIEW` cleans it when the matview row still exists.
+/// A table matched here is therefore either about to be reclaimed by the
+/// following CREATE, or an **older**-epoch residue whose name carries a
+/// different circuit version so the current CREATE never collides with it.
+/// We surface it loudly (fail-loud disclosure) but leave disposal to Turso;
+/// base tables — the source of truth — are never touched, so no data loss.
 async fn cleanup_orphaned_dbsp_state(db_handle: &DbHandle, view_name: &str) -> Result<()> {
     let pattern = format!("__turso_internal_dbsp_state_v%_{}", view_name);
     let check_sql = format!(
         "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '{}'",
         pattern
     );
-    let orphaned = db_handle.query(&check_sql, HashMap::new()).await?;
-    for row in orphaned {
+    let residual = db_handle.query(&check_sql, HashMap::new()).await?;
+    for row in residual {
         if let Some(Value::String(table_name)) = row.get("name") {
-            tracing::debug!(
-                "[reconcile_named_view] Cleaning orphaned DBSP state table: {}",
-                table_name
+            tracing::warn!(
+                "[reconcile_named_view] Leaving Turso-internal DBSP state table '{table_name}' \
+                 in place: its reserved prefix forbids a user DROP, and disposal belongs to \
+                 Turso's own CREATE/DROP MATERIALIZED VIEW path (current-epoch state is \
+                 reclaimed by the following CREATE; an older-epoch residue does not collide). \
+                 Base tables are untouched — no data loss."
             );
-            db_handle
-                .execute_ddl(&format!("DROP TABLE IF EXISTS {}", table_name))
-                .await?;
         }
     }
     Ok(())
@@ -840,25 +855,13 @@ impl MatviewManager {
         Ok(())
     }
 
+    /// Disclose (never DROP) residual `__turso_internal_dbsp_state_*` tables.
+    /// The `__turso_internal_` prefix is reserved: a user `DROP TABLE` bails
+    /// `Cannot drop system table ...`. Disposal belongs to Turso's own
+    /// CREATE/DROP MATERIALIZED VIEW path — see the free-function
+    /// [`cleanup_orphaned_dbsp_state`] doc for the full rationale.
     async fn cleanup_orphaned_dbsp_tables(&self, view_name: &str) -> anyhow::Result<()> {
-        let pattern = format!("__turso_internal_dbsp_state_v%_{}", view_name);
-        let check_sql = format!(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '{}'",
-            pattern
-        );
-        let orphaned = self.db_handle.query(&check_sql, HashMap::new()).await?;
-        for row in orphaned {
-            if let Some(Value::String(table_name)) = row.get("name") {
-                tracing::debug!(
-                    "[MatviewManager] Cleaning up orphaned DBSP state table: {}",
-                    table_name
-                );
-                self.db_handle
-                    .execute_ddl(&format!("DROP TABLE IF EXISTS {}", table_name))
-                    .await?;
-            }
-        }
-        Ok(())
+        cleanup_orphaned_dbsp_state(&self.db_handle, view_name).await
     }
 }
 
@@ -1002,5 +1005,136 @@ mod tests {
         );
 
         handle.shutdown().await.expect("shutdown");
+    }
+
+    /// Regression: the boot-time DBSP-state cleanup must NEVER issue a
+    /// `DROP TABLE __turso_internal_dbsp_state_*`. Turso reserves the
+    /// `__turso_internal_` prefix and bails `Cannot drop system table ...`,
+    /// which on Android surfaced as a stale-DB boot panic (older schema/DBSP
+    /// epoch left an orphaned state table that the cleanup then tried to DROP).
+    ///
+    /// A live matview owns a real `__turso_internal_dbsp_state_v1_{view}`
+    /// table; driving the cleanup while it exists reproduces the forbidden
+    /// DROP without needing two DBSP circuit versions. Post-fix the cleanup
+    /// discloses the residue but leaves disposal to Turso's own CREATE/DROP
+    /// VIEW dbsp handling, so it must return `Ok` and the matview must survive.
+    #[tokio::test]
+    async fn cleanup_never_issues_forbidden_system_table_drop() {
+        use crate::turso::TursoBackend;
+
+        let (_backend, handle) = TursoBackend::new_in_memory()
+            .await
+            .expect("in-memory backend");
+        handle
+            .execute_ddl("CREATE TABLE IF NOT EXISTS src (id TEXT PRIMARY KEY, v TEXT)")
+            .await
+            .expect("create base table");
+        handle
+            .transition_to_ready()
+            .await
+            .expect("transition to ready");
+
+        reconcile_named_view(&handle, "src_view", "SELECT id, v FROM src")
+            .await
+            .expect("create matview");
+
+        // The matview owns a real system-prefixed DBSP state table.
+        let dbsp = handle
+            .query(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE \
+                 '__turso_internal_dbsp_state_v%_src_view'",
+                HashMap::new(),
+            )
+            .await
+            .expect("query dbsp state table");
+        assert_eq!(dbsp.len(), 1, "matview must create a DBSP state table");
+
+        // The exact panic path: cleanup must not attempt a forbidden DROP on
+        // the system-prefixed DBSP state table.
+        cleanup_orphaned_dbsp_state(&handle, "src_view")
+            .await
+            .expect("cleanup must not issue a forbidden system-table DROP");
+
+        // Matview survived and still resolves against its base table.
+        handle
+            .execute_ddl("INSERT INTO src (id, v) VALUES ('x', '1')")
+            .await
+            .expect("insert into base");
+        let rows = handle
+            .query("SELECT id, v FROM src_view", HashMap::new())
+            .await
+            .expect("query matview after cleanup");
+        assert_eq!(rows.len(), 1, "live matview must survive the cleanup");
+
+        handle.shutdown().await.expect("shutdown");
+    }
+
+    /// Keystone rung for the persisted-DB boot ENVIRONMENT gap.
+    ///
+    /// The composed keystone PBT always starts fresh, so the entire
+    /// "reconcile a derived matview over a persisted DB" class is invisible to
+    /// it — the class the Android stale-DB boot panic belonged to. This rung
+    /// boots a **file-backed** DB, creates a matview (persisting its backing
+    /// btree AND its `__turso_internal_dbsp_state_v1_*` state), shuts down,
+    /// reopens over the SAME file, and reconciles with a CHANGED definition —
+    /// the DROP+CREATE-over-persisted-state path. It must complete without a
+    /// `Cannot drop system table` panic, reflect the new definition, and leave
+    /// the base table (source of truth) intact.
+    #[tokio::test]
+    async fn reconcile_over_persisted_db_survives_definition_change() {
+        use crate::turso::TursoBackend;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("reboot.db");
+
+        // ── Boot 1: create base table + matview, then persist ──────────────
+        {
+            let db = TursoBackend::open_database(&db_path).expect("open boot-1");
+            let (cdc_tx, _rx) = tokio::sync::broadcast::channel(64);
+            let (_backend, handle) = TursoBackend::new(db, cdc_tx).expect("backend boot-1");
+            handle
+                .execute_ddl("CREATE TABLE IF NOT EXISTS src (id TEXT PRIMARY KEY, v TEXT, w TEXT)")
+                .await
+                .expect("create base table");
+            handle.transition_to_ready().await.expect("ready boot-1");
+            handle
+                .execute_ddl("INSERT INTO src (id, v, w) VALUES ('x', '1', 'keep')")
+                .await
+                .expect("seed base row");
+            let created = reconcile_named_view(&handle, "src_view", "SELECT id, v FROM src")
+                .await
+                .expect("boot-1 create matview");
+            assert!(created, "boot-1 should create the matview");
+            handle.shutdown().await.expect("shutdown boot-1");
+        }
+
+        // ── Boot 2 over the SAME file: reconcile a CHANGED definition ──────
+        let db = TursoBackend::open_database(&db_path).expect("open boot-2");
+        let (cdc_tx, _rx) = tokio::sync::broadcast::channel(64);
+        let (_backend, handle) = TursoBackend::new(db, cdc_tx).expect("backend boot-2");
+        handle.transition_to_ready().await.expect("ready boot-2");
+
+        // Adds a column to the SELECT — forces DROP+CREATE over the persisted
+        // matview and its persisted DBSP state. Pre-fix this reconcile path
+        // could hit `Cannot drop system table` on an orphaned state table.
+        let changed = reconcile_named_view(&handle, "src_view", "SELECT id, v, w FROM src")
+            .await
+            .expect("boot-2 reconcile over persisted DB must not panic");
+        assert!(changed, "changed definition should recreate the matview");
+
+        let rows = handle
+            .query("SELECT id, v, w FROM src_view", HashMap::new())
+            .await
+            .expect("query recreated matview");
+        assert_eq!(rows.len(), 1, "recreated matview must project the base row");
+
+        // Base table (source of truth) survived the reboot + reconcile.
+        let base = handle
+            .query("SELECT w FROM src WHERE id = 'x'", HashMap::new())
+            .await
+            .expect("query base table after reboot");
+        assert_eq!(base.len(), 1, "base row must survive reboot + reconcile");
+
+        handle.shutdown().await.expect("shutdown boot-2");
     }
 }
