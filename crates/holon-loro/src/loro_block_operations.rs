@@ -950,29 +950,98 @@ impl MarkOperations<Block> for LoroBlockOperations {
 #[async_trait]
 impl TextOperations<Block> for LoroBlockOperations {
     async fn insert_text(&self, id: &str, pos: i64, text: String) -> Result<OperationResult> {
-        let pos = usize::try_from(pos)
+        let pos_usize = usize::try_from(pos)
             .map_err(|_| format!("insert_text: pos must be non-negative, got {pos}"))?;
         let (doc_path, backend) = self.find_doc_for_block(id).await?;
+        // Capture prior content so the projected `content` column can be
+        // fingerprinted (arms the undo stale-guard, same as set_field("content")).
+        let old_content = backend
+            .get_block(id)
+            .await
+            .map_err(|e| format!("insert_text: capture prior content: {e}"))?
+            .content;
         backend
-            .insert_text(id, pos, &text)
+            .insert_text(id, pos_usize, &text)
             .await
             .map_err(|e| format!("insert_text: {e}"))?;
         self.save_doc(&doc_path).await?;
-        Ok(OperationResult::irreversible(vec![]))
+        let new_content = backend
+            .get_block(id)
+            .await
+            .map_err(|e| format!("insert_text: read post-insert content: {e}"))?
+            .content;
+        // Exact inverse: delete the range just inserted. LoroText positions are
+        // Unicode scalars, so the deleted length is the scalar count of `text` —
+        // the same unit `delete_text`'s `len` expects.
+        let inverse = block_op(
+            "delete_text",
+            HashMap::from([
+                ("id".to_string(), Value::String(id.to_string())),
+                ("pos".to_string(), Value::Integer(pos)),
+                (
+                    "len".to_string(),
+                    Value::Integer(text.chars().count() as i64),
+                ),
+            ]),
+        );
+        Ok(OperationResult::new(
+            vec![FieldDelta::new(
+                id.to_string(),
+                "content",
+                Value::String(old_content),
+                Value::String(new_content),
+            )],
+            inverse,
+        ))
     }
 
     async fn delete_text(&self, id: &str, pos: i64, len: i64) -> Result<OperationResult> {
-        let pos = usize::try_from(pos)
+        let pos_usize = usize::try_from(pos)
             .map_err(|_| format!("delete_text: pos must be non-negative, got {pos}"))?;
-        let len = usize::try_from(len)
+        let len_usize = usize::try_from(len)
             .map_err(|_| format!("delete_text: len must be non-negative, got {len}"))?;
         let (doc_path, backend) = self.find_doc_for_block(id).await?;
+        // Capture the exact substring about to be deleted (Unicode-scalar range
+        // [pos, pos+len)) so the inverse can re-insert it verbatim. Char-indexed
+        // to match LoroText's scalar positions.
+        let old_content = backend
+            .get_block(id)
+            .await
+            .map_err(|e| format!("delete_text: capture prior content: {e}"))?
+            .content;
+        let deleted: String = old_content
+            .chars()
+            .skip(pos_usize)
+            .take(len_usize)
+            .collect();
         backend
-            .delete_text(id, pos, len)
+            .delete_text(id, pos_usize, len_usize)
             .await
             .map_err(|e| format!("delete_text: {e}"))?;
         self.save_doc(&doc_path).await?;
-        Ok(OperationResult::irreversible(vec![]))
+        let new_content = backend
+            .get_block(id)
+            .await
+            .map_err(|e| format!("delete_text: read post-delete content: {e}"))?
+            .content;
+        // Exact inverse: re-insert the captured substring at the same position.
+        let inverse = block_op(
+            "insert_text",
+            HashMap::from([
+                ("id".to_string(), Value::String(id.to_string())),
+                ("pos".to_string(), Value::Integer(pos)),
+                ("text".to_string(), Value::String(deleted)),
+            ]),
+        );
+        Ok(OperationResult::new(
+            vec![FieldDelta::new(
+                id.to_string(),
+                "content",
+                Value::String(old_content),
+                Value::String(new_content),
+            )],
+            inverse,
+        ))
     }
 }
 
@@ -1387,6 +1456,159 @@ mod advice_dismiss_tests {
             matches!(&result.undo, UndoAction::Undo(op)
                 if op.params.get("value").and_then(|v| v.as_string()) == Some("a task")),
             "inverse must restore the prior content"
+        );
+    }
+
+    /// `insert_text` must be reversible with an exact `delete_text` inverse:
+    /// the inserted range is `text.chars().count()` Unicode scalars at `pos`,
+    /// and replaying the inverse restores the block byte-for-byte. Gates the
+    /// composite-transform coverage requirement (incremental text edits inside
+    /// a compound UndoEntry).
+    #[tokio::test]
+    async fn insert_text_is_reversible_with_exact_delete_inverse() {
+        let (ops, _dir, anchor) = ops_with_anchor().await;
+        let backend = ops.get_backend("").await.expect("backend");
+
+        // "a task" -> insert "XX" at scalar 2 -> "a XXtask".
+        let result = ops
+            .insert_text(&anchor, 2, "XX".into())
+            .await
+            .expect("insert_text");
+        assert_eq!(
+            backend.get_block(&anchor).await.expect("read").content,
+            "a XXtask"
+        );
+
+        let inverse = match &result.undo {
+            UndoAction::Undo(op) => op.clone(),
+            other => panic!("insert_text must be reversible, got {other:?}"),
+        };
+        assert_eq!(inverse.op_name, "delete_text");
+        assert_eq!(inverse.params.get("pos"), Some(&Value::Integer(2)));
+        assert_eq!(inverse.params.get("len"), Some(&Value::Integer(2)));
+
+        // Replaying the inverse restores the original content.
+        let inverse_params: StorageEntity = inverse
+            .params
+            .into_iter()
+            .map(|(k, v)| (k.into(), v))
+            .collect();
+        ops.execute_operation(&EntityName::new("block"), "delete_text", inverse_params)
+            .await
+            .expect("replay inverse");
+        assert_eq!(
+            backend.get_block(&anchor).await.expect("read").content,
+            "a task"
+        );
+    }
+
+    /// `delete_text` must be reversible with an exact `insert_text` inverse
+    /// carrying the deleted substring verbatim.
+    #[tokio::test]
+    async fn delete_text_is_reversible_with_exact_insert_inverse() {
+        let (ops, _dir, anchor) = ops_with_anchor().await;
+        let backend = ops.get_backend("").await.expect("backend");
+
+        // "a task" -> delete 4 scalars at 2 ("task") -> "a ".
+        let result = ops.delete_text(&anchor, 2, 4).await.expect("delete_text");
+        assert_eq!(
+            backend.get_block(&anchor).await.expect("read").content,
+            "a "
+        );
+
+        let inverse = match &result.undo {
+            UndoAction::Undo(op) => op.clone(),
+            other => panic!("delete_text must be reversible, got {other:?}"),
+        };
+        assert_eq!(inverse.op_name, "insert_text");
+        assert_eq!(inverse.params.get("pos"), Some(&Value::Integer(2)));
+        assert_eq!(
+            inverse.params.get("text"),
+            Some(&Value::String("task".into()))
+        );
+
+        let inverse_params: StorageEntity = inverse
+            .params
+            .into_iter()
+            .map(|(k, v)| (k.into(), v))
+            .collect();
+        ops.execute_operation(&EntityName::new("block"), "insert_text", inverse_params)
+            .await
+            .expect("replay inverse");
+        assert_eq!(
+            backend.get_block(&anchor).await.expect("read").content,
+            "a task"
+        );
+    }
+
+    /// Regression guard for the index unit of the text inverses: Loro's plain
+    /// `insert`/`delete` count Unicode scalars, and the captured inverse uses
+    /// `.chars()` (also scalars). A future switch to the `_utf8` byte-indexed
+    /// Loro APIs would silently corrupt multi-byte content — this test fails
+    /// in that world ("äöü😀" is 4 scalars but 10 UTF-8 bytes).
+    #[tokio::test]
+    async fn text_inverses_are_scalar_indexed_for_multibyte_content() {
+        let (ops, _dir, anchor) = ops_with_anchor().await;
+        let backend = ops.get_backend("").await.expect("backend");
+
+        let result = ops
+            .insert_text(&anchor, 2, "äöü😀".into())
+            .await
+            .expect("insert_text");
+        assert_eq!(
+            backend.get_block(&anchor).await.expect("read").content,
+            "a äöü😀task"
+        );
+        let inverse = match &result.undo {
+            UndoAction::Undo(op) => op.clone(),
+            other => panic!("insert_text must be reversible, got {other:?}"),
+        };
+        assert_eq!(inverse.op_name, "delete_text");
+        assert_eq!(inverse.params.get("pos"), Some(&Value::Integer(2)));
+        assert_eq!(inverse.params.get("len"), Some(&Value::Integer(4)));
+        let inverse_params: StorageEntity = inverse
+            .params
+            .into_iter()
+            .map(|(k, v)| (k.into(), v))
+            .collect();
+        ops.execute_operation(&EntityName::new("block"), "delete_text", inverse_params)
+            .await
+            .expect("replay insert inverse");
+        assert_eq!(
+            backend.get_block(&anchor).await.expect("read").content,
+            "a task"
+        );
+
+        // Delete across multi-byte content and replay its insert inverse.
+        ops.insert_text(&anchor, 2, "äöü😀".into())
+            .await
+            .expect("re-insert");
+        let result = ops.delete_text(&anchor, 3, 2).await.expect("delete_text");
+        assert_eq!(
+            backend.get_block(&anchor).await.expect("read").content,
+            "a ä😀task"
+        );
+        let inverse = match &result.undo {
+            UndoAction::Undo(op) => op.clone(),
+            other => panic!("delete_text must be reversible, got {other:?}"),
+        };
+        assert_eq!(inverse.op_name, "insert_text");
+        assert_eq!(inverse.params.get("pos"), Some(&Value::Integer(3)));
+        assert_eq!(
+            inverse.params.get("text"),
+            Some(&Value::String("öü".into()))
+        );
+        let inverse_params: StorageEntity = inverse
+            .params
+            .into_iter()
+            .map(|(k, v)| (k.into(), v))
+            .collect();
+        ops.execute_operation(&EntityName::new("block"), "insert_text", inverse_params)
+            .await
+            .expect("replay delete inverse");
+        assert_eq!(
+            backend.get_block(&anchor).await.expect("read").content,
+            "a äöü😀task"
         );
     }
 
