@@ -26,6 +26,7 @@
 //! mcp, integration tests) — never the storage-agnostic layers, and never
 //! the wasm frontends (which bring their own wiring).
 
+pub mod boot_error;
 pub mod consolidator_epoch;
 pub mod headless_builder_services;
 pub mod loro_seams;
@@ -38,6 +39,9 @@ pub mod session;
 pub mod turso_seams;
 pub mod wiring;
 
+pub use boot_error::BootComponent;
+pub use boot_error::BootError;
+pub use boot_error::BootStage;
 pub use headless_builder_services::HeadlessBuilderServices;
 pub use mcp_integrations::McpIntegrationRegistry;
 pub use mcp_integrations::McpIntegrationsModule;

@@ -7,14 +7,42 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::*;
+use holon_app::BootComponent;
+use holon_app::BootError;
+use holon_app::BootStage;
 use holon_frontend::FrontendSession;
 use holon_frontend::HolonConfig;
 use holon_frontend::SessionConfig;
 
 use crate::geometry::BoundsRegistry;
 
+/// Single mobile boot-failure chokepoint.
+///
+/// The recovery shell (increment 2) does not exist yet, so a load-bearing boot
+/// failure still terminates the process — but it terminates HERE, through one
+/// funnel that logs the structured, component-attributed [`BootError`] loudly
+/// on every platform first (android_logger bridges `log`; iOS routes `tracing`
+/// to os_log; stderr always). Increment 2 replaces the `exit` with the rung-0
+/// recovery shell without touching any call site. No `catch_unwind` — that is
+/// open question 2, deliberately unresolved.
+fn boot_failed(err: BootError) -> ! {
+    let report = err.structured_report();
+    #[cfg(target_os = "android")]
+    log::error!("BOOT FAILED\n{report}");
+    #[cfg(not(target_os = "android"))]
+    tracing::error!("BOOT FAILED\n{report}");
+    eprintln!("BOOT FAILED\n{report}");
+    std::process::exit(1);
+}
+
 fn open_holon_window(cx: &mut App, db_path: Option<PathBuf>, orgmode_root: Option<PathBuf>) {
-    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+    let rt = tokio::runtime::Runtime::new().unwrap_or_else(|e| {
+        boot_failed(BootError::new(
+            BootComponent::Platform,
+            BootStage::ConfigLoad,
+            anyhow::anyhow!("Failed to create tokio runtime: {e}"),
+        ))
+    });
     let rt_handle = rt.handle().clone();
 
     let (session, engine, debug, app) = rt.block_on(async {
@@ -51,7 +79,9 @@ fn open_holon_window(cx: &mut App, db_path: Option<PathBuf>, orgmode_root: Optio
             config_dir,
             locked_keys: std::collections::HashSet::new(),
         });
-        app.bootstrap().await.expect("GpuiModule bootstrap failed");
+        if let Err(e) = app.bootstrap().await {
+            boot_failed(BootError::from_bootstrap_error(e));
+        }
 
         let injector = app.injector();
         let session = injector.resolve::<FrontendSession>();
@@ -118,7 +148,13 @@ fn open_holon_window(cx: &mut App, db_path: Option<PathBuf>, orgmode_root: Optio
         "Holon",
         cx,
     )
-    .expect("rebindable Holon window failed to open");
+    .unwrap_or_else(|| {
+        boot_failed(BootError::new(
+            BootComponent::Platform,
+            BootStage::SessionResolve,
+            anyhow::anyhow!("rebindable Holon window failed to open"),
+        ))
+    });
 
     // Install the gpui-side reset builder so the (tokio) `reset_vault` tool can
     // boot a fresh SUT without a second MCP server. It runs on whatever runtime
@@ -171,18 +207,42 @@ fn ios_data_paths() -> (Option<PathBuf>, Option<PathBuf>) {
     let orgmode_root = home.as_ref().map(|h| h.join("Documents").join("holon-pkm"));
     if let Some(db) = db_path.as_ref() {
         if let Some(parent) = db.parent() {
-            std::fs::create_dir_all(parent).expect("create Library dir for holon.db");
+            std::fs::create_dir_all(parent).unwrap_or_else(|e| {
+                boot_failed(BootError::new(
+                    BootComponent::Config,
+                    BootStage::ConfigLoad,
+                    anyhow::anyhow!("create Library dir for holon.db: {e}"),
+                ))
+            });
         }
     }
     if let Some(org) = orgmode_root.as_ref() {
-        std::fs::create_dir_all(org).expect("create orgmode root dir");
+        std::fs::create_dir_all(org).unwrap_or_else(|e| {
+            boot_failed(BootError::new(
+                BootComponent::Config,
+                BootStage::ConfigLoad,
+                anyhow::anyhow!("create orgmode root dir: {e}"),
+            ))
+        });
         let is_empty = std::fs::read_dir(org)
-            .expect("read orgmode root dir")
+            .unwrap_or_else(|e| {
+                boot_failed(BootError::new(
+                    BootComponent::Config,
+                    BootStage::ConfigLoad,
+                    anyhow::anyhow!("read orgmode root dir: {e}"),
+                ))
+            })
             .next()
             .is_none();
         if is_empty {
             let seed = org.join("index.org");
-            std::fs::write(&seed, DEFAULT_INDEX_ORG).expect("write seed index.org");
+            std::fs::write(&seed, DEFAULT_INDEX_ORG).unwrap_or_else(|e| {
+                boot_failed(BootError::new(
+                    BootComponent::Config,
+                    BootStage::ConfigLoad,
+                    anyhow::anyhow!("write seed index.org: {e}"),
+                ))
+            });
             eprintln!("GPUI iOS: seeded {}", seed.display());
         }
         // The Journals page (`block:journals` + its query/render/auto-create
@@ -263,8 +323,13 @@ fn android_main(app: android_activity::AndroidApp) {
     let _platform = gpui_mobile::android::jni::init_platform(&app);
     log::info!("android_main: platform initialised");
 
-    let shared = gpui_mobile::android::jni::shared_platform()
-        .expect("shared_platform() returned None after init_platform");
+    let shared = gpui_mobile::android::jni::shared_platform().unwrap_or_else(|| {
+        boot_failed(BootError::new(
+            BootComponent::Platform,
+            BootStage::ContainerConfigure,
+            anyhow::anyhow!("shared_platform() returned None after init_platform"),
+        ))
+    });
 
     let gpui_app = Application::with_platform(std::rc::Rc::new(shared));
     gpui_app.run(|cx| {
