@@ -884,7 +884,25 @@ fn resolve_parent_core(
     let tree_id = uri_to_tree_id(parent_uri)
         .or_else(|| {
             if parent_uri.is_block() {
-                id_cache.lock().unwrap().get(parent_uri.id()).copied()
+                let cached = id_cache.lock().unwrap().get(parent_uri.id()).copied();
+                match cached {
+                    // Live cache hit — use it.
+                    Some(tid) if !node_deleted_now(tree, tid) => Some(tid),
+                    // Stale hit: the cached node is TOMBSTONED. loro 1.12's
+                    // get_meta returns Ok for a tombstoned (deleted-but-still-
+                    // existing) node, so the old `get_meta(tid).is_ok()` guard
+                    // would serve it as a live parent — attaching children under
+                    // a dead node. This bites cache entries tombstoned by a
+                    // REMOTE / CRDT-merge delete, which never runs delete_block's
+                    // uncache. Drop the stale entry and fall through to the tree
+                    // walk below, which re-resolves to the live node if the same
+                    // stable id was recreated under a new TreeID.
+                    Some(_) => {
+                        id_cache.lock().unwrap().remove(parent_uri.id());
+                        None
+                    }
+                    None => None,
+                }
             } else {
                 None
             }
@@ -3120,7 +3138,21 @@ impl LoroBackend {
     /// Checks cache first, falls back to linear scan + cache population.
     pub async fn find_tree_id_by_stable_id(&self, stable_id: &str) -> Option<loro::TreeID> {
         if let Some(tid) = self.resolve_stable_id_cached(stable_id) {
-            return Some(tid);
+            // Validate the cached TreeID is still alive. A delete → undo(create)
+            // resurrects the SAME stable id under a NEW TreeID (delete+recreate,
+            // not in-place un-delete), so a handle that cached the pre-delete
+            // TreeID would otherwise resolve to the tombstoned node and report
+            // the restored block as missing. On a dead hit, drop the stale entry
+            // and fall through to the tree-walk below, which re-resolves and
+            // re-caches the live TreeID.
+            let alive = self
+                .collab_doc
+                .with_read(|doc| Ok(!node_deleted_now(&doc.get_tree(TREE_NAME), tid)))
+                .unwrap_or(false);
+            if alive {
+                return Some(tid);
+            }
+            self.uncache_stable_id(stable_id);
         }
         let stable_id_owned = stable_id.to_string();
         let id_cache = self.id_cache.clone();
@@ -4215,6 +4247,76 @@ mod diff_checkout_race_tests {
             )
             .await
             .unwrap();
+    }
+
+    /// REMOTE-DELETE STALE-PARENT HOLE (verifier finding d): a stable-id cache
+    /// entry tombstoned by a delete that bypasses THIS backend's uncache — a
+    /// remote / CRDT-merge delete, modelled here by deleting through a SECOND
+    /// backend/handle on the same doc — must NOT be served as a live parent.
+    /// loro 1.12's `get_meta` returns Ok for a tombstoned (deleted-but-existing)
+    /// node, so the old `get_meta(tid).is_ok()` guard would attach a new child
+    /// UNDER the dead node. The liveness (`node_deleted_now`) guard drops the
+    /// stale entry and re-resolves; here the parent is truly gone, so the create
+    /// must fail LOUD (ParentNotFound), never silently parent under a tombstone.
+    #[tokio::test]
+    async fn remote_delete_tombstoned_parent_never_served_from_stale_cache() {
+        let doc = Arc::new(LoroDocument::new("remote-del".to_string()).unwrap());
+        let backend_a = LoroBackend::from_document(doc.clone());
+        let backend_b = LoroBackend::from_document(doc.clone());
+
+        // A creates the parent — this caches "parent" → its live TreeID in A's
+        // (per-backend) id_cache.
+        backend_a
+            .create_block_with_properties(
+                EntityUri::no_parent(),
+                BlockContent::text("parent"),
+                Some(EntityUri::block("parent")),
+                &HashMap::new(),
+                &Tags::default(),
+                &[],
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(
+            backend_a.peek_id_cache("parent").is_some(),
+            "precondition: A cached the parent's live TreeID"
+        );
+
+        // A REMOTE delete: B removes the parent on the SHARED doc. `delete_block`
+        // uncaches from B's own cache only — A's cache still points at the now-
+        // tombstoned node, exactly the shape a CRDT-merge delete leaves locally.
+        backend_b.delete_block("block:parent").await.unwrap();
+        assert!(
+            backend_a.peek_id_cache("parent").is_some(),
+            "the remote delete must NOT touch A's cache — the stale entry is the \
+             hole under test"
+        );
+
+        // A now creates a child under the (dead) parent. With the tombstone-blind
+        // `get_meta().is_ok()` guard this SUCCEEDED, attaching the child under a
+        // deleted node. With the liveness guard the stale entry is evicted, the
+        // tree-walk finds no live parent, and the create fails loud.
+        let result = backend_a
+            .create_block_with_properties(
+                EntityUri::block("parent"),
+                BlockContent::text("child"),
+                Some(EntityUri::block("child")),
+                &HashMap::new(),
+                &Tags::default(),
+                &[],
+                &[],
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "create under a remotely-tombstoned parent must fail, not attach the \
+             child under a dead node; got {result:?}"
+        );
+        assert!(
+            backend_a.peek_id_cache("parent").is_none(),
+            "the stale tombstone entry must have been evicted during re-resolution"
+        );
     }
 
     /// PROJECTION-GAP PROBE (2026-07-13): a `set_block_tags` meta-map edit on

@@ -677,11 +677,35 @@ impl CrudOperations<Block> for LoroBlockOperations {
         // All blocks live in the single global tree
         let doc_id = String::new();
 
-        let content = fields
-            .get("content")
-            .and_then(|v| v.as_string())
-            .map(|s| s.to_string())
-            .unwrap_or_default();
+        // `content` is normally a plain String. A `delete` inverse restores a
+        // rich block as an `Object{text, marks}` payload (see `delete`) so the
+        // marks come back atomically with the text: extract the text for
+        // `BlockContent`, and remember the marks to re-apply via Peritext once
+        // the node exists (`create_block_with_properties` writes only the raw
+        // text).
+        let (content, restore_marks): (String, Option<Vec<holon_api::MarkSpan>>) =
+            match fields.get("content") {
+                Some(Value::Object(obj)) => {
+                    let text = obj
+                        .get("text")
+                        .and_then(|v| v.as_string())
+                        .ok_or("create: content Object missing 'text' string field")?
+                        .to_string();
+                    let marks_json = obj
+                        .get("marks")
+                        // ALLOW(jsonb_as_string): payload field, not a CDC row.
+                        .and_then(|v| v.as_string())
+                        .ok_or("create: content Object missing 'marks' JSON string field")?;
+                    let marks = holon_api::marks_from_json(marks_json)
+                        .map_err(|e| format!("create: content marks JSON parse error: {e}"))?;
+                    (text, Some(marks))
+                }
+                Some(Value::String(s)) => (s.clone(), None),
+                None => (String::new(), None),
+                Some(other) => {
+                    return Err(format!("create: unsupported content shape {other:?}").into());
+                }
+            };
 
         let content_type: ContentType = fields
             .get("content_type")
@@ -692,6 +716,11 @@ impl CrudOperations<Block> for LoroBlockOperations {
 
         let source_language = fields
             .get("source_language")
+            .and_then(|v| v.as_string())
+            .map(|s| s.to_string());
+
+        let source_name = fields
+            .get("source_name")
             .and_then(|v| v.as_string())
             .map(|s| s.to_string());
 
@@ -710,6 +739,33 @@ impl CrudOperations<Block> for LoroBlockOperations {
             source_language
         );
 
+        // Edge fields (tags / requires / advice_suppressed) are set-valued
+        // junctions the projector reads from dedicated Loro meta keys, NOT the
+        // `properties` blob. A `delete` inverse restores them by passing them
+        // here; absent (every normal create caller) ⇒ empty, unchanged
+        // behaviour. Routing them into `properties` would silently orphan a
+        // resurrected page (the `Page` tag makes a doc resolvable).
+        let tags: holon_api::Tags = match fields.get("tags") {
+            Some(v) => edge_string_targets(v, "tags")?.into_iter().collect(),
+            None => holon_api::Tags::default(),
+        };
+        let requires: Vec<EntityUri> = match fields.get("requires") {
+            Some(v) => edge_string_targets(v, "requires")?
+                .iter()
+                // ALLOW(entity_uri_from_raw): edge target from create op params dict
+                .map(|s| EntityUri::from_raw(s))
+                .collect(),
+            None => Vec::new(),
+        };
+        let advice_suppressed: Vec<EntityUri> = match fields.get("advice_suppressed") {
+            Some(v) => edge_string_targets(v, "advice_suppressed")?
+                .iter()
+                // ALLOW(entity_uri_from_raw): edge target from create op params dict
+                .map(|s| EntityUri::from_raw(s))
+                .collect(),
+            None => Vec::new(),
+        };
+
         // Build the appropriate BlockContent based on content_type. Image must
         // map to the dedicated variant — otherwise the block is stored in Loro
         // as `content_type = "text"` and the org `[[file:…]]` image classification
@@ -717,7 +773,9 @@ impl CrudOperations<Block> for LoroBlockOperations {
         let block_content = match content_type {
             ContentType::Source => {
                 let lang = source_language.as_deref().unwrap_or("text");
-                BlockContent::source(lang, content.clone())
+                let mut sb = holon_api::block::SourceBlock::new(lang, content.clone());
+                sb.name = source_name.clone();
+                BlockContent::Source(sb)
             }
             ContentType::Image => BlockContent::image(content.clone()),
             ContentType::Text => BlockContent::text(content.clone()),
@@ -768,7 +826,15 @@ impl CrudOperations<Block> for LoroBlockOperations {
             // ALLOW(entity_uri_from_raw): block_id from operation params 'id' field
             let block_uri = block_id.map(|id| holon_api::EntityUri::from_raw(&id));
             backend
-                .create_block(parent_uri, block_content, block_uri)
+                .create_block_with_properties(
+                    parent_uri,
+                    block_content,
+                    block_uri,
+                    &HashMap::new(),
+                    &tags,
+                    &requires,
+                    &advice_suppressed,
+                )
                 .await
                 .map_err(|e| format!("Failed to create block: {}", e))?
         };
@@ -785,6 +851,12 @@ impl CrudOperations<Block> for LoroBlockOperations {
             "source_name",
             "source_header_args",
             "source_results",
+            // Edge fields routed to their junctions above (not the props blob).
+            "tags",
+            "requires",
+            "advice_suppressed",
+            // Positional anchor for a delete-inverse restore (see below).
+            "after",
         ];
         for (key, value) in &fields {
             if !handled_fields.contains(&key.as_ref()) {
@@ -796,6 +868,38 @@ impl CrudOperations<Block> for LoroBlockOperations {
                 .update_block_properties(block.id.as_str(), &props)
                 .await
                 .map_err(|e| format!("Failed to set properties: {}", e))?;
+        }
+
+        // Rich content restore (delete inverse): re-apply the captured marks via
+        // Peritext over the just-written text. `create_block_with_properties`
+        // wrote the raw text only, so a marked block would otherwise resurrect
+        // plain — lossy. `update_block_marked` rewrites text AND marks together.
+        if let Some(marks) = &restore_marks {
+            backend
+                .update_block_marked(block.id.as_str(), &content, marks)
+                .await
+                .map_err(|e| format!("create: restore marks for {}: {e}", block.id))?;
+        }
+
+        // Positional restore (delete inverse): place the block at its original
+        // sibling slot. `after` = predecessor sibling id (String), or Null for
+        // "first child". Absent ⇒ leave it where `create` put it (append) —
+        // every normal create caller. Loro owns order via the fractional index,
+        // so this is the single primitive that restores sibling position.
+        if let Some(after_val) = fields.get("after") {
+            let predecessor = match after_val {
+                Value::String(p) => Some(p.as_str()),
+                Value::Null => None,
+                other => {
+                    return Err(
+                        format!("create: 'after' must be String or Null, got {other:?}").into(),
+                    );
+                }
+            };
+            backend
+                .update_block_position(block.id.as_str(), &parent_id, predecessor)
+                .await
+                .map_err(|e| format!("create: restore position for {}: {e}", block.id))?;
         }
 
         // Save
@@ -839,6 +943,66 @@ impl CrudOperations<Block> for LoroBlockOperations {
     async fn delete(&self, id: &str) -> Result<OperationResult> {
         let (doc_path, backend) = self.find_doc_for_block(id).await?;
 
+        // Capture the FULL block state BEFORE deleting so a LEAF delete is
+        // identity-invertible: the inverse is a `create` with the SAME id,
+        // parent_id, content+marks, tags/edges, and properties, restored at the
+        // SAME sibling position (ADR 0024 — preserve identity, never
+        // delete+recreate). A delete that CASCADES to descendants stays
+        // `DeclaredIrreversible` (fail-loud, never lossy): faithfully
+        // resurrecting an ordered subtree is out of scope, exactly the line the
+        // SqlOnly authority draws.
+        let captured = match backend.get_block(id).await {
+            Ok(block) => Some(block),
+            // Absent (never seeded / already deleted): `delete_block` is an
+            // idempotent no-op and there is nothing to resurrect.
+            Err(ApiError::BlockNotFound { .. }) => None,
+            Err(e) => return Err(format!("delete: capture block {id}: {e}").into()),
+        };
+
+        // Leaf-vs-subtree and the pre-delete sibling predecessor are read
+        // BEFORE the delete removes the node from the tree.
+        let inverse = match &captured {
+            Some(block) => {
+                let has_children = !backend
+                    .list_children(id)
+                    .await
+                    .map_err(|e| format!("delete: list children of {id}: {e}"))?
+                    .is_empty();
+                if has_children {
+                    None
+                } else {
+                    let siblings = backend
+                        .list_children(block.parent_id.as_str())
+                        .await
+                        .map_err(|e| {
+                            format!("delete: list siblings under {}: {e}", block.parent_id)
+                        })?;
+                    // ALLOW(entity_uri_from_raw): sibling ids read back from the Loro tree
+                    let target = EntityUri::from_raw(id);
+                    let idx = siblings
+                        .iter()
+                        // ALLOW(entity_uri_from_raw): sibling ids read back from the Loro tree
+                        .position(|s| EntityUri::from_raw(s) == target)
+                        .ok_or_else(|| {
+                            format!(
+                                "delete: block {id} not among parent {} children",
+                                block.parent_id
+                            )
+                        })?;
+                    let predecessor = if idx == 0 {
+                        None
+                    } else {
+                        Some(siblings[idx - 1].clone())
+                    };
+                    Some(block_op(
+                        "create",
+                        Self::delete_inverse_create_params(block, predecessor),
+                    ))
+                }
+            }
+            None => None,
+        };
+
         backend
             .delete_block(id)
             .await
@@ -846,11 +1010,106 @@ impl CrudOperations<Block> for LoroBlockOperations {
 
         self.save_doc(&doc_path).await?;
 
-        Ok(OperationResult::irreversible(vec![]))
+        match (captured, inverse) {
+            // Leaf: exact create-inverse. Forward fingerprint mirrors the
+            // SqlOnly authority — the `id` field is present pre-delete and
+            // absent after, so an undo (`create`) drops loudly if the id was
+            // resurrected under it before the undo ran.
+            (Some(_), Some(create_op)) => Ok(OperationResult::new(
+                vec![FieldDelta::new(
+                    id.to_string(),
+                    "id",
+                    Value::String(id.to_string()),
+                    Value::Null,
+                )],
+                create_op,
+            )),
+            (Some(_), None) => Ok(OperationResult::declared_irreversible(
+                vec![],
+                "delete: subtree resurrection not yet implemented (Loro authority)",
+            )),
+            (None, _) => Ok(OperationResult::declared_irreversible(
+                vec![],
+                "delete: target block absent (nothing to resurrect)",
+            )),
+        }
     }
 }
 
 impl LoroBlockOperations {
+    /// Build the `create`-op params that resurrect a just-deleted LEAF block
+    /// identically: same id, parent, content (rich `Object{text, marks}` when
+    /// the block carried marks, else plain text), edge fields, every stored
+    /// property (task_state + its category sidecar, DEADLINE/PRIORITY, …), and
+    /// an `after` positional anchor (predecessor sibling id, or `Null` for
+    /// "first child") so `create` restores it at its original slot.
+    fn delete_inverse_create_params(
+        block: &Block,
+        predecessor: Option<String>,
+    ) -> HashMap<String, Value> {
+        let mut params = HashMap::new();
+        params.insert("id".into(), Value::String(block.id.to_string()));
+        params.insert("parent_id".into(), Value::String(block.parent_id.to_string()));
+        params.insert(
+            "content_type".into(),
+            Value::String(block.content_type.to_string()),
+        );
+        // Rich block ⇒ atomic Object payload so `create` reapplies marks over
+        // the same text; plain block ⇒ bare string.
+        let content = match &block.marks {
+            Some(marks) => rich_content_restore_value(&block.content, marks),
+            None => Value::String(block.content.clone()),
+        };
+        params.insert("content".into(), content);
+        if let Some(lang) = &block.source_language {
+            params.insert("source_language".into(), Value::String(lang.to_string()));
+        }
+        if let Some(name) = &block.source_name {
+            params.insert("source_name".into(), Value::String(name.clone()));
+        }
+        if !block.tags.is_empty() {
+            params.insert(
+                "tags".into(),
+                Value::Array(block.tags.to_vec().into_iter().map(Value::String).collect()),
+            );
+        }
+        if !block.requires.is_empty() {
+            params.insert(
+                "requires".into(),
+                Value::Array(
+                    block
+                        .requires
+                        .iter()
+                        .map(|u| Value::String(u.to_string()))
+                        .collect(),
+                ),
+            );
+        }
+        if !block.advice_suppressed.is_empty() {
+            params.insert(
+                "advice_suppressed".into(),
+                Value::Array(
+                    block
+                        .advice_suppressed
+                        .iter()
+                        .map(|u| Value::String(u.to_string()))
+                        .collect(),
+                ),
+            );
+        }
+        for (key, value) in &block.properties {
+            params.insert(key.clone(), value.clone());
+        }
+        params.insert(
+            "after".into(),
+            match predecessor {
+                Some(pred) => Value::String(pred),
+                None => Value::Null,
+            },
+        );
+        params
+    }
+
     /// Update a block with the given fields.
     ///
     /// Forwards to `create` which does upsert (create if not exists, update if
@@ -1832,6 +2091,251 @@ mod advice_dismiss_tests {
         let restored = backend.get_block(&anchor).await.expect("read");
         assert_eq!(restored.content, "a task");
         assert_eq!(restored.marks, None);
+    }
+
+    /// Seed `id`/`text` as a child of `parent` (full URI), returning the child's
+    /// full id. Used to build ordered sibling fixtures for delete-inverse tests.
+    async fn seed_child(
+        backend: &LoroBackend,
+        parent: &str,
+        id: &str,
+        text: &str,
+    ) -> String {
+        let parent_uri = EntityUri::parse_owned(parent.to_string()).expect("parent uri");
+        let block = backend
+            .create_block(parent_uri, BlockContent::text(text), Some(EntityUri::block(id)))
+            .await
+            .expect("seed child");
+        block.id.to_string()
+    }
+
+    /// A LEAF `delete` under the default Loro authority must be EXACTLY
+    /// reversible: undo restores a byte-identical block — content, marks, tags,
+    /// task state — AND at its original sibling position (between its former
+    /// neighbours, not appended at the end).
+    #[tokio::test]
+    async fn leaf_delete_then_undo_restores_block_and_position() {
+        let (ops, _dir, anchor) = ops_with_anchor().await;
+        let backend = ops.get_backend("").await.expect("backend");
+
+        let c1 = seed_child(&backend, &anchor, "c1", "first").await;
+        let c2 = seed_child(&backend, &anchor, "c2", "middle").await;
+        let c3 = seed_child(&backend, &anchor, "c3", "last").await;
+
+        // Enrich c2: a task state (property), a tag (edge), and rich content.
+        ops.set_field(&c2, "task_state", Value::String("TODO".into()))
+            .await
+            .expect("task_state");
+        ops.set_field(&c2, "tags", Value::Array(vec![Value::String("Page".into())]))
+            .await
+            .expect("tags");
+        ops.set_field(&c2, "content", object_content("bold mid", &[bold(0, 4)]))
+            .await
+            .expect("rich content");
+        ops.save_doc("").await.expect("save");
+
+        // Order before delete: c1, c2, c3.
+        assert_eq!(
+            backend.list_children(&anchor).await.expect("children"),
+            vec![c1.clone(), c2.clone(), c3.clone()]
+        );
+
+        let result = ops.delete(&c2).await.expect("delete c2");
+
+        // Forward fingerprint: the `id` field present pre-delete, absent after.
+        assert_eq!(result.changes.len(), 1);
+        assert_eq!(result.changes[0].field, "id");
+
+        // Inverse shape: a `create` of the SAME id, rich Object content, placed
+        // after its predecessor c1.
+        let inverse = match &result.undo {
+            UndoAction::Undo(op) => op.clone(),
+            other => panic!("leaf delete must be reversible, got {other:?}"),
+        };
+        assert_eq!(inverse.op_name, "create");
+        assert_eq!(
+            inverse.params.get("id").and_then(|v| v.as_string()),
+            Some(c2.as_str())
+        );
+        assert!(
+            matches!(inverse.params.get("content"), Some(Value::Object(_))),
+            "rich block ⇒ Object content payload in the inverse"
+        );
+        assert_eq!(
+            inverse.params.get("after").and_then(|v| v.as_string()),
+            Some(c1.as_str()),
+            "position anchor = predecessor sibling"
+        );
+
+        // c2 is gone.
+        assert_eq!(
+            backend.list_children(&anchor).await.expect("children"),
+            vec![c1.clone(), c3.clone()]
+        );
+
+        replay_inverse(&ops, &inverse).await;
+
+        // Byte-identical restore.
+        let restored = backend.get_block(&c2).await.expect("restored");
+        assert_eq!(restored.content, "bold mid");
+        assert_eq!(restored.marks, Some(vec![bold(0, 4)]));
+        assert!(restored.tags.contains("Page"), "tag restored");
+        assert_eq!(
+            restored.get_property_str("task_state").as_deref(),
+            Some("TODO"),
+            "task state restored"
+        );
+        // And back in its original middle slot.
+        assert_eq!(
+            backend.list_children(&anchor).await.expect("children"),
+            vec![c1, c2, c3],
+            "undo restores original sibling position"
+        );
+    }
+
+    /// Deleting the FIRST child and undoing must restore it at the front
+    /// (`after = Null` ⇒ first-child placement), not appended at the end.
+    #[tokio::test]
+    async fn first_child_delete_undo_restores_at_front() {
+        let (ops, _dir, anchor) = ops_with_anchor().await;
+        let backend = ops.get_backend("").await.expect("backend");
+
+        let c1 = seed_child(&backend, &anchor, "c1", "first").await;
+        let c2 = seed_child(&backend, &anchor, "c2", "second").await;
+        ops.save_doc("").await.expect("save");
+
+        let result = ops.delete(&c1).await.expect("delete c1");
+        let inverse = match &result.undo {
+            UndoAction::Undo(op) => op.clone(),
+            other => panic!("leaf delete must be reversible, got {other:?}"),
+        };
+        assert_eq!(
+            inverse.params.get("after"),
+            Some(&Value::Null),
+            "first child ⇒ Null position anchor"
+        );
+
+        replay_inverse(&ops, &inverse).await;
+        assert_eq!(
+            backend.list_children(&anchor).await.expect("children"),
+            vec![c1, c2],
+            "first child restored at the front"
+        );
+    }
+
+    /// Multibyte content (mark ranges are Unicode-scalar offsets) must survive a
+    /// leaf delete → undo byte-for-byte, marks included.
+    #[tokio::test]
+    async fn leaf_delete_undo_multibyte_roundtrip() {
+        let (ops, _dir, anchor) = ops_with_anchor().await;
+        let backend = ops.get_backend("").await.expect("backend");
+
+        let c = seed_child(&backend, &anchor, "c", "seed").await;
+        let text = "äöü😀 tail";
+        ops.set_field(&c, "content", object_content(text, &[bold(0, 4)]))
+            .await
+            .expect("rich multibyte");
+        ops.save_doc("").await.expect("save");
+
+        let result = ops.delete(&c).await.expect("delete");
+        let inverse = match &result.undo {
+            UndoAction::Undo(op) => op.clone(),
+            other => panic!("must be reversible, got {other:?}"),
+        };
+        replay_inverse(&ops, &inverse).await;
+
+        let restored = backend.get_block(&c).await.expect("restored");
+        assert_eq!(restored.content, text);
+        assert_eq!(restored.marks, Some(vec![bold(0, 4)]));
+    }
+
+    /// A SUBTREE delete (target has children) stays `DeclaredIrreversible` —
+    /// fail-loud, never a lossy or wrong-shaped inverse.
+    #[tokio::test]
+    async fn subtree_delete_is_declared_irreversible() {
+        let (ops, _dir, anchor) = ops_with_anchor().await;
+        let backend = ops.get_backend("").await.expect("backend");
+
+        let parent = seed_child(&backend, &anchor, "p", "parent").await;
+        let _gc = seed_child(&backend, &parent, "gc", "grandchild").await;
+        ops.save_doc("").await.expect("save");
+
+        let result = ops.delete(&parent).await.expect("delete subtree");
+        match &result.undo {
+            UndoAction::DeclaredIrreversible(reason) => {
+                assert!(reason.contains("subtree"), "reason: {reason}");
+            }
+            other => panic!("subtree delete must be DeclaredIrreversible, got {other:?}"),
+        }
+    }
+
+    /// A NAMED source block (`#+NAME:` → `source_name`) must survive a leaf
+    /// `delete` → undo byte-identically: both its `source_name` AND
+    /// `source_language` come back. Regression guard — the `create` inverse
+    /// captured `source_name` but the new-block path never re-applied it, so a
+    /// named source block resurrected nameless (name silently dropped).
+    #[tokio::test]
+    async fn named_source_block_delete_undo_restores_name_and_language() {
+        let (ops, _dir, anchor) = ops_with_anchor().await;
+        let backend = ops.get_backend("").await.expect("backend");
+
+        // Create a named source block as a leaf child of the anchor, via the
+        // real `create` op path (content_type=source + source_language +
+        // source_name), so this exercises exactly the resurrection code path.
+        let mut create_params: StorageEntity = HashMap::new();
+        create_params.insert("id".into(), Value::String("block:src".into()));
+        create_params.insert("parent_id".into(), Value::String(anchor.clone()));
+        create_params.insert("content".into(), Value::String("SELECT 1".into()));
+        create_params.insert("content_type".into(), Value::String("source".into()));
+        create_params.insert(
+            "source_language".into(),
+            Value::String("holon_sql".into()),
+        );
+        create_params.insert(
+            "source_name".into(),
+            Value::String("my_named_query".into()),
+        );
+        ops.execute_operation(&EntityName::new("block"), "create", create_params)
+            .await
+            .expect("create named source block");
+        ops.save_doc("").await.expect("save");
+
+        let src = "block:src".to_string();
+
+        // Precondition: the block carries both name and language.
+        let before = backend.get_block(&src).await.expect("read before");
+        assert_eq!(before.source_name.as_deref(), Some("my_named_query"));
+        assert_eq!(
+            before.source_language.as_ref().map(|l| l.to_string()),
+            Some("holon_sql".to_string())
+        );
+
+        let result = ops.delete(&src).await.expect("delete named source");
+        let inverse = match &result.undo {
+            UndoAction::Undo(op) => op.clone(),
+            other => panic!("leaf source delete must be reversible, got {other:?}"),
+        };
+        assert_eq!(inverse.op_name, "create");
+        // The captured inverse must carry source_name (the capture side).
+        assert_eq!(
+            inverse.params.get("source_name").and_then(|v| v.as_string()),
+            Some("my_named_query")
+        );
+
+        replay_inverse(&ops, &inverse).await;
+
+        // Byte-identical restore: name AND language back.
+        let restored = backend.get_block(&src).await.expect("restored");
+        assert_eq!(
+            restored.source_name.as_deref(),
+            Some("my_named_query"),
+            "source_name must be restored on undo (was silently dropped)"
+        );
+        assert_eq!(
+            restored.source_language.as_ref().map(|l| l.to_string()),
+            Some("holon_sql".to_string()),
+            "source_language must be restored on undo"
+        );
     }
 
     fn dismiss_params(anchor_id: &str, lesson_id: &str) -> StorageEntity {
