@@ -1,6 +1,12 @@
 # Page Identity Determinism — Options for Ruling (2026-07-18)
 
-**Status: options document for Martin's ruling. No production code changed.**
+**Status: ACCEPTED / IMPLEMENTED (2026-07-18).** Ruling: the §4 recommendation —
+**Option 2 (path-hash id for new writes) + a bounded slice of Option 3
+((name,parent) repair)**. The guard PBT is un-`#[ignore]`d and green. See
+"Ruling & implementation notes" at the end for what shipped and the local
+decisions taken where this memo left detail open.
+
+Original framing (kept for the record) —
 A RED guard PBT is landed (`#[ignore]`d) —
 `crates/holon/tests/create_page_from_link.rs::inv_page_name_unique_converges_across_peers`.
 
@@ -126,3 +132,96 @@ and Option 3 becomes mandatory.
 
 The RED guard PBT stays `#[ignore]`d until this is ruled; removing the attribute
 replays the stored regression as the green gate.
+
+---
+
+## 5. Ruling & implementation notes (2026-07-18, ACCEPTED / IMPLEMENTED)
+
+**Ruling: §4 recommendation.** Path-hash identity for all NEW page writes, plus
+a bounded `(name, parent)` repair for the already-duplicated vault.
+
+### 5.1 The single constructor (parse-don't-validate)
+
+A new `PageId` newtype in `crates/holon-api/src/link_parser.rs` is the ONE
+sanctioned way to mint a new page id:
+
+```rust
+PageId::for_path(path) == deterministic_entity_id("block", &normalize_for_hash(path))
+```
+
+- **Hash input** = the page's full `/`-joined path, root→leaf (`"Life/Areas"`),
+  **segment-trimmed** (split on `/`, trim each segment, rejoin) and then run
+  through `normalize_for_hash` (lowercase, collapse internal whitespace). Segment
+  trimming is the single canonicalization site, so `"Areas / Sub"` and
+  `"Areas/Sub"` mint the SAME id — the link parser's optimistic id can never
+  drift from the writer's (H2). `for_path` is **fail-loud**: an empty segment
+  (leading/trailing or doubled `/`) is a malformed path and returns `Err`,
+  never a silent `a//b`→`a/b` collapse.
+- Pages are always `block`-scheme, so scheme is NOT a caller parameter — that
+  structurally closes the `EntityName::named` scheme-bypass class (memory note).
+  A non-page scheme (`person:`) is simply not a `PageId`.
+- `EntityUri`, not a bare `String`, is threaded out (`into_entity_uri` /
+  `as_entity_uri` / `as_str`).
+
+### 5.2 The three write paths, unified
+
+1. **Link parser** (`classify_link`, `link_parser.rs`): the block-scheme
+   `target_id` now routes through `PageId::for_path`, so a `[[Areas]]` link's
+   target id is *exactly* the id the page will be created with — link
+   resolution is id-aligned by construction, not just name-lookup luck. (Non-
+   block schemes keep the generic `deterministic_entity_id`.)
+2. **Click / lazy link-create** (`create_page_from_link`,
+   `sql_operation_provider.rs`): replaced `format!("block:{}", Uuid::new_v4())`
+   with `PageId::for_path(&seg_path)`, where `seg_path` is the accumulated
+   root→segment path. This was the largest divergence source (random UUID).
+3. **Org-file ingest** (`get_or_create_by_name_chain`, `sync_ports.rs`):
+   replaced `EntityUri::block_random()` with
+   `PageId::for_path(&accumulated_name_chain)`. This is the FileSyncController
+   `file:→block:` resolution the memo named: a file-page and a link-created
+   page for the same path now converge on one id. `#+ID:`-carrying files keep
+   their authoritative id (respected, unchanged).
+
+### 5.3 Rename semantics (local decision)
+
+Identity is assigned **once, at creation**, from the then-current path, and
+stored on the CRDT. A later **rename is an ordinary edit to the existing
+entity** — the id does NOT re-mint, so history/links survive. A *new* page
+created later under the new name gets a new id; that is correct (it is a
+different logical page). Convergence is over independent *creation* of the same
+page (the PBT), not over post-hoc renames.
+
+### 5.4 Bounded repair — `SqlOperationProvider::dedup_pages`
+
+One-shot, fail-loud collapse of existing `(content, parent_id)` duplicate
+`Page` groups:
+
+- **Survivor rule**: lexicographically-lowest block id in the group.
+  Deterministic and peer-stable (every merged peer sees the same id set →
+  same survivor, no coordination).
+- **Rewrite**: re-home losers' children (`block_raw.parent_id`) and inbound
+  links (`block_links.resolved_id`) onto the survivor, delete the losers'
+  OUTBOUND `block_links` rows (redundant with the survivor's; would otherwise
+  orphan on the row delete), then delete loser rows + tags — all in one
+  transaction (no partial apply).
+- **Bounds (all fail loud, never a silent mass-rewrite)**:
+  `MAX_DUPES_PER_GROUP = 16`, `MAX_DUP_GROUPS = 64`, and an ancestor-cycle walk
+  bounded at `MAX_ANCESTOR_DEPTH = 512` that errors if a loser is an ancestor
+  of its survivor or the walk fails to terminate.
+- Scope: this is the SqlOnly-store repair (the mode the guard PBT and the
+  user's vault run in). It is a callable maintenance op, not an automatic
+  merge-time hook — deliberately, so it stays observable and one-shot.
+
+### 5.5 Deliberately OUT of scope (open, unchanged)
+
+- **Heading pages inside a file** (`extract_or_generate_id`, `parser.rs:655`)
+  still mint a UUID then write it back as `:ID:` — the org-file-as-authority
+  model (vault-compat O1-O5). They reach per-file determinism via write-back;
+  giving them path-hash identity needs the heading's ancestor-title chain and
+  risks cross-file same-name collisions. Left as the O1-O5 fork intended.
+- **`resolve_page_name`'s `ORDER BY … LIMIT 1`** arbitrary tie-break is left in
+  place as a within-store safety net; with convergent ids it should rarely see
+  a tie. §3.4's hard `UNIQUE(content,parent)` DB constraint was deliberately
+  NOT added — under CRDT union-by-id it could reject a legitimate merge; the
+  green invariant PBT is the regression gate instead.
+- **Loro-mode (Full-store) dedup** beyond the SQL projection is not addressed
+  here.

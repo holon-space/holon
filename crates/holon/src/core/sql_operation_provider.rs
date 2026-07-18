@@ -249,6 +249,15 @@ pub struct SqlOperationProvider {
 }
 
 impl SqlOperationProvider {
+    /// Max duplicates tolerated in one `(name, parent)` group before
+    /// [`Self::dedup_pages`] refuses to collapse it (fail loud).
+    const MAX_DUPES_PER_GROUP: usize = 16;
+    /// Max distinct duplicated `(name, parent)` groups tolerated before
+    /// [`Self::dedup_pages`] refuses the whole pass (fail loud).
+    const MAX_DUP_GROUPS: usize = 64;
+    /// Depth bound for the ancestor-cycle walk in [`Self::dedup_pages`].
+    const MAX_ANCESTOR_DEPTH: usize = 512;
+
     pub fn new(
         db_handle: DbHandle,
         table_name: String,
@@ -1073,6 +1082,180 @@ impl SqlOperationProvider {
                 .and_then(|v| v.as_string())
                 .map(|s| s.to_string())
         }))
+    }
+
+    /// One-shot, BOUNDED repair of already-duplicated pages: collapse every
+    /// group of `Page` blocks sharing `(content, parent_id)` onto a single
+    /// deterministic survivor, re-home the losers' children and inbound links
+    /// onto it, then delete the losers.
+    ///
+    /// Survivor = lexicographically-lowest block id in the group. That rule is
+    /// deterministic and identical on every peer that has merged the same id
+    /// set, so independent peers converge on the SAME survivor with no
+    /// coordination — the merge-time counterpart to the deterministic mint that
+    /// stops NEW duplicates.
+    ///
+    /// Bounded and fail-loud — this is a repair for stray duplicates, never a
+    /// silent mass-rewrite:
+    /// - `Err` if any `(content, parent)` group exceeds
+    ///   [`Self::MAX_DUPES_PER_GROUP`] — a large cluster signals a systemic mint
+    ///   bug that must be investigated, not steamrolled;
+    /// - `Err` if more than [`Self::MAX_DUP_GROUPS`] distinct groups are
+    ///   duplicated — the same guard at vault scale;
+    /// - `Err` if the ancestor walk from a survivor hits a loser or fails to
+    ///   terminate within [`Self::MAX_ANCESTOR_DEPTH`] — re-homing the loser's
+    ///   children would then form a parent cycle.
+    ///
+    /// Returns the number of loser pages removed.
+    pub async fn dedup_pages(&self) -> Result<usize> {
+        let rows = self
+            .db_handle
+            .query(
+                "SELECT b.id AS id, b.content AS content, b.parent_id AS parent_id FROM block_raw \
+                 b JOIN block_tags t ON t.block_id = b.id AND t.tag = 'Page' ORDER BY b.content, \
+                 b.parent_id, b.id",
+                HashMap::new(),
+            )
+            .await
+            .map_err(|e| format!("dedup_pages: page enumeration failed: {e}"))?;
+
+        // Group siblings by (content, parent_id). Rows arrive ordered by id, so
+        // the first row of each group is the lowest-id survivor.
+        let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+        let mut last_key: Option<(String, String)> = None;
+        for row in &rows {
+            let id = row
+                .get("id")
+                .and_then(|v| v.as_string())
+                .ok_or("dedup_pages: page row missing 'id'")?
+                .to_string();
+            let content = row
+                .get("content")
+                .and_then(|v| v.as_string())
+                .unwrap_or("")
+                .to_string();
+            let parent = row
+                .get("parent_id")
+                .and_then(|v| v.as_string())
+                .unwrap_or("")
+                .to_string();
+            let key = (content, parent);
+            if last_key.as_ref() == Some(&key) {
+                groups.last_mut().unwrap().1.push(id);
+            } else {
+                groups.push((format!("{}\u{0}{}", key.0, key.1), vec![id]));
+                last_key = Some(key);
+            }
+        }
+
+        let dup_groups: Vec<&(String, Vec<String>)> =
+            groups.iter().filter(|(_, ids)| ids.len() > 1).collect();
+
+        if dup_groups.len() > Self::MAX_DUP_GROUPS {
+            return Err(format!(
+                "dedup_pages: {} duplicated (name,parent) groups exceeds bound {} — refusing a \
+                 mass-rewrite; a systemic page-id mint bug is more likely than this many stray \
+                 duplicates. Investigate before repairing.",
+                dup_groups.len(),
+                Self::MAX_DUP_GROUPS,
+            )
+            .into());
+        }
+
+        let mut removed = 0usize;
+        // Element type of the param vecs resolves from the `transaction` call
+        // below (turso::Value); every param vec here is empty.
+        let mut stmts = Vec::new();
+        for (key, ids) in &dup_groups {
+            if ids.len() > Self::MAX_DUPES_PER_GROUP {
+                return Err(format!(
+                    "dedup_pages: page group {key:?} has {} duplicates, exceeding bound {} — \
+                     refusing to collapse an implausibly large cluster; investigate the mint path.",
+                    ids.len(),
+                    Self::MAX_DUPES_PER_GROUP,
+                )
+                .into());
+            }
+            let survivor = &ids[0];
+            for loser in &ids[1..] {
+                self.assert_not_ancestor(loser, survivor).await?;
+                let sv = survivor.replace('\'', "''");
+                let lv = loser.replace('\'', "''");
+                stmts.push((
+                    format!("UPDATE block_raw SET parent_id = '{sv}' WHERE parent_id = '{lv}'"),
+                    vec![],
+                ));
+                stmts.push((
+                    format!("UPDATE block_links SET resolved_id = '{sv}' WHERE resolved_id = '{lv}'"),
+                    vec![],
+                ));
+                // Drop the loser's OUTBOUND links too — a duplicate-content page's
+                // outbound links are redundant with the survivor's, and leaving
+                // them would orphan `block_links` rows whose `source_block_id`
+                // no longer names any `block_raw` row after the delete below.
+                stmts.push((
+                    format!("DELETE FROM block_links WHERE source_block_id = '{lv}'"),
+                    vec![],
+                ));
+                stmts.push((
+                    format!("DELETE FROM block_tags WHERE block_id = '{lv}'"),
+                    vec![],
+                ));
+                stmts.push((format!("DELETE FROM block_raw WHERE id = '{lv}'"), vec![]));
+                removed += 1;
+            }
+        }
+
+        if !stmts.is_empty() {
+            self.db_handle
+                .transaction(stmts)
+                .await
+                .map_err(|e| format!("dedup_pages: reference-rewrite transaction failed: {e}"))?;
+        }
+        Ok(removed)
+    }
+
+    /// Walk `descendant`'s parent chain and fail loud if it reaches `forbidden`
+    /// (re-homing under it would build a cycle) or fails to terminate within
+    /// [`Self::MAX_ANCESTOR_DEPTH`] (a pre-existing cycle — never silently loop).
+    async fn assert_not_ancestor(&self, forbidden: &str, descendant: &str) -> Result<()> {
+        let mut cursor = descendant.to_string();
+        for _ in 0..Self::MAX_ANCESTOR_DEPTH {
+            let cq = cursor.replace('\'', "''");
+            let rows = self
+                .db_handle
+                .query(
+                    &format!("SELECT parent_id FROM block_raw WHERE id = '{cq}'"),
+                    HashMap::new(),
+                )
+                .await
+                .map_err(|e| format!("dedup_pages: ancestor walk query failed: {e}"))?;
+            let parent = match rows.into_iter().next().and_then(|r| {
+                r.get("parent_id")
+                    .and_then(|v| v.as_string())
+                    .map(|s| s.to_string())
+            }) {
+                Some(p) => p,
+                None => return Ok(()),
+            };
+            if parent == forbidden {
+                return Err(format!(
+                    "dedup_pages: survivor {descendant} is a descendant of loser {forbidden} — \
+                     collapsing would create a parent cycle. Refusing (fail loud)."
+                )
+                .into());
+            }
+            if parent == "sentinel:no_parent" || parent.is_empty() {
+                return Ok(());
+            }
+            cursor = parent;
+        }
+        Err(format!(
+            "dedup_pages: ancestor walk from {descendant} did not terminate within {} steps — a \
+             pre-existing parent cycle. Refusing (fail loud).",
+            Self::MAX_ANCESTOR_DEPTH,
+        )
+        .into())
     }
 
     /// The dangling→resolved trigger: when a Page-tagged block is written,
@@ -2026,8 +2209,22 @@ impl OriginTaggedWrites for SqlOperationProvider {
                             continue;
                         }
                         None => {
-                            // Create the page at this level.
-                            let id = format!("block:{}", uuid::Uuid::new_v4());
+                            // Create the page at this level with a DETERMINISTIC
+                            // id keyed on the accumulated path (root→this
+                            // segment). Two peers that each lazily create the
+                            // same page thus mint the SAME block id — the CRDT
+                            // merge key — so a later merge yields ONE page, not a
+                            // duplicate (inv-page-name-unique). Minted through the
+                            // single `PageId` constructor so no write path can
+                            // fall back to a random UUID.
+                            let seg_path = if accumulated.is_empty() {
+                                trimmed.to_string()
+                            } else {
+                                format!("{accumulated}/{trimmed}")
+                            };
+                            let id = holon_api::link_parser::PageId::for_path(&seg_path)?
+                                .as_str()
+                                .to_string();
                             let mut create_params: StorageEntity = HashMap::new();
                             create_params.insert("id".into(), Value::String(id.clone()));
                             create_params

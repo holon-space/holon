@@ -114,6 +114,71 @@ pub fn deterministic_entity_id(scheme: &str, normalized_path: &str) -> EntityUri
     EntityUri::new(scheme, &uuid_str)
 }
 
+/// Deterministic identity of a `Page`-tagged block, derived purely from its
+/// slash-joined path (root→leaf).
+///
+/// This is the ONE sanctioned way to mint the id of a NEW page. Every page
+/// write path — the lazy link-create op, org-file name-chain ingest, and the
+/// link parser's own target computation — routes through
+/// [`PageId::for_path`] so page identity is a pure function of the normalized
+/// path, never a random UUID. Same normalized path ⇒ same id ⇒ two peers that
+/// each create the same page converge on ONE CRDT merge key
+/// (inv-page-name-unique). Pages are always `block`-scheme, so the scheme is
+/// not a caller-chosen parameter here (that closed the `EntityName::named`
+/// scheme-bypass hole).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageId(EntityUri);
+
+impl PageId {
+    /// Split a page path into per-segment trimmed pieces — the ONE
+    /// canonicalization every page-id computation shares. Trimming each
+    /// segment is what makes `"Areas / Sub"` (spaced separators) and
+    /// `"Areas/Sub"` mint the SAME id, so the link parser's optimistic id can
+    /// never drift from the id the write paths assign.
+    fn segments(path: &str) -> Vec<&str> {
+        path.split('/').map(str::trim).collect()
+    }
+
+    /// Hash already-trimmed segments into a `block:<hash>` id.
+    fn from_segments(segments: &[&str]) -> Self {
+        let canonical = segments.join("/");
+        PageId(deterministic_entity_id("block", &normalize_for_hash(&canonical)))
+    }
+
+    /// Mint the deterministic id for a NEW page whose full path (root→leaf,
+    /// `/`-joined) is `path`. Idempotent modulo case/whitespace.
+    ///
+    /// Fail-loud: an empty segment (a leading/trailing `/` or a `//`) is a
+    /// malformed page path. We refuse it rather than silently collapse
+    /// `"a//b"` into `"a/b"`, which would fuse two distinct intents (or bury a
+    /// typo) under one id.
+    pub fn for_path(path: &str) -> Result<Self, String> {
+        let segments = Self::segments(path);
+        if segments.iter().any(|s| s.is_empty()) {
+            return Err(format!(
+                "page path {path:?} has an empty segment (leading/trailing or doubled '/'); a \
+                 page path must be non-empty '/'-separated segments"
+            ));
+        }
+        Ok(Self::from_segments(&segments))
+    }
+
+    /// Borrow the underlying `EntityUri`.
+    pub fn as_entity_uri(&self) -> &EntityUri {
+        &self.0
+    }
+
+    /// The `block:<hash>` string form.
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    /// Consume into the underlying `EntityUri`.
+    pub fn into_entity_uri(self) -> EntityUri {
+        self.0
+    }
+}
+
 /// Infer entity scheme from the first path segment.
 fn infer_scheme(first_segment: &str) -> Option<&'static str> {
     match first_segment.to_lowercase().as_str() {
@@ -134,14 +199,15 @@ pub fn classify_link(target: &str) -> LinkTarget {
 
     // Already resolved: starts with the entity scheme followed by ':'
     if target.starts_with("block:") {
-        // ALLOW(entity_uri_from_raw): raw org-file wiki-link target string (block:
-        // prefixed)
+        // ALLOW(entity_uri_from_raw): raw org-file wiki-link target
         let uri = EntityUri::from_raw(target);
         return LinkTarget::Resolved(uri);
     }
 
-    // Creation intent: wiki-style link like "Projects/New thing" or "PageName"
-    let segments: Vec<&str> = target.split('/').collect();
+    // Creation intent: wiki-style link like "Projects/New thing" or "PageName".
+    // Segments are trimmed through the SAME canonicalization the write paths
+    // use, so `[[Areas / Sub]]` and `[[Areas/Sub]]` agree on name/parent/id.
+    let segments = PageId::segments(target);
     let name = segments.last().unwrap().to_string();
     let parent_path = if segments.len() > 1 {
         Some(segments[..segments.len() - 1].join("/"))
@@ -154,8 +220,19 @@ pub fn classify_link(target: &str) -> LinkTarget {
         .and_then(|s| infer_scheme(s))
         .unwrap_or("block");
 
-    let normalized = normalize_for_hash(target);
-    let target_id = deterministic_entity_id(scheme, &normalized);
+    // Route the page (block-scheme) case through the SAME `PageId`
+    // canonicalization the write paths mint with, so a `[[Areas / Sub]]` link's
+    // target id is *exactly* the id `create_page_from_link` / org name-chain
+    // ingest will assign the page. Non-page schemes (e.g. `person:`) keep the
+    // generic hash. An empty-segment (malformed) target can never be written —
+    // `create_page_from_link` rejects it loudly — so its optimistic id here is
+    // moot; we still derive it from the trimmed segments rather than fabricate
+    // from the raw string.
+    let target_id = if scheme == "block" {
+        PageId::from_segments(&segments).into_entity_uri()
+    } else {
+        deterministic_entity_id(scheme, &normalize_for_hash(target))
+    };
 
     LinkTarget::CreationIntent {
         scheme: scheme.to_string(),
@@ -462,5 +539,45 @@ mod tests {
         let id1 = links[0].classified.entity_id().unwrap();
         let id2 = links[1].classified.entity_id().unwrap();
         assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn spaced_separators_converge_with_writer() {
+        // H2: a link typed with spaces around '/' must classify to the SAME id
+        // as the tight form AND as the id the write paths mint via
+        // `PageId::for_path` — the parser trims each segment.
+        let spaced = classify_link("Areas / Sub").entity_id().unwrap().clone();
+        let tight = classify_link("Areas/Sub").entity_id().unwrap().clone();
+        assert_eq!(spaced, tight, "spaced vs tight parser id must agree");
+
+        let minted = PageId::for_path("Areas/Sub").unwrap().into_entity_uri();
+        assert_eq!(spaced, minted, "parser id must equal writer-minted id");
+        assert_eq!(
+            PageId::for_path("Areas / Sub").unwrap().into_entity_uri(),
+            minted,
+            "for_path must be insensitive to separator spacing"
+        );
+        // name/parent are trimmed too.
+        match classify_link("Areas / Sub") {
+            LinkTarget::CreationIntent {
+                name, parent_path, ..
+            } => {
+                assert_eq!(name, "Sub");
+                assert_eq!(parent_path.as_deref(), Some("Areas"));
+            }
+            other => panic!("expected CreationIntent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn for_path_rejects_empty_segments() {
+        for bad in ["a//b", "/b", "a/", "  /  b", ""] {
+            assert!(
+                PageId::for_path(bad).is_err(),
+                "malformed page path {bad:?} must be rejected (fail loud)"
+            );
+        }
+        assert!(PageId::for_path("a/b").is_ok());
+        assert!(PageId::for_path("a").is_ok());
     }
 }
