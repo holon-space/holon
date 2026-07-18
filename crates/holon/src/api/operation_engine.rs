@@ -134,7 +134,8 @@ pub struct DispatchingOperationEngine {
 
 /// The engine-level compound operation name: expands into `create` ops routed
 /// through whatever provider owns `block` creation in this session's wiring.
-const INSTANTIATE_TEMPLATE_OP: &str = "instantiate_template";
+/// Single spelling shared with the frontend picker (`holon_api::template`).
+use holon_api::INSTANTIATE_TEMPLATE_OP;
 
 /// Op names whose params are a block field-map written to `block_raw`, so an
 /// injected `_provenance` property lands in the row's `properties` JSON through
@@ -447,6 +448,16 @@ impl DispatchingOperationEngine {
                 request.target_parent
             );
         }
+        // Verify the block-to-replace exists BEFORE any create, so an empty→
+        // in-place instantiation against a stale id fails loud without leaving
+        // a half-instantiated orphan subtree behind.
+        if let Some(replace_id) = &request.replace_block {
+            if !source.exists(replace_id).await? {
+                bail!(
+                    "instantiate_template: replace_block '{replace_id}' does not exist"
+                );
+            }
+        }
         let nodes = source.load_subtree(&request.template_id).await?;
         let plan = plan_instantiation(&nodes, &request)?;
 
@@ -460,6 +471,23 @@ impl DispatchingOperationEngine {
                 &block_entity,
                 "create",
                 create_params,
+                origin.clone(),
+            ))
+            .await?;
+        }
+        // Empty→in-place placement (frontend picker): the instance is created,
+        // now delete the empty block it supersedes. Ordered AFTER the creates so
+        // a failed instantiation never destroys the target (the block is empty,
+        // so this never touches existing content). Routed through the normal
+        // `delete` op → provenance/history/undo classification all apply.
+        if let Some(replace_id) = &request.replace_block {
+            let mut del_params: StorageEntity = StorageEntity::default();
+            del_params.insert(Arc::from("id"), Value::String(replace_id.clone()));
+            Box::pin(OperationEngine::execute_operation(
+                self,
+                &block_entity,
+                "delete",
+                del_params,
                 origin.clone(),
             ))
             .await?;
@@ -503,6 +531,8 @@ impl DispatchingOperationEngine {
                     TypeHint::String,
                     "Idempotence key: rules pass their firing key; manual callers a fresh key",
                 ),
+                // `replace_block` (optional) is passed by the frontend picker's
+                // empty→in-place placement; not advertised as required.
             ],
             affected_fields: vec![],
             param_mappings: vec![],
@@ -1281,6 +1311,143 @@ mod instantiate_template_tests {
             instance_roots(&engine).await.len(),
             0,
             "bogus-parent instantiation must create nothing"
+        );
+    }
+
+    /// SEVERE-data-loss guard: an org-parsed template block carries its `:ID:`
+    /// as an "ID" property. If that copies into the instance, the instance
+    /// claims the template's id — on org writeback+reload the duplicate `:ID:`
+    /// collides and empties the template file. The instance must carry NO "ID".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn instance_never_carries_template_org_id() {
+        let engine = block_engine().await;
+        create_block(
+            &engine,
+            &[
+                ("id", Value::String("block:target".into())),
+                ("content", Value::String("Target".into())),
+            ],
+        )
+        .await;
+        // Template block WITH an org "ID" property, exactly as the org parser
+        // lifts `:ID:` (block_params.rs).
+        create_block(
+            &engine,
+            &[
+                ("id", Value::String("block:tpl".into())),
+                ("content", Value::String("body".into())),
+                (
+                    "properties",
+                    Value::String(
+                        r#"{"template":"daily","template_vars":"","ID":"block:tpl","keep":"y"}"#
+                            .into(),
+                    ),
+                ),
+            ],
+        )
+        .await;
+
+        engine
+            .execute_operation(
+                &EntityName::new("block"),
+                "instantiate_template",
+                instantiate_params("k1", &[]),
+                OpOrigin::User,
+            )
+            .await
+            .unwrap();
+
+        let roots = instance_roots(&engine).await;
+        assert_eq!(roots.len(), 1);
+        let props = props_of(&roots[0]);
+        assert!(
+            props.get("ID").is_none(),
+            "instance must NOT carry the template's org ID (org-roundtrip destruction); got {props:?}"
+        );
+        assert_eq!(props["keep"], "y", "non-identity properties still copy");
+        assert_eq!(props["instance_of"], "block:tpl");
+    }
+
+    async fn block_exists(engine: &BackendEngine, id: &str) -> bool {
+        !engine
+            .db_handle()
+            .query(
+                &format!(
+                    "SELECT id FROM block_raw WHERE id = '{}'",
+                    id.replace('\'', "''")
+                ),
+                HashMap::new(),
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    }
+
+    /// Empty→in-place placement: `replace_block` deletes the empty block the
+    /// instance supersedes, AFTER the instance is created.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn replace_block_deletes_empty_target_after_instantiation() {
+        let engine = block_engine().await;
+        seed_template(&engine).await;
+        // The empty bullet the user triggered the picker on.
+        create_block(
+            &engine,
+            &[
+                ("id", Value::String("block:empty".into())),
+                ("parent_id", Value::String("block:target".into())),
+                ("content", Value::String("".into())),
+            ],
+        )
+        .await;
+
+        let mut params = instantiate_params("k1", &[("date", "2026-07-12")]);
+        params.insert("replace_block".into(), Value::String("block:empty".into()));
+        engine
+            .execute_operation(
+                &EntityName::new("block"),
+                "instantiate_template",
+                params,
+                OpOrigin::User,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            !block_exists(&engine, "block:empty").await,
+            "the empty block must be deleted (replaced in place)"
+        );
+        assert_eq!(
+            instance_roots(&engine).await.len(),
+            1,
+            "exactly one instance root created under the parent"
+        );
+    }
+
+    /// A `replace_block` pointing at a nonexistent block fails loud and creates
+    /// nothing — the pre-create existence check.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn replace_block_nonexistent_fails_loud_and_creates_nothing() {
+        let engine = block_engine().await;
+        seed_template(&engine).await;
+
+        let mut params = instantiate_params("k1", &[("date", "2026-07-12")]);
+        params.insert("replace_block".into(), Value::String("block:ghost".into()));
+        let err = engine
+            .execute_operation(
+                &EntityName::new("block"),
+                "instantiate_template",
+                params,
+                OpOrigin::User,
+            )
+            .await
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("replace_block"), "got: {msg}");
+        assert!(msg.contains("block:ghost"), "got: {msg}");
+        assert_eq!(
+            instance_roots(&engine).await.len(),
+            0,
+            "must create nothing when replace_block is bogus"
         );
     }
 

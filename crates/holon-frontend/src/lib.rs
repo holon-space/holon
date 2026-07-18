@@ -220,6 +220,7 @@ pub mod row_origin;
 pub mod row_pipeline;
 pub mod shadow_builders;
 pub mod size_expectation;
+pub mod template_placement;
 pub mod theme;
 pub mod tour;
 pub mod user_driver;
