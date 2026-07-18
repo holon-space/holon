@@ -296,4 +296,13 @@ impl RefLayoutMutate for ReferenceState {
     fn create_block_under_with_id(&mut self, parent: &EntityUri, content: &str, id: EntityUri) {
         ReferenceState::create_block_under_with_id(self, parent, content, id);
     }
+
+    fn apply_block_to_page(
+        &mut self,
+        origin: &EntityUri,
+        page_id: EntityUri,
+        destination_parent: &EntityUri,
+    ) {
+        ReferenceState::apply_block_to_page(self, origin, page_id, destination_parent);
+    }
 }
