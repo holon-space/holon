@@ -1380,6 +1380,16 @@ fn launch_holon_window_impl(
     // synchronously on gpui's background executor so that the call path
     // stays on the main thread and the outer cx.spawn wrapper (which
     // breaks on iOS) can be avoided.
+    //
+    // Android: NEVER block here. gpui-mobile runs `finish_launching`
+    // (and therefore this whole function) on the event-loop thread — the
+    // one that must keep pumping to present frames. `fg_executor.block_on`
+    // on the foreground executor's own thread is a re-entrancy wedge: the
+    // loop stops pumping, the first frame is never presented, and the app
+    // shows a permanent black screen. Skip the pre-warm and open with the
+    // loading state; the tokio root-layout signal drives the first real
+    // repaint asynchronously once the event loop is running.
+    #[cfg(not(target_os = "android"))]
     if let Some(ref engine) = existing_engine {
         use futures::StreamExt;
         use futures::future::Either;
