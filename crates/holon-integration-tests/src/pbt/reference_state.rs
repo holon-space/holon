@@ -1414,6 +1414,138 @@ impl ReferenceState {
         self.recanon_and_rebuild();
     }
 
+    /// `BlockToPage` (Option B) reference effect — the ref-side mirror of the
+    /// engine-level `convert_block_to_page` compound. Mints a NEW page block
+    /// `page_id` (Page-tagged, its own document) as the last child of
+    /// `destination_parent`, carrying the origin's ORIGINAL content and marks;
+    /// re-homes the origin's direct children (and their non-page subtrees)
+    /// under it; and rewrites the origin in place as a non-page whose marks
+    /// become a single full-span `[[page_id]]` Link. The origin's own
+    /// content, parent, tags and document are untouched — it stays a
+    /// non-page under its old ancestor.
+    ///
+    /// The born-equal `page_id` (a `PageId::for_path` hash the caller computed
+    /// from the SAME title path the backend planner uses) and the reparented
+    /// children / origin-link marks make every field the block-comparison
+    /// invariants read agree with the SUT with no synthetic→real reconcile.
+    pub fn apply_block_to_page(
+        &mut self,
+        origin: &EntityUri,
+        page_id: EntityUri,
+        destination_parent: &EntityUri,
+    ) {
+        use holon_api::inline_mark::EntityRef;
+        use holon_api::inline_mark::InlineMark;
+        use holon_api::inline_mark::MarkSpan;
+        use holon_orgmode::models::OrgBlockExt;
+
+        // Undo-stack correspondence: the compound records ONE User-origin undo
+        // entry, so the ref snapshots exactly once here (mirrors
+        // `create_block_under_with_id`).
+        self.push_undo_snapshot();
+
+        let origin_block = self
+            .domain
+            .block_state
+            .blocks
+            .get(origin)
+            .expect("apply_block_to_page: origin block must exist (precondition)")
+            .clone();
+        let origin_content = origin_block.content.clone();
+        let origin_marks = origin_block.marks.clone();
+
+        // Origin's DIRECT children in sort order, captured before mutating.
+        let children: Vec<EntityUri> = self
+            .sorted_children_of(origin)
+            .into_iter()
+            .map(|b| b.id.clone())
+            .collect();
+
+        // 1. Mint page P as the last child of `destination_parent`, carrying the
+        //    origin's original content + marks. A page is its own document.
+        let mut page = Block::new_text(
+            page_id.clone(),
+            destination_parent.clone(),
+            origin_content.clone(),
+        );
+        page.set_page(true);
+        page.marks = origin_marks;
+        let max_seq = self
+            .domain
+            .block_state
+            .blocks
+            .values()
+            .filter(|b| b.parent_id == *destination_parent)
+            .map(|b| b.sequence())
+            .max();
+        page.set_sequence(max_seq.map_or(0, |s| s + 1));
+        self.domain
+            .block_state
+            .block_documents
+            .insert(page_id.clone(), page_id.clone());
+        self.domain.block_state.blocks.insert(page_id.clone(), page);
+
+        // 2. Re-home the origin's direct children under P, preserving order.
+        for (i, child) in children.iter().enumerate() {
+            let b = self
+                .domain
+                .block_state
+                .blocks
+                .get_mut(child)
+                .expect("apply_block_to_page: origin child must exist");
+            b.parent_id = page_id.clone();
+            b.set_sequence(i as i64);
+        }
+
+        // 3. Re-home the document of every non-page block in the moved subtrees to P
+        //    (they now live in P's file). A nested page owns its own file and
+        //    terminates the walk — its subtree stays homed to it.
+        let mut stack: Vec<EntityUri> = children.clone();
+        while let Some(id) = stack.pop() {
+            let is_page = self
+                .domain
+                .block_state
+                .blocks
+                .get(&id)
+                .is_some_and(|b| b.is_page());
+            if is_page {
+                continue;
+            }
+            self.domain
+                .block_state
+                .block_documents
+                .insert(id.clone(), page_id.clone());
+            let grandchildren: Vec<EntityUri> = self
+                .sorted_children_of(&id)
+                .into_iter()
+                .map(|b| b.id.clone())
+                .collect();
+            stack.extend(grandchildren);
+        }
+
+        // 4. Leave a full-span `[[P]]` link on the origin — content unchanged, marks
+        //    replaced by exactly the one Link the backend's `set_field` writes (label =
+        //    origin content).
+        let link_mark = MarkSpan::new(
+            0,
+            origin_content.chars().count(),
+            InlineMark::Link {
+                target: EntityRef::Internal {
+                    id: page_id.clone(),
+                },
+                label: origin_content.clone(),
+            },
+        );
+        self.domain
+            .block_state
+            .blocks
+            .get_mut(origin)
+            .expect("apply_block_to_page: origin block must exist")
+            .marks = Some(vec![link_mark]);
+
+        self.recanon_and_rebuild();
+    }
+
     /// Join `block_id` into its merge target.
     ///
     /// Two cases, both triggered by Backspace at position 0:

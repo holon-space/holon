@@ -1096,10 +1096,7 @@ mod tests {
                 .execute_ddl("CREATE TABLE IF NOT EXISTS src (id TEXT PRIMARY KEY, v TEXT, w TEXT)")
                 .await
                 .expect("create base table");
-            handle
-                .transition_to_ready()
-                .await
-                .expect("ready boot-1");
+            handle.transition_to_ready().await.expect("ready boot-1");
             handle
                 .execute_ddl("INSERT INTO src (id, v, w) VALUES ('x', '1', 'keep')")
                 .await
@@ -1115,10 +1112,7 @@ mod tests {
         let db = TursoBackend::open_database(&db_path).expect("open boot-2");
         let (cdc_tx, _rx) = tokio::sync::broadcast::channel(64);
         let (_backend, handle) = TursoBackend::new(db, cdc_tx).expect("backend boot-2");
-        handle
-            .transition_to_ready()
-            .await
-            .expect("ready boot-2");
+        handle.transition_to_ready().await.expect("ready boot-2");
 
         // Adds a column to the SELECT — forces DROP+CREATE over the persisted
         // matview and its persisted DBSP state. Pre-fix this reconcile path

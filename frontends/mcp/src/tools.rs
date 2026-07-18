@@ -2987,12 +2987,12 @@ fn encode_rgba_to_png(img: &image::RgbaImage) -> Result<Vec<u8>, String> {
 /// (a) GPU swapchain readback — `gpui_wgpu` configures the surface as
 ///     `RENDER_ATTACHMENT` only (wgpu_renderer.rs:322, no `COPY_SRC`), has no
 ///     readback path (no `copy_texture_to_buffer`/`map_async`), and
-///     `Window::render_to_image` is `#[cfg(any(test, feature = "test-support"))]`
-///     (gpui window.rs:2097) with a default that bails (platform.rs:703).
-///     `AndroidPlatformWindow` (gpui-mobile android/window.rs:1175) does not
-///     implement it. Enabling this needs edits to two external git-dep repos
-///     plus `test-support` in the prod mobile build.
-/// (b) Android `PixelCopy` over JNI — needs a companion Java
+///     `Window::render_to_image` is `#[cfg(any(test, feature =
+/// "test-support"))]`     (gpui window.rs:2097) with a default that bails
+/// (platform.rs:703).     `AndroidPlatformWindow` (gpui-mobile
+/// android/window.rs:1175) does not     implement it. Enabling this needs edits
+/// to two external git-dep repos     plus `test-support` in the prod mobile
+/// build. (b) Android `PixelCopy` over JNI — needs a companion Java
 ///     `OnPixelCopyFinishedListener` shipped in the APK plus a Looper/Handler;
 ///     a Java interface cannot be implemented from pure Rust JNI.
 ///

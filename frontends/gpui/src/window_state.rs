@@ -10,9 +10,11 @@
 //! function that guarantees the restored rectangle sits fully inside a
 //! currently-connected display; it is unit-tested in isolation.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 
 /// File name inside the config dir (sibling of `holon.toml`).
 const WINDOW_STATE_FILE: &str = "window_state.json";
@@ -68,17 +70,14 @@ impl SavedBounds {
     fn intersection_area(&self, other: &DisplayRect) -> f32 {
         let ix = (self.x + self.width).min(other.x + other.width) - self.x.max(other.x);
         let iy = (self.y + self.height).min(other.y + other.height) - self.y.max(other.y);
-        if ix <= 0.0 || iy <= 0.0 {
-            0.0
-        } else {
-            ix * iy
-        }
+        if ix <= 0.0 || iy <= 0.0 { 0.0 } else { ix * iy }
     }
 }
 
-/// A currently-connected display's usable rectangle plus its stable uuid (if the
-/// platform provides one). The uuid lets us prefer the display the window was
-/// last on even when its saved coordinates happen to overlap another monitor.
+/// A currently-connected display's usable rectangle plus its stable uuid (if
+/// the platform provides one). The uuid lets us prefer the display the window
+/// was last on even when its saved coordinates happen to overlap another
+/// monitor.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DisplayRect {
     pub uuid: Option<String>,
@@ -161,12 +160,12 @@ pub fn connected_displays(cx: &gpui::App) -> Vec<DisplayRect> {
 /// Fit `saved` fully inside one currently-connected display, so a restored
 /// window is never (even partially) off-screen.
 ///
-/// Targeting: if `preferred_uuid` names a connected display, that display is the
-/// sole candidate; otherwise every display is a candidate. Among candidates we
-/// pick the one with the largest overlap with `saved`, falling back to the one
-/// whose centre is nearest when there is no overlap at all (the unplugged-monitor
-/// case). The rectangle is then shrunk to fit and shifted fully inside the
-/// target.
+/// Targeting: if `preferred_uuid` names a connected display, that display is
+/// the sole candidate; otherwise every display is a candidate. Among candidates
+/// we pick the one with the largest overlap with `saved`, falling back to the
+/// one whose centre is nearest when there is no overlap at all (the
+/// unplugged-monitor case). The rectangle is then shrunk to fit and shifted
+/// fully inside the target.
 ///
 /// With no displays at all the input is returned unchanged — the caller decides
 /// what to do when the platform reports zero displays.
@@ -217,7 +216,9 @@ pub fn clamp_bounds(
     };
 
     let width = saved.width.clamp(MIN_WIDTH, target.width.max(MIN_WIDTH));
-    let height = saved.height.clamp(MIN_HEIGHT, target.height.max(MIN_HEIGHT));
+    let height = saved
+        .height
+        .clamp(MIN_HEIGHT, target.height.max(MIN_HEIGHT));
     // Shift the origin so the (possibly shrunk) rect lies fully within target.
     let max_x = target.x + (target.width - width).max(0.0);
     let max_y = target.y + (target.height - height).max(0.0);
@@ -276,8 +277,8 @@ pub fn load(config_dir: &Path) -> Option<PersistedWindowState> {
     }
 }
 
-/// Persist window state to `{config_dir}/window_state.json`. Errors are returned
-/// (never swallowed) so callers can log with their own context.
+/// Persist window state to `{config_dir}/window_state.json`. Errors are
+/// returned (never swallowed) so callers can log with their own context.
 pub fn save(config_dir: &Path, state: &PersistedWindowState) -> anyhow::Result<()> {
     let path = state_path(config_dir);
     let json = serde_json::to_string_pretty(state)
@@ -327,7 +328,10 @@ mod tests {
         // Window hangs 300px past the right edge.
         let saved = bounds(1420.0, 100.0, 800.0, 600.0);
         let out = clamp_bounds(saved, None, &displays);
-        assert!(out.x + out.width <= 1920.0, "right edge inside display: {out:?}");
+        assert!(
+            out.x + out.width <= 1920.0,
+            "right edge inside display: {out:?}"
+        );
         assert_eq!(out.width, 800.0, "size preserved when it fits");
         assert_eq!(out.x, 1120.0);
     }
@@ -367,8 +371,14 @@ mod tests {
         let displays = vec![display("primary", 0.0, 0.0, 1920.0, 1080.0)];
         let saved = bounds(2200.0, 300.0, 800.0, 600.0);
         let out = clamp_bounds(saved, Some("secondary-gone"), &displays);
-        assert!(out.x >= 0.0 && out.x + out.width <= 1920.0, "moved onto primary: {out:?}");
-        assert!(out.y >= 0.0 && out.y + out.height <= 1080.0, "moved onto primary: {out:?}");
+        assert!(
+            out.x >= 0.0 && out.x + out.width <= 1920.0,
+            "moved onto primary: {out:?}"
+        );
+        assert!(
+            out.y >= 0.0 && out.y + out.height <= 1080.0,
+            "moved onto primary: {out:?}"
+        );
     }
 
     #[test]
@@ -395,7 +405,10 @@ mod tests {
         let saved = bounds(900.0, 100.0, 800.0, 400.0);
         let out = clamp_bounds(saved, None, &displays);
         assert!(out.x + out.width <= 2000.0);
-        assert!(out.x >= 1000.0, "kept on the majority (right) display: {out:?}");
+        assert!(
+            out.x >= 1000.0,
+            "kept on the majority (right) display: {out:?}"
+        );
     }
 
     #[test]

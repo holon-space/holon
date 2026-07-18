@@ -76,7 +76,10 @@ pub fn open_and_register_core(
         StorageSelector::Turso => {
             tracing::debug!("[DI] Opening database at {:?}...", db_path);
             let db = TursoBackend::open_database(&db_path).map_err(|e| {
-                anyhow::anyhow!("Failed to open Turso database at {}: {e}", db_path.display())
+                anyhow::anyhow!(
+                    "Failed to open Turso database at {}: {e}",
+                    db_path.display()
+                )
             })?;
             tracing::debug!("[DI] Database opened successfully");
 
@@ -84,7 +87,10 @@ pub fn open_and_register_core(
 
             tracing::debug!("[DI] Creating TursoBackend...");
             let (backend_inner, db_handle) = TursoBackend::new(db, cdc_tx).map_err(|e| {
-                anyhow::anyhow!("Failed to create TursoBackend for {}: {e}", db_path.display())
+                anyhow::anyhow!(
+                    "Failed to create TursoBackend for {}: {e}",
+                    db_path.display()
+                )
             })?;
             tracing::debug!("[DI] TursoBackend created");
 

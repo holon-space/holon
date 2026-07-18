@@ -46,6 +46,7 @@ use holon_pbt_core::Projection;
 use holon_pbt_core::StorageAdapter;
 use holon_pbt_core::capabilities::SutBackend;
 use holon_pbt_core::capabilities::SutBlockCreate;
+use holon_pbt_core::capabilities::SutBlockToPage;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
 use holon_pbt_core::capabilities::SutEdgeFieldWrite;
 use holon_pbt_core::capabilities::SutEditorMirrorRead;
@@ -506,7 +507,9 @@ async fn compose_sut_seeded_impl(
         // which the UI-only creation-slot gesture could not reach here.
         caps.insert(floor.clone() as Arc<dyn SutBlockCreate>);
         // Template-instantiation cap at the same op-floor rung.
-        caps.insert(floor as Arc<dyn SutTemplateInstantiate>);
+        caps.insert(floor.clone() as Arc<dyn SutTemplateInstantiate>);
+        // Block→page transform (`BlockToPage`) at the same op-floor rung.
+        caps.insert(floor as Arc<dyn SutBlockToPage>);
         engine = Some(eng);
     }
 

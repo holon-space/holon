@@ -25,6 +25,7 @@ use holon_frontend::operations::OperationIntent;
 pub use holon_frontend::user_driver::ReactiveEngineDriver;
 pub use holon_frontend::user_driver::UserDriver;
 use holon_pbt_core::capabilities::SutBlockCreate;
+use holon_pbt_core::capabilities::SutBlockToPage;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
 use holon_pbt_core::capabilities::SutTemplateInstantiate;
 
@@ -372,6 +373,35 @@ impl SutTemplateInstantiate for DirectUserDriver {
             .await
             .unwrap_or_else(|e| {
                 panic!("[DirectUserDriver floor] block/instantiate_template failed: {e:#}")
+            });
+    }
+}
+
+/// Op-floor `SutBlockToPage`: dispatch `block.convert_block_to_page` through
+/// the production engine (BlockToPageTransform Option B). An empty
+/// `destination_path` is OMITTED so the op takes its `destination_path`-absent
+/// branch — defaulting to the origin's nearest page ancestor — which is exactly
+/// what the reference effect models, so the born-equal page id agrees.
+#[async_trait::async_trait(?Send)]
+impl SutBlockToPage for DirectUserDriver {
+    async fn convert_block_to_page(&self, target: &EntityUri, destination_path: &str) {
+        let mut params: HashMap<String, Value> = HashMap::new();
+        params.insert(
+            "target".to_string(),
+            Value::String(self.resolve(target).to_string()),
+        );
+        // Empty ⇒ omit, so the backend defaults to the nearest page ancestor
+        // (the ref model's destination). A non-empty path is passed verbatim.
+        if !destination_path.is_empty() {
+            params.insert(
+                "destination_path".to_string(),
+                Value::String(destination_path.to_string()),
+            );
+        }
+        self.synthetic_dispatch("block", "convert_block_to_page", params)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[DirectUserDriver floor] block/convert_block_to_page failed: {e:#}")
             });
     }
 }

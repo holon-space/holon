@@ -1368,8 +1368,9 @@ fn launch_holon_window_impl(
         persisted_bounds.or_else(|| env_bounds.map(gpui::WindowBounds::Windowed));
     // Config dir to persist window state into — `None` for PBT / custom-title
     // windows so they never write over the user's real window_state.json.
-    let persist_config_dir: Option<std::path::PathBuf> =
-        custom_title.is_none().then(|| session.config_dir().to_path_buf());
+    let persist_config_dir: Option<std::path::PathBuf> = custom_title
+        .is_none()
+        .then(|| session.config_dir().to_path_buf());
     let window_options = WindowOptions {
         titlebar: Some(TitlebarOptions {
             title: Some(
