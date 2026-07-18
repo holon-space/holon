@@ -2326,12 +2326,6 @@ impl HolonMcpServer {
         &self,
         Parameters(params): Parameters<ScreenshotParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        #[cfg(not(target_os = "macos"))]
-        return Err(rmcp::ErrorData::internal_error(
-            "Screenshot capture is only available on macOS",
-            None,
-        ));
-
         #[cfg(target_os = "macos")]
         {
             // xcap window enumeration is blocking — run on a blocking thread
@@ -2355,6 +2349,18 @@ impl HolonMcpServer {
                 "image/png",
             )]))
         } // cfg(target_os = "macos")
+
+        #[cfg(target_os = "android")]
+        return Err(rmcp::ErrorData::internal_error(
+            screenshot_unsupported_message("Android"),
+            None,
+        ));
+
+        #[cfg(not(any(target_os = "macos", target_os = "android")))]
+        return Err(rmcp::ErrorData::internal_error(
+            screenshot_unsupported_message(std::env::consts::OS),
+            None,
+        ));
     }
 
     #[tool(
@@ -2958,10 +2964,50 @@ fn capture_window_as_png(window_title: Option<&str>) -> Result<Vec<u8>, String> 
         )
     })?;
 
+    encode_rgba_to_png(&img)
+}
+
+/// Encode an RGBA image to PNG bytes. Cross-platform so the encoding path is
+/// exercised by unit tests without a live window (the capture step is not).
+/// Only the macOS capture path and the tests call it today.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn encode_rgba_to_png(img: &image::RgbaImage) -> Result<Vec<u8>, String> {
     let mut png_buf = std::io::Cursor::new(Vec::new());
     img.write_to(&mut png_buf, image::ImageFormat::Png)
         .map_err(|e| format!("PNG encoding failed: {e}"))?;
     Ok(png_buf.into_inner())
+}
+
+/// Fail-loud message for platforms without an in-app screenshot path.
+///
+/// In-process capture is not wired up off macOS. The two in-app options both
+/// need machinery that does not exist yet, so the tool fails loudly and names
+/// the host-side alternative instead of returning a fake/empty image:
+///
+/// (a) GPU swapchain readback — `gpui_wgpu` configures the surface as
+///     `RENDER_ATTACHMENT` only (wgpu_renderer.rs:322, no `COPY_SRC`), has no
+///     readback path (no `copy_texture_to_buffer`/`map_async`), and
+///     `Window::render_to_image` is `#[cfg(any(test, feature = "test-support"))]`
+///     (gpui window.rs:2097) with a default that bails (platform.rs:703).
+///     `AndroidPlatformWindow` (gpui-mobile android/window.rs:1175) does not
+///     implement it. Enabling this needs edits to two external git-dep repos
+///     plus `test-support` in the prod mobile build.
+/// (b) Android `PixelCopy` over JNI — needs a companion Java
+///     `OnPixelCopyFinishedListener` shipped in the APK plus a Looper/Handler;
+///     a Java interface cannot be implemented from pure Rust JNI.
+///
+/// Only reached off macOS; on macOS it is exercised solely by the unit tests.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn screenshot_unsupported_message(platform: &str) -> String {
+    format!(
+        "In-app screenshot capture is not implemented on {platform}. \
+         Host-side workaround (Android, needs adb access): \
+         `adb exec-out screencap -p > holon.png`. \
+         In-process capture would require GPU swapchain readback in gpui_wgpu \
+         (surface is RENDER_ATTACHMENT-only, no COPY_SRC) or an Android \
+         PixelCopy JNI path with a companion Java listener — neither is wired \
+         up yet."
+    )
 }
 
 // --- Helper methods for debug tools ---
@@ -3223,6 +3269,30 @@ mod tests {
     fn type_text_empty_input_is_vacuous_success() {
         // A special-key expansion that produced nothing must not be a "drop".
         assert_eq!(type_text_drop_outcome(0, 0), Ok(0));
+    }
+
+    // ── screenshot: PNG encode + platform dispatch ──────────────────────────
+
+    #[test]
+    fn encode_rgba_to_png_produces_valid_png() {
+        let mut img = image::RgbaImage::new(2, 2);
+        img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        img.put_pixel(1, 1, image::Rgba([0, 0, 255, 255]));
+        let png = encode_rgba_to_png(&img).expect("encode should succeed");
+        // PNG magic: 0x89 'P' 'N' 'G'
+        assert_eq!(&png[1..4], b"PNG");
+        let decoded = image::load_from_memory(&png).expect("decode should succeed");
+        assert_eq!((decoded.width(), decoded.height()), (2, 2));
+    }
+
+    #[test]
+    fn screenshot_unsupported_message_names_adb_fallback() {
+        let msg = screenshot_unsupported_message("Android");
+        assert!(msg.contains("Android"), "names the platform: {msg}");
+        assert!(
+            msg.contains("adb exec-out screencap -p"),
+            "names host-side workaround: {msg}"
+        );
     }
 
     #[test]
