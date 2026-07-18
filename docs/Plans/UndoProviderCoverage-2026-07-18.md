@@ -60,7 +60,7 @@ is where they split** (see table).
 | `set_field(edge: tags/requires/…)` | `set_field(field, prior_set)` | **exact** | whole-set restore — `:433-447` |
 | `set_field(other property: DEADLINE/PRIORITY/generic)` | — | **absent** | `_ => (None, empty)` — `loro_block_operations.rs:449` |
 | `create` | `delete(id)` | **conditional** | exact when inserted; insert-ignored irreversible — Loro `:742-766`, Sql `:1809-1832` |
-| `delete` — **Loro authority (default)** | — | **absent** | unconditionally irreversible — `loro_block_operations.rs:771-782` |
+| `delete` — **Loro authority (default)** | `create(full block + edges + position)` | **conditional** *(NEW)* | leaf exact (identity-preserving; content+marks+tags+requires+advice_suppressed+properties+sibling position all restored via `create`'s new `after` anchor); subtree / absent → DeclaredIrreversible — `loro_block_operations.rs` (this change) |
 | `delete` — SqlOnly authority | `create(full row+edges)` | **conditional** | leaf exact (identity-preserving); cascade/absent irreversible — `sql_operation_provider.rs:1885-1940` |
 | `update` | inherits `create` | **conditional** | Loro upsert→create result (`:790-793`); Sql `update` arm always irreversible (`:1883`) |
 | `split_block` | `restore_join` | **exact** | recreates merged-away block, resets sibling content — `traits.rs:1294-1306` |
@@ -98,13 +98,14 @@ is where they split** (see table).
   (content-String / **content-Object+marks (NEW)** / **marks (NEW)** /
   task_state / edge).
 - **Conditional (M, exact-in-common-case, fail-loud otherwise):** 5 —
-  `create`, `delete` (SqlOnly), `update`, `split_block`, `join_block`.
+  `create`, `delete` (**now BOTH authorities** — SqlOnly and the default Loro,
+  this change), `update`, `split_block`, `join_block`.
 - **Absent (J):** 5 ops — `apply_mark`, `remove_mark`, `set_due_date`,
-  `set_priority`, `dismiss_advice` — **plus** ONE remaining systemic sub-gap:
-  `delete` under the **default Loro authority**. The prior
-  `set_field(marks / rich-content)` sub-gap is now CLOSED (this change); the
-  arbitrary-property sub-gap remains (folded into `set_due_date`/`set_priority`
-  above).
+  `set_priority`, `dismiss_advice`. The prior systemic sub-gap — `delete` under
+  the **default Loro authority** — is now CLOSED (this change), leaving no
+  cross-authority delete gap. The `set_field(marks / rich-content)` sub-gap was
+  closed earlier; the arbitrary-property sub-gap remains (folded into
+  `set_due_date`/`set_priority` above).
 
 Before this change `insert_text`/`delete_text` were absent (closed earlier);
 `set_field(marks / Object content)` and the junction rewrite were absent — this
@@ -120,24 +121,35 @@ to the table:
 |---|---|---|
 | **A** — in-place retag | `add_tag("Page")` (+ ancestor `add_tag`s) [+ `move_block` if re-anchored] | **PASSES** — every op is exact (`add_tag`↔`remove_tag`, `move_block` exact). De-inlining is a write-back side effect, not an op. |
 | **B** — page + link | `create` (page) + N×`move_block` (children) + rewrite origin content to `[[P]]` + backlink `resolved_id` rewrite | **CLEARED** *(NEW)* — `create`/`move_block` exact; the origin-becomes-link marked-content write now has an exact `set_field(Object/marks)` inverse; and the `block_links` junction rewrite now has an operation-level inverse (`rewrite_link_resolution` ↔ `restore_link_resolution`). Every constituent op is invertible ⇒ one composite `UndoEntry`. |
-| **C** — page + move + delete | `create` + N×`move_block` + `delete` origin | **BLOCKED** — `delete` under the **default Loro authority is absent**. Confirms the transform doc's "delete is irreversible under today's providers." |
+| **C** — page + move + delete | `create` + N×`move_block` + `delete` origin | **CLEARED** *(NEW)* — after `N×move_block` re-homes the origin's children, the origin is a **leaf**, so its `delete` under the default Loro authority now has an exact identity+position `create` inverse. `create`/`move_block` are exact. Every constituent op is invertible ⇒ one composite `UndoEntry`. |
 
-**Verdict:** With this change, **Options A and B both clear the composite-undo
-gate**; only **C** remains gated — on a Loro-authority `delete` inverse (the
-last systemic sub-gap, shortlist #1). If the block→page ruling selects B (the
-LogSeq-style recommended default), it is now undoable as one entry. (Option A
-being the undo-cleanest still dovetails with the undo ruling's "A shaped for C"
-framing.)
+**Verdict:** With this change, **Options A, B, and C all clear the
+composite-undo gate** — the last systemic sub-gap (a Loro-authority `delete`
+inverse, shortlist #1) is closed. The block→page ruling is now unconstrained by
+undo atomicity: whichever of A/B/C it selects is undoable as one entry.
+(Caveat for C: the origin must be a genuine leaf at delete time — the transform
+already moves its children first, so this holds by construction; a stray
+child left under the origin would make the delete a subtree delete and fall
+back to `DeclaredIrreversible`, fail-loud.)
 
 ## Ranked shortlist — which missing providers to build first
 
 Ranked by *user-facing frequency first, then transform-prerequisite weight*.
 
-1. **`delete` under Loro authority** *(highest — default prod mode, common user
-   action, and Option-C prerequisite).* Port the SqlOnly leaf-capture pattern
-   (`sql_operation_provider.rs:1885-1940`): capture full row + edges before
-   delete → `create` inverse; cascade stays `DeclaredIrreversible`. Larger than
-   a quick-win (needs Loro-side subtree/edge capture) → **shortlist**.
+1. ~~**`delete` under Loro authority**~~ **DONE (this change).** Ported the
+   SqlOnly leaf-capture semantics to `LoroBlockOperations::delete`: capture the
+   full block (content+marks, tags/requires/advice_suppressed edges, all
+   properties) AND the pre-delete sibling predecessor BEFORE deleting, then emit
+   a `create`-shaped inverse. Position fidelity is expressed by extending the
+   `create` op with an `after` anchor (predecessor sibling id, or `Null` for
+   first-child) routed through `LoroBackend::update_block_position`
+   (`mov_after` / `mov_to(_, 0)`) — Loro owns order via the fractional index, so
+   restore-at-end was not faithful. Marks come back atomically via a rich
+   `Object{text, marks}` content payload reapplied with `update_block_marked`.
+   A subtree delete (target has children) and an absent target stay
+   `DeclaredIrreversible` (fail-loud, never lossy) — the same line SqlOnly
+   draws. Stale-guard armed identically to SqlOnly: forward `id` FieldDelta
+   (present → absent), so an undo drops loud if the id was resurrected.
 
 2. ~~**`set_field(marks)` / `set_field(Object content)`**~~ **DONE (this
    change).** Captures prior `(text, marks)` and restores both atomically via a
@@ -190,17 +202,61 @@ Ranked by *user-facing frequency first, then transform-prerequisite weight*.
   Both descriptors are registered so the dispatcher routes them. Unit tests:
   `rewrite_and_undo_restores_prior_resolved_ids`,
   `undo_does_not_touch_rows_preexisting_at_target`.
+- **`delete` under the default Loro authority** in `LoroBlockOperations` now
+  returns an **exact** leaf inverse (previously unconditionally
+  `irreversible`). Before the delete it captures the full block via `get_block`
+  and the pre-delete sibling predecessor via `list_children(parent)`; a LEAF
+  (no children) yields a `create`-shaped inverse carrying id, parent_id,
+  content (rich `Object{text,marks}` when marked, else plain), content_type,
+  source_language/name, tags/requires/advice_suppressed edges, every stored
+  property, and an `after` positional anchor. `create` was extended to honour
+  `after` (predecessor id `String`, or `Null` ⇒ first child) via
+  `LoroBackend::update_block_position`, to route the edge fields to their
+  junctions (switching the new-block path to `create_block_with_properties`),
+  and to reapply marks from an `Object` content payload via
+  `update_block_marked` — all additive: absent params leave every normal
+  `create` caller unchanged. Subtree (has children) and absent-target deletes
+  stay `DeclaredIrreversible`. Stale-guard: forward `id` FieldDelta
+  (present → absent), mirroring the SqlOnly delete arm. Unit tests:
+  `leaf_delete_then_undo_restores_block_and_position`,
+  `first_child_delete_undo_restores_at_front`,
+  `leaf_delete_undo_multibyte_roundtrip`,
+  `subtree_delete_is_declared_irreversible`.
 - Test-harness fix: `delete_inverse_classification_tests::provider_with_rows`
   now creates `block_links` (via the canonical `LinkSchemaModule`, plus a
   `content_type` column the `backlinks` matview requires) — the `delete`
   cascade's `block_links` cleanup previously failed with "no such table:
   block_links", so both delete-inverse tests were red pre-existing.
 
-### DeclaredIrreversible sub-cases (none)
+### DeclaredIrreversible sub-cases
 
-Both providers are exact for every sub-case in scope. `restore_link_resolution`
-returns `DeclaredIrreversible` by design — it is an inverse-only surface (redo
-re-runs the forward `rewrite_link_resolution`), and its classification is
-ignored on inverse replay. No lossy fallbacks were introduced.
+- **`delete` (Loro authority), subtree** — a target with children is
+  `DeclaredIrreversible("delete: subtree resurrection not yet implemented
+  (Loro authority)")`. Faithfully resurrecting an ordered subtree (recursive
+  capture + per-node position) is deferred; the leaf case is the daily action
+  and the Option-C prerequisite. SqlOnly draws the identical line.
+- **`delete` (Loro authority), absent target** —
+  `DeclaredIrreversible("delete: target block absent (nothing to resurrect)")`
+  (idempotent no-op delete).
+- `restore_link_resolution` returns `DeclaredIrreversible` by design — an
+  inverse-only surface (redo re-runs the forward `rewrite_link_resolution`),
+  its classification ignored on inverse replay.
+
+No lossy fallbacks were introduced: every reversible path is exact, and every
+non-exact path fails loud rather than restoring a wrong-position or
+partial block.
+
+### Stale-guard honesty (Loro `delete` inverse)
+
+The delete inverse is guarded by exactly one fingerprint: the `id` field,
+present pre-delete and absent after. On undo (`create`) the engine re-verifies
+the id is still absent, so an undo drops loud if the block was resurrected out
+from under it. This is the same single-column guard the SqlOnly delete uses; it
+does **not** fingerprint the restored sibling *position* or the state of
+surviving siblings — those rest on the single-writer assumption every
+structural op in this table shares. A concurrent peer that re-inserted a
+sibling at the target slot between delete and undo would not be detected by the
+guard (the restore still lands after the captured predecessor, which is the
+faithful intent).
 </content>
 </invoke>
