@@ -233,6 +233,28 @@ pub trait BuilderServices: Send + Sync {
         Box::pin(std::future::ready(Ok(())))
     }
 
+    /// Follow a click on a *dangling* wiki-link — a `[[Name]]` mark whose
+    /// target does not yet resolve to a block. Creates the page chain for
+    /// `target` (via the `create_page_from_link` op), then navigates `region`
+    /// to the freshly-created leaf page, so the click feels identical to
+    /// clicking an already-resolved link (which dispatches `navigation.focus`).
+    ///
+    /// The leaf page id is a fresh UUID known only from the create op's
+    /// response, so the create→navigate step must chain in-process — it cannot
+    /// be expressed as two independent fire-and-forget intents. This default
+    /// impl fires only the create (stub/headless services have no navigable
+    /// `main` region to focus); `ReactiveEngine` overrides it to also navigate.
+    fn follow_dangling_link(&self, target: String, region: String) {
+        let _ = region;
+        self.dispatch_intent(crate::operations::OperationIntent::new(
+            holon_api::EntityName::new("block"),
+            "create_page_from_link".into(),
+            [("target".to_string(), holon_api::Value::String(target))]
+                .into_iter()
+                .collect(),
+        ));
+    }
+
     /// Present an operation at the op_button tap site.
     ///
     /// Routing contract implementers must provide:
@@ -1277,6 +1299,15 @@ impl UiState {
         Mutable<Option<(EntityUri, usize)>>,
     ) {
         (self.focused_block.clone(), self.pending_caret_seed.clone())
+    }
+
+    /// Cloned handles for the focus signal + main-region nav generation.
+    /// Used by [`ReactiveEngine::follow_dangling_link`], whose create→navigate
+    /// chain runs in a spawned task (so it can't borrow `&self`) and mirrors an
+    /// ordinary `navigation.focus` into these two `Mutable`s once the newly
+    /// created page's id is known from the create op's response.
+    fn nav_focus_handles(&self) -> (Mutable<Option<EntityUri>>, Mutable<u64>) {
+        (self.focused_block.clone(), self.main_nav_generation.clone())
     }
 
     /// Read the pending caret seed for `block` without consuming it. Returns
@@ -2560,6 +2591,34 @@ impl BuilderServices for ReactiveEngine {
         })
     }
 
+    fn follow_dangling_link(&self, target: String, region: String) {
+        let session = self.session.clone();
+        let (focused_block, main_nav) = self.ui_state.nav_focus_handles();
+        // Capture focus at CLICK time to guard the last-writer race: the create
+        // is async, so if the user navigates elsewhere during that window the
+        // stale task must NOT stomp the newer focus. (Resolved-link clicks
+        // mirror focus synchronously and have no such window.)
+        let focus_at_click = focused_block.get_cloned();
+        self.runtime_handle.spawn(async move {
+            if let Err(e) = create_page_and_navigate(
+                &session,
+                &focused_block,
+                &main_nav,
+                &target,
+                &region,
+                focus_at_click,
+            )
+            .await
+            {
+                // Disclose the failed follow: the user clicked a dangling link
+                // and nothing opened, so a dropped error would look like a dead
+                // link. The tracker is the PBT/monitoring seam.
+                session.error_tracker().record_error();
+                tracing::error!("follow_dangling_link({target}) failed: {e:#}");
+            }
+        });
+    }
+
     #[tracing::instrument(level = "trace", skip_all)]
     fn ui_state(&self, block_id: &EntityUri) -> HashMap<String, holon_api::Value> {
         self.ui_state.context_for(block_id)
@@ -3016,6 +3075,122 @@ fn apply_structural_focus(
             focused_block.set(Some(block));
         }
     }
+}
+
+/// Create the page chain for a *dangling* wiki-link `target`, then navigate
+/// `region` to the freshly-created leaf page. Factored out of
+/// [`ReactiveEngine::follow_dangling_link`] so the create→navigate chain —
+/// which depends on the fresh leaf-page id carried in the create op's response
+/// — can run inside a spawned task over cloned `Mutable` handles, and so the
+/// response→nav-target decision is unit-testable via
+/// [`dangling_link_nav_target`].
+///
+/// Navigation is mirrored into `UiState` (so value-fn providers like
+/// `focus_chain` observe it) and then persisted through the backend
+/// `navigation.focus` op, exactly as `maybe_mirror_navigation_focus` +
+/// `NavigationProvider` do for an ordinary click on a resolved link.
+async fn create_page_and_navigate(
+    session: &Arc<FrontendSession>,
+    focused_block: &Mutable<Option<EntityUri>>,
+    main_nav: &Mutable<u64>,
+    target: &str,
+    region: &str,
+    focus_at_click: Option<EntityUri>,
+) -> Result<()> {
+    let create_params = [(
+        "target".to_string(),
+        holon_api::Value::String(target.to_string()),
+    )]
+    .into_iter()
+    .collect();
+    let response = session
+        .execute_operation(
+            &holon_api::EntityName::new("block"),
+            "create_page_from_link",
+            create_params,
+        )
+        .await
+        .with_context(|| format!("create_page_from_link({target})"))?;
+
+    let (leaf, reset_scroll) = dangling_link_nav_target(&response, region)
+        .with_context(|| format!("create_page_from_link({target}) response"))?;
+
+    // Last-writer guard: the page CREATE always happened (and the healed link
+    // makes the next click resolve), but only navigate if no newer navigation
+    // landed during the async create window — otherwise a stale task would
+    // stomp the user's newer focus in both UiState and persisted nav-history.
+    let focus_now = focused_block.get_cloned();
+    if dangling_nav_superseded(&focus_at_click, &focus_now) {
+        tracing::info!(
+            "dangling-link navigation superseded by newer navigation \
+             (target={target}); page created, skipping focus"
+        );
+        return Ok(());
+    }
+
+    // Mirror the navigation into UiState before persisting it, matching the
+    // synchronous click-time mirror of an ordinary `navigation.focus`.
+    if focus_now.as_ref() != Some(&leaf) {
+        focused_block.set(Some(leaf.clone()));
+    }
+    if reset_scroll {
+        main_nav.set(main_nav.get() + 1);
+    }
+
+    let nav_params = [
+        (
+            "region".to_string(),
+            holon_api::Value::String(region.to_string()),
+        ),
+        (
+            "block_id".to_string(),
+            holon_api::Value::String(leaf.to_string()),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    session
+        .execute_operation(
+            &holon_api::EntityName::new("navigation"),
+            "focus",
+            nav_params,
+        )
+        .await
+        .context("navigation.focus after create_page_from_link")?;
+    Ok(())
+}
+
+/// Decide the post-create navigation target from a `create_page_from_link`
+/// response. The op returns the fresh leaf-page id as `Value::String`;
+/// navigation focuses that page and, for `region == "main"`, resets the
+/// main-panel scroll. Any other response shape is a fail-loud contract
+/// violation (the op's response type changed out from under this caller).
+fn dangling_link_nav_target(
+    response: &Option<holon_api::Value>,
+    region: &str,
+) -> Result<(EntityUri, bool)> {
+    match response {
+        Some(holon_api::Value::String(leaf_id)) => {
+            // Operation-result ingest boundary (as in structural_focus_target).
+            // ALLOW(entity_uri_from_raw): leaf page id from create_page_from_link response
+            let leaf = EntityUri::from_raw(leaf_id);
+            Ok((leaf, region == "main"))
+        }
+        other => Err(anyhow::anyhow!(
+            "create_page_from_link must return the leaf page id as Value::String, got: {other:?}"
+        )),
+    }
+}
+
+/// Whether a pending dangling-link navigation has been superseded: `true` when
+/// focus moved between the click that started the async page-create and the
+/// moment the create completed. A stale task must not stomp the newer focus —
+/// the page create still stands, only the focus move is skipped.
+fn dangling_nav_superseded(
+    focus_at_click: &Option<EntityUri>,
+    focus_now: &Option<EntityUri>,
+) -> bool {
+    focus_at_click != focus_now
 }
 
 /// Dispatch `intents` as ONE ordered fire-and-forget chain: a single spawned
@@ -3850,5 +4025,77 @@ mod tests {
                 item.widget_name()
             );
         }
+    }
+
+    // ── follow_dangling_link: create-response → navigation target ────────────
+
+    #[test]
+    fn dangling_link_nav_target_focuses_leaf_page_and_resets_main_scroll() {
+        let response = Some(Value::String("block:leaf-123".to_string()));
+        let (leaf, reset_scroll) =
+            dangling_link_nav_target(&response, "main").expect("well-formed leaf id");
+        assert_eq!(leaf.to_string(), "block:leaf-123");
+        assert!(
+            reset_scroll,
+            "a main-region page open must reset the main-panel scroll"
+        );
+    }
+
+    #[test]
+    fn dangling_link_nav_target_non_main_region_leaves_scroll_alone() {
+        let response = Some(Value::String("block:leaf-9".to_string()));
+        let (_leaf, reset_scroll) =
+            dangling_link_nav_target(&response, "right").expect("well-formed leaf id");
+        assert!(
+            !reset_scroll,
+            "a non-main region (e.g. a right-sidebar pin) must not reset main scroll"
+        );
+    }
+
+    #[test]
+    fn dangling_link_nav_target_fails_loud_on_unexpected_response() {
+        // The op contract is a `Value::String` leaf id; anything else (a None,
+        // an Object, a number) is a fail-loud contract violation, not a
+        // silently-dropped navigation.
+        for bad in [
+            None,
+            Some(Value::Object(HashMap::new())),
+            Some(Value::Integer(7)),
+        ] {
+            let err = dangling_link_nav_target(&bad, "main")
+                .expect_err("unexpected response shape must fail loud");
+            assert!(
+                err.to_string().contains("create_page_from_link"),
+                "error must name the offending op, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn dangling_nav_applied_when_focus_unchanged_since_click() {
+        // ALLOW(entity_uri_from_raw): test literal.
+        let at_click = Some(EntityUri::from_raw("block:src"));
+        let now = at_click.clone();
+        assert!(
+            !dangling_nav_superseded(&at_click, &now),
+            "focus unchanged since click → navigation is still current, must apply"
+        );
+        // Also holds when nothing was focused at click and still isn't.
+        assert!(!dangling_nav_superseded(&None, &None));
+    }
+
+    #[test]
+    fn dangling_nav_skipped_when_focus_moved_during_create() {
+        // ALLOW(entity_uri_from_raw): test literal.
+        let at_click = Some(EntityUri::from_raw("block:src"));
+        // ALLOW(entity_uri_from_raw): test literal.
+        let now = Some(EntityUri::from_raw("block:elsewhere"));
+        assert!(
+            dangling_nav_superseded(&at_click, &now),
+            "user navigated during the async create → stale task must NOT stomp newer focus"
+        );
+        // A clear→focus or focus→clear move is likewise a supersession.
+        assert!(dangling_nav_superseded(&at_click, &None));
+        assert!(dangling_nav_superseded(&None, &at_click));
     }
 }

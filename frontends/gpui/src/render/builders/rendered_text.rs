@@ -34,8 +34,8 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
     let has_content = !content.is_empty();
     let services = ctx.services.clone();
 
-    // ALLOW(entity_uri_from_raw): render-spec rendered_text node row_id (boundary,
-    // parsed once for the click target)
+    // Parsed once for the click target.
+    // ALLOW(entity_uri_from_raw): render-spec rendered_text node row_id (boundary)
     let block_uri = EntityUri::from_raw(&row_id);
 
     // Extract marks (same pattern as text.rs). Fail loud on malformed JSON.
@@ -159,18 +159,22 @@ fn link_aware_render(
                         .into_any_element()
                 }
                 EntityRef::Name { name } => {
-                    // C3 seam: dangling link click logs a well-defined warning.
-                    // C3 workstream consumes tracing::warn!(...) lines with
-                    // intent shape {target: String, source_id: EntityUri}.
-                    let n = name.clone();
-                    let src = block_uri.to_string();
+                    // Dangling link: create the page chain for this name (lazy
+                    // page-create, 2026-07-10 links ruling) and navigate the main
+                    // region to the new leaf, so the click feels identical to
+                    // clicking a resolved link. The next render re-resolves the
+                    // healed junction and this arm becomes `Internal`.
+                    let target = name.clone();
                     div()
                         .child(link_text)
                         .text_color(link_color)
                         .underline()
                         .cursor_pointer()
-                        .on_mouse_down(gpui::MouseButton::Left, move |_, _, _| {
-                            tracing::warn!("dangling link click: target={n} source={src}");
+                        .on_mouse_down(gpui::MouseButton::Left, {
+                            let s = services.clone();
+                            move |_, _, _| {
+                                s.follow_dangling_link(target.clone(), "main".to_string());
+                            }
                         })
                         .into_any_element()
                 }
