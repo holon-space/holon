@@ -23,6 +23,7 @@ use holon_api::MarkSpan;
 use holon_api::Value;
 use holon_core::OperationProvider;
 use holon_turso::schema_modules::LinkSchemaModule;
+use proptest::prelude::*;
 
 const ENTITY: &str = "block";
 const TABLE: &str = "block_raw";
@@ -323,4 +324,107 @@ async fn create_page_from_link_empty_target_is_error() {
         .execute_operation(&entity, "create_page_from_link", op_params)
         .await;
     assert!(result.is_err(), "empty target must produce an error");
+}
+
+// ---------------------------------------------------------------------------
+// inv-page-name-unique (cross-peer convergence PBT)
+// ---------------------------------------------------------------------------
+//
+// Reproduces the "two pages named X coexist in the sidebar" bug (user
+// screenshot) as a property, root-cause first.
+//
+// Holon pages live on a CRDT (Loro) substrate. A page has NO independent
+// identity beyond its (normalized name, position): two peers that each create
+// "the Areas page" are creating the SAME logical entity, so they MUST mint the
+// SAME block id. If they don't, a later merge — the ids are the primary key,
+// so the merge is a union by id — keeps BOTH blocks, and the vault now carries
+// two Page-tagged blocks named "Areas". That is exactly the duplicate the user
+// saw.
+//
+// The SUT is the production lazy-page-creation op `create_page_from_link`,
+// the path a `[[Areas]]` click/link-resolve takes when the page doesn't exist
+// yet. Its within-store dedup (`resolve_page_name`, a name lookup) papers over
+// duplicates as long as everything is in one already-merged store; it cannot
+// see an unmerged peer's page, so it does NOT make the minted id a function of
+// the name.
+//
+// This property drives the op on two INDEPENDENT peers (each its own store)
+// for a generated page name and asserts the minted leaf ids converge. Because
+// block ids are the CRDT merge key, `id_a == id_b` is precisely the condition
+// under which the merged vault holds ONE page named `name` — i.e. asserting
+// equality IS asserting inv-page-name-unique over the merged peer set. The ids
+// come entirely from the SUT (only the name is generated), so the property
+// checks the system, not the seed.
+//
+// RED today: `create_page_from_link` mints `uuid::Uuid::new_v4()`
+// (sql_operation_provider.rs), so the two peers diverge and the property
+// fails, shrinking to a minimal one-character name.
+
+/// A well-formed single-segment page name: non-empty, no path separator, no
+/// SQL-hostile quote, printable. The bug is name-independent, so the shape only
+/// needs to be a legal page name — shrinking drives it to the minimal witness.
+fn page_name_strategy() -> impl Strategy<Value = String> {
+    "[A-Za-z][A-Za-z0-9 ]{0,15}"
+        .prop_map(|s| s.trim().to_string())
+        .prop_filter("name must be non-empty after trimming", |s| !s.is_empty())
+}
+
+/// Create page `name` via the production `create_page_from_link` op on a fresh,
+/// independent peer (its own in-memory store) and return the minted leaf id.
+async fn create_page_on_fresh_peer(name: &str) -> String {
+    let (_backend, handle) = TursoBackend::new_in_memory()
+        .await
+        .expect("in-memory turso");
+    setup_schema(&handle).await;
+    let provider = provider(handle.clone());
+    let entity: EntityName = ENTITY.to_string().into();
+
+    let mut op_params: holon_api::StorageEntity = HashMap::new();
+    op_params.insert("target".into(), Value::String(name.to_string()));
+    let result = provider
+        .execute_operation(&entity, "create_page_from_link", op_params)
+        .await
+        .expect("create_page_from_link");
+    match result.response {
+        Some(Value::String(s)) => s,
+        other => panic!("expected leaf page id in response, got: {other:?}"),
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 24, ..ProptestConfig::default() })]
+
+    /// inv-page-name-unique: independent peers that each create the same-named
+    /// page must converge on one page identity, so a merge yields no duplicate.
+    ///
+    /// KNOWN-RED GUARD. Ignored so the suite stays green while the fix awaits a
+    /// ruling: making page identity deterministic intersects unruled forks
+    /// (row-25 name-vs-(name,parent) dedupe key; vault-compat O1-O5 org-ingest
+    /// id scheme; page-hierarchy PARKED). See docs/Plans/PageIdentityDeterminism.md.
+    /// Remove `#[ignore]` when the deterministic-page-id fix lands; the stored
+    /// regression (create_page_from_link.proptest-regressions) then replays.
+    #[ignore = "known-red duplicate-page guard; deterministic-page-id fix blocked on ruling — see docs/Plans/PageIdentityDeterminism.md"]
+    #[test]
+    fn inv_page_name_unique_converges_across_peers(name in page_name_strategy()) {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let (id_a, id_b) = rt.block_on(async {
+            let a = create_page_on_fresh_peer(&name).await;
+            let b = create_page_on_fresh_peer(&name).await;
+            (a, b)
+        });
+
+        prop_assert_eq!(
+            &id_a,
+            &id_b,
+            "inv-page-name-unique: two independent peers each created page {:?} but minted \
+             divergent block ids ({} vs {}). Block ids are the CRDT merge key, so on merge the \
+             vault holds TWO Page-tagged blocks named {:?} — the duplicate-page bug. Page \
+             identity must be a deterministic function of the (normalized name, position), not a \
+             random UUID.",
+            name, id_a, id_b, name
+        );
+    }
 }
