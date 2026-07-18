@@ -1280,6 +1280,76 @@ impl SqlOperationProvider {
         )]
     }
 
+    /// Capture the `block_links` rows currently resolved to `resolved_id`, as
+    /// the row objects `restore_link_resolution` replays to undo a
+    /// `rewrite_link_resolution`. Each object carries the full PRIMARY KEY
+    /// (`source_block_id`, `target`, `kind`) plus the prior `resolved_id` — here
+    /// always equal to the queried id, but captured verbatim so the restore is
+    /// self-describing (no reliance on the forward `from`).
+    async fn capture_links_resolved_to(&self, resolved_id: &str) -> Result<Vec<Value>> {
+        let sql = format!(
+            "SELECT source_block_id, target, kind, resolved_id FROM block_links WHERE \
+             resolved_id = '{rid}'",
+            rid = resolved_id.replace('\'', "''"),
+        );
+        let rows = self
+            .db_handle
+            .query(&sql, HashMap::new())
+            .await
+            .map_err(|e| format!("capture_links_resolved_to({resolved_id}): {e}"))?;
+        Ok(rows
+            .into_iter()
+            .map(|row| Value::Object(row.into_iter().map(|(k, v)| (k.to_string(), v)).collect()))
+            .collect())
+    }
+
+    /// Build the `UPDATE block_links` statements that restore each captured row's
+    /// prior `resolved_id`, keyed on the junction PRIMARY KEY. A `Null`
+    /// `resolved_id` restores to `NULL` (dangling). Fails loud on a malformed
+    /// captured row (missing/typed-wrong key) rather than silently skipping it.
+    fn restore_links_statements(rows: &[Value]) -> Result<Vec<String>> {
+        let mut stmts = Vec::with_capacity(rows.len());
+        for row in rows {
+            let obj = match row {
+                Value::Object(o) => o,
+                other => {
+                    return Err(
+                        format!("restore_link_resolution: row is not an Object: {other:?}").into(),
+                    );
+                }
+            };
+            let field = |name: &str| -> Result<String> {
+                match obj.get(name) {
+                    Some(v) => v.as_string().map(str::to_string).ok_or_else(|| {
+                        format!("restore_link_resolution: '{name}' is not a string: {v:?}").into()
+                    }),
+                    None => Err(format!("restore_link_resolution: missing '{name}'").into()),
+                }
+            };
+            let source = field("source_block_id")?;
+            let target = field("target")?;
+            let kind = field("kind")?;
+            let set = match obj.get("resolved_id") {
+                Some(Value::String(id)) => format!("'{}'", id.replace('\'', "''")),
+                Some(Value::Null) | None => "NULL".to_string(),
+                Some(other) => {
+                    return Err(format!(
+                        "restore_link_resolution: 'resolved_id' unexpected type: {other:?}"
+                    )
+                    .into());
+                }
+            };
+            stmts.push(format!(
+                "UPDATE block_links SET resolved_id = {set} WHERE source_block_id = '{s}' AND \
+                 target = '{t}' AND kind = '{k}'",
+                s = source.replace('\'', "''"),
+                t = target.replace('\'', "''"),
+                k = kind.replace('\'', "''"),
+            ));
+        }
+        Ok(stmts)
+    }
+
     /// True when a block-write param set tags the block as a Page.
     fn params_tag_page(params: &StorageEntity) -> bool {
         matches!(params.get("tags"), Some(Value::Array(tags))
@@ -1498,6 +1568,42 @@ impl OperationProvider for SqlOperationProvider {
                     name: "target".to_string(),
                     type_hint: TypeHint::String,
                     description: "Wiki-link target (e.g. Projects/X)".to_string(),
+                }],
+                ..Default::default()
+            },
+            OperationDescriptor {
+                entity_name: self.entity_name.clone().into(),
+                entity_short_name: self.entity_short_name.clone(),
+                name: "rewrite_link_resolution".to_string(),
+                display_name: "Rewrite Link Resolution".to_string(),
+                description: "Re-point block_links resolved from one id to another"
+                    .to_string(),
+                required_params: vec![
+                    OperationParam {
+                        name: "from".to_string(),
+                        type_hint: TypeHint::String,
+                        description: "Current resolved_id to rewrite".to_string(),
+                    },
+                    OperationParam {
+                        name: "to".to_string(),
+                        type_hint: TypeHint::String,
+                        description: "New resolved_id".to_string(),
+                    },
+                ],
+                ..Default::default()
+            },
+            OperationDescriptor {
+                entity_name: self.entity_name.clone().into(),
+                entity_short_name: self.entity_short_name.clone(),
+                name: "restore_link_resolution".to_string(),
+                display_name: "Restore Link Resolution".to_string(),
+                description: "Inverse of rewrite_link_resolution — restore captured \
+                     resolved_ids"
+                    .to_string(),
+                required_params: vec![OperationParam {
+                    name: "rows".to_string(),
+                    type_hint: TypeHint::String,
+                    description: "Captured block_links rows to restore".to_string(),
                 }],
                 ..Default::default()
             },
@@ -2274,6 +2380,77 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 )
                 .with_response(Value::String(leaf_id)))
             }
+            "rewrite_link_resolution" => {
+                // Operation-level surface for the block→page transform's inbound
+                // link re-pointing (transform doc §backlinks, Option B): rewrite
+                // every `block_links` row currently resolved to `from` so it
+                // resolves to `to` instead (origin → new page P). The EXACT
+                // inverse captures the affected junction rows' prior
+                // (source_block_id, target, kind, resolved_id) tuples up front
+                // and restores each one — NOT a `to → from` swap, which would
+                // wrongly recapture rows that already pointed at `to` before the
+                // rewrite. Scoped to the transform's need; not a generic
+                // SQL-undo framework.
+                let from = params
+                    .get("from")
+                    .and_then(|v| v.as_string())
+                    .ok_or("rewrite_link_resolution: missing 'from' parameter")?
+                    .to_string();
+                let to = params
+                    .get("to")
+                    .and_then(|v| v.as_string())
+                    .ok_or("rewrite_link_resolution: missing 'to' parameter")?
+                    .to_string();
+
+                let prior_rows = self.capture_links_resolved_to(&from).await?;
+
+                let fromq = from.replace('\'', "''");
+                let toq = to.replace('\'', "''");
+                let update = format!(
+                    "UPDATE block_links SET resolved_id = '{toq}' WHERE resolved_id = '{fromq}'"
+                );
+                self.db_handle
+                    .transaction(vec![(update, vec![])])
+                    .await
+                    .map_err(|e| format!("rewrite_link_resolution: {e}"))?;
+
+                let inverse = Operation::from_params(
+                    EntityName::new(&self.entity_name),
+                    "restore_link_resolution",
+                    "restore_link_resolution",
+                    [("rows".to_string(), Value::Array(prior_rows))],
+                );
+                Ok(OperationResult::new(Vec::new(), inverse))
+            }
+            "restore_link_resolution" => {
+                // Inverse-only surface: replay the captured junction rows,
+                // restoring each PRIMARY KEY row's exact prior `resolved_id`.
+                // Only ever dispatched as `rewrite_link_resolution`'s inverse
+                // (undo); redo re-runs the forward `rewrite_link_resolution`, so
+                // this op needs no inverse of its own — `declared_irreversible`
+                // is the honest classification (and is ignored on inverse
+                // replay).
+                let rows = match params.get("rows") {
+                    Some(Value::Array(rows)) => rows.clone(),
+                    other => {
+                        return Err(format!(
+                            "restore_link_resolution: 'rows' must be an Array, got {other:?}"
+                        )
+                        .into());
+                    }
+                };
+                let stmts = Self::restore_links_statements(&rows)?;
+                if !stmts.is_empty() {
+                    self.db_handle
+                        .transaction(stmts.into_iter().map(|s| (s, vec![])).collect())
+                        .await
+                        .map_err(|e| format!("restore_link_resolution: {e}"))?;
+                }
+                Ok(OperationResult::declared_irreversible(
+                    Vec::new(),
+                    "restore_link_resolution — internal inverse of rewrite_link_resolution",
+                ))
+            }
             "dismiss_advice" => {
                 // Append the lesson to the anchor's `advice_suppressed` set
                 // (ADR 0021/0022). A SINGLE per-row `INSERT OR IGNORE` against
@@ -2713,22 +2890,34 @@ mod create_id_tests {
 #[cfg(test)]
 mod delete_inverse_classification_tests {
     use holon_core::traits::UndoAction;
+    use holon_turso::schema_modules::LinkSchemaModule;
 
     use super::*;
+    use crate::storage::SchemaModule;
 
     async fn provider_with_rows() -> (crate::storage::turso::DbHandle, SqlOperationProvider) {
         let (_backend, db_handle) = crate::storage::turso::TursoBackend::new_in_memory()
             .await
             .expect("in-memory turso");
+        // `content_type` is required by the `backlinks` matview
+        // (`LinkSchemaModule`) which joins `block_raw`; without it the schema
+        // module's view creation fails.
         db_handle
             .execute(
                 "CREATE TABLE block_raw (id TEXT PRIMARY KEY, parent_id TEXT, content TEXT, \
-                 sort_key TEXT, depth INTEGER, properties TEXT, created_at INTEGER, updated_at \
-                 INTEGER)",
+                 content_type TEXT NOT NULL DEFAULT 'text', sort_key TEXT, depth INTEGER, \
+                 properties TEXT, created_at INTEGER, updated_at INTEGER)",
                 vec![],
             )
             .await
             .expect("create table");
+        // The `delete` cascade cleans up `block_links` (drop outbound, un-resolve
+        // inbound), so the table must exist. Reuse the canonical DDL via the
+        // schema module rather than a duplicated string literal.
+        LinkSchemaModule
+            .ensure_schema(&db_handle)
+            .await
+            .expect("block_links schema");
         let provider = SqlOperationProvider::new(
             db_handle.clone(),
             "block_raw".to_string(),
@@ -2810,6 +2999,188 @@ mod delete_inverse_classification_tests {
             }
             other => panic!("subtree delete must be declared irreversible, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod link_resolution_rewrite_tests {
+    use holon_core::traits::UndoAction;
+    use holon_turso::schema_modules::LinkSchemaModule;
+
+    use super::*;
+    use crate::storage::SchemaModule;
+
+    async fn provider_with_links() -> (crate::storage::turso::DbHandle, SqlOperationProvider) {
+        let (_backend, db_handle) = crate::storage::turso::TursoBackend::new_in_memory()
+            .await
+            .expect("in-memory turso");
+        db_handle
+            .execute(
+                "CREATE TABLE block_raw (id TEXT PRIMARY KEY, parent_id TEXT, content TEXT, \
+                 content_type TEXT NOT NULL DEFAULT 'text', properties TEXT, created_at INTEGER, \
+                 updated_at INTEGER)",
+                vec![],
+            )
+            .await
+            .expect("create block_raw");
+        LinkSchemaModule
+            .ensure_schema(&db_handle)
+            .await
+            .expect("block_links schema");
+        let provider = SqlOperationProvider::new(
+            db_handle.clone(),
+            "block_raw".to_string(),
+            "block".to_string(),
+            "block".to_string(),
+        );
+        std::mem::forget(_backend);
+        (db_handle, provider)
+    }
+
+    async fn seed_link(db: &crate::storage::turso::DbHandle, source: &str, resolved: Option<&str>) {
+        let rid = match resolved {
+            Some(r) => format!("'{r}'"),
+            None => "NULL".to_string(),
+        };
+        db.execute(
+            &format!(
+                "INSERT INTO block_links (source_block_id, target, kind, resolved_id) VALUES \
+                 ('{source}', 'SomePage', 'page', {rid})"
+            ),
+            vec![],
+        )
+        .await
+        .expect("seed link");
+    }
+
+    async fn resolved_of(db: &crate::storage::turso::DbHandle, source: &str) -> Value {
+        let rows = db
+            .query(
+                &format!(
+                    "SELECT resolved_id FROM block_links WHERE source_block_id = '{source}'"
+                ),
+                HashMap::new(),
+            )
+            .await
+            .expect("query resolved");
+        rows.into_iter()
+            .next()
+            .and_then(|mut r| r.remove("resolved_id"))
+            .expect("one row")
+    }
+
+    async fn rewrite(
+        provider: &SqlOperationProvider,
+        from: &str,
+        to: &str,
+    ) -> OperationResult {
+        let mut params = StorageEntity::new();
+        params.insert("from".into(), Value::String(from.to_string()));
+        params.insert("to".into(), Value::String(to.to_string()));
+        provider
+            .execute_operation_with_origin(
+                &EntityName::new("block"),
+                "rewrite_link_resolution",
+                params,
+                EventOrigin::Other("test".to_string()),
+            )
+            .await
+            .expect("rewrite_link_resolution")
+    }
+
+    async fn replay(provider: &SqlOperationProvider, op: &Operation) {
+        let params: StorageEntity = op
+            .params
+            .iter()
+            .map(|(k, v)| (k.as_str().into(), v.clone()))
+            .collect();
+        provider
+            .execute_operation_with_origin(
+                &EntityName::new("block"),
+                &op.op_name,
+                params,
+                EventOrigin::Other("test".to_string()),
+            )
+            .await
+            .expect("replay inverse");
+    }
+
+    /// The forward rewrite re-points every row resolved to `origin` onto `P`,
+    /// and its inverse restores each affected row's prior `resolved_id` exactly.
+    #[tokio::test]
+    async fn rewrite_and_undo_restores_prior_resolved_ids() {
+        let (db, provider) = provider_with_links().await;
+        seed_link(&db, "block:src1", Some("block:origin")).await;
+        seed_link(&db, "block:src2", Some("block:origin")).await;
+        seed_link(&db, "block:src3", Some("block:other")).await;
+        seed_link(&db, "block:src4", None).await;
+
+        let result = rewrite(&provider, "block:origin", "block:P").await;
+
+        // Inbound origin-links now resolve to P; unrelated rows untouched.
+        assert_eq!(resolved_of(&db, "block:src1").await, Value::String("block:P".into()));
+        assert_eq!(resolved_of(&db, "block:src2").await, Value::String("block:P".into()));
+        assert_eq!(
+            resolved_of(&db, "block:src3").await,
+            Value::String("block:other".into())
+        );
+        assert_eq!(resolved_of(&db, "block:src4").await, Value::Null);
+
+        // Inverse shape: restore_link_resolution carrying the two captured rows.
+        let inverse = match &result.undo {
+            UndoAction::Undo(op) => op.clone(),
+            other => panic!("rewrite must be reversible, got {other:?}"),
+        };
+        assert_eq!(inverse.op_name, "restore_link_resolution");
+        match inverse.params.get("rows") {
+            Some(Value::Array(rows)) => assert_eq!(rows.len(), 2, "two origin rows captured"),
+            other => panic!("rows must be an Array, got {other:?}"),
+        }
+
+        replay(&provider, &inverse).await;
+
+        // Every row is back to its pre-rewrite resolved_id.
+        assert_eq!(
+            resolved_of(&db, "block:src1").await,
+            Value::String("block:origin".into())
+        );
+        assert_eq!(
+            resolved_of(&db, "block:src2").await,
+            Value::String("block:origin".into())
+        );
+        assert_eq!(
+            resolved_of(&db, "block:src3").await,
+            Value::String("block:other".into())
+        );
+        assert_eq!(resolved_of(&db, "block:src4").await, Value::Null);
+    }
+
+    /// The inverse must be capture-based, NOT a blind `to → from` swap: a row
+    /// that ALREADY resolved to `P` before the rewrite must survive the undo
+    /// unchanged (a swap would wrongly re-point it to `origin`).
+    #[tokio::test]
+    async fn undo_does_not_touch_rows_preexisting_at_target() {
+        let (db, provider) = provider_with_links().await;
+        seed_link(&db, "block:moved", Some("block:origin")).await;
+        seed_link(&db, "block:already", Some("block:P")).await;
+
+        let result = rewrite(&provider, "block:origin", "block:P").await;
+        let inverse = match &result.undo {
+            UndoAction::Undo(op) => op.clone(),
+            other => panic!("expected reversible, got {other:?}"),
+        };
+        replay(&provider, &inverse).await;
+
+        assert_eq!(
+            resolved_of(&db, "block:moved").await,
+            Value::String("block:origin".into()),
+            "the rewritten row returns to origin"
+        );
+        assert_eq!(
+            resolved_of(&db, "block:already").await,
+            Value::String("block:P".into()),
+            "the pre-existing P row must be left untouched by undo"
+        );
     }
 }
 
