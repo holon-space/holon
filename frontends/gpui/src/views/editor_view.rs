@@ -757,8 +757,14 @@ impl EditorView {
             row_id = %self.row_id,
             "converge InputState to authority"
         );
-        // Anchor the caret on the authority before the absolute set (Loro
-        // cells only; SqlOnly returns None and the caret lands at end).
+        // Capture the pre-set caret (UTF-8 byte offset) and anchor it on the
+        // authority before the absolute set — the fork's `set_value` forces the
+        // caret to text-end. The Loro-anchor path (cells only) is the refined
+        // restore: it tracks concurrent edits. SqlOnly has no anchor
+        // (`anchor_cursor` returns None), so we unconditionally restore
+        // `prior_cursor` clamped to the new text — without it the first click
+        // into an unfocused block converges here and jumps the caret to end.
+        let prior_cursor = input.read(cx).cursor();
         let anchor = {
             let state = input.read(cx);
             let cursor_codepoint = state.text().offset_to_char_index(state.cursor());
@@ -770,19 +776,34 @@ impl EditorView {
         input.update(cx, |state, cx| {
             state.set_value(&target, window, cx);
         });
-        if let Some(anchor) = anchor.as_ref() {
-            if let Some(new_codepoint) = self.controller.lock().unwrap().resolve_cursor(anchor) {
-                input.update(cx, |state, cx| {
-                    let byte_offset = state.text().char_index_to_offset(new_codepoint);
-                    let pos = state.text().offset_to_position(byte_offset);
-                    state.set_cursor_position(pos, window, cx);
-                });
-            }
-        }
+        let restored = anchor
+            .as_ref()
+            .and_then(|anchor| self.controller.lock().unwrap().resolve_cursor(anchor));
+        input.update(cx, |state, cx| {
+            let byte_offset = match restored {
+                Some(new_codepoint) => state.text().char_index_to_offset(new_codepoint),
+                None => preserved_caret(prior_cursor, &target),
+            };
+            let pos = state.text().offset_to_position(byte_offset);
+            state.set_cursor_position(pos, window, cx);
+        });
         // Lockstep: the deferred re-entrant Change now sees text ==
         // previous_text → empty delta → no spurious write-back.
         self.previous_text = target;
     }
+}
+
+/// Clamp a caret byte offset captured before an absolute `set_value` onto the
+/// new text: cap at its length and snap down to the nearest UTF-8 char boundary
+/// so the restored caret is always a valid offset. The click position survives
+/// convergence in SqlOnly mode (no Loro anchor); when the new text is shorter
+/// the caret pins to the end.
+fn preserved_caret(old_offset: usize, new_text: &str) -> usize {
+    let mut offset = old_offset.min(new_text.len());
+    while !new_text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
 }
 
 /// Bind this editor's window focus to the in-memory `focused_block` signal:
@@ -1781,5 +1802,55 @@ mod echo_suppression {
         // sync, and there is no seq to advance the high-water mark to.
         let d = evaluate_data_sync_echo("abc", "abc", None, 11);
         assert_eq!(d, EchoDecision::InSync { advance_to: None });
+    }
+}
+
+#[cfg(test)]
+mod caret_preservation {
+    //! Directed regression tests for [`preserved_caret`] — the clamp that keeps
+    //! a click-placed caret from jumping to text-end when `converge_input`
+    //! re-seeds an unfocused editor's `InputState` in SqlOnly mode (no Loro
+    //! anchor). BugFunnel: first click into an unfocused block placed the caret
+    //! at end instead of the clicked char.
+
+    use super::preserved_caret;
+
+    #[test]
+    fn mid_text_offset_is_preserved() {
+        // The clicked byte offset lands inside the unchanged converged text.
+        assert_eq!(preserved_caret(3, "hello world"), 3);
+    }
+
+    #[test]
+    fn offset_past_end_pins_to_length() {
+        // New (converged) text is shorter than where the caret was — pin to end
+        // rather than produce an out-of-bounds offset.
+        assert_eq!(preserved_caret(20, "hello"), 5);
+    }
+
+    #[test]
+    fn offset_equal_to_length_is_end() {
+        assert_eq!(preserved_caret(5, "hello"), 5);
+    }
+
+    #[test]
+    fn zero_offset_stays_at_start() {
+        assert_eq!(preserved_caret(0, "hello"), 0);
+    }
+
+    #[test]
+    fn multibyte_boundary_snaps_down() {
+        // "café" — 'é' is 2 bytes (indices 3..5); an offset landing mid-'é' (4)
+        // must snap down to the char boundary 3, never a raw byte min that would
+        // panic in `offset_to_position`.
+        let text = "café";
+        assert_eq!(text.len(), 5);
+        assert_eq!(preserved_caret(4, text), 3);
+    }
+
+    #[test]
+    fn multibyte_valid_boundary_is_kept() {
+        // An offset already on a char boundary of a multibyte string is kept.
+        assert_eq!(preserved_caret(3, "café"), 3);
     }
 }
