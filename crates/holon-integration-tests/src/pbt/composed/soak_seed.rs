@@ -136,19 +136,80 @@ pub fn soak_nav_hard_assert() -> bool {
     )
 }
 
+/// The seed TREE SHAPE — the depth-vs-count lever for the nav-latency probe.
+/// Parse-don't-validate target for `HOLON_SOAK_SHAPE` (default `Wide`).
+///
+/// The recursive focus-descendant matview's cycle guard is an O(path-length)
+/// string scan PER recursion step (`','||visited||',' NOT LIKE
+/// '%,'||id||',%'`), so its cost grows ~quadratically with tree DEPTH per node
+/// — a lever that a shallow-wide seed (the default) cannot pull. Prod's ~11.9s
+/// cliff was at only 1038 REAL blocks (deep outline chains), vs sub-second at
+/// 2000 shallow synthetic blocks; DEPTH, not count, is the suspected driver.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SoakShape {
+    /// Shallow (depth ≤ 4), wide fan-out — `HOLON_SOAK_BLOCKS_PER_DOC` blocks
+    /// per page. The original soak shape; recursive descent is trivial.
+    Wide,
+    /// A few LINEAR chains of depth `HOLON_SOAK_DEPTH` (default 200), one page
+    /// per chain — mirrors a real deep outline. Each chain is `page → b0 → b1 →
+    /// … → b{L-1}` (heading level `j+1`), so a navigate-to-page materializes an
+    /// L-deep recursion that stresses the cycle-guard string scan.
+    Deep,
+    /// Half wide, half deep (disjoint contiguous page indices).
+    Mixed,
+}
+
+/// Parse `HOLON_SOAK_SHAPE` at the boundary. Unset/empty ⇒ `Wide`. Fails loud
+/// on any other value.
+pub fn soak_shape() -> SoakShape {
+    match std::env::var("HOLON_SOAK_SHAPE") {
+        Err(_) => SoakShape::Wide,
+        Ok(s) if s.trim().is_empty() => SoakShape::Wide,
+        Ok(s) => match s.trim() {
+            "wide" => SoakShape::Wide,
+            "deep" => SoakShape::Deep,
+            "mixed" => SoakShape::Mixed,
+            other => {
+                panic!(
+                    "HOLON_SOAK_SHAPE must be 'wide' | 'deep' | 'mixed' (or unset), got {other:?}"
+                )
+            }
+        },
+    }
+}
+
+/// Per-chain nesting depth for the `deep`/`mixed` shapes (org heading levels).
+/// `HOLON_SOAK_DEPTH` (default `200`) — deep enough to make the cycle-guard
+/// string scan's ~quadratic-in-depth cost dominate.
+fn soak_depth() -> usize {
+    std::env::var("HOLON_SOAK_DEPTH")
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .filter(|&n: &usize| n > 0)
+        .unwrap_or(200)
+}
+
 /// The deterministic set of navigable focus roots the nav rung drives: the
-/// synthetic soak DOC pages `block:soak-doc-0 .. block:soak-doc-{n-1}`, where
-/// `n = ceil(HOLON_SOAK_SEED_BLOCKS / HOLON_SOAK_BLOCKS_PER_DOC)`. Each is a
-/// real ingested page in the SUT store (`#+ID: soak-doc-K`, `#+TITLE: Soak Page
-/// K` — see [`soak_org_files`]) that renders in the LeftSidebar, so a
-/// first-visit `NavigateFocus` to it registers a fresh focus-descendant watch =
-/// the cold materialization under test. `0` when the soak is off.
+/// synthetic soak DOC pages `block:soak-doc-0 .. block:soak-doc-{n-1}`. Each is
+/// a real ingested page in the SUT store (`#+ID: soak-doc-K` — see
+/// [`soak_org_files`]) that renders in the LeftSidebar, so a first-visit
+/// `NavigateFocus` to it registers a fresh focus-descendant watch = the cold
+/// materialization under test. The count is SHAPE-dependent (wide: many small
+/// pages; deep: few deep-chain pages). `0` when the soak is off.
 pub fn soak_doc_count() -> usize {
     let total = soak_block_count();
     if total == 0 {
         return 0;
     }
-    total.div_ceil(blocks_per_doc())
+    match soak_shape() {
+        SoakShape::Wide => total.div_ceil(blocks_per_doc()),
+        SoakShape::Deep => total.div_ceil(soak_depth()),
+        SoakShape::Mixed => {
+            let deep_total = total / 2;
+            let wide_total = total - deep_total;
+            wide_total.div_ceil(blocks_per_doc()) + deep_total.div_ceil(soak_depth())
+        }
+    }
 }
 
 /// Total number of extra vault blocks to seed. `HOLON_SOAK_SEED_BLOCKS`
@@ -211,20 +272,39 @@ const FRAGMENTS: &[&str] = &[
 ];
 
 /// Generate the synthetic vault as org doc files: `Vec<(filename, content)>`.
-/// Empty when the soak is off. Each doc is a page (`#+ID: soak-doc-K`) of
-/// headings with a stable `:ID:` drawer (`soak-K-J`), deterministic depth (deep
-/// trees), task markers, unicode content, and occasional intra-vault links.
+/// Empty when the soak is off. SHAPE-selected (`HOLON_SOAK_SHAPE`): `wide` =
+/// many shallow pages; `deep` = a few deep chains; `mixed` = both (disjoint,
+/// contiguous `soak-doc-K` indices so the nav rung's root set stays dense).
 pub fn soak_org_files() -> Vec<(String, String)> {
     let total = soak_block_count();
     if total == 0 {
         return Vec::new();
     }
+    match soak_shape() {
+        SoakShape::Wide => wide_docs(total, 0).0,
+        SoakShape::Deep => deep_docs(total, 0).0,
+        SoakShape::Mixed => {
+            let deep_total = total / 2;
+            let wide_total = total - deep_total;
+            let (mut files, next_k) = wide_docs(wide_total, 0);
+            let (deep, _) = deep_docs(deep_total, next_k);
+            files.extend(deep);
+            files
+        }
+    }
+}
+
+/// Shallow-wide docs (the original shape): `ceil(total / blocks_per_doc)`
+/// pages, each a depth-≤4 random-walk tree. Returns the files and the next free
+/// page index (for `mixed`).
+fn wide_docs(total: usize, start_k: usize) -> (Vec<(String, String)>, usize) {
     let per_doc = blocks_per_doc();
     let doc_count = total.div_ceil(per_doc);
     let mut files = Vec::with_capacity(doc_count);
     let mut emitted = 0usize;
 
-    for k in 0..doc_count {
+    for i in 0..doc_count {
+        let k = start_k + i;
         let mut body = format!("#+ID: soak-doc-{k}\n#+TITLE: Soak Page {k}\n");
         let mut rng = 0x5EED_0000_0000_0000u64 ^ (k as u64);
         // Current heading depth (org `*` count). Random-walk in 1..=4, biased to stay
@@ -264,5 +344,34 @@ pub fn soak_org_files() -> Vec<(String, String)> {
         }
         files.push((format!("soak-{k}.org"), body));
     }
-    files
+    (files, start_k + doc_count)
+}
+
+/// Deep-chain docs: `ceil(total / soak_depth())` pages, each a single LINEAR
+/// nesting chain (`page → b0 → b1 → … → b{L-1}`, heading level `j+1`) of depth
+/// up to `HOLON_SOAK_DEPTH`. A navigate-to-page here materializes an L-deep
+/// recursive descent — the cycle-guard-string-scan lever. Returns the files and
+/// the next free page index (for `mixed`).
+fn deep_docs(total: usize, start_k: usize) -> (Vec<(String, String)>, usize) {
+    let depth = soak_depth();
+    let mut files = Vec::new();
+    let mut emitted = 0usize;
+    let mut k = start_k;
+    while emitted < total {
+        let chain_len = depth.min(total - emitted);
+        let mut body = format!("#+ID: soak-doc-{k}\n#+TITLE: Soak Chain {k}\n");
+        for j in 0..chain_len {
+            // Heading level `j+1`: each block is the single child of the previous,
+            // so the whole doc is one depth-`chain_len` chain under the page.
+            let stars = "*".repeat(j + 1);
+            let frag = FRAGMENTS[(k + j) % FRAGMENTS.len()];
+            body.push_str(&format!(
+                "{stars} block {k}-{j} · {frag}\n:PROPERTIES:\n:ID: soak-{k}-{j}\n:END:\n"
+            ));
+        }
+        files.push((format!("soak-{k}.org"), body));
+        emitted += chain_len;
+        k += 1;
+    }
+    (files, k)
 }
