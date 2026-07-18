@@ -380,7 +380,15 @@ async fn convert_creates_missing_destination_hierarchy_reversibly() {
 async fn convert_at_vault_root_is_allowed() {
     let engine = block_engine().await;
     let origin = "block:root-origin";
-    create(&engine, origin, "sentinel:no_parent", "Loose note", 0, false).await;
+    create(
+        &engine,
+        origin,
+        "sentinel:no_parent",
+        "Loose note",
+        0,
+        false,
+    )
+    .await;
 
     let page = convert(&engine, origin, "").await;
     assert_eq!(page, PageId::for_path("Loose note").unwrap().as_str());

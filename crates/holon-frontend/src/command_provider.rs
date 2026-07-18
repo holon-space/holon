@@ -43,7 +43,9 @@ impl ServicesBlockResolver {
 
 impl BlockResolver for ServicesBlockResolver {
     fn resolve(&self, id: &str) -> Option<TargetBlock> {
-        self.services.resolve_block(id).map(|b| TargetBlock::from_block(&b))
+        self.services
+            .resolve_block(id)
+            .map(|b| TargetBlock::from_block(&b))
     }
 }
 
@@ -133,8 +135,8 @@ impl CommandProvider {
             .collect()
     }
 
-    /// Build the `instantiate_template` Execute for a picked template, resolving
-    /// the empty-vs-non-empty placement (USER RULING "Option B").
+    /// Build the `instantiate_template` Execute for a picked template,
+    /// resolving the empty-vs-non-empty placement (USER RULING "Option B").
     ///
     /// The target block's content/parent come from the RESOLVER (a live read of
     /// the projection), NOT from `context_params`: the editor's live DataRow
@@ -568,9 +570,18 @@ mod tests {
         assert_eq!(items[0].label, "Template: Daily Journal");
         assert_eq!(items[0].id, "__template__:block:tpl");
         // `/template` surfaces all; `/<name>` narrows; miss → none.
-        assert_eq!(CommandProvider::build_template_items(&templates(), "template").len(), 1);
-        assert_eq!(CommandProvider::build_template_items(&templates(), "daily").len(), 1);
-        assert_eq!(CommandProvider::build_template_items(&templates(), "zzz").len(), 0);
+        assert_eq!(
+            CommandProvider::build_template_items(&templates(), "template").len(),
+            1
+        );
+        assert_eq!(
+            CommandProvider::build_template_items(&templates(), "daily").len(),
+            1
+        );
+        assert_eq!(
+            CommandProvider::build_template_items(&templates(), "zzz").len(),
+            0
+        );
     }
 
     #[test]
@@ -600,7 +611,10 @@ mod tests {
         let map = entries
             .iter()
             .map(|(id, content, parent)| {
-                (id.to_string(), TargetBlock::from_parts(id, content, *parent))
+                (
+                    id.to_string(),
+                    TargetBlock::from_parts(id, content, *parent),
+                )
             })
             .collect();
         Arc::new(FakeResolver(map))
@@ -623,7 +637,11 @@ mod tests {
         let provider = CommandProvider::new(vec![], live_ctx("block:child"))
             .with_prefix_start(0)
             .with_templates(templates())
-            .with_resolver(resolver(&[("block:child", "/journal", Some("block:parent"))]));
+            .with_resolver(resolver(&[(
+                "block:child",
+                "/journal",
+                Some("block:parent"),
+            )]));
         let item = PopupItem {
             id: "__template__:block:tpl".into(),
             label: "Template: Daily Journal".into(),
@@ -637,7 +655,10 @@ mod tests {
                 assert_eq!(params["template_id"], Value::String("block:tpl".into()));
                 // Empty → in place: instantiate under the PARENT, delete the
                 // empty block.
-                assert_eq!(params["target_parent"], Value::String("block:parent".into()));
+                assert_eq!(
+                    params["target_parent"],
+                    Value::String("block:parent".into())
+                );
                 assert_eq!(params["replace_block"], Value::String("block:child".into()));
                 assert!(params.contains_key("context_key"));
             }
@@ -666,7 +687,10 @@ mod tests {
         match provider.on_select(&item, "journal") {
             PopupResult::Execute { params, .. } => {
                 // Non-empty → children of the current block; content untouched.
-                assert_eq!(params["target_parent"], Value::String("block:meeting".into()));
+                assert_eq!(
+                    params["target_parent"],
+                    Value::String("block:meeting".into())
+                );
                 assert!(
                     !params.contains_key("replace_block"),
                     "non-empty target must never be deleted"

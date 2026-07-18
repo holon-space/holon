@@ -138,7 +138,8 @@ pub struct IntegrationFileConfig {
     #[serde(default)]
     pub entities: HashMap<String, EntityConfig>,
     /// Master write switch (leases/read-write ruling). Absent = disabled. Flows
-    /// through into the [`McpSidecar`] so the dispatch chokepoint can enforce it.
+    /// through into the [`McpSidecar`] so the dispatch chokepoint can enforce
+    /// it.
     #[serde(default)]
     pub writes: crate::mcp_sidecar::WritesPolicy,
     #[serde(default)]

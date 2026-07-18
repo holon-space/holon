@@ -3,15 +3,15 @@
 //!
 //! USER RULING ("Option B"): the template action is available on ANY block.
 //! - target block **empty** → the instance replaces it *in place*.
-//! - target block **non-empty** → the instance nests as its **children**;
-//!   the existing block and its content are never touched.
+//! - target block **non-empty** → the instance nests as its **children**; the
+//!   existing block and its content are never touched.
 //!
 //! The decision is a pure function of the target block's emptiness. Encoding
 //! it as an enum (parse-don't-validate) keeps the "never mutate existing
-//! content" invariant in the type rather than in scattered `if content.is_empty()`
-//! checks at each call site: a `TemplatePlacement` is *proof* that the caller
-//! already classified the target, and `target_parent()` is the only parent a
-//! caller can reach.
+//! content" invariant in the type rather than in scattered `if
+//! content.is_empty()` checks at each call site: a `TemplatePlacement` is
+//! *proof* that the caller already classified the target, and `target_parent()`
+//! is the only parent a caller can reach.
 
 use anyhow::Result;
 use anyhow::bail;
@@ -102,7 +102,9 @@ impl TargetBlock {
     /// snapshot (command not yet reflected) strips nothing and is judged on its
     /// real content.
     pub fn without_typed_command(mut self, prefix_start: usize, command_len: usize) -> Self {
-        let end = prefix_start.saturating_add(command_len).min(self.content.len());
+        let end = prefix_start
+            .saturating_add(command_len)
+            .min(self.content.len());
         if prefix_start <= end
             && self.content.is_char_boundary(prefix_start)
             && self.content.is_char_boundary(end)
@@ -299,11 +301,8 @@ mod tests {
         org.properties
             .insert("TEMPLATE".into(), Value::String("daily-journal".into()));
         // A lowercase, programmatically-created template must ALSO be found.
-        let mut prog = Block::new_text(
-            EntityUri::block("tpl-prog"),
-            EntityUri::no_parent(),
-            "body",
-        );
+        let mut prog =
+            Block::new_text(EntityUri::block("tpl-prog"), EntityUri::no_parent(), "body");
         prog.properties
             .insert("template".into(), Value::String("prog".into()));
         // A non-template block is skipped.

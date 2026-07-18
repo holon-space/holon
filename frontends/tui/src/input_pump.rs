@@ -118,6 +118,7 @@ pub async fn dispatch_interaction(
                         "no entity at position {:?} in TUI geometry",
                         position
                     )),
+                    screenshot: None,
                 };
             };
             // Focus the clicked block by setting the in-memory authority
@@ -129,6 +130,7 @@ pub async fn dispatch_interaction(
             InteractionResponse {
                 handled: true,
                 detail: None,
+                screenshot: None,
             }
         }
         _ => InteractionResponse {
@@ -138,6 +140,7 @@ pub async fn dispatch_interaction(
                  module docs for the policy"
                     .into(),
             ),
+            screenshot: None,
         },
     }
 }

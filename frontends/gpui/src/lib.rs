@@ -1914,6 +1914,37 @@ pub fn setup_interaction_pump(
         async move |cx| {
             use futures::StreamExt;
             while let Some(cmd) = rx.next().await {
+                if let holon_mcp::server::InteractionEvent::CaptureScreenshot = &cmd.event {
+                    // Capture the last rendered frame off the swapchain via the
+                    // platform's `render_to_image` (offscreen wgpu readback on
+                    // Android). Fail loud: a render/readback error is surfaced in
+                    // `detail`, never a blank image.
+                    let captured =
+                        cx.update_window(window_handle, |_, window, _cx| window.render_to_image());
+                    let response = match captured {
+                        Ok(Ok(img)) => holon_mcp::server::InteractionResponse {
+                            handled: true,
+                            detail: None,
+                            screenshot: Some(holon_mcp::server::CapturedImage {
+                                width: img.width(),
+                                height: img.height(),
+                                rgba: img.into_raw(),
+                            }),
+                        },
+                        Ok(Err(e)) => holon_mcp::server::InteractionResponse {
+                            handled: false,
+                            detail: Some(format!("render_to_image failed: {e:#}")),
+                            screenshot: None,
+                        },
+                        Err(e) => holon_mcp::server::InteractionResponse {
+                            handled: false,
+                            detail: Some(format!("window update failed during capture: {e}")),
+                            screenshot: None,
+                        },
+                    };
+                    cmd.response_tx.send(response).ok();
+                    continue;
+                }
                 let result = cx.update_window(window_handle, |_, window, cx| {
                     use holon_mcp::server::InteractionEvent;
                     match &cmd.event {
@@ -1998,16 +2029,20 @@ pub fn setup_interaction_pump(
                     }
                 });
                 let response = match result {
-                    Ok(Ok((handled, detail))) => {
-                        holon_mcp::server::InteractionResponse { handled, detail }
-                    }
+                    Ok(Ok((handled, detail))) => holon_mcp::server::InteractionResponse {
+                        handled,
+                        detail,
+                        screenshot: None,
+                    },
                     Ok(Err(detail)) => holon_mcp::server::InteractionResponse {
                         handled: false,
                         detail: Some(detail),
+                        screenshot: None,
                     },
                     Err(e) => holon_mcp::server::InteractionResponse {
                         handled: false,
                         detail: Some(e.to_string()),
+                        screenshot: None,
                     },
                 };
                 cmd.response_tx.send(response).ok();
@@ -2428,7 +2463,8 @@ pub fn interaction_event_to_platform_inputs(
         }
         InteractionEvent::ScrollEntityIntoView { .. }
         | InteractionEvent::ScrollList { .. }
-        | InteractionEvent::InsertText { .. } => {
+        | InteractionEvent::InsertText { .. }
+        | InteractionEvent::CaptureScreenshot => {
             // Handled directly by the interaction pump's match arms
             // (`scroll_entity_into_view` / `scroll_list_by` / `dispatch_insert_text`),
             // not by synthesizing a platform input. Returning an empty vec keeps
