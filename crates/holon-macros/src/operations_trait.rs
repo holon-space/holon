@@ -74,8 +74,6 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
     // OperationResult is re-exported from holon_core for external crates
     let operation_result_path = if pkg_name == "holon-core" {
         quote! { crate::OperationResult }
-    } else if pkg_name == "holon" {
-        quote! { holon_core::OperationResult }
     } else {
         quote! { holon_core::OperationResult }
     };
@@ -83,8 +81,6 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
     // UndoAction is still needed for extracting undo from OperationResult
     let undo_action_path = if pkg_name == "holon-core" {
         quote! { crate::UndoAction }
-    } else if pkg_name == "holon" {
-        quote! { holon_core::UndoAction }
     } else {
         quote! { holon_core::UndoAction }
     };
