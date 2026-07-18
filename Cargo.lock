@@ -5287,6 +5287,7 @@ dependencies = [
  "log",
  "proptest 1.11.0",
  "proptest-state-machine",
+ "serde",
  "serde_json",
  "subsecond",
  "tempfile",
