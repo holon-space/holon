@@ -36,6 +36,12 @@ targets:
       - path: Assets.xcassets
         type: folder
         buildPhase: resources
+      - path: LaunchScreen.storyboard
+        type: file
+        buildPhase: resources
+      - path: PrivacyInfo.xcprivacy
+        type: file
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: space.holon.gpui
