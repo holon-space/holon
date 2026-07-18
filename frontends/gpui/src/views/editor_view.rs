@@ -1041,9 +1041,8 @@ impl Render for EditorView {
         let popup_overlay = {
             let ctrl = self.controller.lock().unwrap();
             let max_h = popup_max_height_px(window.viewport_size().height.into());
-            ctrl.popup_state().map(|s| {
-                render_popup(&s, &self.bounds_registry, &self.popup_scroll, max_h, cx)
-            })
+            ctrl.popup_state()
+                .map(|s| render_popup(&s, &self.bounds_registry, &self.popup_scroll, max_h, cx))
         };
 
         let window_handle = window.window_handle();
@@ -1751,8 +1750,9 @@ mod popup_layout {
     //! Height policy for the slash/link popup overlay. The layout/scroll wiring
     //! itself (`overflow_y_scroll` + `track_scroll` + `anchored` flip) needs a
     //! live gpui window to exercise and is structurally invisible to the
-    //! headless keystone PBT — see docs/Testing/BugFunnel.md. What *is* pure and
-    //! testable is the cap that stops the menu running past the window bottom.
+    //! headless keystone PBT — see docs/Testing/BugFunnel.md. What *is* pure
+    //! and testable is the cap that stops the menu running past the window
+    //! bottom.
 
     use super::POPUP_DESIRED_HEIGHT_PX;
     use super::POPUP_MARGIN_PX;
