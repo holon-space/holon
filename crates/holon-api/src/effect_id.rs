@@ -135,6 +135,31 @@ pub fn deterministic_proposal_id(
     EntityUri::block(&uuid.to_string())
 }
 
+/// Fixed, checked-in namespace for external-connector idempotency keys
+/// (leases/read-write ruling, ADR 0024 P4 applied to `keyed` connector writes).
+/// Distinct from the block-id namespaces so a connector intent key can never
+/// collide with a rule effect, template instance, or proposal id.
+pub const HOLON_CONNECTOR_NAMESPACE: Uuid = Uuid::from_u128(0x2c1d0e4f_6a5b_4c3d_8e7f_0a1b2c3d4e5f);
+
+/// Mint the deterministic idempotency key for one external-connector write
+/// (ADR 0024 P4: idempotent/keyed effects converge by naming discipline, never
+/// by an execution log). The same `(connector, tool, entity-id, intent
+/// fingerprint)` yields the same key on every re-dispatch, so a retry storm
+/// collapses to one remote effect at a server that dedups on the key.
+///
+/// The `fingerprint` is a [`FiringKey`] over the write's params — a canonical,
+/// type-tagged, order-independent serialization — so two dispatches with the
+/// same intent produce the same key regardless of map iteration order.
+pub fn deterministic_intent_key(
+    connector: &str,
+    tool: &str,
+    entity_id: &str,
+    fingerprint: &FiringKey,
+) -> Uuid {
+    let name = format!("{connector}\x1f{tool}\x1f{entity_id}\x1f{}", fingerprint.0);
+    Uuid::new_v5(&HOLON_CONNECTOR_NAMESPACE, name.as_bytes())
+}
+
 /// Typed, deterministic rendering of a value for the firing key. The type tag
 /// prevents `Integer(1)` and `String("1")` from producing the same key; nested
 /// objects are rendered with sorted keys so map iteration order never leaks in.
@@ -255,6 +280,47 @@ mod tests {
         assert_eq!(
             FiringKey::from_row(&created_path).as_str(),
             FiringKey::from_row(&updated_path).as_str()
+        );
+    }
+
+    #[test]
+    fn intent_key_is_stable_and_order_independent() {
+        let fp_a = FiringKey::from_row(&row(&[
+            ("id", Value::String("t1".into())),
+            ("content", Value::String("buy milk".into())),
+        ]));
+        let fp_b = FiringKey::from_row(&row(&[
+            ("content", Value::String("buy milk".into())),
+            ("id", Value::String("t1".into())),
+        ]));
+        let k1 = deterministic_intent_key("todoist", "update-tasks", "t1", &fp_a);
+        let k2 = deterministic_intent_key("todoist", "update-tasks", "t1", &fp_b);
+        assert_eq!(k1, k2, "same intent (any param order) → same key");
+    }
+
+    #[test]
+    fn intent_key_distinct_across_components() {
+        let fp = FiringKey::from_row(&row(&[("id", Value::String("t1".into()))]));
+        let base = deterministic_intent_key("todoist", "update-tasks", "t1", &fp);
+        assert_ne!(
+            base,
+            deterministic_intent_key("gmail", "update-tasks", "t1", &fp)
+        );
+        assert_ne!(
+            base,
+            deterministic_intent_key("todoist", "add-tasks", "t1", &fp)
+        );
+        assert_ne!(
+            base,
+            deterministic_intent_key("todoist", "update-tasks", "t2", &fp)
+        );
+        let fp2 = FiringKey::from_row(&row(&[
+            ("id", Value::String("t1".into())),
+            ("content", Value::String("x".into())),
+        ]));
+        assert_ne!(
+            base,
+            deterministic_intent_key("todoist", "update-tasks", "t1", &fp2)
         );
     }
 }

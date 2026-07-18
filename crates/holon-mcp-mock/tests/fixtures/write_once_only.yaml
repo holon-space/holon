@@ -1,0 +1,21 @@
+# Once-only sidecar: writes enabled, but `write-item` is `once_only`, so the
+# dispatch chokepoint still denies it — write authority (writer designation) is
+# gated on increment 4. The test overrides `command` and inserts
+# MOCK_MCP_SCENARIO: write_happy (never reached — denial precedes the call).
+transport:
+  child_process:
+    command: /bin/false
+entity_prefix: "mock_"
+writes: enabled
+entities:
+  items:
+    short_name: item
+    id_column: id
+    schema:
+      - { name: id,    sql_type: TEXT, primary_key: true }
+      - { name: title, sql_type: TEXT }
+      - { name: body,  sql_type: TEXT }
+tools:
+  write-item:
+    entity: items
+    effect: once_only

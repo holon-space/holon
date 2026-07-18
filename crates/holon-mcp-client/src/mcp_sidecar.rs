@@ -16,6 +16,13 @@ pub struct McpSidecar {
     #[serde(default)]
     pub entity_prefix: Option<String>,
     pub entities: HashMap<String, EntityConfig>,
+    /// Master write switch (leases/read-write ruling). Absent = `disabled` =
+    /// today's fail-loud behaviour: every non-`read` tool is denied at
+    /// dispatch. `enabled` lets `idempotent`/`keyed` tools through;
+    /// `once_only` tools stay blocked until a writer/lease is configured
+    /// (increment 4).
+    #[serde(default)]
+    pub writes: WritesPolicy,
     #[serde(default)]
     pub tools: HashMap<String, ToolConfig>,
     /// Sidecar-declared derived views, created as Turso materialized views at
@@ -247,6 +254,71 @@ pub struct ToolConfig {
     pub precondition: Option<RhaiPrecondition>,
     pub param_overrides: Option<HashMap<String, ParamOverride>>,
     pub undo: Option<UndoConfig>,
+    /// Write-effect classification (leases/read-write ruling). Governs whether
+    /// the dispatch chokepoint lets this tool through under the connector's
+    /// `writes` policy. A write-shaped tool (has `affected_fields` or `undo`)
+    /// MUST declare this — an absent `effect` on such a tool is a loud config
+    /// error at load. Absent on a non-write-shaped tool means
+    /// [`ToolEffect::Read`].
+    #[serde(default)]
+    pub effect: Option<ToolEffect>,
+    /// For `effect: keyed` tools, names the tool argument that carries the
+    /// minted idempotency key. Required when `effect` is `keyed`; a loud config
+    /// error otherwise.
+    #[serde(default)]
+    pub key_param: Option<String>,
+}
+
+/// Connector-wide write policy (leases/read-write ruling).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WritesPolicy {
+    /// No external writes: every non-`read` tool is denied loud at dispatch.
+    #[default]
+    Disabled,
+    /// `idempotent`/`keyed` tools may execute; `once_only` stays gated on a
+    /// writer/lease (increment 4).
+    Enabled,
+}
+
+/// Per-tool write-effect classification (ADR 0024 P4 taxonomy). Parse-don't-
+/// validate: a fixed set of legal values, parsed at sidecar load, so the
+/// dispatch chokepoint matches on an enum instead of re-deciding from strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolEffect {
+    /// No mutation; always allowed regardless of `writes` policy.
+    Read,
+    /// Convergent by construction — re-applying yields the same state (e.g.
+    /// set-field, complete). Allowed when `writes: enabled`.
+    Idempotent,
+    /// Non-idempotent but dedupable via a minted idempotency key (increment 3).
+    /// Allowed when `writes: enabled`.
+    Keyed,
+    /// Once-only external effect (send, create-without-key). Needs a writer/
+    /// lease asymmetry (increment 4); blocked until then even when enabled.
+    OnceOnly,
+}
+
+impl ToolEffect {
+    /// The YAML spelling, for diagnostics.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ToolEffect::Read => "read",
+            ToolEffect::Idempotent => "idempotent",
+            ToolEffect::Keyed => "keyed",
+            ToolEffect::OnceOnly => "once_only",
+        }
+    }
+}
+
+impl ToolConfig {
+    /// A tool is write-shaped if it declares mutation metadata. Such a tool
+    /// MUST carry an explicit `effect` — see [`McpSidecar::from_yaml`]
+    /// validation.
+    fn is_write_shaped(&self) -> bool {
+        self.affected_fields.is_some() || self.undo.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -404,7 +476,29 @@ impl McpSidecar {
 
     pub fn from_yaml(yaml: &str) -> anyhow::Result<Self> {
         let sidecar: McpSidecar = serde_yaml::from_str(yaml)?;
+        sidecar.validate_write_policy()?;
         Ok(sidecar)
+    }
+
+    /// Fail loud at load if the write policy is under-specified — the same
+    /// discipline as a failing `views:` reconcile. A write-shaped tool with no
+    /// `effect`, or a `keyed` tool with no `key_param`, is a config error, not
+    /// a silently-defaulted setting (parse, don't validate).
+    fn validate_write_policy(&self) -> anyhow::Result<()> {
+        for (name, tool) in &self.tools {
+            match tool.effect {
+                None if tool.is_write_shaped() => anyhow::bail!(
+                    "sidecar tool '{name}' declares write metadata (affected_fields/undo) but no \
+                     `effect:` — classify it as read|idempotent|keyed|once_only"
+                ),
+                Some(ToolEffect::Keyed) if tool.key_param.is_none() => anyhow::bail!(
+                    "sidecar tool '{name}' is `effect: keyed` but declares no `key_param:` — name \
+                     the tool argument that carries the idempotency key"
+                ),
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     pub fn default_entity(&self) -> &str {
@@ -741,5 +835,74 @@ entities:
         assert_eq!(td.fields[0].name, "msg_id");
         assert!(!td.fields[0].nullable);
         assert!(td.fields[2].nullable);
+    }
+
+    #[test]
+    fn writes_policy_defaults_to_disabled() {
+        let yaml = "entities:\n  x:\n    short_name: x\n";
+        let sidecar = McpSidecar::from_yaml(yaml).unwrap();
+        assert_eq!(sidecar.writes, WritesPolicy::Disabled);
+    }
+
+    #[test]
+    fn parses_writes_and_effect() {
+        let yaml = r#"
+writes: enabled
+entities:
+  x:
+    short_name: x
+tools:
+  set-thing:
+    entity: x
+    effect: idempotent
+    affected_fields: [thing]
+  send-thing:
+    entity: x
+    effect: keyed
+    key_param: idempotency_key
+"#;
+        let sidecar = McpSidecar::from_yaml(yaml).unwrap();
+        assert_eq!(sidecar.writes, WritesPolicy::Enabled);
+        assert_eq!(
+            sidecar.tools["set-thing"].effect,
+            Some(ToolEffect::Idempotent)
+        );
+        assert_eq!(sidecar.tools["send-thing"].effect, Some(ToolEffect::Keyed));
+    }
+
+    #[test]
+    fn write_shaped_tool_without_effect_fails_loud() {
+        let yaml = r#"
+entities:
+  x:
+    short_name: x
+tools:
+  set-thing:
+    entity: x
+    affected_fields: [thing]
+"#;
+        let err = McpSidecar::from_yaml(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("set-thing") && err.contains("effect"),
+            "config error must name the tool and demand an effect, got: {err}"
+        );
+    }
+
+    #[test]
+    fn keyed_tool_without_key_param_fails_loud() {
+        let yaml = r#"
+entities:
+  x:
+    short_name: x
+tools:
+  send-thing:
+    entity: x
+    effect: keyed
+"#;
+        let err = McpSidecar::from_yaml(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("send-thing") && err.contains("key_param"),
+            "config error must demand a key_param, got: {err}"
+        );
     }
 }

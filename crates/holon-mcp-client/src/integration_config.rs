@@ -137,6 +137,11 @@ pub struct IntegrationFileConfig {
     pub entity_prefix: Option<String>,
     #[serde(default)]
     pub entities: HashMap<String, EntityConfig>,
+    /// Master write switch (leases/read-write ruling). Absent = disabled. Flows
+    /// through into the [`McpSidecar`] so the dispatch chokepoint can enforce
+    /// it.
+    #[serde(default)]
+    pub writes: crate::mcp_sidecar::WritesPolicy,
     #[serde(default)]
     pub tools: HashMap<String, ToolConfig>,
     /// Sidecar-declared derived views (see
@@ -265,6 +270,7 @@ impl IntegrationFileConfig {
         let sidecar = McpSidecar {
             entity_prefix: self.entity_prefix,
             entities: self.entities,
+            writes: self.writes,
             tools: self.tools,
             views: self.views,
         };

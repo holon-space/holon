@@ -249,6 +249,7 @@ async fn build_handle(db_handle: DbHandle) -> anyhow::Result<FakeMcpHandle> {
     let sidecar = McpSidecar {
         entity_prefix: Some("fake_".to_string()),
         entities,
+        writes: Default::default(),
         tools: HashMap::new(),
         views: vec![],
     };

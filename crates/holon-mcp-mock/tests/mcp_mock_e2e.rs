@@ -13,8 +13,10 @@ use std::time::Duration;
 use std::time::Instant;
 
 use holon::di::DbHandleCacheFactory;
+use holon_api::EntityName;
 use holon_api::StreamPosition;
 use holon_api::Value;
+use holon_core::OperationProvider;
 use holon_core::SyncTokenStore;
 use holon_mcp_client::IntegrationFileConfig;
 use holon_mcp_client::McpConnectionResult;
@@ -362,5 +364,162 @@ async fn handshake_error_fails_loud() {
     assert!(
         result.is_err(),
         "a server that refuses initialize must fail loud, got Ok"
+    );
+}
+
+// ── Connector writes (leases/read-write ruling, increments 1–3) ────
+async fn write_provider(fixture: &str, scenario: &str, db: &DbHandle) -> McpIntegration {
+    connected(
+        connect(fixture, MOCK_BIN, Some(scenario), db)
+            .await
+            .unwrap_or_else(|e| panic!("connect {fixture}/{scenario}: {e}")),
+    )
+}
+
+fn storage(content: &str) -> holon_api::StorageEntity {
+    let mut params = holon_api::StorageEntity::new();
+    params.insert("id".into(), Value::String("t1".to_string()));
+    params.insert("content".into(), Value::String(content.to_string()));
+    params
+}
+
+fn obj_field<'a>(v: &'a Value, key: &str) -> &'a Value {
+    match v {
+        Value::Object(m) => m
+            .get(key)
+            .unwrap_or_else(|| panic!("field '{key}' missing in {v:?}")),
+        other => panic!("expected object response, got {other:?}"),
+    }
+}
+
+fn is_true(v: &Value, key: &str) -> bool {
+    matches!(obj_field(v, key), Value::Boolean(true))
+}
+
+fn as_int(v: &Value, key: &str) -> i64 {
+    match obj_field(v, key) {
+        Value::Integer(n) => *n,
+        other => panic!("field '{key}' not an integer: {other:?}"),
+    }
+}
+
+// Increment 2 harness proof: a well-formed keyed write is accepted and acked.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_happy_is_accepted() {
+    let db = setup_db().await;
+    let integ = write_provider("write_keyed.yaml", "write_happy", &db).await;
+    let res = integ
+        .operation_provider
+        .execute_operation(
+            &EntityName::from("items"),
+            "write_item",
+            storage("buy milk"),
+        )
+        .await
+        .expect("well-formed keyed write should be accepted");
+    let resp = res.response.expect("write response present");
+    assert!(is_true(&resp, "ok"), "server should ack ok=true: {resp:?}");
+}
+
+// Increment 1: writes disabled (no `writes:` key) denies loud, naming the
+// policy.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_denied_when_writes_disabled() {
+    let db = setup_db().await;
+    let integ = write_provider("write_disabled.yaml", "write_happy", &db).await;
+    let err = integ
+        .operation_provider
+        .execute_operation(&EntityName::from("items"), "write_item", storage("x"))
+        .await
+        .expect_err("write must be denied when writes are disabled");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("writes are disabled") && msg.contains("write-item"),
+        "denial must name the policy and tool, got: {msg}"
+    );
+}
+
+// Increment 1: once_only stays blocked even when writes are enabled — the
+// message must point at increment 4 (writer designation), not silently allow.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_once_only_blocked_pending_writer() {
+    let db = setup_db().await;
+    let integ = write_provider("write_once_only.yaml", "write_happy", &db).await;
+    let err = integ
+        .operation_provider
+        .execute_operation(&EntityName::from("items"), "write_item", storage("x"))
+        .await
+        .expect_err("once_only must stay blocked pending writer designation");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("once_only") && msg.contains("increment 4"),
+        "once_only denial must cite the pending writer gate, got: {msg}"
+    );
+}
+
+// Increment 2: a CAS/precondition failure surfaces as a loud error, not a
+// swallowed success.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_conflict_fails_loud() {
+    let db = setup_db().await;
+    let integ = write_provider("write_keyed.yaml", "write_conflict", &db).await;
+    let err = integ
+        .operation_provider
+        .execute_operation(&EntityName::from("items"), "write_item", storage("x"))
+        .await
+        .expect_err("a CAS conflict must surface as an error");
+    assert!(
+        err.to_string().contains("precondition failed"),
+        "conflict must fail loud, got: {err}"
+    );
+}
+
+// Increment 2: a slow-acking server is tolerated; the write still completes.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_slow_ack_is_tolerated() {
+    let db = setup_db().await;
+    let integ = write_provider("write_keyed.yaml", "write_slow_ack", &db).await;
+    let res = integ
+        .operation_provider
+        .execute_operation(&EntityName::from("items"), "write_item", storage("x"))
+        .await
+        .expect("a slow ack should still resolve to success");
+    assert!(is_true(&res.response.expect("response"), "ok"));
+}
+
+// Increment 3: a retry storm of N identical keyed dispatches yields exactly one
+// remote effect. The deterministic idempotency key is stable across retries and
+// the server dedups on it — `applied_count` never exceeds 1.
+#[tokio::test(flavor = "multi_thread")]
+async fn keyed_retry_storm_yields_one_effect() {
+    let db = setup_db().await;
+    let integ = write_provider("write_keyed.yaml", "write_duplicate_detected", &db).await;
+    let provider = &integ.operation_provider;
+
+    let mut non_deduped = 0;
+    let mut last_applied = 0;
+    for _ in 0..5 {
+        let res = provider
+            .execute_operation(
+                &EntityName::from("items"),
+                "write_item",
+                storage("buy milk"),
+            )
+            .await
+            .expect("each keyed dispatch should be accepted");
+        let resp = res.response.expect("response present");
+        if !is_true(&resp, "deduped") {
+            non_deduped += 1;
+        }
+        last_applied = as_int(&resp, "applied_count");
+    }
+
+    assert_eq!(
+        non_deduped, 1,
+        "exactly one dispatch of an identical intent should be non-deduped"
+    );
+    assert_eq!(
+        last_applied, 1,
+        "the server must apply the effect exactly once across the retry storm"
     );
 }
