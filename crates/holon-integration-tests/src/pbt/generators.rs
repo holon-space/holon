@@ -160,6 +160,15 @@ pub fn typing_text_strategy() -> BoxedStrategy<String> {
         5 => base,
         5 => prop::collection::vec(extended_char(), 1..=4)
             .prop_map(|cs| cs.into_iter().collect::<String>()),
+        // Wiki-name link markup typed straight into the editor. This is the
+        // ONLY editor-driven path (TypeChars → set_field("content") → the
+        // dispatcher's `extract_inline_marks`) that mints a `Link` mark, so it
+        // is what exercises the (content, marks) pair through the mark-aware
+        // write + undo inverse. Without it the mark column stays empty on every
+        // draw and `inv-blocks-match-ref/block_raw` (which DOES compare marks)
+        // can never observe a link-mark divergence — the undo-drops-marks bug
+        // (Mac dogfood 2026-07-19) was structurally unreachable for this reason.
+        2 => "[a-z]{2,5}".prop_map(|w| format!("[[{w}]]")),
     ]
     .boxed()
 }
