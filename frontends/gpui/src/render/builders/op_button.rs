@@ -91,22 +91,36 @@ fn present_op_from_context(
     services.present_op(op, ctx_params);
 }
 
-/// Hardcoded op-name → single-char icon map. Unknowns return empty and
-/// the caller falls back to the first two letters of `display_name`.
+/// Hardcoded op-name → single-char icon glyph map. The single source of truth
+/// for op glyphs — [`op_icon_char`] looks up here and the icon-font coverage
+/// test sweeps it, so every op glyph is asserted Android-renderable. Glyphs the
+/// embedded DejaVu font can't render (🗑 delete, ⧉ embed) are substituted on
+/// Android by `crate::icon` via `crate::ICON_SUBSTITUTES`.
+pub(crate) const OP_ICONS: &[(&str, &str)] = &[
+    ("cycle_task_state", "\u{27F3}"), // ⟳
+    ("delete", "\u{1F5D1}"),          // 🗑
+    ("dismiss_advice", "\u{2715}"),   // ✕ (dismiss a woven advice suggestion, ADR 0022)
+    ("create", "+"),
+    ("update", "\u{270E}"),       // ✎
+    ("set_field", "\u{270E}"),    // ✎
+    ("embed_entity", "\u{29C9}"), // ⧉
+    ("embed", "\u{29C9}"),        // ⧉
+    ("indent", "\u{21E5}"),       // ⇥
+    ("outdent", "\u{21E4}"),      // ⇤
+    ("move_up", "\u{2191}"),      // ↑
+    ("move_down", "\u{2193}"),    // ↓
+];
+
+/// Op-name → icon glyph, already routed through `crate::icon` so glyphs the
+/// embedded coverage font can't render are substituted on Android. Unknowns
+/// return empty and the caller falls back to the first two letters of
+/// `display_name`.
 fn op_icon_char(op_name: &str) -> &'static str {
-    match op_name {
-        "cycle_task_state" => "\u{27F3}", // ⟳
-        "delete" => "\u{1F5D1}",          // 🗑
-        "dismiss_advice" => "\u{2715}",   // ✕ (dismiss a woven advice suggestion, ADR 0022)
-        "create" => "+",
-        "update" | "set_field" => "\u{270E}",   // ✎
-        "embed_entity" | "embed" => "\u{29C9}", // ⧉
-        "indent" => "\u{21E5}",                 // ⇥
-        "outdent" => "\u{21E4}",                // ⇤
-        "move_up" => "\u{2191}",                // ↑
-        "move_down" => "\u{2193}",              // ↓
-        _ => "",
-    }
+    OP_ICONS
+        .iter()
+        .find(|(name, _)| *name == op_name)
+        .map(|(_, glyph)| crate::icon(glyph))
+        .unwrap_or("")
 }
 
 fn fallback_short_label(display_name: &str) -> String {
@@ -116,4 +130,19 @@ fn fallback_short_label(display_name: &str) -> String {
         .take(2)
         .collect::<String>()
         .to_uppercase()
+}
+
+#[cfg(test)]
+mod op_icon_coverage {
+    use super::OP_ICONS;
+
+    /// Every op glyph must render on Android — DejaVu-covered directly, or
+    /// routed through `crate::ICON_SUBSTITUTES` (🗑, ⧉). Sweeps the table so a
+    /// newly-added op glyph cannot silently tofu the way `delete`/`embed` did.
+    #[test]
+    fn every_op_glyph_renders_on_android() {
+        for (op_name, glyph) in OP_ICONS {
+            crate::assert_icon_renderable_on_android(glyph, &format!("op_button::{op_name}"));
+        }
+    }
 }
