@@ -153,6 +153,10 @@ name = "undo_inverse_wave1"
 required-features = ["test-helpers"]
 
 [[test]]
+name = "undo_inverse_wave2"
+required-features = ["test-helpers"]
+
+[[test]]
 name = "query_history_mcp"
 required-features = ["test-helpers"]
 
