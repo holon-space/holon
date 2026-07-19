@@ -162,6 +162,17 @@ jobs:
           APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
         run: fastlane ios release
 
+      - name: Upload raw build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-logs
+          path: |
+            frontends/gpui/ios/build/logs/
+            ~/Library/Logs/gym/
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v2
         with:
