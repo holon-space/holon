@@ -306,7 +306,7 @@ impl SutSqlProjection for LiveMcp {
 
     /// Watches are not driven over MCP → honest `None` (the watch invariants
     /// deselect; no `SutWatch` cap is registered either).
-    async fn watch_row_count(&self, _query_id: &str) -> Option<usize> {
+    async fn watch_row_count(&self, _: &str) -> Option<usize> {
         None
     }
 
@@ -694,6 +694,45 @@ fn register_live_caps(caps: &mut CapMap, provider: Arc<LiveMcp>) {
     caps.insert(provider as Arc<dyn SutQuiesce>);
 }
 
+/// The browser-worker (dioxus-web) variant of [`register_live_caps`]. The
+/// in-browser `holon-worker` engine is headless (`BackendEngine` +
+/// `ReactiveEngine`, no `LoroDocumentStore` and no on-wasm org parser —
+/// `holon-orgmode` pulls `notify`, which has no wasm backend), so the three
+/// caps whose bodies call the Loro/org MCP tools that the worker rejects
+/// (`SutLoroLog` → `inspect_loro_blocks`/`list_loro_documents`, `SutOrgRead` →
+/// `read_org_file`, `SutOrgRender` → `render_org_from_blocks`) are OMITTED.
+///
+/// The gesture WRITE caps stay registered: the worker answers `click` /
+/// `type_text` / `insert_text` / `send_key_chord` headlessly through the same
+/// [`holon_frontend::user_driver::ReactiveEngineDriver`] the in-process
+/// keystone uses (`HeadlessInputRouter` + `HeadlessEditorMirror`) — no window.
+///
+/// Absent caps narrow the generated alphabet and the per-tick non-vacuity
+/// floor via the captured [`CapSet`], exactly as the honest-cap discipline
+/// intends — no transition is special-cased.
+fn register_live_caps_browser(caps: &mut CapMap, provider: Arc<LiveMcp>) {
+    caps.insert(provider.clone() as Arc<dyn SutBackend>);
+    caps.insert(provider.clone() as Arc<dyn SutSqlProjection>);
+    // OMITTED (worker-unsupported): SutLoroLog, SutOrgRead, SutOrgRender.
+    caps.insert(provider.clone() as Arc<dyn SutBlockTreeWrite>);
+    caps.insert(provider.clone() as Arc<dyn SutFocusWrite>);
+    caps.insert(provider.clone() as Arc<dyn SutEditorMirrorWrite>);
+    caps.insert(provider as Arc<dyn SutQuiesce>);
+}
+
+/// Select the cap-registration function for the current live target. The
+/// dioxus-web browser worker exposes a narrower MCP tool surface than a GPUI /
+/// iOS app, selected by `HOLON_PBT_LIVE_MCP_BROWSER=1`. Both call sites
+/// (`capture_live_cap_set` and `LiveMcpE2E::build`) route through here so the
+/// captured cap set and the per-case build agree on the alphabet.
+fn register_live_caps_for_target(caps: &mut CapMap, provider: Arc<LiveMcp>) {
+    if std::env::var("HOLON_PBT_LIVE_MCP_BROWSER").is_ok() {
+        register_live_caps_browser(caps, provider);
+    } else {
+        register_live_caps(caps, provider);
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // The slice + machine
 // ─────────────────────────────────────────────────────────────────────────────
@@ -721,7 +760,7 @@ pub fn capture_live_cap_set() {
         );
         let resolver: IdResolver = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
         let mut caps = CapMap::new();
-        register_live_caps(&mut caps, Arc::new(LiveMcp { driver, resolver }));
+        register_live_caps_for_target(&mut caps, Arc::new(LiveMcp { driver, resolver }));
         caps.cap_set()
     });
     drop(rt);
@@ -824,7 +863,7 @@ impl ComposedSlice for LiveMcpE2E {
             resolver: resolver.clone(),
         });
         let mut caps = CapMap::new();
-        register_live_caps(&mut caps, provider);
+        register_live_caps_for_target(&mut caps, provider);
 
         // Scaffold = everything booted OR modeled by the oracle EXCEPT the non-seed
         // working tree (parent/c1/c2) and `block:journals` (present + asserted on
@@ -879,7 +918,7 @@ impl ComposedSlice for LiveMcpE2E {
     /// Settle = the server's `await_quiescence` (budget exhaustion is an MCP
     /// tool error → fail loud), then refresh the UI snapshot so any
     /// gesture-observation read sees the post-transition frame.
-    async fn settle_after_apply(handle: &Self::Handle, _caps: &CapMap) {
+    async fn settle_after_apply(handle: &Self::Handle, _: &CapMap) {
         await_quiescence(handle).await;
         handle
             .refresh_ui(&page_root())
@@ -1019,5 +1058,77 @@ mod tests {
             "scripts/seed_wide/index.org body drifted from assets/default/index.org (the \
              DEFAULT_INDEX_ORG the iOS app boots)"
         );
+    }
+
+    /// DRIFT GUARD (hard gate). The browser worker has NO org parser
+    /// (holon-orgmode won't build on wasm), so
+    /// `frontends/holon-worker/src/seed.rs` HAND-CODES the `reset_vault`
+    /// working page + journals as raw SQL. Those tuples MUST equal what the
+    /// REAL org parser produces from `scripts/seed_wide/{structural-page,
+    /// Journals}.org`. This test parses the same on-disk org and asserts
+    /// the parse matches the tuples the worker hardcodes. If it fails,
+    /// update BOTH `EXPECTED_*` below AND `seed.rs::seed_structural` /
+    /// `seed_journals` together — they are one contract split across a wasm
+    /// boundary.
+    ///
+    /// `sort_key` is intentionally NOT compared: the parser mints no sort_keys
+    /// (holon-org-format `parser.rs`: "The parser must NOT mint keys" — the
+    /// order owner assigns them on create). Document ORDER is guarded by each
+    /// tuple's list position, ascending exactly as `seed.rs` assigns ascending
+    /// sort_keys.
+    #[test]
+    fn seed_wide_matches_worker_seed() {
+        use std::path::PathBuf;
+
+        // (id, parent_id, content), doc first then blocks in document order.
+        // MUST equal frontends/holon-worker/src/seed.rs `seed_structural`.
+        const EXPECTED_STRUCTURAL: &[(&str, &str, &str)] = &[
+            (
+                "block:structural-page",
+                "sentinel:no_parent",
+                "structural-page",
+            ),
+            ("block:parent", "block:structural-page", "parent"),
+            ("block:c1", "block:structural-page", "c1"),
+            ("block:c2", "block:structural-page", "c2"),
+        ];
+        // MUST equal frontends/holon-worker/src/seed.rs `seed_journals`.
+        const EXPECTED_JOURNALS: &[(&str, &str, &str)] =
+            &[("block:journals", "sentinel:no_parent", "Journals")];
+
+        for (name, org, expected) in [
+            (
+                "structural-page.org",
+                SEED_STRUCTURAL_ORG,
+                EXPECTED_STRUCTURAL,
+            ),
+            ("Journals.org", SEED_JOURNALS_ORG, EXPECTED_JOURNALS),
+        ] {
+            let path = PathBuf::from(format!("/seed/{name}"));
+            let root = PathBuf::from("/seed");
+            let parsed = holon_orgmode::parser::parse_org_file(
+                &path,
+                org,
+                &holon_api::EntityUri::no_parent(),
+                &root,
+            )
+            .unwrap_or_else(|e| panic!("parse {name}: {e}"));
+
+            let actual: Vec<(String, String, String)> = std::iter::once(&parsed.document)
+                .chain(parsed.blocks.iter())
+                .map(|b| (b.id.to_string(), b.parent_id.to_string(), b.content.clone()))
+                .collect();
+            let expected_vec: Vec<(String, String, String)> = expected
+                .iter()
+                .map(|(i, p, c)| (i.to_string(), p.to_string(), c.to_string()))
+                .collect();
+
+            assert_eq!(
+                actual, expected_vec,
+                "{name}: parsed org blocks drifted from the browser worker's hardcoded seed \
+                 (frontends/holon-worker/src/seed.rs). Update the worker seed AND EXPECTED_* \
+                 together — they are one contract."
+            );
+        }
     }
 }

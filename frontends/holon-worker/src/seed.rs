@@ -321,3 +321,146 @@ pub async fn seed_default_layout(engine: &Arc<BackendEngine>) -> anyhow::Result<
     );
     Ok(())
 }
+
+const SENTINEL_NO_PARENT: &str = "sentinel:no_parent";
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock before epoch")
+        .as_millis() as i64
+}
+
+/// `INSERT OR IGNORE` one text block into `block_raw`, mirroring
+/// `seed_default_layout`'s hand-rolled SQL (worker can't use the org/Loro
+/// create path — holon-orgmode doesn't build on wasm). Properties are `{}`;
+/// content is single-quote-escaped.
+async fn insert_text_block(
+    engine: &Arc<BackendEngine>,
+    id: &str,
+    parent_id: &str,
+    content: &str,
+    sort_key: &str,
+    now: i64,
+) -> anyhow::Result<()> {
+    let content_escaped = content.replace('\'', "''");
+    let sql = format!(
+        // ALLOW(sql): seed INSERT for the reset-vault working page (no wasm org parser)
+        "INSERT OR IGNORE INTO {BLOCK_WRITE_TABLE} (id, parent_id, content, content_type, \
+         sort_key, properties, created_at, updated_at) VALUES ('{id}', '{parent_id}', \
+         '{content_escaped}', 'text', '{sort_key}', '{{}}', {now}, {now})"
+    );
+    // ALLOW(sole_block_writer): reset-vault bootstrap seed on a fresh in-memory DB,
+    // same rationale as seed_default_layout (no BlockOperations writer path on
+    // wasm).
+    engine.db_handle().execute(&sql, vec![]).await?;
+    Ok(())
+}
+
+/// Tag `block_id` as a `Page` so it surfaces in the left sidebar — the same
+/// convention `seed_default_layout` and the native org ingest use.
+async fn tag_page(engine: &Arc<BackendEngine>, block_id: &str) -> anyhow::Result<()> {
+    engine
+        .db_handle()
+        .execute(
+            &format!(
+                // ALLOW(sql): seed INSERT for the reset-vault working page
+                "INSERT OR IGNORE INTO block_tags (block_id, tag) VALUES ('{block_id}', 'Page')"
+            ),
+            vec![],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Seed the `structural-page` working document + its three headline blocks,
+/// mirroring `scripts/seed_wide/structural-page.org` exactly as the org parser
+/// materializes it: the `#+ID: structural-page` doc becomes
+/// `block:structural-page` under the no-parent sentinel (content = file stem
+/// `structural-page`, `set_page(true)`); the `* parent`/`* c1`/`* c2` headlines
+/// (`:ID:` drawers) become `block:parent`/`block:c1`/`block:c2` under the doc,
+/// content = title.
+///
+/// The (id, parent_id, content) tuples below MUST equal the parsed org — the
+/// native drift-guard test `tests::seed_wide_matches_worker_seed` in
+/// `crates/holon-integration-tests/src/pbt/composed/live_mcp.rs` gates it;
+/// update BOTH together. sort_keys MUST be valid fractional indices (hex
+/// strings) minted the SAME way the native ingest mints them
+/// (`holon_core::fractional_index::gen_n_keys` for same-level siblings,
+/// `default_sort_key` for a lone doc) — the reorder ops (indent/outdent/move)
+/// parse sibling keys as hex (`loro_fractional_index::from_hex_string`), so an
+/// arbitrary key like "s1" panics `ParseIntError` on the first reorder. The org
+/// parser mints no keys; the ingest does — and this raw-SQL seed bypasses the
+/// ingest, so it must mint them here.
+pub async fn seed_structural(engine: &Arc<BackendEngine>) -> anyhow::Result<()> {
+    use holon_core::fractional_index::default_sort_key;
+    use holon_core::fractional_index::gen_n_keys;
+
+    let now = now_millis();
+    // parent / c1 / c2 are same-level siblings under the doc: evenly-spaced
+    // fractional indices in ascending order (index 0 < 1 < 2).
+    let child_keys = gen_n_keys(3)?;
+    let doc_key = default_sort_key();
+    // (id, parent_id, content, sort_key)
+    let blocks: [(&str, &str, &str, &str); 4] = [
+        (
+            "block:structural-page",
+            SENTINEL_NO_PARENT,
+            "structural-page",
+            doc_key.as_str(),
+        ),
+        (
+            "block:parent",
+            "block:structural-page",
+            "parent",
+            child_keys[0].as_str(),
+        ),
+        (
+            "block:c1",
+            "block:structural-page",
+            "c1",
+            child_keys[1].as_str(),
+        ),
+        (
+            "block:c2",
+            "block:structural-page",
+            "c2",
+            child_keys[2].as_str(),
+        ),
+    ];
+    for (id, parent_id, content, sort_key) in blocks {
+        insert_text_block(engine, id, parent_id, content, sort_key, now).await?;
+    }
+    // The doc is an org Page (`document.set_page(true)`).
+    tag_page(engine, "block:structural-page").await?;
+    tracing::info!("[seed] seeded structural working page (block:parent/c1/c2)");
+    Ok(())
+}
+
+/// Seed the journals document, mirroring `scripts/seed_wide/Journals.org`
+/// (`#+ID: journals`, NO headlines) → one `Page` doc `block:journals` under the
+/// no-parent sentinel (content = file stem `Journals`).
+///
+/// `block:journals` is ALSO seeded by `seed_default_layout`; `INSERT OR IGNORE`
+/// makes this idempotent (the layout copy wins). This function documents the
+/// org-file mirror and is drift-gated by the native
+/// `tests::seed_wide_matches_worker_seed` — the (id, parent_id, content) tuple
+/// MUST equal the parsed `Journals.org`.
+pub async fn seed_journals(engine: &Arc<BackendEngine>) -> anyhow::Result<()> {
+    let now = now_millis();
+    // Valid fractional index (hex) so a reorder that reaches the doc level does
+    // not panic parsing "j0" — see seed_structural's note.
+    let doc_key = holon_core::fractional_index::default_sort_key();
+    insert_text_block(
+        engine,
+        "block:journals",
+        SENTINEL_NO_PARENT,
+        "Journals",
+        doc_key.as_str(),
+        now,
+    )
+    .await?;
+    tag_page(engine, "block:journals").await?;
+    tracing::info!("[seed] seeded journals page (block:journals)");
+    Ok(())
+}

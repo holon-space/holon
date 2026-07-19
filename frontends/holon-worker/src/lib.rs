@@ -96,9 +96,9 @@ pub async fn ping(s: String) -> String {
 /// This function builds one and asserts that `tokio::spawn` + `tokio::time`
 // ALLOW(fallback): historical doc-comment quoting an architectural plan that uses the word; not a
 // runtime fallback
-/// still work on a current-thread driver — which is the entire fallback path
-/// the plan called out under H4. If this also fails, the whole architecture
-/// has to rethink async.
+/// still work on a current-thread driver — which is the entire contingency
+/// path the plan called out under H4. If this also fails, the whole
+/// architecture has to rethink async.
 ///
 /// Intentionally sync (`#[napi]` without `async`) so the runtime we
 /// build here is the one under test, not napi's ambient one.
@@ -146,6 +146,7 @@ pub fn spawn_check() -> napi::Result<String> {
 mod backend {
     use std::collections::HashMap;
     use std::path::PathBuf;
+    use std::sync::atomic::AtomicBool;
     use std::sync::atomic::AtomicU32;
     use std::sync::atomic::Ordering;
 
@@ -158,6 +159,9 @@ mod backend {
     use holon_api::QueryContext;
     use holon_api::QueryLanguage;
     use holon_api::Value;
+    // `.snapshot()` is a `BlockQuerySource` trait method — in scope so we can
+    // call it on the concrete `TursoBlockQuerySource` for debug_pbt_snapshot.
+    use holon_core::storage::block_query::BlockQuerySource;
     use holon_core::storage::types::StorageEntity;
     use holon_frontend::FrontendSession;
     use holon_frontend::ReactiveViewModel;
@@ -167,8 +171,14 @@ mod backend {
     use holon_frontend::reactive::BuilderServices;
     use holon_frontend::reactive::ReactiveEngine;
     use holon_frontend::shadow_builders::build_shadow_interpreter;
+    use holon_frontend::user_driver::ReactiveEngineDriver;
+    // `UserDriver` in scope so the gesture verbs (click_entity / send_raw_keystroke
+    // / insert_text / send_key_chord / synthetic_dispatch) resolve on the driver.
+    use holon_frontend::user_driver::UserDriver;
 
     use super::*;
+
+    type TursoBlockQuerySource = holon::sync::turso_block_query_source::TursoBlockQuerySource;
 
     pub(super) struct EngineState {
         pub engine: Arc<BackendEngine>,
@@ -177,9 +187,39 @@ mod backend {
         pub runtime: Arc<tokio::runtime::Runtime>,
         pub session: Arc<FrontendSession>,
         pub reactive: Arc<ReactiveEngine>,
+        /// Headless user-gesture driver (click / keystroke / chord) over the
+        /// reactive engine — the enabler for the live-MCP twin's gesture tools.
+        pub driver: Arc<ReactiveEngineDriver>,
+        /// Concrete block read source, cloned from the session's capabilities
+        /// so debug_pbt_snapshot can capture a `BlockSnapshot`
+        /// (live_blocks / focus_roots) the same way the native MCP
+        /// server does.
+        pub block_query: Arc<TursoBlockQuerySource>,
     }
 
     static ENGINE: OnceLock<Mutex<Option<EngineState>>> = OnceLock::new();
+
+    /// Set while an MCP tool dispatch is driving the current-thread runtime via
+    /// `block_on`. A `block_on` that suspends in OPFS IO yields back to JS, so
+    /// the page's rAF `engine_tick` pump would otherwise start a NESTED
+    /// `block_on` on the same runtime ("Cannot start a runtime from within a
+    /// runtime" → panic-abort). `tick` consults this and skips while a dispatch
+    /// is in flight (the dispatch drives the reactor itself).
+    static ENGINE_BUSY: AtomicBool = AtomicBool::new(false);
+
+    /// RAII guard that clears [`ENGINE_BUSY`] on scope exit.
+    struct BusyGuard;
+    impl BusyGuard {
+        fn acquire() -> Self {
+            ENGINE_BUSY.store(true, Ordering::Release);
+            BusyGuard
+        }
+    }
+    impl Drop for BusyGuard {
+        fn drop(&mut self) {
+            ENGINE_BUSY.store(false, Ordering::Release);
+        }
+    }
 
     // ── MCP watch registry ────────────────────────────────────────────────────
     // Stores per-watch pending changes buffers and background drain tasks.
@@ -216,6 +256,17 @@ mod backend {
                 .init();
         });
 
+        *slot().lock() = Some(build_engine_state(db_path)?);
+        Ok(())
+    }
+
+    /// Build a fresh `EngineState` (engine + runtime + session + reactive +
+    /// driver + block_query) against the DB at `db_path`. Extracted from `init`
+    /// so `reset_vault` can rebuild against a clean `:memory:` DB without
+    /// re-installing the global tracing sink. Each call owns its own
+    /// current-thread runtime — the seam the reset arm drives the fresh-DB seed
+    /// on (the OLD state's runtime is torn down before this runs).
+    pub(super) fn build_engine_state(db_path: String) -> napi::Result<EngineState> {
         let runtime = Arc::new(
             tokio::runtime::Builder::new_current_thread()
                 .enable_time()
@@ -286,12 +337,16 @@ mod backend {
         // the production Turso wiring (holon-app `wiring.rs`): the BackendEngine
         // provides the query/operation/ui-watcher capabilities, and the block
         // read seam comes from `TursoBlockQuerySource::watch_default`.
-        let block_query = runtime
-            .block_on(async {
-                holon::sync::turso_block_query_source::TursoBlockQuerySource::watch_default(&engine)
+        let block_query = Arc::new(
+            runtime
+                .block_on(async {
+                    holon::sync::turso_block_query_source::TursoBlockQuerySource::watch_default(
+                        &engine,
+                    )
                     .await
-            })
-            .map_err(|e| super::nerr("block_query watch_default", e))?;
+                })
+                .map_err(|e| super::nerr("block_query watch_default", e))?,
+        );
         let profiles = engine.profile_resolver().clone();
         let query_engine = Some(engine.clone() as Arc<dyn holon::api::QueryEngine>);
         let operation_engine = Some(engine.clone() as Arc<dyn holon::api::OperationEngine>);
@@ -299,7 +354,9 @@ mod backend {
         let session = Arc::new(FrontendSession::from_parts(
             SessionParts::with_capabilities(
                 query_engine,
-                Arc::new(block_query),
+                // Clones the same `TursoBlockQuerySource` the EngineState keeps
+                // (coerces to `Arc<dyn BlockQuerySource>` for the session).
+                block_query.clone(),
                 operation_engine,
                 ui_watcher,
                 profiles,
@@ -325,13 +382,19 @@ mod backend {
         // Ignore the error — if already set, a previous init wired things up.
         let _ = services_slot.set(services);
 
-        *slot().lock() = Some(EngineState {
+        // Headless gesture driver over the reactive engine — the enabler that
+        // lets the live-MCP twin's click / type_text / send_key_chord tools
+        // drive this worker the same way GPUI handlers do.
+        let driver = Arc::new(ReactiveEngineDriver::new(reactive.clone()));
+
+        Ok(EngineState {
             engine,
             runtime,
             session,
             reactive,
-        });
-        Ok(())
+            driver,
+            block_query,
+        })
     }
 
     /// Extract `(Arc<BackendEngine>, Arc<Runtime>)` without holding the lock
@@ -399,6 +462,11 @@ mod backend {
     /// `budget_ms` bounds the sleep inside `block_on`; the reactor will
     /// still drain any tasks that become ready and then return.
     pub(super) fn tick(budget_ms: u32) -> napi::Result<()> {
+        // Skip if an MCP dispatch is mid-`block_on` (it drives the reactor
+        // itself); a nested `block_on` here would panic-abort the instance.
+        if ENGINE_BUSY.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let (_, runtime) = engine_and_rt("tick")?;
         let budget = std::time::Duration::from_millis(u64::from(budget_ms));
         runtime.block_on(async move {
@@ -716,12 +784,26 @@ mod backend {
         let engine = state.engine.clone();
         let runtime = state.runtime.clone();
         let reactive = state.reactive.clone();
+        let driver = state.driver.clone();
+        let block_query = state.block_query.clone();
         drop(guard);
 
         let service = HolonService::new(engine.clone());
 
-        let result = dispatch_mcp_tool(&name, args, &engine, &service, &reactive, &runtime)
-            .map_err(|e| napi::Error::from_reason(format!("mcp_tool::{name}: {e}")))?;
+        // Suppress the page's rAF tick pump for the duration of this dispatch
+        // (prevents a nested `block_on`; see `ENGINE_BUSY`).
+        let _busy = BusyGuard::acquire();
+        let result = dispatch_mcp_tool(
+            &name,
+            args,
+            &engine,
+            &service,
+            &reactive,
+            &runtime,
+            &driver,
+            &block_query,
+        )
+        .map_err(|e| napi::Error::from_reason(format!("mcp_tool::{name}: {e}")))?;
 
         serde_json::to_string(&result).map_err(|e| super::nerr("serialize result", e))
     }
@@ -734,6 +816,8 @@ mod backend {
         service: &HolonService,
         reactive: &Arc<ReactiveEngine>,
         runtime: &Arc<tokio::runtime::Runtime>,
+        driver: &Arc<ReactiveEngineDriver>,
+        block_query: &Arc<TursoBlockQuerySource>,
     ) -> anyhow::Result<serde_json::Value> {
         match name {
             "execute_query" => {
@@ -993,7 +1077,7 @@ mod backend {
             "poll_changes" => {
                 let watch_id = req_str(&args, "watch_id")?;
                 // Yield to the reactor so drain tasks can process any ready CDC events.
-                runtime.block_on(tokio::time::sleep(std::time::Duration::ZERO));
+                runtime.block_on(async { tokio::time::sleep(std::time::Duration::ZERO).await });
                 let guard = mcp_watches().lock();
                 let entry = guard
                     .get(&watch_id)
@@ -1024,13 +1108,23 @@ mod backend {
                     )
                     .await;
                 });
-                let snapshot = reactive.snapshot(&block_uri);
-                let text = if format == "json" {
-                    serde_json::to_string_pretty(&snapshot)?
+                // Match the native `describe_ui` (frontends/mcp `snapshot_resolved`
+                // + `format_display_tree`): the RESOLVED tree round-trips as a
+                // `ViewModel` for the live-MCP twin's `refresh_ui`, whereas raw
+                // `snapshot` leaves unresolved `live_block` placeholders that do
+                // not deserialize.
+                let snapshot = reactive.snapshot_resolved(&block_uri);
+                if format == "json" {
+                    // Return the ViewModel as a JSON VALUE (object), NOT a
+                    // `Value::String(json_text)`: the outer `mcp_tool` re-runs
+                    // `serde_json::to_string` on this result, so a string would
+                    // arrive DOUBLE-encoded as "{...}" and the twin's
+                    // `refresh_ui` (`from_str::<ViewModel>`) fails with
+                    // "invalid type: string". A bare object round-trips.
+                    Ok(serde_json::to_value(&snapshot)?)
                 } else {
-                    snapshot.pretty_print(0)
-                };
-                Ok(serde_json::Value::String(text))
+                    Ok(serde_json::Value::String(snapshot.pretty_print(0)))
+                }
             }
 
             "rank_tasks" => {
@@ -1105,15 +1199,20 @@ mod backend {
             }
 
             "execute_operation" => {
+                // HAZARD FIX (frontends/dioxus-web/README.md:313-318): the raw
+                // `service.execute_operation` path `block_on`s the very runtime
+                // the intent chains advance on, giving unspecified cross-lane
+                // ordering. Route the write through the ORDERED reactive seam —
+                // `ReactiveEngineDriver::synthetic_dispatch` →
+                // `ReactiveEngine::dispatch_intent_sync`. This is NOT the
+                // fire-and-forget `engine_dispatch_intents` chain lane (that
+                // reroute is explicitly forbidden by ruling). The only twin
+                // caller is the navigate-focus write, which ignores the result.
                 let entity_name = req_str(&args, "entity_name")?;
                 let operation = req_str(&args, "operation")?;
-                let storage_entity = parse_storage_entity(&args)?;
-                let result = runtime.block_on(service.execute_operation(
-                    &EntityName::from(entity_name.as_str()),
-                    &operation,
-                    storage_entity,
-                ))?;
-                Ok(serde_json::to_value(&result)?)
+                let params = parse_params(&args)?;
+                runtime.block_on(driver.synthetic_dispatch(&entity_name, &operation, params))?;
+                Ok(serde_json::Value::Null)
             }
 
             "list_commands" => {
@@ -1183,6 +1282,206 @@ mod backend {
                 Ok(serde_json::to_value(&result)?)
             }
 
+            "click" => {
+                let entity_id = req_str(&args, "entity_id")?;
+                let region = args
+                    .get("region")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("main");
+                runtime.block_on(driver.click_entity(&EntityUri::parse(&entity_id)?, region))?;
+                Ok(serde_json::json!({"clicked_entity": entity_id, "region": region}))
+            }
+
+            "type_text" => {
+                let text = req_str(&args, "text")?;
+                let mods: Vec<String> = args
+                    .get("modifiers")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|m| m.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mod_refs: Vec<&str> = mods.iter().map(String::as_str).collect();
+                runtime.block_on(driver.send_raw_keystroke(&text, &mod_refs))?;
+                Ok(serde_json::json!({"keystrokes_sent": 1}))
+            }
+
+            "insert_text" => {
+                let text = req_str(&args, "text")?;
+                runtime.block_on(driver.insert_text(&text))?;
+                Ok(serde_json::json!({"inserted_text": text}))
+            }
+
+            "send_key_chord" => {
+                let entity_id = req_str(&args, "entity_id")?;
+                let keys = args
+                    .get("keys")
+                    .and_then(|v| v.as_array())
+                    .ok_or_else(|| anyhow::anyhow!("missing required field 'keys'"))?;
+                let mut key_set = std::collections::BTreeSet::new();
+                for k in keys {
+                    let s = k.as_str().ok_or_else(|| {
+                        anyhow::anyhow!("'keys' entries must be strings, got {k}")
+                    })?;
+                    key_set.insert(parse_wire_key(s)?);
+                }
+                let chord = holon_api::KeyChord(key_set);
+                let root = holon_api::root_layout_block_uri();
+                // The headless driver ignores the passed tree (re-derives it from
+                // `root` via `snapshot_reactive`), so a default tree is correct.
+                let tree = ReactiveViewModel::default();
+                let ok = runtime.block_on(driver.send_key_chord(
+                    &root,
+                    &tree,
+                    &EntityUri::parse(&entity_id)?,
+                    &chord,
+                    HashMap::new(),
+                ))?;
+                Ok(if ok {
+                    serde_json::json!({"action": "handled"})
+                } else {
+                    serde_json::json!({"action": "none"})
+                })
+            }
+
+            "await_quiescence" => {
+                let budget_ms = args
+                    .get("budget_ms")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(30000);
+                // SqlOnly worker: the only convergence signal is the CDC
+                // watermark (no Loro, no org writeback). The current-thread
+                // runtime has no background driver, so drive the reactor with a
+                // short `block_on` sleep each iteration, then sample the
+                // watermark. Converged = watermark unchanged for a continuous
+                // 50ms window; fail loud on budget exhaustion.
+                let start = std::time::Instant::now();
+                let mut last = engine.db_handle().cdc_emitted_watermark();
+                let mut stable_since = std::time::Instant::now();
+                loop {
+                    // The sleep future MUST be constructed INSIDE the runtime
+                    // context (block_on's async block), else `tokio::time::sleep`
+                    // panics "no reactor running" — see the working `describe_ui`
+                    // `timeout` pattern.
+                    runtime.block_on(async {
+                        tokio::time::sleep(std::time::Duration::from_millis(2)).await
+                    });
+                    let now_wm = engine.db_handle().cdc_emitted_watermark();
+                    if now_wm != last {
+                        last = now_wm;
+                        stable_since = std::time::Instant::now();
+                    }
+                    if stable_since.elapsed() >= std::time::Duration::from_millis(50) {
+                        return Ok(serde_json::json!({
+                            "converged": true,
+                            "waited_ms": start.elapsed().as_millis() as u64,
+                            "signals": ["cdc"],
+                        }));
+                    }
+                    if start.elapsed().as_millis() as u64 >= budget_ms {
+                        return Err(anyhow::anyhow!(
+                            "await_quiescence: CDC watermark still moving after {budget_ms}ms"
+                        ));
+                    }
+                }
+            }
+
+            "debug_pbt_snapshot" => {
+                let focused_block =
+                    holon_frontend::reactive::BuilderServices::focused_block(&**reactive)
+                        .map(|b| b.to_string());
+                let snapshot = runtime
+                    .block_on(block_query.snapshot())
+                    .map_err(|e| anyhow::anyhow!("debug_pbt_snapshot: block snapshot: {e}"))?;
+                let live_blocks: Vec<serde_json::Value> = snapshot
+                    .iter_blocks()
+                    .map(|b| serde_json::to_value(holon_api::block::BlockWire::from(b)))
+                    .collect::<Result<_, _>>()?;
+                let focus_roots: Vec<serde_json::Value> =
+                    holon_core::storage::BlockQuery::focus_roots(&snapshot)
+                        .into_iter()
+                        .map(|fr| serde_json::json!({"region": fr.region, "root_id": fr.root_id}))
+                        .collect();
+                Ok(serde_json::json!({
+                    "live_blocks": live_blocks,
+                    "focus_roots": focus_roots,
+                    "focused_block": focused_block,
+                    "loro_had_errors": false,
+                    "lamport_height": null,
+                    "loro_tree_children": {},
+                }))
+            }
+
+            "reset_vault" => {
+                // Accept the `files` array (name/content) the twin sends but
+                // IGNORE `content`: the wasm worker has no org parser
+                // (holon-orgmode won't build on wasm). Interim per orchestrator
+                // ruling 2026-07-19 — pending a wasm org parser, the seed is
+                // hardcoded raw-SQL mirroring scripts/seed_wide/*.org, kept from
+                // drifting by the native drift-guard test in
+                // holon-integration-tests (seed_wide_matches_worker_seed).
+                let _files = args.get("files");
+                // Tear down the OLD state (releases Turso/OPFS handles) and
+                // rebuild against a fresh in-memory DB for guaranteed per-case
+                // isolation — avoids OPFS-delete gymnastics. Operate on `slot`
+                // directly: the `engine`/`runtime` passed into this fn are the
+                // STALE torn-down handles and must not be reused past here.
+                {
+                    let _ = slot().lock().take();
+                }
+                mcp_watches().lock().clear();
+                let st = build_engine_state(":memory:".to_string())
+                    .map_err(|e| anyhow::anyhow!("reset_vault: build_engine_state: {e}"))?;
+                // Seed the structural working page + journals on the NEW state's
+                // runtime (build_engine_state already ran seed_default_layout).
+                st.runtime
+                    .block_on(async {
+                        seed::seed_structural(&st.engine).await?;
+                        seed::seed_journals(&st.engine).await
+                    })
+                    .map_err(|e| anyhow::anyhow!("reset_vault: seed: {e}"))?;
+                // Self-check against the fresh DB: collect every block_raw id and
+                // fail loud unless the structural working blocks landed.
+                let ids: Vec<String> = st.runtime.block_on(async {
+                    let svc = HolonService::new(st.engine.clone());
+                    let res = svc
+                        .execute_raw_sql(
+                            &format!(
+                                "SELECT id FROM {} ORDER BY id",
+                                holon::storage::BLOCK_WRITE_TABLE
+                            ),
+                            HashMap::new(),
+                        )
+                        .await?;
+                    let ids: Vec<String> = res
+                        .rows
+                        .iter()
+                        .filter_map(|row| {
+                            row.get("id")
+                                .and_then(|v| v.as_string())
+                                .map(str::to_string)
+                        })
+                        .collect();
+                    Ok::<_, anyhow::Error>(ids)
+                })?;
+                for expected in ["block:parent", "block:c1", "block:c2"] {
+                    anyhow::ensure!(
+                        ids.iter().any(|id| id == expected),
+                        "reset_vault self-check: rebuilt vault missing working block {expected:?} \
+                         (block_raw_ids = {ids:?}) — the seed did not land deterministically"
+                    );
+                }
+                let n = ids.len();
+                *slot().lock() = Some(st);
+                Ok(serde_json::json!({
+                    "reset": true,
+                    "block_raw_count": n,
+                    "block_raw_ids": ids,
+                }))
+            }
+
             // Loro/org tools and GPUI-specific tools are not available in the browser worker.
             "inspect_loro_blocks"
             | "diff_loro_sql"
@@ -1191,10 +1490,7 @@ mod backend {
             | "render_org_from_blocks"
             | "create_entity_type"
             | "screenshot"
-            | "click"
             | "scroll"
-            | "type_text"
-            | "send_key_chord"
             | "send_navigation"
             | "describe_navigation" => Err(anyhow::anyhow!(
                 "tool '{}' is not available in browser worker mode",
@@ -1203,6 +1499,40 @@ mod backend {
 
             _ => Err(anyhow::anyhow!("unknown tool '{}'", name)),
         }
+    }
+
+    /// Parse a wire key name (lowercase, as the live-MCP twin sends) into a
+    /// `holon_api::Key`. Reverse of `mcp_user_driver::key_wire_name`; mirrors
+    /// the native `frontends/mcp` `parse_key`. Fails loud on an unknown name.
+    fn parse_wire_key(s: &str) -> anyhow::Result<holon_api::Key> {
+        use holon_api::Key;
+        let lower = s.to_lowercase();
+        let key = match lower.as_str() {
+            "cmd" | "command" | "platform" => Key::Cmd,
+            "ctrl" | "control" => Key::Ctrl,
+            "alt" | "option" => Key::Alt,
+            "shift" => Key::Shift,
+            "up" => Key::Up,
+            "down" => Key::Down,
+            "left" => Key::Left,
+            "right" => Key::Right,
+            "home" => Key::Home,
+            "end" => Key::End,
+            "pageup" => Key::PageUp,
+            "pagedown" => Key::PageDown,
+            "tab" => Key::Tab,
+            "enter" | "return" => Key::Enter,
+            "backspace" => Key::Backspace,
+            "delete" => Key::Delete,
+            "escape" | "esc" => Key::Escape,
+            "space" => Key::Space,
+            other if other.chars().count() == 1 => Key::Char(other.chars().next().unwrap()),
+            other if other.starts_with('f') && other[1..].parse::<u8>().is_ok() => {
+                Key::F(other[1..].parse::<u8>().unwrap())
+            }
+            other => anyhow::bail!("unknown key: '{other}'"),
+        };
+        Ok(key)
     }
 
     fn req_str(args: &serde_json::Value, field: &str) -> anyhow::Result<String> {
