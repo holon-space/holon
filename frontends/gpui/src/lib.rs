@@ -2570,7 +2570,8 @@ pub fn scroll_list_by(
             let cache = panel_cache.read().unwrap();
             cache
                 .values()
-                .filter_map(|any| any.clone().downcast::<ReactiveShell>().ok()) // ALLOW(filter_map_ok): non-ReactiveShell entries are skipped, not errors — ALLOW(ok)
+                .filter_map(|any| any.clone().downcast::<ReactiveShell>().ok()) // ALLOW(filter_map_ok): non-ReactiveShell entries are skipped, not errors —
+                // ALLOW(ok)
                 .collect()
         };
         for list_shell in list_shells {

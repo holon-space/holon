@@ -418,7 +418,8 @@ impl Block {
     /// Whether this block is the local mount row for a shared subtree
     /// (`share-role == "mount"`).
     pub fn is_share_mount(&self) -> bool {
-        self.get_property_str(crate::share_props::SHARE_ROLE_PROPERTY).as_deref()
+        self.get_property_str(crate::share_props::SHARE_ROLE_PROPERTY)
+            .as_deref()
             == Some(crate::share_props::SHARE_ROLE_MOUNT)
     }
 

@@ -185,16 +185,16 @@ mod tests {
         );
     }
 
-    /// Inc 2/3 org materialization: a mount PAGE (adopt-and-collapse page share)
-    /// materializes to an actual `.org` file that (a) contains the shared
-    /// content, and (b) round-trips the share markers so Inc 3's ingest guard
-    /// recognizes it as a projection sink (never re-ingested). Asserts the real
-    /// rendered file text, not just the SQL projection.
+    /// Inc 2/3 org materialization: a mount PAGE (adopt-and-collapse page
+    /// share) materializes to an actual `.org` file that (a) contains the
+    /// shared content, and (b) round-trips the share markers so Inc 3's
+    /// ingest guard recognizes it as a projection sink (never re-ingested).
+    /// Asserts the real rendered file text, not just the SQL projection.
     #[test]
     fn mount_page_materializes_to_org_and_round_trips_share_markers() {
-        use holon_api::share_props::SHARED_TREE_ID_PROPERTY;
         use holon_api::share_props::SHARE_ROLE_MOUNT;
         use holon_api::share_props::SHARE_ROLE_PROPERTY;
+        use holon_api::share_props::SHARED_TREE_ID_PROPERTY;
 
         let adapter = OrgFormatAdapter::new();
         let path = PathBuf::from("/tmp/My Shared Page.org");
@@ -208,13 +208,20 @@ mod tests {
         // ID drawer keeps identity stable across the render→parse round trip.
         mount.set_property("ID", "mount-1");
 
-        let mut child = Block::new_text(EntityUri::block("p-child"), doc_uri.clone(), "Child under P");
+        let mut child = Block::new_text(
+            EntityUri::block("p-child"),
+            doc_uri.clone(),
+            "Child under P",
+        );
         child.set_property(SHARED_TREE_ID_PROPERTY, "stid-x");
         child.set_property("ID", "p-child");
 
         let org = adapter.render_document(&mount, &[child], &path, &doc_uri);
         // (a) the shared content is actually on disk.
-        assert!(org.contains("Child under P"), "child content materializes:\n{org}");
+        assert!(
+            org.contains("Child under P"),
+            "child content materializes:\n{org}"
+        );
 
         // (b) re-parsing the materialized file detects it as a shared projection
         // (the Inc 3 guard predicate), so it is never re-ingested as global intent.

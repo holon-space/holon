@@ -623,7 +623,8 @@ fn resolve_doc_for_block(
 /// dropped. Deduped once per `shared_tree_id` per session to avoid banner spam.
 ///
 /// Post-Inc-2 the mount is a `is_share_mount()` page, so the walk terminates at
-/// it and this never fires — the same predicate self-disarms once the path works.
+/// it and this never fires — the same predicate self-disarms once the path
+/// works.
 fn disclose_unmaterialized_share(
     feed: &holon_api::live_data::LiveData<Block>,
     block: &Block,
@@ -1033,9 +1034,9 @@ mod share_disclosure_tests {
     use holon_api::EntityUri;
     use holon_api::block::Block;
     use holon_api::live_data::LiveData;
-    use holon_api::share_props::SHARED_TREE_ID_PROPERTY;
     use holon_api::share_props::SHARE_ROLE_MOUNT;
     use holon_api::share_props::SHARE_ROLE_PROPERTY;
+    use holon_api::share_props::SHARED_TREE_ID_PROPERTY;
 
     use super::disclose_unmaterialized_share;
 
@@ -1096,7 +1097,11 @@ mod share_disclosure_tests {
         disclose_unmaterialized_share(&feed, &d2, Some(&disc), &seen);
 
         let calls = disc.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1, "one disclosure per share, deduped: {calls:?}");
+        assert_eq!(
+            calls.len(),
+            1,
+            "one disclosure per share, deduped: {calls:?}"
+        );
         assert_eq!(calls[0].0, "block:d1");
         assert_eq!(calls[0].1, "stid-1");
     }

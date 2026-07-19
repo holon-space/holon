@@ -396,9 +396,9 @@ pub trait ShareWritebackDisclosure: Send + Sync {
 /// tests) ⇒ the guard treats nothing as a projection and ingests normally.
 #[async_trait]
 pub trait MountRegistry: Send + Sync {
-    /// True iff `block_id` is an authoritatively-registered shared-subtree mount
-    /// (a real mount node in the global tree), NOT merely a block carrying a
-    /// user-authored `share-role` drawer property.
+    /// True iff `block_id` is an authoritatively-registered shared-subtree
+    /// mount (a real mount node in the global tree), NOT merely a block
+    /// carrying a user-authored `share-role` drawer property.
     async fn is_registered_mount(&self, block_id: &EntityUri) -> Result<bool>;
 }
 

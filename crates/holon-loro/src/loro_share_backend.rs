@@ -734,15 +734,15 @@ impl LoroShareBackend {
 
         // D3 mount-identity shaping. The shared subtree's root determines how it
         // maps onto the mount page:
-        //   * page share (root is a page P): ADOPT-AND-COLLAPSE — the mount page
-        //     IS P (project_mount_to_sql adopted P's title + Page tag), so P's
-        //     node folds: reparent P's CHILDREN to the mount and DROP P's own
-        //     row. P stays uncollapsed in the shared Loro doc (CRDT truth) — the
-        //     fold is projection-only (deliberate Loro↔SQL shape difference,
-        //     mapped in the keystone oracles).
-        //   * block share (root is a plain block): SYNTHETIC CONTAINER — the
-        //     mount is a synthetic page wrapping the shared block; reparent the
-        //     root (its `no_parent`) to the mount and project it unchanged.
+        //   * page share (root is a page P): ADOPT-AND-COLLAPSE — the mount page IS P
+        //     (project_mount_to_sql adopted P's title + Page tag), so P's node folds:
+        //     reparent P's CHILDREN to the mount and DROP P's own row. P stays
+        //     uncollapsed in the shared Loro doc (CRDT truth) — the fold is
+        //     projection-only (deliberate Loro↔SQL shape difference, mapped in the
+        //     keystone oracles).
+        //   * block share (root is a plain block): SYNTHETIC CONTAINER — the mount is a
+        //     synthetic page wrapping the shared block; reparent the root (its
+        //     `no_parent`) to the mount and project it unchanged.
         let root_blocks = crate::loro_backend::snapshot_blocks_from_doc(shared_doc);
         let root = root_blocks
             .values()
@@ -800,14 +800,15 @@ impl LoroShareBackend {
         Ok(())
     }
 
-    /// Whether `block_id` is an AUTHORITATIVELY-registered shared-subtree mount —
-    /// i.e. a real mount NODE exists for it in the global Loro tree (created by
-    /// `share_subtree`/`accept_shared_subtree`, carrying non-user-authorable
-    /// mount metadata). This is the sound signal the org write-back ingest guard
-    /// consults so a hand-authored file that merely carries a `:share-role:
-    /// mount:` drawer property (which round-trips into SQL) is still ingested
-    /// normally instead of being silently skipped (data loss). The global doc is
-    /// loaded before the org ingest sweep, so this is answerable at first ingest.
+    /// Whether `block_id` is an AUTHORITATIVELY-registered shared-subtree mount
+    /// — i.e. a real mount NODE exists for it in the global Loro tree
+    /// (created by `share_subtree`/`accept_shared_subtree`, carrying
+    /// non-user-authorable mount metadata). This is the sound signal the
+    /// org write-back ingest guard consults so a hand-authored file that
+    /// merely carries a `:share-role: mount:` drawer property (which
+    /// round-trips into SQL) is still ingested normally instead of being
+    /// silently skipped (data loss). The global doc is loaded before the
+    /// org ingest sweep, so this is answerable at first ingest.
     pub async fn is_registered_mount(&self, block_id: &str) -> Result<bool> {
         let bare = block_id.strip_prefix("block:").unwrap_or(block_id);
         let collab = self.global_doc().await?;
@@ -1145,7 +1146,8 @@ fn parent_as_option(doc: &LoroDoc, tid: TreeID) -> Option<TreeID> {
 
 /// The nearest `Page`-tagged ancestor of `tid` in the global tree, INCLUSIVE
 /// of `tid` itself. `Ok(Some(page_tid))` when a page is found; `Ok(None)` when
-/// the walk reaches a root without hitting a page (the mount becomes top-level).
+/// the walk reaches a root without hitting a page (the mount becomes
+/// top-level).
 ///
 /// This is the Loro-side of Amendment A: a mount is tagged a Page, and a page
 /// may not sit under a non-page (interim ruling 2026-07-13). Parenting the
@@ -1569,9 +1571,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                 let mount_parent_uri = match page_parent_tid {
                     Some(ptid) => read_stable_id(&tree, ptid)
                         .map(|s| block_uri_from_bare(&s))
-                        .ok_or_else(|| {
-                            err(format!("page ancestor {ptid:?} has no STABLE_ID"))
-                        })?,
+                        .ok_or_else(|| err(format!("page ancestor {ptid:?} has no STABLE_ID")))?,
                     None => no_parent.clone(),
                 };
                 (new_id, mount_parent_uri)
@@ -3825,12 +3825,13 @@ mod tests {
         backend.advertiser.close_all().await;
     }
 
-    /// D3 adopt-and-collapse (page share): sharing a PAGE P makes the mount page
-    /// ADOPT P's identity — the mount carries P's title, P's OWN row is folded
-    /// out of the projection, and P's children reparent to the mount. P stays
-    /// uncollapsed in the shared Loro doc (CRDT truth); only the SQL/org
-    /// projection folds it. Because P's parent (`root-page`) is already a page,
-    /// the mount stays in place under it (no Amendment-A bubbling).
+    /// D3 adopt-and-collapse (page share): sharing a PAGE P makes the mount
+    /// page ADOPT P's identity — the mount carries P's title, P's OWN row
+    /// is folded out of the projection, and P's children reparent to the
+    /// mount. P stays uncollapsed in the shared Loro doc (CRDT truth); only
+    /// the SQL/org projection folds it. Because P's parent (`root-page`) is
+    /// already a page, the mount stays in place under it (no Amendment-A
+    /// bubbling).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn share_page_adopts_identity_and_folds_root() {
@@ -3919,11 +3920,12 @@ mod tests {
             .await
             .unwrap();
         let mount_id = match accept_resp.response.unwrap() {
-            Value::String(s) => serde_json::from_str::<serde_json::Value>(&s).unwrap()
-                ["mount_block_id"]
-                .as_str()
-                .unwrap()
-                .to_string(),
+            Value::String(s) => {
+                serde_json::from_str::<serde_json::Value>(&s).unwrap()["mount_block_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            }
             o => panic!("unexpected: {o:?}"),
         };
 
@@ -3969,8 +3971,20 @@ mod tests {
 
         // `shared-block` lives under a page on A so sharing it is legal.
         seed_page(&backend_a, "root-a", None, "Root A").await;
-        seed_block(&backend_a, "shared-block", Some("root-a"), "Shared block heading").await;
-        seed_block(&backend_a, "sb-child", Some("shared-block"), "child of the block").await;
+        seed_block(
+            &backend_a,
+            "shared-block",
+            Some("root-a"),
+            "Shared block heading",
+        )
+        .await;
+        seed_block(
+            &backend_a,
+            "sb-child",
+            Some("shared-block"),
+            "child of the block",
+        )
+        .await;
         seed_page(&backend_b, "root-b", None, "Root B").await;
 
         let ticket = {
@@ -3990,11 +4004,12 @@ mod tests {
             .await
             .unwrap();
         let mount_id = match accept_resp.response.unwrap() {
-            Value::String(s) => serde_json::from_str::<serde_json::Value>(&s).unwrap()
-                ["mount_block_id"]
-                .as_str()
-                .unwrap()
-                .to_string(),
+            Value::String(s) => {
+                serde_json::from_str::<serde_json::Value>(&s).unwrap()["mount_block_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            }
             o => panic!("unexpected: {o:?}"),
         };
 

@@ -39,6 +39,10 @@ platform :ios do
       configuration: "Release",
       output_directory: "build",
       output_name: "Holon.ipa",
+      # Raw xcodebuild output lands here so CI can upload it on failure —
+      # xcbeautify swallows script-phase (cargo) errors, which cost three
+      # blind debugging cycles on mobile-v0.0.1..4.
+      buildlog_path: "build/logs",
       xcargs: [
         "CODE_SIGNING_ALLOWED=YES",
         "CODE_SIGNING_REQUIRED=YES",
