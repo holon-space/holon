@@ -13,6 +13,7 @@ use holon_core::SyncTokenStore;
 use holon_mcp_client::IntegrationFileConfig;
 use holon_mcp_client::McpIntegration;
 use holon_mcp_client::PendingOAuthFlows;
+use holon_mcp_client::PendingWriteStore;
 use holon_mcp_client::build_mcp_integration;
 use holon_mcp_client::integration_config::UnresolvedVar;
 use holon_mcp_client::load_integration_configs;
@@ -106,6 +107,20 @@ impl Module for McpIntegrationsModule {
         let pending_flows_clone = pending_flows.clone();
         injector.provide::<PendingOAuthFlows>(Provider::root(move |_| pending_flows_clone.clone()));
 
+        // ONE shared pending-write store for all MCP providers (leases/read-
+        // write ruling, increment 4c). Installed on every integration below so
+        // all once_only chokepoints and the frontend approve panel coordinate
+        // through the same at-most-once state machine. Registered as a DI
+        // singleton so the GPUI layer resolves the same handle to render/approve.
+        let pending_writes = Arc::new(PendingWriteStore::new());
+        let pending_writes_di = pending_writes.clone();
+        // fluxdi treats an `Arc<T>`-returning root closure as the shared
+        // instance of `T`, so `provide::<PendingWriteStore>` + a closure cloning
+        // this Arc registers ONE shared store; `resolve::<PendingWriteStore>`
+        // returns that same `Arc<PendingWriteStore>` (mirrors PendingOAuthFlows).
+        injector.provide::<PendingWriteStore>(Provider::root(move |_| pending_writes_di.clone()));
+        let pending_writes_for_registry = pending_writes.clone();
+
         let configs_for_registry = configs.clone();
 
         // Register the registry as an async singleton — resolved in parallel with other
@@ -113,6 +128,7 @@ impl Module for McpIntegrationsModule {
         injector.provide::<McpIntegrationRegistry>(Provider::root_async(move |resolver| {
             let configs_for_registry = configs_for_registry.clone();
             let pending_flows = pending_flows.clone();
+            let pending_writes = pending_writes_for_registry.clone();
             async move {
                 let db_handle = resolver
                     .resolve_async::<dyn holon::di::DbHandleProvider>()
@@ -193,12 +209,17 @@ impl Module for McpIntegrationsModule {
                     .await;
 
                     match result {
-                        Ok(holon_mcp_client::McpConnectionResult::Connected(integration)) => {
+                        Ok(holon_mcp_client::McpConnectionResult::Connected(mut integration)) => {
                             info!(
                                 "[McpIntegrationsModule] Provider '{}' connected ({} operations)",
                                 name,
                                 integration.operation_provider.operations().len()
                             );
+
+                            // Install the shared pending-write store so once_only
+                            // writes on this connector coordinate with the frontend
+                            // approve panel (leases/read-write ruling, increment 4c).
+                            integration.set_pending_store(pending_writes.clone());
 
                             // Register MCP entity types in TypeRegistry for GQL graph
                             integration.register_entity_types(&type_registry);

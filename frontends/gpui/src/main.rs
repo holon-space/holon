@@ -153,10 +153,30 @@ fn main() -> Result<()> {
         std::sync::Arc<holon::sync::loro_share_backend::LoroShareBackend>,
     > = None;
 
+    // Resolve the shared pending connector-write store (leases/read-write
+    // ruling, increment 4c). `McpIntegrationsModule` registers it via
+    // `provide::<PendingWriteStore>`, so `resolve` returns the shared
+    // `Arc<PendingWriteStore>` directly. `None` when no MCP integrations exist
+    // (no once_only writes are possible → no approve panel).
+    let pending_writes: Option<std::sync::Arc<holon_app::PendingWriteStore>> =
+        match injector.try_resolve::<holon_app::PendingWriteStore>() {
+            Ok(store) => Some(store),
+            Err(e) => {
+                tracing::debug!(error = %e, "[pending-writes] no shared store in DI — approve panel inert");
+                None
+            }
+        };
+
     #[cfg(feature = "desktop")]
     {
         let gpui_app = Application::with_platform(gpui_platform::current_platform(false));
         gpui_app.run(move |cx| {
+            // Install the pending-write store as a GPUI global so the window
+            // wiring can spawn the bus bridge and the render pass can build the
+            // approve panel (mirrors the DegradedToastSink/ShareTrigger globals).
+            if let Some(store) = pending_writes {
+                cx.set_global(holon_gpui::share_ui::PendingWritesGlobal(store));
+            }
             launch_holon_window_with_engine_and_share(
                 session,
                 engine,
