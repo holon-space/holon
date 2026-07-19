@@ -133,7 +133,14 @@ targets:
 
           echo "Building holon-gpui for ${RUST_TARGET} (${CONFIGURATION})..."
           rustup target add "${RUST_TARGET}" 2>/dev/null || true
-          cargo build -p holon-gpui \
+          # Scrub Xcode's per-target env before invoking cargo: xcodebuild exports
+          # SDKROOT (iPhoneOS SDK) + deployment targets, which poison HOST-side
+          # build-script C compilation (cc resolves headers against the iOS SDK —
+          # broke aws-lc-sys twice on CI: v0.0.5 memcmp-probe empty output,
+          # v0.0.6 'sys/random.h' not found). With these unset, cc-rs picks the
+          # correct SDK per compile target via xcrun.
+          env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET -u MACOSX_DEPLOYMENT_TARGET \
+            cargo build -p holon-gpui \
             --target "${RUST_TARGET}" \
             --no-default-features --features mobile \
             ${CARGO_FLAGS} 2>&1
