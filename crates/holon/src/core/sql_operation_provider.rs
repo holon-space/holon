@@ -1576,6 +1576,165 @@ impl SqlOperationProvider {
         )
     }
 
+    /// Build the `{"text","marks"}` Object value a rich-content inverse
+    /// restores — the SQL mirror of Loro's `rich_content_restore_value`. Text
+    /// and marks travel as ONE atomic `content` write, so undo restores the
+    /// exact prior (content, marks) pair. Crucially, the dispatcher only splits
+    /// off a derived `marks` follow-up for a *String* content value (it reads
+    /// `value.as_string()`), so an Object value NEVER triggers the re-derive
+    /// that would otherwise clobber the restored marks.
+    fn rich_content_value(text: &str, marks: &Value) -> Value {
+        let marks_json = match marks {
+            Value::String(s) | Value::Json(s) => s.clone(),
+            _ => "[]".to_string(),
+        };
+        let mut obj = std::collections::HashMap::new();
+        obj.insert("text".to_string(), Value::String(text.to_string()));
+        obj.insert("marks".to_string(), Value::String(marks_json));
+        Value::Object(obj)
+    }
+
+    /// True when a `marks` column value carries at least one span (a non-empty,
+    /// non-`[]` JSON array). Drives the choice between a rich Object inverse
+    /// (restore both content AND marks) and a plain String content inverse.
+    fn marks_non_empty(marks: &Value) -> bool {
+        match marks {
+            Value::String(s) | Value::Json(s) => !s.is_empty() && s != "[]" && s != "null",
+            _ => false,
+        }
+    }
+
+    /// Rich `content` write: text AND marks as ONE atomic value (the SQL mirror
+    /// of the Loro `content=Object` path). Writes both columns, re-derives the
+    /// `block_links` junction from the marks, and returns an inverse that
+    /// restores the exact prior (content, marks) pair. Reached only via
+    /// undo/redo replay of a rich inverse — interactive SqlOnly content edits
+    /// arrive as String values and are split into a content write plus a
+    /// dispatcher-derived `marks` follow-up.
+    async fn set_field_content_rich(
+        &self,
+        id: &str,
+        obj: &std::collections::HashMap<String, Value>,
+    ) -> Result<OperationResult> {
+        let text = obj
+            .get("text")
+            .and_then(|v| v.as_string())
+            .ok_or_else(|| {
+                format!("set_field(content): Object value missing string 'text': {obj:?}")
+            })?
+            .to_string();
+        let marks_val = obj.get("marks").cloned().unwrap_or(Value::Null);
+        match &marks_val {
+            Value::String(_) | Value::Json(_) | Value::Null => {}
+            other => {
+                return Err(format!(
+                    "set_field(content): Object 'marks' must be a JSON string or Null, got {other:?}"
+                )
+                .into());
+            }
+        }
+
+        // Trim per content_type (source blocks preserve first-line whitespace).
+        let ct_sql = format!(
+            "SELECT content_type FROM {} WHERE id = '{}'",
+            self.table_name,
+            id.replace('\'', "''")
+        );
+        let is_source = self
+            .db_handle
+            .query(&ct_sql, HashMap::new())
+            .await
+            .map_err(|e| format!("set_field(content rich) content_type lookup: {e}"))?
+            .into_iter()
+            .next()
+            .and_then(|row| {
+                row.get("content_type")
+                    .and_then(|v| v.as_string())
+                    .map(str::to_string)
+            })
+            .is_some_and(|s| s == "source");
+        let trimmed = match Self::trimmed_content(&Value::String(text), is_source) {
+            Value::String(s) => s,
+            other => unreachable!("trimmed_content(String) yields String, got {other:?}"),
+        };
+
+        // Capture prior (content, marks) BEFORE the write — the marks column
+        // still holds the prior set here (the interactive path's `marks`
+        // follow-up runs AFTER this returns), so this is the true predecessor.
+        let prior_content = self.read_field_old_value(id, "content").await?;
+        let prior_marks = self.read_field_old_value(id, "marks").await?;
+
+        let content_sql = Self::value_to_sql(&Value::String(trimmed.clone()));
+        let marks_sql = match &marks_val {
+            Value::String(s) | Value::Json(s) if !s.is_empty() && s != "[]" => {
+                Self::value_to_sql(&Value::String(s.clone()))
+            }
+            _ => "NULL".to_string(),
+        };
+        let sql = format!(
+            "UPDATE {} SET {} = {}, {} = {} WHERE id = '{}'",
+            self.table_name,
+            Self::quote_identifier("content"),
+            content_sql,
+            Self::quote_identifier("marks"),
+            marks_sql,
+            id.replace('\'', "''"),
+        );
+        self.db_handle
+            .execute(&sql, vec![])
+            .await
+            .map_err(|e| format!("set_field(content rich) UPDATE failed: {e}"))?;
+
+        // Re-derive the `block_links` junction from the restored marks (the
+        // String path gets this from its separate `marks` follow-up; the Object
+        // path owns it because no follow-up fires).
+        if self.entity_name == "block" {
+            let stmts: Vec<(String, Vec<turso::Value>)> = self
+                .block_link_statements(id, &marks_val)
+                .await?
+                .into_iter()
+                .map(|s| (s, vec![]))
+                .collect();
+            self.db_handle
+                .transaction(stmts)
+                .await
+                .map_err(|e| format!("set_field(content rich) block_links update failed: {e}"))?;
+        }
+
+        // Inverse restores the prior pair: rich Object when the predecessor
+        // carried marks (so undo↔redo across this write is symmetric), else a
+        // plain String content restore.
+        let prior_text = match &prior_content {
+            Value::String(s) => s.clone(),
+            _ => String::new(),
+        };
+        let inverse = if Self::marks_non_empty(&prior_marks) {
+            self.set_field_inverse(
+                id,
+                "content",
+                Self::rich_content_value(&prior_text, &prior_marks),
+            )
+        } else {
+            self.set_field_inverse(id, "content", Value::String(prior_text))
+        };
+
+        // `content` is a projected column, so arm the stale-guard when the text
+        // actually changed; a marks-only restore (text unchanged) leaves the
+        // column untouched and reports no delta (single-writer safe).
+        let new_content = Value::String(trimmed);
+        let changes = if prior_content != new_content {
+            vec![FieldDelta::new(
+                id.to_string(),
+                "content",
+                prior_content,
+                new_content,
+            )]
+        } else {
+            Vec::new()
+        };
+        Ok(OperationResult::new(changes, inverse))
+    }
+
     /// Capture the full `block_raw` row for `id` as create-op params (columns
     /// verbatim, minus the CDC-provenance sentinel `_change_origin`, which the
     /// writer stamps fresh). Returns `None` when the row is absent. Used to
@@ -1892,6 +2051,18 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 let raw_value = params
                     .get("value")
                     .ok_or_else(|| "Missing 'value' parameter".to_string())?;
+
+                // Rich content write (text + marks as one Object) — the SQL
+                // mirror of the Loro `content=Object` path. Reached via undo/redo
+                // replay of a rich inverse; restores the exact (content, marks)
+                // pair atomically. Interactive content edits arrive as Strings
+                // and fall through to the split content + derived-marks path.
+                if field == "content" {
+                    if let Value::Object(obj) = raw_value {
+                        return self.set_field_content_rich(id, obj).await;
+                    }
+                }
+
                 let value = if field == "content" {
                     // For set_field, params only carries {id, field, value} — no
                     // content_type. Look up the existing block's content_type so
@@ -2128,7 +2299,31 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 } else {
                     Vec::new()
                 };
-                let inverse = self.set_field_inverse(id, field, old_value);
+                // A String content write over a block that ALREADY carried
+                // marks must restore BOTH on undo: the dispatcher folds the
+                // derived `marks` write into this same undoable step (no undo
+                // entry of its own), so a content-only inverse would drop the
+                // predecessor's marks (leaving nonsense-offset or absent spans).
+                // Capture the prior marks (the column still holds them here —
+                // the `marks` follow-up runs after this returns) and upgrade to
+                // a rich Object inverse that restores the exact pair. A plain
+                // predecessor (no marks) keeps the String inverse so the undo
+                // stack's word-boundary coalescer still recognises typing.
+                let inverse = if field == "content" {
+                    let prior_marks = self.read_field_old_value(id, "marks").await?;
+                    if Self::marks_non_empty(&prior_marks) {
+                        let prior_text = old_value.as_string().unwrap_or_default().to_string();
+                        self.set_field_inverse(
+                            id,
+                            "content",
+                            Self::rich_content_value(&prior_text, &prior_marks),
+                        )
+                    } else {
+                        self.set_field_inverse(id, field, old_value)
+                    }
+                } else {
+                    self.set_field_inverse(id, field, old_value)
+                };
                 Ok(OperationResult::new(changes, inverse))
             }
             "create" => {
