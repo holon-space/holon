@@ -213,6 +213,17 @@ pub trait BuilderServices: Send + Sync {
     /// `runtime_handle()` and calling `dispatch_operation()` manually.
     fn dispatch_intent(&self, intent: crate::operations::OperationIntent);
 
+    /// Persist a single preference synchronously, returning `Err` on a write
+    /// failure so the caller (e.g. a GPUI preference field) can surface a
+    /// visible degraded-mode toast instead of the process aborting. Preference
+    /// writes run inline (blocking file IO) rather than through the async
+    /// `dispatch_intent` op path. Default no-ops — stub/headless services do
+    /// not persist config.
+    fn set_preference(&self, key: &str, value: holon_api::Value) -> Result<()> {
+        let _ = (key, value);
+        Ok(())
+    }
+
     /// Synchronous operation dispatch — awaits completion and returns the
     /// operation's result.
     ///
@@ -2463,6 +2474,12 @@ impl BuilderServices for ReactiveEngine {
         self.session.set_widget_open(id, open);
     }
 
+    fn set_preference(&self, key: &str, value: holon_api::Value) -> Result<()> {
+        let pref_key = crate::preferences::PrefKey::new(key);
+        let toml_value = crate::preferences::value_to_toml(&value);
+        self.session.set_preference(&pref_key, toml_value)
+    }
+
     fn dispatch_intent(&self, intent: crate::operations::OperationIntent) {
         if intent.entity_name == "preferences" && intent.op_name == "set" {
             if let (Some(key), Some(value)) = (
@@ -2471,7 +2488,14 @@ impl BuilderServices for ReactiveEngine {
             ) {
                 let pref_key = crate::preferences::PrefKey::new(&key);
                 let toml_value = crate::preferences::value_to_toml(value);
-                self.session.set_preference(&pref_key, toml_value);
+                // Fail-loud, not fatal: a failed preference persist (e.g. a
+                // read-only config dir on Android) must be disclosed, never
+                // abort the process. Callers with a UI seam (GPUI pref fields)
+                // use the fallible `set_preference` trait method to also toast.
+                if let Err(e) = self.session.set_preference(&pref_key, toml_value) {
+                    self.session.error_tracker().record_error();
+                    tracing::error!("Failed to persist preference {key}: {e:#}");
+                }
             }
             return;
         }
@@ -2564,7 +2588,11 @@ impl BuilderServices for ReactiveEngine {
             ) {
                 let pref_key = crate::preferences::PrefKey::new(&key);
                 let toml_value = crate::preferences::value_to_toml(value);
-                self.session.set_preference(&pref_key, toml_value);
+                // Surface a persist failure to the sync caller instead of
+                // aborting — this path awaits the result (MCP/tests/driver).
+                return Box::pin(std::future::ready(
+                    self.session.set_preference(&pref_key, toml_value),
+                ));
             }
             return Box::pin(std::future::ready(Ok(())));
         }
