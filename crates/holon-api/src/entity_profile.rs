@@ -302,14 +302,14 @@ pub fn dynamic_to_value(d: &rhai::Dynamic) -> Value {
 ///   the row is structurally the wrong shape (heterogeneous rows expose
 ///   different columns; an unbound sibling computed field is likewise absent).
 ///   We return a NON-MATCH **without invoking Rhai** — so no "Variable not
-///   found" is raised and, crucially, no `() && …` type-error cascade occurs.
-///   A missing column that IS in `declared` is disclosed LOUDLY once (a real
+///   found" is raised and, crucially, no `() && …` type-error cascade occurs. A
+///   missing column that IS in `declared` is disclosed LOUDLY once (a real
 ///   projection gap); missing UI-state vars and optional columns are silent.
 /// - If every required column is present, we evaluate. A genuine error now
 ///   (type mismatch on present data, non-bool result) is surfaced at WARN and
 ///   treated as a non-match — a disclosed degraded signal, never a silent
-///   false. WARN not ERROR: one bad condition degrades one variant, it must
-///   not abort the render.
+///   false. WARN not ERROR: one bad condition degrades one variant, it must not
+///   abort the render.
 fn eval_condition(
     engine: &RhaiEngine,
     source: &str,
@@ -462,8 +462,9 @@ pub trait ProfileResolving: Send + Sync {
     /// Returns `None` when no profile of that name is in the cache, so the
     /// caller can disclose the degraded default-variant behaviour
     /// (fail-visible, not fail-silent).
-    // ALLOW(fallback): documents a disclosed, fail-visible degrade (returns None so the caller surfaces it), not a hidden swallow
-    // ALLOW(unused_param): trait shape; default impl (mocks) has no cache
+    // ALLOW(fallback): documents a disclosed, fail-visible degrade (returns None so
+    // the caller surfaces it), not a hidden swallow ALLOW(unused_param): trait
+    // shape; default impl (mocks) has no cache
     fn resolve_collection_variants_named(&self, _name: &EntityName) -> Option<Vec<RenderVariant>> {
         None
     }

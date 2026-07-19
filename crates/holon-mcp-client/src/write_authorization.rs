@@ -373,9 +373,15 @@ mod tests {
     fn take_for_dispatch_only_after_confirm() {
         let store = PendingWriteStore::new();
         store.enqueue_pending("k", write(PendingState::AwaitingConfirmation));
-        assert!(!store.take_for_dispatch("k"), "cannot dispatch before confirm");
+        assert!(
+            !store.take_for_dispatch("k"),
+            "cannot dispatch before confirm"
+        );
         assert!(store.confirm("k"));
-        assert!(store.take_for_dispatch("k"), "confirmed -> dispatching once");
+        assert!(
+            store.take_for_dispatch("k"),
+            "confirmed -> dispatching once"
+        );
         assert!(!store.take_for_dispatch("k"), "dispatch token is one-shot");
         assert_eq!(store.state_of("k"), Some(PendingState::Dispatching));
     }

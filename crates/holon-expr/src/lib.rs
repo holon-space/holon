@@ -7,11 +7,11 @@
 
 use std::collections::BTreeSet;
 
+use rhai::AST;
 use rhai::ASTNode;
 use rhai::Engine;
 use rhai::Expr;
 use rhai::Stmt;
-use rhai::AST;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -135,11 +135,11 @@ impl CompiledExpr {
 /// silent-skip direction), no `for` loops (whose loop variable is not a
 /// `Stmt::Var` and would leak), and no `let` nested inside a block (which could
 /// shadow an outer reference and wrongly drop it). For any such
-/// **extraction-unsound** expression this returns the EMPTY set, which makes the
-/// evaluator ALWAYS evaluate it — a missing variable then surfaces as a LOUD
-/// genuine error, never a silent skip. No block-profile flood expression uses
-/// these constructs, so the flood fix is unaffected; this only guards latent
-/// future authorings. See `extraction_is_unsound`.
+/// **extraction-unsound** expression this returns the EMPTY set, which makes
+/// the evaluator ALWAYS evaluate it — a missing variable then surfaces as a
+/// LOUD genuine error, never a silent skip. No block-profile flood expression
+/// uses these constructs, so the flood fix is unaffected; this only guards
+/// latent future authorings. See `extraction_is_unsound`.
 pub fn required_columns(ast: &AST) -> BTreeSet<String> {
     if extraction_is_unsound(ast) {
         return BTreeSet::new();
@@ -331,7 +331,9 @@ mod required_columns_tests {
         // is context-free and lists every referenced name; the EVALUATOR resolves
         // is_source against the live scope. Here we only assert the column
         // source_language is present and no method/keyword leaks in.
-        let cols = req("is_source && (source_language == \"holon_prql\" || source_language == \"render\")");
+        let cols = req(
+            "is_source && (source_language == \"holon_prql\" || source_language == \"render\")",
+        );
         assert!(cols.contains("source_language"));
         assert!(cols.contains("is_source"));
         assert_eq!(cols.len(), 2);
@@ -373,14 +375,23 @@ mod required_columns_tests {
             !cols.contains("t"),
             "closure param t must never be a required column (silent-skip trap): {cols:?}"
         );
-        assert!(cols.is_empty(), "closure expr fail-closes to always-eval: {cols:?}");
+        assert!(
+            cols.is_empty(),
+            "closure expr fail-closes to always-eval: {cols:?}"
+        );
     }
 
     #[test]
     fn for_loop_variable_never_becomes_a_required_column() {
         let cols = req("let s = 0; for i in items { s += i }; s > items.len");
-        assert!(!cols.contains("i"), "for-loop var i must not be required: {cols:?}");
-        assert!(cols.is_empty(), "for-loop expr fail-closes to always-eval: {cols:?}");
+        assert!(
+            !cols.contains("i"),
+            "for-loop var i must not be required: {cols:?}"
+        );
+        assert!(
+            cols.is_empty(),
+            "for-loop expr fail-closes to always-eval: {cols:?}"
+        );
     }
 
     #[test]
@@ -389,7 +400,10 @@ mod required_columns_tests {
         // subtraction would drop the outer `a`; fail-closed avoids the wrong
         // (silent) answer by evaluating — a missing outer `a` is then loud.
         let cols = req("a + (if true { let a = 1; a } else { 0 })");
-        assert!(cols.is_empty(), "nested-let shadow fail-closes to always-eval: {cols:?}");
+        assert!(
+            cols.is_empty(),
+            "nested-let shadow fail-closes to always-eval: {cols:?}"
+        );
     }
 
     #[test]
