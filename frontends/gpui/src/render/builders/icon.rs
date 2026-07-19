@@ -87,31 +87,58 @@ fn icon_svg_name(name: &str) -> Option<&'static str> {
     })
 }
 
-/// Unicode fallback for icons without an SVG file. // ALLOW(fallback):
-/// describes default-branch path, not error swallowing
+/// Icon-name → Unicode glyph, used when no SVG file exists for the name. The
+/// single source of truth swept by the icon-font coverage test so every glyph
+/// is asserted Android-renderable. Glyphs the embedded DejaVu font can't render
+/// (🗑 trash/delete) are substituted on Android via `crate::ICON_SUBSTITUTES`;
+/// 🔒/🔓 have no DejaVu substitute and are documented in
+/// `crate::KNOWN_ANDROID_GLYPH_GAPS` (unreached — no layout names them today).
+pub(crate) const ICON_CHARS: &[(&str, &str)] = &[
+    ("orgmode", "\u{25C9}"),       // ◉
+    ("circle", "\u{25CF}"),        // ●
+    ("chevron_right", "\u{203A}"), // ›
+    ("chevron_down", "\u{2304}"),  // ⌄
+    ("chevron_left", "\u{2039}"),  // ‹
+    ("chevron_up", "\u{2303}"),    // ⌃
+    ("plus", "+"),
+    ("add", "+"),
+    ("minus", "\u{2212}"),          // −
+    ("remove", "\u{2212}"),         // −
+    ("info", "\u{2139}"),           // ℹ
+    ("code", "\u{27E8}\u{27E9}"),   // ⟨⟩
+    ("source", "\u{27E8}\u{27E9}"), // ⟨⟩
+    ("list", "\u{2630}"),           // ☰
+    ("menu", "\u{2630}"),           // ☰
+    ("hamburger", "\u{2630}"),      // ☰
+    ("table", "\u{25A6}"),          // ▦
+    ("eye_off", "\u{25CC}"),        // ◌
+    ("hidden", "\u{25CC}"),         // ◌
+    ("lock", "\u{1F512}"),          // 🔒 (KNOWN_ANDROID_GLYPH_GAPS)
+    ("unlock", "\u{1F513}"),        // 🔓 (KNOWN_ANDROID_GLYPH_GAPS)
+    ("home", "\u{2302}"),           // ⌂
+    ("drag", "\u{283F}"),           // ⠿
+    ("grip", "\u{283F}"),           // ⠿
+    ("edit", "\u{270E}"),           // ✎
+    ("pencil", "\u{270E}"),         // ✎
+    ("trash", "\u{1F5D1}"),         // 🗑 → ⌦ on Android
+    ("delete", "\u{1F5D1}"),        // 🗑 → ⌦ on Android
+];
+
+/// Glyph for an unknown icon name (bullet). // ALLOW(fallback): names the
+/// default-branch glyph, not error swallowing — an unknown name is a valid
+/// input.
+pub(crate) const ICON_CHAR_DEFAULT: &str = "\u{2022}"; // •
+
+/// Icon-name → glyph, routed through `crate::icon` so glyphs the embedded
+/// coverage font can't render are substituted on Android. Unknown names get the
+/// bullet default.
 fn icon_char(name: &str) -> &'static str {
-    match name {
-        "orgmode" => "\u{25C9}",
-        "circle" => "\u{25CF}",
-        "chevron_right" => "\u{203A}",
-        "chevron_down" => "\u{2304}",
-        "chevron_left" => "\u{2039}",
-        "chevron_up" => "\u{2303}",
-        "plus" | "add" => "+",
-        "minus" | "remove" => "\u{2212}",
-        "info" => "\u{2139}",
-        "code" | "source" => "\u{27E8}\u{27E9}",
-        "list" | "menu" | "hamburger" => "\u{2630}",
-        "table" => "\u{25A6}",
-        "eye_off" | "hidden" => "\u{25CC}",
-        "lock" => "\u{1F512}",
-        "unlock" => "\u{1F513}",
-        "home" => "\u{2302}",
-        "drag" | "grip" => "\u{283F}",
-        "edit" | "pencil" => "\u{270E}",
-        "trash" | "delete" => "\u{1F5D1}",
-        _ => "\u{2022}",
-    }
+    let glyph = ICON_CHARS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, g)| *g)
+        .unwrap_or(ICON_CHAR_DEFAULT);
+    crate::icon(glyph)
 }
 
 pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
@@ -167,4 +194,22 @@ pub(crate) fn render_icon(name: &str, size: f32, ctx: &GpuiRenderContext) -> Div
         .line_height(px(icon_size))
         .text_color(color)
         .child(icon_char(name).to_string())
+}
+
+#[cfg(test)]
+mod icon_char_coverage {
+    use super::ICON_CHAR_DEFAULT;
+    use super::ICON_CHARS;
+
+    /// Every named-icon glyph (and the unknown-name default) must render on
+    /// Android: DejaVu-covered, substituted via `crate::ICON_SUBSTITUTES`, or a
+    /// documented `crate::KNOWN_ANDROID_GLYPH_GAPS` entry. Sweeps the table so
+    /// a newly-added icon glyph cannot silently tofu.
+    #[test]
+    fn every_named_icon_glyph_renders_on_android() {
+        for (name, glyph) in ICON_CHARS {
+            crate::assert_icon_renderable_on_android(glyph, &format!("icon::{name}"));
+        }
+        crate::assert_icon_renderable_on_android(ICON_CHAR_DEFAULT, "icon::<default>");
+    }
 }

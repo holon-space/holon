@@ -156,6 +156,9 @@ tracing-oslog = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
+# Parses the embedded DejaVu Sans font in `icon_font_tests` to assert glyph
+# coverage host-side (already in the tree via cosmic-text/fontdb).
+ttf-parser = "0.25"
 holon-integration-tests = { path = "../../crates/holon-integration-tests" }
 holon-layout-testing = { path = "../../crates/holon-layout-testing" }
 holon-pbt-core = { path = "../../crates/holon-pbt-core" }

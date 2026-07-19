@@ -48,6 +48,132 @@ use holon_frontend::view_model::ViewModel;
 use navigation_state::NavigationState;
 use render::builders::GpuiRenderContext;
 
+// ── Android icon-glyph substitutes ──────────────────────────────────────────
+//
+// UI-chrome icons that are *monochrome* Unicode symbols DejaVu Sans covers
+// (☰ ◧ ⚙, chevrons, checkboxes, arrows, …) render on Android via the DejaVu
+// Sans coverage font we embed and register in
+// `mobile::register_android_icon_fonts` — cosmic-text's per-glyph resolution
+// picks up their glyphs from it.
+//
+// Two other classes render as tofu on Android and need a substitute:
+//   • color emoji (🎨 🔗 🔍 🔎 ⛔ 🗑) — Android's on-device NotoColorEmoji uses
+//     COLR v1 outlines that gpui-mobile's swash rasteriser cannot render, and
+//     no CBDT emoji font ships in the APK; DejaVu has no astral-plane emoji.
+//   • monochrome symbols DejaVu simply lacks (⧉ U+29C9) — same mechanism.
+// On Android each is swapped for a DejaVu-covered symbol; mac/iOS use their own
+// system text systems and keep the original glyph.
+//
+// INVARIANT (enforced by the icon-font coverage tests in this crate — see
+// `icon_font_tests` here and the co-located sweeps in `render::builders::
+// op_button` and `render::builders::icon`): every substitute here is present in
+// the embedded DejaVu Sans cmap, and every source glyph is genuinely absent
+// from it. When you add an icon glyph the DejaVu font can't render, add a row
+// here (and route the glyph through `icon()`), or it will tofu on Android.
+// Referenced by the Android `icon()`/`substitute_glyph` and by the tests; on
+// desktop non-test builds those paths don't compile, so it reads as dead there.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) const ICON_SUBSTITUTES: &[(&str, &str)] = &[
+    ("🎨", "▦"), // widget gallery  → square with crosshatch (grid/gallery)
+    ("🔗", "⚭"), // accept ticket   → interlocked rings (link)
+    ("🔍", "⚲"), // inspector       → magnifier-like symbol
+    ("🔎", "⚲"), // search field    → magnifier-like symbol
+    ("⛔", "⊘"), // degraded banner → circled slash (blocked)
+    ("🗑", "⌦"),  // delete op       → erase-to-the-right (delete)
+    ("⧉", "❐"),  // embed op        → shadowed square (overlay/embed)
+];
+
+/// Monochrome glyphs the embedded DejaVu Sans genuinely cannot render on
+/// Android for which no acceptable DejaVu substitute exists — DejaVu ships no
+/// padlock glyph at all. These are only reachable if a layout names the `lock`
+/// / `unlock` semantic icon (`render::builders::icon`); no current layout does
+/// (the widget gallery uses lucide SVG names that fall through to `•`). Listed
+/// here so the coverage tests record the gap loudly instead of it re-escaping
+/// silently. If one becomes reachable, ship an SVG icon or a lock-capable
+/// coverage font rather than a misleading substitute.
+#[allow(dead_code)] // read only by the icon-font coverage tests
+pub(crate) const KNOWN_ANDROID_GLYPH_GAPS: &[&str] = &["🔒", "🔓"];
+
+/// Every non-ASCII icon glyph rendered from an *inline literal* (not from a
+/// name→glyph table like `op_button`/`icon`). Kept here as the single place the
+/// coverage test sweeps inline literals — the hand-maintained list that missing
+/// an entry is the one drift risk, so each entry names its source site.
+#[allow(dead_code)] // read only by the icon-font coverage tests
+pub(crate) const INLINE_UI_GLYPHS: &[&str] = &[
+    "☰",  // lib.rs left-sidebar toggle
+    "◧",  // lib.rs right-sidebar toggle
+    "⚙",  // lib.rs settings gear
+    "🎨", // lib.rs widget-gallery toggle
+    "🔗", // lib.rs accept-ticket toggle
+    "🔎", // lib.rs search field
+    "🔍", // inspector.rs
+    "✕",  // lib.rs / share_ui.rs / oracles_ui.rs close/dismiss
+    "⚠",  // share_ui.rs degraded banner
+    "↻",  // share_ui.rs rehydration banner
+    "⛔", // share_ui.rs blocked banner
+    "▸",  // collapsible.rs collapsed chevron
+    "▾",  // collapsible.rs expanded chevron
+    "▼",  // expand_toggle.rs / reactive_vm_poc.rs expanded
+    "▶",  // expand_toggle.rs / reactive_vm_poc.rs collapsed
+    "◉",  // checkbox.rs checked
+    "○",  // checkbox.rs unchecked
+];
+
+/// Apply the Android icon substitution table to a glyph (see
+/// [`ICON_SUBSTITUTES`]). Non-`cfg`-gated so the host-side coverage tests can
+/// exercise the exact mapping the Android `icon()` uses.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn substitute_glyph(glyph: &'static str) -> &'static str {
+    let mut i = 0;
+    while i < ICON_SUBSTITUTES.len() {
+        if ICON_SUBSTITUTES[i].0 == glyph {
+            return ICON_SUBSTITUTES[i].1;
+        }
+        i += 1;
+    }
+    glyph
+}
+
+/// Map a UI-chrome icon glyph to a platform-renderable form.
+///
+/// On Android, glyphs DejaVu can't render are swapped for DejaVu-covered
+/// substitutes (see [`ICON_SUBSTITUTES`]); everything else passes through. On
+/// every other platform this is the identity.
+#[cfg(target_os = "android")]
+pub(crate) fn icon(glyph: &'static str) -> &'static str {
+    substitute_glyph(glyph)
+}
+
+/// See the Android variant. Identity on non-Android platforms.
+#[cfg(not(target_os = "android"))]
+pub(crate) fn icon(glyph: &'static str) -> &'static str {
+    glyph
+}
+
+/// Shared host-side coverage helper for the icon-font tests. Asserts that
+/// `glyph`, after the Android substitution, is renderable by the embedded
+/// DejaVu Sans font — i.e. every non-ASCII char resolves to a glyph — OR that
+/// it is a documented [`KNOWN_ANDROID_GLYPH_GAPS`] entry. `source` names the
+/// call site for a legible failure.
+#[cfg(test)]
+pub(crate) fn assert_icon_renderable_on_android(glyph: &'static str, source: &str) {
+    const DEJAVU_SANS: &[u8] = include_bytes!("../../../assets/fonts/DejaVuSans.ttf");
+    let face = ttf_parser::Face::parse(DEJAVU_SANS, 0).expect("embedded DejaVu Sans must parse");
+    if KNOWN_ANDROID_GLYPH_GAPS.contains(&glyph) {
+        return;
+    }
+    let effective = substitute_glyph(glyph);
+    for ch in effective.chars() {
+        assert!(
+            ch.is_ascii() || face.glyph_index(ch).is_some(),
+            "{source}: icon {glyph:?} → Android-effective {effective:?} has char U+{:04X} that \
+             DejaVu Sans cannot render and no substitute covers (add a row to ICON_SUBSTITUTES \
+             or KNOWN_ANDROID_GLYPH_GAPS)",
+            ch as u32
+        );
+    }
+}
+
 // ── Global undo/redo actions ────────────────────────────────────────────────
 //
 // `gpui_component::input::{Undo, Redo}` (bound to cmd-z / cmd-shift-z inside
@@ -744,7 +870,7 @@ impl Render for HolonApp {
                             .py(px(4.0))
                             .rounded(px(4.0))
                             .hover(|s| s.bg(gpui::rgba(0x00000010)))
-                            .child("🎨")
+                            .child(icon("🎨"))
                             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                                 gallery_model.update(cx, |m, cx| {
                                     m.show_widget_gallery = !m.show_widget_gallery;
@@ -762,7 +888,7 @@ impl Render for HolonApp {
                             .py(px(4.0))
                             .rounded(px(4.0))
                             .hover(|s| s.bg(gpui::rgba(0x00000010)))
-                            .child("🔗")
+                            .child(icon("🔗"))
                             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                                 share_state.update(cx, |s, cx| {
                                     if s.show_accept_modal {
@@ -787,7 +913,7 @@ impl Render for HolonApp {
                                     .py(px(4.0))
                                     .rounded(px(4.0))
                                     .hover(|s| s.bg(gpui::rgba(0x00000010)))
-                                    .child("🔎")
+                                    .child(icon("🔎"))
                                     .on_mouse_down(MouseButton::Left, |_, window, cx| {
                                         #[cfg(debug_assertions)]
                                         window.toggle_inspector(cx);
@@ -2674,4 +2800,63 @@ fn keystroke_to_keys(ks: &gpui::Keystroke) -> std::collections::BTreeSet<holon_a
         _ => {}
     }
     keys
+}
+
+// ── Icon-font coverage tests ─────────────────────────────────────────────────
+//
+// Guard the Android icon fix. Every icon glyph the app renders must be
+// Android-renderable: covered directly by the embedded DejaVu Sans font, or
+// swapped for a covered glyph via `ICON_SUBSTITUTES`, or a documented
+// `KNOWN_ANDROID_GLYPH_GAPS` entry. The name→glyph tables
+// (`op_button::OP_ICONS`, `icon::ICON_CHARS`) are swept by co-located tests in
+// those modules via `assert_icon_renderable_on_android`; here we sweep the
+// inline literals (`INLINE_UI_GLYPHS`) and check the substitution table's own
+// invariants. These run host-side (parsing only the embedded font bytes), so
+// `cargo test -p holon-gpui` on macOS/Linux catches a truncated/wrong font
+// asset or an unrenderable/unnecessary substitute before it ever reaches a
+// device.
+#[cfg(test)]
+mod icon_font_tests {
+    use ttf_parser::Face;
+
+    use super::ICON_SUBSTITUTES;
+    use super::INLINE_UI_GLYPHS;
+
+    const DEJAVU_SANS: &[u8] = include_bytes!("../../../assets/fonts/DejaVuSans.ttf");
+
+    fn face() -> Face<'static> {
+        Face::parse(DEJAVU_SANS, 0).expect("embedded DejaVu Sans must parse")
+    }
+
+    /// Every inline UI glyph literal (toolbar, chevrons, checkboxes, banners)
+    /// must render on Android — covered by DejaVu directly or
+    /// substitution-routed.
+    #[test]
+    fn inline_ui_glyphs_render_on_android() {
+        for glyph in INLINE_UI_GLYPHS {
+            super::assert_icon_renderable_on_android(glyph, "INLINE_UI_GLYPHS");
+        }
+    }
+
+    /// Every substitute must be a glyph DejaVu actually has, and the source
+    /// glyph it replaces must NOT be in DejaVu — otherwise the substitution is
+    /// either broken (tofu substitute) or unnecessary (source was covered).
+    #[test]
+    fn substitutes_are_covered_and_needed() {
+        let face = face();
+        for (from, sub) in ICON_SUBSTITUTES {
+            let sub_char = sub.chars().next().expect("substitute is non-empty");
+            assert!(
+                face.glyph_index(sub_char).is_some(),
+                "substitute {sub:?} (U+{:04X}) for {from:?} not covered by DejaVu Sans",
+                sub_char as u32
+            );
+            let from_char = from.chars().next().expect("source glyph is non-empty");
+            assert!(
+                face.glyph_index(from_char).is_none(),
+                "source glyph {from:?} (U+{:04X}) IS covered by DejaVu Sans — substitution unnecessary",
+                from_char as u32
+            );
+        }
+    }
 }
