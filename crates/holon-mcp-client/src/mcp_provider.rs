@@ -31,6 +31,15 @@ use crate::mcp_sidecar::McpSidecar;
 use crate::mcp_sidecar::ToolEffect;
 use crate::mcp_sidecar::UndoConfig;
 use crate::mcp_sidecar::WritesPolicy;
+use crate::write_authorization::PendingState;
+use crate::write_authorization::PendingWrite;
+use crate::write_authorization::PendingWriteStore;
+use crate::write_authorization::PendingWriteView;
+use crate::write_authorization::SharedPendingWrites;
+use crate::write_authorization::WriteAuthorizationPolicy;
+use crate::write_authorization::WriteDecision;
+use crate::write_authorization::WriteIntent;
+use crate::write_authorization::policy_for;
 
 /// Type-erased entity field reader — reads entity fields as HashMap<String,
 /// Value>. Allows McpOperationProvider to capture old state without knowing
@@ -185,6 +194,14 @@ pub struct McpOperationProvider {
     /// an execution log is not a cross-replica dedup mechanism). The remote is
     /// the dedup authority; this only lets a retry observe "already sent".
     sent_intents: Arc<Mutex<HashMap<String, u32>>>,
+    /// Writer-designation policy for this connector's `once_only` effects
+    /// (leases/read-write ruling, increment 4). Selected from the sidecar's
+    /// `once_only:` field at construction.
+    policy: Box<dyn WriteAuthorizationPolicy>,
+    /// At-most-once state machine + approve queue for `once_only` writes
+    /// (increment 4). Shared so the frontend approve UI (increment 4c) can list
+    /// and confirm pending intents.
+    pending: SharedPendingWrites,
 }
 
 impl McpOperationProvider {
@@ -313,6 +330,7 @@ impl McpOperationProvider {
             tool_name_map.insert(normalized, tool_name.to_string());
         }
 
+        let policy = policy_for(sidecar.once_only);
         Ok(Self {
             peer: Some(peer),
             descriptors,
@@ -321,6 +339,8 @@ impl McpOperationProvider {
             entity_readers,
             _connection: None,
             sent_intents: Arc::new(Mutex::new(HashMap::new())),
+            policy,
+            pending: Arc::new(PendingWriteStore::new()),
         })
     }
 
@@ -333,6 +353,7 @@ impl McpOperationProvider {
         sidecar: McpSidecar,
         entity_readers: HashMap<String, Arc<dyn EntityFieldReader>>,
     ) -> Self {
+        let policy = policy_for(sidecar.once_only);
         Self {
             peer: None,
             descriptors: Vec::new(),
@@ -341,7 +362,80 @@ impl McpOperationProvider {
             entity_readers,
             _connection: None,
             sent_intents: Arc::new(Mutex::new(HashMap::new())),
+            policy,
+            pending: Arc::new(PendingWriteStore::new()),
         }
+    }
+
+    /// Build a `PendingWrite` record capturing everything needed to re-dispatch
+    /// a `once_only` intent on approval (increment 4). `params` is cloned so the
+    /// stored call survives past the point where the live `execute_operation`
+    /// consumes its params.
+    fn pending_write_record(
+        &self,
+        entity_name: &EntityName,
+        op_name: &str,
+        params: &holon_api::StorageEntity,
+        original_name: &str,
+    ) -> PendingWrite {
+        let connector = self
+            .sidecar
+            .entity_prefix
+            .as_deref()
+            .unwrap_or("")
+            .to_string();
+        let display = self
+            .sidecar
+            .tools
+            .get(original_name)
+            .and_then(|tc| tc.display_name.clone())
+            .unwrap_or_else(|| original_name.to_string());
+        PendingWrite {
+            entity_name: entity_name.clone(),
+            op_name: op_name.to_string(),
+            params: params.clone(),
+            connector,
+            tool: original_name.to_string(),
+            display,
+            // Overwritten by enqueue_pending / begin_dispatch to the correct
+            // initial state.
+            state: PendingState::AwaitingConfirmation,
+            dispatch_count: 0,
+        }
+    }
+
+    /// Approve a pending `once_only` write (leases/read-write ruling, increment
+    /// 4). Compare-and-take (amendment B): only the single winning approval
+    /// re-dispatches; a second approve is a disclosed no-op. Re-dispatch
+    /// re-enters `execute_operation` with the stored call and the SAME intent
+    /// key, so the `Confirmed -> Dispatching` transition and remote dedup keep
+    /// it at-most-once.
+    pub async fn approve(&self, intent_key: &str) -> Result<OperationResult> {
+        if !self.pending.confirm(intent_key) {
+            return Err(format!(
+                "no once_only write awaiting confirmation for intent '{intent_key}' \
+                 (already approved, dispatched, or unknown-outcome)"
+            )
+            .into());
+        }
+        let (entity_name, op_name, params) = self
+            .pending
+            .stored_call(intent_key)
+            .expect("a confirmed intent has a stored call");
+        self.execute_operation(&entity_name, &op_name, params).await
+    }
+
+    /// Snapshot of tracked `once_only` intents for the pending-writes UI
+    /// (increment 4c) and for tests.
+    pub fn pending_writes(&self) -> Vec<PendingWriteView> {
+        self.pending.list()
+    }
+
+    /// Shared handle to the pending-write store — for the frontend approve UI
+    /// (increment 4c) and for tests exercising the compare-and-take contract
+    /// directly.
+    pub fn pending_store(&self) -> SharedPendingWrites {
+        self.pending.clone()
     }
 
     /// Capture old field values from cache for mirror undo.
@@ -529,74 +623,142 @@ impl OperationProvider for McpOperationProvider {
             .get(original_name)
             .and_then(|tc| tc.effect)
             .unwrap_or(ToolEffect::Read);
-        if effect != ToolEffect::Read {
-            match self.sidecar.writes {
-                WritesPolicy::Disabled => {
-                    return Err(format!(
-                        "connector write blocked: tool '{original_name}' (effect: {}) needs \
-                         `writes: enabled` in the provider sidecar — writes are disabled \
-                         (attempted on entity '{}')",
-                        effect.as_str(),
-                        entity_name.as_str()
+        if effect != ToolEffect::Read && self.sidecar.writes == WritesPolicy::Disabled {
+            return Err(format!(
+                "connector write blocked: tool '{original_name}' (effect: {}) needs \
+                 `writes: enabled` in the provider sidecar — writes are disabled \
+                 (attempted on entity '{}')",
+                effect.as_str(),
+                entity_name.as_str()
+            )
+            .into());
+        }
+
+        // Deterministic idempotency/intent key for `keyed` and `once_only`
+        // writes (ADR 0024 P4 naming discipline). Minted BEFORE params are
+        // consumed so the fingerprint is stable across retries/re-dispatches.
+        // For `keyed` the key is injected into the call (remote dedups); for
+        // `once_only` it also keys the pending-write store (approve-dedup +
+        // at-most-once). Injection into the outgoing args happens only when the
+        // tool declares a `key_param`.
+        let intent_key: Option<String> =
+            if matches!(effect, ToolEffect::Keyed | ToolEffect::OnceOnly) {
+                let id_col = self
+                    .sidecar
+                    .entities
+                    .get(entity_name.as_str())
+                    .map(|e| e.id_column_or_default())
+                    .unwrap_or_else(|| "id".to_string());
+                let entity_id = match params.get(id_col.as_str()) {
+                    Some(Value::String(s)) => s.as_str(),
+                    _ => "",
+                };
+                let fingerprint = holon_api::effect_id::FiringKey::from_row(&params);
+                let connector = self.sidecar.entity_prefix.as_deref().unwrap_or("");
+                Some(
+                    holon_api::effect_id::deterministic_intent_key(
+                        connector,
+                        original_name,
+                        entity_id,
+                        &fingerprint,
                     )
-                    .into());
+                    .to_string(),
+                )
+            } else {
+                None
+            };
+
+        // `once_only` writer-designation gate (increment 4; amendments A+B).
+        // The dispatch-owning transition is taken BEFORE the remote call; the
+        // outcome is recorded AFTER. A post-dispatch failure lands in
+        // `OutcomeUnknown` and is NEVER auto-retried.
+        if effect == ToolEffect::OnceOnly {
+            let key = intent_key
+                .as_deref()
+                .expect("once_only mints an intent key");
+            // Approved re-dispatch: `Confirmed -> Dispatching`, single-winner.
+            if !self.pending.take_for_dispatch(key) {
+                let connector = self.sidecar.entity_prefix.as_deref().unwrap_or("");
+                match self.policy.authorize(&WriteIntent {
+                    connector,
+                    tool: original_name,
+                    effect,
+                    intent_key: key,
+                }) {
+                    WriteDecision::Allow => {
+                        // always_run first attempt: take dispatch ownership by
+                        // inserting straight into `Dispatching`. A re-attempt on
+                        // an existing (in-flight / sent / unknown) intent is
+                        // refused — never fire the effect twice.
+                        let record = self.pending_write_record(
+                            entity_name,
+                            op_name,
+                            &params,
+                            original_name,
+                        );
+                        if !self.pending.begin_dispatch(key, record) {
+                            return Err(format!(
+                                "connector write blocked: once_only intent '{key}' for tool \
+                                 '{original_name}' was already dispatched (outcome may be \
+                                 unknown) — not auto-retried; verify on the remote before \
+                                 resending"
+                            )
+                            .into());
+                        }
+                    }
+                    WriteDecision::RequireConfirmation => {
+                        let record = self.pending_write_record(
+                            entity_name,
+                            op_name,
+                            &params,
+                            original_name,
+                        );
+                        self.pending.enqueue_pending(key, record);
+                        return Err(format!(
+                            "connector write queued for confirmation: tool '{original_name}' is \
+                             `effect: once_only` under `once_only: confirm_manually` — approve it \
+                             in the pending-writes panel (intent '{key}'). It will not fire \
+                             unattended."
+                        )
+                        .into());
+                    }
+                    WriteDecision::Deny { reason } => {
+                        return Err(format!(
+                            "connector write denied for tool '{original_name}': {reason}"
+                        )
+                        .into());
+                    }
                 }
-                WritesPolicy::Enabled if effect == ToolEffect::OnceOnly => {
-                    return Err(format!(
-                        "connector write blocked: tool '{original_name}' is `effect: once_only` \
-                         — write authority (writer designation) is not yet configured, pending \
-                         increment 4 of the leases/read-write ruling"
-                    )
-                    .into());
-                }
-                WritesPolicy::Enabled => {}
             }
         }
 
-        // `keyed` writes carry a deterministic idempotency key so a retry storm
-        // collapses to one remote effect (ADR 0024 P4). Minted BEFORE params are
-        // consumed and before the key is injected, so the fingerprint is stable
-        // across retries.
-        let idempotency: Option<(String, String)> = if effect == ToolEffect::Keyed {
-            let key_param = self
-                .sidecar
+        // `keyed` retry bookkeeping (strictly local; the remote is the dedup
+        // authority — ADR 0024 P4).
+        if effect == ToolEffect::Keyed {
+            if let Some(key) = intent_key.as_deref() {
+                let dispatch = {
+                    let mut ledger = self.sent_intents.lock().unwrap();
+                    let c = ledger.entry(key.to_string()).or_insert(0);
+                    *c += 1;
+                    *c
+                };
+                tracing::debug!(
+                    tool = %original_name, key = %key, dispatch,
+                    "keyed connector write: minted idempotency key (retry bookkeeping)"
+                );
+            }
+        }
+
+        // Inject the key into the outgoing call args when the tool declares a
+        // `key_param` (keyed always; once_only only if it opts into remote
+        // dedup).
+        let inject: Option<(String, String)> = intent_key.as_ref().and_then(|key| {
+            self.sidecar
                 .tools
                 .get(original_name)
                 .and_then(|tc| tc.key_param.clone())
-                .expect("keyed effect implies key_param (validated at load)");
-            let id_col = self
-                .sidecar
-                .entities
-                .get(entity_name.as_str())
-                .map(|e| e.id_column_or_default())
-                .unwrap_or_else(|| "id".to_string());
-            let entity_id = match params.get(id_col.as_str()) {
-                Some(Value::String(s)) => s.as_str(),
-                _ => "",
-            };
-            let fingerprint = holon_api::effect_id::FiringKey::from_row(&params);
-            let connector = self.sidecar.entity_prefix.as_deref().unwrap_or("");
-            let key = holon_api::effect_id::deterministic_intent_key(
-                connector,
-                original_name,
-                entity_id,
-                &fingerprint,
-            )
-            .to_string();
-            let dispatch = {
-                let mut ledger = self.sent_intents.lock().unwrap();
-                let c = ledger.entry(key.clone()).or_insert(0);
-                *c += 1;
-                *c
-            };
-            tracing::debug!(
-                tool = %original_name, key = %key, dispatch,
-                "keyed connector write: minted idempotency key (retry bookkeeping)"
-            );
-            Some((key_param, key))
-        } else {
-            None
-        };
+                .map(|param| (param, key.clone()))
+        });
 
         let undo_action = self
             .build_undo_action(original_name, entity_name.as_str(), &params)
@@ -606,48 +768,60 @@ impl OperationProvider for McpOperationProvider {
             .into_iter()
             .map(|(k, v)| (k.to_string(), to_json_value(v)))
             .collect();
-        if let Some((param_name, key)) = idempotency {
+        if let Some((param_name, key)) = inject {
             json_params.insert(param_name, serde_json::Value::String(key));
         }
 
-        let result = peer
+        let call_result: Result<OperationResult> = match peer
             .call_tool(CallToolRequestParam {
                 name: Cow::Owned(original_name.clone()),
                 arguments: Some(json_params),
             })
             .await
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                format!("MCP call_tool '{original_name}' failed: {e}").into()
-            })?;
+        {
+            Err(e) => Err(format!("MCP call_tool '{original_name}' failed: {e}").into()),
+            Ok(result) if result.is_error == Some(true) => {
+                let error_text: String = result
+                    .content
+                    .iter()
+                    .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Err(format!("MCP tool '{original_name}' returned error: {error_text}").into())
+            }
+            Ok(result) => {
+                let response_text: String = result
+                    .content
+                    .iter()
+                    .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let response_value = serde_json::from_str::<serde_json::Value>(&response_text)
+                    .map(Value::from)
+                    .unwrap_or_else(|_| Value::String(response_text));
+                Ok(OperationResult {
+                    changes: vec![],
+                    undo: undo_action,
+                    response: Some(response_value),
+                    follow_ups: vec![],
+                })
+            }
+        };
 
-        if result.is_error == Some(true) {
-            let error_text: String = result
-                .content
-                .iter()
-                .filter_map(|c| c.as_text().map(|t| t.text.clone()))
-                .collect::<Vec<_>>()
-                .join("\n");
-            return Err(format!("MCP tool '{original_name}' returned error: {error_text}").into());
+        // Record the once_only outcome AFTER the call (amendment A): a positive
+        // ack -> `Sent`; ANY failure -> `OutcomeUnknown` (disclosed, never
+        // auto-retried).
+        if effect == ToolEffect::OnceOnly {
+            let key = intent_key
+                .as_deref()
+                .expect("once_only mints an intent key");
+            match &call_result {
+                Ok(_) => self.pending.mark_sent(key),
+                Err(e) => self.pending.mark_outcome_unknown(key, e.to_string()),
+            }
         }
 
-        // Extract text content from MCP response
-        let response_text: String = result
-            .content
-            .iter()
-            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let response_value = serde_json::from_str::<serde_json::Value>(&response_text)
-            .map(Value::from)
-            .unwrap_or_else(|_| Value::String(response_text));
-
-        Ok(OperationResult {
-            changes: vec![],
-            undo: undo_action,
-            response: Some(response_value),
-            follow_ups: vec![],
-        })
+        call_result
     }
 }
 
