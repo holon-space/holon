@@ -23,6 +23,7 @@ use std::sync::Mutex;
 
 use holon_api::EntityName;
 use holon_core::storage::types::StorageEntity;
+use tokio::sync::broadcast;
 
 use crate::mcp_sidecar::OnceOnlyAuthorization;
 use crate::mcp_sidecar::ToolEffect;
@@ -133,32 +134,95 @@ pub struct PendingWriteView {
     pub dispatch_count: u32,
 }
 
+/// What changed about a tracked intent — carried on the store's broadcast so a
+/// frontend can surface a disclosure toast and refresh the pending-writes
+/// panel (increment 4c). Mirrors `holon::sync::ShareDegraded` on the degraded
+/// bus.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingWriteEventKind {
+    /// A once_only write was queued and needs human confirmation.
+    AwaitingConfirmation,
+    /// A dispatched once_only write's outcome is unknown (disclosed; the human
+    /// must verify on the remote).
+    OutcomeUnknown,
+}
+
+/// One broadcast notice from the pending-write store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingWriteEvent {
+    pub intent_key: String,
+    pub connector: String,
+    pub tool: String,
+    pub display: String,
+    pub kind: PendingWriteEventKind,
+    pub detail: String,
+}
+
 /// The at-most-once state machine for once_only writes. All transitions mutate
 /// under one mutex — the store is the correctness surface, so the compare-and-
 /// take methods ([`Self::confirm`], [`Self::take_for_dispatch`],
 /// [`Self::begin_dispatch`]) return a single-winner bool. In-memory per
 /// process (proposal Q3: the ledger is retry bookkeeping, not a cross-replica
 /// dedup mechanism; durability is out of scope for iteration-1 and disclosed).
-#[derive(Default)]
+///
+/// A tokio broadcast bus lets the frontend react to enqueue / outcome-unknown
+/// transitions (increment 4c), mirroring the degraded bus. The panel reads the
+/// full state via [`Self::list`]; the bus only nudges the UI + carries toast
+/// text.
 pub struct PendingWriteStore {
     entries: Mutex<HashMap<String, PendingWrite>>,
+    bus: broadcast::Sender<PendingWriteEvent>,
+}
+
+impl Default for PendingWriteStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PendingWriteStore {
     pub fn new() -> Self {
-        Self::default()
+        let (bus, _) = broadcast::channel(256);
+        Self {
+            entries: Mutex::new(HashMap::new()),
+            bus,
+        }
+    }
+
+    /// Subscribe to enqueue / outcome-unknown notices (frontend bridge).
+    pub fn subscribe(&self) -> broadcast::Receiver<PendingWriteEvent> {
+        self.bus.subscribe()
     }
 
     /// Enqueue a once_only intent awaiting confirmation. Idempotent: a repeated
     /// enqueue of the same intent key (e.g. a reactive `triggered_by` re-fire)
-    /// coalesces to the single existing entry — no duplicate confirmations.
+    /// coalesces to the single existing entry — no duplicate confirmations, and
+    /// no duplicate broadcast (only a genuinely new entry emits).
     pub fn enqueue_pending(&self, key: &str, mut write: PendingWrite) {
-        let mut entries = self.entries.lock().unwrap();
-        entries.entry(key.to_string()).or_insert_with(|| {
-            write.state = PendingState::AwaitingConfirmation;
-            write.dispatch_count = 0;
-            write
-        });
+        let event = {
+            let mut entries = self.entries.lock().unwrap();
+            if entries.contains_key(key) {
+                None
+            } else {
+                write.state = PendingState::AwaitingConfirmation;
+                write.dispatch_count = 0;
+                let event = PendingWriteEvent {
+                    intent_key: key.to_string(),
+                    connector: write.connector.clone(),
+                    tool: write.tool.clone(),
+                    display: write.display.clone(),
+                    kind: PendingWriteEventKind::AwaitingConfirmation,
+                    detail: format!("{} awaiting confirmation", write.display),
+                };
+                entries.insert(key.to_string(), write);
+                Some(event)
+            }
+        };
+        // Emit outside the lock. A send error just means no subscribers yet
+        // (headless/tests) — the panel still reads state via `list()`.
+        if let Some(event) = event {
+            let _ = self.bus.send(event);
+        }
     }
 
     /// Compare-and-take approval (single-winner). `AwaitingConfirmation ->
@@ -215,11 +279,32 @@ impl PendingWriteStore {
     }
 
     /// Record a dispatch whose outcome is unknown (post-dispatch failure).
-    /// Terminal and disclosed; never auto-retried.
+    /// Terminal and disclosed; never auto-retried. Broadcasts so the frontend
+    /// surfaces it (fail-loud, not a silent terminal state).
     pub fn mark_outcome_unknown(&self, key: &str, detail: String) {
-        let mut entries = self.entries.lock().unwrap();
-        if let Some(w) = entries.get_mut(key) {
-            w.state = PendingState::OutcomeUnknown { detail };
+        let event = {
+            let mut entries = self.entries.lock().unwrap();
+            match entries.get_mut(key) {
+                Some(w) => {
+                    w.state = PendingState::OutcomeUnknown {
+                        detail: detail.clone(),
+                    };
+                    Some(PendingWriteEvent {
+                        intent_key: key.to_string(),
+                        connector: w.connector.clone(),
+                        tool: w.tool.clone(),
+                        display: w.display.clone(),
+                        kind: PendingWriteEventKind::OutcomeUnknown,
+                        detail,
+                    })
+                }
+                None => None,
+            }
+        };
+        if let Some(event) = event {
+            // Send error = no subscribers (headless/tests); the panel still
+            // reads this via `list()`. Not an error to surface.
+            let _ = self.bus.send(event);
         }
     }
 

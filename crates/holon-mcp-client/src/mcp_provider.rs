@@ -438,6 +438,15 @@ impl McpOperationProvider {
         self.pending.clone()
     }
 
+    /// Replace this provider's pending-write store with a shared one (increment
+    /// 4c). The DI composition root creates ONE store and installs it on every
+    /// MCP provider so the frontend's approve panel and every connector's
+    /// chokepoint coordinate through the same at-most-once state machine. Set
+    /// before any once_only dispatch (at construction time in `holon-app`).
+    pub fn set_pending_store(&mut self, store: SharedPendingWrites) {
+        self.pending = store;
+    }
+
     /// Capture old field values from cache for mirror undo.
     async fn capture_old_state(
         &self,

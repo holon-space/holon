@@ -160,6 +160,15 @@ impl McpIntegration {
         })
     }
 
+    /// Install the shared pending-write store on this integration's operation
+    /// provider (leases/read-write ruling, increment 4c). The DI composition
+    /// root creates ONE store and calls this on every integration so all
+    /// once_only chokepoints and the frontend approve panel coordinate through
+    /// the same at-most-once state machine.
+    pub fn set_pending_store(&mut self, store: crate::write_authorization::SharedPendingWrites) {
+        self.operation_provider.set_pending_store(store);
+    }
+
     /// Register all entity types from the sidecar config into the TypeRegistry.
     /// Called by frontends after building the integration so GQL graph includes
     /// MCP entities.

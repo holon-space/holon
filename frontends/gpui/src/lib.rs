@@ -369,8 +369,8 @@ impl AppModel {
 
         for block_id in &needed {
             if !self.root_live_blocks.contains_key(block_id) {
-                // ALLOW(entity_uri_from_raw): block_id string from LiveBlock nodes in root
-                // ViewModel tree
+                // block_id string from LiveBlock nodes in the root ViewModel tree
+                // ALLOW(entity_uri_from_raw): block_id from LiveBlock nodes (boundary)
                 let uri = holon_api::EntityUri::from_raw(block_id);
                 let services: Arc<dyn BuilderServices> = self.engine.clone();
                 let live_block = services.watch_live(&uri, services.clone());
@@ -1100,6 +1100,9 @@ impl Render for HolonApp {
             };
             let async_cx = cx.to_async();
             let wh = window.window_handle();
+            let pending_store = cx
+                .try_global::<share_ui::PendingWritesGlobal>()
+                .map(|g| g.0.clone());
             let share_state_read = self.share_ui.read(cx);
             let overlays = share_ui::render_overlays(
                 share_state_read,
@@ -1109,6 +1112,7 @@ impl Render for HolonApp {
                 self.rt_handle.clone(),
                 wh,
                 async_cx,
+                pending_store,
                 overlay_theme,
             );
             for ov in overlays {
@@ -1894,6 +1898,22 @@ fn launch_holon_window_impl(
         ));
     }
 
+    // Wire the pending connector-write bus bridge (leases/read-write ruling,
+    // increment 4c). The shared store is installed as a GPUI global in `main.rs`
+    // from the DI-resolved handle; when MCP integrations are absent the global
+    // is missing and no bridge is spawned (no once_only writes are possible).
+    if let Some(pending) = cx.try_global::<share_ui::PendingWritesGlobal>().cloned() {
+        let async_cx = cx.to_async();
+        let pending_ui_entity = app_model.read(cx).share_ui.clone();
+        share_ui::spawn_pending_writes_bridge(
+            pending.0.clone(),
+            rt_handle.clone(),
+            pending_ui_entity,
+            window_handle.into(),
+            &async_cx,
+        );
+    }
+
     // Wire the share-subtree degraded-bus bridge + ShareTrigger global. If
     // `share_backend` is `None` (iroh-sync disabled or PBT) no bridge is
     // spawned and ShareTrigger is not installed — the share context menu
@@ -2300,7 +2320,7 @@ fn scroll_reactive_shell_tree_to_top(
         let cache = panel_cache.read().unwrap();
         cache
             .values()
-            .filter_map(|any| any.clone().downcast::<ReactiveShell>().ok()) // ALLOW(ok): non-ReactiveShell entries are skipped, not errors
+            .filter_map(|any| any.clone().downcast::<ReactiveShell>().ok()) // ALLOW(filter_map_ok): non-ReactiveShell entries are skipped, not errors — ALLOW(ok)
             .collect()
     };
     for list_shell in list_shells {
@@ -2348,7 +2368,8 @@ pub fn scroll_list_by(
             let cache = panel_cache.read().unwrap();
             cache
                 .values()
-                .filter_map(|any| any.clone().downcast::<ReactiveShell>().ok()) // ALLOW(ok): non-ReactiveShell entries are skipped, not errors
+                .filter_map(|any| any.clone().downcast::<ReactiveShell>().ok()) // ALLOW(filter_map_ok): non-ReactiveShell entries are skipped, not errors —
+                // ALLOW(ok)
                 .collect()
         };
         for list_shell in list_shells {

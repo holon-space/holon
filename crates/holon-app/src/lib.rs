@@ -43,6 +43,16 @@ pub use boot_error::BootComponent;
 pub use boot_error::BootError;
 pub use boot_error::BootStage;
 pub use headless_builder_services::HeadlessBuilderServices;
+// Re-export the connector pending-write types (leases/read-write ruling,
+// increment 4c) so the GPUI frontend — which depends on holon-app, not on the
+// holon-mcp-client adapter directly — can resolve the shared store from DI and
+// render/approve the pending-writes panel.
+pub use holon_mcp_client::PendingState;
+pub use holon_mcp_client::PendingWriteEvent;
+pub use holon_mcp_client::PendingWriteEventKind;
+pub use holon_mcp_client::PendingWriteStore;
+pub use holon_mcp_client::PendingWriteView;
+pub use holon_mcp_client::SharedPendingWrites;
 pub use mcp_integrations::McpIntegrationRegistry;
 pub use mcp_integrations::McpIntegrationsModule;
 pub use no_turso::from_block_query_source;

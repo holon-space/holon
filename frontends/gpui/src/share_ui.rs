@@ -40,6 +40,11 @@ use holon::sync::ShareDegraded;
 use holon::sync::ShareDegradedReason;
 use holon_api::EntityName;
 use holon_api::Value;
+use holon_app::PendingState;
+use holon_app::PendingWriteEvent;
+use holon_app::PendingWriteEventKind;
+use holon_app::PendingWriteStore;
+use holon_app::PendingWriteView;
 use holon_frontend::FrontendSession;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive::ReactiveEngine;
@@ -132,6 +137,15 @@ pub enum DegradedKind {
     /// restart, and the process must stay alive — never SIGABRT on a failed
     /// settings write.
     PreferenceSaveFailed,
+    /// Yellow — a `once_only` connector write was queued and needs human
+    /// confirmation (leases/read-write ruling, increment 4). Disclosed on
+    /// enqueue; the write never fires unattended. Approve it in the
+    /// pending-writes panel.
+    ConnectorWritePending,
+    /// Red — a dispatched `once_only` connector write's outcome is unknown
+    /// (post-dispatch failure / lost ack). Fail-loud: it is NOT auto-retried;
+    /// the human must verify on the remote before resending.
+    ConnectorWriteOutcomeUnknown,
     /// A plain info-style toast (used for "ticket copied").
     Info,
 }
@@ -369,6 +383,157 @@ pub fn spawn_degraded_bus_bridge(
                     });
                 });
             }
+        })
+        .detach();
+}
+
+// ─── Pending connector-write approval (leases/read-write ruling, inc 4c) ────
+
+/// GPUI global holding the shared [`PendingWriteStore`] so the render pass and
+/// the approve dispatcher can reach it without threading it through every
+/// window-launch signature — mirrors [`DegradedToastSink`]/[`ShareTrigger`].
+/// Installed in `main.rs` from the DI-resolved handle when MCP integrations are
+/// configured.
+#[derive(Clone)]
+pub struct PendingWritesGlobal(pub Arc<PendingWriteStore>);
+
+impl gpui::Global for PendingWritesGlobal {}
+
+/// Spawn the pending-write bus → GPUI bridge (mirror of
+/// [`spawn_degraded_bus_bridge`]). Each [`PendingWriteEvent`] pushes a
+/// disclosure toast and triggers a re-render; the panel itself reads live state
+/// via [`PendingWriteStore::list`], so the event only needs to nudge the UI.
+pub fn spawn_pending_writes_bridge(
+    store: Arc<PendingWriteStore>,
+    rt_handle: tokio::runtime::Handle,
+    share_state: Entity<ShareUiState>,
+    window_handle: AnyWindowHandle,
+    async_cx: &AsyncApp,
+) {
+    let (tx, mut rx) = futures::channel::mpsc::unbounded::<PendingWriteEvent>();
+
+    rt_handle.spawn(async move {
+        let mut bus_rx = store.subscribe();
+        loop {
+            match bus_rx.recv().await {
+                Ok(event) => {
+                    if tx.unbounded_send(event).is_err() {
+                        return;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("[pending-writes] bus lagged by {n} events");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::info!("[pending-writes] bus closed; bridge exiting");
+                    return;
+                }
+            }
+        }
+    });
+
+    async_cx
+        .spawn(async move |cx| {
+            use futures::StreamExt;
+            while let Some(event) = rx.next().await {
+                let toast = pending_event_toast(&event);
+                let _ = cx.update_window(window_handle, |_, _window, cx| {
+                    share_state.update(cx, |s, cx| {
+                        s.push_toast(toast.clone());
+                        cx.emit(NotifyShareUi);
+                        cx.notify();
+                    });
+                });
+            }
+        })
+        .detach();
+}
+
+/// Build the disclosure toast for a pending-write event.
+fn pending_event_toast(event: &PendingWriteEvent) -> DegradedToast {
+    match event.kind {
+        PendingWriteEventKind::AwaitingConfirmation => DegradedToast {
+            kind: DegradedKind::ConnectorWritePending,
+            shared_tree_id: event.connector.clone(),
+            detail: format!(
+                "{} ({}) — approve in the pending panel",
+                event.display, event.tool
+            ),
+        },
+        PendingWriteEventKind::OutcomeUnknown => DegradedToast {
+            kind: DegradedKind::ConnectorWriteOutcomeUnknown,
+            shared_tree_id: event.connector.clone(),
+            detail: format!(
+                "{} ({}) — {}; verify on the remote",
+                event.display, event.tool, event.detail
+            ),
+        },
+    }
+}
+
+/// Dispatch approval of a queued `once_only` connector write (increment 4c).
+/// Compare-and-take on the shared store, then re-dispatch through
+/// `session.execute_operation` — the SAME chokepoint — with the stored call.
+/// Only the single winning approval re-dispatches (the store's `confirm` is a
+/// one-shot); a failed re-dispatch surfaces a loud toast.
+pub fn dispatch_approve(
+    session: Arc<FrontendSession>,
+    store: Arc<PendingWriteStore>,
+    rt_handle: tokio::runtime::Handle,
+    share_state: Entity<ShareUiState>,
+    window_handle: AnyWindowHandle,
+    async_cx: &AsyncApp,
+    intent_key: String,
+) {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
+    rt_handle.spawn(async move {
+        let outcome = if !store.confirm(&intent_key) {
+            Err(format!(
+                "no once_only write awaiting confirmation for intent '{intent_key}' (already \
+                 approved, dispatched, or unknown-outcome)"
+            ))
+        } else {
+            match store.stored_call(&intent_key) {
+                Some((entity_name, op_name, params)) => {
+                    // StorageEntity keys are `Arc<str>`; the session API takes
+                    // `HashMap<String, Value>`. The key/value strings survive the
+                    // round-trip, so the chokepoint re-mints the SAME intent key.
+                    let params: std::collections::HashMap<String, Value> = params
+                        .into_iter()
+                        .map(|(k, v)| (k.to_string(), v))
+                        .collect();
+                    session
+                        .execute_operation(&entity_name, &op_name, params)
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| format!("{e:#}"))
+                }
+                None => Err(format!(
+                    "confirmed intent '{intent_key}' has no stored call — cannot re-dispatch"
+                )),
+            }
+        };
+        let _ = tx.send(outcome);
+    });
+
+    async_cx
+        .spawn(async move |cx| {
+            let outcome = rx.await;
+            let _ = cx.update_window(window_handle, |_, _window, cx| {
+                share_state.update(cx, |s, cx| {
+                    if let Ok(Err(e)) = outcome {
+                        s.push_toast(DegradedToast {
+                            kind: DegradedKind::ConnectorWriteOutcomeUnknown,
+                            shared_tree_id: "connector-write".into(),
+                            detail: format!("approve failed: {e}"),
+                        });
+                    }
+                    // Success is silent here; the panel re-reads store state
+                    // (the row leaves AwaitingConfirmation) and disappears.
+                    cx.emit(NotifyShareUi);
+                    cx.notify();
+                });
+            });
         })
         .detach();
 }
@@ -632,6 +797,7 @@ pub struct OverlayTheme {
 
 /// Render every overlay (share/accept/quarantine modals + toast stack) for
 /// the current state. Caller stacks these on top of the main content.
+#[allow(clippy::too_many_arguments)]
 pub fn render_overlays(
     state: &ShareUiState,
     share_state: Entity<ShareUiState>,
@@ -640,9 +806,42 @@ pub fn render_overlays(
     rt_handle: tokio::runtime::Handle,
     window_handle: AnyWindowHandle,
     async_cx: AsyncApp,
+    pending_store: Option<Arc<PendingWriteStore>>,
     theme: OverlayTheme,
 ) -> Vec<AnyElement> {
     let mut overlays: Vec<AnyElement> = Vec::new();
+
+    // Pending connector-write approval panel (leases/read-write ruling, inc 4c).
+    // Built first, from clones, so the modal branches below can still consume
+    // `session`/`async_cx`/`share_state` by value. Rendered last (pushed at the
+    // end) so it sits above content. Shows writes awaiting confirmation and
+    // disclosed outcome-unknown entries; both must be visible.
+    let pending_panel: Option<AnyElement> = pending_store.as_ref().and_then(|store| {
+        let rows: Vec<PendingWriteView> = store
+            .list()
+            .into_iter()
+            .filter(|r| {
+                matches!(
+                    r.state,
+                    PendingState::AwaitingConfirmation | PendingState::OutcomeUnknown { .. }
+                )
+            })
+            .collect();
+        if rows.is_empty() {
+            None
+        } else {
+            Some(render_pending_writes_panel(
+                rows,
+                session.clone(),
+                store.clone(),
+                rt_handle.clone(),
+                window_handle,
+                async_cx.clone(),
+                share_state.clone(),
+                theme,
+            ))
+        }
+    });
 
     if let Some(ticket) = &state.share_modal {
         overlays.push(render_share_modal(ticket, share_state.clone(), theme));
@@ -677,7 +876,120 @@ pub fn render_overlays(
         overlays.push(render_toast_stack(&state.toasts, share_state, theme));
     }
 
+    if let Some(panel) = pending_panel {
+        overlays.push(panel);
+    }
+
     overlays
+}
+
+/// Render the pending connector-write approval panel (leases/read-write ruling,
+/// increment 4c). One card per `AwaitingConfirmation` intent (with an Approve
+/// button that re-dispatches through the chokepoint) and per `OutcomeUnknown`
+/// intent (disclosed, no auto-retry — the human verifies on the remote).
+#[allow(clippy::too_many_arguments)]
+fn render_pending_writes_panel(
+    rows: Vec<PendingWriteView>,
+    session: Arc<FrontendSession>,
+    store: Arc<PendingWriteStore>,
+    rt_handle: tokio::runtime::Handle,
+    window_handle: AnyWindowHandle,
+    async_cx: AsyncApp,
+    share_state: Entity<ShareUiState>,
+    theme: OverlayTheme,
+) -> AnyElement {
+    let mut panel = div()
+        .id("pending-writes-panel")
+        .absolute()
+        .top(px(16.0))
+        .right(px(16.0))
+        .flex()
+        .flex_col()
+        .gap_2()
+        .min_w(px(300.0))
+        .max_w(px(420.0));
+
+    panel = panel.child(
+        div()
+            .text_size(px(12.0))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(theme.fg)
+            .child(format!("Connector writes ({})", rows.len())),
+    );
+
+    for row in rows {
+        let awaiting = matches!(row.state, PendingState::AwaitingConfirmation);
+        let (bar, title) = if awaiting {
+            (gpui::rgba(0xfbbf24ff), "Awaiting approval")
+        } else {
+            (gpui::rgba(0xef4444ff), "Outcome unknown — verify on remote")
+        };
+        let detail = match &row.state {
+            PendingState::OutcomeUnknown { detail } => {
+                format!("{} · {} · {}", row.display, row.tool, detail)
+            }
+            _ => format!("{} · {} · {}", row.display, row.tool, row.connector),
+        };
+
+        let mut card = div()
+            .id(SharedString::from(format!("pending-{}", row.intent_key)))
+            .px_3()
+            .py_2()
+            .rounded(px(6.0))
+            .bg(theme.bg)
+            .border_l_4()
+            .border_1()
+            .border_color(bar)
+            .text_color(theme.fg)
+            .text_size(px(12.0))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(bar)
+                    .child(title),
+            )
+            .child(div().text_color(theme.muted_fg).child(detail));
+
+        if awaiting {
+            let session = session.clone();
+            let store = store.clone();
+            let rt_handle = rt_handle.clone();
+            let share_state = share_state.clone();
+            let async_cx = async_cx.clone();
+            let key = row.intent_key.clone();
+            card = card.child(
+                div()
+                    .id(SharedString::from(format!("approve-{}", row.intent_key)))
+                    .mt_1()
+                    .px_3()
+                    .py_1()
+                    .rounded(px(6.0))
+                    .bg(gpui::rgba(0x22c55eff))
+                    .text_color(gpui::rgba(0x000000cc))
+                    .cursor_pointer()
+                    .w(px(96.0))
+                    .child("Approve")
+                    .on_mouse_down(MouseButton::Left, move |_, _, _| {
+                        dispatch_approve(
+                            session.clone(),
+                            store.clone(),
+                            rt_handle.clone(),
+                            share_state.clone(),
+                            window_handle,
+                            &async_cx,
+                            key.clone(),
+                        );
+                    }),
+            );
+        }
+
+        panel = panel.child(card);
+    }
+
+    panel.into_any_element()
 }
 
 fn overlay_backdrop(id: &str) -> Stateful<gpui::Div> {
@@ -1140,6 +1452,16 @@ fn render_toast_stack(
                 gpui::rgba(0xef4444ff),
                 crate::icon("⛔"),
                 "Preference not saved",
+            ),
+            DegradedKind::ConnectorWritePending => (
+                gpui::rgba(0xfbbf24ff),
+                "⚠",
+                "Connector write needs approval",
+            ),
+            DegradedKind::ConnectorWriteOutcomeUnknown => (
+                gpui::rgba(0xef4444ff),
+                crate::icon("⛔"),
+                "Connector write outcome unknown",
             ),
             DegradedKind::Info => (gpui::rgba(0x60a5faff), "i", "Info"),
         };
