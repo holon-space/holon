@@ -58,6 +58,13 @@ pub mod reseed_observer;
 #[cfg(any(test, feature = "pbt"))]
 pub mod harness;
 
+/// Per-case structured telemetry for the ONE composed keystone (weights-spike
+/// step 0): env-gated (`HOLON_PBT_TELEMETRY=1`) machine-parseable per-case
+/// lines measuring transition-kind/bigram diversity, wiring, invariant
+/// engagement, and wall time. Off by default (byte-identical runs).
+#[cfg(any(test, feature = "pbt"))]
+pub mod telemetry;
+
 #[cfg(test)]
 pub mod fixtures;
 
