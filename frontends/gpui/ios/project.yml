@@ -33,9 +33,12 @@ targets:
       - path: gpui_ios.h
         type: file
         buildPhase: headers
+      # NO type:folder override — xcodegen must recognize .xcassets as an
+      # asset catalog so Xcode COMPILES it (actool → Assets.car + CFBundleIcons).
+      # type:folder caused a plain CpResource copy: icons never entered the
+      # bundle and App Store validation rejected the upload (mobile-v0.0.9,
+      # altool 90022 'Missing required icon file').
       - path: Assets.xcassets
-        type: folder
-        buildPhase: resources
       - path: LaunchScreen.storyboard
         type: file
         buildPhase: resources
