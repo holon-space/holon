@@ -168,7 +168,16 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
     // typing into an empty block creates content. Rendered as an
     // absolutely-positioned BEHIND the real Input so it doesn't intercept
     // clicks or typing (GPUI hit-tests children in reverse paint order).
-    let element = if !has_content {
+    //
+    // Visibility keys off the LIVE editor text (`displayed_text`), NOT the
+    // committed `content` prop: the first keystroke into an empty block updates
+    // the `InputState` immediately but does not commit to the projection until
+    // later, so `has_content` (derived from `content`) would still be false and
+    // the grey "Type here" hint would draw UNDER the freshly-typed glyph until
+    // commit (dogfood 2026-07-19 PERCEPTION bug). `displayed_text` reflects the
+    // keystroke this same frame, so the hint disappears the instant text lands.
+    let show_placeholder = displayed_text.is_empty();
+    let element = if show_placeholder {
         div()
             .relative()
             .child(
