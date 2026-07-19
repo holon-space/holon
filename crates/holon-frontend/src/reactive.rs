@@ -3163,9 +3163,9 @@ fn maybe_mirror_navigation_focus(ui_state: &UiState, intent: &crate::operations:
                 ui_state.bump_main_nav();
             }
         }
-        // ALLOW(direct_focus_mutation): mirror of navigation.go_home into UiState for value-fn
-        // graph.
         Ok(NavigationOp::GoHome) => {
+            // ALLOW(direct_focus_mutation): mirror of navigation.go_home into UiState for
+            // value-fn graph.
             ui_state.set_focus(None);
             ui_state.bump_main_nav();
         }

@@ -1485,6 +1485,39 @@ impl Render for EditorView {
             .capture_action({
                 let services = self.services.clone();
                 let row_id = self.row_id.clone();
+                let input = self.input.clone();
+                let ctrl = self.controller.clone();
+                move |_: &crate::TurnIntoPage, _window, cx: &mut App| {
+                    // Creation slot: no real block to convert — swallow (see
+                    // Backspace/indent).
+                    if RowOrigin::from_id(&row_id).is_creation_placeholder() {
+                        cx.stop_propagation();
+                        return;
+                    }
+                    // Same op the slash-menu "Turn into page" entry runs
+                    // (`execute_operation` with the `convert_block_to_page`
+                    // descriptor). The descriptor maps `id -> target`; here we
+                    // supply `target` directly (the focused block id). Commit
+                    // any pending edit first (structural commit point) so the
+                    // planner reads up-to-date content.
+                    let mut params = std::collections::HashMap::new();
+                    params.insert(
+                        "target".to_string(),
+                        holon_api::Value::String(row_id.clone()),
+                    );
+                    let intent = holon_frontend::operations::OperationIntent::new(
+                        holon_api::EntityName::new("block"),
+                        "convert_block_to_page".to_string(),
+                        params,
+                    );
+                    let live_text = input.read(cx).value().to_string();
+                    dispatch_structural_as_commit_point(&ctrl, &services, &live_text, intent);
+                    cx.stop_propagation();
+                }
+            })
+            .capture_action({
+                let services = self.services.clone();
+                let row_id = self.row_id.clone();
                 move |_: &Paste, _window, cx: &mut App| {
                     if let Some(clipboard) = cx.read_from_clipboard() {
                         for entry in clipboard.entries() {

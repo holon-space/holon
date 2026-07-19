@@ -609,6 +609,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn convert_block_to_page_surfaces_as_turn_into_page() {
+        // Mirrors the engine-synthetic `convert_block_to_page` descriptor:
+        // required `target`, mapped from the focused block's `id`. Once the
+        // descriptor is in a block's resolved profile operations (DI wiring in
+        // `create_profile_resolver`), the slash menu must surface it as the
+        // "Turn into page" command — resolving `target` from the context `id`.
+        let convert = OperationWiring {
+            modified_param: String::new(),
+            descriptor: OperationDescriptor {
+                entity_name: EntityName::new("block"),
+                entity_short_name: "block".into(),
+                name: "convert_block_to_page".into(),
+                display_name: "Turn into page".into(),
+                required_params: vec![param("target", TypeHint::String)],
+                param_mappings: vec![holon_api::render_types::ParamMapping {
+                    from: "id".into(),
+                    provides: vec!["target".into()],
+                    defaults: Default::default(),
+                }],
+                ..Default::default()
+            },
+        };
+        let items = CommandProvider::build_command_items(&[convert], &context(), "");
+        assert!(
+            items
+                .iter()
+                .any(|i| i.id == "convert_block_to_page" && i.label == "Turn into page"),
+            "convert_block_to_page must surface as the 'Turn into page' command"
+        );
+    }
+
     /// A resolver stub returning canned target blocks by id — stands in for the
     /// real projection read (`ServicesBlockResolver`).
     struct FakeResolver(HashMap<String, TargetBlock>);

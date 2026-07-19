@@ -190,6 +190,14 @@ pub(crate) fn assert_icon_renderable_on_android(glyph: &'static str, source: &st
 // and route both to the engine-level `FrontendSession::undo`/`redo`.
 actions!(holon_gpui, [TriggerUndo, TriggerRedo, OpenSearch]);
 
+// "Turn into page" (engine-synthetic `convert_block_to_page`, Option B) as an
+// editor keybinding, sitting beside indent/outdent (`IndentInline`/
+// `OutdentInline`) which are likewise editor-context actions intercepted by
+// `EditorView`'s capture handlers. Bound in the "Input" context so it fires
+// only while a block editor is focused; `EditorView::render` supplies the
+// per-row `capture_action` that dispatches the op for the focused block.
+actions!(holon_gpui, [TurnIntoPage]);
+
 // ── AppModel: Entity-based reactive state ──────────────────────────────────
 
 /// Reactive model backed by `ReactiveEngine`.
@@ -1544,6 +1552,15 @@ fn launch_holon_window_impl(
         KeyBinding::new("ctrl-y", TriggerRedo, None),
         KeyBinding::new("ctrl-k", OpenSearch, None),
     ]);
+
+    // "Turn into page" — bound in the editor's "Input" context (same context
+    // gpui_component binds Tab/Shift-Tab -> IndentInline/OutdentInline in), so
+    // it only fires while a block editor is focused. `EditorView`'s per-row
+    // `capture_action(&TurnIntoPage)` handles it for the focused block.
+    #[cfg(target_os = "macos")]
+    cx.bind_keys([KeyBinding::new("cmd-shift-p", TurnIntoPage, Some("Input"))]);
+    #[cfg(not(target_os = "macos"))]
+    cx.bind_keys([KeyBinding::new("ctrl-shift-p", TurnIntoPage, Some("Input"))]);
 
     #[cfg(debug_assertions)]
     inspector::init(cx);
