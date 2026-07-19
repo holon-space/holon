@@ -10,6 +10,25 @@ rustflags = [
   "threads=8",
 ]
 
+# iOS cdylib link fix (TestFlight release build).
+# turso_sdk_kit is built as a cdylib on aarch64-apple-ios and rustc links it with
+# `-nodefaultlibs`, which suppresses clang's automatic link of the compiler runtime.
+# The legacy zstd_v01..v07 decompressors (pulled in transitively by tantivy's FTS via
+# zstd's default `legacy` feature) have large stack frames and reference the Darwin
+# stack-probe builtin `___chkstk_darwin`, which lives in libclang_rt.ios.a. Re-add the
+# runtime lib so the cdylib link resolves it.
+# NOTE: the `clang/21` path segment is Xcode-version-specific (Xcode 26 -> clang 21);
+# bump it after an Xcode major upgrade. `clang -print-runtime-dir` prints the current
+# dir. The robust long-term fix is to drop zstd's legacy feature in the turso fork
+# (see agent report) — that removes the symbol entirely and needs no linker flags.
+[target.aarch64-apple-ios]
+rustflags = [
+  "-Z",
+  "threads=8",
+  "-Clink-arg=-L/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/lib/darwin",
+  "-Clink-arg=-lclang_rt.ios",
+]
+
 # Android NDK configuration for cross-compilation
 [target.aarch64-linux-android]
 linker = "aarch64-linux-android33-clang"
