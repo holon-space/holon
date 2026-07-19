@@ -165,8 +165,13 @@ pub fn journals_auto_create_blocks() -> Vec<holon_api::block::Block> {
 
     // Single-block holon_rule (sugar form): `when:` = clock-day inhibitor arc
     // (`not block_exists("Journals/{today}")`), `emit:` = ratcheted create of the
-    // `{today}` block under the journals page. Byte-identical to the ratified
-    // `assets/default/Journals.org` rule so the disk and programmatic seeds agree.
+    // `{today}` block as a PAGE-file child of the journals page (`place:
+    // page(journals)`, LogSeq-parity daily-note ruling 2026-07-19): the day block
+    // is `Page`-tagged, becomes a first-class `[[{today}]]` link target, and
+    // materializes into its own `Journals/{today}.org`; the day's bullets nest
+    // UNDER it (no longer flat siblings of the journals shell). Byte-identical to
+    // the ratified `assets/default/Journals.org` rule so the disk and programmatic
+    // seeds agree.
     let rule = Block::new_source(
         uri(JOURNALS_ACTION_ID),
         auto_create,
@@ -175,7 +180,7 @@ pub fn journals_auto_create_blocks() -> Vec<holon_api::block::Block> {
         // other seed block), so the reference — which models this exact content —
         // must match `block_raw`/sql without one.
         "name: daily_journal\nwhen: 'not block_exists(\"Journals/{today}\")'\nemit:\n  place: \
-         journals\n  name: \"{today}\"",
+         page(journals)\n  name: \"{today}\"",
     );
 
     vec![auto, rule]
@@ -964,7 +969,10 @@ mod journals_seed_tests {
         ));
         // The ratified sugar form: `when:` guard + `emit:` place/name.
         assert!(rule.content.contains("when:") && rule.content.contains("emit:"));
-        assert!(rule.content.contains("place: journals"));
+        // LogSeq-parity daily-note ruling (2026-07-19): the day block is a
+        // PAGE-file child of the journals shell (`place: page(journals)`), so it is
+        // `Page`-tagged, a `[[{today}]]` link target, and owns `Journals/{today}.org`.
+        assert!(rule.content.contains("place: page(journals)"));
     }
 
     #[test]

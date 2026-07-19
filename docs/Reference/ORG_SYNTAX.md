@@ -48,7 +48,7 @@ to a Rhai `block.create(...)` action). The default journal-auto-create rule:
 name: daily_journal
 when: 'not block_exists("Journals/{today}")'
 emit:
-  place: journals
+  place: page(journals)
   name: "{today}"
 #+END_SRC
 ```
@@ -59,10 +59,13 @@ emit:
   (`{today}`-interpolated leaf content). `place: <root>` places an **inline child**
   of `block:<root>` (`journals` → `block:journals`); `place: page(<root>)` places a
   `Page`-tagged child that materializes into its own `<name-chain>.org` file. The
-  journal rule's ratified target is `page(journals)` (own `Journals/{today}.org`),
-  but it currently ships as `place: journals` (inline) — the page-file flip is
-  deferred to Fork B B1 (companion de-inline; a rule-created child page is otherwise
-  inlined into the `Journals.org` companion and loses its `Page` tag on writeback).
+  journal rule ships `place: page(journals)` (LogSeq-parity daily-note ruling
+  2026-07-19): each day is minted as a `Page`-tagged child of the journals shell
+  that owns its own `Journals/{today}.org` file, so the day's bullets nest UNDER
+  the date page (not as flat siblings of the shell) and the date is a first-class
+  `[[{today}]]` link target. Companion de-inline (a rule-created child page would
+  otherwise stay inlined in the `Journals.org` companion) is handled by the Fork B
+  B1 writeback sweep.
 - The block is **program-marked** (`is_program`) so it renders as a rule card, not
   as query content. A malformed body surfaces a loud `RuleStatus::ParseError` on
   the card. The parser is `holon_advice::holon_rule::parse_holon_rule`.

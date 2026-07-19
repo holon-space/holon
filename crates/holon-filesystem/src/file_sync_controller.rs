@@ -2227,6 +2227,23 @@ impl FileSyncController {
         doc_id: &EntityUri,
         delta: &BlockDelta,
     ) -> Result<bool> {
+        // Fork B: a page starts its OWN document. When THIS delta upserts a block
+        // that is authoritatively a `Page`, ensure its identity file exists even if
+        // childless — INDEPENDENT of which document `resolve_doc_for_block` routed
+        // this delta to. That router reads the block-feed, whose `is_page` can lag
+        // the authoritative store (matview enrich), so a just-minted page can be
+        // routed to its PARENT document (de-inlined there) and its own file never
+        // written. The authoritative re-check + registry-free materialization below
+        // closes that gap generally (rule-minted journal dates,
+        // `convert_block_to_page` on a childless block). Idempotent (see the method).
+        if let BlockDelta::Upsert(b) = delta {
+            if let Some(auth) = self.block_reader.get_block_authoritative(&b.id).await? {
+                if auth.is_page() {
+                    self.materialize_page_identity_file(&auth.id).await?;
+                }
+            }
+        }
+
         let path = match self.doc_id_to_path(doc_id).await {
             Ok(Some(p)) => p,
             Ok(None) => return Ok(false),
@@ -2859,6 +2876,129 @@ impl FileSyncController {
 
             info!("[FileSyncController] Re-rendered {}", path.display());
         }
+        Ok(())
+    }
+
+    /// Build a page's `/`-joined title chain reading ONLY the authoritative
+    /// block store (`block_raw` + `block_tags`) via `block_reader`, so it works
+    /// for a page the documents registry (the lagging `WHERE tag='Page'`
+    /// matview behind `DocumentManager::name_chain`) has NOT caught up to
+    /// yet — e.g. a page a rule or `convert_block_to_page` just minted.
+    /// Mirrors `DocumentManager::name_chain`'s page-boundary + fail-loud
+    /// rules: a non-page STARTING block owns no file (empty chain); a
+    /// non-page ANCESTOR of a real page is prohibited (interim ruling
+    /// 2026-07-13) and fails loud.
+    async fn authoritative_name_chain(&self, page_id: &EntityUri) -> Result<Vec<String>> {
+        let mut chain: Vec<String> = Vec::new();
+        let mut current = page_id.clone();
+        let mut is_self = true;
+        let mut guard = 0usize;
+        loop {
+            if current == EntityUri::no_parent() || current.is_sentinel() {
+                break;
+            }
+            guard += 1;
+            if guard > 1024 {
+                anyhow::bail!(
+                    "authoritative_name_chain({page_id}): parent chain too deep (cycle?)"
+                );
+            }
+            let block = match self.block_reader.get_block_authoritative(&current).await? {
+                Some(b) => b,
+                None if is_self => return Ok(Vec::new()),
+                None => anyhow::bail!(
+                    "authoritative_name_chain({page_id}): ancestor '{current}' of a page is absent \
+                     from the block store — a page's structural ancestors must themselves all be \
+                     pages (interim ruling 2026-07-13)"
+                ),
+            };
+            if block.is_page() {
+                chain.push(block.title());
+            } else if !is_self {
+                anyhow::bail!(
+                    "authoritative_name_chain({page_id}): non-page ancestor '{current}' while \
+                     walking to root — pages under non-pages are prohibited (interim ruling \
+                     2026-07-13)"
+                );
+            } else {
+                // Starting block is not a page — it owns no file.
+                return Ok(Vec::new());
+            }
+            is_self = false;
+            current = block.parent_id.clone();
+        }
+        chain.reverse();
+        Ok(chain)
+    }
+
+    /// Fork B / LogSeq-parity daily-note ruling (2026-07-19): ensure a page
+    /// owns its identity file on disk even when CHILDLESS.
+    /// `inv-every-page-has-its-own- file` is UNCONDITIONAL — a page's file
+    /// existence must never depend on it having children. A runtime-created
+    /// page (a rule-minted journal date, or `convert_block_to_page` on a
+    /// childless block) otherwise stays FILELESS: the reactive re-render
+    /// resolves the page's path + doc-root header through the documents
+    /// registry (a `WHERE tag='Page'` matview), which LAGS the
+    /// authoritative `block_raw` write, so `doc_id_to_path`/`render_doc_blocks`
+    /// see nothing and skip it — and no later CDC event re-fires the page. Here
+    /// we resolve BOTH the path (`authoritative_name_chain`) and the
+    /// `#+ID:` header (rendered from the page's authoritative doc-root
+    /// block) from the block store, bypassing the registry lag entirely.
+    /// Idempotent: a page that already owns a file (tracked in
+    /// `last_projection` or present on disk) is skipped, so this is safe to
+    /// fire on every page upsert.
+    async fn materialize_page_identity_file(&mut self, page_id: &EntityUri) -> Result<()> {
+        let Some(page_block) = self.block_reader.get_block_authoritative(page_id).await? else {
+            return Ok(());
+        };
+        if !page_block.is_page() {
+            return Ok(());
+        }
+        let chain = self.authoritative_name_chain(page_id).await?;
+        if chain.is_empty() {
+            return Ok(());
+        }
+        let path = self.root_dir.join(chain.join("/")).with_extension("org");
+        let canonical = CanonicalPath::new(&path);
+        // Already ours (we wrote it) — nothing to do.
+        if self.last_projection.contains_key(&canonical) {
+            return Ok(());
+        }
+        // Already on disk (ingested / materialized elsewhere) — do not clobber.
+        let disk = read_disk_or_empty(&self.fs, &path).await?;
+        if !disk.is_empty() {
+            return Ok(());
+        }
+        // Render the page's own doc: the `#+ID:` header (from the authoritative
+        // doc-root block) + any children the page already has. `render_document`
+        // emits `#+ID: <id>` for a block-scheme doc-root, so a childless page
+        // renders NON-empty — its identity file exists.
+        let children = self.block_reader.get_blocks(page_id).await?;
+        let rendered = self
+            .format
+            .render_document(&page_block, &children, &path, &page_block.id);
+        if rendered.trim().is_empty() {
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
+            self.fs.create_dir_all(parent).await?;
+        }
+        self.fs.write(&path, rendered.as_bytes()).await?;
+        self.run_post_write_hook(&path);
+        // Register the UUID → file-path alias NOW (mirrors the ingest path's
+        // `register_alias`), so the page immediately OWNS its file in the alias
+        // registry — `inv-every-page-has-its-own-file` (and every file-tracking
+        // consumer) reads that registry, and a runtime materialize must not wait for
+        // a watcher re-ingest round-trip to surface the file.
+        if let Some(ref registrar) = self.alias_registrar {
+            registrar.register_alias(page_id, &path).await;
+        }
+        self.last_projection.insert(canonical, rendered);
+        tracing::info!(
+            "[FileSyncController] Materialized identity file for runtime-created page {} -> {}",
+            page_id,
+            path.display()
+        );
         Ok(())
     }
 
