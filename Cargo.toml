@@ -274,3 +274,12 @@ gpui-mobile = { git = "https://github.com/holon-space/gpui-mobile.git", branch =
 # patched to pass KeyError::Invalid to KeyMalformed (matching 3.0.0-rc.0 fix).
 [patch.crates-io]
 ed25519-dalek = { path = ".cargo/patches/ed25519-dalek" }
+# core-graphics 0.24.0 unchanged EXCEPT the never-called `set_font_smoothing_style`
+# wrapper + its `CGContextSetFontSmoothingStyle` extern are `#[cfg(not(target_os =
+# "ios"))]`. That method is dead code (no caller in the tree) but font-kit /
+# gpui-mobile use sibling `CGContext` methods from the same crate, so the whole
+# core-graphics staticlib CGU — including the SPI reference — is force-loaded into
+# the iOS app with dead-stripping off, tripping App Store review (ITMS-90338,
+# _CGContextSetFontSmoothingStyle). Gating it off keeps the symbol out of every
+# iOS binary; macOS/desktop are unaffected.
+core-graphics = { path = ".cargo/patches/core-graphics" }
