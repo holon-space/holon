@@ -35,7 +35,55 @@ fn boot_failed(err: BootError) -> ! {
     std::process::exit(1);
 }
 
-fn open_holon_window(cx: &mut App, db_path: Option<PathBuf>, orgmode_root: Option<PathBuf>) {
+/// Derive the three writable storage locations Holon needs on Android from the
+/// platform-provided data dirs.
+///
+/// The process CWD on Android is `/` (read-only), so any path that resolves
+/// *relative* (like [`resolve_config_dir`]'s `.holon` default) lands on a
+/// read-only filesystem and a config write SIGABRTs the process. Route ALL
+/// writable state through the app-private dirs the platform hands us:
+///
+/// - `config` + `db` → INTERNAL storage (`internal_data_path`, always writable,
+///   not user-visible) — the config dir MUST be here so preference writes never
+///   hit the read-only relative `.holon`.
+/// - `orgmode_root` → EXTERNAL app-private storage (`external_data_path`), so
+///   the vault is reachable via the Files app / MTP for the user to inspect.
+///
+/// Kept as a free function (not inlined into `android_main`) so it is unit-
+/// testable host-side — it is pure path joining with no Android dependency.
+#[cfg(any(target_os = "android", test))]
+fn android_storage_paths(
+    internal: Option<PathBuf>,
+    external: Option<PathBuf>,
+) -> AndroidStoragePaths {
+    AndroidStoragePaths {
+        config_dir: internal.as_ref().map(|p| p.join("config")),
+        db_path: internal.as_ref().map(|p| p.join("holon.db")),
+        orgmode_root: external.as_ref().map(|p| p.join("holon-pkm")),
+    }
+}
+
+#[cfg(any(target_os = "android", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AndroidStoragePaths {
+    config_dir: Option<PathBuf>,
+    db_path: Option<PathBuf>,
+    orgmode_root: Option<PathBuf>,
+}
+
+/// Open the main Holon window.
+///
+/// `config_dir`, when `Some`, pins the directory `holon.toml` and other
+/// app-local config live in. Mobile platforms MUST pass their app-private dir
+/// here (see [`android_storage_paths`]); passing `None` defers to
+/// [`resolve_config_dir`], whose relative `.holon` default is fatal on Android
+/// (read-only CWD) but correct on iOS/desktop (writable `$HOME`).
+fn open_holon_window(
+    cx: &mut App,
+    db_path: Option<PathBuf>,
+    orgmode_root: Option<PathBuf>,
+    config_dir: Option<PathBuf>,
+) {
     let rt = tokio::runtime::Runtime::new().unwrap_or_else(|e| {
         boot_failed(BootError::new(
             BootComponent::Platform,
@@ -63,7 +111,12 @@ fn open_holon_window(cx: &mut App, db_path: Option<PathBuf>, orgmode_root: Optio
         // "No provider registered for entity: tree". Mobile is a first-class
         // target for sharing, so enable the CRDT substrate unconditionally.
         holon_config.crdt.enabled = Some(true);
-        let config_dir = holon_frontend::config::resolve_config_dir(None);
+        // The caller pins the config dir on mobile (app-private storage); only
+        // defer to `resolve_config_dir` when unset. On Android the relative
+        // `.holon` default is on the read-only CWD `/` and any preference write
+        // there aborts the process, so the app-private dir is load-bearing.
+        let config_dir =
+            config_dir.unwrap_or_else(|| holon_frontend::config::resolve_config_dir(None));
         let session_config = SessionConfig::new(ui_info);
 
         // Bootstrap through `GpuiModule` (same path as desktop `main.rs`)
@@ -288,7 +341,9 @@ pub extern "C" fn gpui_ios_register_app() {
     gpui_mobile::ios::ffi::set_app_callback(Box::new(|cx: &mut App| {
         let (db_path, orgmode_root) = ios_data_paths();
         eprintln!("GPUI iOS: db_path={db_path:?} orgmode_root={orgmode_root:?}");
-        open_holon_window(cx, db_path, orgmode_root);
+        // iOS: `None` defers to `resolve_config_dir`, which resolves under the
+        // sandbox `$HOME` (writable) — correct here, unlike on Android.
+        open_holon_window(cx, db_path, orgmode_root, None);
     }));
 }
 
@@ -316,9 +371,14 @@ fn android_main(app: android_activity::AndroidApp) {
     let external = app.external_data_path();
     log::info!("android_main: internal_data_path={internal:?}, external_data_path={external:?}");
 
-    let db_path = internal.map(|p| p.join("holon.db"));
-    let orgmode_root = external.map(|p| p.join("holon-pkm"));
-    log::info!("android_main: db_path={db_path:?}, orgmode_root={orgmode_root:?}");
+    let AndroidStoragePaths {
+        config_dir,
+        db_path,
+        orgmode_root,
+    } = android_storage_paths(internal, external);
+    log::info!(
+        "android_main: config_dir={config_dir:?}, db_path={db_path:?}, orgmode_root={orgmode_root:?}"
+    );
 
     let _platform = gpui_mobile::android::jni::init_platform(&app);
     log::info!("android_main: platform initialised");
@@ -332,8 +392,8 @@ fn android_main(app: android_activity::AndroidApp) {
     });
 
     let gpui_app = Application::with_platform(std::rc::Rc::new(shared));
-    gpui_app.run(|cx| {
-        open_holon_window(cx, db_path, orgmode_root);
+    gpui_app.run(move |cx| {
+        open_holon_window(cx, db_path, orgmode_root, config_dir);
     });
 }
 
@@ -458,4 +518,48 @@ fn platform_hide_keyboard() {
         "soft keyboard hide requested but this platform has no soft-keyboard backend (mobile \
          feature enabled on a desktop OS)"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    // NB: import only what's needed — a `use super::*` glob would pull gpui's
+    // `test` attribute macro (via the module's `use gpui::*`) into scope and
+    // shadow the std `#[test]`, causing "recursion limit reached while expanding
+    // #[test]".
+    use std::path::PathBuf;
+
+    use super::android_storage_paths;
+
+    /// Regression for the Android SIGABRT (dogfood 2026-07-19): the CONFIG dir
+    /// MUST resolve under app-private INTERNAL storage — never a relative
+    /// `.holon` on the read-only CWD `/`. DB co-locates with config (internal);
+    /// the org vault goes to EXTERNAL app-private storage.
+    #[test]
+    fn android_storage_paths_routes_config_to_internal_app_private() {
+        let internal = PathBuf::from("/data/data/space.holon.gpui/files");
+        let external = PathBuf::from("/storage/emulated/0/Android/data/space.holon.gpui/files");
+
+        let paths = android_storage_paths(Some(internal.clone()), Some(external.clone()));
+
+        assert_eq!(paths.config_dir, Some(internal.join("config")));
+        assert_eq!(paths.db_path, Some(internal.join("holon.db")));
+        assert_eq!(paths.orgmode_root, Some(external.join("holon-pkm")));
+
+        // The critical invariant: config never resolves relative (which would
+        // land on the read-only `/` and SIGABRT on the first preference write).
+        assert!(
+            paths.config_dir.as_ref().unwrap().is_absolute(),
+            "config dir must be absolute app-private storage, not relative .holon"
+        );
+    }
+
+    /// Missing platform dirs propagate as `None` (defers to
+    /// `resolve_config_dir`) rather than fabricating a bogus path.
+    #[test]
+    fn android_storage_paths_passes_through_none() {
+        let paths = android_storage_paths(None, None);
+        assert_eq!(paths.config_dir, None);
+        assert_eq!(paths.db_path, None);
+        assert_eq!(paths.orgmode_root, None);
+    }
 }

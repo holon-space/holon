@@ -510,17 +510,25 @@ impl HolonConfig {
     /// Save config to `{config_dir}/holon.toml`, preserving any keys not owned
     /// by HolonConfig. On wasm32, logs a visible warning and no-ops —
     /// config persistence is not supported.
-    pub fn save_runtime(&self, config_dir: &Path) {
+    ///
+    /// Returns `Err` (never panics/aborts) when the config dir can't be created
+    /// or the file can't be written — e.g. on Android when the config dir
+    /// resolves under a read-only filesystem. A preference write that cannot
+    /// persist MUST surface a visible degraded-mode notice and keep the app
+    /// alive, never SIGABRT the process (fail-loud, not fail-fatal).
+    pub fn save_runtime(&self, config_dir: &Path) -> anyhow::Result<()> {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = config_dir;
             tracing::warn!(
                 "[HolonConfig] config save not supported on wasm32 — using in-memory config"
             );
-            return;
+            Ok(())
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
+            use anyhow::Context;
+
             let path = config_dir.join("holon.toml");
 
             let mut table: toml::Table = match std::fs::read_to_string(&path) {
@@ -528,28 +536,28 @@ impl HolonConfig {
                     .parse::<toml::Table>()
                     .unwrap_or_else(|_| toml::Table::new()),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
-                Err(e) => panic!("Failed to read {}: {}", path.display(), e),
+                Err(e) => {
+                    return Err(e).with_context(|| format!("Failed to read {}", path.display()));
+                }
             };
 
-            let our_toml = toml::to_string_pretty(self)
-                .unwrap_or_else(|e| panic!("Failed to serialize config: {}", e));
+            let our_toml = toml::to_string_pretty(self).context("Failed to serialize config")?;
             let our_table: toml::Table = our_toml
                 .parse::<toml::Table>()
-                .unwrap_or_else(|e| panic!("Failed to re-parse serialized config: {}", e));
+                .context("Failed to re-parse serialized config")?;
 
             for (k, v) in our_table {
                 table.insert(k, v);
             }
 
-            let content = toml::to_string_pretty(&table)
-                .unwrap_or_else(|e| panic!("Failed to serialize config: {}", e));
+            let content = toml::to_string_pretty(&table).context("Failed to serialize config")?;
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).unwrap_or_else(|e| {
-                    panic!("Failed to create config dir {}: {}", parent.display(), e)
-                });
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("Failed to create config dir {}", parent.display()))?;
             }
             std::fs::write(&path, content)
-                .unwrap_or_else(|e| panic!("Failed to write {}: {}", path.display(), e));
+                .with_context(|| format!("Failed to write {}", path.display()))?;
+            Ok(())
         }
     }
 
@@ -619,6 +627,51 @@ mod tests {
         let table: toml::Table = content.parse().unwrap();
         let vault = table["vault"].as_table().unwrap();
         assert_eq!(vault["root"].as_str().unwrap(), "/org");
+    }
+
+    /// A happy-path `save_runtime` persists and returns `Ok`.
+    #[test]
+    fn save_runtime_persists_and_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = HolonConfig {
+            ui: UiConfig {
+                theme: Some("dracula".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        config
+            .save_runtime(dir.path())
+            .expect("save_runtime must succeed on a writable dir");
+        let content = std::fs::read_to_string(dir.path().join("holon.toml")).unwrap();
+        assert!(content.contains("dracula"), "persisted config: {content}");
+    }
+
+    /// Regression for the Android SIGABRT (dogfood 2026-07-19): a config dir on
+    /// an UNWRITABLE parent must make `save_runtime` return `Err` — NOT panic /
+    /// abort the process. A preference that cannot persist has to keep the app
+    /// alive so the frontend can surface a visible degraded-mode notice.
+    #[cfg(unix)]
+    #[test]
+    fn save_runtime_unwritable_parent_returns_err_not_panic() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        // Read+execute but NOT write: create_dir_all of a child must fail.
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let config_dir = root.path().join("nested-config");
+
+        let result = HolonConfig::default().save_runtime(&config_dir);
+
+        // Restore write bits so the tempdir can be cleaned up.
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = result.expect_err("unwritable parent must surface an Err, never panic");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("config dir") || msg.contains("nested-config"),
+            "error must name the failed config dir: {msg}"
+        );
     }
 
     #[test]
