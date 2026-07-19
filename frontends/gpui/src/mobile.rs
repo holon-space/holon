@@ -35,6 +35,35 @@ fn boot_failed(err: BootError) -> ! {
     std::process::exit(1);
 }
 
+/// Register the embedded DejaVu Sans coverage font so Android renders the
+/// app's monochrome Unicode icon glyphs (☰ ◧ ⚙, chevrons, checkboxes, …).
+///
+/// Android's bundled fonts (Roboto, Noto Sans — loaded by the gpui-mobile
+/// platform) do NOT cover the Miscellaneous-Symbols / Geometric-Shapes /
+/// Dingbats Unicode blocks these icons live in, so they render as tofu boxes.
+/// DejaVu Sans (permissive Bitstream Vera license, shipped unmodified in
+/// `assets/fonts/`) has broad symbol coverage; adding it to the cosmic-text
+/// font database lets cosmic-text's per-glyph resolution find the icon glyphs.
+/// Color-emoji icons (🎨 🔗 …) are handled separately by `crate::icon` since
+/// swash cannot rasterise the device's COLR v1 emoji font. mac/iOS use their
+/// own system text systems and never call this.
+///
+/// Fails loud: a registration error is logged at error level, not swallowed.
+#[cfg(target_os = "android")]
+fn register_android_icon_fonts(cx: &mut App) {
+    const DEJAVU_SANS: &[u8] = include_bytes!("../../../assets/fonts/DejaVuSans.ttf");
+    match cx
+        .text_system()
+        .add_fonts(vec![std::borrow::Cow::Borrowed(DEJAVU_SANS)])
+    {
+        Ok(()) => log::info!(
+            "registered DejaVu Sans coverage font ({} bytes) for Android icon glyphs",
+            DEJAVU_SANS.len()
+        ),
+        Err(e) => log::error!("failed to register DejaVu Sans coverage font: {e:#}"),
+    }
+}
+
 /// Derive the three writable storage locations Holon needs on Android from the
 /// platform-provided data dirs.
 ///
@@ -84,6 +113,11 @@ fn open_holon_window(
     orgmode_root: Option<PathBuf>,
     config_dir: Option<PathBuf>,
 ) {
+    // Register the embedded icon-coverage font before the window renders any
+    // text, so the toolbar/menu Unicode symbols resolve on their first frame.
+    #[cfg(target_os = "android")]
+    register_android_icon_fonts(cx);
+
     let rt = tokio::runtime::Runtime::new().unwrap_or_else(|e| {
         boot_failed(BootError::new(
             BootComponent::Platform,

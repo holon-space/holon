@@ -5299,6 +5299,7 @@ dependencies = [
  "tracing",
  "tracing-oslog",
  "tracing-subscriber",
+ "ttf-parser",
  "validated",
  "workspace-hack 0.1.0",
 ]
