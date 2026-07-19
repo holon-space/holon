@@ -1531,6 +1531,18 @@ pub struct ReactiveEngine {
     /// Guards the one-time lazy spawn of the reactive advice weaver (spawned on
     /// first `advice_children` call, once a query engine is wired).
     advice_weaver_started: std::sync::atomic::AtomicBool,
+
+    /// Monotonic count of CDC changes the watch CONSUMER tasks have applied
+    /// into their `ReactiveRenderedRows` (bumped once per `apply_change` in the
+    /// `ensure_query_watching` drain loop). The reactive pipeline is async: a
+    /// write emits CDC (tracked by Turso's `cdc_emitted_watermark`), the watch
+    /// stream delivers it, and only THEN does the consumer task apply it here.
+    /// A settle that waits only for CDC *emission* can therefore read a
+    /// `snapshot()` one delta stale (e.g. a `split_block` origin-content
+    /// truncation not yet applied). Test settles (`converge_signals`) wait for
+    /// this epoch to hold steady — alongside the CDC/Loro/org signals — so the
+    /// consumer is proven drained before invariants read the ViewModel.
+    apply_epoch: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl ReactiveEngine {
@@ -1587,7 +1599,17 @@ impl ReactiveEngine {
             services_slot,
             advice_sidecar: Arc::new(Mutex::new(HashMap::new())),
             advice_weaver_started: std::sync::atomic::AtomicBool::new(false),
+            apply_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    /// Monotonic count of CDC changes the watch consumer tasks have applied.
+    /// A settle waits for this to hold steady (alongside CDC emission / Loro /
+    /// org quiescence) to prove the async reactive drain has caught the last
+    /// emitted delta before invariants read `snapshot()`. See the `apply_epoch`
+    /// field docs.
+    pub fn apply_epoch(&self) -> u64 {
+        self.apply_epoch.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Recompute the advice weave sidecar from the current SQL state (one-shot
@@ -2235,6 +2257,7 @@ impl ReactiveEngine {
         {
             let session = self.session.clone();
             let reactive = results.clone();
+            let apply_epoch = self.apply_epoch.clone();
             let task = self.runtime_handle.spawn(async move {
                 match session
                     .watch_query(&query, lang, HashMap::new(), query_context)
@@ -2245,6 +2268,10 @@ impl ReactiveEngine {
                         while let Some(batch) = rx.recv().await {
                             for enriched_change in batch.inner.items {
                                 reactive.apply_change(enriched_change, 1);
+                                // Publish consumer progress so a settle can wait
+                                // for this async drain to catch the emitted CDC
+                                // (see `apply_epoch` field docs).
+                                apply_epoch.fetch_add(1, std::sync::atomic::Ordering::Release);
                             }
                         }
                     }
