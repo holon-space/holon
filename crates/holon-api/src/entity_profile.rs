@@ -14,6 +14,7 @@
 //! and compiles on-demand during resolution. Compilation is fast for small
 //! expressions (<1µs each).
 
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -53,8 +54,14 @@ pub struct StoredVariant {
     pub priority: i32,
     /// Original full Rhai condition source (empty = always matches).
     pub condition_source: String,
+    /// Required-column set of `condition_source` (type-aware binding). A row
+    /// missing any of these makes the condition a structural non-match without
+    /// invoking Rhai. Empty when `condition_source` is empty.
+    pub condition_required: BTreeSet<String>,
     /// Data-only Rhai condition (None = always true on data side).
     pub data_condition: Option<String>,
+    /// Required-column set of `data_condition` (empty when `None`).
+    pub data_condition_required: BTreeSet<String>,
     /// Frontend-evaluable UI condition extracted from the full condition.
     pub ui_condition: Predicate,
     pub profile: Arc<StoredProfile>,
@@ -86,6 +93,14 @@ pub struct EntityProfile {
     /// virtual editable placeholder at the end. Typing into it materializes
     /// a real entity.
     pub virtual_child: Option<VirtualChildConfig>,
+    /// The entity's DECLARED schema columns — the persistent field names of its
+    /// `TypeDefinition` (the columns a well-formed row of this type always
+    /// carries). Used for type-aware binding classification: a required column
+    /// MISSING from a row is a real projection gap (LOUD) iff it is declared
+    /// here; otherwise it is expected heterogeneity — an optional property or a
+    /// UI-state variable — and is silent. Empty for profiles built without a
+    /// TypeDefinition (org-source / test fixtures): every miss is then silent.
+    pub declared_columns: BTreeSet<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -157,7 +172,13 @@ impl EntityProfile {
         for variant in &self.variants {
             let data_matches = match &variant.data_condition {
                 None => true, // No data condition = always matches on data side
-                Some(dc) => condition_holds(eval_bool_source(engine, dc, &mut scope), dc),
+                Some(dc) => eval_condition(
+                    engine,
+                    dc,
+                    &variant.data_condition_required,
+                    &self.declared_columns,
+                    &mut scope,
+                ),
             };
             if data_matches {
                 candidates.push((variant, variant.profile.clone()));
@@ -183,9 +204,12 @@ impl EntityProfile {
         // match.
         for variant in &self.variants {
             if variant.condition_source.is_empty()
-                || condition_holds(
-                    eval_bool_source(engine, &variant.condition_source, scope),
+                || eval_condition(
+                    engine,
                     &variant.condition_source,
+                    &variant.condition_required,
+                    &self.declared_columns,
+                    scope,
                 )
             {
                 return Some(variant.profile.clone());
@@ -195,12 +219,18 @@ impl EntityProfile {
     }
 
     fn extract_computed_values(&self, scope: &Scope<'_>) -> HashMap<String, Value> {
+        // Every computed field appears in the output. A field UNBOUND for this
+        // row (type-aware binding skipped it, so it was never pushed to scope)
+        // defaults to `Null` — preserving the row's shape for consumers without
+        // letting the unbound field poison downstream scope evaluation.
         self.computed_fields
             .iter()
-            .filter_map(|(name, _expr)| {
-                scope
+            .map(|(name, _expr)| {
+                let value = scope
                     .get_value::<rhai::Dynamic>(name)
-                    .map(|d| (name.clone(), dynamic_to_value(&d)))
+                    .map(|d| dynamic_to_value(&d))
+                    .unwrap_or(Value::Null);
+                (name.clone(), value)
             })
             .collect()
     }
@@ -225,13 +255,15 @@ impl EntityProfile {
             }
         }
 
-        // Evaluate computed fields in topo order via shared evaluator
+        // Evaluate computed fields in topo order via shared evaluator, with
+        // type-aware binding against this entity's declared schema.
         let mut computed_ctx = row.clone();
         crate::computed::resolve_computed_fields_with_scope(
             engine,
             &mut scope,
             &self.computed_fields,
             &mut computed_ctx,
+            &self.declared_columns,
         );
 
         scope
@@ -258,67 +290,50 @@ pub fn dynamic_to_value(d: &rhai::Dynamic) -> Value {
     }
 }
 
-/// Outcome of evaluating a boolean profile condition against a row scope.
+/// Evaluate a profile variant condition against a row scope with **type-aware
+/// binding** — the same contract as computed fields.
 ///
-/// Distinguishes a legitimate NON-MATCH from a genuine failure. Profile
-/// variants are tried against heterogeneous rows (different entity types expose
-/// different columns), so a condition that references a variable ABSENT from
-/// the scope is a legitimate non-match, not an error. Any OTHER Rhai error — a
-/// type mismatch such as `() && ...`, a non-bool result, a syntax error — is a
-/// real authoring/data bug and must be surfaced LOUDLY, never silently
-/// collapsed to `false` (repo rule: errors must not silently become falsy).
-enum BoolCondition {
-    /// The condition evaluated to this boolean.
-    Matched(bool),
-    /// A referenced variable was not bound in scope — a legitimate non-match.
-    Unbound(String),
-    /// A genuine evaluation error (type mismatch / non-bool result / syntax).
-    Failed(String),
-}
-
-fn eval_bool_source(engine: &RhaiEngine, source: &str, scope: &mut Scope) -> BoolCondition {
-    match engine.eval_with_scope::<bool>(scope, source) {
-        Ok(val) => BoolCondition::Matched(val),
-        Err(e) => {
-            let msg = format!("{e}");
-            if msg.contains("Variable not found") {
-                BoolCondition::Unbound(msg)
-            } else {
-                BoolCondition::Failed(msg)
+/// `required` is the condition's precompiled required-column set (free vars
+/// minus `is_def_var` guards minus `let` locals — see
+/// [`holon_expr::required_columns`]). `declared` is the entity's declared
+/// schema.
+///
+/// - If any required column is ABSENT from scope, the condition is *unbound*:
+///   the row is structurally the wrong shape (heterogeneous rows expose
+///   different columns; an unbound sibling computed field is likewise absent).
+///   We return a NON-MATCH **without invoking Rhai** — so no "Variable not
+///   found" is raised and, crucially, no `() && …` type-error cascade occurs. A
+///   missing column that IS in `declared` is disclosed LOUDLY once (a real
+///   projection gap); missing UI-state vars and optional columns are silent.
+/// - If every required column is present, we evaluate. A genuine error now
+///   (type mismatch on present data, non-bool result) is surfaced at WARN and
+///   treated as a non-match — a disclosed degraded signal, never a silent
+///   false. WARN not ERROR: one bad condition degrades one variant, it must not
+///   abort the render.
+fn eval_condition(
+    engine: &RhaiEngine,
+    source: &str,
+    required: &BTreeSet<String>,
+    declared: &BTreeSet<String>,
+    scope: &mut Scope,
+) -> bool {
+    let missing: Vec<&String> = required.iter().filter(|c| !scope.contains(c)).collect();
+    if !missing.is_empty() {
+        for col in &missing {
+            if declared.contains(*col) {
+                crate::computed::warn_missing_declared_column(source, col);
             }
         }
+        return false;
     }
-}
-
-/// Reduce a [`BoolCondition`] to a match/no-match decision, disclosing
-/// failures.
-///
-/// A genuine [`BoolCondition::Failed`] is surfaced VISIBLY (WARN) and the
-/// variant is treated as non-matching — a disclosed, degraded fallback (the
-/// repo's "falls back visibly" tier), NOT a silent `false`. It is deliberately
-/// WARN, not ERROR: a single profile condition that cannot evaluate must
-/// degrade this one variant, never crash/abort the render (the keystone's
-/// `inv-no-observed-errors` treats ERROR as a run-aborting hidden failure — a
-/// per-row condition fallback is not that). An [`BoolCondition::Unbound`] is a
-/// legitimate non-match (heterogeneous rows expose different columns), logged
-/// at debug only.
-fn condition_holds(outcome: BoolCondition, source: &str) -> bool {
-    match outcome {
-        BoolCondition::Matched(b) => b,
-        BoolCondition::Unbound(msg) => {
-            tracing::debug!(
-                condition = source,
-                "profile condition references a variable not bound for this row — treated as \
-                 non-match: {msg}"
-            );
-            false
-        }
-        BoolCondition::Failed(msg) => {
+    match engine.eval_with_scope::<bool>(scope, source) {
+        Ok(val) => val,
+        Err(e) => {
             tracing::warn!(
                 condition = source,
-                "profile condition failed to evaluate (NOT a missing variable) — treated as \
-                 non-match, this variant is DEGRADED. Fix the condition or the row data producing \
-                 it: {msg}"
+                "profile condition failed to evaluate on PRESENT columns (type mismatch / \
+                 non-bool result) — treated as non-match, this variant is DEGRADED. Fix the \
+                 condition or the row data producing it: {e}"
             );
             false
         }
@@ -445,9 +460,11 @@ pub trait ProfileResolving: Send + Sync {
     /// a profile whose collection variants default to `board`).
     ///
     /// Returns `None` when no profile of that name is in the cache, so the
-    /// caller can disclose the degraded fallback to the default variants
+    /// caller can disclose the degraded default-variant behaviour
     /// (fail-visible, not fail-silent).
-    // ALLOW(unused_param): trait shape; default impl (mocks) has no cache
+    // ALLOW(fallback): documents a disclosed, fail-visible degrade (returns None so
+    // the caller surfaces it), not a hidden swallow ALLOW(unused_param): trait
+    // shape; default impl (mocks) has no cache
     fn resolve_collection_variants_named(&self, _name: &EntityName) -> Option<Vec<RenderVariant>> {
         None
     }
