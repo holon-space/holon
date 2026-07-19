@@ -14,3 +14,17 @@ pub struct LinkCandidate {
     /// Human-readable label (first content line for pages, content for blocks).
     pub label: String,
 }
+
+/// Two-section result of a quick-open / content search (`cmd-K` modal).
+///
+/// The user-facing search modal renders `pages` first (jump-to-page targets)
+/// and `content` second (full-text block matches), so the split is carried in
+/// the type rather than re-derived by the frontend — the search SQL that knows
+/// which rows are `Page`-tagged stays behind the query capability.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct QuickOpenResults {
+    /// Page-tagged blocks whose content matched, label = first content line.
+    pub pages: Vec<LinkCandidate>,
+    /// Non-page blocks whose content matched, label = matched content line.
+    pub content: Vec<LinkCandidate>,
+}

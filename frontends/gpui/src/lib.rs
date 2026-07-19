@@ -8,6 +8,7 @@
 
 #![recursion_limit = "1024"]
 
+pub mod breadcrumb;
 pub mod di;
 pub mod entity_view_registry;
 pub mod geometry;
@@ -21,6 +22,7 @@ pub mod oracles_ui;
 pub mod reactive_vm_poc;
 pub mod render;
 pub mod reset;
+pub mod search_ui;
 pub mod share_ui;
 
 pub mod user_driver;
@@ -186,7 +188,7 @@ pub(crate) fn assert_icon_renderable_on_android(glyph: &'static str, source: &st
 // in `HolonApp::render` intercept both these and the `Input` actions (in the
 // capture phase, before `InputState`'s own bubble-phase text-undo can run)
 // and route both to the engine-level `FrontendSession::undo`/`redo`.
-actions!(holon_gpui, [TriggerUndo, TriggerRedo]);
+actions!(holon_gpui, [TriggerUndo, TriggerRedo, OpenSearch]);
 
 // ── AppModel: Entity-based reactive state ──────────────────────────────────
 
@@ -572,6 +574,12 @@ pub struct HolonApp {
     /// so the render pass can build overlays without a double-read through
     /// `app_model.read(cx).share_ui.read(cx)`.
     pub share_ui: Entity<share_ui::ShareUiState>,
+    /// User-facing search modal (quick-open + full-text content), cmd-K.
+    pub search_ui: Entity<search_ui::SearchUiState>,
+    /// Page-ancestor breadcrumb for the focused page.
+    pub breadcrumb: Entity<breadcrumb::BreadcrumbState>,
+    /// Last focus the breadcrumb was resolved for; a change re-resolves it.
+    last_breadcrumb_focus: Option<holon_api::EntityUri>,
     /// Live-oracle violations (debug builds): mirrors the global
     /// `holon_oracles` status; rendered as an impossible-to-miss top banner.
     #[cfg(debug_assertions)]
@@ -638,6 +646,40 @@ impl Render for HolonApp {
                 .cloned()
             {
                 scroll_reactive_shell_tree_to_top(&main_panel, cx);
+            }
+        }
+        // Re-resolve the page-ancestor breadcrumb whenever the focused block
+        // changes. The trail is fetched async (matview-backed) and pumped back
+        // into `self.breadcrumb`.
+        {
+            let focused = self.app_model.read(cx).engine.ui_state().focused_block();
+            if focused != self.last_breadcrumb_focus {
+                self.last_breadcrumb_focus = focused.clone();
+                match focused {
+                    Some(block_id) => {
+                        let generation = self.breadcrumb.update(cx, |s, _| {
+                            s.block_id = Some(block_id.clone());
+                            s.error = None;
+                            s.generation = s.generation.wrapping_add(1);
+                            s.generation
+                        });
+                        let session = self.session.clone();
+                        let rt_handle = self.rt_handle.clone();
+                        let state = self.breadcrumb.clone();
+                        let wh = window.window_handle();
+                        let async_cx = cx.to_async();
+                        breadcrumb::resolve_breadcrumb(
+                            block_id, generation, session, rt_handle, state, wh, &async_cx,
+                        );
+                    }
+                    None => {
+                        self.breadcrumb.update(cx, |s, _| {
+                            s.block_id = None;
+                            s.segments.clear();
+                            s.error = None;
+                        });
+                    }
+                }
             }
         }
         let (view_model, shadow_ctx, services, show_settings, show_widget_gallery) = {
@@ -762,6 +804,7 @@ impl Render for HolonApp {
         let right_model = self.app_model.clone();
         let settings_model = self.app_model.clone();
         let gallery_model = self.app_model.clone();
+        let search_ui_for_btn = self.search_ui.clone();
 
         let title_bar = div()
             .id("title-bar")
@@ -846,6 +889,24 @@ impl Render for HolonApp {
                     )
                     .child(
                         div()
+                            .id("search-open")
+                            .cursor_pointer()
+                            .text_size(px(15.0))
+                            .px(px(6.0))
+                            .py(px(4.0))
+                            .rounded(px(4.0))
+                            .hover(|s| s.bg(gpui::rgba(0x00000010)))
+                            .child(icon("🔎"))
+                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                search_ui_for_btn.update(cx, |s, cx| {
+                                    s.open(window, cx);
+                                    cx.emit(search_ui::NotifySearchUi);
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .child(
+                        div()
                             .id("settings-gear")
                             .cursor_pointer()
                             .text_size(px(15.0))
@@ -861,23 +922,27 @@ impl Render for HolonApp {
                                 });
                             }),
                     )
-                    .child(
-                        div()
-                            .id("gallery-toggle")
-                            .cursor_pointer()
-                            .text_size(px(15.0))
-                            .px(px(6.0))
-                            .py(px(4.0))
-                            .rounded(px(4.0))
-                            .hover(|s| s.bg(gpui::rgba(0x00000010)))
-                            .child(icon("🎨"))
-                            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                                gallery_model.update(cx, |m, cx| {
-                                    m.show_widget_gallery = !m.show_widget_gallery;
-                                    cx.notify();
-                                });
-                            }),
-                    )
+                    // Widget Gallery is a dev tool — demoted off the toolbar
+                    // outside debug builds (matches the Inspector's gating).
+                    .when(cfg!(debug_assertions), |this| {
+                        this.child(
+                            div()
+                                .id("gallery-toggle")
+                                .cursor_pointer()
+                                .text_size(px(15.0))
+                                .px(px(6.0))
+                                .py(px(4.0))
+                                .rounded(px(4.0))
+                                .hover(|s| s.bg(gpui::rgba(0x00000010)))
+                                .child(icon("🎨"))
+                                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                    gallery_model.update(cx, |m, cx| {
+                                        m.show_widget_gallery = !m.show_widget_gallery;
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                    })
                     .child({
                         let share_state = self.share_ui.clone();
                         div()
@@ -913,7 +978,10 @@ impl Render for HolonApp {
                                     .py(px(4.0))
                                     .rounded(px(4.0))
                                     .hover(|s| s.bg(gpui::rgba(0x00000010)))
-                                    .child(icon("🔎"))
+                                    // 🐞 not 🔎 — the magnifier now opens the
+                                    // user search modal; this stays the debug
+                                    // inspector (debug builds only).
+                                    .child(icon("🐞"))
                                     .on_mouse_down(MouseButton::Left, |_, window, cx| {
                                         #[cfg(debug_assertions)]
                                         window.toggle_inspector(cx);
@@ -1068,6 +1136,25 @@ impl Render for HolonApp {
                 .child(root)
         };
 
+        let search_theme = search_ui::SearchTheme {
+            bg,
+            border: border_color,
+            fg: text,
+            muted_fg: theme.muted_foreground,
+            selected_bg: theme.accent,
+            selected_fg: theme.accent_foreground,
+        };
+
+        // Page-ancestor breadcrumb bar, between the title bar and the content.
+        // Full width for v1 (disclosed) — a slim path-back strip under the top
+        // bar; clicking a segment navigates via the shared chokepoint.
+        let breadcrumb_bar = breadcrumb::render_breadcrumb_bar(
+            self.breadcrumb.read(cx),
+            services.clone(),
+            search_theme,
+            16.0,
+        );
+
         let mut page = div()
             .size_full()
             .bg(bg)
@@ -1075,13 +1162,26 @@ impl Render for HolonApp {
             .flex_col()
             .pt(px(self.safe_area_top))
             .pb(px(self.safe_area_bottom))
-            .child(title_bar)
-            .child(content);
+            .child(title_bar);
+        if let Some(bar) = breadcrumb_bar {
+            page = page.child(bar);
+        }
+        page = page.child(content);
 
         if let Some(overlay) = settings_overlay {
             page = page.child(overlay);
         }
         if let Some(overlay) = gallery_overlay {
+            page = page.child(overlay);
+        }
+
+        // User search modal (quick-open + full-text content), cmd-K / 🔎.
+        if let Some(overlay) = search_ui::render_search_overlay(
+            self.search_ui.read(cx),
+            self.search_ui.clone(),
+            services.clone(),
+            search_theme,
+        ) {
             page = page.child(overlay);
         }
 
@@ -1434,11 +1534,15 @@ fn launch_holon_window_impl(
     cx.bind_keys([
         KeyBinding::new("cmd-z", TriggerUndo, None),
         KeyBinding::new("cmd-shift-z", TriggerRedo, None),
+        // Quick-open / search — cmd-K (free chord; cmd-P is unbound too but
+        // cmd-K matches the VS Code / Linear / Slack command-palette idiom).
+        KeyBinding::new("cmd-k", OpenSearch, None),
     ]);
     #[cfg(not(target_os = "macos"))]
     cx.bind_keys([
         KeyBinding::new("ctrl-z", TriggerUndo, None),
         KeyBinding::new("ctrl-y", TriggerRedo, None),
+        KeyBinding::new("ctrl-k", OpenSearch, None),
     ]);
 
     #[cfg(debug_assertions)]
@@ -1452,6 +1556,13 @@ fn launch_holon_window_impl(
     let model_entity: Arc<std::sync::OnceLock<Entity<AppModel>>> =
         Arc::new(std::sync::OnceLock::new());
     let model_slot = model_entity.clone();
+
+    // Slot to carry the search-UI entity out of the window-creation closure so
+    // the cmd-K `OpenSearch` action handler (registered app-level, after the
+    // window exists) can open + focus it.
+    let search_entity_slot: Arc<std::sync::OnceLock<Entity<search_ui::SearchUiState>>> =
+        Arc::new(std::sync::OnceLock::new());
+    let search_entity_slot_for_window = search_entity_slot.clone();
 
     // Slot to carry the oracle-UI entity out of the window-creation closure
     // so the status bridge (needs the window handle) can be wired after.
@@ -1660,6 +1771,11 @@ fn launch_holon_window_impl(
 
         let initial_root_view = root_reactive_view(&root_vm);
         let share_ui_entity = cx.new(|_cx| share_ui::ShareUiState::new());
+        let search_ui_entity = cx.new(|cx| search_ui::SearchUiState::new(window, cx));
+        search_entity_slot_for_window
+            .set(search_ui_entity.clone())
+            .ok();
+        let breadcrumb_entity = cx.new(|_cx| breadcrumb::BreadcrumbState::default());
         #[cfg(debug_assertions)]
         let oracle_ui_entity = cx.new(|_cx| oracles_ui::OracleUiState::default());
         #[cfg(debug_assertions)]
@@ -1742,6 +1858,54 @@ fn launch_holon_window_impl(
             )
             .detach();
 
+            // Re-render + re-search whenever the search modal state changes.
+            cx.subscribe(
+                &search_ui_entity,
+                move |_, _, _: &search_ui::NotifySearchUi, cx| {
+                    cx.notify();
+                },
+            )
+            .detach();
+            cx.subscribe(
+                &breadcrumb_entity,
+                move |_, _, _: &breadcrumb::NotifyBreadcrumb, cx| {
+                    cx.notify();
+                },
+            )
+            .detach();
+
+            // Search input → async query. Each keystroke bumps `generation`
+            // (stale-response guard) and kicks off `run_search`, whose result
+            // pumps back into the search entity.
+            let search_input = search_ui_entity.read(cx).input.clone();
+            cx.subscribe_in(
+                &search_input,
+                window,
+                move |this: &mut HolonApp,
+                      _input,
+                      event: &gpui_component::input::InputEvent,
+                      window,
+                      cx| {
+                    if matches!(event, gpui_component::input::InputEvent::Change) {
+                        let query = this.search_ui.read(cx).input.read(cx).value().to_string();
+                        let generation = this.search_ui.update(cx, |s, _| {
+                            s.query = query.clone();
+                            s.generation = s.generation.wrapping_add(1);
+                            s.generation
+                        });
+                        let session = this.session.clone();
+                        let rt_handle = this.rt_handle.clone();
+                        let state = this.search_ui.clone();
+                        let wh = window.window_handle();
+                        let async_cx = cx.to_async();
+                        search_ui::run_search(
+                            query, generation, session, rt_handle, state, wh, &async_cx,
+                        );
+                    }
+                },
+            )
+            .detach();
+
             // Re-render whenever the live-oracle status changes, so a
             // violation banner appears the moment an oracle fires.
             #[cfg(debug_assertions)]
@@ -1763,6 +1927,9 @@ fn launch_holon_window_impl(
                 safe_area_top: 0.0,
                 safe_area_bottom: 0.0,
                 share_ui: share_ui_entity,
+                search_ui: search_ui_entity,
+                breadcrumb: breadcrumb_entity,
+                last_breadcrumb_focus: None,
                 #[cfg(debug_assertions)]
                 oracle_ui: oracle_ui_entity.clone(),
                 applied_theme: String::new(),
@@ -1833,6 +2000,24 @@ fn launch_holon_window_impl(
                 wh,
                 &async_cx,
             );
+            cx.stop_propagation();
+        });
+    }
+
+    // App-level cmd-K handler: open + focus the search modal. Registered
+    // globally (like undo/redo) so it fires regardless of which element holds
+    // focus. Needs the window to focus the input, so it hops through
+    // `update_window`.
+    if let Some(search_entity) = search_entity_slot.get().cloned() {
+        cx.on_action(move |_: &OpenSearch, cx: &mut App| {
+            let search_entity = search_entity.clone();
+            let _ = cx.update_window(wh, move |_, window, cx| {
+                search_entity.update(cx, |s, cx| {
+                    s.open(window, cx);
+                    cx.emit(search_ui::NotifySearchUi);
+                    cx.notify();
+                });
+            });
             cx.stop_propagation();
         });
     }

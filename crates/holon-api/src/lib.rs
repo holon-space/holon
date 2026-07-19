@@ -167,6 +167,7 @@ pub use interp_value::{
 
 // Re-export link search candidate
 pub use link_candidate::LinkCandidate;
+pub use link_candidate::QuickOpenResults;
 // Re-export the dual-evaluated Pattern guard AST (ADR 0024 Phase-2 spike)
 pub use pattern::{
     BuiltinRef, CmpOp, CurrentSchema, FieldRef, Guard, GuardParseError, GuardResult, InMemoryWorld,
