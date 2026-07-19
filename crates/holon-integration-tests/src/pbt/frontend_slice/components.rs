@@ -509,6 +509,10 @@ impl HeadlessFrontendComponent {
                 sync,
                 store,
                 org_idle,
+                // Boot registers only the sidebar page-list watch; the reactive
+                // consumer-drain stage matters for per-transition settles, not
+                // this tolerant boot settle.
+                None,
                 remaining,
             )
             .await;
@@ -1138,13 +1142,14 @@ impl SutRenderer for HeadlessFrontendComponent {
                 stable += 1;
                 // FULLY-RESOLVED fixed point (no loading/unknown placeholders):
                 // one confirming resample suffices — the composed harness has
-                // already converged CDC+Loro+org before any check
-                // (`settle_after_apply` → `converge_projections`), so nothing
+                // already converged CDC+Loro+org+reactive-consumer before any
+                // check (`settle_after_apply` → `converge_projections`, which
+                // now also waits the reactive apply-epoch quiet), so nothing
                 // async is still due. The former unconditional 4×120 ms
                 // resample predates that settle and was measured at ~83% of
                 // keystone wall time. A tree still holding placeholders keeps
-                // the cautious exit (4 stable samples at 120 ms) so slow watch
-                // delivery isn't cut short.
+                // the cautious exit (4 stable samples at 120 ms) so slow
+                // watch delivery isn't cut short.
                 if pending == 0 || stable >= 4 {
                     return inject_display_placed(snap);
                 }

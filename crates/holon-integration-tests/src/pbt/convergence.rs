@@ -9,6 +9,7 @@ use std::time::Duration;
 use holon::api::BackendEngine;
 use holon::sync::LoroDocumentStore;
 use holon::sync::LoroSyncControllerHandle;
+use holon_frontend::reactive::ReactiveEngine;
 use holon_orgmode::OrgSyncIdleSignal;
 
 use crate::test_environment::pbt_quiet_floor;
@@ -45,15 +46,18 @@ pub(crate) async fn converge_signals(
     sync: Option<Arc<LoroSyncControllerHandle>>,
     store: Option<LoroDocumentStore>,
     org_idle: Option<Arc<OrgSyncIdleSignal>>,
+    reactive: Option<&Arc<ReactiveEngine>>,
     budget: Duration,
 ) -> bool {
     let deadline = tokio::time::Instant::now() + budget;
     let quiet = pbt_quiet_floor();
     let poll = Duration::from_millis(2);
 
-    // Baselines for the change-detected signals (CDC watermark, org tick).
+    // Baselines for the change-detected signals (CDC watermark, org tick,
+    // reactive consumer apply-epoch).
     let mut last_cdc = engine.map(|e| e.db_handle().cdc_emitted_watermark());
     let mut last_tick = org_idle.as_ref().map(|s| s.current_tick());
+    let mut last_epoch = reactive.map(|r| r.apply_epoch());
     // The last instant ANY signal showed activity OR Loro was not yet caught up.
     // Convergence = all three quiet AND Loro caught up, held for one `quiet` floor.
     let mut last_activity = tokio::time::Instant::now();
@@ -97,6 +101,22 @@ pub(crate) async fn converge_signals(
             let now_tick = idle.current_tick();
             if last_tick != Some(now_tick) {
                 last_tick = Some(now_tick);
+                active = true;
+            }
+        }
+
+        // Reactive watch CONSUMER drain: the async task that applies emitted CDC
+        // into `ReactiveRenderedRows` bumps `apply_epoch` per change. CDC
+        // emission going quiet (above) does NOT imply the consumer has APPLIED
+        // it — the ViewModel `snapshot()` the invariants read lags until it
+        // does. Treating a still-rising epoch as activity holds the quiet window
+        // open until the consumer catches the last delta, closing the
+        // `inv-displayed-text/viewmodel` split-block staleness race. (Absent
+        // reactive = a Loro-only / no-frontend draw = nothing to wait for.)
+        if let Some(reactive) = reactive {
+            let now_epoch = reactive.apply_epoch();
+            if last_epoch != Some(now_epoch) {
+                last_epoch = Some(now_epoch);
                 active = true;
             }
         }

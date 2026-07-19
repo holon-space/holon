@@ -165,6 +165,10 @@ async fn converge_projections(handle: &WideHandle, budget: Duration) {
         ),
         None => (None, None, None),
     };
+    // The reactive engine whose watch-consumer drain the settle must also wait
+    // out (see `converge_signals`' reactive-epoch stage): its `snapshot()` is
+    // what the ViewModel invariants read.
+    let reactive = handle.reactive();
     // Loop to a combined fixed point with a generous cap (a settled SUT still
     // returns in ~one quiet floor). Honour a larger caller budget if given, but
     // never wait less than CONVERGE_BUDGET — 150ms is below the heavy projection
@@ -175,6 +179,7 @@ async fn converge_projections(handle: &WideHandle, budget: Duration) {
         sync,
         store,
         org_idle,
+        reactive.as_ref(),
         cap,
     )
     .await;
