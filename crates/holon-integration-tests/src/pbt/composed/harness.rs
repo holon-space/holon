@@ -315,6 +315,12 @@ pub struct ComposedSut<S: ComposedSlice> {
     /// vacuity dashboard primitive: it surfaces always-`Skipped` invariants
     /// (engaged=0) even outside the floor set.
     engaged: std::cell::RefCell<std::collections::BTreeMap<&'static str, EngageTally>>,
+    /// Per-case telemetry accumulator (weights-spike step 0). Populated in
+    /// `apply` (behind interior mutability, like `engaged`) only when
+    /// `HOLON_PBT_TELEMETRY=1`; `teardown` emits one machine-parseable line
+    /// from it + the engagement ledger + the drawn wiring. Empty and unread on
+    /// the default (flag-off) path, so runs stay byte-identical.
+    telemetry: std::cell::RefCell<super::telemetry::CaseTelemetry>,
     _slice: PhantomData<S>,
 }
 
@@ -359,6 +365,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
             rt,
             settle,
             engaged: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+            telemetry: std::cell::RefCell::new(super::telemetry::new_case()),
             _slice: PhantomData,
         }
     }
@@ -498,13 +505,18 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             rt,
             settle: Box::new(|| {}),
             engaged: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+            telemetry: std::cell::RefCell::new(super::telemetry::new_case()),
             _slice: PhantomData,
         }
     }
 
     fn apply(mut sut: Self, ref_state: &ReferenceState, transition: S::Transition) -> Self {
         let action = action_label(&transition);
-        let (before, after) = {
+        // Weights-spike telemetry: pre-clone the kind label (the async block
+        // moves `action`), record after the timed apply. No-op when the flag is
+        // off — `record_label` stays `None`.
+        let record_label = super::telemetry::telemetry_enabled().then(|| action.clone());
+        let (before, after, action_us) = {
             // Split the borrow: `settle_after_apply` reads `&sut.handle` while the apply
             // writes `&mut sut.caps` — disjoint fields, so borrow each separately before
             // the `block_on` (both are captured by the `async move`).
@@ -515,6 +527,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
                 let t_action = std::time::Instant::now();
                 S::apply_transition(&transition, ref_state, caps).await;
                 S::settle_after_apply(handle, caps).await;
+                let action_us = t_action.elapsed().as_micros() as u64;
                 // Latency (end-to-end, action->visible rows): dispatch through the
                 // real pipeline plus the CDC settle — everything except final GPU
                 // paint (headless harness). Greppable via target="holon_latency".
@@ -527,9 +540,14 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
                 );
                 feed_sut_clock(caps, ref_state).await;
                 let after = sut_ids(caps).await;
-                (before, after)
+                (before, after, action_us)
             })
         };
+        // Weights-spike telemetry: record this transition's kind + wall micros
+        // (flag-off => `record_label` is `None`, so no accumulation happens).
+        if let Some(label) = record_label {
+            sut.telemetry.borrow_mut().record(label, action_us);
+        }
         // Per-tick reconciliation: a single transition mints at most one block, so
         // the one unmapped synthetic id (oracle, post-apply) pairs 1:1 with the one
         // new real id (SUT). Accumulate into the shared resolver. (For a counter-sync
@@ -701,6 +719,20 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
     /// invariants first, then sweep").
     fn teardown(sut: Self, ref_state: ReferenceState) {
         let ledger = sut.engaged.borrow();
+        // Weights-spike telemetry: one machine-parseable per-case line
+        // (`[pbt-telemetry] {json}`) from the accumulated transitions + this
+        // ledger + the drawn wiring. Flag-gated, so a default run emits nothing.
+        if super::telemetry::telemetry_enabled() {
+            let tele = sut.telemetry.borrow();
+            let line = super::telemetry::build_line(
+                tele.case_index,
+                &ref_state.harness.wiring,
+                &tele.kinds,
+                &tele.micros,
+                &ledger,
+            );
+            super::telemetry::emit(&line);
+        }
         // Observe-only vacuity dashboard (telemetry sweep): one line per
         // sequence, `<id>=<engaged>/<total>` for EVERY invariant that ran this
         // sequence. `engaged=0` (i.e. `0/N`) flags an always-`Skipped`
