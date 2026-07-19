@@ -83,24 +83,114 @@ impl QueryEngine for BackendEngine {
              '%{escaped}%' LIMIT 5)"
         );
         let rows = BackendEngine::execute_query(self, sql, HashMap::new(), None).await?;
-        rows.into_iter()
-            .map(|row| {
-                let raw_id = row
-                    .get("id")
-                    .and_then(|v| v.as_string())
-                    .ok_or_else(|| anyhow::anyhow!("link-search row missing 'id': {row:?}"))?
-                    .to_string();
-                let id = EntityUri::parse(&raw_id).map_err(|e| {
-                    anyhow::anyhow!("link-search row id {raw_id:?} is not a valid EntityUri: {e}")
-                })?;
+        parse_link_candidates(rows)
+    }
+
+    async fn quick_open_search(&self, filter: &str) -> Result<holon_api::QuickOpenResults> {
+        use crate::storage::BLOCK_READ_TABLE;
+        let trimmed = filter.trim();
+        if trimmed.is_empty() {
+            return Ok(holon_api::QuickOpenResults::default());
+        }
+        let escaped = trimmed.replace('\'', "''");
+
+        // Pages: blocks carrying the 'Page' tag whose content matches. Label is
+        // the first content line (the page title). Prefix matches rank first.
+        let pages_sql = format!(
+            "SELECT b.id AS id, substr(b.content, 1, instr(b.content || char(10), char(10)) - 1) \
+             AS label FROM {BLOCK_READ_TABLE} b JOIN block_tags bt ON bt.block_id = b.id WHERE \
+             bt.tag = 'Page' AND b.content LIKE '%{escaped}%' ORDER BY (b.content LIKE \
+             '{escaped}%') DESC, length(b.content) ASC LIMIT 20"
+        );
+        // Content: non-page blocks whose content matches. Label is the matched
+        // content (full block content — the modal truncates for display).
+        let content_sql = format!(
+            "SELECT b.id AS id, b.content AS label FROM {BLOCK_READ_TABLE} b WHERE b.content LIKE \
+             '%{escaped}%' AND b.id NOT IN (SELECT block_id FROM block_tags WHERE tag = 'Page') \
+             ORDER BY (b.content LIKE '{escaped}%') DESC, length(b.content) ASC LIMIT 30"
+        );
+
+        let pages = parse_link_candidates(
+            BackendEngine::execute_query(self, pages_sql, HashMap::new(), None).await?,
+        )?;
+        let content = parse_link_candidates(
+            BackendEngine::execute_query(self, content_sql, HashMap::new(), None).await?,
+        )?;
+        Ok(holon_api::QuickOpenResults { pages, content })
+    }
+
+    async fn breadcrumb_trail(&self, block_id: &EntityUri) -> Result<Vec<LinkCandidate>> {
+        use crate::storage::BLOCK_READ_TABLE;
+        let escaped_id = block_id.to_string().replace('\'', "''");
+
+        // 1. Ancestor path from the matview (`/rootId/childId/.../blockId`).
+        let path_sql =
+            format!("SELECT path FROM block_with_path WHERE id = '{escaped_id}' LIMIT 1");
+        let path_rows = BackendEngine::execute_query(self, path_sql, HashMap::new(), None).await?;
+        let path = path_rows
+            .first()
+            .and_then(|r| r.get("path"))
+            .and_then(|v| v.as_string())
+            .ok_or_else(|| {
+                anyhow::anyhow!("breadcrumb: block {block_id} has no path in block_with_path")
+            })?
+            .to_string();
+
+        // Ordered ancestor ids, root → target.
+        let ordered_ids: Vec<String> = path
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        if ordered_ids.is_empty() {
+            anyhow::bail!("breadcrumb: empty ancestor path {path:?} for {block_id}");
+        }
+
+        // 2. Titles for the `Page`-tagged ancestors among those ids.
+        let in_list = ordered_ids
+            .iter()
+            .map(|id| format!("'{}'", id.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let titles_sql = format!(
+            "SELECT b.id AS id, substr(b.content, 1, instr(b.content || char(10), char(10)) - 1) \
+             AS label FROM {BLOCK_READ_TABLE} b JOIN block_tags bt ON bt.block_id = b.id WHERE \
+             bt.tag = 'Page' AND b.id IN ({in_list})"
+        );
+        let title_rows =
+            BackendEngine::execute_query(self, titles_sql, HashMap::new(), None).await?;
+        let page_titles: std::collections::HashMap<String, String> = title_rows
+            .into_iter()
+            .filter_map(|row| {
+                let id = row.get("id").and_then(|v| v.as_string())?.to_string();
                 let label = row
                     .get("label")
                     .and_then(|v| v.as_string())
                     .unwrap_or("(untitled)")
                     .to_string();
-                Ok(LinkCandidate { id, label })
+                Some((id, label))
             })
-            .collect()
+            .collect();
+
+        // 3. Emit page ancestors in path order (root → current).
+        let mut trail = Vec::new();
+        for raw_id in &ordered_ids {
+            if let Some(label) = page_titles.get(raw_id) {
+                let id = EntityUri::parse(raw_id).map_err(|e| {
+                    anyhow::anyhow!("breadcrumb: path id {raw_id:?} is not a valid EntityUri: {e}")
+                })?;
+                trail.push(LinkCandidate {
+                    id,
+                    label: label.clone(),
+                });
+            }
+        }
+        if trail.is_empty() {
+            anyhow::bail!(
+                "breadcrumb: no Page-tagged ancestors resolved for {block_id} (path {path:?})"
+            );
+        }
+        Ok(trail)
     }
 
     /// One-shot compile + execute (the advice weave's canonical read, ADR
@@ -133,6 +223,31 @@ impl QueryEngine for BackendEngine {
                 .map(str::to_string)
         }))
     }
+}
+
+/// Parse `(id, label)` search rows into typed [`LinkCandidate`]s, failing loud
+/// on a missing/invalid `id` (parse-don't-validate at the storage boundary).
+/// Shared by [`QueryEngine::search_link_candidates`] and
+/// [`QueryEngine::quick_open_search`].
+fn parse_link_candidates(rows: Vec<holon_api::StorageEntity>) -> Result<Vec<LinkCandidate>> {
+    rows.into_iter()
+        .map(|row| {
+            let raw_id = row
+                .get("id")
+                .and_then(|v| v.as_string())
+                .ok_or_else(|| anyhow::anyhow!("link-search row missing 'id': {row:?}"))?
+                .to_string();
+            let id = EntityUri::parse(&raw_id).map_err(|e| {
+                anyhow::anyhow!("link-search row id {raw_id:?} is not a valid EntityUri: {e}")
+            })?;
+            let label = row
+                .get("label")
+                .and_then(|v| v.as_string())
+                .unwrap_or("(untitled)")
+                .to_string();
+            Ok(LinkCandidate { id, label })
+        })
+        .collect()
 }
 
 #[async_trait]

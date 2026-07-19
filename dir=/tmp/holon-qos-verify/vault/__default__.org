@@ -1,0 +1,75 @@
+#+ID: __default__
+* Holon Layout
+:PROPERTIES:
+:ID: root-layout
+:END:
+** Advice Rules
+:PROPERTIES:
+:ID: default-advice-rules
+:END:
+#+BEGIN_SRC holon_advice_rule_yaml :id lessons_for_tasks::rule::0
+# Bundled advice rule (ADR 0022 v1 cut). Ships INACTIVE — set `active: true` to
+# enable; flipping it triggers the single matview reconcile. See docs/adr/0022.
+name: lessons_for_tasks
+active: false
+anchor:
+  has_tag: task
+candidates:
+  tag_overlap_recency:
+    source:
+      has_tag: lesson
+k: 5
+#+END_SRC
+** Left Sidebar
+:PROPERTIES:
+:ID: default-left-sidebar
+:collapse_to: drawer
+:END:
+#+BEGIN_SRC render :id left_sidebar::render::0
+column(tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: selectable(row(icon("notebook"), spacer(6), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})}), divider(), row(icon("sync"), spacer(6), text("Integrations", #{bold: true})), live_query(#{sql: "SELECT provider_name, updated_at FROM sync_states ORDER BY provider_name ASC", item_template: row(spacer(6), icon("link"), spacer(6), text(col("provider_name")), spacer(8), text(col("updated_at")))}))
+#+END_SRC
+#+BEGIN_SRC holon_sql :id left_sidebar::src::0
+SELECT b.* FROM block b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = 'Page' AND b.id != 'block:__default__' ORDER BY b.content ASC
+#+END_SRC
+** Main Panel
+:PROPERTIES:
+:ID: default-main-panel
+:END:
+#+BEGIN_SRC holon_sql :id default-main-panel::src::0
+WITH RECURSIVE focus_descendants AS (
+  SELECT b.*, 0 AS _depth
+  FROM focus_roots fr
+  JOIN block b ON b.id = fr.root_id
+  WHERE fr.region = 'main'
+  UNION ALL
+  SELECT child.*, fd._depth + 1
+  FROM focus_descendants fd
+  JOIN block child ON child.parent_id = fd.id
+  LEFT JOIN block_tags bt ON bt.block_id = fd.id AND bt.tag = 'Page'
+  WHERE fd._depth = 0 OR bt.block_id IS NULL
+)
+SELECT * FROM focus_descendants ORDER BY _depth, sort_key
+#+END_SRC
+** Right Sidebar
+:PROPERTIES:
+:ID: default-right-sidebar
+:collapse_to: drawer
+:END:
+#+BEGIN_SRC render :id default-right-sidebar::render::0
+tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: render_entity(), rules: [#{when: eq("level", 0), override: #{role: "page_title", show_bullet: false, show_chevron: false}}]})
+#+END_SRC
+#+BEGIN_SRC holon_sql :id default-right-sidebar::src::0
+WITH RECURSIVE focus_descendants AS (
+  SELECT b.*, fr.added_ts, 0 AS _depth
+  FROM focus_roots fr
+  JOIN block b ON b.id = fr.root_id
+  WHERE fr.region = 'right'
+  UNION ALL
+  SELECT child.*, fd.added_ts, fd._depth + 1
+  FROM focus_descendants fd
+  JOIN block child ON child.parent_id = fd.id
+  LEFT JOIN block_tags bt ON bt.block_id = fd.id AND bt.tag = 'Page'
+  WHERE fd._depth = 0 OR bt.block_id IS NULL
+)
+SELECT * FROM focus_descendants ORDER BY added_ts DESC, sort_key
+#+END_SRC

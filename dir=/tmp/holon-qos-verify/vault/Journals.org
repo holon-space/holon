@@ -1,0 +1,22 @@
+#+ID: journals
+#+BEGIN_SRC render :id journals::render::0
+list(#{sortkey: "-content", item_template: column(render_entity(), divider())})
+#+END_SRC
+#+BEGIN_SRC holon_sql :id journals::src::0
+SELECT * FROM journal_feed ORDER BY content DESC
+#+END_SRC
+* 2026-07-19
+:PROPERTIES:
+:ID: 1b63b3e1-24eb-5fd2-81b2-22fb97c3ba30
+:END:
+* Journal Auto-Create
+:PROPERTIES:
+:ID: journals::auto-create
+:END:
+#+BEGIN_SRC holon_rule :id journals::action::0
+name: daily_journal
+when: 'not block_exists("Journals/{today}")'
+emit:
+  place: journals
+  name: "{today}"
+#+END_SRC
