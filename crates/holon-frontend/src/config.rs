@@ -351,6 +351,19 @@ pub fn load_config(
 
     let toml_path = config_dir.join("holon.toml");
 
+    // First run: a missing config file is not an error. Persist the built-in
+    // defaults so the rest of the pipeline reads a real file (and the user has
+    // something to edit), and disclose it via an info line. A PRESENT but
+    // malformed file is NOT first run — it falls through to `Toml::file`, which
+    // surfaces the parse error loudly below.
+    if !toml_path.exists() {
+        save_config(config_dir, &HolonConfig::default())?;
+        tracing::info!(
+            "first run: created default config at {}",
+            toml_path.display()
+        );
+    }
+
     let traced = Config::<HolonConfig>::builder()
         .source(premortem::sources::Defaults::from(HolonConfig::default()))
         .source(premortem::sources::Toml::file(&toml_path))
@@ -639,6 +652,69 @@ mod tests {
         assert_eq!(
             config.resolve_db_path(dir),
             PathBuf::from("/custom/db.sqlite")
+        );
+    }
+
+    /// First run: a fresh config dir with no `holon.toml` must NOT fail. It
+    /// boots from built-in defaults and persists them to disk, and a second
+    /// load reads that file back to an identical config (round-trip).
+    #[test]
+    fn first_run_creates_default_config_and_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_path = dir.path().join("holon.toml");
+        assert!(!toml_path.exists(), "precondition: no config file yet");
+
+        let (traced1, _) = load_config(dir.path(), HolonConfig::default())
+            .expect("first run must load from defaults, not fail");
+        let config1 = traced1.into_inner();
+
+        assert!(
+            toml_path.exists(),
+            "first run must persist a default config"
+        );
+        let on_disk_first = std::fs::read_to_string(&toml_path).unwrap();
+
+        // Loaded config equals built-in defaults.
+        assert_eq!(
+            toml::to_string_pretty(&config1).unwrap(),
+            toml::to_string_pretty(&HolonConfig::default()).unwrap(),
+            "first-run config must equal built-in defaults"
+        );
+
+        // Second load reads the now-present file back identically and does not
+        // mutate it.
+        let (traced2, _) =
+            load_config(dir.path(), HolonConfig::default()).expect("second load must succeed");
+        let config2 = traced2.into_inner();
+        let on_disk_second = std::fs::read_to_string(&toml_path).unwrap();
+
+        assert_eq!(
+            on_disk_first, on_disk_second,
+            "second load must not rewrite the config file"
+        );
+        assert_eq!(
+            toml::to_string_pretty(&config1).unwrap(),
+            toml::to_string_pretty(&config2).unwrap(),
+            "config must round-trip identically across loads"
+        );
+    }
+
+    /// A PRESENT but malformed config file is NOT first run — it must fail loud
+    /// (surface the parse error), never silently fall back to defaults.
+    #[test]
+    fn malformed_config_fails_loud() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("holon.toml"),
+            "this is = = not valid toml [[[\n",
+        )
+        .unwrap();
+
+        let result = load_config(dir.path(), HolonConfig::default());
+        let err = result.expect_err("malformed config must fail loud, not fall back to defaults");
+        assert!(
+            err.to_string().contains("Config errors"),
+            "error must surface the config parse failure: {err}"
         );
     }
 
