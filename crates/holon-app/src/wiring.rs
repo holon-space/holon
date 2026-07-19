@@ -210,6 +210,37 @@ impl FrontendInjectorExt for Injector {
                 let ops = resolver.resolve::<LoroBlockOperations>();
                 Shared::new(CrudAuthority(ops as Arc<dyn OperationProvider>))
             }));
+
+            // Shared-subtree write-back disclosure (Inc 1). Forwards a
+            // not-yet-materialized shared edit to the DegradedSignalBus (provided
+            // by the Loro module in this branch) so the frontend banners it
+            // instead of the edit silently failing to reach disk. Only wired in
+            // Loro mode — shares don't exist in SqlOnly, so its absence there
+            // (di.rs WARN-logs) is correct.
+            self.provide::<dyn holon_filesystem::ShareWritebackDisclosure>(Provider::root(
+                |resolver| {
+                    let bus = resolver.resolve::<Arc<holon::sync::DegradedSignalBus>>();
+                    Arc::new(crate::loro_seams::ShareDegradedDisclosure {
+                        bus: (*bus).clone(),
+                    }) as Arc<dyn holon_filesystem::ShareWritebackDisclosure>
+                },
+            ));
+
+            // Authoritative mount registry (Inc 3): the org ingest guard skips a
+            // shared-subtree projection file ONLY when its page id is a real
+            // mount node in the global Loro tree — never on drawer content alone
+            // (which round-trips from any user file). Backed by LoroShareBackend
+            // (async-provided), so resolve async.
+            self.provide::<dyn holon_filesystem::MountRegistry>(Provider::root_async(
+                |resolver| async move {
+                    let backend = resolver
+                        .resolve_async::<Arc<holon_loro::loro_share_backend::LoroShareBackend>>()
+                        .await;
+                    Arc::new(crate::loro_seams::LoroMountRegistry {
+                        backend: (*backend).clone(),
+                    }) as Arc<dyn holon_filesystem::MountRegistry>
+                },
+            ));
         }
 
         // OrgMode (native-only — holon-orgmode uses tokio::fs + tokio::process)

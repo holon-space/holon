@@ -45,6 +45,14 @@ pub enum ShareDegradedReason {
     /// aggregated per-file failure summary. `shared_tree_id` is the sentinel
     /// `"org-initial-scan"` (this is not tied to a shared doc).
     OrgIngestFailed(String),
+    /// A block inside a shared subtree was edited, but its content could NOT be
+    /// materialized to a dedicated on-disk org file (the mount is not yet a
+    /// page-file, so the write-back layer cannot resolve a path). The edit is
+    /// safe in Loro + SQL and syncs to peers, but disk org is stale until
+    /// materialization is wired. Disclosed (not silently dropped) so the gap is
+    /// visible. String carries the offending block id. `shared_tree_id` names
+    /// the share.
+    SharedSubtreeNotMaterialized(String),
 }
 
 #[derive(Clone, Debug)]

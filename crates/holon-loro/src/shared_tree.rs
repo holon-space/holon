@@ -82,16 +82,13 @@ const MOUNT_KIND_VALUE: &str = "shared_tree";
 const MOUNT_SHARED_TREE_ID: &str = "shared_tree_id";
 const MOUNT_SHARED_ROOT: &str = "shared_root";
 
-/// Block property key that marks a row as a share-participating node.
-/// Value `"mount"` identifies the local mount block; other roles
-/// (e.g. `"participant"`) are reserved for future descendant projection.
-pub const SHARE_ROLE_PROPERTY: &str = "share-role";
-/// Value of `SHARE_ROLE_PROPERTY` for a shared-tree mount row.
-pub const SHARE_ROLE_MOUNT: &str = "mount";
-/// Block property key storing the shared tree's UUID.
-/// Mirrors `MOUNT_SHARED_TREE_ID` in Loro metadata so SQL queries can locate
-/// mount rows without traversing Loro.
-pub const SHARED_TREE_ID_PROPERTY: &str = "shared-tree-id";
+// Share-property keys live canonically in `holon-api::share_props` so every
+// layer (share backend, org write-back, SQL projection) agrees on one spelling.
+// Re-exported here for this crate's existing `shared_tree::SHARE_ROLE_*` /
+// `shared_tree::SHARED_TREE_ID_PROPERTY` call sites.
+pub use holon_api::share_props::SHARE_ROLE_MOUNT;
+pub use holon_api::share_props::SHARE_ROLE_PROPERTY;
+pub use holon_api::share_props::SHARED_TREE_ID_PROPERTY;
 
 /// Result of extracting a subtree for sharing.
 pub struct ExtractedSubtree {

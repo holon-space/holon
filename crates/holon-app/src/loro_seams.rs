@@ -615,6 +615,43 @@ impl AliasRegistrar for LoroAliasRegistrar {
     }
 }
 
+/// `ShareWritebackDisclosure` (Inc 1) that forwards a shared-subtree
+/// write-back gap to the `DegradedSignalBus`, so the frontend renders a
+/// degraded banner instead of the edit silently failing to reach disk. Lives
+/// in the wiring crate because it bridges the storage-agnostic port
+/// (holon-filesystem) to the concrete bus (holon-loro/holon).
+pub struct ShareDegradedDisclosure {
+    pub bus: Arc<holon::sync::DegradedSignalBus>,
+}
+
+impl holon_filesystem::ShareWritebackDisclosure for ShareDegradedDisclosure {
+    fn shared_subtree_not_materialized(&self, block_id: &EntityUri, shared_tree_id: &str) {
+        self.bus.emit(holon::sync::ShareDegraded {
+            shared_tree_id: shared_tree_id.to_string(),
+            reason: holon::sync::ShareDegradedReason::SharedSubtreeNotMaterialized(
+                block_id.to_string(),
+            ),
+        });
+    }
+}
+
+/// `MountRegistry` (Inc 3) backed by the global Loro tree's mount nodes — the
+/// authoritative, non-user-authorable signal for "is this id a real shared
+/// subtree mount?". Delegates to `LoroShareBackend::is_registered_mount`.
+pub struct LoroMountRegistry {
+    pub backend: Arc<holon_loro::loro_share_backend::LoroShareBackend>,
+}
+
+#[async_trait]
+impl holon_filesystem::MountRegistry for LoroMountRegistry {
+    async fn is_registered_mount(&self, block_id: &EntityUri) -> anyhow::Result<bool> {
+        self.backend
+            .is_registered_mount(block_id.as_str())
+            .await
+            .map_err(|e| anyhow::anyhow!("mount registry check for {block_id}: {e}"))
+    }
+}
+
 #[cfg(test)]
 mod order_minting_type_level {
     //! Type-level proof for spec 0008 §3.2 (Replication.md §5): the Loro
