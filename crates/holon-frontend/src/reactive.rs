@@ -2271,8 +2271,7 @@ impl ReactiveEngine {
                                 // Publish consumer progress so a settle can wait
                                 // for this async drain to catch the emitted CDC
                                 // (see `apply_epoch` field docs).
-                                apply_epoch
-                                    .fetch_add(1, std::sync::atomic::Ordering::Release);
+                                apply_epoch.fetch_add(1, std::sync::atomic::Ordering::Release);
                             }
                         }
                     }
@@ -3164,9 +3163,9 @@ fn maybe_mirror_navigation_focus(ui_state: &UiState, intent: &crate::operations:
                 ui_state.bump_main_nav();
             }
         }
-        // ALLOW(direct_focus_mutation): mirror of navigation.go_home into UiState for value-fn
-        // graph.
         Ok(NavigationOp::GoHome) => {
+            // ALLOW(direct_focus_mutation): mirror of navigation.go_home into UiState for
+            // value-fn graph.
             ui_state.set_focus(None);
             ui_state.bump_main_nav();
         }

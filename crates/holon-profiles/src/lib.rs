@@ -451,11 +451,13 @@ pub fn profile_variants_to_stored(
             };
 
         let data_condition_required = match &data_condition {
-            Some(dc) => CompiledExpr::compile(&RhaiEngine::new(), dc.as_str())
-                .map_err(|e| {
-                    anyhow::anyhow!("compiling data condition of variant '{}': {e}", pv.name)
-                })?
-                .required_columns,
+            Some(dc) => {
+                CompiledExpr::compile(&RhaiEngine::new(), dc.as_str())
+                    .map_err(|e| {
+                        anyhow::anyhow!("compiling data condition of variant '{}': {e}", pv.name)
+                    })?
+                    .required_columns
+            }
             None => BTreeSet::new(),
         };
 

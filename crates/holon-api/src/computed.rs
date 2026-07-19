@@ -92,8 +92,8 @@ pub fn resolve_computed_fields(
 /// **Type-aware binding (C4 caller contract).** This is the production enrich
 /// seat (`ui_watcher::enrich_row` → `resolve_computed_only`) and the render
 /// seat (`EntityProfile::build_scope`). Each field carries its
-/// `required_columns` (derived from its AST at compile time). Before evaluating,
-/// we compare those against the live `scope`:
+/// `required_columns` (derived from its AST at compile time). Before
+/// evaluating, we compare those against the live `scope`:
 ///
 /// - **Structurally unbound** (a required column is absent from scope — e.g.
 ///   `task_state` on a non-task block, or a sibling computed field that was
@@ -113,9 +113,9 @@ pub fn resolve_computed_fields(
 /// profile resolver (`register_entity_lookups`), which the default
 /// `bounded_engine()` behind `Computation::eval` lacks.
 ///
-/// `declared_columns` is the entity's declared schema (TypeDefinition persistent
-/// field names). Pass an empty set when no schema is known (every miss is then
-/// treated as structurally-absent → silent).
+/// `declared_columns` is the entity's declared schema (TypeDefinition
+/// persistent field names). Pass an empty set when no schema is known (every
+/// miss is then treated as structurally-absent → silent).
 pub fn resolve_computed_fields_with_scope(
     engine: &RhaiEngine,
     scope: &mut Scope,
@@ -243,10 +243,16 @@ mod tests {
     fn present_columns_still_evaluate_and_a_prior_field_binds_dependents() {
         let engine = RhaiEngine::new();
         let mut scope = Scope::new();
-        scope.push("content_type".to_string(), value_to_dynamic(&Value::String("text".into())));
+        scope.push(
+            "content_type".to_string(),
+            value_to_dynamic(&Value::String("text".into())),
+        );
         let mut ctx = HashMap::new();
         let fields = vec![
-            ("is_source".to_string(), compile("content_type == \"source\"")),
+            (
+                "is_source".to_string(),
+                compile("content_type == \"source\""),
+            ),
             ("shown".to_string(), compile("!is_source")),
         ];
         let declared = BTreeSet::new();

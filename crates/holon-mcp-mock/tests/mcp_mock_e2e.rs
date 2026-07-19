@@ -453,7 +453,11 @@ async fn once_only_always_run_dispatches() {
         .expect("always_run once_only should dispatch");
     let resp = res.response.expect("write response present");
     assert!(is_true(&resp, "ok"), "server should ack ok=true: {resp:?}");
-    assert_eq!(as_int(&resp, "applied_count"), 1, "exactly one remote effect");
+    assert_eq!(
+        as_int(&resp, "applied_count"),
+        1,
+        "exactly one remote effect"
+    );
 }
 
 // Increment 4 (confirm_manually, the default): a once_only write does NOT fire
@@ -493,7 +497,11 @@ async fn once_only_confirm_then_approve_one_effect() {
     let provider = &integ.operation_provider;
 
     provider
-        .execute_operation(&EntityName::from("items"), "write_item", storage("buy milk"))
+        .execute_operation(
+            &EntityName::from("items"),
+            "write_item",
+            storage("buy milk"),
+        )
         .await
         .expect_err("first attempt is queued for confirmation");
     let key = {
@@ -504,9 +512,19 @@ async fn once_only_confirm_then_approve_one_effect() {
 
     let res = provider.approve(&key).await.expect("approve re-dispatches");
     let resp = res.response.expect("response present");
-    assert!(!is_true(&resp, "deduped"), "the approved dispatch is the effect");
-    assert_eq!(as_int(&resp, "applied_count"), 1, "exactly one remote effect");
-    assert_eq!(provider.pending_store().state_of(&key), Some(PendingState::Sent));
+    assert!(
+        !is_true(&resp, "deduped"),
+        "the approved dispatch is the effect"
+    );
+    assert_eq!(
+        as_int(&resp, "applied_count"),
+        1,
+        "exactly one remote effect"
+    );
+    assert_eq!(
+        provider.pending_store().state_of(&key),
+        Some(PendingState::Sent)
+    );
 }
 
 // Increment 4 (minor amendment): with NO key_param the remote cannot dedup, so
@@ -525,7 +543,10 @@ async fn once_only_confirm_approve_no_key_param_local_at_most_once() {
         .expect_err("queued for confirmation");
     let key = provider.pending_writes()[0].intent_key.clone();
 
-    let res = provider.approve(&key).await.expect("first approve dispatches");
+    let res = provider
+        .approve(&key)
+        .await
+        .expect("first approve dispatches");
     assert_eq!(
         as_int(&res.response.expect("resp"), "applied_count"),
         1,
@@ -537,11 +558,13 @@ async fn once_only_confirm_approve_no_key_param_local_at_most_once() {
         .await
         .expect_err("second approve is a no-op");
     assert!(
-        err.to_string().contains("already approved")
-            || err.to_string().contains("already"),
+        err.to_string().contains("already approved") || err.to_string().contains("already"),
         "second approve must be a disclosed no-op, got: {err}"
     );
-    assert_eq!(provider.pending_store().state_of(&key), Some(PendingState::Sent));
+    assert_eq!(
+        provider.pending_store().state_of(&key),
+        Some(PendingState::Sent)
+    );
 }
 
 // Increment 4 (amendment B): two approves racing through the real store API are
@@ -565,11 +588,11 @@ async fn once_only_double_approve_is_noop() {
     let a = tokio::spawn(async move { store_a.confirm(&ka) });
     let b = tokio::spawn(async move { store_b.confirm(&kb) });
     let (ra, rb) = (a.await.unwrap(), b.await.unwrap());
-    assert!(
-        ra ^ rb,
-        "exactly one confirm must win (a={ra}, b={rb})"
+    assert!(ra ^ rb, "exactly one confirm must win (a={ra}, b={rb})");
+    assert_eq!(
+        provider.pending_store().state_of(&key),
+        Some(PendingState::Confirmed)
     );
-    assert_eq!(provider.pending_store().state_of(&key), Some(PendingState::Confirmed));
 
     // The winner's dispatch fires exactly one effect.
     let res = provider

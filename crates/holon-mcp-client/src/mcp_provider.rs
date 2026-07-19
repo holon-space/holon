@@ -368,9 +368,9 @@ impl McpOperationProvider {
     }
 
     /// Build a `PendingWrite` record capturing everything needed to re-dispatch
-    /// a `once_only` intent on approval (increment 4). `params` is cloned so the
-    /// stored call survives past the point where the live `execute_operation`
-    /// consumes its params.
+    /// a `once_only` intent on approval (increment 4). `params` is cloned so
+    /// the stored call survives past the point where the live
+    /// `execute_operation` consumes its params.
     fn pending_write_record(
         &self,
         entity_name: &EntityName,
@@ -699,12 +699,8 @@ impl OperationProvider for McpOperationProvider {
                         // inserting straight into `Dispatching`. A re-attempt on
                         // an existing (in-flight / sent / unknown) intent is
                         // refused — never fire the effect twice.
-                        let record = self.pending_write_record(
-                            entity_name,
-                            op_name,
-                            &params,
-                            original_name,
-                        );
+                        let record =
+                            self.pending_write_record(entity_name, op_name, &params, original_name);
                         if !self.pending.begin_dispatch(key, record) {
                             return Err(format!(
                                 "connector write blocked: once_only intent '{key}' for tool \
@@ -716,12 +712,8 @@ impl OperationProvider for McpOperationProvider {
                         }
                     }
                     WriteDecision::RequireConfirmation => {
-                        let record = self.pending_write_record(
-                            entity_name,
-                            op_name,
-                            &params,
-                            original_name,
-                        );
+                        let record =
+                            self.pending_write_record(entity_name, op_name, &params, original_name);
                         self.pending.enqueue_pending(key, record);
                         return Err(format!(
                             "connector write queued for confirmation: tool '{original_name}' is \
