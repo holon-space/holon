@@ -133,24 +133,26 @@ fn open_holon_window(
             available_widgets: widgets,
             screen_size: None,
         };
-        let mut holon_config = HolonConfig {
-            db_path,
-            vault: holon_frontend::config::VaultConfig { root: orgmode_root },
-            ..Default::default()
-        };
-        // Mobile builds don't read `~/.config/holon/holon.toml`, so the
-        // desktop-style opt-in (`[crdt] enabled = true`) doesn't apply here.
-        // Without this, `LoroModule` is never configured → `Arc<LoroShareBackend>`
-        // is never registered → share/accept ops fail with
-        // "No provider registered for entity: tree". Mobile is a first-class
-        // target for sharing, so enable the CRDT substrate unconditionally.
-        holon_config.crdt.enabled = Some(true);
         // The caller pins the config dir on mobile (app-private storage); only
         // defer to `resolve_config_dir` when unset. On Android the relative
         // `.holon` default is on the read-only CWD `/` and any preference write
         // there aborts the process, so the app-private dir is load-bearing.
         let config_dir =
             config_dir.unwrap_or_else(|| holon_frontend::config::resolve_config_dir(None));
+        // Load the PERSISTED config from `config_dir` (not `::default()`), so a
+        // `ui.theme` (and any other preference) saved by the settings UI in a
+        // prior session is applied at boot — desktop reads this via
+        // `load_config`; mobile skipping it booted the built-in `holonLight`
+        // every restart (dogfood 2026-07-19). CRDT is force-enabled: mobile is a
+        // first-class sharing target and without it `LoroModule` is never
+        // configured → `Arc<LoroShareBackend>` unregistered → share/accept ops
+        // fail with "No provider registered for entity: tree".
+        let holon_config = HolonConfig::load_runtime_with_platform_overrides(
+            &config_dir,
+            db_path,
+            orgmode_root,
+            true,
+        );
         let session_config = SessionConfig::new(ui_info);
 
         // Bootstrap through `GpuiModule` (same path as desktop `main.rs`)

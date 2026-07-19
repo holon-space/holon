@@ -507,6 +507,41 @@ impl HolonConfig {
         }
     }
 
+    /// Boot config for a platform launch that pins its paths programmatically
+    /// (mobile: iOS / Android) instead of reading them from CLI/env.
+    ///
+    /// Desktop boots through [`load_config`], which layers the persisted
+    /// `holon.toml` over the built-in defaults via premortem — so a preference
+    /// set in a prior session (e.g. `ui.theme = "dracula"`) is applied at boot.
+    /// Mobile does NOT go through `load_config`; it must load the persisted
+    /// config the same way, or every restart boots the built-in defaults and
+    /// silently discards the user's saved theme (dogfood 2026-07-19).
+    ///
+    /// Starts from [`Self::load_runtime`] (persisted file → typed config; first
+    /// run with no file → built-in defaults; a MALFORMED file panics loud,
+    /// never a silent default), then applies the platform overrides that
+    /// are *not* user preferences: the platform-resolved db/vault paths
+    /// (only when the caller actually resolved one — `None` never clobbers
+    /// a persisted value) and the unconditional mobile CRDT opt-in. A
+    /// missing `ui.theme` key falls through to the documented default theme
+    /// downstream — that default is not a swallowed error.
+    pub fn load_runtime_with_platform_overrides(
+        config_dir: &Path,
+        db_path: Option<PathBuf>,
+        vault_root: Option<PathBuf>,
+        crdt_enabled: bool,
+    ) -> Self {
+        let mut config = Self::load_runtime(config_dir);
+        if db_path.is_some() {
+            config.db_path = db_path;
+        }
+        if vault_root.is_some() {
+            config.vault.root = vault_root;
+        }
+        config.crdt.enabled = Some(crdt_enabled);
+        config
+    }
+
     /// Save config to `{config_dir}/holon.toml`, preserving any keys not owned
     /// by HolonConfig. On wasm32, logs a visible warning and no-ops —
     /// config persistence is not supported.
@@ -750,6 +785,80 @@ mod tests {
             toml::to_string_pretty(&config2).unwrap(),
             "config must round-trip identically across loads"
         );
+    }
+
+    /// DESKTOP boot path: `load_config` (Defaults → holon.toml → CLI/env) must
+    /// apply a `ui.theme` persisted in `holon.toml`. Proves the desktop path is
+    /// NOT affected by the boot-theme regression (that one is mobile-only).
+    #[test]
+    fn load_config_applies_persisted_ui_theme() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("holon.toml"), "[ui]\ntheme = \"dracula\"\n").unwrap();
+
+        let (traced, _) = load_config(dir.path(), HolonConfig::default())
+            .expect("load_config must succeed for a valid config");
+        assert_eq!(
+            traced.into_inner().ui.theme.as_deref(),
+            Some("dracula"),
+            "desktop boot (load_config) must apply the persisted ui.theme"
+        );
+    }
+
+    /// MOBILE boot path regression (dogfood 2026-07-19): mobile built its
+    /// `HolonConfig` from `::default()`, so a `ui.theme` persisted by the
+    /// settings UI was ignored on restart (booted `holonLight`). The boot
+    /// config must read the persisted `ui.theme`, while platform-resolved
+    /// paths and the mobile CRDT opt-in still override.
+    #[test]
+    fn mobile_boot_applies_persisted_ui_theme() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("holon.toml"), "[ui]\ntheme = \"dracula\"\n").unwrap();
+
+        let config = HolonConfig::load_runtime_with_platform_overrides(
+            dir.path(),
+            Some(PathBuf::from("/data/holon.db")),
+            None,
+            true,
+        );
+
+        assert_eq!(
+            config.ui.theme.as_deref(),
+            Some("dracula"),
+            "mobile boot must apply the persisted ui.theme, not reset to default"
+        );
+        assert_eq!(
+            config.db_path,
+            Some(PathBuf::from("/data/holon.db")),
+            "platform-resolved db_path must still override"
+        );
+        assert_eq!(
+            config.crdt.enabled,
+            Some(true),
+            "mobile CRDT opt-in must still apply"
+        );
+    }
+
+    /// First-run mobile boot (no persisted file yet) must NOT fail and must
+    /// land on the built-in default theme (`ui.theme == None` → default
+    /// downstream).
+    #[test]
+    fn mobile_boot_first_run_defaults_theme_and_keeps_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!dir.path().join("holon.toml").exists());
+
+        let config = HolonConfig::load_runtime_with_platform_overrides(
+            dir.path(),
+            None,
+            Some(PathBuf::from("/vault")),
+            true,
+        );
+
+        assert_eq!(
+            config.ui.theme, None,
+            "no persisted theme → default downstream"
+        );
+        assert_eq!(config.vault.root, Some(PathBuf::from("/vault")));
+        assert_eq!(config.crdt.enabled, Some(true));
     }
 
     /// A PRESENT but malformed config file is NOT first run — it must fail loud
