@@ -409,6 +409,20 @@ impl Block {
         }
     }
 
+    /// The `shared-tree-id` this block belongs to, if any. Present on a mount
+    /// row and on every projected descendant of a shared subtree.
+    pub fn shared_tree_id(&self) -> Option<String> {
+        self.get_property_str(crate::share_props::SHARED_TREE_ID_PROPERTY)
+    }
+
+    /// Whether this block is the local mount row for a shared subtree
+    /// (`share-role == "mount"`).
+    pub fn is_share_mount(&self) -> bool {
+        self.get_property_str(crate::share_props::SHARE_ROLE_PROPERTY)
+            .as_deref()
+            == Some(crate::share_props::SHARE_ROLE_MOUNT)
+    }
+
     /// Create a new text block with sensible defaults.
     pub fn new_text(id: EntityUri, parent_id: EntityUri, text: impl Into<String>) -> Self {
         Self {

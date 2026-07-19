@@ -109,6 +109,27 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
     device re-ingests the other's projections as fresh intent: duplicated ops
     with wrong attribution, order oscillation, and `.sync-conflict` files
     ingested as duplicate-ID documents.
+
+    **Disclosed exception — shared/mounted subtrees (share write-back):** a
+    shared subtree is exactly the inverse setup of the failure above, and turns
+    it into the design. The subtree lives in its OWN shared `LoroDoc` that
+    converges across devices over iroh (invariant 11's sanctioned P2P channel).
+    For that subtree, **Loro is truth and the on-disk org file is a one-way
+    projection SINK** — rendered FROM the shared doc, never re-ingested as
+    fresh global intent (Inc 3 marks the file so the file-sync controller
+    suppresses its ingest). This is the deliberate carve-out from "org files
+    are truth": for a mounted subtree the org file is a materialized view, and
+    convergence still travels only through Loro/P2P, never through the file.
+
+    The mount node is projected as a **Page** so the subtree owns a dedicated
+    file, and there is a deliberate **Loro↔SQL shape difference at the mount
+    boundary** the keystone oracles are taught to MAP (never skip): the mount
+    id ≡ the shared page's id — when a PAGE `P` is shared the mount adopts `P`'s
+    identity and `P`'s node FOLDS onto the mount in the SQL/org projection
+    (P's children reparent to the mount, P's own row is dropped) while `P`
+    stays uncollapsed in the shared Loro doc. When a plain BLOCK is shared the
+    mount is a synthetic container page. A mount page never sits under a
+    non-page (Amendment A: it bubbles to the nearest page ancestor).
 12. **Every field write resolves a cell backing** — content and scalars do so
     in both modes: `LoroTextCellBacking`/`LoroMetaCellBacking<T>` in Full,
     `LwwTextCellBacking`/`LwwScalarBacking<T>` in SqlOnly (via
