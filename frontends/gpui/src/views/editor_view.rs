@@ -141,6 +141,15 @@ pub struct EditorView {
     /// keyboard-selected entry in view and the user's manual scroll survives
     /// re-renders while the menu is open.
     popup_scroll: ScrollHandle,
+    /// Last popup `selected_index` we programmatically scrolled into view.
+    /// `scroll_to_item` must run ONLY when the keyboard selection actually
+    /// moves — calling it every render (as the first cut of the 07-18 fix did)
+    /// re-snaps the viewport to the selected row on every unrelated re-render
+    /// (cursor blink, data-sync notify, signal ticks), which silently defeats
+    /// the user's own mouse-wheel scroll: the menu appears to cap at the first
+    /// screenful with "no scroll" (dogfood 2026-07-19). `None` while the popup
+    /// is closed so the next open scrolls back to the top.
+    popup_scrolled_index: std::cell::Cell<Option<usize>>,
     /// Last window-focus state observed by the render-path reconcile gate
     /// (`focus_transition`). Used to detect the frame where focus first arrives
     /// (false→true) so the NO-CELL builder backstop can re-sync a stale
@@ -659,6 +668,7 @@ impl EditorView {
             nav,
             bounds_registry,
             popup_scroll: ScrollHandle::new(),
+            popup_scrolled_index: std::cell::Cell::new(None),
             _data_subscription,
             _focus_subscription,
             previous_text,
@@ -1041,8 +1051,33 @@ impl Render for EditorView {
         let popup_overlay = {
             let ctrl = self.controller.lock().unwrap();
             let max_h = popup_max_height_px(window.viewport_size().height.into());
-            ctrl.popup_state()
-                .map(|s| render_popup(&s, &self.bounds_registry, &self.popup_scroll, max_h, cx))
+            match ctrl.popup_state() {
+                Some(s) => {
+                    // Drive `scroll_to_item` ONLY on the frame the keyboard
+                    // selection actually moved. Doing it every render re-snaps
+                    // the viewport to the selected row on unrelated notifies and
+                    // eats the user's mouse-wheel scroll (the "no scroll" cap).
+                    let scroll_to_selection = popup_should_scroll_to_selection(
+                        self.popup_scrolled_index.get(),
+                        s.selected_index,
+                    );
+                    self.popup_scrolled_index.set(Some(s.selected_index));
+                    Some(render_popup(
+                        &s,
+                        &self.bounds_registry,
+                        &self.popup_scroll,
+                        max_h,
+                        scroll_to_selection,
+                        cx,
+                    ))
+                }
+                None => {
+                    // Popup closed — forget the scrolled row so the next open
+                    // starts at the top instead of a stale mid-list offset.
+                    self.popup_scrolled_index.set(None);
+                    None
+                }
+            }
         };
 
         let window_handle = window.window_handle();
@@ -1644,11 +1679,28 @@ fn popup_max_height_px(viewport_height: f32) -> f32 {
     (viewport_height - POPUP_MARGIN_PX).clamp(POPUP_MIN_HEIGHT_PX, POPUP_DESIRED_HEIGHT_PX)
 }
 
+/// Whether this render should re-drive `scroll_to_item` to reveal the
+/// keyboard-selected popup row.
+///
+/// Returns true only when the selection has actually MOVED since the last
+/// programmatic scroll. Scrolling every render re-snaps the viewport to the
+/// selected row on unrelated re-renders (cursor blink, data-sync notify,
+/// signal ticks), which cancels the user's own mouse-wheel scroll and makes a
+/// long menu look capped with "no scroll" (dogfood 2026-07-19). `prev` is
+/// `None` while the popup is closed, so the first frame of a fresh open always
+/// scrolls (to the top, index 0).
+///
+/// Pure so the scroll-gating policy is unit-tested without a live gpui window.
+fn popup_should_scroll_to_selection(prev: Option<usize>, selected: usize) -> bool {
+    prev != Some(selected)
+}
+
 fn render_popup(
     state: &PopupState,
     bounds_registry: &BoundsRegistry,
     scroll: &ScrollHandle,
     max_height_px: f32,
+    scroll_to_selection: bool,
     cx: &App,
 ) -> Deferred {
     use gpui::div;
@@ -1735,8 +1787,13 @@ fn render_popup(
     }
 
     // Keep the keyboard-selected entry inside the scroll viewport as the user
-    // arrows through a list longer than `max_height_px`.
-    scroll.scroll_to_item(state.selected_index);
+    // arrows through a list longer than `max_height_px`. Gated on an actual
+    // selection change (see `EditorView.popup_scrolled_index`) so unrelated
+    // re-renders don't re-snap the viewport and eat the user's mouse-wheel
+    // scroll — the "caps at one screenful, no scroll" dogfood bug.
+    if scroll_to_selection {
+        scroll.scroll_to_item(state.selected_index);
+    }
 
     // `anchored` positions the popup one line below the caret and, when that
     // would overrun the window bottom, flips it above / snaps it back inside
@@ -1841,6 +1898,28 @@ mod popup_layout {
     use super::POPUP_MARGIN_PX;
     use super::POPUP_MIN_HEIGHT_PX;
     use super::popup_max_height_px;
+    use super::popup_should_scroll_to_selection;
+
+    #[test]
+    fn fresh_open_scrolls_to_top() {
+        // Popup closed (`None`) → first frame scrolls (to index 0).
+        assert!(popup_should_scroll_to_selection(None, 0));
+    }
+
+    #[test]
+    fn unchanged_selection_does_not_rescroll() {
+        // The regression: an unrelated re-render (same selection) must NOT
+        // re-drive scroll_to_item, or it cancels the user's mouse-wheel scroll
+        // and the menu looks capped with no scroll.
+        assert!(!popup_should_scroll_to_selection(Some(3), 3));
+    }
+
+    #[test]
+    fn moved_selection_scrolls_into_view() {
+        // Arrowing down to a new row re-drives scroll-into-view.
+        assert!(popup_should_scroll_to_selection(Some(3), 4));
+        assert!(popup_should_scroll_to_selection(Some(4), 3));
+    }
 
     #[test]
     fn tall_window_caps_at_desired_height() {
