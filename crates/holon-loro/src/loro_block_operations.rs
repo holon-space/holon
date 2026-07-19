@@ -514,7 +514,25 @@ impl CrudOperations<Block> for LoroBlockOperations {
                 params.insert("value".to_string(), old);
                 (Some(block_op("set_field", params)), Vec::new())
             }
-            _ => (None, Vec::new()),
+            _ => {
+                // Every other field is routed to the block's properties map by
+                // the `_` write arm below (DEADLINE/PRIORITY from
+                // `set_due_date`/`set_priority`, and any generic org drawer
+                // key). Capture the prior value for an EXACT inverse. A
+                // previously-ABSENT property inverts to a REMOVE: `Value::Null`
+                // routed back through the write arm's delete path, so undo of a
+                // first-time property write leaves the block genuinely
+                // property-free rather than pinning a null-valued key. The
+                // properties blob is not a column the `SqlUndoStateReader`
+                // fingerprints, so `changes` stays empty (single-writer safe)
+                // while the inverse is a real, provably-correct restore.
+                let old = prior.get_property(field).unwrap_or(Value::Null);
+                let mut params = HashMap::new();
+                params.insert("id".to_string(), Value::String(id.to_string()));
+                params.insert("field".to_string(), Value::String(field.to_string()));
+                params.insert("value".to_string(), old);
+                (Some(block_op("set_field", params)), Vec::new())
+            }
         };
 
         match field {
@@ -624,13 +642,20 @@ impl CrudOperations<Block> for LoroBlockOperations {
                     .map_err(|e| format!("set_field('{f}') for {id}: {e:#}"))?;
             }
             _ => {
-                // Store in properties. A bare `task_state` keyword write gets
-                // its `task_state_category` sidecar derived and written in the
-                // SAME commit — the pair invariant `Block::set_task_state`
+                // Store in the properties map. A `Value::Null` REMOVES the key
+                // (the exact inverse of a previously-absent property) instead
+                // of pinning a null blob — `update_block_fields` routes through
+                // `apply_field_changes_to_meta`, which deletes on Null and
+                // inserts otherwise, per-key (H3-safe), matching the
+                // `LoroMetaCellBacking` write path.
+                //
+                // A bare `task_state` keyword write gets its
+                // `task_state_category` sidecar derived and written in the SAME
+                // commit — the pair invariant `Block::set_task_state`
                 // establishes at the org parse boundary (see
-                // `TaskState::category_str_for_keyword`); without this every
-                // UI cycle dropped/staled the category.
-                let mut props = HashMap::new();
+                // `TaskState::category_str_for_keyword`); a `task_state` cleared
+                // to Null removes both keys together.
+                let mut fields: Vec<(String, Value, Value)> = Vec::new();
                 if field == "task_state" {
                     let category = match &value {
                         Value::Null => Value::Null,
@@ -644,11 +669,11 @@ impl CrudOperations<Block> for LoroBlockOperations {
                             .into());
                         }
                     };
-                    props.insert("task_state_category".to_string(), category);
+                    fields.push(("task_state_category".to_string(), Value::Null, category));
                 }
-                props.insert(field.to_string(), value);
+                fields.push((field.to_string(), Value::Null, value));
                 backend
-                    .update_block_properties(id, &props)
+                    .update_block_fields(id, &fields)
                     .await
                     .map_err(|e| format!("Failed to update property: {}", e))?;
             }
@@ -1234,12 +1259,38 @@ impl MarkOperations<Block> for LoroBlockOperations {
         })?;
 
         let (doc_path, backend) = self.find_doc_for_block(id).await?;
+        // Capture the EXACT prior rich content (text + FULL mark set) BEFORE the
+        // mark write. The inverse restores it atomically via the whole-set
+        // `content=Object` path (`update_block_marked`), which clears every mark
+        // over the whole range before re-applying — so undo restores the exact
+        // prior marks. A blind `remove_mark(range, key)` inverse would instead
+        // strip a PRE-EXISTING overlapping mark of the same key the user never
+        // touched (e.g. applying Bold over a sub-range of an existing Bold span,
+        // then undoing, must NOT punch a hole in the original span). Text is
+        // unchanged by a mark op, so `changes` stays empty (single-writer safe),
+        // matching the `set_field("marks")` arm.
+        let prior = backend
+            .get_block(id)
+            .await
+            .map_err(|e| format!("apply_mark: capture prior marks: {e}"))?;
+        let prior_marks = prior.marks.clone().unwrap_or_default();
         backend
             .apply_inline_mark(id, start..end, &mark)
             .await
             .map_err(|e| format!("apply_inline_mark: {e}"))?;
         self.save_doc(&doc_path).await?;
-        Ok(OperationResult::irreversible(vec![]))
+        let inverse = block_op(
+            "set_field",
+            HashMap::from([
+                ("id".to_string(), Value::String(id.to_string())),
+                ("field".to_string(), Value::String("content".to_string())),
+                (
+                    "value".to_string(),
+                    rich_content_restore_value(&prior.content, &prior_marks),
+                ),
+            ]),
+        );
+        Ok(OperationResult::new(vec![], inverse))
     }
 
     async fn remove_mark(
@@ -1268,12 +1319,33 @@ impl MarkOperations<Block> for LoroBlockOperations {
         }
 
         let (doc_path, backend) = self.find_doc_for_block(id).await?;
+        // Capture the EXACT prior rich content (text + FULL mark set) BEFORE the
+        // removal so the inverse restores the captured prior mark set for the
+        // affected range — atomically via the whole-set `content=Object`
+        // restore path. Symmetric to `apply_mark`; text is untouched so
+        // `changes` stays empty (single-writer safe).
+        let prior = backend
+            .get_block(id)
+            .await
+            .map_err(|e| format!("remove_mark: capture prior marks: {e}"))?;
+        let prior_marks = prior.marks.clone().unwrap_or_default();
         backend
             .remove_inline_mark(id, start..end, &key)
             .await
             .map_err(|e| format!("remove_inline_mark: {e}"))?;
         self.save_doc(&doc_path).await?;
-        Ok(OperationResult::irreversible(vec![]))
+        let inverse = block_op(
+            "set_field",
+            HashMap::from([
+                ("id".to_string(), Value::String(id.to_string())),
+                ("field".to_string(), Value::String("content".to_string())),
+                (
+                    "value".to_string(),
+                    rich_content_restore_value(&prior.content, &prior_marks),
+                ),
+            ]),
+        );
+        Ok(OperationResult::new(vec![], inverse))
     }
 }
 
