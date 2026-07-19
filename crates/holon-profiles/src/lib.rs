@@ -24,6 +24,7 @@
 pub mod trust;
 pub mod type_registry;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -165,6 +166,12 @@ impl ParsedProfile {
             variants,
             computed_fields,
             virtual_child: self.virtual_child,
+            // A YAML/org-source profile parsed standalone has no TypeDefinition,
+            // so no declared schema is known here — every missing required column
+            // is treated as expected heterogeneity (silent). The block profile's
+            // declared columns come from the type-def base it merges into (see
+            // `profile_from_type_def` + `build_cache_from_source` merge order).
+            declared_columns: BTreeSet::new(),
         })
     }
 }
@@ -428,14 +435,28 @@ pub fn profile_variants_to_stored(
 ) -> Result<Vec<StoredVariant>> {
     let mut variants = Vec::new();
     for pv in profile_variants {
-        let (condition_src, data_condition, ui_condition) = if let Some(ref compiled) = pv.condition
-        {
-            let src = compiled.source.clone();
-            let (dc, uc) = split_condition(&src)
-                .with_context(|| format!("in condition of variant '{}'", pv.name))?;
-            (src, dc, uc)
-        } else {
-            (String::new(), None, Predicate::Always)
+        let (condition_src, condition_required, data_condition, ui_condition) =
+            if let Some(ref compiled) = pv.condition {
+                let src = compiled.source.clone();
+                let (dc, uc) = split_condition(&src)
+                    .with_context(|| format!("in condition of variant '{}'", pv.name))?;
+                // The full condition's required columns come straight off its
+                // already-compiled AST. The data-only subset is a different
+                // string (UI conjuncts stripped), so derive its required set by
+                // compiling it once here (compile-only; it is a subset of the
+                // parent that already compiled).
+                (src, compiled.required_columns.clone(), dc, uc)
+            } else {
+                (String::new(), BTreeSet::new(), None, Predicate::Always)
+            };
+
+        let data_condition_required = match &data_condition {
+            Some(dc) => CompiledExpr::compile(&RhaiEngine::new(), dc.as_str())
+                .map_err(|e| {
+                    anyhow::anyhow!("compiling data condition of variant '{}': {e}", pv.name)
+                })?
+                .required_columns,
+            None => BTreeSet::new(),
         };
 
         let profile = Arc::new(StoredProfile {
@@ -447,7 +468,9 @@ pub fn profile_variants_to_stored(
             name: pv.name.clone(),
             priority: pv.priority,
             condition_source: condition_src,
+            condition_required,
             data_condition,
+            data_condition_required,
             ui_condition,
             profile,
         });
@@ -475,11 +498,36 @@ pub fn profile_from_type_def(type_def: &holon_api::TypeDefinition) -> Option<Ent
         .map(|(name, expr)| (name.to_string(), expr.clone()))
         .collect();
 
+    // Declared schema = the TypeDefinition's persistent field names. This is the
+    // O1 contract for type-aware binding: a required column MISSING from a row
+    // is a real projection gap (LOUD) iff it is one of these declared columns;
+    // otherwise (an optional property flattened from `properties`, or a UI-state
+    // variable) it is expected heterogeneity and stays silent.
+    //
+    // Only PERSISTENT fields — `persistent_fields()` excludes `Computed`-lifetime
+    // entries, which are the profile's OWN computed fields (is_program,
+    // is_rule_head, …) registered into the TypeDefinition. Those are NOT columns
+    // the projection carries; classifying them as declared would turn every
+    // unbound-sibling propagation into a false LOUD.
+    //
+    // NOTE: `#[edge_field]` columns (e.g. block `tags`/`requires`) are marked
+    // skip-serialization by the Entity derive, so they are NOT in `fields` and
+    // are therefore currently classified as optional (silent). This is a known
+    // v1 narrowing (see BugFunnel). The persistent columns present here
+    // (e.g. `source_language`, `content_type`) already surface the real
+    // projection gaps observed at boot.
+    let declared_columns: BTreeSet<String> = type_def
+        .persistent_fields()
+        .iter()
+        .map(|f| f.name.clone())
+        .collect();
+
     Some(EntityProfile {
         entity_name: holon_api::EntityName::new(&type_def.name),
         variants,
         computed_fields,
         virtual_child: None,
+        declared_columns,
     })
 }
 
@@ -826,6 +874,7 @@ impl ProfileResolver {
             variants: filtered_variants,
             computed_fields: profile.computed_fields.clone(),
             virtual_child: profile.virtual_child.clone(),
+            declared_columns: profile.declared_columns.clone(),
         }
     }
 }
@@ -1787,5 +1836,84 @@ variants:
             resolver.resolve_entity_required(&entity_row).is_ok(),
             "entity row must satisfy the entity-required contract"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Type-aware binding — the boot-flood fix. These use the REAL block
+    // EntityProfile built from the TypeDefinition (so `declared_columns` is
+    // populated), exercising the classification that silences the
+    // task_state-class flood while surfacing declared-column projection gaps.
+    // -----------------------------------------------------------------------
+
+    /// The block `EntityProfile` with `declared_columns` populated (the prod
+    /// shape, not the YAML-only `parse_entity_profile` fixture).
+    fn block_profile_with_schema() -> EntityProfile {
+        let registry = crate::type_registry::create_default_registry().unwrap();
+        crate::type_registry::type_profiles_from_registry(&registry)
+            .into_iter()
+            .find(|p| p.entity_name.as_str() == "block")
+            .expect("block profile must exist in the default registry")
+    }
+
+    #[test]
+    fn declared_columns_separate_columns_from_optional_properties() {
+        let profile = block_profile_with_schema();
+        // Declared persistent columns → LOUD when missing.
+        for col in ["content_type", "source_language", "content", "parent_id"] {
+            assert!(
+                profile.declared_columns.contains(col),
+                "'{col}' must be a declared block column"
+            );
+        }
+        // task_state is an optional PROPERTY (flattened from `properties`), not a
+        // declared column → structurally-absent → silent.
+        assert!(
+            !profile.declared_columns.contains("task_state"),
+            "task_state is a property, must NOT be a declared column (else the \
+             dominant boot flood would become loud noise)"
+        );
+    }
+
+    #[test]
+    fn computed_fields_carry_the_required_columns_that_drive_classification() {
+        let profile = block_profile_with_schema();
+        let required = |name: &str| {
+            profile
+                .computed_fields
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, e)| e.required_columns.clone())
+                .unwrap_or_else(|| panic!("computed field '{name}' missing"))
+        };
+        assert!(required("is_task").contains("task_state"));
+        assert!(required("is_page_row").contains("tags"));
+        assert!(required("is_legacy_rule").contains("source_language"));
+    }
+
+    #[test]
+    fn heterogeneous_plain_block_row_produces_no_error_and_typed_nulls() {
+        // The boot-flood row shape: a plain block missing task_state AND tags.
+        // Type-aware binding must yield is_task=Null / is_page_row=Null WITHOUT
+        // any Rhai "Variable not found", and the dependent embedded_page
+        // condition must NOT type-error (the Seat-B cascade) — it just resolves
+        // to a non-embedded variant.
+        let profile = block_profile_with_schema();
+        let engine = RhaiEngine::new();
+        let mut row: HashMap<String, Value> = HashMap::new();
+        row.insert("id".into(), Value::String("block:plain".into()));
+        row.insert("parent_id".into(), Value::String("block:root".into()));
+        row.insert("content".into(), Value::String("hello".into()));
+        row.insert("content_type".into(), Value::String("text".into()));
+        row.insert("source_language".into(), Value::Null);
+
+        let (resolved, computed) = profile.resolve_with_computed(&row, &engine);
+        // Unbound computed fields surface as Null (row shape preserved), not errors.
+        assert_eq!(computed.get("is_task"), Some(&Value::Null));
+        assert_eq!(computed.get("is_page_row"), Some(&Value::Null));
+        // A variant still resolves (no panic, no cascade abort); embedded_page —
+        // which ANDs the unbound is_page_row — is NOT selected.
+        let name = resolved.expect("a variant must resolve").name.clone();
+        assert_ne!(name, "embedded_page");
+        assert_ne!(name, "embedded_page_expanded");
     }
 }
