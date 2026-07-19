@@ -153,3 +153,14 @@ targets:
           echo "Rust build complete for ${RUST_TARGET}"
         shell: /bin/bash
         basedOnDependencyAnalysis: false
+        # Declare the produced static libs so Xcode's new build system lets the
+        # link phase consume them ("Build input file cannot be found … Did you
+        # forget to declare this file as an output of a script phase" —
+        # mobile-v0.0.8, first run where the cargo build actually succeeded).
+        # Both device+sim and debug+release variants are listed; declaring
+        # not-produced siblings is harmless (outputs are ordering hints).
+        outputFiles:
+          - $(PROJECT_DIR)/../../../target/aarch64-apple-ios/release/libholon_gpui.a
+          - $(PROJECT_DIR)/../../../target/aarch64-apple-ios/debug/libholon_gpui.a
+          - $(PROJECT_DIR)/../../../target/aarch64-apple-ios-sim/release/libholon_gpui.a
+          - $(PROJECT_DIR)/../../../target/aarch64-apple-ios-sim/debug/libholon_gpui.a
