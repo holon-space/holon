@@ -197,7 +197,8 @@ impl EditorView {
         // Attach a `Cell<String>` if the cell registry can resolve one.
         // Headless / stub / test paths leave it unattached and the VM's
         // pass-through CRDT methods become no-ops.
-        // ALLOW(entity_uri_from_raw): boundary — `row_id` is the render-spec row id (a `String`); parse once here before handing a typed URI to the cell registry.
+        // ALLOW(entity_uri_from_raw): boundary — `row_id` is the render-spec row id (a
+        // `String`); parse once here before handing a typed URI to the cell registry.
         let row_uri = holon_api::EntityUri::from_raw(&row_id);
         if let Ok(cell) = services.editable_text(&row_uri, &field_for_subscription) {
             controller.attach_cell(cell);
@@ -257,7 +258,8 @@ impl EditorView {
                         // GeometryDriver read the focus from the engine's
                         // `focused_block_mutable()` Mutable, so this single write
                         // is the only update needed.
-                        // ALLOW(entity_uri_from_raw): EditorView.row_id from render-spec node.row_id() (parsed on Focus/Blur)
+                        // ALLOW(entity_uri_from_raw): EditorView.row_id from render-spec
+                        // node.row_id() (parsed on Focus/Blur)
                         let my_uri = holon_api::EntityUri::from_raw(&row_id_for_blur);
                         if services_clone.focused_block().as_ref() != Some(&my_uri) {
                             if caret_probe() {
@@ -549,7 +551,8 @@ impl EditorView {
         // re-emission can't steal focus. Handles focus arriving at an
         // already-mounted (cache-reused) editor; the synchronous first-mount
         // grab below covers the fast path. RAII-scoped to this EditorView.
-        // ALLOW(entity_uri_from_raw): render-spec row_id parsed once to match the focus signal
+        // ALLOW(entity_uri_from_raw): render-spec row_id parsed once to match the focus
+        // signal
         let row_uri_for_focus = holon_api::EntityUri::from_raw(&row_id);
         let _focus_subscription = spawn_focus_binding(cx, services.clone(), row_uri_for_focus);
 
@@ -650,7 +653,8 @@ impl EditorView {
         // never consumed at the wrong caret — the end default cannot yank a
         // caret the user already placed, because no user interaction can have
         // reached a not-yet-mounted InputState.
-        // ALLOW(entity_uri_from_raw): render-spec row_id parsed vs focused_block() on mount
+        // ALLOW(entity_uri_from_raw): render-spec row_id parsed vs focused_block() on
+        // mount
         let row_uri = holon_api::EntityUri::from_raw(&row_id);
         if services.focused_block().as_ref() == Some(&row_uri) {
             grab_focus_and_seed_caret(&input, window, cx, services.as_ref(), &row_uri, true);

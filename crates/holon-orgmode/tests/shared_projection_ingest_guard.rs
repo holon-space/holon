@@ -11,7 +11,8 @@
 //! zero calls ⇒ the guard skipped) and assert:
 //!   * content-looks-like-mount but NOT registered  → INGESTED (no false skip);
 //!   * content-looks-like-mount AND registered       → SKIPPED  (guard works);
-//!   * no registry seam at all                        → INGESTED (safe default).
+//!   * no registry seam at all                        → INGESTED (safe
+//!     default).
 
 #![cfg(feature = "di")]
 
@@ -113,7 +114,8 @@ impl BlockOrdering for NoopOrdering {
     }
 }
 
-/// Stub registry with a fixed answer — models "this id IS / IS NOT a real mount".
+/// Stub registry with a fixed answer — models "this id IS / IS NOT a real
+/// mount".
 struct StubMountRegistry {
     registered: bool,
 }
@@ -134,7 +136,11 @@ fn mount_page_org(path: &std::path::Path) -> String {
     mount.set_property("share-role", "mount");
     mount.set_property("shared-tree-id", "stid-abc");
     mount.set_property("ID", "mount-xyz");
-    let mut child = Block::new_text(EntityUri::block("child-1"), doc_uri.clone(), "Child under P");
+    let mut child = Block::new_text(
+        EntityUri::block("child-1"),
+        doc_uri.clone(),
+        "Child under P",
+    );
     child.set_property("shared-tree-id", "stid-abc");
     child.set_property("ID", "child-1");
     OrgFormatAdapter::new().render_document(&mount, &[child], path, &doc_uri)

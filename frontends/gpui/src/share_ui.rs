@@ -467,7 +467,10 @@ fn pending_event_toast(event: &PendingWriteEvent) -> DegradedToast {
         PendingWriteEventKind::AwaitingConfirmation => DegradedToast {
             kind: DegradedKind::ConnectorWritePending,
             shared_tree_id: event.connector.clone(),
-            detail: format!("{} ({}) — approve in the pending panel", event.display, event.tool),
+            detail: format!(
+                "{} ({}) — approve in the pending panel",
+                event.display, event.tool
+            ),
         },
         PendingWriteEventKind::OutcomeUnknown => DegradedToast {
             kind: DegradedKind::ConnectorWriteOutcomeUnknown,
@@ -507,8 +510,10 @@ pub fn dispatch_approve(
                     // StorageEntity keys are `Arc<str>`; the session API takes
                     // `HashMap<String, Value>`. The key/value strings survive the
                     // round-trip, so the chokepoint re-mints the SAME intent key.
-                    let params: std::collections::HashMap<String, Value> =
-                        params.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+                    let params: std::collections::HashMap<String, Value> = params
+                        .into_iter()
+                        .map(|(k, v)| (k.to_string(), v))
+                        .collect();
                     session
                         .execute_operation(&entity_name, &op_name, params)
                         .await
@@ -1460,9 +1465,11 @@ fn render_toast_stack(
                 crate::icon("⛔"),
                 "Preference not saved",
             ),
-            DegradedKind::ConnectorWritePending => {
-                (gpui::rgba(0xfbbf24ff), "⚠", "Connector write needs approval")
-            }
+            DegradedKind::ConnectorWritePending => (
+                gpui::rgba(0xfbbf24ff),
+                "⚠",
+                "Connector write needs approval",
+            ),
             DegradedKind::ConnectorWriteOutcomeUnknown => (
                 gpui::rgba(0xef4444ff),
                 crate::icon("⛔"),

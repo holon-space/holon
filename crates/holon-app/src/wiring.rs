@@ -219,12 +219,10 @@ impl FrontendInjectorExt for Injector {
             // (di.rs WARN-logs) is correct.
             self.provide::<dyn holon_filesystem::ShareWritebackDisclosure>(Provider::root(
                 |resolver| {
-                    let bus =
-                        resolver.resolve::<Arc<holon::sync::DegradedSignalBus>>();
+                    let bus = resolver.resolve::<Arc<holon::sync::DegradedSignalBus>>();
                     Arc::new(crate::loro_seams::ShareDegradedDisclosure {
                         bus: (*bus).clone(),
-                    })
-                        as Arc<dyn holon_filesystem::ShareWritebackDisclosure>
+                    }) as Arc<dyn holon_filesystem::ShareWritebackDisclosure>
                 },
             ));
 

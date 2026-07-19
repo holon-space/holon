@@ -441,7 +441,8 @@ impl FileSyncController {
 
     /// Wire the authoritative mount registry (Inc 3). Without it, a file whose
     /// parsed content looks like a shared-subtree projection is NOT treated as
-    /// one (ingested normally) — the guard only skips ids the registry confirms.
+    /// one (ingested normally) — the guard only skips ids the registry
+    /// confirms.
     pub fn with_mount_registry(mut self, registry: Arc<dyn MountRegistry>) -> Self {
         self.mount_registry = Some(registry);
         self
@@ -3647,9 +3648,9 @@ fn three_way_text_content(
 mod shared_projection_guard_tests {
     use holon_api::EntityUri;
     use holon_api::block::Block;
-    use holon_api::share_props::SHARED_TREE_ID_PROPERTY;
     use holon_api::share_props::SHARE_ROLE_MOUNT;
     use holon_api::share_props::SHARE_ROLE_PROPERTY;
+    use holon_api::share_props::SHARED_TREE_ID_PROPERTY;
 
     use super::is_shared_subtree_projection;
 
