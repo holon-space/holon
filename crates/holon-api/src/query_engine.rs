@@ -51,6 +51,33 @@ pub trait QueryEngine: Send + Sync {
     /// lives behind the impl, the frontend only sees typed candidates.
     async fn search_link_candidates(&self, filter: &str) -> Result<Vec<LinkCandidate>>;
 
+    /// User-facing quick-open / content search (`cmd-K` modal). Returns two
+    /// sections — `pages` (jump-to-page targets, `Page`-tagged) first, then
+    /// `content` (full-text block matches) — so the modal renders them
+    /// separately without re-deriving which rows are pages. The `Page`-tag
+    /// join and the `LIKE` search live behind this capability, mirroring
+    /// [`Self::search_link_candidates`].
+    ///
+    /// Default impl fails loud (returns `Err`) rather than faking an empty
+    /// result — a `QueryEngine` without quick-open wiring must surface that.
+    async fn quick_open_search(&self, filter: &str) -> Result<crate::QuickOpenResults> {
+        let _ = filter;
+        anyhow::bail!("QueryEngine::quick_open_search not implemented by this impl")
+    }
+
+    /// Resolve the page-ancestor breadcrumb trail for `block_id`: the chain of
+    /// `Page`-tagged ancestors from root to (and including) the block's nearest
+    /// page, in root→current order. Each entry is `(id, title)` where the title
+    /// is the page's first content line. Reuses the same ancestor path the
+    /// `block_with_path` matview maintains — no separate tree walk.
+    ///
+    /// Fails loud (default impl bails) rather than returning an empty trail: a
+    /// breadcrumb that can't be resolved must surface, not silently vanish.
+    async fn breadcrumb_trail(&self, block_id: &EntityUri) -> Result<Vec<LinkCandidate>> {
+        let _ = block_id;
+        anyhow::bail!("QueryEngine::breadcrumb_trail not implemented by this impl")
+    }
+
     /// Non-settling read of a single block's `content` straight from the
     /// write table (`block_raw`). Used by the headless editor mirror, which
     /// must see exactly what a production editor's SQL read would see —
