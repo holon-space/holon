@@ -744,7 +744,7 @@ impl DispatchingOperationEngine {
     /// The synthetic descriptor advertising the engine-level
     /// `convert_block_to_page` op so MCP / the slash menu discover it like any
     /// provider op.
-    fn convert_block_to_page_descriptor() -> OperationDescriptor {
+    pub(crate) fn convert_block_to_page_descriptor() -> OperationDescriptor {
         use holon_api::render_types::TypeHint;
         OperationDescriptor {
             entity_name: EntityName::new("block"),
