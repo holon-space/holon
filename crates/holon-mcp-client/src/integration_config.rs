@@ -142,6 +142,11 @@ pub struct IntegrationFileConfig {
     /// it.
     #[serde(default)]
     pub writes: crate::mcp_sidecar::WritesPolicy,
+    /// Writer designation for `once_only` effects (leases/read-write ruling,
+    /// increment 4). Absent = confirm_manually. Flows through into the
+    /// [`McpSidecar`] so the dispatch chokepoint can select the policy.
+    #[serde(default)]
+    pub once_only: crate::mcp_sidecar::OnceOnlyAuthorization,
     #[serde(default)]
     pub tools: HashMap<String, ToolConfig>,
     /// Sidecar-declared derived views (see
@@ -271,6 +276,7 @@ impl IntegrationFileConfig {
             entity_prefix: self.entity_prefix,
             entities: self.entities,
             writes: self.writes,
+            once_only: self.once_only,
             tools: self.tools,
             views: self.views,
         };

@@ -246,6 +246,7 @@ impl PbtMcpIntegration {
             entity_prefix: Some("pbt_".to_string()),
             entities,
             writes: Default::default(),
+            once_only: Default::default(),
             tools: HashMap::new(),
             views: vec![],
         };

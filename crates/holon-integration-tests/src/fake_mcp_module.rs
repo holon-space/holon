@@ -250,6 +250,7 @@ async fn build_handle(db_handle: DbHandle) -> anyhow::Result<FakeMcpHandle> {
         entity_prefix: Some("fake_".to_string()),
         entities,
         writes: Default::default(),
+        once_only: Default::default(),
         tools: HashMap::new(),
         views: vec![],
     };
