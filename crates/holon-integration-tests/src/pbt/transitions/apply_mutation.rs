@@ -605,7 +605,11 @@ impl<
         // apply + canonical re-sequencing, profile rebuild, render-expr cache,
         // next-id bump, cursor reset on content update) is encapsulated in the
         // `ReferenceState` impl — the generic body never touches ref internals.
-        state.apply_content_mutation(&self.event.mutation);
+        // `External` mutations cross the org-FILE boundary (write + re-ingest), so
+        // the ref must model the file-parse tag reinterpretation; `UI` mutations
+        // stay in-store (echo-suppressed) and keep raw content.
+        let crosses_org_boundary = self.event.source == MutationSource::External;
+        state.apply_content_mutation(&self.event.mutation, crosses_org_boundary);
 
         if let Mutation::Delete { id, .. } = &self.event.mutation {
             state.clear_focus_if_deleted(id);

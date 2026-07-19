@@ -2153,7 +2153,18 @@ pub trait RefApplyMutationMut {
     /// method — the generic `apply_to_ref` drives them through
     /// [`RefBlockTreeMut::push_undo_snapshot`]
     /// and [`RefFocusMut::clear_focus_if_deleted`].
-    fn apply_content_mutation(&mut self, mutation: &crate::types::Mutation);
+    ///
+    /// `crosses_org_boundary` is true for an `External` (org-file) mutation:
+    /// the block is written to disk and RE-INGESTED, so the ref must model
+    /// the org FILE-parse reinterpretation (a trailing `:tag:` group on the
+    /// headline — e.g. `:PROPERTIES:` — re-parses into `block.tags`, not
+    /// content). A `UI` mutation stays in-store (its writeback echo is
+    /// suppressed), so the raw content is kept and this is false.
+    fn apply_content_mutation(
+        &mut self,
+        mutation: &crate::types::Mutation,
+        crosses_org_boundary: bool,
+    );
 }
 
 /// Reference-side wide-PBT block-interaction mutation surface. Each method is

@@ -283,7 +283,11 @@ impl RefBlockTreeMut for ReferenceState {
 }
 
 impl RefApplyMutationMut for ReferenceState {
-    fn apply_content_mutation(&mut self, mutation: &holon_pbt_core::types::Mutation) {
+    fn apply_content_mutation(
+        &mut self,
+        mutation: &holon_pbt_core::types::Mutation,
+        crosses_org_boundary: bool,
+    ) {
         use holon_pbt_core::types::Mutation;
 
         if let Mutation::Create { id, parent_id, .. } = mutation {
@@ -311,6 +315,26 @@ impl RefApplyMutationMut for ReferenceState {
         mutation.apply_to(&mut blocks);
         crate::org_utils::assign_reference_sequences_canonical(&mut blocks);
         self.domain.block_state.blocks = blocks.into_iter().map(|b| (b.id.clone(), b)).collect();
+
+        // External (org-file) mutation: the created/updated block is written to
+        // disk and RE-INGESTED, so a trailing `:tag:` group on its headline (e.g.
+        // `:PROPERTIES:`) re-parses into `block.tags`, not content — mirror that
+        // FILE-parse reinterpretation exactly as `bulk_add_blocks` / the
+        // CreateDocument ingest do. `Mutation::apply_to` above already applied the
+        // inline-mark round-trip normalization; the tag split is the remaining
+        // org-file-boundary lens. A `UI` mutation stays in-store (echo-suppressed),
+        // so it keeps raw content and this is skipped.
+        if crosses_org_boundary {
+            let affected = match mutation {
+                Mutation::Create { id, .. } | Mutation::Update { id, .. } => Some(id.clone()),
+                _ => None,
+            };
+            if let Some(id) = affected
+                && let Some(block) = self.domain.block_state.blocks.get_mut(&id)
+            {
+                super::super::types::apply_org_headline_tag_split(block);
+            }
+        }
         self.rebuild_profile_tracking();
 
         if let Mutation::Update { id, fields, .. } = mutation
