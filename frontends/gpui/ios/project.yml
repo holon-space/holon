@@ -133,13 +133,18 @@ targets:
 
           echo "Building holon-gpui for ${RUST_TARGET} (${CONFIGURATION})..."
           rustup target add "${RUST_TARGET}" 2>/dev/null || true
-          # Scrub Xcode's per-target env before invoking cargo: xcodebuild exports
-          # SDKROOT (iPhoneOS SDK) + deployment targets, which poison HOST-side
-          # build-script C compilation (cc resolves headers against the iOS SDK —
-          # broke aws-lc-sys twice on CI: v0.0.5 memcmp-probe empty output,
-          # v0.0.6 'sys/random.h' not found). With these unset, cc-rs picks the
-          # correct SDK per compile target via xcrun.
-          env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET -u MACOSX_DEPLOYMENT_TARGET \
+          # Repoint Xcode's per-target env before invoking cargo: xcodebuild
+          # exports SDKROOT (iPhoneOS SDK) + deployment targets, which poison
+          # HOST-side build-script C compilation (broke aws-lc-sys on CI twice:
+          # v0.0.5 memcmp-probe empty output, v0.0.6 'sys/random.h' missing).
+          # Fully UNSETTING SDKROOT broke CI differently (v0.0.7: runners have
+          # no CLT default headers, host cc found no SDK at all — ring's
+          # TargetConditionals.h missing). Correct shape: SDKROOT = macOS SDK —
+          # host compiles get the right headers, and cc-rs sees macosx ≠
+          # iphoneos for target code and falls back to `xcrun --sdk iphoneos`.
+          MACOS_SDKROOT="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
+          env -u IPHONEOS_DEPLOYMENT_TARGET -u MACOSX_DEPLOYMENT_TARGET \
+            SDKROOT="${MACOS_SDKROOT}" \
             cargo build -p holon-gpui \
             --target "${RUST_TARGET}" \
             --no-default-features --features mobile \
