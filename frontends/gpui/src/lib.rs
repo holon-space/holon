@@ -79,8 +79,8 @@ pub(crate) const ICON_SUBSTITUTES: &[(&str, &str)] = &[
     ("🔍", "⚲"), // inspector       → magnifier-like symbol
     ("🔎", "⚲"), // search field    → magnifier-like symbol
     ("⛔", "⊘"), // degraded banner → circled slash (blocked)
-    ("🗑", "⌦"), // delete op       → erase-to-the-right (delete)
-    ("⧉", "❐"), // embed op        → shadowed square (overlay/embed)
+    ("🗑", "⌦"),  // delete op       → erase-to-the-right (delete)
+    ("⧉", "❐"),  // embed op        → shadowed square (overlay/embed)
 ];
 
 /// Monochrome glyphs the embedded DejaVu Sans genuinely cannot render on
@@ -100,28 +100,28 @@ pub(crate) const KNOWN_ANDROID_GLYPH_GAPS: &[&str] = &["🔒", "🔓"];
 /// an entry is the one drift risk, so each entry names its source site.
 #[allow(dead_code)] // read only by the icon-font coverage tests
 pub(crate) const INLINE_UI_GLYPHS: &[&str] = &[
-    "☰", // lib.rs left-sidebar toggle
-    "◧", // lib.rs right-sidebar toggle
-    "⚙", // lib.rs settings gear
+    "☰",  // lib.rs left-sidebar toggle
+    "◧",  // lib.rs right-sidebar toggle
+    "⚙",  // lib.rs settings gear
     "🎨", // lib.rs widget-gallery toggle
     "🔗", // lib.rs accept-ticket toggle
     "🔎", // lib.rs search field
     "🔍", // inspector.rs
-    "✕", // lib.rs / share_ui.rs / oracles_ui.rs close/dismiss
-    "⚠", // share_ui.rs degraded banner
-    "↻", // share_ui.rs rehydration banner
+    "✕",  // lib.rs / share_ui.rs / oracles_ui.rs close/dismiss
+    "⚠",  // share_ui.rs degraded banner
+    "↻",  // share_ui.rs rehydration banner
     "⛔", // share_ui.rs blocked banner
-    "▸", // collapsible.rs collapsed chevron
-    "▾", // collapsible.rs expanded chevron
-    "▼", // expand_toggle.rs / reactive_vm_poc.rs expanded
-    "▶", // expand_toggle.rs / reactive_vm_poc.rs collapsed
-    "◉", // checkbox.rs checked
-    "○", // checkbox.rs unchecked
+    "▸",  // collapsible.rs collapsed chevron
+    "▾",  // collapsible.rs expanded chevron
+    "▼",  // expand_toggle.rs / reactive_vm_poc.rs expanded
+    "▶",  // expand_toggle.rs / reactive_vm_poc.rs collapsed
+    "◉",  // checkbox.rs checked
+    "○",  // checkbox.rs unchecked
 ];
 
-/// Apply the Android icon substitution table to a glyph (see [`ICON_SUBSTITUTES`]).
-/// Non-`cfg`-gated so the host-side coverage tests can exercise the exact
-/// mapping the Android `icon()` uses.
+/// Apply the Android icon substitution table to a glyph (see
+/// [`ICON_SUBSTITUTES`]). Non-`cfg`-gated so the host-side coverage tests can
+/// exercise the exact mapping the Android `icon()` uses.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) fn substitute_glyph(glyph: &'static str) -> &'static str {
     let mut i = 0;
@@ -158,8 +158,7 @@ pub(crate) fn icon(glyph: &'static str) -> &'static str {
 #[cfg(test)]
 pub(crate) fn assert_icon_renderable_on_android(glyph: &'static str, source: &str) {
     const DEJAVU_SANS: &[u8] = include_bytes!("../../../assets/fonts/DejaVuSans.ttf");
-    let face =
-        ttf_parser::Face::parse(DEJAVU_SANS, 0).expect("embedded DejaVu Sans must parse");
+    let face = ttf_parser::Face::parse(DEJAVU_SANS, 0).expect("embedded DejaVu Sans must parse");
     if KNOWN_ANDROID_GLYPH_GAPS.contains(&glyph) {
         return;
     }
@@ -2808,18 +2807,20 @@ fn keystroke_to_keys(ks: &gpui::Keystroke) -> std::collections::BTreeSet<holon_a
 // Guard the Android icon fix. Every icon glyph the app renders must be
 // Android-renderable: covered directly by the embedded DejaVu Sans font, or
 // swapped for a covered glyph via `ICON_SUBSTITUTES`, or a documented
-// `KNOWN_ANDROID_GLYPH_GAPS` entry. The name→glyph tables (`op_button::OP_ICONS`,
-// `icon::ICON_CHARS`) are swept by co-located tests in those modules via
-// `assert_icon_renderable_on_android`; here we sweep the inline literals
-// (`INLINE_UI_GLYPHS`) and check the substitution table's own invariants. These
-// run host-side (parsing only the embedded font bytes), so `cargo test
-// -p holon-gpui` on macOS/Linux catches a truncated/wrong font asset or an
-// unrenderable/unnecessary substitute before it ever reaches a device.
+// `KNOWN_ANDROID_GLYPH_GAPS` entry. The name→glyph tables
+// (`op_button::OP_ICONS`, `icon::ICON_CHARS`) are swept by co-located tests in
+// those modules via `assert_icon_renderable_on_android`; here we sweep the
+// inline literals (`INLINE_UI_GLYPHS`) and check the substitution table's own
+// invariants. These run host-side (parsing only the embedded font bytes), so
+// `cargo test -p holon-gpui` on macOS/Linux catches a truncated/wrong font
+// asset or an unrenderable/unnecessary substitute before it ever reaches a
+// device.
 #[cfg(test)]
 mod icon_font_tests {
+    use ttf_parser::Face;
+
     use super::ICON_SUBSTITUTES;
     use super::INLINE_UI_GLYPHS;
-    use ttf_parser::Face;
 
     const DEJAVU_SANS: &[u8] = include_bytes!("../../../assets/fonts/DejaVuSans.ttf");
 
@@ -2828,7 +2829,8 @@ mod icon_font_tests {
     }
 
     /// Every inline UI glyph literal (toolbar, chevrons, checkboxes, banners)
-    /// must render on Android — covered by DejaVu directly or substitution-routed.
+    /// must render on Android — covered by DejaVu directly or
+    /// substitution-routed.
     #[test]
     fn inline_ui_glyphs_render_on_android() {
         for glyph in INLINE_UI_GLYPHS {

@@ -137,10 +137,7 @@ async fn journal_feed_chain_lists_day_pages_and_maintains_deltas() {
     // (2) Feed = only the Page-tagged day pages, newest-first, expand_default=1.
     assert_eq!(
         feed_contents(&handle).await,
-        vec![
-            ("2026-07-17".to_string(), 1),
-            ("2026-07-16".to_string(), 1),
-        ],
+        vec![("2026-07-17".to_string(), 1), ("2026-07-16".to_string(), 1),],
         "journal_feed lists only Page-tagged day pages, newest-first, expanded"
     );
 
