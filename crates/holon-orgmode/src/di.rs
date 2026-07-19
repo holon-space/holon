@@ -415,6 +415,22 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                     .optional_resolve_async::<dyn holon_filesystem::ThreeWayTextMerge>()
                     .await;
 
+                // Disclosure seam for shared-subtree write-back gaps (Inc 1).
+                // Present in the app container (forwards to `DegradedSignalBus`);
+                // absent in test/no-Turso containers — then shared-subtree edits
+                // that fail to materialize log at WARN instead of a banner.
+                let share_disclosure = resolver
+                    .optional_resolve_async::<dyn holon_filesystem::ShareWritebackDisclosure>()
+                    .await;
+
+                // Authoritative mount registry (Inc 3): lets the ingest guard
+                // skip a shared-subtree projection file only when its page id is
+                // a real mount node (not a user-authored `share-role` drawer).
+                // Absent in test/SqlOnly containers → the guard never skips.
+                let mount_registry = resolver
+                    .optional_resolve_async::<dyn holon_filesystem::MountRegistry>()
+                    .await;
+
                 let idle_signal_weak = std::sync::Arc::downgrade(&idle_signal);
 
                 let mut controller = FileSyncController::with_format(
@@ -437,12 +453,18 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                 if let Some(merger) = text_merge {
                     controller = controller.with_text_merge(merger);
                 }
+                if let Some(registry) = mount_registry {
+                    controller = controller.with_mount_registry(registry);
+                }
 
                 let (rerender_tx, rerender_rx) =
                     tokio::sync::mpsc::unbounded_channel::<OrgRerender>();
                 if let Some(feed) = block_feed.clone() {
                     let resolver_feed = feed.clone();
                     let tx = rerender_tx.clone();
+                    let disclosure = share_disclosure.clone();
+                    let disclosed: Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
+                        Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
                     tokio::spawn(async move {
                         use futures_signals::signal_map::MapDiff;
                         use futures_signals::signal_map::SignalMapExt;
@@ -451,10 +473,24 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                             .for_each(move |diff| {
                                 let tx = tx.clone();
                                 let feed = feed.clone();
+                                let disclosure = disclosure.clone();
+                                let disclosed = disclosed.clone();
                                 async move {
                                     let msg = match diff {
                                         MapDiff::Insert { value, .. }
                                         | MapDiff::Update { value, .. } => {
+                                            // Inc 1: a block inside a shared subtree whose content
+                                            // cannot yet be materialized to its own on-disk org
+                                            // file (the mount is not a page-file) is DISCLOSED, not
+                                            // silently dropped/inlined. The edit is safe in Loro +
+                                            // SQL; only disk org is stale until Inc 2 wires
+                                            // materialization. Deduped once per share per session.
+                                            disclose_unmaterialized_share(
+                                                &feed,
+                                                &value,
+                                                disclosure.as_deref(),
+                                                &disclosed,
+                                            );
                                             match resolve_doc_for_block(&feed, &value) {
                                                 Some(doc) => OrgRerender::Block {
                                                     doc,
@@ -573,6 +609,67 @@ fn resolve_doc_for_block(
         }
     }
     None
+}
+
+/// Inc 1 — loud disclosure of a shared-subtree write-back gap.
+///
+/// A block that belongs to a share (`shared_tree_id` property present) is
+/// "materialized" once its owning page is the share's mount page-file
+/// (`is_share_mount()`). Until Inc 2 tags the mount a page, walking up from a
+/// shared block terminates at a non-mount global page (content would inline
+/// into a global-truth file) or at nothing — either way the shared content owns
+/// no dedicated file and the edit cannot reach disk. That gap is DISCLOSED
+/// (banner via the seam, or WARN log when no seam is wired), never silently
+/// dropped. Deduped once per `shared_tree_id` per session to avoid banner spam.
+///
+/// Post-Inc-2 the mount is a `is_share_mount()` page, so the walk terminates at
+/// it and this never fires — the same predicate self-disarms once the path works.
+fn disclose_unmaterialized_share(
+    feed: &holon_api::live_data::LiveData<Block>,
+    block: &Block,
+    disclosure: Option<&dyn holon_filesystem::ShareWritebackDisclosure>,
+    disclosed: &Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+) {
+    let Some(stid) = block.shared_tree_id() else {
+        return;
+    };
+    // Walk to the owning page; materialized iff that page is the mount page.
+    let owning_is_mount = {
+        let map = feed.read();
+        let mut current = block.clone();
+        let mut found = false;
+        for _ in 0..50 {
+            if current.is_page() {
+                found = current.is_share_mount();
+                break;
+            }
+            match map.get(current.parent_id.as_str()) {
+                Some(parent) => current = (**parent).clone(),
+                None => break,
+            }
+        }
+        found
+    };
+    if owning_is_mount {
+        return;
+    }
+    // Not materialized. Disclose once per share.
+    {
+        let mut seen = disclosed.lock().unwrap();
+        if !seen.insert(stid.clone()) {
+            return;
+        }
+    }
+    match disclosure {
+        Some(d) => d.shared_subtree_not_materialized(&block.id, &stid),
+        None => tracing::warn!(
+            block_id = %block.id,
+            shared_tree_id = %stid,
+            "[OrgMode] shared-subtree edit could not be materialized to a dedicated org file \
+             (mount is not yet a page-file); edit is safe in Loro + SQL and syncs to peers, but \
+             on-disk org is stale. No disclosure seam wired in this container.",
+        ),
+    }
 }
 
 /// Backend-blind FileSyncController driver: initialize, build the file watcher,
@@ -925,5 +1022,126 @@ pub async fn run_file_sync_controller(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod share_disclosure_tests {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    use holon_api::EntityUri;
+    use holon_api::block::Block;
+    use holon_api::live_data::LiveData;
+    use holon_api::share_props::SHARED_TREE_ID_PROPERTY;
+    use holon_api::share_props::SHARE_ROLE_MOUNT;
+    use holon_api::share_props::SHARE_ROLE_PROPERTY;
+
+    use super::disclose_unmaterialized_share;
+
+    #[derive(Default)]
+    struct RecordingDisclosure {
+        calls: Mutex<Vec<(String, String)>>,
+    }
+    impl holon_filesystem::ShareWritebackDisclosure for RecordingDisclosure {
+        fn shared_subtree_not_materialized(&self, block_id: &EntityUri, shared_tree_id: &str) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((block_id.to_string(), shared_tree_id.to_string()));
+        }
+    }
+
+    fn empty_feed() -> Arc<LiveData<Block>> {
+        LiveData::new(vec![], |_| unreachable!(), |_| unreachable!())
+    }
+
+    fn block(id: &str, parent: &str, content: &str) -> Block {
+        let parent_uri = if parent == "no_parent" {
+            EntityUri::no_parent()
+        } else {
+            EntityUri::parse(parent).unwrap()
+        };
+        Block::new_text(EntityUri::parse(id).unwrap(), parent_uri, content)
+    }
+
+    // A shared descendant whose owning page is NOT the mount page (pre-Inc-2:
+    // the mount is a plain block, so the walk terminates at a non-mount global
+    // page) is DISCLOSED once, then deduped for the same share.
+    #[test]
+    fn unmaterialized_shared_edit_discloses_once() {
+        let feed = empty_feed();
+        // Global page P.
+        let mut page = block("block:page", "no_parent", "P");
+        page.set_page(true);
+        // Mount M under P — a plain block carrying share-role=mount (pre-Inc-2).
+        let mut mount = block("block:mount", "block:page", "shared");
+        mount.set_property(SHARE_ROLE_PROPERTY, SHARE_ROLE_MOUNT);
+        mount.set_property(SHARED_TREE_ID_PROPERTY, "stid-1");
+        // Shared descendants under M, stamped with the share id.
+        let mut d1 = block("block:d1", "block:mount", "child one");
+        d1.set_property(SHARED_TREE_ID_PROPERTY, "stid-1");
+        let mut d2 = block("block:d2", "block:mount", "child two");
+        d2.set_property(SHARED_TREE_ID_PROPERTY, "stid-1");
+
+        feed.insert("block:page".into(), Arc::new(page));
+        feed.insert("block:mount".into(), Arc::new(mount));
+        feed.insert("block:d1".into(), Arc::new(d1.clone()));
+        feed.insert("block:d2".into(), Arc::new(d2.clone()));
+
+        let disc = RecordingDisclosure::default();
+        let seen = Arc::new(Mutex::new(std::collections::HashSet::new()));
+
+        disclose_unmaterialized_share(&feed, &d1, Some(&disc), &seen);
+        disclose_unmaterialized_share(&feed, &d2, Some(&disc), &seen);
+
+        let calls = disc.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "one disclosure per share, deduped: {calls:?}");
+        assert_eq!(calls[0].0, "block:d1");
+        assert_eq!(calls[0].1, "stid-1");
+    }
+
+    // A non-shared block never discloses.
+    #[test]
+    fn non_shared_block_never_discloses() {
+        let feed = empty_feed();
+        let mut page = block("block:page", "no_parent", "P");
+        page.set_page(true);
+        let plain = block("block:plain", "block:page", "no share");
+        feed.insert("block:page".into(), Arc::new(page));
+        feed.insert("block:plain".into(), Arc::new(plain.clone()));
+
+        let disc = RecordingDisclosure::default();
+        let seen = Arc::new(Mutex::new(std::collections::HashSet::new()));
+        disclose_unmaterialized_share(&feed, &plain, Some(&disc), &seen);
+        assert!(disc.calls.lock().unwrap().is_empty());
+    }
+
+    // Post-Inc-2 shape: the mount IS a page tagged share-role=mount, so a shared
+    // descendant's owning page is the mount page — MATERIALIZED, no disclosure.
+    // The same predicate self-disarms once materialization is wired.
+    #[test]
+    fn materialized_mount_page_does_not_disclose() {
+        let feed = empty_feed();
+        let mut page = block("block:page", "no_parent", "P");
+        page.set_page(true);
+        let mut mount = block("block:mount", "block:page", "shared page");
+        mount.set_page(true);
+        mount.set_property(SHARE_ROLE_PROPERTY, SHARE_ROLE_MOUNT);
+        mount.set_property(SHARED_TREE_ID_PROPERTY, "stid-2");
+        let mut d1 = block("block:d1", "block:mount", "child");
+        d1.set_property(SHARED_TREE_ID_PROPERTY, "stid-2");
+
+        feed.insert("block:page".into(), Arc::new(page));
+        feed.insert("block:mount".into(), Arc::new(mount));
+        feed.insert("block:d1".into(), Arc::new(d1.clone()));
+
+        let disc = RecordingDisclosure::default();
+        let seen = Arc::new(Mutex::new(std::collections::HashSet::new()));
+        disclose_unmaterialized_share(&feed, &d1, Some(&disc), &seen);
+        assert!(
+            disc.calls.lock().unwrap().is_empty(),
+            "materialized mount-page must not disclose"
+        );
     }
 }

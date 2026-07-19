@@ -363,6 +363,45 @@ pub trait ThreeWayTextMerge: Send + Sync {
     fn merge_text(&self, base: &str, theirs: &str, mine: &str) -> Result<String>;
 }
 
+/// Disclosure seam for shared-subtree write-back gaps.
+///
+/// Edits to a block inside a shared/mounted subtree route into the shared Loro
+/// doc + SQL and sync to peers (that path works), but until the mount is
+/// materialized as a page-file the write-back layer cannot resolve a disk path
+/// for the shared content — so on-disk org is stale. That gap must be
+/// DISCLOSED, never silently dropped (`docs/Architecture/Model.md` inv-11 +
+/// CLAUDE.md fail-loud). The concrete impl lives in the app wiring layer and
+/// forwards to `holon-loro`'s `DegradedSignalBus`; holon-filesystem /
+/// holon-orgmode stay storage-agnostic (they do not depend on holon-loro — the
+/// reverse would be a cycle), mirroring [`ThreeWayTextMerge`].
+pub trait ShareWritebackDisclosure: Send + Sync {
+    /// Signal that `block_id` (belonging to share `shared_tree_id`) was edited
+    /// but could not be materialized to a dedicated on-disk org file. Emit a
+    /// user-visible degraded banner; the edit itself is safe in Loro + SQL.
+    fn shared_subtree_not_materialized(&self, block_id: &EntityUri, shared_tree_id: &str);
+}
+
+/// Authoritative "is this block id a registered shared-subtree mount?" seam.
+///
+/// The Inc 3 ingest guard must decide whether an org file is a shared-subtree
+/// PROJECTION SINK (skip ingest — its truth is the shared Loro doc) purely from
+/// AUTHORITATIVE state, never from parsed drawer content: `share-role`/
+/// `shared-tree-id` drawer properties round-trip verbatim from ANY user file,
+/// so keying on them (even after they land in SQL) would let a hand-authored
+/// `:share-role: mount:` file be silently skipped — a page that never loads and
+/// edits that vanish. The sound signal is a real mount NODE in the global Loro
+/// tree (created only by share/accept, non-user-authorable). The concrete impl
+/// lives in the wiring layer over `holon-loro`; holon-filesystem stays
+/// storage-agnostic (mirrors [`ThreeWayTextMerge`]). Absent seam (SqlOnly /
+/// tests) ⇒ the guard treats nothing as a projection and ingests normally.
+#[async_trait]
+pub trait MountRegistry: Send + Sync {
+    /// True iff `block_id` is an authoritatively-registered shared-subtree mount
+    /// (a real mount node in the global tree), NOT merely a block carrying a
+    /// user-authored `share-role` drawer property.
+    async fn is_registered_mount(&self, block_id: &EntityUri) -> Result<bool>;
+}
+
 #[cfg(test)]
 mod name_chain_tests {
     //! Red-first coverage for the no-pages-under-non-pages ruling

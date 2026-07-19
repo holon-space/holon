@@ -565,6 +565,20 @@ fn read_tags_from_meta(meta: &loro::LoroMap) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Whether the tree node `tid` carries the `Page` tag in its Loro meta — the
+/// same `tags` metadata the SQL `block_tags` projection mirrors. Used by the
+/// share backend to resolve a mount's nearest page ancestor (Amendment A)
+/// directly from Loro, without a SQL read seam. `get_meta` failing on a node
+/// we are actively walking is a real corruption, not "no page" — propagate it.
+pub(crate) fn node_is_page(tree: &loro::LoroTree, tid: loro::TreeID) -> anyhow::Result<bool> {
+    let meta = tree
+        .get_meta(tid)
+        .map_err(|e| anyhow::anyhow!("node_is_page get_meta({tid:?}): {e}"))?;
+    Ok(read_tags_from_meta(&meta)
+        .iter()
+        .any(|t| t == holon_api::block::PAGE_TAG))
+}
+
 /// Read the `requires` JSON-encoded list (org-edna dependency edge field) from
 /// a node's metadata. Stored under a dedicated `requires` meta key — like
 /// `tags`, it is an edge field (the `block_requires` junction), never part of

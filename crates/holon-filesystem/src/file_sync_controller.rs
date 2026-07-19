@@ -49,6 +49,7 @@ use crate::sync_ports::AliasRegistrar;
 use crate::sync_ports::BlockReader;
 use crate::sync_ports::DocumentManager;
 use crate::sync_ports::ImageDataProvider;
+use crate::sync_ports::MountRegistry;
 use crate::sync_ports::ThreeWayTextMerge;
 
 /// Bump when the org renderer changes in a way that alters the canonical
@@ -200,6 +201,12 @@ pub struct FileSyncController {
     /// be wrong.
     text_merge: Option<Arc<dyn ThreeWayTextMerge>>,
 
+    /// Inc 3: authoritative "is this a registered shared-subtree mount?" seam.
+    /// Consulted before skipping ingest of a file whose parsed content LOOKS
+    /// like a mount, so a hand-authored `:share-role: mount:` file is not
+    /// silently skipped (data loss). `None` (SqlOnly / tests) ⇒ never skip.
+    mount_registry: Option<Arc<dyn MountRegistry>>,
+
     /// Initial-scan feed-barrier batching (boot ingest latency, Options 0+1).
     /// `None` in steady state — each runtime `on_file_changed` pays its own
     /// per-file `wait_for_blocks_in_feed` barrier (unchanged). `Some(buf)` only
@@ -273,6 +280,7 @@ impl FileSyncController {
             fs,
             doc_blocks: HashMap::new(),
             text_merge: None,
+            mount_registry: None,
             scan_feed_ids: None,
             quarantined: HashSet::new(),
             quarantine_skip_logged: std::sync::Mutex::new(HashSet::new()),
@@ -428,6 +436,14 @@ impl FileSyncController {
     /// ladder). No-op in `Upstream` (Loro) mode — the live CRDT merges there.
     pub fn with_text_merge(mut self, merger: Arc<dyn ThreeWayTextMerge>) -> Self {
         self.text_merge = Some(merger);
+        self
+    }
+
+    /// Wire the authoritative mount registry (Inc 3). Without it, a file whose
+    /// parsed content looks like a shared-subtree projection is NOT treated as
+    /// one (ingested normally) — the guard only skips ids the registry confirms.
+    pub fn with_mount_registry(mut self, registry: Arc<dyn MountRegistry>) -> Self {
+        self.mount_registry = Some(registry);
         self
     }
 
@@ -871,6 +887,62 @@ impl FileSyncController {
                 path.display()
             );
             return Ok(());
+        }
+
+        // Inc 3 (Model.md invariant 11): a shared-subtree org file is a one-way
+        // PROJECTION SINK, rendered FROM the shared Loro doc (which converges
+        // across devices over iroh). Re-ingesting it as fresh global intent
+        // would duplicate the shared blocks into the GLOBAL doc — colliding
+        // with the shared-doc→SQL projection (`first_local_collision` would then
+        // refuse the honest projection).
+        //
+        // The skip decision keys on AUTHORITATIVE state (a real mount node in
+        // the global Loro tree, via `mount_registry`), NOT on parsed drawer
+        // content: `:share-role: mount:` / `:shared-tree-id:` round-trip
+        // verbatim from ANY user file, so skipping on content alone would let a
+        // hand-authored file be silently dropped (a page that never loads).
+        // Content is only a cheap PRE-FILTER; the registry is the authority. No
+        // registry (SqlOnly / tests) ⇒ never skip. A cheap substring pre-filter
+        // keeps normal files off the parse path — it matches EITHER marker
+        // (`share-role` on the mount, `shared-tree-id` stamped on descendants),
+        // since a page share's mount drawer does not always round-trip while its
+        // descendants' `shared-tree-id` always does.
+        let lc = disk_content.to_ascii_lowercase();
+        if lc.contains("share-role") || lc.contains("shared-tree-id") {
+            let probe =
+                self.format
+                    .parse(path, &disk_content, &EntityUri::no_parent(), &self.root_dir)?;
+            if is_shared_subtree_projection(&probe.document, &probe.blocks) {
+                let registered = match &self.mount_registry {
+                    Some(reg) => reg.is_registered_mount(&probe.document.id).await?,
+                    None => false,
+                };
+                if registered {
+                    tracing::warn!(
+                        path = %path.display(),
+                        page_id = %probe.document.id,
+                        "[FileSyncController] Model.md invariant 11: registered shared-subtree \
+                         projection file — SKIPPING ingest. Its truth is the shared Loro doc \
+                         (converges over iroh); the org file is a one-way projection sink, so \
+                         re-ingesting it would duplicate the shared blocks into the global doc."
+                    );
+                    // Stamp last_projection so in-session echo-suppression treats
+                    // the file as up to date (it IS our own projection output).
+                    self.last_projection
+                        .insert(canonical.clone(), disk_content.clone());
+                    return Ok(());
+                }
+                // Content looks like a mount but the page id is NOT a registered
+                // mount — a hand-authored / imported / templated `share-role`
+                // drawer. Disclosed, then ingested as a normal file (never
+                // silently dropped).
+                tracing::warn!(
+                    path = %path.display(),
+                    page_id = %probe.document.id,
+                    "[FileSyncController] a `share-role` drawer property was found on a page that \
+                     is NOT a registered shared-subtree mount — ingesting it as a normal file."
+                );
+            }
         }
 
         // Phase 1 cold-boot fast-path: when `last_projection` has no entry
@@ -3341,6 +3413,18 @@ async fn read_disk_or_empty(fs: &Arc<dyn FileSystem>, path: &Path) -> Result<Str
     }
 }
 
+/// Inc 3: whether a parsed org file is a shared-subtree PROJECTION (a mount
+/// page and its shared descendants), which must NOT be re-ingested as fresh
+/// global intent (Model.md invariant 11 — its truth is the shared Loro doc).
+/// True when the page block IS the mount, or any block carries the mount role
+/// or a `shared-tree-id` stamp.
+fn is_shared_subtree_projection(document: &Block, blocks: &[Block]) -> bool {
+    document.is_share_mount()
+        || blocks
+            .iter()
+            .any(|b| b.is_share_mount() || b.shared_tree_id().is_some())
+}
+
 /// Convert a relative path (e.g. "projects/todo.org") to a name chain
 /// (["projects", "todo"]).
 fn path_to_name_chain(rel_path: &Path) -> Vec<String> {
@@ -3417,6 +3501,58 @@ fn three_way_text_content(
         .merge_text(base, theirs, mine)
         .with_context(|| "3-way text merge of concurrent file-vs-UI edit failed")?;
     Ok((merged, true))
+}
+
+#[cfg(test)]
+mod shared_projection_guard_tests {
+    use holon_api::EntityUri;
+    use holon_api::block::Block;
+    use holon_api::share_props::SHARED_TREE_ID_PROPERTY;
+    use holon_api::share_props::SHARE_ROLE_MOUNT;
+    use holon_api::share_props::SHARE_ROLE_PROPERTY;
+
+    use super::is_shared_subtree_projection;
+
+    fn page(id: &str) -> Block {
+        let mut b = Block::new_text(EntityUri::block(id), EntityUri::no_parent(), "Page");
+        b.set_page(true);
+        b
+    }
+
+    // A normal page + normal blocks are NOT a shared projection — must ingest.
+    #[test]
+    fn normal_file_is_not_a_shared_projection() {
+        let doc = page("doc");
+        let blocks = vec![Block::new_text(
+            EntityUri::block("b1"),
+            EntityUri::block("doc"),
+            "hi",
+        )];
+        assert!(!is_shared_subtree_projection(&doc, &blocks));
+    }
+
+    // The page block IS the mount (adopt-and-collapse page share) → skip ingest.
+    #[test]
+    fn mount_page_is_a_shared_projection() {
+        let mut doc = page("mount");
+        doc.set_property(SHARE_ROLE_PROPERTY, SHARE_ROLE_MOUNT);
+        doc.set_property(SHARED_TREE_ID_PROPERTY, "stid-1");
+        assert!(is_shared_subtree_projection(&doc, &[]));
+    }
+
+    // Synthetic-container share: the page is a plain synthetic page, but a child
+    // carries the mount role / shared-tree-id stamp → skip ingest.
+    #[test]
+    fn descendant_with_share_stamp_is_a_shared_projection() {
+        let doc = page("synthetic");
+        let mut child = Block::new_text(
+            EntityUri::block("shared-root"),
+            EntityUri::block("synthetic"),
+            "shared",
+        );
+        child.set_property(SHARED_TREE_ID_PROPERTY, "stid-2");
+        assert!(is_shared_subtree_projection(&doc, &[child]));
+    }
 }
 
 #[cfg(test)]

@@ -53,6 +53,7 @@ pub mod render_dsl;
 pub mod render_eval;
 pub mod render_types;
 pub mod repository;
+pub mod share_props;
 pub mod storage_error;
 pub mod streaming;
 pub mod template;

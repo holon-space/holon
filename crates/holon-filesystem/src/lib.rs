@@ -76,6 +76,8 @@ pub use sync_ports::AliasRegistrar;
 pub use sync_ports::BlockReader;
 pub use sync_ports::DocumentManager;
 pub use sync_ports::ImageDataProvider;
+pub use sync_ports::MountRegistry;
+pub use sync_ports::ShareWritebackDisclosure;
 pub use sync_ports::ThreeWayTextMerge;
 
 /// Filesystem utilities
