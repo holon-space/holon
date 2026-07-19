@@ -146,6 +146,11 @@ pub enum DegradedKind {
     /// (post-dispatch failure / lost ack). Fail-loud: it is NOT auto-retried;
     /// the human must verify on the remote before resending.
     ConnectorWriteOutcomeUnknown,
+    /// Yellow — a write inside a shared/mounted subtree reached Loro+SQL but
+    /// its org materialization is pending (mount not yet a page on disk).
+    /// Disclosed degrade per the share write-back track (inc 1): the edit is
+    /// NOT lost, only the file projection lags.
+    SharedSubtreeNotMaterialized,
     /// A plain info-style toast (used for "ticket copied").
     Info,
 }
@@ -254,6 +259,13 @@ impl ShareUiState {
                     kind: DegradedKind::OrgIngestFailed,
                     shared_tree_id: event.shared_tree_id,
                     detail: summary,
+                });
+            }
+            ShareDegradedReason::SharedSubtreeNotMaterialized(detail) => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::SharedSubtreeNotMaterialized,
+                    shared_tree_id: event.shared_tree_id,
+                    detail,
                 });
             }
         }
@@ -1455,6 +1467,11 @@ fn render_toast_stack(
                 gpui::rgba(0xef4444ff),
                 crate::icon("⛔"),
                 "Connector write outcome unknown",
+            ),
+            DegradedKind::SharedSubtreeNotMaterialized => (
+                gpui::rgba(0xfbbf24ff),
+                "⚠",
+                "Shared edit saved — org file pending",
             ),
             DegradedKind::Info => (gpui::rgba(0x60a5faff), "i", "Info"),
         };
