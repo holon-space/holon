@@ -516,21 +516,35 @@ pub fn seed_boot_journal(state: &mut ReferenceState) {
     use crate::pbt::frontend_slice::components::keystone_boot_journal_id;
     let journals = EntityUri::parse("block:journals").expect("journals id");
     let id = keystone_boot_journal_id();
-    let mut block = Block::new_text(id.clone(), journals.clone(), &keystone_boot_journal_date());
+    let date = keystone_boot_journal_date();
+    let mut block = Block::new_text(id.clone(), journals.clone(), &date);
+    // LogSeq-parity daily-note ruling (2026-07-19): the auto-create rule emits
+    // `place: page(journals)`, so the day-block is a PAGE-file child of the
+    // journals shell — `Page`-tagged, a `[[{date}]]` link target, and materialized
+    // into its OWN subdir file `Journals/{date}.org` (name_chain → nearest ancestor
+    // page = journals), DE-INLINED from the `Journals.org` companion. Model that
+    // shape here (mirrors `seed_folder_companion_subdir`): a self-documenting
+    // NON-seed page owning its subdir file.
+    block.set_page(true);
     // The action creates the journal AFTER the boot seed, so the SUT's fractional
     // index appends it after the seeded `Journal Auto-Create` heading (both are
-    // Text-group siblings of `block:journals`). The oracle orders siblings by
+    // siblings of `block:journals`). The oracle orders siblings by
     // `(sibling_order_group, sequence, id)` (ADR 0005); the heading has sequence 0,
-    // so give the journal sequence 1 to match the SUT's created-last order (else
-    // the id tie-break sorts the UUID-named journal first and diverges
-    // `inv-{live,loro}-children-match-ref` + `inv-blocks-match-ref/org`).
+    // so give the journal sequence 1 to match the SUT's created-last order.
     block.set_sequence(1);
     state.domain.block_state.blocks.insert(id.clone(), block);
+    // Self-documenting page (`block_documents[id]=id`, NON-seed) so it is INCLUDED
+    // in `all_non_seed_block_ids` — `inv-every-page-has-its-own-file` checks it (a
+    // seed-classified page would be skipped, leaving the oracle inert).
     state
         .domain
         .block_state
         .block_documents
-        .insert(id, journals);
+        .insert(id.clone(), id.clone());
+    state
+        .files
+        .documents
+        .insert(id, format!("Journals/{date}.org"));
 }
 
 /// The page-rooted leaf-sibling oracle (`parent`/`c1`/`c2` re-rooted under a

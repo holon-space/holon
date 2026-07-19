@@ -50,6 +50,7 @@ use holon_api::effect_id::FiringKey;
 use holon_api::effect_id::OutputSlot;
 use holon_api::effect_id::RuleId;
 use holon_api::effect_id::deterministic_block_id;
+use holon_api::link_parser::PageId;
 use holon_api::pattern::Subject;
 use holon_api::streaming::Change;
 use holon_core::storage::types::StorageEntity;
@@ -290,15 +291,57 @@ async fn fire_emit(
         }
     }
 
-    // Deterministic effect id (ADR 0024 P4): a name-based UUIDv5 of
-    // (rule-id, firing-key, slot), so every replica firing this rule for this day
-    // mints the SAME block id; the CRDT merge collapses concurrent creates, and a
-    // re-fire upserts the same id.
-    let key = FiringKey::from_row(binding);
-    let id = deterministic_block_id(rule_id, &key, &OutputSlot::first());
+    // Deterministic effect id. Two shapes, both pure functions of stable inputs
+    // (so replicas converge and a re-fire upserts the same id):
+    //   - PAGE placement (`place: page(<root>)`): the id is the CANONICAL page
+    //     identity `PageId::for_path(<parent-page-path>/<content>)` — a name-based
+    //     UUIDv5 of the name-chain, IDENTICAL to the id org-ingest /
+    //     `convert_block_to_page` assign to a page at this location. So a
+    //     `[[<parent-page-path>/<content>]]` wiki-link resolves to the very page
+    //     this rule mints (LogSeq-parity daily-note ruling 2026-07-19: date pages
+    //     stay nested under `journals`, e.g. `[[Journals/2026-07-19]]`). Bare-date
+    //     `[[2026-07-19]]` resolution is a SEPARATE page-alias feature, out of
+    //     scope.
+    //   - INLINE placement (`place: <root>`): the id stays a firing-keyed UUIDv5 of
+    //     (rule-id, firing-key, slot) (ADR 0024 P4).
+    let id: String = if emit.place.is_page() {
+        let parent_path = match page_path_of(engine, &parent_id).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(
+                    "[holon_rule_watcher] {} page-path resolution failed for parent {parent_id}: \
+                     {e:#}",
+                    rule_id.as_str()
+                );
+                status.set(rule_id.as_str(), RuleStatus::ExecError(format!("{e:#}")));
+                return;
+            }
+        };
+        let full_path = if parent_path.is_empty() {
+            content.clone()
+        } else {
+            format!("{parent_path}/{content}")
+        };
+        match PageId::for_path(&full_path) {
+            Ok(pid) => pid.as_str().to_string(),
+            Err(e) => {
+                tracing::error!(
+                    "[holon_rule_watcher] {} PageId::for_path({full_path:?}) failed: {e}",
+                    rule_id.as_str()
+                );
+                status.set(rule_id.as_str(), RuleStatus::ExecError(e));
+                return;
+            }
+        }
+    } else {
+        let key = FiringKey::from_row(binding);
+        deterministic_block_id(rule_id, &key, &OutputSlot::first())
+            .as_str()
+            .to_string()
+    };
 
     let mut params = StorageEntity::new();
-    params.insert("id".into(), Value::String(id.as_str().to_string()));
+    params.insert("id".into(), Value::String(id));
     params.insert("parent_id".into(), Value::String(parent_id));
     params.insert("content".into(), Value::String(content));
     // Page-file placement (`place: page(<root>)`): tag the emitted block `Page` so
@@ -372,6 +415,61 @@ async fn already_present(engine: &BackendEngine, parent_id: &str, content: &str)
         .await
         .context("inhibitor existence read failed")?;
     Ok(!rows.is_empty())
+}
+
+/// The `/`-joined page-title chain of `block_id`, walking up `parent_id` while
+/// each ancestor is itself a `Page`. The SAME chain
+/// `SqlOperationProvider::page_path_of` builds, so a page minted under
+/// `block_id` gets the canonical `PageId::for_path` id — the id org-ingest /
+/// `convert_block_to_page` (and thus wiki-link resolution) assign to that
+/// location. A direct base-table walk (`block_raw` + `block_tags`), never a
+/// matview. Fails loud on a runaway parent chain.
+async fn page_path_of(engine: &BackendEngine, block_id: &str) -> Result<String> {
+    let mut segments: Vec<String> = Vec::new();
+    let mut cursor = Some(block_id.to_string());
+    let mut guard = 0usize;
+    while let Some(id) = cursor {
+        guard += 1;
+        if guard > 1024 {
+            return Err(anyhow::anyhow!(
+                "page_path_of({block_id}): parent chain too deep (cycle?)"
+            ));
+        }
+        let mut params = HashMap::new();
+        params.insert("id".to_string(), Value::String(id.clone()));
+        let is_page = !engine
+            .db_handle()
+            .query(
+                "SELECT 1 FROM block_tags WHERE block_id = $id AND tag = 'Page' LIMIT 1",
+                params.clone(),
+            )
+            .await
+            .context("page_path_of: Page-tag existence read failed")?
+            .is_empty();
+        if !is_page {
+            break;
+        }
+        let rows = engine
+            .db_handle()
+            .query(
+                "SELECT content, parent_id FROM block_raw WHERE id = $id",
+                params,
+            )
+            .await
+            .context("page_path_of: content/parent read failed")?;
+        let Some(row) = rows.first() else { break };
+        let title = match row.get("content") {
+            Some(Value::String(s)) => s.trim().to_string(),
+            _ => break,
+        };
+        segments.push(title);
+        cursor = row
+            .get("parent_id")
+            .and_then(|v| v.as_string())
+            .map(str::to_string);
+    }
+    segments.reverse();
+    Ok(segments.join("/"))
 }
 
 fn extract_string(row: &StorageEntity, key: &str) -> Option<String> {

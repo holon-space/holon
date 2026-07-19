@@ -131,25 +131,19 @@ pub fn keystone_boot_journal_date() -> String {
     holon_api::CalendarDate::from_clock(keystone_boot_clock().as_ref()).ymd()
 }
 
-/// The deterministic id of the journal day-block the boot auto-create rule
-/// fires for [`keystone_boot_journal_date`]. Computed with the SAME
-/// `holon-api::effect_id` functions the production `holon_rule_watcher` uses:
-/// `RuleId` = the holon_rule block's stored id (`JOURNALS_ACTION_ID`),
-/// `FiringKey` over the clock binding row `SELECT today AS today FROM clock`
-/// (so the key column is `today`, not `name`), first output slot — so the
-/// reference model places the block in the SUT id space exactly.
+/// The deterministic id of the journal day-PAGE the boot auto-create rule fires
+/// for [`keystone_boot_journal_date`]. Per the LogSeq-parity daily-note ruling
+/// (2026-07-19) the rule emits `place: page(journals)`, so the day is a `Page`
+/// whose id is the CANONICAL page identity
+/// `PageId::for_path("Journals/{date}")` — a name-based UUIDv5 of the
+/// name-chain, IDENTICAL to what org-ingest / `convert_block_to_page` /
+/// wiki-link resolution assign to a page nested under the `journals`
+/// folder-page (content "Journals"). Mirrors `fire_emit`'s page branch exactly,
+/// so the reference model places the block in the SUT id space.
 pub fn keystone_boot_journal_id() -> EntityUri {
-    use holon_api::effect_id::FiringKey;
-    use holon_api::effect_id::OutputSlot;
-    use holon_api::effect_id::RuleId;
-    use holon_api::effect_id::deterministic_block_id;
-    let rule = RuleId::new(holon_frontend::JOURNALS_ACTION_ID);
-    let row: holon_api::entity::StorageEntity = std::iter::once((
-        Arc::<str>::from("today"),
-        holon_api::Value::String(keystone_boot_journal_date()),
-    ))
-    .collect();
-    deterministic_block_id(&rule, &FiringKey::from_row(&row), &OutputSlot::first())
+    holon_api::link_parser::PageId::for_path(&format!("Journals/{}", keystone_boot_journal_date()))
+        .expect("keystone journal page path is well-formed")
+        .into_entity_uri()
 }
 
 /// A composition component wrapping a real headless frontend stack. Owns the
@@ -284,6 +278,63 @@ impl HeadlessFrontendComponent {
             out.push((path, id));
         }
         out
+    }
+
+    /// Page-files the production `FileSyncController` MATERIALIZED reactively
+    /// after boot (a rule-minted journal date, `convert_block_to_page`, the B2
+    /// sweep) that are NOT among `already_tracked` paths — each paired with its
+    /// doc id (parsed from the file's `#+ID:` header). Prod observes these via
+    /// the alias registry the materialize registered; the SUT's org readers
+    /// must too, else a materialized page's blocks are invisible and both
+    /// `inv-blocks-match-ref/org` (parse-back) and `inv-every-page-...` /
+    /// `inv-org-render-fixed-point` (render) false-diverge (oracle has the
+    /// page, SUT-org misses it). The ONE disk-scan the two org readers +
+    /// the doc-path resolver share (no duplicated scan logic). Deduped
+    /// against `already_tracked`.
+    async fn materialized_doc_files_absent_from(
+        &self,
+        already_tracked: &std::collections::HashSet<PathBuf>,
+    ) -> Vec<(EntityUri, PathBuf)> {
+        let default_doc_bare = holon_api::default_doc_block_uri().id().to_string();
+        let mut out = Vec::new();
+        for (path, id) in self.disk_org_files().await {
+            if already_tracked.contains(&path) {
+                continue;
+            }
+            let Some(bare) = id else { continue };
+            // Skip the `__default__` layout file (`index.org`): the session's
+            // `build_default_layout_blocks` writes it to disk at boot, but the org
+            // readers DELIBERATELY exclude it from the comparison surface (like
+            // `soak-*` docs and unlike `org_paths` user docs) — the ref models the
+            // layout as blocks, not as an org file, so parsing it back would drag
+            // the whole 3-column layout subtree into `/org` and false-diverge.
+            if bare == default_doc_bare {
+                continue;
+            }
+            out.push((EntityUri::from_raw(&format!("block:{bare}")), path));
+        }
+        out
+    }
+
+    /// Resolve a document's on-disk `.org` path: the boot-tracked `documents`
+    /// list first, then — for a reactively-materialized page not in that list —
+    /// the shared materialized-file scan matching the doc's bare id.
+    pub(crate) async fn resolve_doc_file_path(&self, doc_uri: &EntityUri) -> Option<PathBuf> {
+        if let Some(p) = self
+            .documents
+            .lock()
+            .expect("documents lock")
+            .iter()
+            .find(|(u, _)| *u == *doc_uri)
+            .map(|(_, p)| p.clone())
+        {
+            return Some(p);
+        }
+        self.materialized_doc_files_absent_from(&std::collections::HashSet::new())
+            .await
+            .into_iter()
+            .find(|(u, _)| *u == *doc_uri)
+            .map(|(_, path)| path)
     }
 
     /// Fork B echo-test helper — re-trigger the production `FileSyncController`
@@ -1459,6 +1510,19 @@ impl SutOrgRead for HeadlessFrontendComponent {
                 paths.push(p.clone());
             }
         }
+        // Fork B: also parse page-files the writeback MATERIALIZED after boot
+        // (a rule-minted journal date + its later-added children live in
+        // `Journals/{date}.org`, which is neither in `org_paths` nor `documents`).
+        // Without this the date page's children are invisible to `/org` and
+        // `inv-blocks-match-ref/org` false-diverges (oracle has them, SUT-org misses
+        // them) — the same disk scan `snapshot_org_render_pairs` uses. (The parse
+        // gives each child `parent_id = file_id`, the date page id, matching the
+        // ref; the doc-root itself is not in `result.blocks`, so its own parent is
+        // moot — no subdir-parent resolution needed.)
+        let tracked: std::collections::HashSet<PathBuf> = paths.iter().cloned().collect();
+        for (_, path) in self.materialized_doc_files_absent_from(&tracked).await {
+            paths.push(path);
+        }
         let mut all_blocks = Vec::new();
         for path in &paths {
             let raw = FileSystem::read_to_string(self.org_fs.as_ref(), path)
@@ -1516,6 +1580,8 @@ impl SutOrgRender for HeadlessFrontendComponent {
             .collect();
 
         let mut out = Vec::new();
+        let mut emitted_paths: std::collections::HashSet<PathBuf> =
+            std::collections::HashSet::new();
         let docs_snapshot = self.documents.lock().expect("documents lock").clone();
         for (doc_id, path) in &docs_snapshot {
             // disk-INDEPENDENT doc id (cached at boot), so a corrupted disk is
@@ -1532,6 +1598,33 @@ impl SutOrgRender for HeadlessFrontendComponent {
             let disk = FileSystem::read_to_string(self.org_fs.as_ref(), path)
                 .await
                 .expect("SutOrgRender: read org file");
+            emitted_paths.insert(path.clone());
+            out.push((path.to_string_lossy().to_string(), disk, rendered));
+        }
+
+        // Fork B / LogSeq-parity: also render page-files the production
+        // `FileSyncController` MATERIALIZED reactively after boot (a rule-minted
+        // journal date + its later-added children, `convert_block_to_page`, the B2
+        // sweep) — NOT in the boot-tracked `documents` list but on the shared
+        // `org_fs`. Else `inv-every-page-has-its-own-file` / `inv-org-render-fixed-
+        // point` false-RED a page that DOES own a file. Shared disk scan with
+        // `org_block_snapshot`.
+        for (doc_uri, path) in self
+            .materialized_doc_files_absent_from(&emitted_paths)
+            .await
+        {
+            let Some(doc_block) = doc_blocks.get(doc_uri.as_str()) else {
+                continue;
+            };
+            let descendants = reader
+                .get_blocks(&doc_uri)
+                .await
+                .expect("SutOrgRender: get_blocks (materialized page) failed");
+            let rendered =
+                OrgRenderer::render_document(doc_block, &descendants, &path, &doc_block.id);
+            let disk = FileSystem::read_to_string(self.org_fs.as_ref(), &path)
+                .await
+                .expect("SutOrgRender: read materialized org file");
             out.push((path.to_string_lossy().to_string(), disk, rendered));
         }
         out
@@ -2306,7 +2399,17 @@ impl SutSeamMutate for HeadlessFrontendComponent {
         self.stamp_sequence_from_sort_key(&mut current).await;
         resolved.apply_to(&mut current);
         let grouped = holon_api::blocks_by_document(&current);
-        let docs_snapshot = self.documents.lock().expect("documents lock").clone();
+        let mut docs_snapshot = self.documents.lock().expect("documents lock").clone();
+        // Fork B: also rewrite page-files the writeback MATERIALIZED after boot
+        // (a rule-minted journal date page). Without this, an External mutation
+        // that adds a child UNDER the date page never writes it to
+        // `Journals/{date}.org` (the page is not in `documents`), so the child is
+        // never ingested — SUT-arm INGEST DATA LOSS (the child present in the ref
+        // but absent from block_raw/sql/matview/loro). Excludes the `__default__`
+        // layout file (see `materialized_doc_files_absent_from`).
+        let tracked: std::collections::HashSet<PathBuf> =
+            docs_snapshot.iter().map(|(_, p)| p.clone()).collect();
+        docs_snapshot.extend(self.materialized_doc_files_absent_from(&tracked).await);
         for (doc_uri, file_path) in &docs_snapshot {
             let doc_blocks: Vec<&Block> = grouped
                 .iter()
@@ -2328,12 +2431,8 @@ impl SutSeamMutate for HeadlessFrontendComponent {
         use holon_filesystem::FileSystem;
         let resolved_doc = self.resolve_id(doc_uri);
         let file_path = self
-            .documents
-            .lock()
-            .expect("documents lock")
-            .iter()
-            .find(|(u, _)| *u == resolved_doc)
-            .map(|(_, p)| p.clone())
+            .resolve_doc_file_path(&resolved_doc)
+            .await
             .unwrap_or_else(|| {
                 panic!("[bulk_external_add] no file for doc {doc_uri} (resolved {resolved_doc})")
             });
@@ -3211,61 +3310,68 @@ mod tests {
             "journal block must NOT carry a `name` property — Bug-3: the date belongs in content"
         );
 
-        // ORG round-trip: block:journals renders the day-block as a `* <date>`
-        // headline (content in the headline), never a bare `* ` + `:name:` drawer.
+        // LogSeq-parity daily-note ruling (2026-07-19): the day-block is emitted as
+        // a PAGE-file child of the journals shell (`place: page(journals)`), so it
+        // is `Page`-tagged and DE-INLINED from the `Journals.org` companion (the
+        // `get_blocks` CTE excludes `Page`-tagged children). Assert the store tag +
+        // the companion de-inline. (Own-file materialization into
+        // `Journals/{date}.org` is asserted at the composed-keystone layer where the
+        // full writeback stack runs; this headless component exercises the store +
+        // companion-render facet.)
         {
             use holon_pbt_core::capabilities::SutOrgRender;
+            let tag_rows = comp
+                .engine
+                .db_handle()
+                .query(
+                    &format!(
+                        "SELECT tag FROM block_tags WHERE block_id = '{}'",
+                        boot_id.replace('\'', "''")
+                    ),
+                    std::collections::HashMap::new(),
+                )
+                .await
+                .expect("boot journal tag query");
+            assert!(
+                tag_rows
+                    .iter()
+                    .any(|r| r.get("tag").and_then(|v| v.as_string()) == Some("Page")),
+                "boot journal must be Page-tagged (place: page(journals)); tags={tag_rows:?}"
+            );
             let pairs = comp.snapshot_org_render_pairs().await;
-            let (_, _, rendered) = pairs
+            let (_, _, journals_render) = pairs
                 .iter()
                 .find(|(path, _, _)| path.ends_with("Journals.org"))
                 .expect("Journals.org is a tracked org doc");
             assert!(
-                rendered.contains(&format!("* {boot_date}")),
-                "journal must org-render as headline `* {boot_date}` (content), got:\n{rendered}"
+                !journals_render.contains(&format!("* {boot_date}")),
+                "day page must be DE-INLINED from the Journals.org companion (it owns its own \
+                 page-file), got:\n{journals_render}"
             );
             assert!(
-                !rendered.contains(":name:"),
-                "journal block must not org-render a `:name:` property drawer:\n{rendered}"
+                !journals_render.contains(":name:"),
+                "journal block must not org-render a `:name:` property drawer:\n{journals_render}"
             );
         }
 
-        // WP2: the boot-day block carries the deterministic id
-        // UUIDv5(rule-id, firing-key, slot). Reproduce it from the discovered rule
-        // block id + the trigger row `{name: <date>}` and assert it matches — the
-        // convergence-by-naming property the whole capstone rests on.
-        let rule_id = comp
-            .engine
-            .db_handle()
-            .query(
-                "SELECT id FROM block_raw WHERE source_language = 'holon_rule'",
-                std::collections::HashMap::new(),
-            )
-            .await
-            .expect("rule-block query")
-            .first()
-            .and_then(|r| r.get("id").and_then(|v| v.as_string()).map(str::to_string))
-            .expect("a holon_rule block exists");
-        eprintln!("[advance-day] discovered rule id: {rule_id}");
-        // The firing row is the holon_rule clock binding `SELECT today AS today
-        // FROM clock` — `{today: <date>, _rowid: 1}` (the clock relation holds a
-        // single day-row; `_rowid` is excluded from the FiringKey, so it is stable).
+        // WP2 / Fork A (LogSeq-parity daily-note ruling 2026-07-19): the day is a
+        // `Page` emitted via `place: page(journals)`, so its id is the CANONICAL
+        // page identity `PageId::for_path("Journals/<date>")` — a name-based UUIDv5
+        // of the name-chain, IDENTICAL to what org-ingest / `convert_block_to_page`
+        // / wiki-link resolution assign to a page nested under `journals`. So
+        // `[[Journals/<date>]]` resolves to the very page the rule mints. Reproduce
+        // it and assert it matches — the convergence-by-naming property (and the
+        // link-target-identity property) the whole capstone now rests on.
         let expect_id_for = |date: &str| -> String {
-            let mut row = holon_api::StorageEntity::new();
-            row.insert("today".into(), Value::String(date.to_string()));
-            row.insert("_rowid".into(), Value::Integer(1));
-            holon_api::effect_id::deterministic_block_id(
-                &holon_api::effect_id::RuleId::new(rule_id.clone()),
-                &holon_api::effect_id::FiringKey::from_row(&row),
-                &holon_api::effect_id::OutputSlot::first(),
-            )
-            .as_str()
-            .to_string()
+            holon_api::link_parser::PageId::for_path(&format!("Journals/{date}"))
+                .expect("journal page path is well-formed")
+                .as_str()
+                .to_string()
         };
         assert_eq!(
             boot_days[0].0,
             expect_id_for(&boot_date),
-            "boot journal block carries the WP2 deterministic id"
+            "boot journal page carries the canonical PageId::for_path(\"Journals/<date>\") id"
         );
 
         // Journal day-blocks are ORDINARY content (WP3): not source/program blocks.
@@ -3292,25 +3398,25 @@ mod tests {
             "journal day-blocks must be ordinary content, none program/source-marked"
         );
 
-        // A rule-minted id is a deterministic name-based UUIDv5 (the version nibble
-        // is `5`), never a random v4 — the property that makes concurrent replicas
-        // converge (WP2). `block:XXXXXXXX-XXXX-5XXX-...`.
-        let is_uuid_v5 = |id: &str| {
-            id.strip_prefix("block:")
-                .and_then(|u| u.split('-').nth(2))
-                .map(|g| g.starts_with('5'))
-                .unwrap_or(false)
-        };
-        assert!(is_uuid_v5(&boot_days[0].0), "boot journal id is a v5 UUID");
+        // (The boot day's id was already proven to equal the canonical
+        // `PageId::for_path("Journals/<date>")` above — the deterministic,
+        // name-based, replica-convergent identity, NOT a random v4. Fork A: page
+        // ids are path-hashes, so the earlier UUIDv5-version-nibble proxy no longer
+        // applies; the `expect_id_for` equality is the direct convergence proof.)
 
-        // Advance one day: exactly one NEW journal appears, with a deterministic id.
+        // Advance one day: exactly one NEW journal appears, carrying the canonical
+        // `PageId::for_path("Journals/<next-date>")` id (deterministic by naming).
         let d1 = comp.advance_clock_days(1).await;
         let after1 = wait_for_journal_days(&comp, 2, Duration::from_secs(10)).await;
         let d1_block = after1
             .iter()
             .find(|(_, n)| n == &d1)
             .expect("day+1 journal created");
-        assert!(is_uuid_v5(&d1_block.0), "day+1 journal id is a v5 UUID");
+        assert_eq!(
+            d1_block.0,
+            expect_id_for(&d1),
+            "day+1 journal page carries the canonical PageId::for_path id"
+        );
 
         // Re-tick the SAME day: idempotent — no new block (deterministic-id upsert).
         let d1_again = comp.advance_clock_days(0).await;
@@ -3337,6 +3443,177 @@ mod tests {
             after2.iter().map(|(_, n)| n).collect();
         assert_eq!(distinct_days.len(), 3, "one journal per distinct day");
         eprintln!("[advance-day] final journals: {after2:?} ✓");
+    }
+
+    /// Fork B data-persistence gate (verifier half 2): a bullet added UNDER a
+    /// runtime-materialized journal date page — via the REACTIVE store path (a
+    /// `block.create`, the way the user typing a bullet reaches the store), NOT
+    /// an external file rewrite — must PERSIST into that page's OWN
+    /// `Journals/{date}.org` on disk. Else the bullet lives only in the store
+    /// and VANISHES on any store-rebuild-from-disk (the row-137 loss class,
+    /// now for runtime-minted pages). Reads the ACTUAL on-disk bytes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn child_added_to_runtime_journal_page_persists_into_its_own_file() {
+        use holon_pbt_core::capabilities::SutOrgRender;
+
+        let boot_ms = noon_millis(2026, 1, 15);
+        let clock = Arc::new(holon_api::TestClock::new(boot_ms));
+        let boot_date = holon_api::CalendarDate::from_clock(clock.as_ref()).ymd();
+        let comp = HeadlessFrontendComponent::new_with_clock(
+            &[("Journals.org", "#+ID: journals\n")],
+            Duration::from_millis(500),
+            false,
+            clock.clone(),
+        )
+        .await;
+
+        // The boot journal DATE PAGE (own `Journals/2026-01-15.org` materialized).
+        let boot_days = wait_for_journal_days(&comp, 1, Duration::from_secs(10)).await;
+        let page_id = boot_days[0].0.clone();
+        assert_eq!(boot_days[0].1, boot_date);
+
+        // A bullet typed under the date page → the reactive store create path.
+        let child_content = "a bullet typed under today's date page";
+        comp.create_block("block:jday-child-1", &page_id, child_content)
+            .await;
+
+        // Let the reactive writeback route + persist the child.
+        comp.settle_block_ids_stable(Duration::from_secs(5)).await;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+
+        // DISK TRUTH: the child must be in the date page's OWN file, and the
+        // `Journals.org` companion must NOT swallow it (it is a child of a Page).
+        let pairs = comp.snapshot_org_render_pairs().await;
+        let (day_path, day_disk, _) = pairs
+            .iter()
+            .find(|(p, _, _)| p.ends_with(&format!("{boot_date}.org")))
+            .unwrap_or_else(|| {
+                panic!(
+                    "date page must own Journals/{boot_date}.org; tracked docs: {:?}",
+                    pairs.iter().map(|(p, _, _)| p).collect::<Vec<_>>()
+                )
+            });
+        assert!(
+            day_disk.contains(child_content),
+            "a bullet added under the runtime-materialized date page MUST persist into ITS OWN \
+             file {day_path} (else data loss on store-rebuild); on-disk content:\n{day_disk}"
+        );
+        if let Some((_, journals_disk, _)) =
+            pairs.iter().find(|(p, _, _)| p.ends_with("Journals.org"))
+        {
+            assert!(
+                !journals_disk.contains(child_content),
+                "the date page's child must live in the date file, NOT the Journals.org companion:\
+                 \n{journals_disk}"
+            );
+        }
+
+        // The `/org` reader (binds `inv-blocks-match-ref/org`) must ALSO see the
+        // date page's CHILD — parsed from the materialized `Journals/{date}.org`
+        // with `parent_id = <date page id>`, matching the store/ref. This is the
+        // oracle-asymmetry half the verifier flagged: without the materialized-file
+        // union the child is invisible to `/org` and false-diverges. (The date
+        // page doc-ROOT is not in `parse_org_file`'s `result.blocks` — only its
+        // children — so it is not compared here.)
+        use holon_pbt_core::capabilities::SutOrgRead;
+        let org_blocks = comp.org_block_snapshot().await;
+        let child = org_blocks
+            .iter()
+            .find(|b| b.content == child_content)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the child bullet must be visible to org_block_snapshot (parsed from the date \
+                     file); got ids: {:?}",
+                    org_blocks
+                        .iter()
+                        .map(|b| b.id.to_string())
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(
+            child.parent_id.as_str(),
+            page_id,
+            "the child parses UNDER the date page (its file_id), matching the store/ref"
+        );
+        // The `__default__` layout file must NOT leak into `/org` (it is excluded).
+        assert!(
+            !org_blocks
+                .iter()
+                .any(|b| b.id.as_str() == "block:root-layout"),
+            "the __default__ layout subtree must stay excluded from /org, not pulled in by the \
+             materialized-file scan"
+        );
+        eprintln!("[journal-child] child persisted into {day_path} + visible to /org ✓");
+    }
+
+    /// Org-file-boundary regression (verifier green9 root cause): a bullet
+    /// whose content is literally the drawer keyword `:PROPERTIES:` (a
+    /// trailing `:tag:` group — deliberate extended-gen stressor) is org
+    /// TAG syntax on the headline line. When it crosses the org-FILE
+    /// boundary (an External write + re-ingest,
+    /// via `serialize_blocks_to_org_with_doc`/`OrgRenderer` → `parse_org_file`)
+    /// it re-parses into `block.tags` with EMPTY content — org has no
+    /// escape for it. This pins the SUT round-trip behavior the reference
+    /// now mirrors for `External` mutations via
+    /// `apply_org_headline_tag_split` (before the fix the ref kept raw
+    /// `:PROPERTIES:` content → `inv-blocks-match-ref/*` divergence
+    /// on any page hosting such a child, including a journal date page).
+    #[test]
+    fn properties_keyword_content_tag_splits_across_the_org_file_boundary() {
+        use holon_orgmode::parser::parse_org_file;
+        let page_id = EntityUri::block("dp");
+        let mut page = Block::new_text(page_id.clone(), EntityUri::block("journals"), "2026-01-15");
+        page.set_page(true);
+        let child = Block::new_text(EntityUri::block("block-3"), page_id.clone(), ":PROPERTIES:");
+        let root = std::path::Path::new("/tmp/jdp_diag");
+        let path = root.join("Journals").join("2026-01-15.org");
+
+        // Both the TEST serializer and the PRODUCTION OrgRenderer agree — this is
+        // real org semantics, not a serializer bug.
+        for (label, org) in [
+            (
+                "test",
+                crate::serialize_blocks_to_org_with_doc(&[&page, &child], &page_id, Some(&page)),
+            ),
+            (
+                "prod",
+                holon_orgmode::org_renderer::OrgRenderer::render_document(
+                    &page,
+                    &[child.clone()],
+                    &path,
+                    &page_id,
+                ),
+            ),
+        ] {
+            let res = parse_org_file(&path, &org, &EntityUri::no_parent(), root).unwrap();
+            let parsed = res
+                .blocks
+                .iter()
+                .find(|b| b.id.as_str() == "block:block-3")
+                .unwrap_or_else(|| panic!("[{label}] child parsed\n{org}"));
+            assert_eq!(
+                parsed.content, "",
+                "[{label}] `:PROPERTIES:` content re-parses to EMPTY across the file boundary\n{org}"
+            );
+            assert!(
+                parsed.tags.contains("PROPERTIES"),
+                "[{label}] `:PROPERTIES:` re-parses into a tag, not content\n{org}"
+            );
+        }
+
+        // The reference lens mirrors exactly this: apply it to a raw block and it
+        // must reach the same (empty content, tag) state the file round-trip does.
+        let mut ref_block =
+            Block::new_text(EntityUri::block("block-3"), page_id.clone(), ":PROPERTIES:");
+        crate::pbt::types::apply_org_headline_tag_split(&mut ref_block);
+        assert_eq!(
+            ref_block.content, "",
+            "ref lens drops the tag-group content"
+        );
+        assert!(
+            ref_block.tags.contains("PROPERTIES"),
+            "ref lens re-homes `:PROPERTIES:` into tags"
+        );
     }
 
     /// C-revised ruling (WP3) loud-guard: a rule's trigger is program machinery

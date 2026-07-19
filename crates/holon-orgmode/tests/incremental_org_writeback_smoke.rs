@@ -884,3 +884,116 @@ async fn name_chain_failed_ungrounded_drop_hard_vetoes() {
         "the file stays quarantined — no truncated write over disk; got {after_second:?}"
     );
 }
+
+// ── Fork B / LogSeq-parity daily-note ruling (2026-07-19)
+// ───────────────────── A page CREATED AT RUNTIME with NO children MUST still
+// materialize its OWN identity file (`#+ID:` header) —
+// `inv-every-page-has-its-own-file` is unconditional; a page's file existence
+// must never depend on it having children. Before the fix, `on_block_changed`
+// resolved a page's path + doc-root header through the documents registry (a
+// lagging `WHERE tag='Page'` matview), so a just-minted childless page (a
+// rule-minted journal date, `convert_block_to_page` on a childless block) was
+// skipped and left FILELESS. The fix resolves BOTH from the authoritative block
+// store. This models the registry MISS explicitly (the doc-manager stub does
+// NOT know the page).
+
+/// Authoritative store for exactly ONE childless page: `get_blocks` returns no
+/// children, `get_block_authoritative` returns the page block.
+struct ChildlessPageReader {
+    page: Block,
+}
+
+#[async_trait]
+impl BlockReader for ChildlessPageReader {
+    async fn get_blocks(&self, _doc_id: &EntityUri) -> anyhow::Result<Vec<Block>> {
+        Ok(vec![])
+    }
+    async fn get_block_authoritative(&self, id: &EntityUri) -> anyhow::Result<Option<Block>> {
+        Ok((self.page.id == *id).then(|| self.page.clone()))
+    }
+    async fn iter_documents_with_blocks(&self) -> anyhow::Result<Vec<(EntityUri, Vec<Block>)>> {
+        Ok(vec![(self.page.id.clone(), vec![])])
+    }
+}
+
+/// No children for anyone — the childless-page ordering.
+struct NoChildrenOrdering;
+
+#[async_trait]
+impl BlockOrdering for NoChildrenOrdering {
+    async fn place(
+        &self,
+        _: &EntityUri,
+        _: &EntityUri,
+        _: Option<&EntityUri>,
+    ) -> OrderingResult<()> {
+        Ok(())
+    }
+    async fn prev_sibling(&self, _: &EntityUri) -> OrderingResult<Option<EntityUri>> {
+        Ok(None)
+    }
+    async fn next_sibling(&self, _: &EntityUri) -> OrderingResult<Option<EntityUri>> {
+        Ok(None)
+    }
+    async fn first_child(&self, _: &EntityUri) -> OrderingResult<Option<EntityUri>> {
+        Ok(None)
+    }
+    async fn last_child(&self, _: &EntityUri) -> OrderingResult<Option<EntityUri>> {
+        Ok(None)
+    }
+    async fn children(&self, _: &EntityUri) -> OrderingResult<Vec<EntityUri>> {
+        Ok(vec![])
+    }
+    async fn update_in_tree(&self, _: holon_api::StorageEntity) -> OrderingResult<()> {
+        Ok(())
+    }
+    async fn delete_in_tree(&self, _: holon_api::StorageEntity) -> OrderingResult<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn childless_runtime_page_materializes_its_identity_file() {
+    let page_id = EntityUri::block("jp");
+    let mut page = Block::new_text(page_id.clone(), EntityUri::no_parent(), "2026-07-19");
+    page.set_page(true);
+
+    let reader = Arc::new(ChildlessPageReader { page: page.clone() });
+    // The doc-manager deliberately does NOT know the page (models the lagging
+    // page registry): the fix must resolve path + header from the block store.
+    let doc_manager = Arc::new(StubDocManager {
+        doc: Block::new_text(
+            EntityUri::block("unrelated"),
+            EntityUri::no_parent(),
+            "unrelated",
+        ),
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let fs = Arc::new(RealFileSystem);
+    let mut controller = new_org_sync_controller(
+        reader,
+        doc_manager,
+        root.clone(),
+        Arc::new(NoChildrenOrdering),
+        fs,
+    );
+
+    // The reactive per-block writeback fires with the page as the upserted block.
+    controller
+        .on_block_changed(&page_id, &BlockDelta::Upsert(page.clone()))
+        .await
+        .expect("on_block_changed must not error");
+
+    // The page owns its own file at its authoritative name-chain path, carrying
+    // the `#+ID:` identity header even though it is childless.
+    let path = holon_core::CanonicalPath::new(&root)
+        .into_path_buf()
+        .join("2026-07-19.org");
+    let disk = std::fs::read_to_string(&path)
+        .expect("childless runtime-created page must materialize its own identity file");
+    assert!(
+        disk.contains("#+ID: jp"),
+        "materialized file must carry the page identity header, got:\n{disk}"
+    );
+}
