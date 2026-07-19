@@ -182,10 +182,21 @@ impl CommandProvider {
         );
         // Manual invocation → fresh context_key so every instantiation is a new
         // instance (rules pass their firing key instead, to converge on re-fire).
-        params.insert(
-            "context_key".into(),
-            Value::String(format!("manual:{}", uuid::Uuid::new_v4())),
-        );
+        // `uuid` is a native-only dep (see Cargo.toml); on wasm (the browser
+        // worker) a process-monotonic counter gives an equally-fresh key.
+        #[cfg(not(target_arch = "wasm32"))]
+        let context_key = format!("manual:{}", uuid::Uuid::new_v4());
+        #[cfg(target_arch = "wasm32")]
+        let context_key = {
+            use std::sync::atomic::AtomicU64;
+            use std::sync::atomic::Ordering;
+            static MANUAL_CTX_SEQ: AtomicU64 = AtomicU64::new(0);
+            format!(
+                "manual:wasm-{}",
+                MANUAL_CTX_SEQ.fetch_add(1, Ordering::Relaxed)
+            )
+        };
+        params.insert("context_key".into(), Value::String(context_key));
         if let Some(replaced) = placement.block_to_replace() {
             params.insert("replace_block".into(), Value::String(replaced.to_string()));
         }
