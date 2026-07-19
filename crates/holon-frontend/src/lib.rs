@@ -514,10 +514,20 @@ impl<T> FrontendSession<T> {
     }
 
     /// Mutate UI config and persist to disk.
+    ///
+    /// The in-memory mutation always applies; a persistence failure (e.g. a
+    /// read-only config dir) is surfaced loudly in the log rather than
+    /// aborting the process. Widget-open toggles run through here — they must
+    /// never SIGABRT the app on a failed disk write.
     pub fn update_ui_settings(&self, f: impl FnOnce(&mut UiConfig)) {
         let mut guard = self.holon_config.lock().unwrap();
         f(&mut guard.ui);
-        guard.save_runtime(&self.config_dir);
+        if let Err(e) = guard.save_runtime(&self.config_dir) {
+            tracing::error!(
+                "[config] failed to persist UI settings to {}: {e:#}",
+                self.config_dir.display()
+            );
+        }
     }
 
     /// Look up widget state by block ID. Returns default (open=true) if not
@@ -587,10 +597,19 @@ impl<T> FrontendSession<T> {
     }
 
     /// Set a preference value and persist to disk.
-    pub fn set_preference(&self, key: &preferences::PrefKey, value: toml::Value) {
+    ///
+    /// The in-memory mutation always applies. Returns `Err` (never panics) when
+    /// the write can't be persisted so the caller can surface a visible
+    /// degraded-mode notice — a preference that fails to save must keep the app
+    /// alive, not abort it.
+    pub fn set_preference(
+        &self,
+        key: &preferences::PrefKey,
+        value: toml::Value,
+    ) -> anyhow::Result<()> {
         let mut guard = self.holon_config.lock().unwrap();
         guard.set_preference(key, value);
-        guard.save_runtime(&self.config_dir);
+        guard.save_runtime(&self.config_dir)
     }
 
     /// Generate the render data for the preferences UI.

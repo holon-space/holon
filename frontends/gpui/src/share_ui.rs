@@ -126,6 +126,12 @@ pub enum DegradedKind {
     /// placement). Fail-loud: the selection consumed the key, so it must never
     /// look like a silent no-op or a stray block-split.
     CommandFailed,
+    /// Red — a preference write reached the config layer but could not be
+    /// persisted (e.g. the config dir is on a read-only filesystem). Fail-loud:
+    /// the in-memory value applied for this session, but it will NOT survive a
+    /// restart, and the process must stay alive — never SIGABRT on a failed
+    /// settings write.
+    PreferenceSaveFailed,
     /// A plain info-style toast (used for "ticket copied").
     Info,
 }
@@ -1124,6 +1130,9 @@ fn render_toast_stack(
             ),
             DegradedKind::UndoFailed => (gpui::rgba(0xef4444ff), "⛔", "Undo/redo failed"),
             DegradedKind::CommandFailed => (gpui::rgba(0xef4444ff), "⛔", "Command failed"),
+            DegradedKind::PreferenceSaveFailed => {
+                (gpui::rgba(0xef4444ff), "⛔", "Preference not saved")
+            }
             DegradedKind::Info => (gpui::rgba(0x60a5faff), "i", "Info"),
         };
         let close_state = share_state.clone();
