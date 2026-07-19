@@ -1128,11 +1128,19 @@ fn render_toast_stack(
                 "⚠",
                 "File sync degraded (bad org file)",
             ),
-            DegradedKind::UndoFailed => (gpui::rgba(0xef4444ff), crate::icon("⛔"), "Undo/redo failed"),
-            DegradedKind::CommandFailed => (gpui::rgba(0xef4444ff), crate::icon("⛔"), "Command failed"),
-            DegradedKind::PreferenceSaveFailed => {
-                (gpui::rgba(0xef4444ff), crate::icon("⛔"), "Preference not saved")
+            DegradedKind::UndoFailed => (
+                gpui::rgba(0xef4444ff),
+                crate::icon("⛔"),
+                "Undo/redo failed",
+            ),
+            DegradedKind::CommandFailed => {
+                (gpui::rgba(0xef4444ff), crate::icon("⛔"), "Command failed")
             }
+            DegradedKind::PreferenceSaveFailed => (
+                gpui::rgba(0xef4444ff),
+                crate::icon("⛔"),
+                "Preference not saved",
+            ),
             DegradedKind::Info => (gpui::rgba(0x60a5faff), "i", "Info"),
         };
         let close_state = share_state.clone();

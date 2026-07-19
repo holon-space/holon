@@ -72,9 +72,9 @@ fn register_android_icon_fonts(cx: &mut App) {
 /// read-only filesystem and a config write SIGABRTs the process. Route ALL
 /// writable state through the app-private dirs the platform hands us:
 ///
-/// - `config` + `db` → INTERNAL storage (`internal_data_path`, always
-///   writable, not user-visible) — the config dir MUST be here so preference
-///   writes never hit the read-only relative `.holon`.
+/// - `config` + `db` → INTERNAL storage (`internal_data_path`, always writable,
+///   not user-visible) — the config dir MUST be here so preference writes never
+///   hit the read-only relative `.holon`.
 /// - `orgmode_root` → EXTERNAL app-private storage (`external_data_path`), so
 ///   the vault is reachable via the Files app / MTP for the user to inspect.
 ///
@@ -149,8 +149,8 @@ fn open_holon_window(
         // defer to `resolve_config_dir` when unset. On Android the relative
         // `.holon` default is on the read-only CWD `/` and any preference write
         // there aborts the process, so the app-private dir is load-bearing.
-        let config_dir = config_dir
-            .unwrap_or_else(|| holon_frontend::config::resolve_config_dir(None));
+        let config_dir =
+            config_dir.unwrap_or_else(|| holon_frontend::config::resolve_config_dir(None));
         let session_config = SessionConfig::new(ui_info);
 
         // Bootstrap through `GpuiModule` (same path as desktop `main.rs`)
@@ -587,8 +587,8 @@ mod tests {
         );
     }
 
-    /// Missing platform dirs propagate as `None` (defers to `resolve_config_dir`)
-    /// rather than fabricating a bogus path.
+    /// Missing platform dirs propagate as `None` (defers to
+    /// `resolve_config_dir`) rather than fabricating a bogus path.
     #[test]
     fn android_storage_paths_passes_through_none() {
         let paths = android_storage_paths(None, None);

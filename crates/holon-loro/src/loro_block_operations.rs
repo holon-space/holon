@@ -1074,7 +1074,10 @@ impl LoroBlockOperations {
     ) -> HashMap<String, Value> {
         let mut params = HashMap::new();
         params.insert("id".into(), Value::String(block.id.to_string()));
-        params.insert("parent_id".into(), Value::String(block.parent_id.to_string()));
+        params.insert(
+            "parent_id".into(),
+            Value::String(block.parent_id.to_string()),
+        );
         params.insert(
             "content_type".into(),
             Value::String(block.content_type.to_string()),
@@ -2165,17 +2168,17 @@ mod advice_dismiss_tests {
         assert_eq!(restored.marks, None);
     }
 
-    /// Seed `id`/`text` as a child of `parent` (full URI), returning the child's
-    /// full id. Used to build ordered sibling fixtures for delete-inverse tests.
-    async fn seed_child(
-        backend: &LoroBackend,
-        parent: &str,
-        id: &str,
-        text: &str,
-    ) -> String {
+    /// Seed `id`/`text` as a child of `parent` (full URI), returning the
+    /// child's full id. Used to build ordered sibling fixtures for
+    /// delete-inverse tests.
+    async fn seed_child(backend: &LoroBackend, parent: &str, id: &str, text: &str) -> String {
         let parent_uri = EntityUri::parse_owned(parent.to_string()).expect("parent uri");
         let block = backend
-            .create_block(parent_uri, BlockContent::text(text), Some(EntityUri::block(id)))
+            .create_block(
+                parent_uri,
+                BlockContent::text(text),
+                Some(EntityUri::block(id)),
+            )
             .await
             .expect("seed child");
         block.id.to_string()
@@ -2198,9 +2201,13 @@ mod advice_dismiss_tests {
         ops.set_field(&c2, "task_state", Value::String("TODO".into()))
             .await
             .expect("task_state");
-        ops.set_field(&c2, "tags", Value::Array(vec![Value::String("Page".into())]))
-            .await
-            .expect("tags");
+        ops.set_field(
+            &c2,
+            "tags",
+            Value::Array(vec![Value::String("Page".into())]),
+        )
+        .await
+        .expect("tags");
         ops.set_field(&c2, "content", object_content("bold mid", &[bold(0, 4)]))
             .await
             .expect("rich content");
@@ -2295,8 +2302,8 @@ mod advice_dismiss_tests {
         );
     }
 
-    /// Multibyte content (mark ranges are Unicode-scalar offsets) must survive a
-    /// leaf delete → undo byte-for-byte, marks included.
+    /// Multibyte content (mark ranges are Unicode-scalar offsets) must survive
+    /// a leaf delete → undo byte-for-byte, marks included.
     #[tokio::test]
     async fn leaf_delete_undo_multibyte_roundtrip() {
         let (ops, _dir, anchor) = ops_with_anchor().await;
@@ -2359,14 +2366,8 @@ mod advice_dismiss_tests {
         create_params.insert("parent_id".into(), Value::String(anchor.clone()));
         create_params.insert("content".into(), Value::String("SELECT 1".into()));
         create_params.insert("content_type".into(), Value::String("source".into()));
-        create_params.insert(
-            "source_language".into(),
-            Value::String("holon_sql".into()),
-        );
-        create_params.insert(
-            "source_name".into(),
-            Value::String("my_named_query".into()),
-        );
+        create_params.insert("source_language".into(), Value::String("holon_sql".into()));
+        create_params.insert("source_name".into(), Value::String("my_named_query".into()));
         ops.execute_operation(&EntityName::new("block"), "create", create_params)
             .await
             .expect("create named source block");
@@ -2390,7 +2391,10 @@ mod advice_dismiss_tests {
         assert_eq!(inverse.op_name, "create");
         // The captured inverse must carry source_name (the capture side).
         assert_eq!(
-            inverse.params.get("source_name").and_then(|v| v.as_string()),
+            inverse
+                .params
+                .get("source_name")
+                .and_then(|v| v.as_string()),
             Some("my_named_query")
         );
 

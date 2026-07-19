@@ -4253,11 +4253,12 @@ mod diff_checkout_race_tests {
     /// entry tombstoned by a delete that bypasses THIS backend's uncache — a
     /// remote / CRDT-merge delete, modelled here by deleting through a SECOND
     /// backend/handle on the same doc — must NOT be served as a live parent.
-    /// loro 1.12's `get_meta` returns Ok for a tombstoned (deleted-but-existing)
-    /// node, so the old `get_meta(tid).is_ok()` guard would attach a new child
-    /// UNDER the dead node. The liveness (`node_deleted_now`) guard drops the
-    /// stale entry and re-resolves; here the parent is truly gone, so the create
-    /// must fail LOUD (ParentNotFound), never silently parent under a tombstone.
+    /// loro 1.12's `get_meta` returns Ok for a tombstoned
+    /// (deleted-but-existing) node, so the old `get_meta(tid).is_ok()`
+    /// guard would attach a new child UNDER the dead node. The liveness
+    /// (`node_deleted_now`) guard drops the stale entry and re-resolves;
+    /// here the parent is truly gone, so the create must fail LOUD
+    /// (ParentNotFound), never silently parent under a tombstone.
     #[tokio::test]
     async fn remote_delete_tombstoned_parent_never_served_from_stale_cache() {
         let doc = Arc::new(LoroDocument::new("remote-del".to_string()).unwrap());

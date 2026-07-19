@@ -32,12 +32,17 @@ use tokio::sync::RwLock;
 /// `block:anchor` with plain text "a task" (marks `None`, no properties).
 async fn ops_with_anchor() -> (LoroBlockOperations, tempfile::TempDir, String) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let store = Arc::new(RwLock::new(LoroDocumentStore::new(dir.path().to_path_buf())));
+    let store = Arc::new(RwLock::new(LoroDocumentStore::new(
+        dir.path().to_path_buf(),
+    )));
     let ops = LoroBlockOperations::new(store);
 
     let mut fields: StorageEntity = HashMap::new();
     fields.insert("id".into(), Value::String("block:anchor".into()));
-    fields.insert("parent_id".into(), Value::String("sentinel:no_parent".into()));
+    fields.insert(
+        "parent_id".into(),
+        Value::String("sentinel:no_parent".into()),
+    );
     fields.insert("content".into(), Value::String("a task".into()));
     let (id, _res) = ops.create(fields).await.expect("create anchor");
     (ops, dir, id)
@@ -136,8 +141,8 @@ async fn set_priority_first_time_undo_removes_property() {
     );
 }
 
-/// `set_due_date` (writes the `DEADLINE` property) is invertible: overwriting an
-/// existing deadline and undoing restores the prior deadline exactly.
+/// `set_due_date` (writes the `DEADLINE` property) is invertible: overwriting
+/// an existing deadline and undoing restores the prior deadline exactly.
 #[tokio::test(flavor = "multi_thread")]
 async fn set_due_date_undo_restores_prior_deadline() {
     let (ops, _dir, id) = ops_with_anchor().await;
@@ -148,11 +153,16 @@ async fn set_due_date_undo_restores_prior_deadline() {
         .unwrap()
         .with_timezone(&chrono::Utc);
 
-    ops.set_due_date(&id, Some(d1)).await.expect("seed deadline");
+    ops.set_due_date(&id, Some(d1))
+        .await
+        .expect("seed deadline");
     let before = block(&ops, &id).await.get_property("DEADLINE");
     assert!(before.is_some(), "seeded a DEADLINE");
 
-    let result = ops.set_due_date(&id, Some(d2)).await.expect("overwrite date");
+    let result = ops
+        .set_due_date(&id, Some(d2))
+        .await
+        .expect("overwrite date");
     assert_ne!(
         block(&ops, &id).await.get_property("DEADLINE"),
         before,

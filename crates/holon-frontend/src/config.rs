@@ -541,8 +541,7 @@ impl HolonConfig {
                 }
             };
 
-            let our_toml =
-                toml::to_string_pretty(self).context("Failed to serialize config")?;
+            let our_toml = toml::to_string_pretty(self).context("Failed to serialize config")?;
             let our_table: toml::Table = our_toml
                 .parse::<toml::Table>()
                 .context("Failed to re-parse serialized config")?;
@@ -551,12 +550,10 @@ impl HolonConfig {
                 table.insert(k, v);
             }
 
-            let content =
-                toml::to_string_pretty(&table).context("Failed to serialize config")?;
+            let content = toml::to_string_pretty(&table).context("Failed to serialize config")?;
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).with_context(|| {
-                    format!("Failed to create config dir {}", parent.display())
-                })?;
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("Failed to create config dir {}", parent.display()))?;
             }
             std::fs::write(&path, content)
                 .with_context(|| format!("Failed to write {}", path.display()))?;
@@ -724,7 +721,10 @@ mod tests {
             .expect("first run must load from defaults, not fail");
         let config1 = traced1.into_inner();
 
-        assert!(toml_path.exists(), "first run must persist a default config");
+        assert!(
+            toml_path.exists(),
+            "first run must persist a default config"
+        );
         let on_disk_first = std::fs::read_to_string(&toml_path).unwrap();
 
         // Loaded config equals built-in defaults.
