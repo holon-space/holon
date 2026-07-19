@@ -22,6 +22,7 @@ use holon_mcp_client::IntegrationFileConfig;
 use holon_mcp_client::McpConnectionResult;
 use holon_mcp_client::McpIntegration;
 use holon_mcp_client::PendingOAuthFlows;
+use holon_mcp_client::PendingState;
 use holon_mcp_client::SyncGate;
 use holon_mcp_client::build_mcp_integration;
 use holon_turso::turso::DbHandle;
@@ -439,21 +440,207 @@ async fn write_denied_when_writes_disabled() {
     );
 }
 
-// Increment 1: once_only stays blocked even when writes are enabled — the
-// message must point at increment 4 (writer designation), not silently allow.
+// Increment 4 (always_run): once_only writes dispatch immediately when this
+// device holds write authority.
 #[tokio::test(flavor = "multi_thread")]
-async fn write_once_only_blocked_pending_writer() {
+async fn once_only_always_run_dispatches() {
     let db = setup_db().await;
-    let integ = write_provider("write_once_only.yaml", "write_happy", &db).await;
-    let err = integ
+    let integ = write_provider("write_once_only_always_run.yaml", "write_happy", &db).await;
+    let res = integ
         .operation_provider
         .execute_operation(&EntityName::from("items"), "write_item", storage("x"))
         .await
-        .expect_err("once_only must stay blocked pending writer designation");
+        .expect("always_run once_only should dispatch");
+    let resp = res.response.expect("write response present");
+    assert!(is_true(&resp, "ok"), "server should ack ok=true: {resp:?}");
+    assert_eq!(as_int(&resp, "applied_count"), 1, "exactly one remote effect");
+}
+
+// Increment 4 (confirm_manually, the default): a once_only write does NOT fire
+// — it is queued for confirmation. The remote is never called (zero effects),
+// and the disclosure names the approve path, not a silent allow.
+#[tokio::test(flavor = "multi_thread")]
+async fn once_only_confirm_manually_queues_not_dispatched() {
+    let db = setup_db().await;
+    let integ = write_provider("write_once_only.yaml", "write_happy", &db).await;
+    let provider = &integ.operation_provider;
+    let err = provider
+        .execute_operation(&EntityName::from("items"), "write_item", storage("x"))
+        .await
+        .expect_err("confirm_manually must queue, not dispatch");
     let msg = err.to_string();
     assert!(
-        msg.contains("once_only") && msg.contains("increment 4"),
-        "once_only denial must cite the pending writer gate, got: {msg}"
+        msg.contains("queued for confirmation") && msg.contains("confirm_manually"),
+        "denial must disclose the pending-confirmation gate, got: {msg}"
+    );
+    let pending = provider.pending_writes();
+    assert_eq!(pending.len(), 1, "exactly one queued intent");
+    assert_eq!(pending[0].state, PendingState::AwaitingConfirmation);
+}
+
+// Increment 4 (confirm -> approve, with key_param): the approved re-dispatch
+// fires exactly one remote effect and injects the minted idempotency key so the
+// remote can dedup (belt-and-braces over the local single-winner store).
+#[tokio::test(flavor = "multi_thread")]
+async fn once_only_confirm_then_approve_one_effect() {
+    let db = setup_db().await;
+    let integ = write_provider(
+        "write_once_only_keyed_confirm.yaml",
+        "write_duplicate_detected",
+        &db,
+    )
+    .await;
+    let provider = &integ.operation_provider;
+
+    provider
+        .execute_operation(&EntityName::from("items"), "write_item", storage("buy milk"))
+        .await
+        .expect_err("first attempt is queued for confirmation");
+    let key = {
+        let pending = provider.pending_writes();
+        assert_eq!(pending.len(), 1);
+        pending[0].intent_key.clone()
+    };
+
+    let res = provider.approve(&key).await.expect("approve re-dispatches");
+    let resp = res.response.expect("response present");
+    assert!(!is_true(&resp, "deduped"), "the approved dispatch is the effect");
+    assert_eq!(as_int(&resp, "applied_count"), 1, "exactly one remote effect");
+    assert_eq!(provider.pending_store().state_of(&key), Some(PendingState::Sent));
+}
+
+// Increment 4 (minor amendment): with NO key_param the remote cannot dedup, so
+// the LOCAL store alone must give at-most-once. Approve fires once; a second
+// approve is a disclosed no-op — proving the guarantee comes from the store's
+// single-winner compare-and-take, not from the remote.
+#[tokio::test(flavor = "multi_thread")]
+async fn once_only_confirm_approve_no_key_param_local_at_most_once() {
+    let db = setup_db().await;
+    let integ = write_provider("write_once_only.yaml", "write_happy", &db).await;
+    let provider = &integ.operation_provider;
+
+    provider
+        .execute_operation(&EntityName::from("items"), "write_item", storage("x"))
+        .await
+        .expect_err("queued for confirmation");
+    let key = provider.pending_writes()[0].intent_key.clone();
+
+    let res = provider.approve(&key).await.expect("first approve dispatches");
+    assert_eq!(
+        as_int(&res.response.expect("resp"), "applied_count"),
+        1,
+        "exactly one remote effect"
+    );
+    // Second approve must NOT re-dispatch (no remote dedup exists to save us).
+    let err = provider
+        .approve(&key)
+        .await
+        .expect_err("second approve is a no-op");
+    assert!(
+        err.to_string().contains("already approved")
+            || err.to_string().contains("already"),
+        "second approve must be a disclosed no-op, got: {err}"
+    );
+    assert_eq!(provider.pending_store().state_of(&key), Some(PendingState::Sent));
+}
+
+// Increment 4 (amendment B): two approves racing through the real store API are
+// single-winner — exactly one compare-and-take succeeds; the other is a no-op.
+#[tokio::test(flavor = "multi_thread")]
+async fn once_only_double_approve_is_noop() {
+    let db = setup_db().await;
+    let integ = write_provider("write_once_only.yaml", "write_happy", &db).await;
+    let provider = &integ.operation_provider;
+
+    provider
+        .execute_operation(&EntityName::from("items"), "write_item", storage("x"))
+        .await
+        .expect_err("queued for confirmation");
+    let key = provider.pending_writes()[0].intent_key.clone();
+
+    // Race two confirms on the shared store handle.
+    let store_a = provider.pending_store();
+    let store_b = provider.pending_store();
+    let (ka, kb) = (key.clone(), key.clone());
+    let a = tokio::spawn(async move { store_a.confirm(&ka) });
+    let b = tokio::spawn(async move { store_b.confirm(&kb) });
+    let (ra, rb) = (a.await.unwrap(), b.await.unwrap());
+    assert!(
+        ra ^ rb,
+        "exactly one confirm must win (a={ra}, b={rb})"
+    );
+    assert_eq!(provider.pending_store().state_of(&key), Some(PendingState::Confirmed));
+
+    // The winner's dispatch fires exactly one effect.
+    let res = provider
+        .execute_operation(&EntityName::from("items"), "write_item", storage("x"))
+        .await
+        .expect("confirmed re-dispatch");
+    assert_eq!(as_int(&res.response.expect("resp"), "applied_count"), 1);
+}
+
+// Increment 4 (triggered_by re-fire): a repeated identical once_only intent
+// coalesces to a single pending entry — the reactive double-fire vector cannot
+// stack duplicate confirmations.
+#[tokio::test(flavor = "multi_thread")]
+async fn once_only_triggered_by_refire_coalesces() {
+    let db = setup_db().await;
+    let integ = write_provider("write_once_only.yaml", "write_happy", &db).await;
+    let provider = &integ.operation_provider;
+
+    for _ in 0..3 {
+        provider
+            .execute_operation(&EntityName::from("items"), "write_item", storage("x"))
+            .await
+            .expect_err("each re-fire is queued, not dispatched");
+    }
+    assert_eq!(
+        provider.pending_writes().len(),
+        1,
+        "identical re-fires coalesce to one pending entry"
+    );
+}
+
+// Increment 4 (amendment A): a post-dispatch failure (effect applied on the
+// remote, ack lost) surfaces as a loud error and lands in OutcomeUnknown. It is
+// NEVER auto-retried — a fresh attempt on the same intent is refused, so the
+// remote effect happens exactly once.
+#[tokio::test(flavor = "multi_thread")]
+async fn once_only_dispatch_failure_no_auto_retry() {
+    let db = setup_db().await;
+    let integ = write_provider(
+        "write_once_only_always_run.yaml",
+        "write_accepted_then_error",
+        &db,
+    )
+    .await;
+    let provider = &integ.operation_provider;
+
+    let err = provider
+        .execute_operation(&EntityName::from("items"), "write_item", storage("x"))
+        .await
+        .expect_err("post-dispatch failure must surface loud");
+    assert!(
+        err.to_string().contains("post-dispatch failure"),
+        "failure must be disclosed, got: {err}"
+    );
+    let key = provider.pending_writes()[0].intent_key.clone();
+    assert!(
+        matches!(
+            provider.pending_store().state_of(&key),
+            Some(PendingState::OutcomeUnknown { .. })
+        ),
+        "a failed once_only dispatch is disclosed as outcome-unknown"
+    );
+
+    // A retry of the same intent is refused — never fire the effect twice.
+    let retry = provider
+        .execute_operation(&EntityName::from("items"), "write_item", storage("x"))
+        .await
+        .expect_err("outcome-unknown intent must not be auto-retried");
+    assert!(
+        retry.to_string().contains("not auto-retried"),
+        "retry must be refused with a disclosed reason, got: {retry}"
     );
 }
 

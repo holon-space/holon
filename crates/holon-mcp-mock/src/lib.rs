@@ -58,6 +58,12 @@ pub enum Scenario {
     WriteConflict,
     /// Write tool accepts but delays its ack (slow-acking server).
     WriteSlowAck,
+    /// Write tool APPLIES the effect (bumps `applied_count`) but then returns
+    /// `isError: true` — models a post-dispatch failure / lost ack: the remote
+    /// side effect happened exactly once, yet the client sees an error. The
+    /// once_only at-most-once test asserts the intent lands in
+    /// `OutcomeUnknown` and is never auto-retried (amendment A).
+    WriteAcceptedThenError,
 }
 
 impl Scenario {
@@ -77,6 +83,7 @@ impl Scenario {
             "write_duplicate_detected" => Self::WriteDuplicateDetected,
             "write_conflict" => Self::WriteConflict,
             "write_slow_ack" => Self::WriteSlowAck,
+            "write_accepted_then_error" => Self::WriteAcceptedThenError,
             other => anyhow::bail!("unknown MOCK_MCP_SCENARIO '{other}'"),
         })
     }
@@ -97,6 +104,7 @@ impl Scenario {
                 | Self::WriteDuplicateDetected
                 | Self::WriteConflict
                 | Self::WriteSlowAck
+                | Self::WriteAcceptedThenError
         )
     }
 }
@@ -345,7 +353,8 @@ fn tool_response(
         | Scenario::WriteHappy
         | Scenario::WriteDuplicateDetected
         | Scenario::WriteConflict
-        | Scenario::WriteSlowAck => CallToolResult::error(vec![Content::text(
+        | Scenario::WriteSlowAck
+        | Scenario::WriteAcceptedThenError => CallToolResult::error(vec![Content::text(
             "tool_response is read-only; this scenario is handled elsewhere".to_string(),
         )]),
     }
@@ -396,6 +405,16 @@ async fn write_response(
         Scenario::WriteConflict => CallToolResult::error(vec![Content::text(
             "precondition failed: CAS conflict — resource changed since read".to_string(),
         )]),
+        Scenario::WriteAcceptedThenError => {
+            // Apply the effect exactly once, THEN fail the ack: the remote side
+            // effect happened but the client sees an error (amendment A).
+            let mut c = applied_count.lock().await;
+            *c += 1;
+            CallToolResult::error(vec![Content::text(
+                "post-dispatch failure: write applied on the server but the ack was lost"
+                    .to_string(),
+            )])
+        }
         _ => unreachable!("write_response called for non-write scenario {scenario:?}"),
     }
 }

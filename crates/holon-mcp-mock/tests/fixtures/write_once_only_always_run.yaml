@@ -1,0 +1,23 @@
+# Once-only sidecar with `once_only: always_run` — this device holds write
+# authority, so the dispatch chokepoint fires `once_only` writes immediately
+# (leases/read-write ruling, increment 4). No `key_param`: at-most-once rests on
+# the local pending-write store's dispatch-owning transition (amendment A). The
+# test overrides `command` and inserts MOCK_MCP_SCENARIO.
+transport:
+  child_process:
+    command: /bin/false
+entity_prefix: "mock_"
+writes: enabled
+once_only: always_run
+entities:
+  items:
+    short_name: item
+    id_column: id
+    schema:
+      - { name: id,    sql_type: TEXT, primary_key: true }
+      - { name: title, sql_type: TEXT }
+      - { name: body,  sql_type: TEXT }
+tools:
+  write-item:
+    entity: items
+    effect: once_only

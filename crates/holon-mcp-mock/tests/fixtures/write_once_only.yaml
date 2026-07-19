@@ -1,7 +1,9 @@
-# Once-only sidecar: writes enabled, but `write-item` is `once_only`, so the
-# dispatch chokepoint still denies it — write authority (writer designation) is
-# gated on increment 4. The test overrides `command` and inserts
-# MOCK_MCP_SCENARIO: write_happy (never reached — denial precedes the call).
+# Once-only sidecar, DEFAULT writer designation (`once_only: confirm_manually`,
+# the absent-field default). `write-item` is `once_only`, so the dispatch
+# chokepoint QUEUES it for human confirmation instead of firing (leases/read-
+# write ruling, increment 4). No `key_param`: this connector has no remote
+# dedup, so the LOCAL pending-write store is the sole at-most-once authority.
+# The test overrides `command` and inserts MOCK_MCP_SCENARIO.
 transport:
   child_process:
     command: /bin/false

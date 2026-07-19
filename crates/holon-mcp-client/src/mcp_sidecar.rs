@@ -23,6 +23,13 @@ pub struct McpSidecar {
     /// (increment 4).
     #[serde(default)]
     pub writes: WritesPolicy,
+    /// Writer designation for this connector's `once_only` effects (leases/
+    /// read-write ruling, increment 4). Absent = `confirm_manually` = the safe
+    /// default: once_only becomes usable but every such write pauses for
+    /// explicit human confirmation and never fires unattended. `always_run`
+    /// means this device holds write authority and dispatches immediately.
+    #[serde(default)]
+    pub once_only: OnceOnlyAuthorization,
     #[serde(default)]
     pub tools: HashMap<String, ToolConfig>,
     /// Sidecar-declared derived views, created as Turso materialized views at
@@ -279,6 +286,24 @@ pub enum WritesPolicy {
     /// `idempotent`/`keyed` tools may execute; `once_only` stays gated on a
     /// writer/lease (increment 4).
     Enabled,
+}
+
+/// Per-connector writer designation for `once_only` effects (leases/read-write
+/// ruling, increment 4; Martin 2026-07-19). Parse-don't-validate: a fixed set
+/// of legal values parsed at sidecar load, mapped to a
+/// [`crate::write_authorization::WriteAuthorizationPolicy`] impl. Future
+/// designations (vault-block role, TTL lease) add variants here without
+/// touching the dispatch chokepoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnceOnlyAuthorization {
+    /// Safe default: pause every once_only write for explicit human
+    /// confirmation; never fire unattended.
+    #[default]
+    ConfirmManually,
+    /// This device holds write authority: dispatch once_only writes
+    /// immediately.
+    AlwaysRun,
 }
 
 /// Per-tool write-effect classification (ADR 0024 P4 taxonomy). Parse-don't-
