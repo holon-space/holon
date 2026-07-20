@@ -473,6 +473,14 @@ pub trait BlockEntity: MaybeSendSync {
     /// Get the block content (text content of the block)
     fn content(&self) -> &str;
 
+    /// The block's inline marks (`[[link]]`, `*bold*`, …), if any. Default
+    /// `None` keeps synthetic test stores that don't model marks working;
+    /// production block entities override to return their stored set so
+    /// structural ops (`split_block`) can partition marks across the split.
+    fn marks(&self) -> Option<&[holon_api::MarkSpan]> {
+        None
+    }
+
     /// Tags attached to this block. The literal `"Page"` tag marks the
     /// block as a page (org file root).
     fn tags(&self) -> Tags;
@@ -1130,15 +1138,38 @@ where
             .into());
         }
 
-        // Split content at cursor
-        let mut content_before = content[..position].to_string();
-        let mut content_after = content[position..].to_string();
+        if !content.is_char_boundary(position) {
+            return Err(anyhow::anyhow!(
+                "Split position {position} is not a char boundary of {content:?}"
+            )
+            .into());
+        }
 
-        // Strip trailing whitespace from the old block
-        content_before = content_before.trim_end().to_string();
-
-        // Strip leading whitespace from the new block
-        content_after = content_after.trim_start().to_string();
+        // Split content AND partition marks at the cursor. `split_content_marks`
+        // is the single source of truth shared with the keystone reference model:
+        // it applies the same whitespace trimming (left `trim_end`, right
+        // `trim_start`) AND partitions the mark set so a `[[link]]` / `*bold*`
+        // that lies left of the split stays on the retained block (in bounds),
+        // one that lies right moves to the new block rebased, and one that
+        // straddles the split degrades (link → plain text on both sides) or
+        // truncates (formatting → both sides). Before this, split wrote only
+        // `content`: the retained block kept STALE out-of-bounds marks and the
+        // new block got NULL marks, destroying links across a split (dogfood
+        // 2026-07-20). Marks are read off the fetched block projection; in
+        // SqlOnly mode this is the same authority `content_owned` came from.
+        let origin_marks: Vec<holon_api::MarkSpan> = block.marks().unwrap_or(&[]).to_vec();
+        let holon_api::SplitContentMarks {
+            left:
+                holon_api::SplitSide {
+                    content: content_before,
+                    marks: left_marks,
+                },
+            right:
+                holon_api::SplitSide {
+                    content: content_after,
+                    marks: right_marks,
+                },
+        } = holon_api::split_content_marks(content, &origin_marks, position);
 
         // Generate new block ID. Mirror the rest of the system's URI
         // convention: SQL `block.id` stores the prefixed form (`block:UUID`)
@@ -1176,10 +1207,19 @@ where
             &parent_for_split,
             Some(&after_uri),
             &new_block_uri,
-            // The new half of a split is always plain text — the reference
-            // model's `split_block` creates `Block::new_text`. (Splitting a
-            // source block is not a user-reachable op.)
-            holon_api::BlockContent::text(content_after.clone()),
+            // The new half of a split carries the marks that fell to the RIGHT
+            // of the split point (rebased by `split_content_marks`). RichText
+            // when there are marks so the cell registry applies them via
+            // Peritext; plain Text otherwise (a source-block split is not a
+            // user-reachable op).
+            if right_marks.is_empty() {
+                holon_api::BlockContent::text(content_after.clone())
+            } else {
+                holon_api::BlockContent::RichText {
+                    text: content_after.clone(),
+                    marks: right_marks.clone(),
+                }
+            },
         )
         .await?;
 
@@ -1224,6 +1264,15 @@ where
             let mut new_block_fields = crate::storage::types::StorageEntity::new();
             new_block_fields.insert("id".into(), Value::String(new_block_id.clone()));
             new_block_fields.insert("content".into(), Value::String(content_after));
+            if !right_marks.is_empty() {
+                // Marks that fell to the RIGHT of the split. The SqlOnly create
+                // path writes the `marks` column AND derives the `block_links`
+                // junction from this param (links increment 2).
+                new_block_fields.insert(
+                    "marks".into(),
+                    Value::String(holon_api::marks_to_json(&right_marks)),
+                );
+            }
             new_block_fields.insert("parent_id".into(), {
                 if let Some(ref pid) = block.parent_id() {
                     Value::String(pid.to_string())
@@ -1266,21 +1315,41 @@ where
             ));
         }
 
-        // Update current block with truncated content. Prefer writing
-        // through the Loro CRDT layer (via the cell registry) when
-        // available so the `LoroSyncController.on_loro_changed` outbound
-        // projector becomes the single SQL writer for content. Drops
-        // through to a direct `set_field` write when no cell route exists
-        // (SqlOnly mode, synthetic in-memory test store, block not yet in
-        // Loro tree).
-        // `set_field` is the single content-write seam: it routes `content`
-        // through the cell registry (Loro in Full mode) and falls back to a
-        // direct SQL write when no cell route exists (SqlOnly, synthetic test
-        // store, block not yet in the Loro tree).
+        // Update current block with truncated content. `set_field("content")`
+        // is the single content-write seam: it routes through the cell registry
+        // (Loro in Full mode) and falls back to a direct SQL write when no cell
+        // route exists (SqlOnly, synthetic test store, block not yet in the Loro
+        // tree). The value stays a plain String — the cell registry's content
+        // arm only accepts a String, and a Loro String content write already
+        // resets that block's Peritext marks, so marks are re-established by the
+        // dedicated `set_field("marks")` write below.
         let content_result = self
             .set_field(id_str, "content", Value::String(content_before))
             .await?;
         changes.extend(content_result.changes);
+
+        // Re-establish the retained block's marks as the LEFT partition. The
+        // pre-fix code wrote only `content`, leaving the `marks` column STALE:
+        // spans computed against the pre-split content, now out of bounds — the
+        // `scalar_range_to_bytes` crash condition and the dogfood 2026-07-20
+        // link-loss. We fire this write exactly when the origin HAD marks (so a
+        // plain-text split is byte-unchanged and the synthetic in-memory test
+        // store — which models no marks — is untouched). `set_field("marks")`
+        // routes to the SQL authority (write_field returns `false` for `marks`),
+        // which writes the column AND re-derives the `block_links` junction. A
+        // now-empty left partition is written as `Null` to CLEAR the column (the
+        // case where every mark moved to the new right block). In Loro/Full mode
+        // this lands in the SQL projection but not Peritext — a documented
+        // follow-up; the SqlOnly desktop path (the reported repro) is correct.
+        if !origin_marks.is_empty() {
+            let left_marks_value = if left_marks.is_empty() {
+                Value::Null
+            } else {
+                Value::String(holon_api::marks_to_json(&left_marks))
+            };
+            let marks_result = self.set_field(id_str, "marks", left_marks_value).await?;
+            changes.extend(marks_result.changes);
+        }
 
         // Focus moves to the new block at caret offset 0. This is returned in
         // the op response (not dispatched as a backend `editor_focus`
@@ -2113,6 +2182,10 @@ impl BlockEntity for holon_api::block::Block {
 
     fn content(&self) -> &str {
         &self.content
+    }
+
+    fn marks(&self) -> Option<&[holon_api::MarkSpan]> {
+        self.marks.as_deref()
     }
 
     fn tags(&self) -> Tags {

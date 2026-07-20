@@ -333,9 +333,337 @@ pub fn derive_block_links(marks: &[MarkSpan]) -> Vec<DerivedLink> {
     out
 }
 
+/// One side of a `split_block` — the resulting content string and the marks
+/// that survived the split on that side.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SplitSide {
+    pub content: String,
+    pub marks: Vec<MarkSpan>,
+}
+
+/// Result of splitting a block's `(content, marks)` at a cursor: the retained
+/// (left) half and the split-off (right) half.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SplitContentMarks {
+    pub left: SplitSide,
+    pub right: SplitSide,
+}
+
+/// Split a block's stripped-label `content` and its `marks` at byte offset
+/// `split_byte`, returning the two halves each with correctly partitioned
+/// marks.
+///
+/// This is the SINGLE source of truth for how `split_block` divides marks. Both
+/// the production `BlockOperations::split_block` and the keystone reference
+/// model call it, so model and prod cannot silently disagree about the fate of
+/// a mark that spans a split point (the model-first invariant).
+///
+/// Mirrors `split_block`'s whitespace normalization: the LEFT half is
+/// `trim_end`ed and the RIGHT half is `trim_start`ed. Mark offsets are Unicode
+/// scalar `[start, end)` (matching `MarkSpan` and the Loro Peritext
+/// convention), while `split_byte` is a BYTE offset into `content` (matching
+/// the editor's cursor position and `content[..split_byte]` slicing) — the two
+/// coordinate spaces are reconciled internally.
+///
+/// Partition rule per mark `[s, e)` against the split scalar `p`:
+/// - **entirely left** (`e <= p`): stays on the left, ends clamped into the
+///   trimmed left length so a mark that ran into trimmed trailing whitespace
+///   never dangles out of bounds.
+/// - **entirely right** (`s >= p`): moves to the right, rebased by `p` plus any
+///   leading whitespace the right half trimmed.
+/// - **straddling** (`s < p < e`): kind-differentiated, because the two mark
+///   families round-trip through org differently —
+///   - a **link** degrades to plain text on BOTH halves (the mark is DROPPED).
+///     A partial link label is not a resolvable reference: org-rendering a
+///     truncated `[[Ada Lo]]` and its remainder `[[velace]]` would fabricate
+///     two phantom pages. Dropping matches editor behavior (splitting inside a
+///     wiki-link breaks it) and is the org round-trip fixed point — plain text
+///     re-extracts to plain text, no phantom `block_links`.
+///   - a **formatting** mark (bold/italic/code/verbatim/strike/underline/
+///     sub/super) is TRUNCATED: the left keeps `[s, p)` and the right keeps
+///     `[0, e-p)`. `*bo|ld*` splits to `*bo*` + `*ld*`, both valid org and
+///     round-trip stable.
+///
+/// Both halves are `canonicalize_marks`d before return (zero-width remnants —
+/// e.g. a mark wholly inside trimmed whitespace — are dropped there).
+pub fn split_content_marks(
+    content: &str,
+    marks: &[MarkSpan],
+    split_byte: usize,
+) -> SplitContentMarks {
+    assert!(
+        split_byte <= content.len(),
+        "split_content_marks: byte offset {split_byte} exceeds content length {}",
+        content.len()
+    );
+    assert!(
+        content.is_char_boundary(split_byte),
+        "split_content_marks: byte offset {split_byte} is not a char boundary of {content:?}"
+    );
+
+    let left_raw = &content[..split_byte];
+    let right_raw = &content[split_byte..];
+
+    // Split point expressed in Unicode-scalar space, where marks live.
+    let split_scalar = left_raw.chars().count();
+
+    let left_content = left_raw.trim_end();
+    let right_content = right_raw.trim_start();
+
+    // Scalar length of the left half AFTER trimming trailing whitespace; left
+    // marks are clamped into this so nothing dangles past the truncated content.
+    let left_len = left_content.chars().count();
+    // Leading whitespace scalars trimmed off the right half — right marks rebase
+    // by the split point plus this amount.
+    let right_lead_trim = right_raw.chars().count() - right_content.chars().count();
+    let right_shift = split_scalar + right_lead_trim;
+
+    let mut left_marks: Vec<MarkSpan> = Vec::new();
+    let mut right_marks: Vec<MarkSpan> = Vec::new();
+
+    for m in marks {
+        let (s, e) = (m.start, m.end);
+        if e <= split_scalar {
+            // Entirely left: keep, clamping the end into the trimmed left length.
+            left_marks.push(MarkSpan::new(
+                s.min(left_len),
+                e.min(left_len),
+                m.mark.clone(),
+            ));
+        } else if s >= split_scalar {
+            // Entirely right: rebase left by the split + trimmed leading ws.
+            right_marks.push(MarkSpan::new(
+                s.saturating_sub(right_shift),
+                e.saturating_sub(right_shift),
+                m.mark.clone(),
+            ));
+        } else {
+            // Straddling the split point.
+            match &m.mark {
+                InlineMark::Link { .. } => {
+                    // Degrade to plain text on both halves — drop the mark.
+                }
+                _ => {
+                    // Formatting mark: truncate to each side.
+                    left_marks.push(MarkSpan::new(
+                        s.min(left_len),
+                        split_scalar.min(left_len),
+                        m.mark.clone(),
+                    ));
+                    right_marks.push(MarkSpan::new(
+                        0,
+                        e.saturating_sub(right_shift),
+                        m.mark.clone(),
+                    ));
+                }
+            }
+        }
+    }
+
+    canonicalize_marks(&mut left_marks);
+    canonicalize_marks(&mut right_marks);
+
+    SplitContentMarks {
+        left: SplitSide {
+            content: left_content.to_string(),
+            marks: left_marks,
+        },
+        right: SplitSide {
+            content: right_content.to_string(),
+            marks: right_marks,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn link(name: &str) -> InlineMark {
+        InlineMark::Link {
+            target: EntityRef::Name {
+                name: name.to_string(),
+            },
+            label: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn split_keeps_link_entirely_left_and_leaves_right_bare() {
+        // Dogfood 2026-07-20 repro: "Owner is Ada Lovelace and reviewer",
+        // link over "Ada Lovelace" = scalars [9, 21). Split after "and"
+        // (byte 25, before the space). Link is wholly left → preserved in
+        // bounds; right half "reviewer" carries no marks.
+        let content = "Owner is Ada Lovelace and reviewer";
+        let marks = vec![MarkSpan::new(9, 21, link("Ada Lovelace"))];
+        let out = split_content_marks(content, &marks, 25);
+        assert_eq!(out.left.content, "Owner is Ada Lovelace and");
+        assert_eq!(
+            out.left.marks,
+            vec![MarkSpan::new(9, 21, link("Ada Lovelace"))]
+        );
+        assert_eq!(out.right.content, "reviewer");
+        assert!(out.right.marks.is_empty());
+    }
+
+    #[test]
+    fn split_moves_link_entirely_right_rebased() {
+        // "see Ada Lovelace" split after "see " (byte 4): link over
+        // "Ada Lovelace" [4, 16) moves right, rebased to [0, 12).
+        let content = "see Ada Lovelace";
+        let marks = vec![MarkSpan::new(4, 16, link("Ada Lovelace"))];
+        let out = split_content_marks(content, &marks, 4);
+        assert_eq!(out.left.content, "see");
+        assert!(out.left.marks.is_empty());
+        assert_eq!(out.right.content, "Ada Lovelace");
+        assert_eq!(
+            out.right.marks,
+            vec![MarkSpan::new(0, 12, link("Ada Lovelace"))]
+        );
+    }
+
+    #[test]
+    fn split_inside_link_degrades_to_plain_text_both_sides() {
+        // Split INSIDE "Ada Lovelace" (byte 12 = after "Ada Lovel") — the link
+        // straddles the split, so it degrades to plain text on BOTH halves.
+        let content = "Ada Lovelace";
+        let marks = vec![MarkSpan::new(0, 12, link("Ada Lovelace"))];
+        let out = split_content_marks(content, &marks, 5); // "Ada L" | "ovelace"
+        assert_eq!(out.left.content, "Ada L");
+        assert!(
+            out.left.marks.is_empty(),
+            "left link remnant must be dropped, got {:?}",
+            out.left.marks
+        );
+        assert_eq!(out.right.content, "ovelace");
+        assert!(
+            out.right.marks.is_empty(),
+            "right link remnant must be dropped, got {:?}",
+            out.right.marks
+        );
+    }
+
+    #[test]
+    fn split_inside_formatting_mark_truncates_both_sides() {
+        // Bold over all of "bold" [0,4); split after "bo" (byte 2).
+        let content = "bold";
+        let marks = vec![MarkSpan::new(0, 4, InlineMark::Bold)];
+        let out = split_content_marks(content, &marks, 2);
+        assert_eq!(out.left.content, "bo");
+        assert_eq!(out.left.marks, vec![MarkSpan::new(0, 2, InlineMark::Bold)]);
+        assert_eq!(out.right.content, "ld");
+        assert_eq!(out.right.marks, vec![MarkSpan::new(0, 2, InlineMark::Bold)]);
+    }
+
+    #[test]
+    fn split_at_start_moves_all_marks_right() {
+        let content = "Ada";
+        let marks = vec![MarkSpan::new(0, 3, InlineMark::Italic)];
+        let out = split_content_marks(content, &marks, 0);
+        assert_eq!(out.left.content, "");
+        assert!(out.left.marks.is_empty());
+        assert_eq!(out.right.content, "Ada");
+        assert_eq!(
+            out.right.marks,
+            vec![MarkSpan::new(0, 3, InlineMark::Italic)]
+        );
+    }
+
+    #[test]
+    fn split_at_end_keeps_all_marks_left() {
+        let content = "Ada";
+        let marks = vec![MarkSpan::new(0, 3, InlineMark::Italic)];
+        let out = split_content_marks(content, &marks, 3);
+        assert_eq!(out.left.content, "Ada");
+        assert_eq!(
+            out.left.marks,
+            vec![MarkSpan::new(0, 3, InlineMark::Italic)]
+        );
+        assert_eq!(out.right.content, "");
+        assert!(out.right.marks.is_empty());
+    }
+
+    #[test]
+    fn split_clamps_left_mark_into_trimmed_trailing_whitespace() {
+        // Bold covers "ab  " [0,4) including two trailing spaces; splitting at
+        // byte 4 trims them off the left, so the bold clamps to [0,2).
+        let content = "ab  cd";
+        let marks = vec![MarkSpan::new(0, 4, InlineMark::Bold)];
+        let out = split_content_marks(content, &marks, 4);
+        assert_eq!(out.left.content, "ab");
+        assert_eq!(out.left.marks, vec![MarkSpan::new(0, 2, InlineMark::Bold)]);
+        assert_eq!(out.right.content, "cd");
+    }
+
+    #[test]
+    fn split_boundary_marks_do_not_cross() {
+        // Two adjacent bolds [0,3) and [3,6); split exactly at scalar 3.
+        let content = "abcdef";
+        let marks = vec![
+            MarkSpan::new(0, 3, InlineMark::Bold),
+            MarkSpan::new(3, 6, InlineMark::Italic),
+        ];
+        let out = split_content_marks(content, &marks, 3);
+        assert_eq!(out.left.marks, vec![MarkSpan::new(0, 3, InlineMark::Bold)]);
+        assert_eq!(
+            out.right.marks,
+            vec![MarkSpan::new(0, 3, InlineMark::Italic)]
+        );
+    }
+
+    #[test]
+    fn split_multibyte_prefix_rebases_right_mark_in_scalar_space() {
+        // "über Ada tail": ü is 2 bytes, so BYTE and SCALAR offsets diverge.
+        // Link over "Ada" = scalars [5,8). Split after "über " (BYTE 6, which
+        // is 5 SCALARS). The link is entirely right and must rebase to [0,3) in
+        // scalar space — a byte-space rebase (by 6) would give [-1,2)/[0,2).
+        let content = "über Ada tail";
+        assert_eq!(content.len(), 14, "ü is 2 bytes: 14 bytes, 13 scalars");
+        let marks = vec![MarkSpan::new(5, 8, link("Ada"))];
+        let out = split_content_marks(content, &marks, 6);
+        assert_eq!(out.left.content, "über");
+        assert!(out.left.marks.is_empty());
+        assert_eq!(out.right.content, "Ada tail");
+        assert_eq!(out.right.marks, vec![MarkSpan::new(0, 3, link("Ada"))]);
+    }
+
+    #[test]
+    fn split_end_clamps_left_mark_spanning_multibyte_chars() {
+        // "café  bar": é is 2 bytes. Bold covers "café  " = scalars [0,6)
+        // (including the two trailing spaces). Splitting after the spaces
+        // (BYTE 7, = 6 SCALARS) trims them off the left, clamping the bold to
+        // [0,4) over "café" — the clamp is computed in scalar space across é.
+        let content = "café  bar";
+        assert_eq!(content.len(), 10, "café=5 bytes + 2 spaces + bar=3");
+        let marks = vec![MarkSpan::new(0, 6, InlineMark::Bold)];
+        let out = split_content_marks(content, &marks, 7);
+        assert_eq!(out.left.content, "café");
+        assert_eq!(out.left.marks, vec![MarkSpan::new(0, 4, InlineMark::Bold)]);
+        assert_eq!(out.right.content, "bar");
+        assert!(out.right.marks.is_empty());
+    }
+
+    #[test]
+    fn split_at_byte_boundary_right_after_multibyte_char() {
+        // Split lands on the BYTE boundary immediately after é (byte 5), which
+        // is SCALAR 4. A bold ending exactly at é stays fully left (end-clamped
+        // in scalar space); a link in the right half rebases to [0,3).
+        let content = "café bar";
+        assert_eq!(content.len(), 9, "café=5 bytes + space + bar=3");
+        assert!(
+            content.is_char_boundary(5),
+            "byte 5 is the boundary after é"
+        );
+        let marks = vec![
+            MarkSpan::new(0, 4, InlineMark::Bold), // "café"
+            MarkSpan::new(5, 8, link("bar")),      // "bar"
+        ];
+        let out = split_content_marks(content, &marks, 5);
+        assert_eq!(out.left.content, "café");
+        assert_eq!(out.left.marks, vec![MarkSpan::new(0, 4, InlineMark::Bold)]);
+        assert_eq!(out.right.content, "bar");
+        assert_eq!(out.right.marks, vec![MarkSpan::new(0, 3, link("bar"))]);
+    }
 
     #[test]
     fn round_trip_simple_marks() {
