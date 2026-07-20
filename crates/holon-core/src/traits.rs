@@ -2317,6 +2317,7 @@ pub fn generate_sync_operation(provider_name: &str) -> OperationDescriptor {
         required_params: vec![],
         affected_fields: vec![], // Sync operations don't affect specific fields
         param_mappings: vec![],
+        target_scope: holon_api::TargetScope::Block,
         menu_exposure: holon_api::MenuExposure::NotListed {
             surface: holon_api::NonMenuSurface::External,
         },
