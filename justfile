@@ -120,6 +120,14 @@ pbt name='general' cases='64' *FLAGS:
 keystone-smoke:
     just pbt general 1
 
+# Replay hand-authored keystone regressions (concrete transition sequences from
+# docs/Testing/HandAuthoredRegressions.md) through the keystone harness. Same
+# --features pbt gate as the keystone; fail-loud on any red or parse error.
+hand-authored *FLAGS:
+    cargo test \
+        -p holon-integration-tests --features pbt --test hand_authored_regressions \
+        -- --nocapture {{FLAGS}} 2>&1 | tee /tmp/pbt-hand-authored.log
+
 # Weave-time full keystone sweep (orchestrator-run, typically in background)
 keystone-full cases='16':
     just pbt general {{cases}}
