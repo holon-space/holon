@@ -1046,6 +1046,19 @@ where
 
         let maybe_parent: Option<T> = self.get_by_id(parent_id.as_str()).await?;
         let parent: T = maybe_parent.ok_or_else(|| anyhow::anyhow!("Parent not found"))?;
+
+        // ADR 0028 D1: outdenting a DIRECT PAGE CHILD would move the block out of
+        // its page container to the page's own level — escaping the page. That
+        // crossing is forbidden. Reject loudly (no structural change); the editor
+        // surfaces this as a user-visible CommandFailed toast.
+        if parent.is_page() {
+            return Err(anyhow::anyhow!(
+                "Cannot outdent a direct child of a page: block {id_str} would escape its page \
+                 container (ADR 0028 D1). Move it elsewhere instead."
+            )
+            .into());
+        }
+
         let grandparent_id = parent
             .parent_id()
             .ok_or_else(|| anyhow::anyhow!("Cannot outdent: parent is already at root level"))?;

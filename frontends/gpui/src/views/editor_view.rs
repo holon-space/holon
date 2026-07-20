@@ -1549,7 +1549,43 @@ impl Render for EditorView {
                     }
                     if let Some(intent) = structural_block_action(EditorKey::BackTab, &row_id, 0) {
                         let live_text = input.read(cx).value().to_string();
-                        dispatch_structural_as_commit_point(&ctrl, &services, &live_text, intent);
+                        // ADR 0028 D1: outdent of a direct page child is REJECTED
+                        // by the op engine (it would escape the page container).
+                        // Route through the awaitable path — same as the slash-menu
+                        // ops (commit abfbed92) — so the rejection surfaces as a
+                        // visible CommandFailed toast, not just a `tracing::error!`.
+                        // Commit any pending text edit FIRST (structural commit
+                        // point), then dispatch outdent and await its result.
+                        let commit = ctrl.lock().unwrap().pending_commit_intent(&live_text);
+                        let services_for = services.clone();
+                        let rt = services.runtime_handle();
+                        cx.spawn(async move |cx| {
+                            let (tx, rx) = tokio::sync::oneshot::channel::<Option<String>>();
+                            rt.spawn(async move {
+                                for c in commit {
+                                    let _ = services_for.dispatch_intent_awaitable(c).await;
+                                }
+                                let outcome = services_for
+                                    .dispatch_intent_awaitable(intent)
+                                    .await
+                                    .err()
+                                    .map(|e| format!("{e:#}"));
+                                let _ = tx.send(outcome);
+                            });
+                            if let Ok(Some(detail)) = rx.await {
+                                let _ = cx.update_window(window_handle, |_, _window, cx| {
+                                    crate::share_ui::DegradedToastSink::push(
+                                        crate::share_ui::DegradedToast {
+                                            kind: crate::share_ui::DegradedKind::CommandFailed,
+                                            shared_tree_id: "command".into(),
+                                            detail,
+                                        },
+                                        cx,
+                                    );
+                                });
+                            }
+                        })
+                        .detach();
                     }
                     cx.stop_propagation();
                 }
