@@ -188,6 +188,43 @@ impl OperationDispatcher {
     }
 }
 
+/// Structural block ops that are knowingly double-advertised under Loro
+/// authority (SqlBlockOperations + LoroBlockOperations). A SEPARATE
+/// pre-existing duplicate from BugFunnel N1's CRUD dup; tolerated by the
+/// registry-uniqueness assertion until the structural-op authority/routing
+/// question is resolved.
+#[cfg(debug_assertions)]
+const STRUCTURAL_BLOCK_OP_DUP_ALLOWLIST: &[&str] = &[
+    "indent",
+    "outdent",
+    "move_block",
+    "move_to_position",
+    "move_up",
+    "move_down",
+    "split_block",
+    "join_block",
+    "restore_split",
+    "restore_join",
+    "embed_entity",
+];
+
+/// Return the `entity::op` keys advertised more than once across `ops`.
+///
+/// Pure helper for the fail-loud registry-uniqueness invariant in
+/// [`OperationDispatcher::operations`]. Empty result == the invariant holds.
+/// Keyed on `(entity_name, name)` so per-provider `sync` ops (each carries a
+/// distinct `"<provider>.sync"` entity_name) never false-positive.
+fn duplicate_operations(ops: &[OperationDescriptor]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut dups = Vec::new();
+    for op in ops {
+        if !seen.insert((op.entity_name.as_str(), op.name.as_str())) {
+            dups.push(format!("{}::{}", op.entity_name, op.name));
+        }
+    }
+    dups
+}
+
 #[async_trait]
 impl OperationProvider for OperationDispatcher {
     /// Get all operations from all registered providers
@@ -245,6 +282,37 @@ impl OperationProvider for OperationDispatcher {
                 bound_params: Default::default(),
                 precondition: None,
             });
+        }
+
+        // Registry-uniqueness invariant (fail-loud, debug/test builds): no two
+        // providers may advertise the same (entity, op) EXCEPT the known,
+        // pre-existing structural-block-op overlap. The registry unions provider
+        // `operations()` WITHOUT dedup and dispatch is first-registered-wins, so
+        // a stray duplicate leaks a second identical slash-menu entry (BugFunnel
+        // N1 — 12 block CRUD ops listed twice in SqlOnly). This fix removes the
+        // N1 CRUD duplicate at its source (holon_core::OperationSubset in
+        // holon-app turso_seams); the assertion guards against it regressing.
+        //
+        // The STRUCTURAL block ops (indent/outdent/split/join/move…) are ALSO
+        // double-advertised under Loro authority (SqlBlockOperations +
+        // LoroBlockOperations), a SEPARATE pre-existing dup surfaced by the
+        // keystone. Removing it is a structural-op authority/routing decision
+        // out of this fix's scope; it is explicitly tolerated here (named
+        // allowlist) so the guard stays loud for every OTHER duplicate.
+        #[cfg(debug_assertions)]
+        {
+            let unexpected: Vec<String> = duplicate_operations(&ops)
+                .into_iter()
+                .filter(|d| {
+                    !STRUCTURAL_BLOCK_OP_DUP_ALLOWLIST
+                        .contains(&d.strip_prefix("block::").unwrap_or(d))
+                })
+                .collect();
+            assert!(
+                unexpected.is_empty(),
+                "duplicate operation registrations (two providers advertise the same op — narrow \
+                 the redundant provider, see holon_core::OperationSubset): {unexpected:?}"
+            );
         }
 
         ops
@@ -996,6 +1064,46 @@ mod tests {
         let dispatcher = OperationDispatcher::new(vec![provider1]);
         assert!(dispatcher.has_provider("entity1"));
         assert_eq!(dispatcher.provider_count(), 1);
+    }
+
+    #[test]
+    fn duplicate_operations_detects_cross_provider_overlap() {
+        // Unique across providers → no duplicates.
+        let unique = vec![
+            create_test_operation("block", "create"),
+            create_test_operation("block", "delete"),
+            create_test_operation("doc", "create"),
+        ];
+        assert!(duplicate_operations(&unique).is_empty());
+
+        // Same (entity, op) advertised twice (the N1 shape) → flagged loud.
+        let dup = vec![
+            create_test_operation("block", "create"),
+            create_test_operation("block", "delete"),
+            create_test_operation("block", "create"),
+        ];
+        assert_eq!(
+            duplicate_operations(&dup),
+            vec!["block::create".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "duplicate operation registrations")]
+    async fn operations_invariant_fires_loud_on_duplicate_registration() {
+        // Two providers advertising the SAME (entity, op) — the exact N1
+        // double-registration shape. `operations()` must fail LOUD (debug
+        // build), not silently union the duplicate into the menu.
+        let p1 = Arc::new(MockProvider {
+            entity_name: "block".to_string(),
+            operations_list: vec![create_test_operation("block", "create")],
+        });
+        let p2 = Arc::new(MockProvider {
+            entity_name: "block".to_string(),
+            operations_list: vec![create_test_operation("block", "create")],
+        });
+        let dispatcher = OperationDispatcher::new(vec![p1, p2]);
+        let _ = dispatcher.operations();
     }
 
     #[tokio::test]

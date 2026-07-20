@@ -107,6 +107,18 @@ pub fn outdent_apply_to_ref<
 ) {
     // Model the chord-dispatch click (see mod.rs::model_chord_click_focus).
     super::model_chord_click_focus(block_id, state);
+
+    // ADR 0028 D1: the op engine REJECTS outdent of a direct page child (it would
+    // escape the page container) — fail-loud, no structural change. Mirror that
+    // rejection here so the model stays faithful: no undo snapshot, no move. The
+    // focus click above still models the gesture reaching the block.
+    let parent_is_page = state
+        .parent_of(block_id)
+        .is_some_and(|parent| state.is_page_block(&parent));
+    if parent_is_page {
+        return;
+    }
+
     state.push_undo_snapshot();
     state.outdent(block_id);
 }
