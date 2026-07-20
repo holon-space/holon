@@ -4,8 +4,10 @@
 //! with an EMPTY `destination_path` (omitted), so the backend takes its
 //! `destination_path`-absent branch and defaults the destination to the
 //! origin's nearest page ancestor. The ref side mints the SAME deterministic
-//! page id (`PageId::for_path` over the same title path the backend planner
-//! walks) under that ancestor and re-homes the origin's children onto it —
+//! page id (`PageId::for_page_under` with the origin content as ONE leaf
+//! title — the same single source the backend planner calls, so model and
+//! prod cannot re-diverge on path semantics) under that ancestor and
+//! re-homes the origin's children onto it —
 //! leaving the origin a non-page `[[P]]` link — so the block-comparison and
 //! `inv-no-page-under-non-page` invariants verify the transform.
 //!
@@ -102,12 +104,13 @@ fn plan_new_page<R: RefBlockTree>(state: &R, origin: &EntityUri) -> Option<(Enti
     if origin_content.is_empty() {
         return None;
     }
-    let full_path = if ancestor_path.is_empty() {
-        origin_content
-    } else {
-        format!("{ancestor_path}/{origin_content}")
-    };
-    let page_id = PageId::for_path(&full_path).ok()?.into_entity_uri();
+    // The origin's content is the page TITLE — a single leaf segment, NOT a
+    // `/`-path. Mirror the backend planner's `PageId::for_page_under` so a `/`
+    // in the content is treated as part of the title on BOTH sides (never split
+    // into path segments), keeping the born-equal page id in agreement.
+    let page_id = PageId::for_page_under(&ancestor_path, &origin_content)
+        .ok()?
+        .into_entity_uri();
     Some((ancestor, page_id))
 }
 

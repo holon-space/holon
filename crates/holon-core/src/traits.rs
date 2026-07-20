@@ -864,6 +864,7 @@ where
     /// propagation, plus the recursive-depth-update for descendants that the
     /// inline implementation was missing.
     #[holon_macros::affects("parent_id", "depth", "sort_key")]
+    #[holon_macros::menu_exposure(listed)]
     async fn indent(&self, id: &EntityUri) -> Result<OperationResult> {
         let id_str = id.as_str();
         let block = self
@@ -933,6 +934,7 @@ where
     #[holon_macros::affects("parent_id", "depth", "sort_key")]
     #[holon_macros::triggered_by(availability_of = "tree_position", providing = ["parent_id", "after_block_id"])]
     #[holon_macros::triggered_by(availability_of = "selected_id", providing = ["parent_id"])]
+    #[holon_macros::menu_exposure(pointer_gesture)]
     async fn move_block(
         &self,
         id: &EntityUri,
@@ -1025,6 +1027,7 @@ where
 
     /// Move block out to parent's level (decrease indentation)
     #[holon_macros::affects("parent_id", "depth", "sort_key")]
+    #[holon_macros::menu_exposure(listed)]
     async fn outdent(&self, id: &EntityUri) -> Result<OperationResult> {
         let id_str = id.as_str();
         let maybe_block: Option<T> = self.get_by_id(id_str).await?;
@@ -1082,6 +1085,7 @@ where
     /// * `position` - Character position to split at (as i64, will be converted
     ///   to usize)
     #[holon_macros::affects("content")]
+    #[holon_macros::menu_exposure(keyboard_gesture)]
     async fn split_block(&self, id: &EntityUri, position: i64) -> Result<OperationResult> {
         use uuid::Uuid;
 
@@ -1723,6 +1727,7 @@ where
 
     /// Move a block up (swap with previous sibling)
     #[holon_macros::affects("parent_id", "sort_key")]
+    #[holon_macros::menu_exposure(listed)]
     async fn move_up(&self, id: &EntityUri) -> Result<OperationResult> {
         let id_str = id.as_str();
         // Capture old state
@@ -1781,6 +1786,7 @@ where
     /// of the block's content.
     #[holon_macros::affects("content")]
     #[holon_macros::triggered_by(availability_of = "selected_id", providing = ["target_uri"])]
+    #[holon_macros::menu_exposure(listed)]
     async fn embed_entity(
         &self,
         id: &EntityUri,
@@ -1827,6 +1833,7 @@ where
 
     /// Move a block down (swap with next sibling)
     #[holon_macros::affects("parent_id", "sort_key")]
+    #[holon_macros::menu_exposure(listed)]
     async fn move_down(&self, id: &EntityUri) -> Result<OperationResult> {
         let id_str = id.as_str();
         // Capture old state
@@ -2310,7 +2317,12 @@ pub fn generate_sync_operation(provider_name: &str) -> OperationDescriptor {
         required_params: vec![],
         affected_fields: vec![], // Sync operations don't affect specific fields
         param_mappings: vec![],
-        ..Default::default()
+        menu_exposure: holon_api::MenuExposure::NotListed {
+            surface: holon_api::NonMenuSurface::External,
+        },
+        trigger: None,
+        bound_params: std::collections::HashMap::new(),
+        precondition: None,
     }
 }
 

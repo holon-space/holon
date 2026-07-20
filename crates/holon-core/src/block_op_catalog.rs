@@ -97,7 +97,16 @@ pub fn dismiss_advice_descriptor(
                 description: "The advice lesson block to dismiss".to_string(),
             },
         ],
-        ..Default::default()
+        affected_fields: vec![],
+        param_mappings: vec![],
+        // Dismiss-advice is fired from the advice UI affordance, not the slash
+        // command menu.
+        menu_exposure: holon_api::MenuExposure::NotListed {
+            surface: holon_api::NonMenuSurface::Internal,
+        },
+        trigger: None,
+        bound_params: std::collections::HashMap::new(),
+        precondition: None,
     }
 }
 
@@ -174,6 +183,15 @@ fn tag_descriptor(
                 description: "The tag to add or remove".to_string(),
             },
         ],
-        ..Default::default()
+        affected_fields: vec![],
+        param_mappings: vec![],
+        // Element-wise tag mutation is a programmatic/structural op, not a bare
+        // slash command.
+        menu_exposure: holon_api::MenuExposure::NotListed {
+            surface: holon_api::NonMenuSurface::Internal,
+        },
+        trigger: None,
+        bound_params: std::collections::HashMap::new(),
+        precondition: None,
     }
 }

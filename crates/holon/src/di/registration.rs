@@ -409,19 +409,23 @@ async fn create_profile_resolver(
             .or_default()
             .push(op);
     }
-    // Engine-synthetic compound (Option B): `convert_block_to_page` is not a
-    // dispatcher-registered provider op, so it is absent from the loop above.
-    // Add its descriptor here — the SAME source `available_operations` uses —
-    // so it reaches `resolve_profile(row).operations` and thus every op-driven
-    // UI surface (slash menu, op-button toolbar, and the key-chord pump),
-    // sitting beside indent/outdent/move_up/move_down. `instantiate_template`
-    // is deliberately NOT added: it needs a template pick and is surfaced via
-    // the template picker (per-template entries), not as a bare op.
+    // Engine-synthetic `block` compounds are not dispatcher-registered
+    // providers, so they are absent from the loop above. Inject them from the
+    // SAME single source `available_operations` uses
+    // (`block_synthetic_descriptors`), so the profile resolver and MCP
+    // discovery can never drift. `convert_block_to_page` thus reaches
+    // `resolve_profile(row).operations` and every op-driven UI surface (slash
+    // menu via the `Listed` filter, op-button toolbar, key-chord pump), beside
+    // indent/outdent/move_up/move_down. `instantiate_template` is NOT injected
+    // here (`include_template_picker = false`): it is surfaced via the template
+    // picker, not as a bare profile op.
     entity_operations
         .entry(EntityName::new("block"))
         .or_default()
-        .push(
-            crate::api::operation_engine::DispatchingOperationEngine::convert_block_to_page_descriptor(),
+        .extend(
+            crate::api::operation_engine::DispatchingOperationEngine::block_synthetic_descriptors(
+                false,
+            ),
         );
     match matview_manager.watch(PROFILE_SQL).await {
         Ok(result) => {

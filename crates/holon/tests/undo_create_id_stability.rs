@@ -58,7 +58,19 @@ impl OperationProvider for MintingProvider {
             .map(|name| OperationDescriptor {
                 entity_name: EntityName::new("block"),
                 name: name.to_string(),
-                ..Default::default()
+                entity_short_name: String::new(),
+                id_column: "id".to_string(),
+                display_name: String::new(),
+                description: String::new(),
+                required_params: vec![],
+                affected_fields: vec![],
+                param_mappings: vec![],
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Test,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             })
             .collect()
     }

@@ -1209,6 +1209,23 @@ impl Render for EditorView {
                             new_text.push_str(&text[cursor..]);
 
                             let input = input.clone();
+                            let services_for_dispatch = services.clone();
+                            let rt = services.runtime_handle();
+                            // ONE ordered spawn: (B) strip the typed "/command"
+                            // from the editor FIRST, THEN dispatch. Previously
+                            // the strip ran in a SEPARATE detached spawn that
+                            // raced the synchronous `dispatch_intent`, so the
+                            // menu-trigger `/` was still in the origin's content
+                            // when `convert_block_to_page` read it (GPUI dogfood
+                            // 2026-07-20, bug a2). Sequencing strip→dispatch in
+                            // one future removes that race.
+                            //
+                            // (D) EVERY menu-dispatched op now goes through the
+                            // awaitable path so a backend failure surfaces as a
+                            // visible toast — fail-loud, not a lone
+                            // `tracing::error!`. Before, only
+                            // `instantiate_template` got the toast; convert (and
+                            // every other slash op) failed silently (bug a3).
                             cx.spawn(async move |cx| {
                                 let _ = cx.update_window(window_handle, |_, window, cx| {
                                     input.update(cx, |state, cx| {
@@ -1217,17 +1234,6 @@ impl Render for EditorView {
                                         state.set_cursor_position(pos, window, cx);
                                     });
                                 });
-                            })
-                            .detach();
-                            // `instantiate_template` can fail in the BACKEND
-                            // (template not found, missing bindings). Await the
-                            // result on the tokio runtime and surface a failure
-                            // as a visible toast — fail-loud, not just a log
-                            // line. Other slash commands keep the fire-and-forget
-                            // dispatch (unchanged hot path).
-                            if intent.op_name == holon_api::INSTANTIATE_TEMPLATE_OP {
-                                let services_for_dispatch = services.clone();
-                                let rt = services.runtime_handle();
                                 let (tx, rx) = tokio::sync::oneshot::channel::<Option<String>>();
                                 rt.spawn(async move {
                                     let outcome = services_for_dispatch
@@ -1237,26 +1243,20 @@ impl Render for EditorView {
                                         .map(|e| format!("{e:#}"));
                                     let _ = tx.send(outcome);
                                 });
-                                cx.spawn(async move |cx| {
-                                    if let Ok(Some(detail)) = rx.await {
-                                        let _ =
-                                            cx.update_window(window_handle, |_, _window, cx| {
-                                                crate::share_ui::DegradedToastSink::push(
-                                                    crate::share_ui::DegradedToast {
-                                                        kind:
-                                                            crate::share_ui::DegradedKind::CommandFailed,
-                                                        shared_tree_id: "command".into(),
-                                                        detail,
-                                                    },
-                                                    cx,
-                                                );
-                                            });
-                                    }
-                                })
-                                .detach();
-                            } else {
-                                services.dispatch_intent(intent);
-                            }
+                                if let Ok(Some(detail)) = rx.await {
+                                    let _ = cx.update_window(window_handle, |_, _window, cx| {
+                                        crate::share_ui::DegradedToastSink::push(
+                                            crate::share_ui::DegradedToast {
+                                                kind: crate::share_ui::DegradedKind::CommandFailed,
+                                                shared_tree_id: "command".into(),
+                                                detail,
+                                            },
+                                            cx,
+                                        );
+                                    });
+                                }
+                            })
+                            .detach();
                             cx.stop_propagation();
                             cx.notify(editor_entity_id);
                         }
@@ -1287,8 +1287,7 @@ impl Render for EditorView {
                                     let _ = cx.update_window(window_handle, |_, window, cx| {
                                         input.update(cx, |state, cx| {
                                             state.set_value(&new_text, window, cx);
-                                            let pos =
-                                                state.text().offset_to_position(abs_start);
+                                            let pos = state.text().offset_to_position(abs_start);
                                             state.set_cursor_position(pos, window, cx);
                                         });
                                     });

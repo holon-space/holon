@@ -473,6 +473,57 @@ async fn convert_rejects_an_already_page_origin() {
     );
 }
 
+/// Bug (C) regression (GPUI dogfood 2026-07-20): the origin block's CONTENT is
+/// a page TITLE, not a `/`-separated path. A `/` in the content — the
+/// menu-trigger `/` still trailing when convert dispatches, or a legitimate
+/// title like `"buy milk/eggs"` — must NOT be split into page-path segments.
+/// Before the fix the planner did `format!("{destination}/{leaf}")` then
+/// `PageId::for_path`, so a TRAILING `/` produced an "empty segment" fail-loud
+/// (the exact dogfood symptom — convert looked like a silent no-op) and an
+/// EMBEDDED `/` silently minted a multi-segment page id (phantom hierarchy).
+#[tokio::test(flavor = "multi_thread")]
+async fn convert_treats_slash_in_content_as_title_not_path() {
+    // Case 1 — trailing-slash content at the vault root = the exact dogfood
+    // repro (menu trigger `/` left in the origin's content at plan time).
+    let engine = block_engine().await;
+    let origin = "block:slashy-origin";
+    create(
+        &engine,
+        origin,
+        "sentinel:no_parent",
+        "Promote me to page/",
+        0,
+        false,
+    )
+    .await;
+
+    let page = convert(&engine, origin, "").await;
+    assert_eq!(
+        page,
+        PageId::for_page_under("", "Promote me to page/")
+            .unwrap()
+            .as_str(),
+        "content is a single-segment title; a trailing '/' must not split it \
+         into an empty path segment and fail loud"
+    );
+    assert!(is_page(&engine, &page).await);
+
+    // Case 2 — embedded-slash content under a page ancestor stays ONE leaf.
+    let home = PageId::for_path("Home").unwrap().as_str().to_string();
+    create(&engine, &home, "sentinel:no_parent", "Home", 0, true).await;
+    let origin2 = "block:embedded-slash";
+    create(&engine, origin2, &home, "buy milk/eggs", 1, false).await;
+    let page2 = convert(&engine, origin2, "Home").await;
+    assert_eq!(
+        page2,
+        PageId::for_page_under("Home", "buy milk/eggs")
+            .unwrap()
+            .as_str(),
+        "an embedded '/' in the title must not spawn a 'buy milk' > 'eggs' page hierarchy"
+    );
+    assert!(is_page(&engine, &page2).await);
+}
+
 trait AssertApplied {
     fn assert_applied(self);
 }

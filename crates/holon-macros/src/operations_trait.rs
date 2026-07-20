@@ -232,6 +232,11 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                 quote! { vec![#(#mapping_exprs),*] }
             };
 
+            // Extract UI menu exposure from #[menu_exposure(...)]. Absent ⇒
+            // fail-closed `NotListed { ProviderDefault }` — a macro-generated
+            // provider op stays invisible to the slash menu until it opts in.
+            let menu_exposure_expr = menu_exposure_tokens(extract_menu_exposure(&method.attrs));
+
             // Construct entity_name: if provider_name is set, use
             // "{provider_name}.{operation_name}", otherwise use passed entity_name
             let entity_name_expr = if let Some(ref provider) = provider_name {
@@ -273,6 +278,7 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                         ],
                         affected_fields: #affected_fields_expr,
                         param_mappings: #param_mappings_expr,
+                        menu_exposure: #menu_exposure_expr,
                         trigger: None,
                         bound_params: ::std::collections::HashMap::new(),
                         #precondition_field
@@ -1423,4 +1429,48 @@ fn infer_type_hint_from_rust_type(rust_type_str: &str) -> proc_macro2::TokenStre
 
 fn extract_affected_fields(attrs: &[syn::Attribute]) -> Vec<String> {
     attr_parser::extract_affected_fields(attrs)
+}
+
+fn extract_menu_exposure(attrs: &[syn::Attribute]) -> Option<String> {
+    attr_parser::extract_menu_exposure(attrs)
+}
+
+/// Map a `#[menu_exposure(<variant>)]` marker (or its absence) to the
+/// `holon_api::MenuExposure` construction tokens. Absent / unknown ⇒ the
+/// fail-closed `ProviderDefault` surface (invisible to the menu until an op
+/// deliberately declares `listed`).
+fn menu_exposure_tokens(variant: Option<String>) -> proc_macro2::TokenStream {
+    match variant.as_deref() {
+        Some("listed") => quote! { holon_api::MenuExposure::Listed },
+        Some("keyboard_gesture") => quote! {
+            holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::KeyboardGesture,
+            }
+        },
+        Some("pointer_gesture") => quote! {
+            holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::PointerGesture,
+            }
+        },
+        Some("navigation") => quote! {
+            holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::Navigation,
+            }
+        },
+        Some("external") => quote! {
+            holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::External,
+            }
+        },
+        Some("internal") => quote! {
+            holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::Internal,
+            }
+        },
+        _ => quote! {
+            holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::ProviderDefault,
+            }
+        },
+    }
 }
