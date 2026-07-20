@@ -2,7 +2,7 @@
 //!
 //! This sync provider scans an org-mode directory and emits changes on typed
 //! streams. Architecture:
-//! - ONE sync() call → multiple typed streams (directories, files, blocks)
+//! - ONE sync() call → the file change stream
 //! - Uses file content hashes for change detection
 //! - Fire-and-forget operations - updates arrive via streams
 //!
@@ -38,22 +38,38 @@ use holon_core::generate_sync_operation;
 use holon_core::storage::types::StorageEntity;
 use holon_filesystem::File;
 use holon_filesystem::FileSystem;
-use holon_filesystem::directory::ChangesWithMetadata;
-use holon_filesystem::directory::Directory;
-use holon_filesystem::directory::DirectoryChangeProvider;
-use holon_filesystem::directory::ROOT_ID;
+use holon_filesystem::file::ChangesWithMetadata;
 use tokio::sync::broadcast;
 
 use crate::parser::compute_content_hash;
-use crate::parser::generate_directory_id;
 use crate::parser::generate_file_id;
 
-/// Sync state stored as JSON in token store
+/// `File::parent_id` value for a file sitting directly in the vault root.
+/// A plain relative path, not an entity id — see `File::parent_id`.
+const ROOT_PARENT: &str = ".";
+
+/// Sync state stored as JSON in token store.
+///
+/// `deny_unknown_fields` is deliberate: this struct IS the on-disk token
+/// format, and silently ignoring a field we no longer understand is exactly
+/// the kind of format drift that hides bugs. Unknown fields route to the
+/// explicit legacy migration in `load_state` instead.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct SyncState {
     /// Map of file paths to their content hashes
     file_hashes: HashMap<String, String>,
-    /// Map of directory paths
+}
+
+/// Pre-`Directory`-purge token shape. Vaults synced before the `Directory`
+/// entity was deleted carry a `known_dirs` map that no longer has any meaning.
+/// Parsed only to salvage `file_hashes`, so an upgrade does not re-emit every
+/// file as `Created`.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacySyncState {
+    file_hashes: HashMap<String, String>,
+    #[allow(dead_code)]
     known_dirs: HashMap<String, bool>,
 }
 
@@ -62,7 +78,6 @@ struct SyncState {
 pub struct OrgModeSyncProvider {
     root_directory: PathBuf,
     token_store: Arc<dyn SyncTokenStore>,
-    directory_tx: broadcast::Sender<ChangesWithMetadata<Directory>>,
     file_tx: broadcast::Sender<ChangesWithMetadata<File>>,
     fs: Arc<dyn FileSystem>,
     /// Serializes the load-base -> scan -> save-base read-modify-write of
@@ -79,15 +94,10 @@ impl OrgModeSyncProvider {
         Self {
             root_directory,
             token_store,
-            directory_tx: broadcast::channel(1000).0,
             file_tx: broadcast::channel(1000).0,
             fs,
             sync_lock: tokio::sync::Mutex::new(()),
         }
-    }
-
-    pub fn subscribe_directories(&self) -> broadcast::Receiver<ChangesWithMetadata<Directory>> {
-        self.directory_tx.subscribe()
     }
 
     pub fn subscribe_files(&self) -> broadcast::Receiver<ChangesWithMetadata<File>> {
@@ -104,11 +114,34 @@ impl OrgModeSyncProvider {
 
         match position {
             StreamPosition::Beginning => Ok(SyncState::default()),
-            StreamPosition::Version(bytes) => {
-                let state: SyncState = serde_json::from_slice(&bytes)
-                    .map_err(|e| format!("Failed to parse sync state: {}", e))?;
-                Ok(state)
-            }
+            StreamPosition::Version(bytes) => match serde_json::from_slice::<SyncState>(&bytes) {
+                Ok(state) => Ok(state),
+                Err(current_err) => {
+                    // Not the current shape. Try the one legacy shape we know
+                    // how to migrate, and say so loudly — a token we cannot
+                    // account for is an error, never a silent reset to
+                    // `default()` (that would re-emit the whole vault as
+                    // `Created` while looking perfectly healthy).
+                    let legacy: LegacySyncState =
+                        serde_json::from_slice(&bytes).map_err(|legacy_err| {
+                            format!(
+                                "Failed to parse orgmode sync state. As current format: \
+                                 {current_err}. As pre-Directory-purge legacy format: \
+                                 {legacy_err}"
+                            )
+                        })?;
+                    tracing::warn!(
+                        file_hashes = legacy.file_hashes.len(),
+                        "[OrgModeSyncProvider] MIGRATING sync token: dropping the obsolete \
+                         `known_dirs` field left by the deleted Directory entity. File hashes \
+                         are carried over, so this does not re-scan the vault. This warning \
+                         should appear exactly once per vault."
+                    );
+                    Ok(SyncState {
+                        file_hashes: legacy.file_hashes,
+                    })
+                }
+            },
         }
     }
 
@@ -116,56 +149,17 @@ impl OrgModeSyncProvider {
     async fn scan_and_compute_changes(
         &self,
         old_state: &SyncState,
-    ) -> Result<(SyncState, Vec<Change<Directory>>, Vec<Change<File>>)> {
+    ) -> Result<(SyncState, Vec<Change<File>>)> {
         let origin = ChangeOrigin::remote_with_current_span();
         let mut new_state = SyncState::default();
-        let mut dir_changes = Vec::new();
         let mut file_changes = Vec::new();
 
         // Track what we've seen to detect deletions
-        let mut seen_dirs: HashMap<String, bool> = HashMap::new();
         let mut seen_files: HashMap<String, bool> = HashMap::new();
 
         let scanned = crate::file_watcher::scan_directory(self.fs.as_ref(), &self.root_directory)
             .await
             .map_err(|e| format!("Failed to scan {}: {e}", self.root_directory.display()))?;
-
-        for path in &scanned.directories {
-            let dir_id = generate_directory_id(path, &self.root_directory);
-            seen_dirs.insert(dir_id.clone(), true);
-
-            let parent_id = path
-                .parent()
-                .map(|p| {
-                    if p == self.root_directory {
-                        ROOT_ID.to_string()
-                    } else {
-                        generate_directory_id(p, &self.root_directory)
-                    }
-                })
-                .unwrap_or_else(|| ROOT_ID.to_string());
-
-            let depth = path
-                .strip_prefix(&self.root_directory)
-                .map(|p| p.components().count() as i64)
-                .unwrap_or(1);
-
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown")
-                .to_string();
-
-            if !old_state.known_dirs.contains_key(&dir_id) {
-                let dir = Directory::new(dir_id.clone(), name, parent_id, depth);
-                dir_changes.push(Change::Created {
-                    data: dir,
-                    origin: origin.clone(),
-                });
-            }
-
-            new_state.known_dirs.insert(dir_id, true);
-        }
 
         let canonical_root = self
             .fs
@@ -196,16 +190,24 @@ impl OrgModeSyncProvider {
                 .unwrap_or(true);
 
             if file_changed {
-                let parent_id = path
-                    .parent()
-                    .map(|p| {
-                        if p == self.root_directory {
-                            ROOT_ID.to_string()
-                        } else {
-                            generate_directory_id(p, &self.root_directory)
-                        }
-                    })
-                    .unwrap_or_else(|| ROOT_ID.to_string());
+                // Relative path of the containing folder — a plain path
+                // string, never an entity id (see `File::parent_id`).
+                let parent_id = match path.parent() {
+                    Some(p) if p != self.root_directory => {
+                        // `path` came out of a scan rooted at `root_directory`,
+                        // so its parent is always under the root. A failure
+                        // here means the scanner returned a foreign path.
+                        let rel = p.strip_prefix(&self.root_directory).map_err(|e| {
+                            format!(
+                                "Scanned file parent {} is not under vault root {}: {e}",
+                                p.display(),
+                                self.root_directory.display()
+                            )
+                        })?;
+                        rel.to_string_lossy().to_string()
+                    }
+                    _ => ROOT_PARENT.to_string(),
+                };
 
                 let file = File::new(
                     file_id.clone(),
@@ -233,20 +235,9 @@ impl OrgModeSyncProvider {
         }
 
         tracing::info!(
-            "[OrgModeSyncProvider] Scan complete: {} directories, {} files found",
-            scanned.directories.len(),
+            "[OrgModeSyncProvider] Scan complete: {} files found",
             scanned.files.len()
         );
-
-        // Detect deleted directories
-        for old_dir_id in old_state.known_dirs.keys() {
-            if !seen_dirs.contains_key(old_dir_id) {
-                dir_changes.push(Change::Deleted {
-                    id: old_dir_id.clone(),
-                    origin: origin.clone(),
-                });
-            }
-        }
 
         // Detect deleted files (and their blocks)
         for old_file_id in old_state.file_hashes.keys() {
@@ -260,7 +251,7 @@ impl OrgModeSyncProvider {
             }
         }
 
-        Ok((new_state, dir_changes, file_changes))
+        Ok((new_state, file_changes))
     }
 
     /// Extract file paths from FieldDeltas
@@ -293,24 +284,18 @@ impl OrgModeSyncProvider {
     }
 }
 
-impl DirectoryChangeProvider for OrgModeSyncProvider {
-    fn subscribe_directories(&self) -> broadcast::Receiver<ChangesWithMetadata<Directory>> {
-        self.directory_tx.subscribe()
-    }
-
-    fn root_directory(&self) -> std::path::PathBuf {
-        self.root_directory.clone()
-    }
-}
-
 #[async_trait]
 impl SyncableProvider for OrgModeSyncProvider {
     fn provider_name(&self) -> &str {
         "orgmode"
     }
 
-    #[tracing::instrument(name = "provider.orgmode.sync", skip(self, _position))]
-    async fn sync(&self, _position: StreamPosition) -> Result<StreamPosition> {
+    /// The position argument is unused: `SyncableProvider::sync` fixes this
+    /// signature, but a local filesystem walk is always complete, so there is
+    /// no cursor to resume from. The delta base is the provider's own
+    /// persisted `SyncState` (see module header).
+    #[tracing::instrument(name = "provider.orgmode.sync", skip(self))]
+    async fn sync(&self, _: StreamPosition) -> Result<StreamPosition> {
         use tracing::info;
 
         info!(
@@ -335,8 +320,7 @@ impl SyncableProvider for OrgModeSyncProvider {
         let old_state = self.load_state().await?;
 
         // Scan directory and compute changes
-        let (new_state, dir_changes, file_changes) =
-            self.scan_and_compute_changes(&old_state).await?;
+        let (new_state, file_changes) = self.scan_and_compute_changes(&old_state).await?;
 
         // Serialize new state for position
         let state_bytes = serde_json::to_vec(&new_state)
@@ -348,13 +332,6 @@ impl SyncableProvider for OrgModeSyncProvider {
         // sync_token is None: the provider persists its own base directly
         // below instead of piggybacking it on the batch (the piggyback path
         // was never wired -- cache feeds apply batches with sync_token None).
-        let dir_metadata = BatchMetadata {
-            relation_name: "directory".to_string(),
-            trace_context: trace_context.clone(),
-            sync_token: None,
-            seq: 0,
-        };
-
         let file_metadata = BatchMetadata {
             relation_name: "file".to_string(),
             trace_context,
@@ -363,15 +340,9 @@ impl SyncableProvider for OrgModeSyncProvider {
         };
 
         info!(
-            "[OrgModeSyncProvider] Emitting {} directory, {} file changes",
-            dir_changes.len(),
+            "[OrgModeSyncProvider] Emitting {} file changes",
             file_changes.len(),
         );
-
-        let _ = self.directory_tx.send(WithMetadata {
-            inner: dir_changes,
-            metadata: dir_metadata,
-        });
 
         let _ = self.file_tx.send(WithMetadata {
             inner: file_changes,
@@ -596,6 +567,48 @@ mod tests {
         )
     }
 
+    /// A sync token written before the `Directory` purge still carries
+    /// `known_dirs`. It must migrate — keeping `file_hashes` so the vault is
+    /// not re-emitted as `Created` — rather than being silently reset.
+    #[tokio::test]
+    async fn test_legacy_sync_token_migrates_keeping_file_hashes() {
+        let dir = tempdir().unwrap();
+        let provider = provider_for(dir.path());
+
+        let legacy = br#"{"file_hashes":{"file:a.org":"deadbeef"},"known_dirs":{"Notes":true}}"#;
+        provider
+            .token_store
+            .save_token("orgmode", StreamPosition::Version(legacy.to_vec()))
+            .await
+            .unwrap();
+
+        let state = provider.load_state().await.unwrap();
+        assert_eq!(state.file_hashes.get("file:a.org").unwrap(), "deadbeef");
+    }
+
+    /// A token that matches neither the current nor the known legacy shape is
+    /// an error, never a silent reset to `default()`.
+    #[tokio::test]
+    async fn test_unrecognized_sync_token_errors_loudly() {
+        let dir = tempdir().unwrap();
+        let provider = provider_for(dir.path());
+
+        provider
+            .token_store
+            .save_token(
+                "orgmode",
+                StreamPosition::Version(br#"{"totally":"unexpected"}"#.to_vec()),
+            )
+            .await
+            .unwrap();
+
+        let err = provider.load_state().await.unwrap_err().to_string();
+        assert!(
+            err.contains("Failed to parse orgmode sync state"),
+            "error must name the failure and both attempted shapes, got: {err}"
+        );
+    }
+
     /// Externally deleting a file must produce `Change::Deleted` on the next
     /// sync — regardless of the position the caller passes (all production
     /// callers pass `StreamPosition::Beginning`).
@@ -627,31 +640,62 @@ mod tests {
         }
     }
 
-    /// Externally deleting a subdirectory must produce a directory
-    /// `Change::Deleted` on the next sync.
+    /// A folder whose name contains a space (e.g. `Agentic DPL`) must sync
+    /// without panicking. This is the boot-crash repro: the scan path feeds a
+    /// raw relative path into an id that was parsed as an RFC 3986 URI, and a
+    /// space is not a legal URI character.
     #[tokio::test]
-    async fn test_external_directory_deletion_emits_deleted() {
+    async fn test_directory_name_with_space_syncs() {
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("Agentic DPL");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("note.org"), "* Note\n").unwrap();
+
+        let provider = provider_for(dir.path());
+        let mut file_rx = provider.subscribe_files();
+
+        provider.sync(StreamPosition::Beginning).await.unwrap();
+
+        let batch = file_rx.try_recv().unwrap();
+        assert_eq!(batch.inner.len(), 1, "expected the one .org file");
+        match &batch.inner[0] {
+            Change::Created { data, .. } => {
+                assert_eq!(data.parent_id, "Agentic DPL");
+            }
+            other => panic!("expected Created, got {:?}", other),
+        }
+    }
+
+    /// Externally deleting a subdirectory must produce a `Change::Deleted` for
+    /// the files it contained. Folders themselves are not entities; the files
+    /// inside them are what the rest of the system tracks.
+    #[tokio::test]
+    async fn test_external_directory_deletion_emits_file_deletions() {
         let dir = tempdir().unwrap();
         let sub = dir.path().join("notes");
         std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("kept.org"), "* Kept\n").unwrap();
 
         let provider = provider_for(dir.path());
-        let mut dir_rx = provider.subscribe_directories();
+        let mut file_rx = provider.subscribe_files();
 
         provider.sync(StreamPosition::Beginning).await.unwrap();
-        let first = dir_rx.try_recv().unwrap();
+        let first = file_rx.try_recv().unwrap();
         assert_eq!(first.inner.len(), 1);
+        let created_id = match &first.inner[0] {
+            Change::Created { data, .. } => data.id.clone(),
+            other => panic!("expected Created, got {:?}", other),
+        };
 
-        std::fs::remove_dir(&sub).unwrap();
+        std::fs::remove_dir_all(&sub).unwrap();
 
         provider.sync(StreamPosition::Beginning).await.unwrap();
-        let second = dir_rx.try_recv().unwrap();
+        let second = file_rx.try_recv().unwrap();
         assert_eq!(second.inner.len(), 1, "expected exactly the deletion");
-        assert!(
-            matches!(&second.inner[0], Change::Deleted { .. }),
-            "expected Deleted, got {:?}",
-            second.inner[0]
-        );
+        match &second.inner[0] {
+            Change::Deleted { id, .. } => assert_eq!(id, &created_id),
+            other => panic!("expected Deleted, got {:?}", other),
+        }
     }
 
     /// Re-syncing an unchanged tree must emit NO changes — no spurious
@@ -664,15 +708,12 @@ mod tests {
         std::fs::write(dir.path().join("sub").join("b.org"), "* B\n").unwrap();
 
         let provider = provider_for(dir.path());
-        let mut dir_rx = provider.subscribe_directories();
         let mut file_rx = provider.subscribe_files();
 
         provider.sync(StreamPosition::Beginning).await.unwrap();
-        assert_eq!(dir_rx.try_recv().unwrap().inner.len(), 1);
         assert_eq!(file_rx.try_recv().unwrap().inner.len(), 2);
 
         provider.sync(StreamPosition::Beginning).await.unwrap();
-        assert!(dir_rx.try_recv().unwrap().inner.is_empty());
         assert!(file_rx.try_recv().unwrap().inner.is_empty());
     }
 

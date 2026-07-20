@@ -132,7 +132,7 @@ lock contention) and saves the sync token atomically with the data.
 | Caller | File |
 |--------|------|
 | MCP sync engine | `crates/holon-mcp-client/src/mcp_sync_engine.rs` |
-| Directory/file cache feeds | `crates/holon-app/src/turso_seams.rs` |
+| File cache feed | `crates/holon-app/src/turso_seams.rs` |
 
 **Implemented, unwired**: `ingest_stream(rx)` and `ingest_stream_with_metadata(rx)`
 (subscribe to a `broadcast::Receiver<Vec<Change<T>>>` and apply in a background
