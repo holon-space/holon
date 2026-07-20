@@ -75,6 +75,10 @@ fn err(msg: impl Into<String>) -> Box<dyn std::error::Error + Send + Sync> {
 pub const TREE_ENTITY: &str = "tree";
 use crate::loro_backend::STABLE_ID;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default enrollment window for a share ticket's capability: after this many
+/// seconds no *new* peer may enroll (already-enrolled peers keep syncing). 30
+/// days is a placeholder pending the lease-policy ruling (ADR 0028 D4/H8).
+const DEFAULT_ENROLLMENT_WINDOW_SECS: i64 = 30 * 24 * 60 * 60;
 
 /// Stable id (bare, no `block:` prefix) of the recipient-side **"Shared with
 /// me" root** — the dedicated home for accepted shares (ADR 0028 H7). A single
@@ -1179,8 +1183,8 @@ fn find_tree_id_by_stable_id(doc: &LoroDoc, stable_id: &EntityUri) -> Option<Tre
 fn first_local_collision(global: &LoroDoc, ops: &[(String, StorageEntity)]) -> Option<String> {
     for (_op, params) in ops {
         if let Some(Value::String(id)) = params.get("id") {
-            // block_to_params builds op id as a canonical block URI string.
-            // ALLOW(entity_uri_from_raw): SQL op batch id from block_to_params
+            // op id string is produced by block_to_params for the SQL op batch
+            // ALLOW(entity_uri_from_raw): canonical block URI from block_to_params
             let uri = EntityUri::from_raw(id);
             if find_tree_id_by_stable_id(global, &uri).is_some() {
                 return Some(id.clone());
@@ -1519,7 +1523,17 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
             .await?;
 
         let alpn = format!("{ALPN_PREFIX}/{shared_tree_id}");
-        let ticket = Ticket::new(shared_tree_id.clone(), addr, alpn)
+        // Mint the share's access capability + enrollment deadline. The
+        // capability — not the leaky `shared_tree_id` — is the real secret a
+        // recipient proves possession of at enrollment (see
+        // `share_enrollment`). NOTE: the acceptor-side gate that verifies it is
+        // wired with the enrollment-ceremony ruling (ADR 0028 §H5/C1'); until
+        // then this is forward-compat plumbing, not an enforced boundary.
+        let capability = crate::share_enrollment::CapabilitySecret::generate();
+        let expires_at = crate::share_enrollment::ExpiryTime(
+            chrono::Utc::now().timestamp() + DEFAULT_ENROLLMENT_WINDOW_SECS,
+        );
+        let ticket = Ticket::new(shared_tree_id.clone(), addr, alpn, capability, expires_at)
             .encode()
             .map_err(|e| err(format!("encode ticket: {e:#}")))?;
 
@@ -1549,6 +1563,11 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                 parent_uri.scheme()
             )));
         }
+        // SECURITY (disclosed gap): the v2 ticket's capability is decoded but
+        // NOT enforced here yet — acceptance is still ALPN-only. Wiring the
+        // acceptor gate is deferred to the enrollment-ceremony ruling (see
+        // share_enrollment.rs module docs); until then possession of this
+        // ticket string remains a bearer read+write capability.
         let t = Ticket::decode(&ticket).map_err(|e| err(format!("decode ticket: {e:#}")))?;
 
         // Create a fresh LoroDoc for the shared tree. `configure_text_styles`
