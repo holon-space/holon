@@ -62,6 +62,14 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // boundary before `name_chain` bail!s in writeback.
         invariants::no_page_under_non_page::wire(),
         invariants::no_errors::wire(),
+        // Mark-bounds tripwire (dogfood 2026-07-20): every inline mark's span
+        // must lie within its block content (`end <= content.chars().count()`),
+        // read from the SUT RAW snapshot. A decoupled marks-only write (or a
+        // later content-only trim) leaves a mark outliving its content, which
+        // aborts EVERY GPUI render in `scalar_range_to_bytes`. Needs
+        // `SutBackend`; ref-independent, so it selects on every backend-bearing
+        // slice.
+        invariants::mark_bounds_within_content::wire(),
         invariants::viewmodel_no_error_widgets::wire(),
         invariants::task_state_storage_coherence::wire(),
         // Windowed (E4): selected only by the windowed slice

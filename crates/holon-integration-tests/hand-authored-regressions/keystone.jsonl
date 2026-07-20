@@ -21,3 +21,17 @@
 # oracle mirrors that same content-as-path assumption, so this case goes RED on the unfixed base.
 # Becomes the permanent regression lock: green once content is treated as a single leaf page name.
 {"name": "block-to-page-slash-content-empty-segment", "description": "dogfood 2026-07-20 bug (a1): convert_block_to_page planner treats origin content as a /-split page path; trailing/embedded '/' -> empty-segment fail-loud", "transitions": [{"CreateBlockUnderFocus": {"content": "Slashy block/", "id": "block:slashy"}}, {"BlockToPage": {"origin_id": "block:slashy"}}]}
+#
+# --- mark-bounds coverage note (dogfood 2026-07-20, journal-click SIGABRT) --------------------
+# The mark-outlives-content corruption (a persisted link mark whose span exceeds its block
+# content -> `scalar_range_to_bytes` aborts EVERY render) is NOT reachable via a hand-authored
+# create+convert here: the SUT trims content on every write (`SqlOperationProvider::trimmed_content`),
+# so `convert_block_to_page` derives its full-span link mark from ALREADY-TRIMMED content, and the
+# harness applies plan+apply atomically (no shrink window). A trailing-space create instead trips
+# the ref/SUT content-trim asymmetry (`inv-block-content/*`, `inv-displayed-text/*`) — a separate
+# reference-model bug, not this one. The mark-bounds invariant (`inv-mark-bounds-within-content`)
+# DOES engage on the slash convert case above (3/3) and on every backend-bearing slice; its teeth
+# are proven by the unit catch test in
+# `pbt::composed::invariants::mark_bounds_within_content::tests`. A keystone RED needs a
+# fault-injection transition that writes a mark span decoupled from a shorter content (or a
+# store-divergence create) — tracked as a coverage follow-up.
