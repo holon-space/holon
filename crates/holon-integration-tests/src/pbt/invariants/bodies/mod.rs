@@ -19,6 +19,7 @@ pub mod frontend_root_not_error;
 pub mod live_children_match_ref;
 pub mod live_tree_matches_fresh;
 pub mod main_panel_rows_match_focus;
+pub mod mark_bounds_within_content;
 // `navigation_focus` moved to `capability_pair!`'s `compare_navigation_focus`
 // in holon-pbt-core (auto-derived `inv-navigation-focus`); body file deleted.
 pub mod companion_has_no_child_page_headings;

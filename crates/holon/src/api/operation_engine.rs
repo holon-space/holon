@@ -148,8 +148,7 @@ const CONVERT_BLOCK_TO_PAGE_OP: &str = "convert_block_to_page";
 /// mark. The id crosses the dispatch boundary as a plan `Value` string (the
 /// planner minted it via `PageId::for_path`), so this is a genuine boundary.
 fn convert_page_uri(page_id: &str) -> EntityUri {
-    // ALLOW(entity_uri_from_raw): page_id arrives as a plan Value string across the
-    // dispatch boundary
+    // ALLOW(entity_uri_from_raw): plan Value string across dispatch boundary
     EntityUri::from_raw(page_id)
 }
 
@@ -658,8 +657,18 @@ impl DispatchingOperationEngine {
         //    `content=Object` write, whose dispatcher-split marks follow-up drops the
         //    marks inverse) yields the exact `set_field(marks=old)` inverse — so undo
         //    restores the origin's original marks faithfully.
-        let label = plan.origin_content.clone();
-        let link_mark = MarkSpan::new(
+        //
+        // The span must match the origin's PERSISTED content. Storage trims
+        // trailing whitespace on every write (SqlOperationProvider::
+        // trimmed_content), so deriving the span from a raw/untrimmed
+        // `origin_content` would mint a Link longer than the text it decorates
+        // — an out-of-bounds mark that aborts EVERY render in
+        // `scalar_range_to_bytes`. Derive both label and span from the trimmed
+        // content (a no-op for the already-trimmed planner read, robust against
+        // any untrimmed source), then clamp defensively so a mark can never be
+        // born out of bounds regardless of what the planner supplied.
+        let label = plan.origin_content.trim_end().to_string();
+        let mut link_marks = vec![MarkSpan::new(
             0,
             label.chars().count(),
             InlineMark::Link {
@@ -668,11 +677,12 @@ impl DispatchingOperationEngine {
                 },
                 label: label.clone(),
             },
-        );
+        )];
+        holon_api::canonicalize_marks_against(&label, &mut link_marks);
         let mut sf = StorageEntity::new();
         sf.insert("id".into(), Value::String(plan.origin_id.clone()));
         sf.insert("field".into(), Value::String("marks".into()));
-        sf.insert("value".into(), Value::String(marks_to_json(&[link_mark])));
+        sf.insert("value".into(), Value::String(marks_to_json(&link_marks)));
         let (fwd, marks_inv, ch) = self.dispatch_constituent("set_field", sf).await?;
         forwards.push(fwd);
         all_changes.extend(ch);

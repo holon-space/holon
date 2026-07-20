@@ -90,6 +90,26 @@ fn link_aware_render(
         a: 1.0,
     };
 
+    // Never abort on a corrupt persisted mark. A mark span outliving its
+    // content ("N..M exceeds text length K") aborts EVERY paint of this block —
+    // a page permanently un-openable. Disclosed degraded render: log loud with
+    // the block id (fail-loud, not silent) and let `scalar_range_to_bytes`
+    // clamp the offending span. The durable fix is the read-boundary
+    // `canonicalize_marks_against`; this is the render-layer safety net.
+    let content_chars = content.chars().count();
+    for ms in marks {
+        if ms.end > content_chars {
+            tracing::error!(
+                block_id = %block_uri.as_str(),
+                mark_start = ms.start,
+                mark_end = ms.end,
+                content_chars,
+                "rendered_text: mark span exceeds content length; rendering \
+                 degraded (clamped). Corrupt persisted marks for this block."
+            );
+        }
+    }
+
     let segments = build_content_segments(content, marks);
 
     let mut el = div()
