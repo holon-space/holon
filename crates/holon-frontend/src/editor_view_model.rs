@@ -655,11 +655,13 @@ mod tests {
                 prefix: "/".to_string(),
                 action: "command_menu".to_string(),
                 at_line_start: true,
+                word_boundary: false,
             },
             InputTrigger::TextPrefix {
                 prefix: "[[".to_string(),
                 action: "doc_link".to_string(),
                 at_line_start: false,
+                word_boundary: false,
             },
         ];
         let context = HashMap::from([("id".into(), Value::String("block-1".into()))]);
@@ -679,6 +681,78 @@ mod tests {
         let action = ctrl.on_text_changed("/", 1);
         assert!(matches!(action, EditorAction::PopupActivated { .. }));
         assert!(ctrl.is_popup_active());
+    }
+
+    /// Controller wired with the PRODUCTION triggers a rendered editable block
+    /// gets (`default_triggers_for_operations`: mid-line `/` command_menu with
+    /// the word-boundary gate + always-on `[[`). `test_controller`'s slash
+    /// trigger is `at_line_start: true`, which does NOT exercise the mid-line
+    /// URL path — this one does.
+    fn prod_controller() -> EditorViewModel {
+        let ops = vec![
+            make_op(
+                "set_field",
+                &["content"],
+                vec![param("id"), param("field"), param("value")],
+            ),
+            make_op("delete", &["parent_id"], vec![param("id")]),
+        ];
+        let triggers = crate::input_trigger::default_triggers_for_operations(&ops);
+        let context = HashMap::from([("id".into(), Value::String("block-1".into()))]);
+        EditorViewModel::new(ops, triggers, context, "content".into(), "original".into())
+    }
+
+    /// Regression (BugFunnel): a block whose content is a URL must NOT open the
+    /// command menu. Before the word-boundary gate, the trailing `/path` fired
+    /// `command_menu`; the URL tail became a filter matching nothing → the
+    /// permanent "Type to search…" popup that never dismissed. This drives the
+    /// exact per-keystroke entry the GPUI editor view calls (`on_text_changed`)
+    /// and observes the real popup state (`is_popup_active`).
+    #[test]
+    fn url_content_does_not_activate_command_menu() {
+        let mut ctrl = prod_controller();
+        let url = "https://example.com/path";
+        let action = ctrl.on_text_changed(url, url.len());
+        assert!(
+            matches!(action, EditorAction::None),
+            "URL content must not activate any popup, got {action:?}"
+        );
+        assert!(
+            !ctrl.is_popup_active(),
+            "command menu must stay closed for URL content"
+        );
+    }
+
+    /// Logseq-style `text /cmd`: a `/` right after whitespace still opens the
+    /// menu (the boundary gate must not over-reject).
+    #[test]
+    fn slash_after_space_activates_command_menu() {
+        let mut ctrl = prod_controller();
+        let line = "foo /de";
+        let action = ctrl.on_text_changed(line, line.len());
+        assert!(
+            matches!(action, EditorAction::PopupActivated { .. }),
+            "slash after a space must open the command menu, got {action:?}"
+        );
+        assert!(ctrl.is_popup_active());
+    }
+
+    /// Dismissal-side consistency: once the menu is open, typing on into a URL
+    /// (so `check_triggers` now returns `None`) must DISMISS it — the fix keeps
+    /// the open/close sides symmetric, so a popup can never get stuck open on a
+    /// URL block.
+    #[test]
+    fn url_after_open_menu_dismisses_it() {
+        let mut ctrl = prod_controller();
+        ctrl.on_text_changed("/", 1);
+        assert!(ctrl.is_popup_active(), "precondition: menu opened on '/'");
+        let url = "https://example.com/path";
+        let action = ctrl.on_text_changed(url, url.len());
+        assert!(
+            matches!(action, EditorAction::PopupDismissed),
+            "typing into a URL must dismiss the menu, got {action:?}"
+        );
+        assert!(!ctrl.is_popup_active());
     }
 
     #[test]
