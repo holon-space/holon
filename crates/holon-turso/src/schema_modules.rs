@@ -3,8 +3,7 @@
 //! This module provides `SchemaModule` implementations for the core database
 //! schema objects in Holon:
 //!
-//! - `CoreSchemaModule`: block_raw (the underlying block table), directories,
-//!   files
+//! - `CoreSchemaModule`: block_raw (the underlying block table), files, clock
 //! - `BlockSchemaModule`: block_requires, block_tags junction tables (FK to
 //!   block_raw)
 //! - `BlockMatviewSchemaModule`: the `block` matview hydrating tags + requires
@@ -32,7 +31,8 @@ use crate::schema_module::SchemaModule;
 use crate::sql_utils::sql_statements;
 use crate::turso::DbHandle;
 
-/// Core schema module providing the fundamental tables: blocks, directories.
+/// Core schema module providing the fundamental tables: block_raw, files, and
+/// the `clock` relation.
 ///
 /// This module has no dependencies and should be initialized first.
 pub struct CoreSchemaModule;
@@ -46,7 +46,6 @@ impl SchemaModule for CoreSchemaModule {
     fn provides(&self) -> Vec<Resource> {
         vec![
             Resource::schema("block_raw"),
-            Resource::schema("directory"),
             Resource::schema("file"),
             Resource::schema("clock"),
         ]
@@ -80,11 +79,6 @@ impl SchemaModule for CoreSchemaModule {
             )
             .await?;
         tracing::debug!("[CoreSchemaModule] sentinel:no_parent row seeded");
-
-        for stmt in sql_statements(include_str!("../sql/schema/directories.sql")) {
-            db_handle.execute_ddl(stmt).await?;
-        }
-        tracing::debug!("[CoreSchemaModule] directories table + index created");
 
         for stmt in sql_statements(include_str!("../sql/schema/files.sql")) {
             db_handle.execute_ddl(stmt).await?;
@@ -1054,7 +1048,6 @@ mod tests {
         let provides = module.provides();
 
         assert!(provides.contains(&Resource::schema("block_raw")));
-        assert!(provides.contains(&Resource::schema("directory")));
         assert!(provides.contains(&Resource::schema("file")));
     }
 

@@ -150,9 +150,9 @@ async fn main() -> anyhow::Result<()> {
     println!("  events_view_block created");
 
     conn.execute(
-        r#"CREATE MATERIALIZED VIEW events_view_directory AS
+        r#"CREATE MATERIALIZED VIEW events_view_operation AS
            SELECT * FROM events
-           WHERE status = 'confirmed' AND aggregate_type = 'directory'"#,
+           WHERE status = 'confirmed' AND aggregate_type = 'operation'"#,
         (),
     )
     .await?;
@@ -164,7 +164,7 @@ async fn main() -> anyhow::Result<()> {
         (),
     )
     .await?;
-    println!("  events_view_directory + events_view_file created");
+    println!("  events_view_operation + events_view_file created");
 
     // Navigation matviews
     conn.execute(

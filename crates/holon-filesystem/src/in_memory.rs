@@ -213,12 +213,6 @@ impl FileSystem for InMemoryFileSystem {
             return Ok(ScannedEntries::default());
         }
         Ok(ScannedEntries {
-            directories: st
-                .dirs
-                .iter()
-                .filter(|d| d.starts_with(&root) && **d != root)
-                .cloned()
-                .collect(),
             files: st
                 .files
                 .keys()
@@ -313,7 +307,7 @@ mod tests {
 
         let scanned = fs.scan_directory(Path::new("/r")).await.unwrap();
         assert_eq!(scanned.files.len(), 3);
-        assert!(scanned.directories.contains(&PathBuf::from("/r/sub")));
+        assert!(scanned.files.contains(&PathBuf::from("/r/sub/b.org")));
 
         let meta_a = fs.metadata(Path::new("/r/a.org")).await.unwrap();
         let meta_b = fs.metadata(Path::new("/r/sub/b.org")).await.unwrap();
