@@ -43,6 +43,7 @@ fn doc_link_controller() -> EditorViewModel {
         prefix: "[[".to_string(),
         action: "doc_link".to_string(),
         at_line_start: false,
+        word_boundary: false,
     }];
     let context = HashMap::from([("id".into(), Value::String("block-1".into()))]);
     EditorViewModel::new(ops, triggers, context, "content".into(), String::new())
