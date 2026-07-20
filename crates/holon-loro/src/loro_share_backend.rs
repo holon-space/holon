@@ -76,6 +76,17 @@ pub const TREE_ENTITY: &str = "tree";
 use crate::loro_backend::STABLE_ID;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Stable id (bare, no `block:` prefix) of the recipient-side **"Shared with
+/// me" root** — the dedicated home for accepted shares (ADR 0028 H7). A single
+/// well-known id makes the root idempotent to ensure: every accept resolves the
+/// same node instead of minting a fresh orphan. Accepted mounts that would
+/// otherwise bubble to `no_parent` (an invisible top-level orphan — dogfood N3,
+/// 2026-07-20) attach here instead, so the shared content is reachable and
+/// rendered under a visible page in the UI.
+pub const SHARED_WITH_ME_ROOT_ID: &str = "shared-with-me";
+/// Display title of the "Shared with me" recipient root.
+pub const SHARED_WITH_ME_TITLE: &str = "Shared with me";
+
 /// Operations for creating and accepting shared Loro subtrees.
 #[holon_macros::operations_trait]
 #[async_trait]
@@ -709,6 +720,43 @@ impl LoroShareBackend {
         Ok(())
     }
 
+    /// Project the recipient-side **"Shared with me" root** into the SQL
+    /// `block` table so the UI (which reads SQL matviews, not Loro) renders
+    /// it as a top-level page. Idempotent: uses the `create` op's `INSERT
+    /// OR IGNORE` semantics, so re-projecting on every accept leaves an
+    /// existing row untouched. No-op without DI-wired `sql_ops`
+    /// (backend-only tests).
+    ///
+    /// Pairs with [`ensure_shared_with_me_root_node`] (the Loro side): together
+    /// they give an accepted mount a visible, reachable home (ADR 0028 H7).
+    async fn project_shared_with_me_root_to_sql(&self) -> Result<()> {
+        let Some(sql_ops) = self.sql_ops.as_ref() else {
+            return Ok(());
+        };
+        let root_uri = block_uri_from_bare(SHARED_WITH_ME_ROOT_ID);
+        let mut params = StorageEntity::new();
+        params.insert("id".into(), Value::String(root_uri));
+        params.insert(
+            "parent_id".into(),
+            Value::String(EntityUri::no_parent().as_str().to_string()),
+        );
+        params.insert(
+            "content".into(),
+            Value::String(SHARED_WITH_ME_TITLE.to_string()),
+        );
+        params.insert("content_type".into(), Value::String("text".to_string()));
+        params.insert(
+            "tags".into(),
+            Value::Array(vec![Value::String(holon_api::block::PAGE_TAG.to_string())]),
+        );
+        let entity = EntityName::new("block");
+        sql_ops
+            .execute_operation(&entity, "create", params)
+            .await
+            .map_err(|e| err(format!("project 'Shared with me' root into SQL: {e}")))?;
+        Ok(())
+    }
+
     /// Project all nodes from a shared LoroDoc into SQL block rows.
     ///
     /// Reuses the standard `snapshot_blocks_from_doc` → `block_to_params`
@@ -1043,6 +1091,35 @@ impl LoroShareBackend {
     }
 }
 
+/// Interim N4 guard (dogfood 2026-07-20). Sharing the **root layout block** or
+/// the **default-document root** wraps the ENTIRE UI (sidebars, panels, advice,
+/// render/src blocks) under a share mount — the frontend collapses to a blank
+/// screen and, absent the mass-truncation tripwire on write-back, the on-disk
+/// vault can be destroyed. These are structural/layout blocks, never user
+/// content, so sharing them is always a mistake. Reject loudly.
+///
+/// This is deliberately cheap and id-based. ADR 0028 replaces the mechanism
+/// with C3 fail-closed boundary classification (every structural op declares
+/// its boundary behavior); until then this closes the vault-destroying hole.
+fn structural_share_rejection(id: &EntityUri) -> Option<String> {
+    let s = id.as_str();
+    if s == holon_api::ROOT_LAYOUT_BLOCK_ID {
+        return Some(format!(
+            "refusing to share {s}: it is the root layout block. Sharing it would wrap the entire \
+             UI (sidebars, panels, advice) under a share mount and collapse the app to a blank \
+             screen. Share a specific page or block instead."
+        ));
+    }
+    if s == holon_api::DEFAULT_DOC_BLOCK_ID {
+        return Some(format!(
+            "refusing to share {s}: it is the default-document root that owns the bundled layout. \
+             Sharing it would pull the whole UI layout into the share. Share a specific page or \
+             block instead."
+        ));
+    }
+    None
+}
+
 fn parse_retention(s: &str) -> Result<HistoryRetention> {
     match s {
         "none" => Ok(HistoryRetention::None),
@@ -1102,8 +1179,8 @@ fn find_tree_id_by_stable_id(doc: &LoroDoc, stable_id: &EntityUri) -> Option<Tre
 fn first_local_collision(global: &LoroDoc, ops: &[(String, StorageEntity)]) -> Option<String> {
     for (_op, params) in ops {
         if let Some(Value::String(id)) = params.get("id") {
-            // ALLOW(entity_uri_from_raw): op id is a canonical block URI string built by
-            // block_to_params for the SQL op batch
+            // block_to_params builds op id as a canonical block URI string.
+            // ALLOW(entity_uri_from_raw): SQL op batch id from block_to_params
             let uri = EntityUri::from_raw(id);
             if find_tree_id_by_stable_id(global, &uri).is_some() {
                 return Some(id.clone());
@@ -1168,6 +1245,42 @@ fn nearest_page_ancestor_tid(doc: &LoroDoc, tid: TreeID) -> Result<Option<TreeID
     }
 }
 
+/// Ensure the recipient-side **"Shared with me" root** exists in the global
+/// tree and return its `TreeID` (ADR 0028 H7). The root is a top-level `Page`
+/// node keyed by the well-known [`SHARED_WITH_ME_ROOT_ID`], so this is
+/// idempotent: an existing root is returned unchanged; only the first accept on
+/// a device mints it. Accepted-share mounts that have no page ancestor to sit
+/// under attach here instead of orphaning at `no_parent` (invisible in the UI).
+///
+/// The caller must hold the global-doc write lock; this both reads and, on
+/// first use, writes+commits the new node.
+fn ensure_shared_with_me_root_node(doc: &LoroDoc) -> Result<TreeID> {
+    let uri = EntityUri::block(SHARED_WITH_ME_ROOT_ID);
+    if let Some(tid) = find_tree_id_by_stable_id(doc, &uri) {
+        return Ok(tid);
+    }
+    let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
+    let node = tree
+        .create(None)
+        .map_err(|e| err(format!("create 'Shared with me' root node: {e:#}")))?;
+    let meta = tree
+        .get_meta(node)
+        .map_err(|e| err(format!("get 'Shared with me' root meta: {e:#}")))?;
+    meta.insert(STABLE_ID, SHARED_WITH_ME_ROOT_ID)
+        .map_err(|e| err(format!("set 'Shared with me' stable_id: {e:#}")))?;
+    let text: loro::LoroText = meta
+        .insert_container("content_raw", loro::LoroText::new())
+        .map_err(|e| err(format!("insert 'Shared with me' content: {e:#}")))?;
+    text.insert(0, SHARED_WITH_ME_TITLE)
+        .map_err(|e| err(format!("write 'Shared with me' title: {e:#}")))?;
+    let tags_json = serde_json::to_string(&[holon_api::block::PAGE_TAG])
+        .map_err(|e| err(format!("encode 'Shared with me' tags: {e:#}")))?;
+    meta.insert("tags", tags_json.as_str())
+        .map_err(|e| err(format!("tag 'Shared with me' as Page: {e:#}")))?;
+    doc.commit();
+    Ok(node)
+}
+
 /// Summary of a shared doc's root node used to shape materialization (D3):
 /// `is_page` decides adopt-and-collapse (page share — the mount adopts P's
 /// identity, P's node folds) vs synthetic-container (block share — the mount is
@@ -1221,6 +1334,10 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                 "share_subtree expects a `block:` URI, got scheme {:?} (full URI: {id:?})",
                 id_uri.scheme()
             )));
+        }
+        // N4 interim guard: never share the layout/structural roots.
+        if let Some(reason) = structural_share_rejection(&id_uri) {
+            return Err(err(reason));
         }
         let retention = parse_retention(&retention)?;
         let collab = self.global_doc().await?;
@@ -1521,6 +1638,9 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         // Return the existing mount instead.
         let collab = self.global_doc().await?;
         let no_parent = EntityUri::no_parent().as_str().to_string();
+        // Set when the mount is parented under the "Shared with me" recipient
+        // root (H7) — drives the post-lock SQL projection of that root row.
+        let mut attached_to_shared_with_me = false;
         let (mount_stable_id, mount_parent_uri) = {
             let doc_arc = collab.doc();
             let doc = &*doc_arc;
@@ -1555,7 +1675,19 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                 // a page (the common case). The SAME resolved parent lands in
                 // both the Loro tree and the SQL row, keeping the stores
                 // aligned.
-                let page_parent_tid = nearest_page_ancestor_tid(doc, parent_tid)?;
+                //
+                // H7 (ADR 0028): when the target has NO page ancestor, the mount
+                // would orphan at `no_parent` — present in SQL but invisible in
+                // the UI (dogfood N3, 2026-07-20). Attach it under the dedicated
+                // "Shared with me" recipient root instead, so accepted shares are
+                // always reachable and rendered.
+                let page_parent_tid = match nearest_page_ancestor_tid(doc, parent_tid)? {
+                    Some(p) => Some(p),
+                    None => {
+                        attached_to_shared_with_me = true;
+                        Some(ensure_shared_with_me_root_node(doc)?)
+                    }
+                };
 
                 let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
                 let mount = shared_tree::create_mount_node(
@@ -1587,6 +1719,13 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                 )),
             });
             return Err(err(format!("global doc save_all failed: {e:#}")));
+        }
+
+        // H7: if the mount was parented under the "Shared with me" recipient
+        // root, project that root row FIRST so the mount's SQL parent resolves
+        // to a rendered page (the UI reads SQL). Idempotent (INSERT OR IGNORE).
+        if attached_to_shared_with_me {
+            self.project_shared_with_me_root_to_sql().await?;
         }
 
         // Project the mount node as a Page Block row so the UI (SQL matviews)
@@ -2372,6 +2511,37 @@ mod tests {
         assert!(
             format!("{err}").contains("expects a `block:` URI"),
             "expected a scheme-gate error, got: {err}"
+        );
+    }
+
+    /// N4 (dogfood 2026-07-20): sharing the root layout block must be rejected
+    /// loudly — it wraps the whole UI under a mount and can destroy the vault.
+    /// RED (pre-guard): `share_subtree` accepted it and returned a ticket.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn share_rejects_root_layout_block() {
+        let (backend, _dir) = make_backend();
+        let err = backend
+            .share_subtree(holon_api::ROOT_LAYOUT_BLOCK_ID, "none".into())
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("root layout block"),
+            "expected a structural-share rejection, got: {err}"
+        );
+    }
+
+    /// N4: the default-document root (owns the bundled layout) is equally
+    /// structural and must be rejected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn share_rejects_default_doc_root() {
+        let (backend, _dir) = make_backend();
+        let err = backend
+            .share_subtree(holon_api::DEFAULT_DOC_BLOCK_ID, "none".into())
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("default-document root"),
+            "expected a structural-share rejection, got: {err}"
         );
     }
 
@@ -4042,6 +4212,194 @@ mod tests {
             Some("block:shared-block"),
             "the block's own subtree is preserved under it"
         );
+
+        backend_a.advertiser.close_all().await;
+        backend_b.advertiser.close_all().await;
+    }
+
+    /// N3 / ADR 0028 H7 — recipient-side orphan fix. Accepting a share under a
+    /// target that has NO page ancestor must NOT orphan the mount at
+    /// `no_parent` (present in SQL but invisible in the UI — dogfood
+    /// 2026-07-20). The mount must land under the dedicated **"Shared with
+    /// me"** recipient root, and that root must itself be projected as a
+    /// rendered top-level page so the accepted content is reachable.
+    ///
+    /// RED (pre-fix): the mount row's `parent_id` is `sentinel:no_parent` and
+    /// no `block:shared-with-me` row exists → both assertions below fail.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn accept_orphan_target_lands_under_shared_with_me_root() {
+        let (backend_a, _dir_a) = make_backend();
+        let (backend_b, sql_b, _dir_b) = make_backend_with_sql();
+
+        // A shares a plain block that lives under a page (legal to share).
+        seed_page(&backend_a, "root-a", None, "Root A").await;
+        seed_block(&backend_a, "shared-block", Some("root-a"), "Shared heading").await;
+
+        // B's accept target is a plain, NON-page top-level block: it has no page
+        // ancestor, so the mount would otherwise bubble to `no_parent`.
+        seed_block(&backend_b, "host-b", None, "Host B").await;
+
+        let ticket = {
+            let resp = backend_a
+                .share_subtree("block:shared-block", "none".into())
+                .await
+                .unwrap();
+            let tj: serde_json::Value = match resp.response.unwrap() {
+                Value::String(s) => serde_json::from_str(&s).unwrap(),
+                o => panic!("unexpected: {o:?}"),
+            };
+            tj["ticket"].as_str().unwrap().to_string()
+        };
+
+        let accept_resp = backend_b
+            .accept_shared_subtree("block:host-b", ticket)
+            .await
+            .unwrap();
+        let mount_id = match accept_resp.response.unwrap() {
+            Value::String(s) => {
+                serde_json::from_str::<serde_json::Value>(&s).unwrap()["mount_block_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            }
+            o => panic!("unexpected: {o:?}"),
+        };
+
+        let shared_with_me_uri = block_uri_from_bare(SHARED_WITH_ME_ROOT_ID);
+
+        // (1) The mount attaches under the "Shared with me" root, NOT no_parent.
+        let mount = sql_b.get(&mount_id).expect("mount row on acceptor");
+        assert_eq!(
+            mount.get("parent_id").and_then(|v| v.as_string()),
+            Some(shared_with_me_uri.as_str()),
+            "orphan-target mount must attach under the 'Shared with me' root \
+             (H7), not orphan at no_parent; got {:?}",
+            mount.get("parent_id")
+        );
+
+        // (2) The "Shared with me" root is a rendered top-level page.
+        let root = sql_b
+            .get(&shared_with_me_uri)
+            .expect("'Shared with me' root row must be projected so the UI renders it");
+        assert_eq!(
+            root.get("parent_id").and_then(|v| v.as_string()),
+            Some(EntityUri::no_parent().as_str()),
+            "'Shared with me' root is a top-level page"
+        );
+        assert_eq!(
+            root.get("content").and_then(|v| v.as_string()),
+            Some(SHARED_WITH_ME_TITLE),
+        );
+        assert!(
+            matches!(root.get("tags"), Some(Value::Array(t))
+                if t.iter().any(|x| x.as_string() == Some(holon_api::block::PAGE_TAG))),
+            "'Shared with me' root must be tagged Page so it renders as a page"
+        );
+
+        backend_a.advertiser.close_all().await;
+        backend_b.advertiser.close_all().await;
+    }
+
+    /// H7 idempotency: TWO orphan-target accepts on the SAME device must reuse
+    /// ONE "Shared with me" root, not mint a second one. Guards the
+    /// `ensure_shared_with_me_root_node` short-circuit + the root row's
+    /// INSERT-OR-IGNORE projection. Both distinct shares' mounts land under the
+    /// single shared root.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn two_orphan_accepts_reuse_one_shared_with_me_root() {
+        let (backend_a, _dir_a) = make_backend();
+        let (backend_b, sql_b, _dir_b) = make_backend_with_sql();
+
+        // A shares two independent blocks (each under a page, so sharing is legal).
+        seed_page(&backend_a, "root-a", None, "Root A").await;
+        seed_block(&backend_a, "share-one", Some("root-a"), "Share one").await;
+        seed_block(&backend_a, "share-two", Some("root-a"), "Share two").await;
+
+        // B's accept target is a plain, NON-page top-level block (no page
+        // ancestor) so BOTH accepts hit the orphan → "Shared with me" path.
+        seed_block(&backend_b, "host-b", None, "Host B").await;
+
+        let ticket_for = |backend: &Arc<LoroShareBackend>, id: &str| {
+            let backend = backend.clone();
+            let id = id.to_string();
+            async move {
+                let resp = backend.share_subtree(&id, "none".into()).await.unwrap();
+                let tj: serde_json::Value = match resp.response.unwrap() {
+                    Value::String(s) => serde_json::from_str(&s).unwrap(),
+                    o => panic!("unexpected: {o:?}"),
+                };
+                tj["ticket"].as_str().unwrap().to_string()
+            }
+        };
+        let ticket_one = ticket_for(&backend_a, "block:share-one").await;
+        let ticket_two = ticket_for(&backend_a, "block:share-two").await;
+
+        let accept_mount = |backend: &Arc<LoroShareBackend>, ticket: String| {
+            let backend = backend.clone();
+            async move {
+                let resp = backend
+                    .accept_shared_subtree("block:host-b", ticket)
+                    .await
+                    .unwrap();
+                match resp.response.unwrap() {
+                    Value::String(s) => {
+                        serde_json::from_str::<serde_json::Value>(&s).unwrap()["mount_block_id"]
+                            .as_str()
+                            .unwrap()
+                            .to_string()
+                    }
+                    o => panic!("unexpected: {o:?}"),
+                }
+            }
+        };
+        let mount_one = accept_mount(&backend_b, ticket_one).await;
+        // Second accept (distinct share) must succeed, not fail on the
+        // already-existing root.
+        let mount_two = accept_mount(&backend_b, ticket_two).await;
+        assert_ne!(
+            mount_one, mount_two,
+            "two distinct shares get distinct mounts"
+        );
+
+        let shared_with_me_uri = block_uri_from_bare(SHARED_WITH_ME_ROOT_ID);
+
+        // Exactly ONE "Shared with me" node in B's global Loro tree.
+        let loro_root_count = {
+            let collab = backend_b.global_doc().await.unwrap();
+            let doc_arc = collab.doc();
+            let doc = &*doc_arc;
+            let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
+            tree.get_nodes(false)
+                .iter()
+                .filter(|n| !matches!(n.parent, TreeParentId::Deleted | TreeParentId::Unexist))
+                .filter(|n| read_stable_id(&tree, n.id).as_deref() == Some(SHARED_WITH_ME_ROOT_ID))
+                .count()
+        };
+        assert_eq!(
+            loro_root_count, 1,
+            "exactly one 'Shared with me' root node must exist in the Loro tree, found {loro_root_count}"
+        );
+
+        // Exactly ONE "Shared with me" row in SQL (keyed by id; assert present).
+        let root = sql_b
+            .get(&shared_with_me_uri)
+            .expect("'Shared with me' root row must be projected");
+        assert_eq!(
+            root.get("content").and_then(|v| v.as_string()),
+            Some(SHARED_WITH_ME_TITLE),
+        );
+
+        // Both mounts sit under the single shared root.
+        for mount_id in [&mount_one, &mount_two] {
+            let mount = sql_b.get(mount_id).expect("mount row on acceptor");
+            assert_eq!(
+                mount.get("parent_id").and_then(|v| v.as_string()),
+                Some(shared_with_me_uri.as_str()),
+                "mount {mount_id} must attach under the single 'Shared with me' root"
+            );
+        }
 
         backend_a.advertiser.close_all().await;
         backend_b.advertiser.close_all().await;
