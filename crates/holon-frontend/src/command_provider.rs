@@ -217,11 +217,15 @@ impl CommandProvider {
         let all_matches: Vec<MatchedOperation> =
             operation_matcher::find_satisfiable(operations, context_params)
                 .into_iter()
-                // The raw `instantiate_template` op can't execute from the
-                // command list (it needs a template_id the user hasn't picked
-                // yet). It is surfaced as per-template picker entries instead
-                // (see `build_template_items`), so hide the bare op here.
-                .filter(|m| m.descriptor.name != holon_api::INSTANTIATE_TEMPLATE_OP)
+                // The slash command list shows exactly the ops CLASSIFIED as
+                // `Listed` at their descriptor (parse-don't-validate). This
+                // subsumes the old bespoke `instantiate_template` exclusion —
+                // that op is `PickerBacked` (surfaced as per-template picker
+                // entries, `build_template_items`), so it is not `Listed`. It
+                // also keeps gesture/navigation/internal ops (move_block,
+                // split_block, set_field, create_page_from_link, …) out of the
+                // menu instead of leaking every id-resolvable provider op.
+                .filter(|m| matches!(m.descriptor.menu_exposure, holon_api::MenuExposure::Listed))
                 .collect();
 
         let filtered: Vec<MatchedOperation> = if filter.is_empty() {
@@ -429,7 +433,14 @@ mod tests {
                 name: name.into(),
                 display_name: display.into(),
                 required_params: params,
-                ..Default::default()
+                id_column: "id".to_string(),
+                description: String::new(),
+                affected_fields: vec![],
+                param_mappings: vec![],
+                menu_exposure: holon_api::MenuExposure::Listed,
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             },
         }
     }
@@ -597,15 +608,22 @@ mod tests {
 
     #[test]
     fn raw_instantiate_op_is_hidden_from_command_list() {
-        let ops = vec![make_op(
+        // `instantiate_template` is `PickerBacked` (surfaced via per-template
+        // picker entries), so the `Listed`-only command filter hides the bare
+        // op — a corollary of the registry↔menu correspondence, not a bespoke
+        // name check.
+        let mut wiring = make_op(
             "instantiate_template",
             "Instantiate template",
             vec![param("template_id", TypeHint::String)],
-        )];
-        let items = CommandProvider::build_command_items(&ops, &context(), "");
+        );
+        wiring.descriptor.menu_exposure = holon_api::MenuExposure::PickerBacked {
+            picker: holon_api::PickerKind::Template,
+        };
+        let items = CommandProvider::build_command_items(&[wiring], &context(), "");
         assert!(
             items.iter().all(|i| i.id != "instantiate_template"),
-            "the bare instantiate_template op must not appear as a command"
+            "the bare instantiate_template op (PickerBacked) must not appear as a command"
         );
     }
 
@@ -629,7 +647,13 @@ mod tests {
                     provides: vec!["target".into()],
                     defaults: Default::default(),
                 }],
-                ..Default::default()
+                id_column: "id".to_string(),
+                description: String::new(),
+                affected_fields: vec![],
+                menu_exposure: holon_api::MenuExposure::Listed,
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             },
         };
         let items = CommandProvider::build_command_items(&[convert], &context(), "");

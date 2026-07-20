@@ -443,7 +443,12 @@ impl IdentityProvider {
             required_params: required,
             affected_fields: Vec::new(),
             param_mappings: Vec::new(),
-            ..Default::default()
+            menu_exposure: holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::Internal,
+            },
+            trigger: None,
+            bound_params: Default::default(),
+            precondition: None,
         }
     }
 

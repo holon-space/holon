@@ -769,6 +769,7 @@ impl DispatchingOperationEngine {
                 provides: vec!["target".to_string()],
                 defaults: Default::default(),
             }],
+            menu_exposure: holon_api::MenuExposure::Listed,
             trigger: None,
             bound_params: Default::default(),
             affected_fields: vec![],
@@ -817,10 +818,30 @@ impl DispatchingOperationEngine {
             ],
             affected_fields: vec![],
             param_mappings: vec![],
+            menu_exposure: holon_api::MenuExposure::PickerBacked {
+                picker: holon_api::PickerKind::Template,
+            },
             trigger: None,
             bound_params: Default::default(),
             precondition: None,
         }
+    }
+
+    /// The engine-synthetic `block` operations that are NOT
+    /// dispatcher-registered providers — the SINGLE source for both
+    /// injection sites (the profile resolver's `entity_operations` map in
+    /// `di::registration` and the MCP `available_operations` discovery
+    /// list), so the two can never drift. `convert_block_to_page` is always
+    /// present; `instantiate_template` only when a template source is wired
+    /// (it is `PickerBacked`, surfaced via the template picker, never as a
+    /// bare menu op).
+    pub fn block_synthetic_descriptors(include_template_picker: bool) -> Vec<OperationDescriptor> {
+        let mut ops = Vec::with_capacity(2);
+        if include_template_picker {
+            ops.push(Self::instantiate_template_descriptor());
+        }
+        ops.push(Self::convert_block_to_page_descriptor());
+        ops
     }
 
     /// Coerce a sub-trust-threshold dispatch into a proposal emission
@@ -1241,11 +1262,10 @@ impl OperationEngine for DispatchingOperationEngine {
             .into_iter()
             .filter(|op| op.entity_name == entity_name)
             .collect();
-        if entity_name == "block" && self.template_source.is_some() {
-            ops.push(Self::instantiate_template_descriptor());
-        }
         if entity_name == "block" {
-            ops.push(Self::convert_block_to_page_descriptor());
+            ops.extend(Self::block_synthetic_descriptors(
+                self.template_source.is_some(),
+            ));
         }
         ops
     }

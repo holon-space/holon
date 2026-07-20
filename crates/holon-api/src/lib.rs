@@ -195,9 +195,10 @@ pub use render_eval::is_template_arg;
 pub use render_eval::resolve_args;
 // Re-export render types
 pub use render_types::{
-    Arg, BinaryOperator, ClickModifiers, Operation, OperationDescriptor, OperationParam,
-    OperationWiring, ParamMapping, PreconditionChecker, RenderExpr, RenderProfile, RenderVariant,
-    RenderableItem, RowProfile, RowTemplate, Trigger, TypeHint, ViewSpec, extract_widget_names,
+    Arg, BinaryOperator, ClickModifiers, MenuExposure, NonMenuSurface, Operation,
+    OperationDescriptor, OperationParam, OperationWiring, ParamMapping, PickerKind,
+    PreconditionChecker, RenderExpr, RenderProfile, RenderVariant, RenderableItem, RowProfile,
+    RowTemplate, Trigger, TypeHint, ViewSpec, extract_widget_names,
 };
 // Re-export streaming types
 pub use streaming::{
