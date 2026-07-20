@@ -70,6 +70,19 @@ pub struct SearchUiState {
     /// Bumped on every keystroke; async responses carrying an older value are
     /// dropped so a slow query can't overwrite a newer one.
     pub generation: u64,
+    /// Soft-keyboard focus generation this modal claimed on its last open (0 if
+    /// never opened). The search box is a `gpui_component` text input just like
+    /// an editor block, so on mobile it must join the SAME keyboard-generation
+    /// protocol (`crate::mobile::editor_focus_gained`/`editor_focus_lost`):
+    ///   * On open it claims a generation and raises the keyboard — without
+    ///     this the search box shows a caret but no keyboard.
+    ///   * Claiming a generation also CANCELS the deferred-hide the
+    ///     just-blurred editor scheduled (its `my_generation` is now stale), so
+    ///     opening search over a focused block keeps the keyboard up instead of
+    ///     letting it drop ~150ms later.
+    /// Unused off `feature = "mobile"`.
+    #[cfg_attr(not(feature = "mobile"), allow(dead_code))]
+    focus_gen: u64,
 }
 
 /// Emitted whenever the search state changes so `HolonApp` re-renders.
@@ -89,6 +102,7 @@ impl SearchUiState {
             selected: 0,
             query: String::new(),
             generation: 0,
+            focus_gen: 0,
         }
     }
 
@@ -118,10 +132,25 @@ impl SearchUiState {
             input.set_value("", window, cx);
             input.focus(window, cx);
         });
+        // Mobile: focusing the input renders a caret but does NOT raise the
+        // platform keyboard on its own (the fork only shows it via
+        // `show_keyboard`). Claim a keyboard generation and show it — this both
+        // pops the keyboard for the search box and supersedes any deferred-hide
+        // the editor we just blurred scheduled. See `focus_gen`.
+        #[cfg(feature = "mobile")]
+        {
+            self.focus_gen = crate::mobile::editor_focus_gained();
+        }
     }
 
-    pub fn close(&mut self) {
+    pub fn close(&mut self, cx: &mut gpui::Context<Self>) {
         self.open = false;
+        // Mobile: dismiss the soft keyboard (generation-guarded, so it is a
+        // no-op if focus has since moved to another text input).
+        #[cfg(feature = "mobile")]
+        crate::mobile::editor_focus_lost(cx, self.focus_gen);
+        #[cfg(not(feature = "mobile"))]
+        let _ = cx;
     }
 
     pub fn move_selection(&mut self, delta: isize) {
@@ -321,7 +350,7 @@ pub fn render_search_overlay(
                         .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
                             navigate_to(&services, &target);
                             state_entity.update(cx, |s, cx| {
-                                s.close();
+                                s.close(cx);
                                 cx.emit(NotifySearchUi);
                                 cx.notify();
                             });
@@ -382,7 +411,7 @@ pub fn render_search_overlay(
             match key {
                 "escape" => {
                     key_state.update(cx, |s, cx| {
-                        s.close();
+                        s.close(cx);
                         cx.emit(NotifySearchUi);
                         cx.notify();
                     });
@@ -393,7 +422,7 @@ pub fn render_search_overlay(
                     if let Some(target) = target {
                         navigate_to(&key_services, &target);
                         key_state.update(cx, |s, cx| {
-                            s.close();
+                            s.close(cx);
                             cx.emit(NotifySearchUi);
                             cx.notify();
                         });
@@ -429,7 +458,7 @@ pub fn render_search_overlay(
                     let state_entity = state_entity.clone();
                     move |_, _window, cx| {
                         state_entity.update(cx, |s, cx| {
-                            s.close();
+                            s.close(cx);
                             cx.emit(NotifySearchUi);
                             cx.notify();
                         });
