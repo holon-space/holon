@@ -38,7 +38,7 @@ SELECT * FROM focus_descendants ORDER BY _depth, sort_key
 :collapse_to: drawer
 :END:
 #+BEGIN_SRC render :id default-right-sidebar::render::0
-tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: render_entity(), rules: [#{when: eq("level", 0), override: #{role: "page_title", show_bullet: false, show_chevron: false}}]})
+tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: render_entity(), rules: [#{when: eq("level", 0), override: #{role: "page_title", show_bullet: false, show_chevron: false}}, #{when: always(), override: #{show_bullet: false}}]})
 #+END_SRC
 #+BEGIN_SRC holon_sql :id default-right-sidebar::src::0
 WITH RECURSIVE focus_descendants AS (

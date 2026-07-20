@@ -46,7 +46,7 @@ pub struct LayoutStyle {
 impl Default for LayoutStyle {
     fn default() -> Self {
         Self {
-            tree_indent_px: 28.0,
+            tree_indent_px: 20.0,
             tree_chevron_size: 20.0,
             tree_bullet_size: 7.0,
             tree_item_min_height: 32.0,
