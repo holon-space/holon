@@ -36,9 +36,9 @@ use holon_integration_tests::pbt::composed::harness::ComposedSut;
 use holon_integration_tests::pbt::composed::wide_e2e::WideE2E;
 use holon_integration_tests::pbt::composed::wide_e2e::wide_e2e_ref;
 use holon_integration_tests::pbt::transitions::E2ETransition;
+use holon_pbt_core::fixture::Fixture;
 use proptest::test_runner::Config;
 use proptest_state_machine::StateMachineTest;
-use serde::Deserialize;
 
 /// Sidecar of hand-authored keystone regressions, relative to the crate root.
 /// One JSON object per line (JSONL); `#`-prefixed and blank lines are ignored.
@@ -47,19 +47,21 @@ const SIDECAR: &str = "hand-authored-regressions/keystone.jsonl";
 /// One hand-authored regression: a human-written twin of a persisted keystone
 /// failure, but with the transition sequence spelled out concretely instead of
 /// hidden behind an RNG seed.
-#[derive(Debug, Deserialize)]
-struct HandAuthoredCase {
-    /// Stable slug — printed before the case runs so a red pinpoints which line
-    /// failed, and referenced from `BugFunnel.md` / the fixing commit.
-    name: String,
-    /// Free-form provenance (the dogfood/report the repro came from). Optional.
-    #[serde(default)]
-    #[allow(dead_code)]
-    description: Option<String>,
-    /// The repro, as the production transition enum. Applied in order over
-    /// [`wide_e2e_ref`] via the keystone harness.
-    transitions: Vec<E2ETransition>,
-}
+///
+/// This is the canonical value-level [`Fixture`] format (`holon-pbt-core`), the
+/// SINGLE serialization shape for hand-authored regression cases — not a
+/// bespoke parallel struct. A case pins `name` / `description` / `transitions`;
+/// the `Fixture`-only `environment` and `initial_state` fields are
+/// `#[serde(default)]`, so a JSONL line that omits them (as every hand-authored
+/// case does — the base is the fixed [`wide_e2e_ref`], not a serialized
+/// `ReferenceState`) deserializes cleanly with `initial_state = ()`.
+///
+/// Upstream convergence: proptest PR #653 (value persistence) is the eventual
+/// single-format home for this per the 2026-06-25 decision; Holon pins upstream
+/// v1.10.0 (seed-only) until it lands. Do not fold this onto the seed file
+/// before then — a seed regression is not hand-authorable (see the module doc
+/// above).
+type HandAuthoredCase = Fixture<E2ETransition>;
 
 fn sidecar_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(SIDECAR)
