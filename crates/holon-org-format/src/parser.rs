@@ -24,13 +24,6 @@ use crate::models::OrgDocumentExt;
 use crate::models::SourceBlock;
 use crate::models::parse_header_args_from_str;
 
-/// Generate a directory ID from its path (ID is the relative path from root)
-pub fn generate_directory_id(path: &Path, root_directory: &Path) -> String {
-    path.strip_prefix(root_directory)
-        .map(|rel_path| rel_path.to_string_lossy().to_string())
-        .unwrap_or_else(|_| path.to_string_lossy().to_string())
-}
-
 /// Generate a file URI from a file path relative to a root directory.
 ///
 /// The root is canonicalized to handle symlinks (e.g., /var -> /private/var on

@@ -67,7 +67,6 @@ pub use file_watcher::OrgFileWatcher;
 // Core types
 // Note: Block is NOT re-exported here to avoid duplicate type issues with flutter_rust_bridge
 // Use holon_api::block::Block directly instead
-pub use holon_filesystem::directory::{Directory, ROOT_ID};
 pub use models::BlockResolver;
 pub use models::HashMapBlockResolver;
 pub use models::OrgBlockExt;

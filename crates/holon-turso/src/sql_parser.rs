@@ -755,7 +755,6 @@ pub fn apply_sql_transforms(sql: &str, transformers: &[Box<dyn SqlTransformer>])
 /// Materialized views, CTEs, and other derived tables do not.
 const TABLES_WITH_CHANGE_ORIGIN: &[&str] = &[
     "block",
-    "directory",
     "file",
     "operation",
     "todoist_task",

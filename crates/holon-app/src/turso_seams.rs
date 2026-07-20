@@ -34,7 +34,6 @@ use holon_core::SyncableProvider;
 use holon_filesystem::BlockReader;
 use holon_filesystem::DocumentManager;
 use holon_filesystem::File;
-use holon_filesystem::directory::Directory;
 use holon_orgmode::OrgModeSyncProvider;
 use holon_orgmode::di::FileSyncStarted;
 use holon_orgmode::di::OrgModeConfig;
@@ -669,13 +668,6 @@ impl Module for OrgModeModule {
 
         // Register filesystem entity types in the TypeRegistry for GQL graph.
         // Done inside an async provider so TypeRegistry is already available.
-        injector.provide::<QueryableCache<Directory>>(Provider::root_async(|r| async move {
-            let type_registry = r.resolve::<TypeRegistry>();
-            if let Err(e) = type_registry.register(Directory::type_definition()) {
-                tracing::warn!("[OrgModeModule] Failed to register Directory type: {e}");
-            }
-            Shared::new(holon::di::create_queryable_cache_async(&r).await)
-        }));
         injector.provide::<QueryableCache<File>>(Provider::root_async(|r| async move {
             let type_registry = r.resolve::<TypeRegistry>();
             if let Err(e) = type_registry.register(File::type_definition()) {
@@ -728,7 +720,6 @@ impl Module for OrgModeModule {
                 // ============================================================
                 info!("[OrgMode] Phase 1: Resolving services (DDL)");
 
-                let _dir_cache = resolver.resolve_async::<QueryableCache<Directory>>().await;
                 let _file_cache = resolver.resolve_async::<QueryableCache<File>>().await;
                 let _block_cache = resolver.resolve_async::<QueryableCache<Block>>().await;
                 let sync_provider = resolver.resolve_async::<OrgModeSyncProvider>().await;
@@ -802,29 +793,8 @@ impl Module for OrgModeModule {
                 // inherent need for a durable replay buffer. Batches are coarse
                 // `Vec<Change>` messages, so the broadcast buffer never lags.)
                 {
-                    let dir_cache = resolver.resolve_async::<QueryableCache<Directory>>().await;
                     let file_cache = resolver.resolve_async::<QueryableCache<File>>().await;
-                    let mut dir_rx = sync_provider.subscribe_directories();
                     let mut file_rx = sync_provider.subscribe_files();
-                    tokio::spawn(async move {
-                        loop {
-                            match dir_rx.recv().await {
-                                Ok(batch) => {
-                                    if let Err(e) = dir_cache.apply_batch(&batch.inner, None).await
-                                    {
-                                        error!("[directory cache feed] apply_batch failed: {}", e);
-                                    }
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                    tracing::warn!(
-                                        "[directory cache feed] lagged by {} batches",
-                                        n
-                                    );
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                            }
-                        }
-                    });
                     tokio::spawn(async move {
                         loop {
                             match file_rx.recv().await {

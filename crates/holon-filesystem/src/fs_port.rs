@@ -17,7 +17,6 @@ use async_trait::async_trait;
 /// filters (`.org`, `.md`) belong to the caller.
 #[derive(Debug, Default, Clone)]
 pub struct ScannedEntries {
-    pub directories: Vec<PathBuf>,
     pub files: Vec<PathBuf>,
 }
 
@@ -111,11 +110,10 @@ impl FileSystem for RealFileSystem {
 /// for directory walking (moved here from `holon-orgmode::file_watcher`).
 #[tracing::instrument(name = "scan_directory", fields(root = %root.display()))]
 pub fn walk_directory(root: &Path) -> ScannedEntries {
-    let mut directories = Vec::new();
     let mut files = Vec::new();
 
     if !root.exists() {
-        return ScannedEntries { directories, files };
+        return ScannedEntries { files };
     }
 
     for entry in ignore::WalkBuilder::new(root)
@@ -129,14 +127,12 @@ pub fn walk_directory(root: &Path) -> ScannedEntries {
         if path == root {
             continue;
         }
-        if path.is_dir() {
-            directories.push(path);
-        } else {
+        if !path.is_dir() {
             files.push(path);
         }
     }
 
-    ScannedEntries { directories, files }
+    ScannedEntries { files }
 }
 
 #[cfg(test)]
@@ -159,6 +155,6 @@ mod tests {
         assert_eq!(scanned.files.len(), 2);
 
         let missing = fs.scan_directory(&dir.path().join("nope")).await.unwrap();
-        assert!(missing.files.is_empty() && missing.directories.is_empty());
+        assert!(missing.files.is_empty());
     }
 }

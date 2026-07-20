@@ -848,11 +848,21 @@ fn valid_timestamp() -> impl Strategy<Value = String> {
     ]
 }
 
-/// Filename- and Page-title-safe path segment: ASCII alphanumerics only, no
-/// spaces or path separators. Used as both the directory name and the
-/// matching Page title (which `path_to_name_chain` derives from the path).
+/// Filename- and Page-title-safe path segment. Used as both the directory name
+/// and the matching Page title (which `path_to_name_chain` derives from the
+/// path).
+///
+/// Spaces and non-ASCII letters are generated deliberately: real vaults have
+/// folders like `Agentic DPL`, and a space is what turned a path-shaped id into
+/// an invalid RFC 3986 URI (the boot panic that motivated deleting the
+/// `Directory` entity). The alphabet excludes `/` and guarantees a
+/// non-whitespace first and last char, so segments stay filename-safe and
+/// round-trip through `path_to_name_chain` as Page titles unchanged.
 fn path_segment() -> impl Strategy<Value = String> {
-    "[a-zA-Z][a-zA-Z0-9]{0,15}"
+    prop_oneof![
+        "[a-zA-Z][a-zA-Z0-9 ]{0,14}[a-zA-Z0-9]",
+        "[a-zA-Zäöüéñ][a-zA-Z0-9äöüéñ ]{0,14}[a-zA-Z0-9äöüéñ]",
+    ]
 }
 
 /// 1..=3 segment directory chain ending at the `.org` file stem. Segments

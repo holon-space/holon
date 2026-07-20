@@ -725,8 +725,7 @@ impl HolonMcpServer {
 
     #[tool(
         description = "List available operations for an entity. Returns operation names, required \
-                       parameters, and descriptions. Common entities: blocks, directories, \
-                       documents"
+                       parameters, and descriptions. Common entities: blocks, documents"
     )]
     async fn list_operations(
         &self,
