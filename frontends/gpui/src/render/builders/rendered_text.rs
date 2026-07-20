@@ -99,14 +99,33 @@ fn link_aware_render(
     let content_chars = content.chars().count();
     for ms in marks {
         if ms.end > content_chars {
-            tracing::error!(
-                block_id = %block_uri.as_str(),
-                mark_start = ms.start,
-                mark_end = ms.end,
-                content_chars,
-                "rendered_text: mark span exceeds content length; rendering \
-                 degraded (clamped). Corrupt persisted marks for this block."
-            );
+            // First occurrence per block stays loud (ERROR) so the corruption
+            // is disclosed once; per-frame repaint repeats drop to debug! to
+            // avoid the 1847×/block spam (BugFunnel N7). No global mute — a
+            // different corrupt block gets its own loud first line.
+            let first = crate::render::warn_throttle::first_time_seen((
+                "rendered_text_mark_overflow",
+                block_uri.as_str(),
+            ));
+            if first {
+                tracing::error!(
+                    block_id = %block_uri.as_str(),
+                    mark_start = ms.start,
+                    mark_end = ms.end,
+                    content_chars,
+                    "rendered_text: mark span exceeds content length; rendering \
+                     degraded (clamped). Corrupt persisted marks for this block."
+                );
+            } else {
+                tracing::debug!(
+                    block_id = %block_uri.as_str(),
+                    mark_start = ms.start,
+                    mark_end = ms.end,
+                    content_chars,
+                    "rendered_text: mark span exceeds content length (repeat; \
+                     first occurrence for this block logged at ERROR)."
+                );
+            }
         }
     }
 
