@@ -1,0 +1,20 @@
+# Hand-authored keystone regressions. One JSON object per line (JSONL).
+# Blank lines and lines starting with '#' are ignored.
+# Schema: {"name": <slug>, "description": <provenance>, "transitions": [<E2ETransition>, ...]}
+# Each transition is the production `E2ETransition` enum in serde's external-tag form:
+#   {"CreateBlockUnderFocus": {"content": "...", "id": "block:..."}}
+#   {"BlockToPage": {"origin_id": "block:..."}}
+# Replayed over `wide_e2e_ref()` (full_headless wiring) by tests/hand_authored_regressions.rs.
+#
+# --- liveness smoke: a clean create must stay GREEN -----------------------------------------
+# Proves the harness is not rigged to always panic: a bread-and-butter create the random
+# keystone runs constantly. Runs first; must pass before the red case below is reached.
+{"name": "create-block-smoke", "description": "harness liveness: a lone clean create under the focused page passes the full invariant catalog", "transitions": [{"CreateBlockUnderFocus": {"content": "clean smoke", "id": "block:smoke0"}}]}
+#
+# --- block-to-page on '/'-containing content (dogfood 2026-07-20, bug a1) -------------------
+# Repro: create a block whose content contains a trailing '/', then convert it to a page.
+# The planner (PageId::for_path) splits the origin content on '/', so a trailing '/' yields an
+# empty path segment and fails loud ("... has an empty segment ..."). The keystone's reference
+# oracle mirrors that same content-as-path assumption, so this case goes RED on the unfixed base.
+# Becomes the permanent regression lock: green once content is treated as a single leaf page name.
+{"name": "block-to-page-slash-content-empty-segment", "description": "dogfood 2026-07-20 bug (a1): convert_block_to_page planner treats origin content as a /-split page path; trailing/embedded '/' -> empty-segment fail-loud", "transitions": [{"CreateBlockUnderFocus": {"content": "Slashy block/", "id": "block:slashy"}}, {"BlockToPage": {"origin_id": "block:slashy"}}]}
