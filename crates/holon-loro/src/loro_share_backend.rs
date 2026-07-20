@@ -2448,6 +2448,82 @@ mod tests {
         );
     }
 
+    /// Regression (ADR 0028 §H4 / loro fork W2): the live share-projection
+    /// worker forks the RECIPIENT's doc at a watermark to compute incremental
+    /// diffs (`fork_at(&last)` at loro_share_backend.rs:362). A recipient's
+    /// shared subtree is a *shallow* snapshot imported into a fresh doc (see
+    /// shared_tree.rs `HistoryRetention::None`), and the watermark is
+    /// initialised to that doc's `oplog_frontiers()` == the shallow root
+    /// (loro_share_backend.rs:323), then only ever advanced forward. So every
+    /// `fork_at` targets a frontier at or after the shallow root.
+    ///
+    /// Upstream loro (through 1.13.7) rejected `fork_at` on ANY shallow doc
+    /// with `NotImplemented("fork_at on shallow docs")`, which killed live
+    /// share-sync projection. The Holon loro fork implements the
+    /// at/after-shallow-root case; this exercises the exact recipient shape.
+    #[test]
+    fn fork_at_watermark_on_shallow_recipient_doc() {
+        use loro::ExportMode;
+
+        use crate::loro_backend::TREE_NAME;
+        use crate::loro_backend::configure_text_styles;
+        use crate::loro_backend::snapshot_blocks_from_doc;
+
+        // Owner side: a tree with one shared node.
+        let owner = loro::LoroDoc::new();
+        let tree = owner.get_tree(TREE_NAME);
+        let node = tree.create(None).unwrap();
+        tree.get_meta(node)
+            .unwrap()
+            .insert(STABLE_ID, "33333333-3333-3333-3333-333333333333")
+            .unwrap();
+        owner.commit();
+
+        // Recipient side: state-only (shallow) snapshot imported into a fresh
+        // doc, mirroring `HistoryRetention::None` in shared_tree.rs.
+        let snapshot = owner
+            .export(ExportMode::shallow_snapshot(&owner.oplog_frontiers()))
+            .unwrap();
+        let recipient = loro::LoroDoc::new();
+        configure_text_styles(&recipient);
+        recipient.set_peer_id(0x5eed).unwrap();
+        recipient.import(&snapshot).unwrap();
+        assert!(recipient.is_shallow(), "recipient doc must be shallow");
+
+        // Worker watermark == recipient's current frontiers == the shallow root.
+        let watermark = recipient.oplog_frontiers();
+
+        // A remote op imports (a second node appears), advancing past the root.
+        let tree_r = recipient.get_tree(TREE_NAME);
+        let node2 = tree_r.create(None).unwrap();
+        tree_r
+            .get_meta(node2)
+            .unwrap()
+            .insert(STABLE_ID, "44444444-4444-4444-4444-444444444444")
+            .unwrap();
+        recipient.commit();
+
+        // THE REGRESSION: forking the shallow recipient doc at the watermark.
+        // Before the loro fork this returned NotImplemented and the worker died.
+        let fork = recipient
+            .fork_at(&watermark)
+            .expect("fork_at at/after the shallow root must succeed on a shallow recipient doc");
+        let before = snapshot_blocks_from_doc(&fork);
+        assert_eq!(
+            before.len(),
+            1,
+            "fork at the watermark = the shallow-root state (one node)"
+        );
+
+        // The live doc has advanced to two nodes; the incremental diff is real.
+        let after = snapshot_blocks_from_doc(&recipient);
+        assert_eq!(after.len(), 2, "recipient advanced to two nodes");
+
+        // Forking at the advanced frontier also works and reflects both nodes.
+        let fork_latest = recipient.fork_at(&recipient.oplog_frontiers()).unwrap();
+        assert_eq!(snapshot_blocks_from_doc(&fork_latest).len(), 2);
+    }
+
     #[test]
     fn parse_retention_none_is_accepted() {
         assert!(matches!(
