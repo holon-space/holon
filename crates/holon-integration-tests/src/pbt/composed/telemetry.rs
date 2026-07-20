@@ -42,7 +42,8 @@ use super::harness::EngageTally;
 /// stable per-case key; it is drawn only when telemetry is enabled.
 static CASE_INDEX: AtomicU64 = AtomicU64::new(0);
 
-/// Whether `HOLON_PBT_TELEMETRY=1` is set. Read once — a run cannot flip mid-way.
+/// Whether `HOLON_PBT_TELEMETRY=1` is set. Read once — a run cannot flip
+/// mid-way.
 pub(crate) fn telemetry_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("HOLON_PBT_TELEMETRY").as_deref() == Ok("1"))
@@ -163,9 +164,18 @@ mod tests {
         let mut m = BTreeMap::new();
         m.insert(
             "inv-viewmodel-entity-ids-subset-of-data",
-            EngageTally { engaged: 3, skipped: 1 },
+            EngageTally {
+                engaged: 3,
+                skipped: 1,
+            },
         );
-        m.insert("inv-block-parent-validity", EngageTally { engaged: 0, skipped: 4 });
+        m.insert(
+            "inv-block-parent-validity",
+            EngageTally {
+                engaged: 0,
+                skipped: 4,
+            },
+        );
         m
     }
 
@@ -173,8 +183,10 @@ mod tests {
     /// schema — the contract the analysis scripts rely on.
     #[test]
     fn line_parses_and_is_stable_shaped() {
-        let kinds: Vec<String> =
-            ["Indent", "Split", "Indent", "Outdent"].iter().map(|s| s.to_string()).collect();
+        let kinds: Vec<String> = ["Indent", "Split", "Indent", "Outdent"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let micros = vec![10u64, 20, 30, 40];
         let value = build_line(7, &sample_wiring(), &kinds, &micros, &sample_engagement());
 
@@ -184,7 +196,10 @@ mod tests {
 
         assert_eq!(parsed["case_index"], 7);
         assert_eq!(parsed["n_transitions"], 4);
-        assert_eq!(parsed["wiring"]["storage_adapters"], json!(["Loro", "Turso"]));
+        assert_eq!(
+            parsed["wiring"]["storage_adapters"],
+            json!(["Loro", "Turso"])
+        );
         assert_eq!(parsed["wiring"]["actors"], json!(["UI"]));
         assert_eq!(parsed["transition_kinds"]["Indent"], 2);
         assert_eq!(parsed["transition_kinds"]["Split"], 1);
@@ -193,8 +208,14 @@ mod tests {
             parsed["distinct_bigrams"],
             json!(["Indent>Outdent", "Indent>Split", "Split>Indent"])
         );
-        assert_eq!(parsed["engagement"]["inv-viewmodel-entity-ids-subset-of-data"], json!([3, 4]));
-        assert_eq!(parsed["engagement"]["inv-block-parent-validity"], json!([0, 4]));
+        assert_eq!(
+            parsed["engagement"]["inv-viewmodel-entity-ids-subset-of-data"],
+            json!([3, 4])
+        );
+        assert_eq!(
+            parsed["engagement"]["inv-block-parent-validity"],
+            json!([0, 4])
+        );
         // Wall aggregates are present and separable from the deterministic body.
         assert_eq!(parsed["wall"]["total_us"], 100);
         assert!(parsed["wall"]["per_kind_us"].is_object());
@@ -205,15 +226,41 @@ mod tests {
     /// the wall micros differ between the two "runs".
     #[test]
     fn non_wall_content_is_deterministic_across_differing_timings() {
-        let kinds: Vec<String> =
-            ["Indent", "Split", "Indent"].iter().map(|s| s.to_string()).collect();
-        let run_a = build_line(0, &sample_wiring(), &kinds, &[1, 2, 3], &sample_engagement());
-        let run_b =
-            build_line(0, &sample_wiring(), &kinds, &[999, 7, 88_000], &sample_engagement());
+        let kinds: Vec<String> = ["Indent", "Split", "Indent"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let run_a = build_line(
+            0,
+            &sample_wiring(),
+            &kinds,
+            &[1, 2, 3],
+            &sample_engagement(),
+        );
+        let run_b = build_line(
+            0,
+            &sample_wiring(),
+            &kinds,
+            &[999, 7, 88_000],
+            &sample_engagement(),
+        );
 
-        for key in ["case_index", "n_transitions", "wiring", "transition_kinds", "distinct_bigrams", "engagement"] {
-            assert_eq!(run_a[key], run_b[key], "field {key} must be timing-independent");
+        for key in [
+            "case_index",
+            "n_transitions",
+            "wiring",
+            "transition_kinds",
+            "distinct_bigrams",
+            "engagement",
+        ] {
+            assert_eq!(
+                run_a[key], run_b[key],
+                "field {key} must be timing-independent"
+            );
         }
-        assert_ne!(run_a["wall"], run_b["wall"], "wall fields track the (differing) timings");
+        assert_ne!(
+            run_a["wall"], run_b["wall"],
+            "wall fields track the (differing) timings"
+        );
     }
 }

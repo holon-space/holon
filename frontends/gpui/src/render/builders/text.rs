@@ -17,9 +17,21 @@ use super::prelude::*;
 
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     let content = node.prop_str("content").unwrap_or_default();
-    let bold = node.prop_bool("bold").unwrap_or(false);
-    let size = node.prop_f64("size").unwrap_or(14.0) as f32;
+    let mut bold = node.prop_bool("bold").unwrap_or(false);
+    let mut size = node.prop_f64("size").unwrap_or(14.0) as f32;
     let color = node.prop_str("color").map(|s| s.to_string());
+
+    // A semantic `style` keyword (e.g. `#{style: "h1"}` on the page-title
+    // variant) resolves to the heading type scale here at render time — the
+    // single place both the initial build and the fast-path props recompute
+    // funnel through, so the size can never regress to body size on a CDC
+    // recompute. The semantic style wins over the numeric `size:` default.
+    if let Some(style) = node.prop_str("style") {
+        if let Some(scale) = holon_api::render_eval::text_style_font_size(&style) {
+            size = scale;
+            bold = bold || style.starts_with('h');
+        }
+    }
 
     // `marks` lives on the row data, not on props — it doesn't go through the
     // DSL args path. Fail loud on malformed JSON: stored marks must be valid.
