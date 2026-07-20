@@ -249,8 +249,23 @@ impl CommandProvider {
                 .collect()
         };
 
+        // Presentation dedup (dogfood-round3 B1): the operation catalog is the
+        // dispatcher's UNIONED provider set, advertised WITHOUT dedup (see
+        // `OperationDispatcher::operations` — structural block ops are knowingly
+        // double-advertised by `SqlBlockOperations` + `LoroBlockOperations`
+        // under Loro authority, tolerated by `STRUCTURAL_BLOCK_OP_DUP_ALLOWLIST`).
+        // A duplicated op name would therefore render as two identical menu
+        // rows. Collapse to ONE entry per operation name, keeping the FIRST
+        // occurrence so the visible row corresponds to the same first-wins
+        // provider the dispatcher routes to — this is presentation-only, it does
+        // NOT touch dispatch (both registrations remain; `find_matched_operation`
+        // resolves independently). Keyed on the operation name (the `id`), never
+        // the label: two genuinely different ops may legitimately share a
+        // display label and must both survive.
+        let mut seen_op_names = std::collections::HashSet::new();
         filtered
             .iter()
+            .filter(|m| seen_op_names.insert(m.operation_name().to_string()))
             .map(|m| PopupItem {
                 id: m.operation_name().to_string(),
                 label: m.descriptor.display_name.clone(),
