@@ -403,6 +403,21 @@ async fn compose_sut_seeded_impl(
                 resolver.clone(),
             )) as Arc<dyn SutEdgeFieldWrite>);
         }
+        // Block→page transform (`BlockToPage`) — the composed home for the
+        // `convert_block_to_page` transition on the wide (frontend) config. There
+        // is no gesture-driver seam for this compound transform (it is an engine
+        // op, not a keystroke/click), so — exactly like `EdgeFieldWriter` above and
+        // the storage-only branch's op-floor — route it through THIS frontend's
+        // own engine (`comp.engine()`) via a resolver-sharing `DirectUserDriver`.
+        // Dispatching the production `block.convert_block_to_page` op through the
+        // frontend's engine mutates the same Turso backend the composed invariants
+        // read, and the shared resolver maps the oracle's synthetic origin id to
+        // the real minted id. Without this insert the SELECTED `BlockToPage`
+        // transition fails loud at composition (cap absent from the CapMap).
+        caps.insert(Arc::new(DirectUserDriver::with_resolver(
+            comp.engine(),
+            resolver.clone(),
+        )) as Arc<dyn SutBlockToPage>);
         // The VM-rung driver (§8.11 layer-localization): install the frontend's OWN
         // headless `ReactiveEngineDriver` as THE driver backing the gesture caps, so
         // the composed `CapMap` drives user gestures UI-adjacently (click-intent

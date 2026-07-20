@@ -908,6 +908,42 @@ impl Module for OrgModeModule {
             }
         }));
 
+        // Block→page transform planner/link-rewrite provider.
+        //
+        // The engine-level `convert_block_to_page` compound
+        // (`operation_engine.rs`) dispatches two ops that ONLY
+        // `SqlOperationProvider` advertises: `block_to_page_plan` (a read-only
+        // planner over `block_raw`) and `rewrite_link_resolution` (rewrites the
+        // SQL-side `block_links` junction). In SqlOnly mode the CRUD provider
+        // above IS a `SqlOperationProvider`, so it already serves these; but
+        // under Loro authority the CRUD provider is `LoroBlockOperations`, which
+        // advertises neither — so without this registration `convert_block_to_page`
+        // dies at dispatch ("No provider registered ... block_to_page_plan") in
+        // full/Loro mode. Register a bare `SqlOperationProvider` LAST so the
+        // dispatcher's first-registered-wins routing (operation_dispatcher.rs)
+        // leaves block CRUD with `LoroBlockOperations` and structural ops with
+        // `SqlBlockOperations` (EventInfraModule): this provider wins ONLY the
+        // two ops nobody else advertises. Authority-safe under Loro: the planner
+        // only READS the Loro-projected `block_raw`, and `rewrite_link_resolution`
+        // writes only the `block_links` junction (a SQL-side projection, NOT
+        // Loro-authoritative content), so no Loro authority is bypassed. In
+        // SqlOnly this provider is inert (the earlier CRUD provider already wins
+        // those ops on registration order).
+        injector.provide_into_set::<dyn OperationProvider>(Provider::root_async(
+            |resolver| async move {
+                let db_handle = resolver
+                    .resolve::<dyn holon::di::DbHandleProvider>()
+                    .handle();
+                Arc::new(holon::core::SqlOperationProvider::with_edge_fields(
+                    db_handle,
+                    BLOCK_WRITE_TABLE.to_string(),
+                    "block".to_string(),
+                    "block".to_string(),
+                    BlockSchemaModule.edge_fields(),
+                )) as Arc<dyn OperationProvider>
+            },
+        ));
+
         Ok(())
     }
 }
