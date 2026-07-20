@@ -1271,24 +1271,42 @@ impl ReferenceState {
 
         let original = self.domain.block_state.blocks.get(block_id).unwrap();
         let content = original.content.clone();
+        let origin_marks = original.marks.clone().unwrap_or_default();
         let parent_id = original.parent_id.clone();
         let original_seq = original.sequence();
 
-        // Split content (same logic as traits.rs:756-763)
-        let content_before = content[..position].trim_end().to_string();
-        let content_after = content[position..].trim_start().to_string();
+        // Split content AND partition marks — model-first parity with prod's
+        // `BlockOperations::split_block`, both routed through the ONE
+        // `holon_api::split_content_marks` (link straddling → plain text on both
+        // sides; formatting straddling → truncate; whitespace trims applied).
+        // Before this the model mirrored prod's OLD bug (split content, leave
+        // marks untouched) so a mark destroyed across a split diverged on
+        // neither side — invisible to the keystone. Now both carry marks and a
+        // regression that drops them goes RED.
+        let holon_api::SplitContentMarks {
+            left:
+                holon_api::SplitSide {
+                    content: content_before,
+                    marks: left_marks,
+                },
+            right:
+                holon_api::SplitSide {
+                    content: content_after,
+                    marks: right_marks,
+                },
+        } = holon_api::split_content_marks(&content, &origin_marks, position);
 
-        // Update original block
-        self.domain
-            .block_state
-            .blocks
-            .get_mut(block_id)
-            .unwrap()
-            .content = content_before;
+        // Update original block: truncated content + left-partition marks.
+        {
+            let orig = self.domain.block_state.blocks.get_mut(block_id).unwrap();
+            orig.content = content_before;
+            orig.marks = (!left_marks.is_empty()).then_some(left_marks);
+        }
 
         // Create new block with synthetic ID
         let new_id = EntityUri::block(&format!(":split-{}", self.domain.block_state.next_id));
         let mut new_block = Block::new_text(new_id.clone(), parent_id.clone(), content_after);
+        new_block.marks = (!right_marks.is_empty()).then_some(right_marks);
         // Place after original: shift every sibling already at or after this
         // position one slot down before inserting, so the new block lands
         // uniquely between the original and the next existing sibling.
