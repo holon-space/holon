@@ -94,7 +94,9 @@ async fn slash_menu_equals_the_listed_ops_resolvable_from_id_context() {
     // as a real gap.)
     let expected_listed: BTreeSet<String> = catalog
         .iter()
-        .filter(|d| matches!(d.menu_exposure, MenuExposure::Listed))
+        .filter(
+            |d| matches!(d.menu_exposure, MenuExposure::Listed { surfaces } if surfaces.slash_menu),
+        )
         .map(|d| d.name.clone())
         .collect();
 
