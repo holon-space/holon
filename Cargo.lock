@@ -280,7 +280,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -291,7 +291,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1074,7 +1074,7 @@ dependencies = [
  "bitflags 2.13.1",
  "cexpr",
  "clang-sys",
- "itertools 0.10.5",
+ "itertools 0.13.0",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -1095,7 +1095,7 @@ dependencies = [
  "bitflags 2.13.1",
  "cexpr",
  "clang-sys",
- "itertools 0.10.5",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "regex",
@@ -1816,7 +1816,7 @@ checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
 dependencies = [
  "serde",
  "termcolor",
- "unicode-width 0.1.14",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -1944,7 +1944,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
 dependencies = [
  "lazy_static",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3000,7 +3000,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3428,7 +3428,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5013,7 +5013,7 @@ dependencies = [
  "holon-turso",
  "iroh",
  "loro",
- "loro_fractional_index",
+ "loro_fractional_index 1.6.0",
  "once_cell",
  "opentelemetry",
  "opentelemetry_sdk",
@@ -5148,7 +5148,7 @@ dependencies = [
  "futures",
  "holon-api",
  "holon-macros",
- "loro_fractional_index",
+ "loro_fractional_index 1.6.0",
  "serde",
  "serde_json",
  "tempfile",
@@ -6590,7 +6590,7 @@ dependencies = [
  "libc",
  "socket2 0.6.5",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6648,7 +6648,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7198,9 +7198,8 @@ dependencies = [
 
 [[package]]
 name = "loro"
-version = "1.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e63def75cde167dbc652d21bc6f56e2dc44ce90a5332eb900c42c51ad0e5ed46"
+version = "1.13.7"
+source = "git+https://github.com/nightscape/loro.git?rev=4d179c68#4d179c688c8a0717954155b78eb6135cc83d9824"
 dependencies = [
  "enum-as-inner 0.6.1",
  "generic-btree",
@@ -7215,8 +7214,7 @@ dependencies = [
 [[package]]
 name = "loro-common"
 version = "1.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b51042936156a1d537df8a38938ec8ed24b45de14530af933c1d02de39c9e056"
+source = "git+https://github.com/nightscape/loro.git?rev=4d179c68#4d179c688c8a0717954155b78eb6135cc83d9824"
 dependencies = [
  "arbitrary",
  "enum-as-inner 0.6.1",
@@ -7233,8 +7231,7 @@ dependencies = [
 [[package]]
 name = "loro-delta"
 version = "1.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96f381e7fb5d4bf5605b4f4a9241f3adf61403ded978d757552004c8302cccbb"
+source = "git+https://github.com/nightscape/loro.git?rev=4d179c68#4d179c688c8a0717954155b78eb6135cc83d9824"
 dependencies = [
  "arrayvec",
  "enum-as-inner 0.5.1",
@@ -7244,9 +7241,8 @@ dependencies = [
 
 [[package]]
 name = "loro-internal"
-version = "1.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d42db22ea93c266d5b6ef09ba94af080b6a4d131942e9a28bfa6a218b312b5f"
+version = "1.13.7"
+source = "git+https://github.com/nightscape/loro.git?rev=4d179c68#4d179c688c8a0717954155b78eb6135cc83d9824"
 dependencies = [
  "append-only-bytes",
  "arref",
@@ -7265,7 +7261,7 @@ dependencies = [
  "loro-delta",
  "loro-kv-store",
  "loro-rle",
- "loro_fractional_index",
+ "loro_fractional_index 1.13.0",
  "md5",
  "nonmax",
  "num",
@@ -7292,8 +7288,7 @@ dependencies = [
 [[package]]
 name = "loro-kv-store"
 version = "1.13.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b42b8d6d2c95abf67d7f50a60171759d693206796d7f8f03f3fe68e531c88794"
+source = "git+https://github.com/nightscape/loro.git?rev=4d179c68#4d179c688c8a0717954155b78eb6135cc83d9824"
 dependencies = [
  "bytes",
  "ensure-cov",
@@ -7309,8 +7304,7 @@ dependencies = [
 [[package]]
 name = "loro-rle"
 version = "1.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76400c3eea6bb39b013406acce964a8db39311534e308286c8d8721baba8ee20"
+source = "git+https://github.com/nightscape/loro.git?rev=4d179c68#4d179c688c8a0717954155b78eb6135cc83d9824"
 dependencies = [
  "append-only-bytes",
  "num",
@@ -7335,11 +7329,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "loro_fractional_index"
+version = "1.13.0"
+source = "git+https://github.com/nightscape/loro.git?rev=4d179c68#4d179c688c8a0717954155b78eb6135cc83d9824"
+dependencies = [
+ "once_cell",
+ "rand 0.8.7",
+ "serde",
+]
+
+[[package]]
 name = "lorotree-spike"
 version = "0.1.0"
 dependencies = [
  "loro",
- "loro_fractional_index",
+ "loro_fractional_index 1.6.0",
  "serde_json",
 ]
 
@@ -8283,7 +8287,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
  "serde",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9946,7 +9950,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -9959,7 +9963,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -10180,7 +10184,7 @@ dependencies = [
  "once_cell",
  "socket2 0.6.5",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11048,7 +11052,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -11061,7 +11065,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11120,7 +11124,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11314,7 +11318,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b55fb86dfd3a2f5f76ea78310a88f96c4ea21a3031f8d212443d56123fd0521"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11954,7 +11958,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -12082,7 +12086,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -12769,7 +12773,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -12799,7 +12803,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix 1.1.4",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -13858,7 +13862,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset 0.9.1",
  "tempfile",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -14876,7 +14880,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -15541,7 +15545,7 @@ dependencies = [
  "litemap",
  "lock_api",
  "log",
- "loro_fractional_index",
+ "loro_fractional_index 1.6.0",
  "markdown",
  "memchr",
  "miette",
