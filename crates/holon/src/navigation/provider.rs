@@ -59,6 +59,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             ],
             affected_fields: vec!["block_id".to_string()],
             param_mappings: vec![],
+            target_scope: holon_api::TargetScope::Global,
             menu_exposure: holon_api::MenuExposure::NotListed {
                 surface: holon_api::NonMenuSurface::Navigation,
             },
@@ -84,6 +85,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             ],
             affected_fields: vec!["block_id".to_string()],
             param_mappings: vec![],
+            target_scope: holon_api::TargetScope::Global,
             menu_exposure: holon_api::MenuExposure::NotListed {
                 surface: holon_api::NonMenuSurface::Navigation,
             },
@@ -105,6 +107,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             }],
             affected_fields: vec!["closed_at".to_string()],
             param_mappings: vec![],
+            target_scope: holon_api::TargetScope::Global,
             menu_exposure: holon_api::MenuExposure::NotListed {
                 surface: holon_api::NonMenuSurface::Navigation,
             },
@@ -122,6 +125,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             required_params: vec![region_param()],
             affected_fields: vec!["block_id".to_string()],
             param_mappings: vec![],
+            target_scope: holon_api::TargetScope::Global,
             menu_exposure: holon_api::MenuExposure::NotListed {
                 surface: holon_api::NonMenuSurface::Navigation,
             },
@@ -139,6 +143,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             required_params: vec![region_param()],
             affected_fields: vec!["block_id".to_string()],
             param_mappings: vec![],
+            target_scope: holon_api::TargetScope::Global,
             menu_exposure: holon_api::MenuExposure::NotListed {
                 surface: holon_api::NonMenuSurface::Navigation,
             },
@@ -156,6 +161,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             required_params: vec![region_param()],
             affected_fields: vec!["block_id".to_string()],
             param_mappings: vec![],
+            target_scope: holon_api::TargetScope::Global,
             menu_exposure: holon_api::MenuExposure::NotListed {
                 surface: holon_api::NonMenuSurface::Navigation,
             },

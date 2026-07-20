@@ -57,6 +57,7 @@ impl StubProvider {
             required_params: vec![],
             affected_fields: vec![],
             param_mappings: vec![],
+            target_scope: holon_api::TargetScope::Block,
             menu_exposure: holon_api::MenuExposure::NotListed {
                 surface: holon_api::NonMenuSurface::Test,
             },

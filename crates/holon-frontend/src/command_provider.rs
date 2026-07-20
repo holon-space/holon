@@ -225,7 +225,12 @@ impl CommandProvider {
                 // also keeps gesture/navigation/internal ops (move_block,
                 // split_block, set_field, create_page_from_link, …) out of the
                 // menu instead of leaking every id-resolvable provider op.
-                .filter(|m| matches!(m.descriptor.menu_exposure, holon_api::MenuExposure::Listed))
+                .filter(|m| {
+                    matches!(
+                        m.descriptor.menu_exposure,
+                        holon_api::MenuExposure::Listed { surfaces } if surfaces.slash_menu
+                    )
+                })
                 .collect();
 
         let filtered: Vec<MatchedOperation> = if filter.is_empty() {
@@ -437,7 +442,13 @@ mod tests {
                 description: String::new(),
                 affected_fields: vec![],
                 param_mappings: vec![],
-                menu_exposure: holon_api::MenuExposure::Listed,
+                target_scope: holon_api::TargetScope::Block,
+                menu_exposure: holon_api::MenuExposure::Listed {
+                    surfaces: holon_api::SurfaceSet {
+                        slash_menu: true,
+                        action_bar: false,
+                    },
+                },
                 trigger: None,
                 bound_params: Default::default(),
                 precondition: None,
@@ -650,7 +661,13 @@ mod tests {
                 id_column: "id".to_string(),
                 description: String::new(),
                 affected_fields: vec![],
-                menu_exposure: holon_api::MenuExposure::Listed,
+                target_scope: holon_api::TargetScope::Block,
+                menu_exposure: holon_api::MenuExposure::Listed {
+                    surfaces: holon_api::SurfaceSet {
+                        slash_menu: true,
+                        action_bar: false,
+                    },
+                },
                 trigger: None,
                 bound_params: Default::default(),
                 precondition: None,
