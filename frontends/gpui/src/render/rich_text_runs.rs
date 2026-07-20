@@ -172,13 +172,33 @@ pub fn scalar_range_to_bytes(text: &str, range: Range<usize>) -> Range<usize> {
     char_to_byte.push(text.len());
     let total = char_to_byte.len() - 1;
     if range.start > total || range.end > total {
-        tracing::error!(
+        // Per-frame repaint of a corrupt block would spam this every frame;
+        // keep the first loud (ERROR), drop repeats of the SAME corrupt span
+        // to debug! (see render::warn_throttle). No block id reaches this fn,
+        // so the corrupt span itself is the throttle key.
+        let first = crate::render::warn_throttle::first_time_seen((
+            "scalar_range_to_bytes",
+            text,
             range.start,
             range.end,
-            content_chars = total,
-            "scalar_range_to_bytes: range exceeds content length; clamping to \
-             render degraded (corrupt mark span?)"
-        );
+        ));
+        if first {
+            tracing::error!(
+                range.start,
+                range.end,
+                content_chars = total,
+                "scalar_range_to_bytes: range exceeds content length; clamping to \
+                 render degraded (corrupt mark span?)"
+            );
+        } else {
+            tracing::debug!(
+                range.start,
+                range.end,
+                content_chars = total,
+                "scalar_range_to_bytes: range exceeds content length (repeat; \
+                 first occurrence logged at ERROR)"
+            );
+        }
     }
     let start = range.start.min(total);
     let end = range.end.min(total).max(start);

@@ -533,6 +533,40 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// ADR 0028 D1: outdenting a DIRECT PAGE CHILD is rejected — it would move
+    /// the block out of its page container, escaping the page. Structurally a
+    /// grandparent exists (GP), so the ONLY reason this must fail is the
+    /// page-parent rule; before that rule this outdent succeeded (moved B to
+    /// GP).
+    #[tokio::test]
+    async fn outdent_direct_page_child_is_rejected() {
+        let store = MemStore::new();
+        insert_block(&store, "GP", None, None);
+        // P is a Page nested under GP, so B (child of P) HAS a grandparent —
+        // the generic "no grandparent" guard does not apply here.
+        insert_page(&store, "P", Some("GP"));
+
+        let b = TestBlock {
+            id: EntityUri::block("B"),
+            parent_id: Some(EntityUri::block("P")),
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 2,
+            content: "Content B".to_string(),
+            tags: holon_api::Tags::default(),
+        };
+        store.insert(b);
+
+        let result = store.outdent(&EntityUri::block("B")).await;
+        assert!(
+            result.is_err(),
+            "outdent of a direct page child must be rejected (ADR 0028 D1)"
+        );
+
+        // Rejection is inert: B stays under the page, unchanged.
+        let b = store.get("B").unwrap();
+        assert_eq!(b.parent_id, Some(EntityUri::block("P")));
+    }
+
     #[tokio::test]
     async fn move_up_swaps_with_prev_sibling() {
         let store = MemStore::new();

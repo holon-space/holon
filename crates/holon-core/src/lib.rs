@@ -24,6 +24,7 @@ pub mod entity_cache;
 pub mod file_format;
 pub mod fractional_index;
 pub mod operation_log;
+pub mod operation_subset;
 pub mod operation_wrapper;
 pub mod publish_errors;
 pub mod replica_state;
@@ -48,6 +49,7 @@ mod block_operations_tests;
 
 pub use operation_log::OperationLogEntry;
 pub use operation_log::OperationStatus;
+pub use operation_subset::OperationSubset;
 pub use operation_wrapper::OperationWrapper;
 pub use traits::BlockDataSourceHelpers;
 pub use traits::BlockEntity;
