@@ -1,6 +1,9 @@
 # Hand-authored keystone regressions. One JSON object per line (JSONL).
 # Blank lines and lines starting with '#' are ignored.
-# Schema: {"name": <slug>, "description": <provenance>, "transitions": [<E2ETransition>, ...]}
+# Schema: the canonical `Fixture<E2ETransition>` (holon-pbt-core) serde shape —
+#   {"name": <slug>, "description": <provenance>, "transitions": [<E2ETransition>, ...]}
+# The Fixture-only `environment`/`initial_state` fields are omitted here (serde-default):
+# the base state is the fixed `wide_e2e_ref()`, not a serialized ReferenceState.
 # Each transition is the production `E2ETransition` enum in serde's external-tag form:
 #   {"CreateBlockUnderFocus": {"content": "...", "id": "block:..."}}
 #   {"BlockToPage": {"origin_id": "block:..."}}
