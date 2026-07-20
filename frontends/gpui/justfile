@@ -88,6 +88,22 @@ sync-org src="$HOME/Workspaces/pkm/holon-pkm":
 # Build + package + install + launch (the full cycle)
 deploy profile="release": (build profile) (apk profile) install launch
 
+# Start the Android emulator and wait for boot. Default gpu is swiftshader_indirect
+# because it is the ONLY mode that renders Holon GPUI: `-gpu host` dies at startup
+# (gfxstream Vulkan passthrough → MoltenVK fails to compile GPUI's vertex shader →
+# wgpu device lost), and `-gpu host -feature -Vulkan` leaves only the GLES translator,
+# which gpui_wgpu rejects over compute limits. See docs/Testing/BugFunnel.md row 233.
+start-emulator avd="Medium_Phone_API_36.0" gpu="swiftshader_indirect":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{ sdk }}/emulator/emulator -avd {{ avd }} -gpu {{ gpu }} -no-snapshot-load >/dev/null 2>&1 &
+    echo "Emulator starting (avd={{ avd }}, gpu={{ gpu }}), waiting for boot..."
+    {{ sdk }}/platform-tools/adb wait-for-device
+    until [ "$({{ sdk }}/platform-tools/adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; do
+        sleep 2
+    done
+    echo "Emulator booted"
+
 # Build desktop (default features)
 desktop *args="":
     cargo run -p holon-gpui {{ args }}
