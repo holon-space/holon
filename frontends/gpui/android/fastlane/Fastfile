@@ -2,21 +2,21 @@ default_platform(:android)
 
 # Required env:
 #   GOOGLE_PLAY_SERVICE_ACCOUNT_JSON  raw JSON key of the Play service account
-#   HOLON_APK_PATH                    path to the signed release APK
+#   HOLON_AAB_PATH                    path to the signed release AAB
 #
-# KNOWN LIMITATION (documented, not hidden): this uploads an APK, not an AAB.
-# The repo's Android build is a direct aapt2/zipalign/apksigner pipeline with
-# no Gradle project, and Google Play requires an AAB for a NEW app's
-# PRODUCTION track. Internal testing accepts APKs, which is all this lane
-# targets. Producing an AAB (bundletool or a minimal Gradle wrapper) is a
-# follow-up — see docs/Operations/ReleasePipeline.md.
+# Play REQUIRES an Android App Bundle (.aab) — APK uploads are rejected for a
+# new app ("APKs are not allowed for this application", mobile-v0.0.13). The
+# repo has no Gradle project; the AAB is produced by a direct
+# aapt2(--proto-format) + bundletool pipeline in build-release-aab.sh. The
+# universal APK is still built and attached to the GitHub Release for sideload
+# dogfooding, but only the AAB is uploaded to Play.
 
 platform :android do
-  desc "Upload the signed release APK to the Play internal testing track (draft)"
+  desc "Upload the signed release AAB to the Play internal testing track (draft)"
   lane :internal do
     supply(
       track: "internal",
-      apk: ENV.fetch("HOLON_APK_PATH"),
+      aab: ENV.fetch("HOLON_AAB_PATH"),
       json_key_data: ENV.fetch("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON"),
       # Draft until the app has its first published release; promotion to any
       # wider track is always manual, in Play Console.
