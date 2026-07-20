@@ -328,16 +328,15 @@ impl SqlOperationProvider {
     /// mirrors `normalize_content_for_org_roundtrip` in `pbt/types.rs`.
     fn trimmed_content(value: &Value, is_source: bool) -> Value {
         match value {
-            Value::String(s) => {
-                let trimmed_end = s.trim_end();
-                if is_source {
-                    return Value::String(trimmed_end.to_string());
-                }
-                Value::String(match trimmed_end.split_once('\n') {
-                    Some((first, rest)) => format!("{}\n{}", first.trim(), rest),
-                    None => trimmed_end.trim_start().to_string(),
-                })
-            }
+            // SINGLE SOURCE OF TRUTH: the exact transform lives in
+            // `holon_api::content_canonical` so the GPUI editor's echo-suppression
+            // discriminator (`evaluate_data_sync_echo`) can recognize the
+            // canonicalized echo of its own write without the two definitions
+            // drifting (a drift would let the store canonicalize typed whitespace
+            // the editor then fails to recognize, deleting it from the buffer).
+            Value::String(s) => Value::String(
+                holon_api::content_canonical::canonicalize_stored_content(s, is_source),
+            ),
             other => other.clone(),
         }
     }

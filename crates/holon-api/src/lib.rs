@@ -23,6 +23,7 @@ pub mod clock;
 /// flutter_rust_bridge:ignore
 pub mod computation;
 pub mod computed;
+pub mod content_canonical;
 pub mod edge_field;
 pub mod effect_id;
 pub mod entity;
