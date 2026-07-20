@@ -201,6 +201,40 @@ pub fn canonicalize_marks(marks: &mut Vec<MarkSpan>) {
     });
 }
 
+/// Clamp every mark span into the bounds of `content`, then canonicalize.
+///
+/// This is the SINGLE read-boundary choke point that guarantees a corrupt
+/// persisted `(content, marks)` pair — a mark whose `end` exceeds
+/// `content.chars().count()` — can never reach a projection or the GPUI
+/// renderer, where an out-of-bounds span aborts EVERY paint of the block in
+/// `scalar_range_to_bytes` (the crash that made a page permanently
+/// un-openable). Such a mark arises when a producer writes a full-span mark
+/// decoupled from the content (`convert_block_to_page`) or a later content-only
+/// trim shortens the text without adjusting marks.
+///
+/// Fail-loud, not silent (project error philosophy): each clamp emits a loud
+/// `warn!` naming the offending span and the content length — a disclosed
+/// degraded read, not a cosmetic fix. A span clamped to empty is then dropped
+/// by [`canonicalize_marks`]. Callers that also know the block id should log it
+/// at the call site for row-level attribution.
+pub fn canonicalize_marks_against(content: &str, marks: &mut Vec<MarkSpan>) {
+    let len = content.chars().count();
+    for m in marks.iter_mut() {
+        if m.start > len || m.end > len {
+            tracing::warn!(
+                mark_start = m.start,
+                mark_end = m.end,
+                content_chars = len,
+                "canonicalize_marks_against: mark span exceeds content length; \
+                 clamping (corrupt persisted marks)"
+            );
+            m.start = m.start.min(len);
+            m.end = m.end.min(len);
+        }
+    }
+    canonicalize_marks(marks);
+}
+
 // --- Value <-> MarkSpan conversions for the entity framework ---
 //
 // The `Block.marks: Option<Vec<MarkSpan>>` field flows through the
@@ -370,6 +404,37 @@ mod tests {
             back.is_empty(),
             "zero-width mark survived json read: {back:?}"
         );
+    }
+
+    #[test]
+    fn canonicalize_against_clamps_out_of_bounds_end() {
+        // A mark whose end outlives the content (a decoupled marks-only write,
+        // or a later content-only trim) must be clamped to the content length —
+        // otherwise it aborts every render in scalar_range_to_bytes.
+        let mut marks = vec![MarkSpan::new(0, 5, InlineMark::Bold)];
+        canonicalize_marks_against("abc", &mut marks); // "abc" = 3 scalars
+        assert_eq!(marks, vec![MarkSpan::new(0, 3, InlineMark::Bold)]);
+    }
+
+    #[test]
+    fn canonicalize_against_drops_fully_out_of_bounds_mark() {
+        // start and end both past the content clamp to (len, len) = empty, which
+        // canonicalize then drops.
+        let mut marks = vec![MarkSpan::new(4, 6, InlineMark::Italic)];
+        canonicalize_marks_against("ab", &mut marks); // "ab" = 2 scalars
+        assert!(
+            marks.is_empty(),
+            "fully out-of-bounds mark survived: {marks:?}"
+        );
+    }
+
+    #[test]
+    fn canonicalize_against_uses_scalar_not_byte_length() {
+        // Multi-byte content: a 3-scalar string ("a你好") whose byte length is 7.
+        // A mark 0..3 is in-bounds by SCALARS and must be preserved untouched.
+        let mut marks = vec![MarkSpan::new(0, 3, InlineMark::Bold)];
+        canonicalize_marks_against("a你好", &mut marks);
+        assert_eq!(marks, vec![MarkSpan::new(0, 3, InlineMark::Bold)]);
     }
 
     #[test]
