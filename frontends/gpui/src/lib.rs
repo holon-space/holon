@@ -50,6 +50,14 @@ use holon_frontend::view_model::ViewModel;
 use navigation_state::NavigationState;
 use render::builders::GpuiRenderContext;
 
+/// Half-spread (in HSLA lightness, 0.0–1.0) of the subtle root-background
+/// gradient painted in `render`. The top of the window is lightened by this
+/// amount and the bottom darkened by it, both derived from the active theme's
+/// `background` token so the fade tracks light/dark themes automatically.
+/// Keep it small — this is a hint of depth, not a visible band. Raise it for a
+/// more pronounced fade; set it to `0.0` to restore a flat fill.
+const BG_GRADIENT_LIGHTNESS_SPREAD: f32 = 0.015;
+
 // ── Android icon-glyph substitutes ──────────────────────────────────────────
 //
 // UI-chrome icons that are *monochrome* Unicode symbols DejaVu Sans covers
@@ -756,6 +764,31 @@ impl Render for HolonApp {
         } else {
             theme.background
         };
+
+        // Root window fill. A flat single color reads as dull; instead paint a
+        // very subtle top→bottom luminance sweep DERIVED from the active theme's
+        // background token (hue/saturation preserved, so it tracks light and
+        // dark themes and any accent tint automatically). The spread is tiny
+        // (`BG_GRADIENT_LIGHTNESS_SPREAD`) — a hint of depth, never enough to
+        // change text contrast. Glass mode keeps its flat translucent fill.
+        let page_background: gpui::Background = if glass {
+            bg.into()
+        } else {
+            let base = theme.background;
+            let hi = gpui::Hsla {
+                l: (base.l + BG_GRADIENT_LIGHTNESS_SPREAD).min(1.0),
+                ..base
+            };
+            let lo = gpui::Hsla {
+                l: (base.l - BG_GRADIENT_LIGHTNESS_SPREAD).max(0.0),
+                ..base
+            };
+            gpui::linear_gradient(
+                160.0,
+                gpui::linear_color_stop(hi, 0.0),
+                gpui::linear_color_stop(lo, 1.0),
+            )
+        };
         let text = theme.foreground;
 
         // Drawer (id, mode) pairs from static snapshot (simpler than walking
@@ -1165,7 +1198,7 @@ impl Render for HolonApp {
 
         let mut page = div()
             .size_full()
-            .bg(bg)
+            .bg(page_background)
             .text_color(text)
             .flex_col()
             .pt(px(self.safe_area_top))
@@ -2570,8 +2603,9 @@ pub fn scroll_list_by(
             let cache = panel_cache.read().unwrap();
             cache
                 .values()
-                .filter_map(|any| any.clone().downcast::<ReactiveShell>().ok()) // ALLOW(filter_map_ok): non-ReactiveShell entries are skipped, not errors —
-                // ALLOW(ok)
+                // ALLOW(filter_map_ok): non-ReactiveShell entries are skipped, not errors.
+                // ALLOW(ok): a downcast miss is a type mismatch to skip, not a swallowed error
+                .filter_map(|any| any.clone().downcast::<ReactiveShell>().ok())
                 .collect()
         };
         for list_shell in list_shells {

@@ -171,6 +171,25 @@ pub fn cycle_state(current: &str, states: &[String]) -> String {
     states[next].clone()
 }
 
+/// Font size (px) for a semantic text `style` keyword (`text(.., #{style:
+/// "h1"})`).
+///
+/// Single source of truth for the heading type scale, shared by every frontend
+/// (the value flows through the `text` widget's `size` prop, so gpui/dioxus
+/// render identically and the PBT widget-tree snapshot can assert on it).
+/// Returns `None` for an unrecognized keyword so the caller can fail loud
+/// instead of silently rendering a heading at body size — the exact silent
+/// drop that let the page-title-not-a-heading regression ship.
+pub fn text_style_font_size(style: &str) -> Option<f32> {
+    match style {
+        "h1" => Some(28.0),
+        "h2" => Some(22.0),
+        "h3" => Some(18.0),
+        "body" => Some(15.0),
+        _ => None,
+    }
+}
+
 pub fn state_icon(state: &str) -> &'static str {
     if state.is_empty() {
         ""
@@ -1451,6 +1470,23 @@ mod mutation_gap_tests {
         assert_eq!(resolve_color_name("muted"), "#808080");
         assert_eq!(resolve_color_name("#ABCDEF"), "#ABCDEF");
         assert_eq!(resolve_color_name("chartreuse"), "#FFFFFF");
+    }
+
+    #[test]
+    fn text_style_font_size_maps_headings_and_fails_loud_on_unknown() {
+        // The heading type scale is monotonically decreasing h1 > h2 > h3, and
+        // every heading is strictly larger than the 14px body default so a
+        // `#{style: "h1"}` title can never render at body size.
+        let h1 = text_style_font_size("h1").expect("h1 is a known style");
+        let h2 = text_style_font_size("h2").expect("h2 is a known style");
+        let h3 = text_style_font_size("h3").expect("h3 is a known style");
+        assert!(h1 > h2 && h2 > h3, "heading scale must decrease h1>h2>h3");
+        assert!(h3 > 14.0, "even h3 must exceed the 14px body default");
+        assert_eq!(h1, 28.0, "h1 pins the page-title heading scale");
+        // Unknown keyword returns None (caller fails loud) rather than silently
+        // resolving to body size — the exact swallow that hid the title bug.
+        assert_eq!(text_style_font_size("h7"), None);
+        assert_eq!(text_style_font_size(""), None);
     }
 
     #[test]

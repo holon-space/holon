@@ -11,6 +11,30 @@ use holon_frontend::reactive_view_model::ReactiveViewModel;
 use super::prelude::*;
 use crate::geometry::TransparentTracker;
 
+/// The single leading chrome element a tree row draws, if any. A row draws at
+/// most ONE of these — chevron and bullet are mutually exclusive, and a row may
+/// draw neither. The outline sets `show_bullet: false` on every row (the block
+/// content already draws its own draggable orgmode bullet), so its leaf rows
+/// resolve to [`LeadingMarker::None`] and never double up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeadingMarker {
+    Chevron,
+    Bullet,
+    None,
+}
+
+/// Pick the row's leading marker. Kept as a pure function so the
+/// "no redundant second bullet" contract is unit-testable without a window.
+fn leading_marker(show_chevron: bool, has_children: bool, show_bullet: bool) -> LeadingMarker {
+    if show_chevron && has_children {
+        LeadingMarker::Chevron
+    } else if show_bullet {
+        LeadingMarker::Bullet
+    } else {
+        LeadingMarker::None
+    }
+}
+
 /// Extract a stable ID from the first child's entity data for collapse state
 /// tracking. Walks into wrapper nodes (render_entity, live_query) to find the
 /// actual entity with an "id".
@@ -211,31 +235,35 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
         .min_h(px(ctx.style().tree_item_min_height))
         .pl(px(indent));
 
-    if show_chevron && has_children {
-        let el_id = id.clone().unwrap_or_else(|| "tree-toggle".to_string());
-        // Fall back to a fresh standalone Mutable when the node has no
-        // `expanded` field — the chevron still renders but click toggles
-        // a detached cell. In practice `wrap_tree_item` always sets one.
-        let mutable = expanded_handle.unwrap_or_else(|| Mutable::new(true));
-        // Persist through set_field(collapsed) when the row is identifiable;
-        // rows without an id (synthetic gallery items) fold view-locally.
-        let persist = id.clone().map(|row_id| (ctx.services.clone(), row_id));
-        let chevron_el = collapse_chevron(collapsed, el_id, mutable, persist, ctx);
-        if let Some(target_id) = explicit_target.as_deref() {
-            // Register the chevron in the bounds registry under the
-            // canonical id so layout-PBT `ToggleCollapse` transitions
-            // can click it via `expand_toggle_id_for(target_id)`.
-            row = row.child(TransparentTracker::new(
-                expand_toggle_id_for(target_id),
-                "expand_toggle",
-                ctx.bounds_registry.clone(),
-                chevron_el.into_any_element(),
-            ));
-        } else {
-            row = row.child(chevron_el);
+    match leading_marker(show_chevron, has_children, show_bullet) {
+        LeadingMarker::Chevron => {
+            let el_id = id.clone().unwrap_or_else(|| "tree-toggle".to_string());
+            // Fall back to a fresh standalone Mutable when the node has no
+            // `expanded` field — the chevron still renders but click toggles
+            // a detached cell. In practice `wrap_tree_item` always sets one.
+            let mutable = expanded_handle.unwrap_or_else(|| Mutable::new(true));
+            // Persist through set_field(collapsed) when the row is identifiable;
+            // rows without an id (synthetic gallery items) fold view-locally.
+            let persist = id.clone().map(|row_id| (ctx.services.clone(), row_id));
+            let chevron_el = collapse_chevron(collapsed, el_id, mutable, persist, ctx);
+            if let Some(target_id) = explicit_target.as_deref() {
+                // Register the chevron in the bounds registry under the
+                // canonical id so layout-PBT `ToggleCollapse` transitions
+                // can click it via `expand_toggle_id_for(target_id)`.
+                row = row.child(TransparentTracker::new(
+                    expand_toggle_id_for(target_id),
+                    "expand_toggle",
+                    ctx.bounds_registry.clone(),
+                    chevron_el.into_any_element(),
+                ));
+            } else {
+                row = row.child(chevron_el);
+            }
         }
-    } else if show_bullet {
-        row = row.child(bullet_dot(ctx));
+        LeadingMarker::Bullet => {
+            row = row.child(bullet_dot(ctx));
+        }
+        LeadingMarker::None => {}
     }
 
     if let Some(node) = content {
@@ -243,4 +271,39 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     }
 
     row
+}
+
+#[cfg(test)]
+mod marker_tests {
+    use super::LeadingMarker;
+    use super::leading_marker;
+
+    #[test]
+    fn outline_leaf_draws_no_bullet_so_content_marker_is_not_doubled() {
+        // Outline rows carry `show_bullet: false` (the block content already
+        // draws its own draggable orgmode bullet). A leaf then has no chevron
+        // and no tree bullet — exactly one marker total (the content's), never
+        // two. This is the regression guard for the double-bullet bug.
+        assert_eq!(
+            leading_marker(false, false, false),
+            LeadingMarker::None,
+            "show_bullet=false leaf must not draw a redundant tree bullet"
+        );
+    }
+
+    #[test]
+    fn parent_keeps_its_disclosure_chevron() {
+        // A collapsible parent still shows the chevron even with bullets
+        // suppressed — the chevron is a disclosure control, not a bullet.
+        assert_eq!(leading_marker(true, true, false), LeadingMarker::Chevron);
+    }
+
+    #[test]
+    fn bullet_only_when_requested_and_not_a_parent() {
+        // Trees that opt into bullets (default `show_bullet: true`, e.g. the
+        // sidebar page tree) still get exactly one bullet on their leaves.
+        assert_eq!(leading_marker(false, false, true), LeadingMarker::Bullet);
+        // Chevron wins over bullet on a parent — never both.
+        assert_eq!(leading_marker(true, true, true), LeadingMarker::Chevron);
+    }
 }
