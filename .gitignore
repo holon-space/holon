@@ -59,3 +59,5 @@ specs/.current-epic
 
 # archidoc IR scratch output
 _context/
+frontends/gpui/android/build-release/
+frontends/gpui/android/build-release-aab/

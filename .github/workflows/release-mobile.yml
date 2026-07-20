@@ -42,7 +42,7 @@ jobs:
             ios_line="- **iOS**: ⚠️ SKIPPED — Apple Developer Program enrollment pending (repo variable \`APPLE_RELEASE_ENABLED\` is not \`true\`)."
           fi
           if [ "$ANDROID_RELEASE_ENABLED" = "true" ]; then
-            android_line="- **Android**: uploaded to the Google Play **internal testing** track as a draft release; the attached \`holon-release.apk\` mirrors the exact uploaded build. Promotion beyond internal testing is manual, in Play Console."
+            android_line="- **Android**: the signed \`holon-release.aab\` is uploaded to the Google Play **internal testing** track as a draft release; both it and a sideloadable \`holon-release.apk\` (same .so, direct APK pipeline) are attached to this Release. Promotion beyond internal testing is manual, in Play Console."
           else
             android_line="- **Android**: ⚠️ SKIPPED — repo variable \`ANDROID_RELEASE_ENABLED\` is not \`true\`."
           fi
@@ -276,7 +276,23 @@ jobs:
           "$STRIP" target/aarch64-linux-android/release/libholon_gpui.so
           ls -lh target/aarch64-linux-android/release/libholon_gpui.so
 
-      - name: Package release-signed APK
+      # Download + pin bundletool (produces the AAB Play requires). Fail loud on
+      # a checksum mismatch — never build a release from an unverified binary.
+      - name: Download + verify bundletool
+        env:
+          BUNDLETOOL_VERSION: "1.17.2"
+          BUNDLETOOL_SHA256: "2d4ad908faea64047c1cc9cb747e6aa667c6ab192e09607bd16b67246a8cd6ae"
+        run: |
+          JAR="$RUNNER_TEMP/bundletool-all-$BUNDLETOOL_VERSION.jar"
+          curl -fsSL -o "$JAR" \
+            "https://github.com/google/bundletool/releases/download/$BUNDLETOOL_VERSION/bundletool-all-$BUNDLETOOL_VERSION.jar"
+          echo "$BUNDLETOOL_SHA256  $JAR" | sha256sum -c -
+          echo "BUNDLETOOL_JAR=$JAR" >> "$GITHUB_ENV"
+
+      # Play upload uses ONLY the AAB. The universal-ish sideload APK below is a
+      # secondary artifact (GitHub Release attachment for dogfooding), not
+      # uploaded to Play.
+      - name: Package release-signed AAB (Play) + APK (sideload)
         env:
           ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
@@ -286,6 +302,7 @@ jobs:
           KEYSTORE_FILE="$RUNNER_TEMP/release.jks"
           printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 -d > "$KEYSTORE_FILE"
           export KEYSTORE_FILE
+          bash frontends/gpui/android/build-release-aab.sh
           bash frontends/gpui/android/build-release-apk.sh
 
       - name: Install fastlane
@@ -295,17 +312,20 @@ jobs:
         working-directory: frontends/gpui/android
         env:
           GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
-          HOLON_APK_PATH: build-release/holon-release.apk
+          HOLON_AAB_PATH: build-release-aab/holon-release.aab
         run: fastlane android internal
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: frontends/gpui/android/build-release/holon-release.apk
+          subject-path: |
+            frontends/gpui/android/build-release-aab/holon-release.aab
+            frontends/gpui/android/build-release/holon-release.apk
 
-      - name: Mirror uploaded APK on the GitHub Release
+      - name: Mirror uploaded AAB + sideload APK on the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber \
+            frontends/gpui/android/build-release-aab/holon-release.aab \
             frontends/gpui/android/build-release/holon-release.apk

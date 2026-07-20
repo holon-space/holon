@@ -35,7 +35,7 @@ warning and labels the output:
 | Repo variable | When unset / not `"true"` | When `"true"` |
 |---|---|---|
 | `APPLE_RELEASE_ENABLED` | Desktop: macOS artifact is built but **unsigned**, named `…-unsigned.zip`, release notes say so. Mobile: iOS job is skipped entirely (a stub job logs why). | macOS is codesigned + notarized; iOS builds a signed IPA and uploads to TestFlight. |
-| `ANDROID_RELEASE_ENABLED` | Android jobs are skipped entirely (stub jobs log why). | Mobile (`mobile-v*`): builds a **release-keystore-signed** APK and uploads to the Play internal track. Desktop (`v*`): additionally attaches the same-shaped sideloadable `holon-release.apk` to every desktop GitHub Release (no store involvement). |
+| `ANDROID_RELEASE_ENABLED` | Android jobs are skipped entirely (stub jobs log why). | Mobile (`mobile-v*`): builds a **release-keystore-signed** AAB (bundletool) and uploads it to the Play internal track; a sideloadable `holon-release.apk` is also attached to the Release. Desktop (`v*`): additionally attaches the same-shaped sideloadable `holon-release.apk` to every desktop GitHub Release (no store involvement). |
 
 Windows is intentionally unsigned in v1 (decision: no paid or free signing
 cert yet). Users see one SmartScreen prompt; the release notes say so.
@@ -109,9 +109,10 @@ for the first real release; the workflows are otherwise complete.
 
 Prereq: a Play Console developer account (exists already) and the app created
 in Play Console (**Create app**, package name `space.holon.gpui`). The very
-first APK upload to the internal track may need to be done by hand in Play
+first AAB upload to the internal track may need to be done by hand in Play
 Console before API uploads are accepted — Play quirk, do it once with the
-CI-built APK off the GitHub Release if the first `supply` run complains.
+CI-built `holon-release.aab` off the GitHub Release if the first `supply` run
+complains.
 
 1. Play Console → **Setup** → **API access** → link a Google Cloud project.
 2. In that Cloud project: IAM & Admin → Service Accounts → **Create service
@@ -148,10 +149,12 @@ Store as repo secrets:
 Then set repo **variable** `ANDROID_RELEASE_ENABLED` = `true`.
 
 The release job **never** falls back to the debug keystore — the packaging
-script (`frontends/gpui/android/build-release-apk.sh`) requires every
-keystore variable and fails loud otherwise. It also strips the dev manifest's
-`android:debuggable="true"` (Play rejects debuggable APKs) and injects
-`versionCode`/`versionName` at link time.
+scripts (`build-release-aab.sh` for Play, `build-release-apk.sh` for the
+sideload artifact) require every keystore variable and fail loud otherwise.
+Both strip the dev manifest's `android:debuggable="true"` (Play rejects
+debuggable builds) and inject `versionCode`/`versionName` at link time. The AAB
+is signed with `jarsigner`; the sideload APK with `apksigner` — same keystore
+and env vars in both.
 
 ## Complete secrets & variables reference
 
@@ -244,11 +247,16 @@ verified against GitHub's Sigstore instance. Also compare
 - **Windows CRT**: built with `-C target-feature=+crt-static`, so the `.exe`
   has no VC++ redistributable (`vcruntime140.dll`) dependency — it runs on a
   clean Windows install. x86_64 only; no ARM64 Windows build.
-- **APK, not AAB**: the Android build is a direct aapt2/zipalign/apksigner
-  pipeline (no Gradle). Google Play requires an **AAB** for a new app's
-  *production* track; the internal testing track accepts APKs, which is all
-  this pipeline targets. **Follow-up before any production rollout**: produce
-  an AAB (bundletool or a minimal Gradle wrapper).
+- **AAB for Play, APK for sideload**: Google Play rejects APK uploads for this
+  app ("APKs are not allowed for this application", mobile-v0.0.13) — a new
+  Play app requires an **AAB**, no opt-out. There is no Gradle project; the AAB
+  is produced by a direct `aapt2 --proto-format` + **bundletool** pipeline in
+  `frontends/gpui/android/build-release-aab.sh` (pinned bundletool 1.17.2,
+  checksum-verified in CI). bundletool `validate` + a `build-apks
+  --mode=universal` badging diff against the direct-APK output gate correctness.
+  The direct-APK pipeline (`build-release-apk.sh`) still runs to produce a
+  sideloadable `holon-release.apk` attached to the GitHub Release; only the AAB
+  is uploaded to Play.
 - **Play track**: uploads go to `internal` as `draft`, never auto-promoted.
 - **Windows signing**: skipped in v1 by decision. Follow-up if SmartScreen
   friction matters: an OV/EV cert or Azure Trusted Signing.
