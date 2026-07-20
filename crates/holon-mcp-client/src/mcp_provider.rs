@@ -323,7 +323,11 @@ impl McpOperationProvider {
                 affected_fields,
                 param_mappings,
                 precondition,
-                ..Default::default()
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::External,
+                },
+                trigger: None,
+                bound_params: Default::default(),
             };
 
             descriptors.push(descriptor);

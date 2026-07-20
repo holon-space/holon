@@ -1836,7 +1836,15 @@ impl OperationProvider for SqlOperationProvider {
                         description: "Field value".to_string(),
                     },
                 ],
-                ..Default::default()
+                id_column: "id".to_string(),
+                affected_fields: vec![],
+                param_mappings: vec![],
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Internal,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -1844,7 +1852,16 @@ impl OperationProvider for SqlOperationProvider {
                 name: "create".to_string(),
                 display_name: "Create".to_string(),
                 description: format!("Create a new {}", self.entity_short_name),
-                ..Default::default()
+                id_column: "id".to_string(),
+                required_params: vec![],
+                affected_fields: vec![],
+                param_mappings: vec![],
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Internal,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -1857,7 +1874,15 @@ impl OperationProvider for SqlOperationProvider {
                     type_hint: TypeHint::String,
                     description: "Entity ID".to_string(),
                 }],
-                ..Default::default()
+                id_column: "id".to_string(),
+                affected_fields: vec![],
+                param_mappings: vec![],
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Internal,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -1870,7 +1895,13 @@ impl OperationProvider for SqlOperationProvider {
                     type_hint: TypeHint::String,
                     description: "Entity ID".to_string(),
                 }],
-                ..Default::default()
+                id_column: "id".to_string(),
+                affected_fields: vec![],
+                param_mappings: vec![],
+                menu_exposure: holon_api::MenuExposure::Listed,
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -1884,7 +1915,12 @@ impl OperationProvider for SqlOperationProvider {
                     description: "Entity ID".to_string(),
                 }],
                 affected_fields: vec!["task_state".to_string()],
-                ..Default::default()
+                id_column: "id".to_string(),
+                param_mappings: vec![],
+                menu_exposure: holon_api::MenuExposure::Listed,
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -1897,7 +1933,15 @@ impl OperationProvider for SqlOperationProvider {
                     type_hint: TypeHint::String,
                     description: "Wiki-link target (e.g. Projects/X)".to_string(),
                 }],
-                ..Default::default()
+                id_column: "id".to_string(),
+                affected_fields: vec![],
+                param_mappings: vec![],
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Internal,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -1917,7 +1961,15 @@ impl OperationProvider for SqlOperationProvider {
                         description: "New resolved_id".to_string(),
                     },
                 ],
-                ..Default::default()
+                id_column: "id".to_string(),
+                affected_fields: vec![],
+                param_mappings: vec![],
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Internal,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -1932,7 +1984,15 @@ impl OperationProvider for SqlOperationProvider {
                     type_hint: TypeHint::String,
                     description: "Captured block_links rows to restore".to_string(),
                 }],
-                ..Default::default()
+                id_column: "id".to_string(),
+                affected_fields: vec![],
+                param_mappings: vec![],
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Internal,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -1945,7 +2005,15 @@ impl OperationProvider for SqlOperationProvider {
                     type_hint: TypeHint::String,
                     description: "Origin block id to convert".to_string(),
                 }],
-                ..Default::default()
+                id_column: "id".to_string(),
+                affected_fields: vec![],
+                param_mappings: vec![],
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Internal,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             },
         ];
 
@@ -2886,14 +2954,18 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 let (destination_parent_id, destination_parent_depth, missing_segments) =
                     self.resolve_destination_chain(&destination_path).await?;
 
-                let full_page_path = if destination_path.trim().is_empty() {
-                    leaf_name.to_string()
-                } else {
-                    format!("{}/{leaf_name}", destination_path.trim())
-                };
-                let page_id = holon_api::link_parser::PageId::for_path(&full_page_path)?
-                    .as_str()
-                    .to_string();
+                // The origin's content is the page TITLE — a single leaf
+                // segment, NOT a `/`-separated path. Route it through
+                // `for_page_under` so a `/` in the content (a legitimate title
+                // like "buy milk/eggs", or the slash-menu trigger `/` still
+                // trailing at plan time) is never split into page-path segments
+                // (which would fail loud on an empty trailing segment, or
+                // silently mint phantom hierarchy). Only the `destination_path`
+                // is a real `/`-path, validated fail-loud inside `for_page_under`.
+                let page_id =
+                    holon_api::link_parser::PageId::for_page_under(&destination_path, leaf_name)?
+                        .as_str()
+                        .to_string();
                 let page_depth = destination_parent_depth + 1;
 
                 let child_ids = self.read_ordered_children(&origin_id).await?;

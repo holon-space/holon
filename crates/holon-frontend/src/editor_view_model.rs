@@ -619,7 +619,15 @@ mod tests {
                 display_name: name.into(),
                 required_params: params,
                 affected_fields: fields.iter().map(|s| s.to_string()).collect(),
-                ..Default::default()
+                id_column: "id".to_string(),
+                description: String::new(),
+                param_mappings: vec![],
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Test,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             },
         }
     }

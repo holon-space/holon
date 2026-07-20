@@ -324,7 +324,12 @@ mod tests {
                 }],
                 affected_fields: vec![],
                 param_mappings: vec![],
-                ..Default::default()
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Test,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             },
             OperationDescriptor {
                 entity_name: "task".into(),
@@ -342,7 +347,12 @@ mod tests {
                 }],
                 affected_fields: vec![],
                 param_mappings: vec![],
-                ..Default::default()
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Test,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             },
         ]
     }

@@ -166,6 +166,39 @@ impl PageId {
         Ok(Self::from_segments(&segments))
     }
 
+    /// Mint the id for a NEW page placed directly under `destination_path`
+    /// (root→leaf, `/`-joined; empty ⇒ the vault root) whose leaf title is
+    /// `leaf`.
+    ///
+    /// Unlike [`for_path`](Self::for_path), `leaf` is treated as ONE segment:
+    /// a `/` inside it is part of the title, never a path separator. This is
+    /// the sanctioned entry point for "turn block into page", where the leaf
+    /// comes from the origin block's CONTENT — a title, not a path — so a
+    /// title like `"buy milk/eggs"` (or a stray menu-trigger `/`) must not
+    /// spawn phantom hierarchy nor trip the empty-segment guard. The
+    /// destination path itself is still validated fail-loud (a malformed
+    /// picker/MCP `destination_path` is a real error).
+    pub fn for_page_under(destination_path: &str, leaf: &str) -> Result<Self, String> {
+        let leaf = leaf.trim();
+        if leaf.is_empty() {
+            return Err("page leaf title is empty; a page needs a non-empty title".to_string());
+        }
+        let mut segments: Vec<&str> = if destination_path.trim().is_empty() {
+            Vec::new()
+        } else {
+            Self::segments(destination_path)
+        };
+        if segments.iter().any(|s| s.is_empty()) {
+            return Err(format!(
+                "page destination path {destination_path:?} has an empty segment \
+                 (leading/trailing or doubled '/'); a page path must be non-empty \
+                 '/'-separated segments"
+            ));
+        }
+        segments.push(leaf);
+        Ok(Self::from_segments(&segments))
+    }
+
     /// Borrow the underlying `EntityUri`.
     pub fn as_entity_uri(&self) -> &EntityUri {
         &self.0
@@ -582,5 +615,34 @@ mod tests {
         }
         assert!(PageId::for_path("a/b").is_ok());
         assert!(PageId::for_path("a").is_ok());
+    }
+
+    #[test]
+    fn for_page_under_treats_leaf_as_a_single_segment() {
+        // Bug (C): the "turn block into page" leaf comes from block CONTENT (a
+        // title), so a `/` inside it is part of the title, never a separator —
+        // it must NOT trip the empty-segment guard nor mint phantom hierarchy.
+        assert!(
+            PageId::for_page_under("", "Promote me to page/").is_ok(),
+            "a trailing '/' in the title is one leaf segment, not a malformed path"
+        );
+        assert!(
+            PageId::for_page_under("Home", "buy milk/eggs").is_ok(),
+            "an embedded '/' in the title stays one leaf segment"
+        );
+        // Equivalence to for_path for slash-free content keeps ids born-equal
+        // with the existing write paths.
+        assert_eq!(
+            PageId::for_page_under("Home", "Section").unwrap(),
+            PageId::for_path("Home/Section").unwrap(),
+        );
+        assert_eq!(
+            PageId::for_page_under("", "Loose note").unwrap(),
+            PageId::for_path("Loose note").unwrap(),
+        );
+        // The DESTINATION path is still a real path — malformed destinations and
+        // empty leaves fail loud.
+        assert!(PageId::for_page_under("a//b", "leaf").is_err());
+        assert!(PageId::for_page_under("Home", "   ").is_err());
     }
 }

@@ -1137,7 +1137,16 @@ mod tests {
                 trigger: Some(Trigger::KeyChord {
                     chord: KeyChord::new(&[crate::input::Key::Cmd, crate::input::Key::Enter]),
                 }),
-                ..Default::default()
+                entity_short_name: String::new(),
+                id_column: "id".to_string(),
+                display_name: String::new(),
+                description: String::new(),
+                required_params: vec![],
+                affected_fields: vec![],
+                param_mappings: vec![],
+                bound_params: Default::default(),
+                menu_exposure: holon_api::MenuExposure::Listed,
+                precondition: None,
             },
         });
 
@@ -1185,7 +1194,18 @@ mod tests {
                     name: "set_field".into(),
                     entity_name: "block".into(),
                     trigger: None,
-                    ..Default::default()
+                    entity_short_name: String::new(),
+                    id_column: "id".to_string(),
+                    display_name: String::new(),
+                    description: String::new(),
+                    required_params: vec![],
+                    affected_fields: vec![],
+                    param_mappings: vec![],
+                    bound_params: Default::default(),
+                    menu_exposure: holon_api::MenuExposure::NotListed {
+                        surface: holon_api::NonMenuSurface::Test,
+                    },
+                    precondition: None,
                 },
             },
             OperationWiring {
@@ -1196,7 +1216,16 @@ mod tests {
                     trigger: Some(Trigger::KeyChord {
                         chord: KeyChord::new(&[crate::input::Key::Cmd, crate::input::Key::Enter]),
                     }),
-                    ..Default::default()
+                    entity_short_name: String::new(),
+                    id_column: "id".to_string(),
+                    display_name: String::new(),
+                    description: String::new(),
+                    required_params: vec![],
+                    affected_fields: vec![],
+                    param_mappings: vec![],
+                    bound_params: Default::default(),
+                    menu_exposure: holon_api::MenuExposure::Listed,
+                    precondition: None,
                 },
             },
         ];
@@ -1318,7 +1347,17 @@ mod tests {
                     ("region".into(), Value::String("main".into())),
                     ("block_id".into(), Value::String("block:page-foo".into())),
                 ]),
-                ..Default::default()
+                entity_short_name: String::new(),
+                id_column: "id".to_string(),
+                display_name: String::new(),
+                description: String::new(),
+                required_params: vec![],
+                affected_fields: vec![],
+                param_mappings: vec![],
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Test,
+                },
+                precondition: None,
             },
         });
 
@@ -1373,7 +1412,17 @@ mod tests {
                     ("region".into(), Value::String("main".into())),
                     ("block_id".into(), Value::String("block:foo".into())),
                 ]),
-                ..Default::default()
+                entity_short_name: String::new(),
+                id_column: "id".to_string(),
+                display_name: String::new(),
+                description: String::new(),
+                required_params: vec![],
+                affected_fields: vec![],
+                param_mappings: vec![],
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Test,
+                },
+                precondition: None,
             },
         });
 

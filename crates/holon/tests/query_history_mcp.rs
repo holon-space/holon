@@ -45,7 +45,16 @@ impl OperationProvider for DeltaProvider {
                 name: name.to_string(),
                 display_name: name.to_string(),
                 description: format!("{name} on block"),
-                ..Default::default()
+                id_column: "id".to_string(),
+                required_params: vec![],
+                affected_fields: vec![],
+                param_mappings: vec![],
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Test,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             })
             .collect()
     }

@@ -323,7 +323,15 @@ fn default_block_operations() -> Vec<holon_api::render_types::OperationDescripto
                     description: "Field value".to_string(),
                 },
             ],
-            ..Default::default()
+            id_column: "id".to_string(),
+            affected_fields: vec![],
+            param_mappings: vec![],
+            menu_exposure: holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::Test,
+            },
+            trigger: None,
+            bound_params: Default::default(),
+            precondition: None,
         },
         OperationDescriptor {
             entity_name: entity_name.clone().into(),
@@ -333,7 +341,12 @@ fn default_block_operations() -> Vec<holon_api::render_types::OperationDescripto
             description: "Cycle to the next task state".to_string(),
             required_params: vec![id_param],
             affected_fields: vec!["task_state".to_string()],
-            ..Default::default()
+            id_column: "id".to_string(),
+            param_mappings: vec![],
+            menu_exposure: holon_api::MenuExposure::Listed,
+            trigger: None,
+            bound_params: Default::default(),
+            precondition: None,
         },
     ]
 }
