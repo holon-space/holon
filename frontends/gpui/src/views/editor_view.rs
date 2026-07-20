@@ -53,6 +53,17 @@ pub(crate) enum EchoDecision {
     /// A reordered/lagged echo of an edit strictly older than the editor's last
     /// local write. Drop it — this is the "typing resets the block" fix.
     DropStale,
+    /// The echo carries the editor's OWN last write-seq AND its content is
+    /// exactly the trailing-whitespace canonicalization of the focused buffer
+    /// (`SqlOperationProvider::trimmed_content` strips trailing whitespace on
+    /// store). This is the SQL-canonicalized echo of the user's own in-flight
+    /// write, NOT a newer external authority — the two are indistinguishable by
+    /// seq alone because non-editor writers don't bump `write_seq`. Converging
+    /// would delete the just-typed trailing space from the focused buffer (the
+    /// "typed space vanishes ~100ms later" bug). Keep the visible buffer as
+    /// typed; adopt the canonical text as the change-tracking baseline so a
+    /// later blur/idle diffs against SQL truth, not a stale baseline.
+    AdoptBaseline { seq: i64 },
     /// Content changed but the row carried no `write_seq` ordering token — a
     /// schema/projection regression. Drop and report loudly (never converge
     /// blindly: that is the stale-echo data loss we are preventing).
@@ -86,7 +97,38 @@ pub(crate) fn evaluate_data_sync_echo(
     };
     if seq < last_local_seq {
         EchoDecision::DropStale
+    } else if seq == last_local_seq
+        && holon_api::content_canonical::canonicalize_stored_content(current, false) == new_value
+    {
+        // Same seq as our last local write AND the echo is exactly the SERVER
+        // canonicalization of the focused buffer. Non-editor writers
+        // (split/join/org) do NOT bump `write_seq`, so a genuine structural write
+        // echoes at `seq == last_local` too — but its content is a substantive
+        // change, never merely the whitespace-canonicalization of `current`. This
+        // branch is therefore the SQL-canonicalized echo of the user's OWN
+        // in-flight write. Converging would delete the just-typed whitespace (the
+        // "typed space vanishes ~100ms later" bug, whether at the end of the
+        // buffer or at the end of a multiline block's first line). Keep the
+        // buffer; the caller adopts the canonical baseline instead.
+        //
+        // The canonicalization MUST match what the store actually applied to
+        // produce this echo, so it delegates to the single shared definition
+        // (`holon_api::content_canonical`) that `SqlOperationProvider::trimmed_content`
+        // also calls — the two can never drift. `is_source = false` is a
+        // deliberate approximation: the provider resolves `is_source` from the
+        // block's REAL content_type via a live DB lookup
+        // (`SqlOperationProvider`, set_field paths ~:2152-2175 / ~:1636-1654),
+        // which this pure function cannot see. For text blocks both sides use
+        // the text rule (exact match). For SOURCE blocks the store applies only
+        // `trim_end`, so a pure-trailing trim still matches (the reported bug
+        // stays fixed) and a first-line/leading divergence falls through to
+        // Converge — the pre-fix behavior, disclosed gap, no new data loss.
+        EchoDecision::AdoptBaseline { seq }
     } else {
+        // `seq > last_local` (a genuinely newer authority — a peer edit stamps a
+        // fresh seq), OR `seq == last_local` with a substantive external change
+        // (a split truncation "hello world" -> "hello" shares the editor's seq
+        // but is not a trailing-whitespace trim of the buffer). Converge.
         EchoDecision::Converge { seq }
     }
 }
@@ -515,6 +557,37 @@ impl EditorView {
                                                     this.last_local_seq
                                                 );
                                             }
+                                        }
+                                        EchoDecision::AdoptBaseline { seq } => {
+                                            if caret_probe() {
+                                                eprintln!(
+                                                    "[data-sync] ADOPT-BASELINE (own \
+                                                     canonicalized echo) seq={seq} last_local={} \
+                                                     current={current:?} new={new_value:?} — \
+                                                     keeping typed buffer, rebaselining to canonical",
+                                                    this.last_local_seq
+                                                );
+                                            }
+                                            // The echo is the SQL-canonicalized form of our OWN
+                                            // in-flight write (trailing whitespace trimmed on
+                                            // store). Do NOT converge — that would delete the
+                                            // just-typed trailing space from the focused buffer.
+                                            // Keep the visible text as typed; re-baseline the
+                                            // blur-commit change tracking to the canonical
+                                            // authority so a later blur/idle diffs against SQL
+                                            // truth (the buffer/authority divergence is then a
+                                            // single trailing space, never a phantom diff against
+                                            // a stale baseline). `rebaseline` dispatches nothing
+                                            // and does not advance the write-seq — the same no-op
+                                            // contract `converge_input` relies on. A single benign
+                                            // blur re-dispatch of "foo " (server-trimmed to "foo",
+                                            // idempotent) may follow; it cannot loop because the
+                                            // trimmed re-echo is itself AdoptBaseline/InSync.
+                                            this.last_local_seq = this.last_local_seq.max(seq);
+                                            this.controller
+                                                .lock()
+                                                .unwrap()
+                                                .rebaseline(&new_value);
                                         }
                                         EchoDecision::Converge { seq } => {
                                             if caret_probe() {
@@ -2043,8 +2116,84 @@ mod echo_suppression {
         // Non-editor writers (split/join/org) don't bump write_seq, so the row
         // retains the editor's last seq; their echo carries seq == last_local and
         // a DIFFERENT value → converge (they changed content, not the token).
+        // The truncation "hello world" -> "hello" is NOT a trailing-whitespace
+        // canonicalization of the buffer (`"hello world".trim_end()` != "hello"),
+        // so it is a genuine external change and still converges even though it
+        // shares the editor's seq. This is the discriminator that keeps the
+        // trailing-space fix from swallowing real structural writes.
         let d = evaluate_data_sync_echo("hello world", "hello", Some(11), 11);
         assert_eq!(d, EchoDecision::Converge { seq: 11 });
+    }
+
+    #[test]
+    fn same_seq_trailing_space_echo_adopts_baseline_not_converge() {
+        // THE TRAILING-SPACE BUG. The user typed "foo " (trailing space); the
+        // editor stamped write_seq 11 on that content write. The SQL provider
+        // trims trailing whitespace on store ("foo") and echoes it back through
+        // CDC carrying the SAME write_seq 11 (the trim does not re-stamp). At the
+        // moment the echo arrives the focused buffer is still "foo " and
+        // last_local_seq is 11. This echo is the SQL-canonicalized form of the
+        // user's OWN in-flight write, distinguished from a genuine same-seq
+        // external write by `"foo ".trim_end() == "foo"`. Converging would delete
+        // the just-typed space; the correct decision keeps the buffer and adopts
+        // the canonical baseline.
+        let d = evaluate_data_sync_echo("foo ", "foo", Some(11), 11);
+        assert_eq!(d, EchoDecision::AdoptBaseline { seq: 11 });
+    }
+
+    #[test]
+    fn same_seq_multiple_trailing_spaces_echo_adopts_baseline() {
+        // Multiple trailing spaces collapse to the same canonical form, so the
+        // discriminator (`trim_end`) still recognises the echo as our own write.
+        let d = evaluate_data_sync_echo("hello world   ", "hello world", Some(42), 42);
+        assert_eq!(d, EchoDecision::AdoptBaseline { seq: 42 });
+    }
+
+    #[test]
+    fn same_seq_first_line_trailing_space_in_multiline_adopts_baseline() {
+        // CLASS EXTENSION. The server ALSO trims the FIRST line's trailing
+        // whitespace in multiline text content (the first line becomes the org
+        // headline). A space typed at the end of a multiline block's first line
+        // echoes back canonicalized ("foo \nbar" -> "foo\nbar") at the SAME seq.
+        // `current.trim_end()` cannot see this — the stripped space is interior
+        // to the whole string — so the discriminator must use the FULL server
+        // canonicalization (`holon_api::content_canonical`). Without it this
+        // narrower instance of the same bug still eats the space.
+        let d = evaluate_data_sync_echo("foo \nbar", "foo\nbar", Some(11), 11);
+        assert_eq!(d, EchoDecision::AdoptBaseline { seq: 11 });
+    }
+
+    #[test]
+    fn blur_reecho_after_adopt_does_not_loop() {
+        // BLUR-AFTER-ADOPT LIVENESS. After AdoptBaseline the buffer ("foo ") and
+        // SQL truth ("foo") diverge by a trailing space while focused. On blur
+        // the change-tracking (baselined to "foo") diffs the live "foo " and
+        // re-dispatches ONE set_field("foo ") — a blur intent carries NO
+        // write_seq, so the provider trims to "foo" and leaves the write_seq
+        // column at the editor's last value N. The re-echo is therefore
+        // ("foo", seq N) at last_local N. Two terminal buffer states are
+        // possible when that re-echo lands, and NEITHER re-converges — so the
+        // "own canonicalized echo" cannot become an infinite Converge loop:
+        //
+        //   (1) the unfocused render backstop has already canonicalized the
+        //       buffer to "foo": the re-echo equals the buffer → InSync.
+        let settled = evaluate_data_sync_echo("foo", "foo", Some(600), 600);
+        assert_eq!(
+            settled,
+            EchoDecision::InSync {
+                advance_to: Some(600)
+            }
+        );
+        //   (2) the backstop has not run yet and the buffer is still "foo ":
+        //       the re-echo is again the trailing-whitespace canonicalization →
+        //       AdoptBaseline (a no-op re-baseline, still no set_value).
+        let still_focused = evaluate_data_sync_echo("foo ", "foo", Some(600), 600);
+        assert_eq!(still_focused, EchoDecision::AdoptBaseline { seq: 600 });
+        // The trim is idempotent server-side, so a single benign blur
+        // re-dispatch is acceptable; the absence of any Converge here is what
+        // rules out the pathological echo loop.
+        assert!(!matches!(settled, EchoDecision::Converge { .. }));
+        assert!(!matches!(still_focused, EchoDecision::Converge { .. }));
     }
 
     #[test]
