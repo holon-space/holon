@@ -16,8 +16,6 @@
 // surface is the port traits + sync base store consumed by holon-loro.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod change_source;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod directory;
 pub mod error;
 pub mod file;
 #[cfg(not(target_arch = "wasm32"))]
@@ -40,15 +38,8 @@ pub use change_source::FileChangeKind;
 pub use change_source::FileChangeSource;
 #[cfg(not(target_arch = "wasm32"))]
 pub use change_source::NotifyWatcher;
-#[cfg(not(target_arch = "wasm32"))]
-pub use directory::ChangesWithMetadata;
-#[cfg(not(target_arch = "wasm32"))]
-pub use directory::Directory;
-#[cfg(not(target_arch = "wasm32"))]
-pub use directory::DirectoryChangeProvider;
-#[cfg(not(target_arch = "wasm32"))]
-pub use directory::ROOT_ID;
 pub use error::FilesystemError;
+pub use file::ChangesWithMetadata;
 pub use file::File;
 #[cfg(not(target_arch = "wasm32"))]
 pub use file_sync_controller::BlockDelta;
