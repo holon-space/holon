@@ -226,6 +226,26 @@ pub fn extract_enum_from(attrs: &[syn::Attribute]) -> Option<ParsedEnumFrom> {
 
 /// Extract affected fields from #[affects("field1", "field2")] or
 /// #[operation(affects = [...])]
+/// Extract the `#[menu_exposure(<variant>)]` marker on a macro-generated
+/// operation, returning the bare variant identifier (e.g. `"listed"`,
+/// `"keyboard_gesture"`). `None` means the op did not classify itself — the
+/// operations_trait macro then emits the fail-closed `ProviderDefault` surface.
+pub fn extract_menu_exposure(attrs: &[syn::Attribute]) -> Option<String> {
+    for attr in attrs {
+        let is_menu_attr = attr.path().is_ident("menu_exposure")
+            || (attr.path().segments.len() == 2
+                && attr.path().segments[0].ident == "holon_macros"
+                && attr.path().segments[1].ident == "menu_exposure");
+        if is_menu_attr
+            && let syn::Meta::List(meta_list) = &attr.meta
+            && let Ok(ident) = meta_list.parse_args::<syn::Ident>()
+        {
+            return Some(ident.to_string());
+        }
+    }
+    None
+}
+
 pub fn extract_affected_fields(attrs: &[syn::Attribute]) -> Vec<String> {
     for attr in attrs {
         // Check for standalone #[affects("field1", "field2")]

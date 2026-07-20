@@ -211,7 +211,15 @@ impl OperationProvider for OperationDispatcher {
                 name: "sync".to_string(),
                 display_name: "Sync".to_string(),
                 description: "Sync registered syncable providers".to_string(),
-                ..Default::default()
+                required_params: vec![],
+                affected_fields: vec![],
+                param_mappings: vec![],
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::External,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             });
 
             // Add wildcard full_sync operation (clear caches + sync)
@@ -225,7 +233,15 @@ impl OperationProvider for OperationDispatcher {
                 description: "Clear all caches, reset sync tokens, and re-sync from external \
                               systems"
                     .to_string(),
-                ..Default::default()
+                required_params: vec![],
+                affected_fields: vec![],
+                param_mappings: vec![],
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::External,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             });
         }
 
@@ -958,7 +974,12 @@ mod tests {
             required_params: vec![],
             affected_fields: vec![],
             param_mappings: vec![],
-            ..Default::default()
+            menu_exposure: holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::Test,
+            },
+            trigger: None,
+            bound_params: Default::default(),
+            precondition: None,
         }
     }
 

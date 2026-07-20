@@ -298,7 +298,15 @@ mod tests {
                 entity_short_name: "block".into(),
                 name: "delete".into(),
                 display_name: "Delete".into(),
-                ..Default::default()
+                id_column: "id".to_string(),
+                description: String::new(),
+                required_params: vec![],
+                affected_fields: vec![],
+                param_mappings: vec![],
+                menu_exposure: holon_api::MenuExposure::Listed,
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             },
         }];
         let triggers = default_triggers_for_operations(&ops);

@@ -84,7 +84,15 @@ impl OperationProvider for SqlOperationProvider {
                         description: "Field value".to_string(),
                     },
                 ],
-                ..Default::default()
+                id_column: "id".to_string(),
+                affected_fields: vec![],
+                param_mappings: vec![],
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Test,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone(),
@@ -92,7 +100,16 @@ impl OperationProvider for SqlOperationProvider {
                 name: "create".to_string(),
                 display_name: "Create".to_string(),
                 description: format!("Create a new {}", self.entity_short_name),
-                ..Default::default()
+                id_column: "id".to_string(),
+                required_params: vec![],
+                affected_fields: vec![],
+                param_mappings: vec![],
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Test,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone(),
@@ -105,7 +122,13 @@ impl OperationProvider for SqlOperationProvider {
                     type_hint: holon_api::TypeHint::String,
                     description: "Entity ID".to_string(),
                 }],
-                ..Default::default()
+                id_column: "id".to_string(),
+                affected_fields: vec![],
+                param_mappings: vec![],
+                menu_exposure: holon_api::MenuExposure::Listed,
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             },
         ]
     }

@@ -31,7 +31,17 @@ fn build_wiring(name: &str, args: &[Arg], row: &DataRow, trigger: Trigger) -> Op
             name: op_name,
             trigger: Some(trigger),
             bound_params,
-            ..Default::default()
+            entity_short_name: String::new(),
+            id_column: "id".to_string(),
+            display_name: String::new(),
+            description: String::new(),
+            required_params: vec![],
+            affected_fields: vec![],
+            param_mappings: vec![],
+            menu_exposure: holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::PointerGesture,
+            },
+            precondition: None,
         },
     }
 }
