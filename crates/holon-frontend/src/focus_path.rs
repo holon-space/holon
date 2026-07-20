@@ -1145,7 +1145,13 @@ mod tests {
                 affected_fields: vec![],
                 param_mappings: vec![],
                 bound_params: Default::default(),
-                menu_exposure: holon_api::MenuExposure::Listed,
+                target_scope: holon_api::TargetScope::Block,
+                menu_exposure: holon_api::MenuExposure::Listed {
+                    surfaces: holon_api::SurfaceSet {
+                        slash_menu: true,
+                        action_bar: false,
+                    },
+                },
                 precondition: None,
             },
         });
@@ -1202,6 +1208,7 @@ mod tests {
                     affected_fields: vec![],
                     param_mappings: vec![],
                     bound_params: Default::default(),
+                    target_scope: holon_api::TargetScope::Block,
                     menu_exposure: holon_api::MenuExposure::NotListed {
                         surface: holon_api::NonMenuSurface::Test,
                     },
@@ -1224,7 +1231,13 @@ mod tests {
                     affected_fields: vec![],
                     param_mappings: vec![],
                     bound_params: Default::default(),
-                    menu_exposure: holon_api::MenuExposure::Listed,
+                    target_scope: holon_api::TargetScope::Block,
+                    menu_exposure: holon_api::MenuExposure::Listed {
+                        surfaces: holon_api::SurfaceSet {
+                            slash_menu: true,
+                            action_bar: false,
+                        },
+                    },
                     precondition: None,
                 },
             },
@@ -1354,6 +1367,7 @@ mod tests {
                 required_params: vec![],
                 affected_fields: vec![],
                 param_mappings: vec![],
+                target_scope: holon_api::TargetScope::Block,
                 menu_exposure: holon_api::MenuExposure::NotListed {
                     surface: holon_api::NonMenuSurface::Test,
                 },
@@ -1419,6 +1433,7 @@ mod tests {
                 required_params: vec![],
                 affected_fields: vec![],
                 param_mappings: vec![],
+                target_scope: holon_api::TargetScope::Block,
                 menu_exposure: holon_api::MenuExposure::NotListed {
                     surface: holon_api::NonMenuSurface::Test,
                 },

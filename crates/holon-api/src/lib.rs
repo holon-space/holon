@@ -198,7 +198,7 @@ pub use render_types::{
     Arg, BinaryOperator, ClickModifiers, MenuExposure, NonMenuSurface, Operation,
     OperationDescriptor, OperationParam, OperationWiring, ParamMapping, PickerKind,
     PreconditionChecker, RenderExpr, RenderProfile, RenderVariant, RenderableItem, RowProfile,
-    RowTemplate, Trigger, TypeHint, ViewSpec, extract_widget_names,
+    RowTemplate, SurfaceSet, TargetScope, Trigger, TypeHint, ViewSpec, extract_widget_names,
 };
 // Re-export streaming types
 pub use streaming::{

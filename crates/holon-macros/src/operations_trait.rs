@@ -279,6 +279,7 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                         affected_fields: #affected_fields_expr,
                         param_mappings: #param_mappings_expr,
                         menu_exposure: #menu_exposure_expr,
+                        target_scope: holon_api::TargetScope::Block,
                         trigger: None,
                         bound_params: ::std::collections::HashMap::new(),
                         #precondition_field
@@ -1441,7 +1442,11 @@ fn extract_menu_exposure(attrs: &[syn::Attribute]) -> Option<String> {
 /// deliberately declares `listed`).
 fn menu_exposure_tokens(variant: Option<String>) -> proc_macro2::TokenStream {
     match variant.as_deref() {
-        Some("listed") => quote! { holon_api::MenuExposure::Listed },
+        Some("listed") => quote! {
+            holon_api::MenuExposure::Listed {
+                surfaces: holon_api::SurfaceSet { slash_menu: true, action_bar: false },
+            }
+        },
         Some("keyboard_gesture") => quote! {
             holon_api::MenuExposure::NotListed {
                 surface: holon_api::NonMenuSurface::KeyboardGesture,

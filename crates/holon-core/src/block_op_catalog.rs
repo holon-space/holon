@@ -101,6 +101,7 @@ pub fn dismiss_advice_descriptor(
         param_mappings: vec![],
         // Dismiss-advice is fired from the advice UI affordance, not the slash
         // command menu.
+        target_scope: holon_api::TargetScope::Block,
         menu_exposure: holon_api::MenuExposure::NotListed {
             surface: holon_api::NonMenuSurface::Internal,
         },
@@ -187,6 +188,7 @@ fn tag_descriptor(
         param_mappings: vec![],
         // Element-wise tag mutation is a programmatic/structural op, not a bare
         // slash command.
+        target_scope: holon_api::TargetScope::Block,
         menu_exposure: holon_api::MenuExposure::NotListed {
             surface: holon_api::NonMenuSurface::Internal,
         },

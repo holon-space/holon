@@ -102,7 +102,7 @@ pub struct RenderProfile {
 
 // ALLOW(compatibility): RowProfile is a deprecated alias still used by
 // serialized fixtures
-/// Backward compatibility alias.
+/// Deprecated alias retained for serialized fixtures.
 pub type RowProfile = RenderProfile;
 
 /// Modifier keys held during a mouse click.
@@ -215,7 +215,13 @@ pub enum Trigger {
 pub enum MenuExposure {
     /// Appears in the slash command menu whenever its params resolve from the
     /// editor context (indent, outdent, move_up, move_down, delete, convert…).
-    Listed,
+    ///
+    /// Carries a `SurfaceSet` so ONE exposure axis drives both the slash menu
+    /// and the (future) mobile action bar — single source of truth, no parallel
+    /// enum. Today every `Listed` op is `slash_menu: true, action_bar: false`,
+    /// preserving exact current behaviour (slash-only, invisible to the
+    /// not-yet-existent action bar).
+    Listed { surfaces: SurfaceSet },
     /// Not a bare menu op — surfaced only through a dedicated picker whose
     /// entries are data-driven (e.g. per-template rows for
     /// `instantiate_template`).
@@ -224,6 +230,33 @@ pub enum MenuExposure {
     /// only (keyboard/pointer gesture, navigation, sync, or an internal
     /// read-only planner step).
     NotListed { surface: NonMenuSurface },
+}
+
+/// Which UI surfaces a `Listed` op is reachable from. One exposure axis drives
+/// both the slash menu and the (future) mobile action bar, so an op's
+/// discoverability lives in a single place instead of two parallel enums.
+/// flutter_rust_bridge:non_opaque
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SurfaceSet {
+    /// Surfaces in the slash command menu.
+    pub slash_menu: bool,
+    /// Surfaces in the mobile action bar (not yet rendered).
+    pub action_bar: bool,
+}
+
+/// How narrowly an operation targets — the sort key for the future action bar.
+///
+/// Derive order is narrowness order: `Block < Page < Global`. `Block`-acting
+/// ops (cycle-state, indent/outdent, move, delete, embed, convert-to-page) act
+/// on a single block; `Page`-level ops (share, rename-page, page settings) act
+/// on a page; app/global ops act on the whole app.
+/// flutter_rust_bridge:non_opaque
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetScope {
+    Block,
+    Page,
+    Global,
 }
 
 /// A dedicated picker that surfaces an op outside the flat command list.
@@ -292,6 +325,12 @@ pub struct OperationDescriptor {
     /// registry↔menu correspondence oracle reads this instead of assuming
     /// "every profile op is a menu candidate".
     pub menu_exposure: MenuExposure,
+
+    /// How narrowly this op targets (block / page / global). Non-defaultable
+    /// (no `Default` on the struct) so every construction site classifies
+    /// explicitly — a forgotten scope is a compile error, not a silent default.
+    /// The future action bar sorts its ops by this narrowness key.
+    pub target_scope: TargetScope,
 
     /// Input that invokes this operation when bound to a widget.
     ///
@@ -521,8 +560,8 @@ impl TypeHint {
                     .map(|v| v.trim().to_string())
                     .collect();
                 // ALLOW(compatibility): legacy enum:foo,bar form predates the structured
-                // Value::String list Convert string values to Value::String for
-                // backward compatibility
+                // Value::String list; convert string values to Value::String for
+                // the legacy callers
                 let values: Vec<Value> = string_values.into_iter().map(Value::String).collect();
                 TypeHint::OneOf { values }
             }

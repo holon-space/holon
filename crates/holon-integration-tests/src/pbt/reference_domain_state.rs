@@ -326,6 +326,7 @@ fn default_block_operations() -> Vec<holon_api::render_types::OperationDescripto
             id_column: "id".to_string(),
             affected_fields: vec![],
             param_mappings: vec![],
+            target_scope: holon_api::TargetScope::Block,
             menu_exposure: holon_api::MenuExposure::NotListed {
                 surface: holon_api::NonMenuSurface::Test,
             },
@@ -343,7 +344,13 @@ fn default_block_operations() -> Vec<holon_api::render_types::OperationDescripto
             affected_fields: vec!["task_state".to_string()],
             id_column: "id".to_string(),
             param_mappings: vec![],
-            menu_exposure: holon_api::MenuExposure::Listed,
+            target_scope: holon_api::TargetScope::Block,
+            menu_exposure: holon_api::MenuExposure::Listed {
+                surfaces: holon_api::SurfaceSet {
+                    slash_menu: true,
+                    action_bar: false,
+                },
+            },
             trigger: None,
             bound_params: Default::default(),
             precondition: None,

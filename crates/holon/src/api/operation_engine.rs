@@ -769,7 +769,13 @@ impl DispatchingOperationEngine {
                 provides: vec!["target".to_string()],
                 defaults: Default::default(),
             }],
-            menu_exposure: holon_api::MenuExposure::Listed,
+            target_scope: holon_api::TargetScope::Block,
+            menu_exposure: holon_api::MenuExposure::Listed {
+                surfaces: holon_api::SurfaceSet {
+                    slash_menu: true,
+                    action_bar: false,
+                },
+            },
             trigger: None,
             bound_params: Default::default(),
             affected_fields: vec![],
@@ -818,6 +824,7 @@ impl DispatchingOperationEngine {
             ],
             affected_fields: vec![],
             param_mappings: vec![],
+            target_scope: holon_api::TargetScope::Block,
             menu_exposure: holon_api::MenuExposure::PickerBacked {
                 picker: holon_api::PickerKind::Template,
             },
