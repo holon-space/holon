@@ -56,7 +56,7 @@ use render::builders::GpuiRenderContext;
 /// `background` token so the fade tracks light/dark themes automatically.
 /// Keep it small — this is a hint of depth, not a visible band. Raise it for a
 /// more pronounced fade; set it to `0.0` to restore a flat fill.
-const BG_GRADIENT_LIGHTNESS_SPREAD: f32 = 0.015;
+const BG_GRADIENT_LIGHTNESS_SPREAD: f32 = 0.035;
 
 // ── Android icon-glyph substitutes ──────────────────────────────────────────
 //
