@@ -28,6 +28,8 @@ use holon_core::cell::CursorBias;
 use holon_core::cell::TextDelta;
 use holon_core::cell::TextOp;
 
+use crate::echo::EchoDecision;
+use crate::echo::evaluate_data_sync_echo;
 use crate::input_trigger::InputTrigger;
 use crate::input_trigger::ViewEvent;
 use crate::input_trigger::{self};
@@ -138,6 +140,22 @@ impl std::fmt::Debug for EditorAction {
     }
 }
 
+/// Instruction the convergence decision hands back to the adapter: set the
+/// visible editor buffer (`InputState`) to the backend authority.
+///
+/// `target` is the SqlOnly authority text and doubles as the fallback the
+/// adapter's `converge_input` uses when no Loro cell is attached; a
+/// cell-attached editor re-reads the *live* cell authority at apply time, so a
+/// composition committed during an IME deferral is merged, never reverted.
+/// `seq` is the write-ordering high-water this convergence accepted — it lets a
+/// directive deferred past an IME composition be discarded when a newer local
+/// write (the committed composition) superseded it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConvergeDirective {
+    pub target: String,
+    pub seq: i64,
+}
+
 /// Framework-agnostic controller for an editable text field.
 ///
 /// Each editable text node in the ViewModel gets one controller.
@@ -170,6 +188,11 @@ pub struct EditorViewModel {
     /// less than this. Starts at `WriteSeq::ZERO`: before the user types, every
     /// echo converges (correct seeding).
     last_local_seq: i64,
+    /// A convergence directive deferred because an IME composition was in
+    /// progress at converge time. Stashed by `set_pending_directive`,
+    /// superseded by any newer directive, and replayed by the adapter on the
+    /// composition-end / focus edge via `take_pending_directive`.
+    pending_directive: Option<ConvergeDirective>,
 }
 
 impl EditorViewModel {
@@ -188,6 +211,7 @@ impl EditorViewModel {
             cell: None,
             buffer: original_value,
             last_local_seq: holon_api::write_seq::WriteSeq::ZERO.get(),
+            pending_directive: None,
         }
     }
 
@@ -340,6 +364,95 @@ impl EditorViewModel {
             "set_field".into(),
             params,
         )))
+    }
+
+    /// Decide how to react to a SqlOnly data-sync echo (`new_value` carrying
+    /// ordering token `echo_seq`), running the op-versioned echo-suppression
+    /// rule against the VM's own authoritative `buffer`. Performs every
+    /// VM-state mutation that is safe mid-IME-composition inline (high-water
+    /// advance for InSync/Converge, baseline adopt for AdoptBaseline) and
+    /// returns `Some(directive)` ONLY for the Converge case — the adapter must
+    /// then set the visible InputState to the authority (immediately, or
+    /// deferred past an IME composition). Returns `None` for InSync / DropStale
+    /// / DropNoSeq / AdoptBaseline: the visible buffer is left untouched.
+    pub fn converge_from_data_sync(
+        &mut self,
+        new_value: &str,
+        echo_seq: Option<i64>,
+    ) -> Option<ConvergeDirective> {
+        match evaluate_data_sync_echo(&self.buffer, new_value, echo_seq, self.last_local_seq) {
+            EchoDecision::InSync { advance_to } => {
+                if let Some(seq) = advance_to {
+                    self.advance_local_seq(seq);
+                }
+                None
+            }
+            EchoDecision::DropStale => None,
+            EchoDecision::DropNoSeq => {
+                // Content changed but the row carries no `write_seq` token — a
+                // schema/projection regression. Fail LOUD and DROP: converging
+                // blindly here is exactly the stale-echo data loss we prevent.
+                tracing::error!(
+                    target: "editor.data_sync",
+                    row_id = ?self.handler.context_id(),
+                    new = %new_value,
+                    "data-sync echo has no write_seq column; dropping \
+                     (schema/projection regression)"
+                );
+                None
+            }
+            EchoDecision::AdoptBaseline { seq } => {
+                // The echo is the SQL-canonicalized form of our OWN in-flight
+                // write (trailing whitespace trimmed on store). Keep the typed
+                // buffer; re-baseline change tracking to the canonical authority
+                // so a later blur diffs against SQL truth, not a stale baseline.
+                self.advance_local_seq(seq);
+                self.rebaseline(new_value);
+                None
+            }
+            EchoDecision::Converge { seq } => {
+                self.advance_local_seq(seq);
+                Some(ConvergeDirective {
+                    target: new_value.to_string(),
+                    seq: self.last_local_seq,
+                })
+            }
+        }
+    }
+
+    /// Build the convergence directive for a cell-mode remote-delta wakeup:
+    /// converge the visible InputState to the live Loro authority
+    /// (`current_text`). `None` when no cell is attached (the remote-delta loop
+    /// only runs cell-attached). `seq` is the current high-water; cell-mode
+    /// local edits do not stamp a write-seq, so a deferred remote directive
+    /// always replays and the adapter re-reads the live (merged) cell.
+    pub fn remote_converge_directive(&self) -> Option<ConvergeDirective> {
+        let target = self.current_text()?;
+        Some(ConvergeDirective {
+            target,
+            seq: self.last_local_seq,
+        })
+    }
+
+    /// Stash a convergence directive the adapter deferred because an IME
+    /// composition is in progress (`ime_marked_range().is_some()`). A newer
+    /// directive supersedes an older pending one. The buffer is NOT committed
+    /// while deferred, so a mid-composition converge never overwrites the
+    /// in-flight composed text.
+    pub fn set_pending_directive(&mut self, directive: ConvergeDirective) {
+        self.pending_directive = Some(directive);
+    }
+
+    /// Take the deferred directive for replay on a composition-end / focus
+    /// edge, clearing the pending slot. Returns `None` — discarding it — when a
+    /// newer local write (a committed composition, which stamped a higher
+    /// `write_seq`) superseded it since it was deferred.
+    pub fn take_pending_directive(&mut self) -> Option<ConvergeDirective> {
+        let directive = self.pending_directive.take()?;
+        if self.last_local_seq > directive.seq {
+            return None;
+        }
+        Some(directive)
     }
 
     /// Apply a local edit to the CRDT (origin-tagged so the remote-delta
@@ -1275,6 +1388,81 @@ mod tests {
         assert!(
             matches!(vm.on_blur("Some Page edited"), EditorAction::None),
             "second blur with unchanged text must not re-commit"
+        );
+    }
+
+    /// Inc 3: the convergence DECISION lives in the VM. A genuinely newer
+    /// external authority write yields a directive the adapter must apply; the
+    /// non-converging echo outcomes yield `None` and only mutate VM state.
+    #[test]
+    fn data_sync_decision_maps_echo_outcomes_to_directive() {
+        let mut vm = test_controller();
+        vm.advance_local_seq(10);
+
+        // Stale echo (seq < high-water) → dropped, no directive, no advance.
+        assert!(vm.converge_from_data_sync("older", Some(5)).is_none());
+        assert_eq!(vm.last_local_seq(), 10);
+
+        // In-sync echo of the current buffer → no directive, advances high-water.
+        assert!(vm.converge_from_data_sync("original", Some(12)).is_none());
+        assert_eq!(vm.last_local_seq(), 12);
+
+        // Genuinely newer external write → Converge directive for the adapter.
+        let directive = vm
+            .converge_from_data_sync("peer edit", Some(20))
+            .expect("newer external write must yield a converge directive");
+        assert_eq!(directive.target, "peer edit");
+        assert_eq!(directive.seq, 20);
+        assert_eq!(vm.last_local_seq(), 20);
+    }
+
+    /// The SQL-canonicalized echo of the editor's OWN in-flight write (same
+    /// seq, trailing whitespace trimmed) adopts the baseline WITHOUT a
+    /// directive — the typed buffer, trailing space and all, is kept.
+    #[test]
+    fn data_sync_own_canonicalized_echo_adopts_baseline_without_directive() {
+        let mut vm = test_controller();
+        // Type a trailing space through the buffer sink; records a fresh seq.
+        vm.apply_local_edit("foo ").unwrap();
+        let seq = vm.last_local_seq();
+        assert!(
+            vm.converge_from_data_sync("foo", Some(seq)).is_none(),
+            "own canonicalized echo must not converge (would delete the space)"
+        );
+        assert_eq!(vm.buffer(), "foo ", "typed buffer kept as-is");
+    }
+
+    /// Amendment 3: a directive deferred during an IME composition replays
+    /// until a newer local write supersedes it, and a newer deferred
+    /// directive supersedes an older pending one.
+    #[test]
+    fn pending_directive_supersede_and_stale_discard() {
+        let mut vm = test_controller();
+
+        // Newer pending directive supersedes an older one.
+        vm.set_pending_directive(ConvergeDirective {
+            target: "old".into(),
+            seq: 2,
+        });
+        vm.set_pending_directive(ConvergeDirective {
+            target: "new".into(),
+            seq: 7,
+        });
+        let taken = vm
+            .take_pending_directive()
+            .expect("newest directive replays");
+        assert_eq!(taken.target, "new");
+        assert!(vm.take_pending_directive().is_none(), "cleared after take");
+
+        // A directive whose seq is behind a newer local write is discarded.
+        vm.set_pending_directive(ConvergeDirective {
+            target: "stale".into(),
+            seq: 5,
+        });
+        vm.advance_local_seq(9);
+        assert!(
+            vm.take_pending_directive().is_none(),
+            "a directive superseded by a newer local write is discarded on replay"
         );
     }
 }
