@@ -9,6 +9,8 @@
 //! the UI would and undo replays their real op-level inverses.
 
 use std::collections::HashMap;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use holon::api::backend_engine::BackendEngine;
@@ -19,6 +21,7 @@ use holon::di::test_helpers::create_test_engine_with_providers;
 use holon::storage::BLOCK_WRITE_TABLE;
 use holon_api::EntityName;
 use holon_api::EntityRef;
+use holon_api::EntityUri;
 use holon_api::InlineMark;
 use holon_api::MarkSpan;
 use holon_api::OpOrigin;
@@ -30,6 +33,8 @@ use holon_api::link_parser::PageId;
 use holon_api::marks_to_json;
 use holon_core::OperationProvider;
 use holon_core::storage::types::StorageEntity;
+use holon_org_format::OrgRenderer;
+use holon_org_format::parse_org_file;
 use holon_turso::schema_module::SchemaModule;
 use holon_turso::schema_modules::BlockSchemaModule;
 
@@ -500,11 +505,12 @@ async fn convert_treats_slash_in_content_as_title_not_path() {
     let page = convert(&engine, origin, "").await;
     assert_eq!(
         page,
-        PageId::for_page_under("", "Promote me to page/")
+        PageId::for_page_under("", "Promote me to page")
             .unwrap()
             .as_str(),
-        "content is a single-segment title; a trailing '/' must not split it \
-         into an empty path segment and fail loud"
+        "content is a single-segment title; a trailing '/' is stripped at the \
+         convert boundary so the title, its id, and its filename all agree \
+         (and it never splits into an empty path segment)"
     );
     assert!(is_page(&engine, &page).await);
 
@@ -522,6 +528,97 @@ async fn convert_treats_slash_in_content_as_title_not_path() {
         "an embedded '/' in the title must not spawn a 'buy milk' > 'eggs' page hierarchy"
     );
     assert!(is_page(&engine, &page2).await);
+}
+
+/// Read a block's stored `content` column.
+async fn content_of(engine: &BackendEngine, id: &str) -> Option<String> {
+    scalar(
+        engine,
+        &format!("SELECT content FROM {BLOCK_WRITE_TABLE} WHERE id = '{id}'"),
+        "content",
+    )
+    .await
+}
+
+/// The `.org` file path `FileSyncController::authoritative_name_chain` would
+/// form for a page: destination segments + the page's own `title()` as the
+/// leaf, `.org` extension. `chain.push(block.title())` is the sole title
+/// carrier on disk — the vault convention is filename-as-title (zero `.org`
+/// files carry `#+TITLE:`; parser.rs derives the page title from the file stem
+/// and the PBT model normalizes on it, so an emitted `#+TITLE:` would break
+/// correspondence).
+fn page_file_path(root: &Path, destination_segments: &[&str], page_title: &str) -> PathBuf {
+    let mut p = root.to_path_buf();
+    for seg in destination_segments {
+        p = p.join(seg);
+    }
+    p.join(page_title).with_extension("org")
+}
+
+/// Round-trip invariant: convert → render the new page's own `.org` file →
+/// reingest it → the reingested page title EQUALS the DB page title. Because
+/// the title rides the FILENAME (no `#+TITLE:`), any character the filename
+/// cannot carry verbatim breaks the round-trip. A trailing `/` is retained in
+/// the DB title but stripped by path normalization when the filename is formed,
+/// so an unsanitized title reingests DIVERGENT.
+async fn assert_title_round_trips(origin_content: &str) {
+    let engine = block_engine().await;
+    let origin = "block:rt-origin";
+    create(
+        &engine,
+        origin,
+        "sentinel:no_parent",
+        origin_content,
+        0,
+        false,
+    )
+    .await;
+    let page = convert(&engine, origin, "").await;
+
+    // The authoritative title the writeback must persist.
+    let db_content = content_of(&engine, &page).await.expect("page content");
+    let db_title = db_content.lines().next().unwrap_or("").to_string();
+
+    // Reconstruct the page doc-root as file_sync renders it, then reingest.
+    let bare = page.strip_prefix("block:").unwrap_or(&page);
+    let doc_id = EntityUri::block(bare);
+    let root_parent = EntityUri::from_raw("sentinel:no_parent");
+    let mut doc = Block::new_text(doc_id.clone(), root_parent.clone(), db_content.clone());
+    doc.set_page(true);
+
+    let root = PathBuf::from("/vault");
+    let path = page_file_path(&root, &[], &doc.title());
+    let rendered = OrgRenderer::render_document(&doc, &[], &path, &doc_id);
+
+    // Lock the vehicle decision: the title rides the filename, NEVER `#+TITLE:`.
+    assert!(
+        !rendered.contains("#+TITLE"),
+        "page files carry the title in the FILENAME, not `#+TITLE:` (rendered: {rendered:?})"
+    );
+
+    let reparsed =
+        parse_org_file(&path, &rendered, &root_parent, &root).expect("reingest the page file");
+    assert_eq!(
+        reparsed.document.title(),
+        db_title,
+        "convert writeback must persist the page title across render→reingest \
+         (page file: {path:?}, rendered: {rendered:?})"
+    );
+}
+
+/// Control: a clean title round-trips through the filename with no `#+TITLE:`.
+#[tokio::test(flavor = "multi_thread")]
+async fn convert_title_round_trips_clean() {
+    assert_title_round_trips("Round Trip Clean").await;
+}
+
+/// RED (pre-fix): a trailing `/` in the title is kept in the DB but dropped by
+/// path normalization, so the page reingests with a different title. The fix
+/// sanitizes the trailing `/` at the convert boundary so title, id, and
+/// filename all agree.
+#[tokio::test(flavor = "multi_thread")]
+async fn convert_title_round_trips_trailing_slash() {
+    assert_title_round_trips("Trailing Slash/").await;
 }
 
 trait AssertApplied {
