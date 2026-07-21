@@ -67,6 +67,7 @@ variants:
     render: >-
       expand_toggle(#{
         default_expanded: true,
+        hover_reveal_toggle: true,
         header: selectable(row(icon("orgmode", #{size: 12}), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})}),
         content: live_query(#{
           prql: "from descendants",
@@ -83,6 +84,7 @@ variants:
     condition: 'is_page_row && (!is_def_var("role") || role != "page_title")'
     render: >-
       expand_toggle(#{
+        hover_reveal_toggle: true,
         header: row(icon("orgmode", #{size: 12}), text(col("content"))),
         content: live_query(#{
           prql: "from descendants",
