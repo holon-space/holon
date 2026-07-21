@@ -1,0 +1,321 @@
+//! Seed-shape + data guards for the main-panel **Linked references**
+//! (backlinks) section.
+//!
+//! Martin's ruling (2026-07-21): backlinks must NOT be hard-coded in Rust —
+//! they live in the declarative render pipeline (`assets/default/`). The
+//! section is expressed inside the seeded main-panel render block
+//! (`assets/default/index.org`): the page outline (`collection_view()`, the
+//! block's profile-derived tree/table/board switcher) is wrapped in a
+//! `column(...)` followed by `divider()`, a "Linked references" header, and a
+//! `live_query` over the `backlinks` matview scoped to the current page via a
+//! `focus_roots` join.
+//!
+//! The one generic Rust capability this needs is the `collection_view()`
+//! render marker (expanded by `BlockDomain::render_entity` into the block's
+//! default collection view), so the declarative render can compose the outline
+//! with surrounding chrome WITHOUT losing view-mode switching and WITHOUT
+//! hard-coding the tree.
+//!
+//! Guards:
+//!  1. `fresh_seed_places_backlinks_section_below_outline` — the seeded
+//!     main-panel render composes outline → divider → header → backlinks query,
+//!     in order.
+//!  2. `render_entity_expands_collection_view_marker` — rendering the main
+//!     panel expands `collection_view()` into the real view-mode switcher and
+//!     keeps the backlinks `live_query`; no raw marker leaks to the frontend.
+//!  3. `backlinks_query_lists_incoming_links_for_focused_page` — with the main
+//!     region focused on a page, the section query returns the blocks linking
+//!     to it; focusing a page with no incoming links returns nothing.
+//!
+//! @pbt kind harness
+//! @pbt covers backlinks-section-seed — main-panel Linked-references section is
+//! seeded below the outline behind a divider as declarative layout data, and
+//! its query returns incoming resolved links for the focused page.
+//! @pbt overlaps block_links_junction — kept: the junction test proves the
+//! `backlinks` matview lifecycle; this proves the seeded render wiring +
+//! focus-scoped query.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use fluxdi::Module;
+use fluxdi::Provider;
+use holon::storage::BLOCK_READ_TABLE;
+use holon::sync::EventInfraModule;
+use holon_api::EntityName;
+use holon_api::EntityRef;
+use holon_api::EntityUri;
+use holon_api::InlineMark;
+use holon_api::MarkSpan;
+use holon_api::OpOrigin;
+use holon_api::Value;
+
+const MAIN_PANEL_ID: &str = "block:default-main-panel";
+
+/// The exact query the seeded Linked-references section runs — kept in sync
+/// with `assets/default/index.org`. Backlinks for the block the main region is
+/// currently focused on (`focus_roots` region='main').
+const SECTION_SQL: &str = "SELECT bl.id AS id, bl.content AS content, bl.parent_id \
+     AS parent_id FROM backlinks bl JOIN focus_roots fr ON fr.region = 'main' \
+     WHERE bl.target_id = fr.root_id ORDER BY bl.content ASC";
+
+fn runtime() -> Arc<tokio::runtime::Runtime> {
+    Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create runtime"),
+    )
+}
+
+/// Fresh file-backed SqlOnly engine + `BlockOrdering` through the same lazy-DI
+/// entry the gpui frontend uses (mirrors `integrations_section_seed.rs`).
+async fn fresh_engine(
+    db_path: std::path::PathBuf,
+) -> (
+    Arc<holon::api::BackendEngine>,
+    Arc<dyn holon_core::block_ordering::BlockOrdering>,
+) {
+    holon::di::create_backend_engine_with_extras(
+        db_path,
+        |injector| {
+            EventInfraModule.configure(injector).map_err(|e| {
+                anyhow::anyhow!("configure EventInfraModule for backlinks-seed test: {e}")
+            })?;
+            injector.provide_into_set::<dyn holon_core::OperationProvider>(Provider::root(
+                |resolver| {
+                    let db = resolver
+                        .resolve::<dyn holon::di::DbHandleProvider>()
+                        .handle();
+                    Arc::new(holon::core::SqlOperationProvider::new(
+                        db,
+                        holon::storage::BLOCK_WRITE_TABLE.to_string(),
+                        "block".to_string(),
+                        "block".to_string(),
+                    )) as Arc<dyn holon_core::OperationProvider>
+                },
+            ));
+            Ok(())
+        },
+        |injector| async move {
+            injector
+                .resolve_async::<dyn holon_core::block_ordering::BlockOrdering>()
+                .await
+        },
+    )
+    .await
+    .expect("fresh-db lazy DI graph must build (BackendEngine + BlockOrdering)")
+}
+
+/// The main-panel render block's content: the sole `render`-language child of
+/// `block:default-main-panel` (id resolved from the query, not hard-coded).
+async fn main_panel_render_content(db: &holon::storage::DbHandle) -> Option<String> {
+    let rows = db
+        .query(
+            &format!(
+                "SELECT content FROM {BLOCK_READ_TABLE} \
+                 WHERE parent_id = '{MAIN_PANEL_ID}' AND source_language = 'render'"
+            ),
+            HashMap::new(),
+        )
+        .await
+        .expect("query main-panel render block");
+    rows.first().map(|row| {
+        row.get("content")
+            .and_then(|v| v.as_string())
+            .expect("render row has content")
+            .to_string()
+    })
+}
+
+/// An id-form (`EntityRef::Internal`) link mark — resolves trivially at the
+/// write boundary, so the `backlinks` matview picks it up without needing the
+/// target to exist or be Page-tagged.
+fn id_link_marks(target_local: &str, label: &str, start: usize, end: usize) -> String {
+    holon_api::marks_to_json(&[MarkSpan::new(
+        start,
+        end,
+        InlineMark::Link {
+            target: EntityRef::Internal {
+                id: EntityUri::block(target_local),
+            },
+            label: label.to_string(),
+        },
+    )])
+}
+
+async fn create_linking_block(
+    engine: &holon::api::BackendEngine,
+    block_local: &str,
+    content: &str,
+    target_local: &str,
+    label: &str,
+) {
+    let block_entity: EntityName = "block".to_string().into();
+    let mut p: holon_api::StorageEntity = HashMap::new();
+    p.insert("id".into(), Value::String(format!("block:{block_local}")));
+    p.insert("content".into(), Value::String(content.to_string()));
+    p.insert(
+        "marks".into(),
+        Value::String(id_link_marks(target_local, label, 0, label.len())),
+    );
+    engine
+        .execute_operation(&block_entity, "create", p, OpOrigin::User)
+        .await
+        .expect("create linking block");
+}
+
+/// Point the main region's focus at `block_local` (closes any prior open main
+/// focus first, mirroring `focus_replace`).
+async fn focus_main(db: &holon::storage::DbHandle, block_local: &str) {
+    db.execute_values(
+        "UPDATE navigation_history SET closed_at = datetime('now') \
+         WHERE region = 'main' AND closed_at IS NULL",
+        vec![],
+    )
+    .await
+    .expect("close prior main focus");
+    db.execute_values(
+        &format!(
+            "INSERT INTO navigation_history (region, block_id) \
+             VALUES ('main', 'block:{block_local}')"
+        ),
+        vec![],
+    )
+    .await
+    .expect("insert main focus row");
+}
+
+async fn section_result_ids(db: &holon::storage::DbHandle) -> Vec<String> {
+    let rows = db
+        .query(SECTION_SQL, HashMap::new())
+        .await
+        .expect("backlinks section query must compile and run (fail loud, not empty)");
+    rows.into_iter()
+        .map(|r| {
+            r.get("id")
+                .and_then(|v| v.as_string())
+                .expect("section row has id")
+                .to_string()
+        })
+        .collect()
+}
+
+/// The seeded main-panel render composes, IN ORDER: the page outline
+/// (`collection_view()`), a divider, the "Linked references" header, then a
+/// `live_query` over the `backlinks` matview scoped by `focus_roots`.
+#[test]
+fn fresh_seed_places_backlinks_section_below_outline() {
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (engine, ordering) = fresh_engine(dir.path().join("fresh.db")).await;
+
+        holon_app::seed_default_layout(&engine, ordering, false)
+            .await
+            .expect("seed_default_layout must complete on a fresh file DB");
+
+        let db = engine.db_handle();
+        let content = main_panel_render_content(&db)
+            .await
+            .expect("main panel must have a seeded render block after fresh seed");
+
+        let outline_at = content
+            .find("collection_view(")
+            .expect("render must embed the page outline via collection_view()");
+        let divider_at = content
+            .find("divider(")
+            .expect("render must contain a divider() separating outline from backlinks");
+        let header_at = content
+            .find("Linked references")
+            .expect("render must contain the Linked references header");
+        let query_at = content
+            .find("live_query")
+            .expect("backlinks section must be a live_query (reactive)");
+
+        assert!(
+            outline_at < divider_at && divider_at < header_at && header_at < query_at,
+            "order must be: outline, divider, header, backlinks query — got \
+             outline@{outline_at} divider@{divider_at} header@{header_at} \
+             query@{query_at} in: {content}"
+        );
+        assert!(
+            content.contains("backlinks") && content.contains("focus_roots"),
+            "section must query the backlinks matview scoped to the current page \
+             via focus_roots: {content}"
+        );
+    });
+}
+
+/// Rendering the main panel expands the `collection_view()` marker into the
+/// real view-mode switcher (view modes preserved) and keeps the backlinks
+/// `live_query` — no raw marker reaches the frontend.
+#[test]
+fn render_entity_expands_collection_view_marker() {
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (engine, ordering) = fresh_engine(dir.path().join("fresh.db")).await;
+        holon_app::seed_default_layout(&engine, ordering, false)
+            .await
+            .expect("seed_default_layout");
+
+        let main_uri = EntityUri::block("default-main-panel");
+        let (expr, _stream) = engine
+            .blocks()
+            .render_entity(&main_uri, &None)
+            .await
+            .expect("render_entity(main panel) must resolve");
+        let dump = format!("{expr:?}");
+
+        assert!(
+            dump.contains("view_mode_switcher"),
+            "collection_view() must expand to the profile view-mode switcher \
+             (view modes preserved), got: {dump}"
+        );
+        assert!(
+            dump.contains("backlinks"),
+            "the composed render must keep the backlinks live_query: {dump}"
+        );
+        assert!(
+            !dump.contains("collection_view"),
+            "the collection_view() marker must be fully substituted, not leaked \
+             to the frontend: {dump}"
+        );
+    });
+}
+
+/// With the main region focused on a page, the section query returns the
+/// blocks linking to it (alphabetical by content); focusing a page with no
+/// incoming links returns nothing (the section renders empty, never
+/// fabricated).
+#[test]
+fn backlinks_query_lists_incoming_links_for_focused_page() {
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (engine, ordering) = fresh_engine(dir.path().join("fresh.db")).await;
+        holon_app::seed_default_layout(&engine, ordering.clone(), false)
+            .await
+            .expect("seed_default_layout");
+
+        // Two blocks link to page `alice`; none link to page `bob`.
+        create_linking_block(&engine, "ref-b", "beta mentions", "alice", "Alice").await;
+        create_linking_block(&engine, "ref-a", "alpha mentions", "alice", "Alice").await;
+
+        let db = engine.db_handle();
+
+        focus_main(&db, "alice").await;
+        assert_eq!(
+            section_result_ids(&db).await,
+            vec!["block:ref-a".to_string(), "block:ref-b".to_string()],
+            "focused on alice → its incoming links, ordered by content (alpha, beta)"
+        );
+
+        focus_main(&db, "bob").await;
+        assert!(
+            section_result_ids(&db).await.is_empty(),
+            "focused on bob (no incoming links) → empty section, never fabricated"
+        );
+    });
+}
