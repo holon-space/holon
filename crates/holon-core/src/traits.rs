@@ -1972,6 +1972,113 @@ where
             ),
         ))
     }
+
+    /// Delete a block **and its entire subtree** (every descendant).
+    ///
+    /// This is the EXPLICIT cascade variant. The bare `delete` op refuses a
+    /// non-leaf block (destructive-delete ruling 2026-07-21) so that no caller
+    /// — keyboard, menu, or MCP/agent — cascades a subtree away by accident.
+    /// This op is how a caller opts INTO the cascade after confirming intent.
+    ///
+    /// Loro authority (`cells()` present): a single `tree.delete` cascades the
+    /// whole subtree — routed through the cell registry, the same path
+    /// `join_block` uses, so the outbound projector emits the SQL deletes.
+    /// SqlOnly / synthetic substrate (no cell route): descendants are deleted
+    /// deepest-first so every `delete` sees a leaf and the fail-closed
+    /// non-leaf guard is never tripped, then the now-childless root.
+    ///
+    /// Declared irreversible: faithfully resurrecting an ordered subtree is out
+    /// of scope (fail-loud, never a lossy inverse) — the same line the leaf
+    /// `delete` inverse draws.
+    #[holon_macros::menu_exposure(listed)]
+    #[holon_macros::boundary_behavior(private_only)]
+    async fn delete_subtree(&self, id: &EntityUri) -> Result<OperationResult> {
+        if delete_block_via_cells(self.cells(), id).await? {
+            return Ok(OperationResult::declared_irreversible(
+                Vec::new(),
+                "delete_subtree: subtree resurrection not implemented (Loro authority)",
+            ));
+        }
+        let mut descendants: Vec<T> = self.get_descendants(id).await?;
+        // Deepest-first: a node is deleted only after all of its descendants,
+        // so each `self.delete` operates on a leaf.
+        descendants.sort_by(|a, b| b.depth().cmp(&a.depth()));
+        for d in &descendants {
+            self.delete(d.id().as_str()).await?;
+        }
+        self.delete(id.as_str()).await?;
+        Ok(OperationResult::declared_irreversible(
+            Vec::new(),
+            "delete_subtree: subtree resurrection not implemented",
+        ))
+    }
+
+    /// Delete a block but **keep its children**: reparent every child to the
+    /// deleted block's parent, spliced in at the block's own sibling slot so
+    /// relative order is preserved (destructive-delete ruling 2026-07-21).
+    ///
+    /// The reparent threads the positional anchor exactly like `join_block`:
+    /// children are read IN ORDER from the positional authority, then each is
+    /// `move_to_position`-ed after its predecessor starting from the deleted
+    /// block's own predecessor sibling — so the children take the block's slot
+    /// among its siblings in their original order. Once the block is a leaf it
+    /// is deleted through the Loro authority when present, else the SQL row
+    /// directly.
+    ///
+    /// Declared irreversible: the reparent + delete pair has no exact single
+    /// inverse (mirrors `join_block`'s with-children case).
+    #[holon_macros::affects("parent_id", "depth", "sort_key")]
+    #[holon_macros::menu_exposure(listed)]
+    #[holon_macros::boundary_behavior(crossing_widens)]
+    async fn delete_keep_children(&self, id: &EntityUri) -> Result<OperationResult> {
+        let id_str = id.as_str();
+        let block: T = self
+            .get_by_id(id_str)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
+        let parent_uri = block
+            .parent_id()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Cannot delete_keep_children on a root block"))?;
+
+        // Children IN ORDER from the positional authority — `get_children` is
+        // an unordered `get_all` filter (same authority rule as `join_block`).
+        let children: Vec<EntityUri> = match self.ordering() {
+            Some(ordering) => ordering.children(id).await?,
+            None => self
+                .get_children(id)
+                .await?
+                .iter()
+                .map(|c| c.id().clone())
+                .collect(),
+        };
+
+        // Splice the children into the block's OWN slot: anchor on the block's
+        // predecessor sibling, then thread each moved child as the next anchor
+        // so their relative order is preserved.
+        let mut changes = Vec::new();
+        let mut last_after: Option<EntityUri> =
+            self.get_prev_sibling(id).await?.map(|p| p.id().clone());
+        for child in children {
+            let move_changes = self
+                .move_to_position(&child, &parent_uri, last_after.as_ref())
+                .await?;
+            changes.extend(move_changes);
+            last_after = Some(child);
+        }
+
+        // `id` is now a leaf — delete it through the Loro authority when
+        // available, else the SQL row directly (mirrors `join_block`).
+        if !delete_block_via_cells(self.cells(), id).await? {
+            let delete_result = self.delete(id_str).await?;
+            changes.extend(delete_result.changes);
+        }
+
+        Ok(OperationResult::declared_irreversible(
+            changes,
+            "delete_keep_children: reparent+delete not yet invertible",
+        ))
+    }
 }
 
 /// Rename operations (for entities with a name field)
