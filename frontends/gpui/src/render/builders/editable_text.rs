@@ -124,7 +124,7 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
             // arrived this frame (no keystroke yet). A continuously-focused editor
             // is left alone so in-flight typing is never yanked. `converge_input`
             // prefers the Loro cell authority over the SQL-lagged `content`
-            // (curing the projection lag) and keeps `previous_text` in lockstep.
+            // (curing the projection lag) and keeps the VM buffer in lockstep.
             // Increment G — in the steady state a cell-attached editor converges
             // solely via its `_remote_delta_subscription` (the entity `Cell` is the
             // single external content source), so the render backstop stays OFF

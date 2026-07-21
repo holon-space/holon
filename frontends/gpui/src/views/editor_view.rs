@@ -21,8 +21,7 @@ use gpui_component::menu::PopupMenuItem;
 use holon_api::widget_spec::DataRow;
 use holon_frontend::RowOrigin;
 use holon_frontend::cell::CursorBias;
-use holon_frontend::echo::EchoDecision;
-use holon_frontend::echo::evaluate_data_sync_echo;
+use holon_frontend::editor_view_model::ConvergeDirective;
 use holon_frontend::editor_view_model::EditorAction;
 use holon_frontend::editor_view_model::EditorKey;
 use holon_frontend::editor_view_model::EditorViewModel;
@@ -143,7 +142,7 @@ impl EditorView {
         // SQL-projected `content` prop until the first delta — the transient
         // staleness the removed just-focused render backstop used to cure. The
         // cell text is synchronously readable here (`current_text()` is a
-        // synchronous borrow, already used below to seed `previous_text`).
+        // synchronous borrow, already used below to seed the VM buffer).
         // Building `input` AFTER `attach_cell` means no stale value ever exists.
         // No cell (unwired / headless) → seed from `content`, exactly as before.
         let cell_attached = controller.has_cell();
@@ -178,7 +177,7 @@ impl EditorView {
             cx.subscribe_in(
                 &input,
                 window,
-                move |this, entity, event, _window, cx| match event {
+                move |this, entity, event, window, cx| match event {
                     InputEvent::Focus => {
                         #[cfg(feature = "mobile")]
                         this.note_focus_gained_mobile();
@@ -204,7 +203,10 @@ impl EditorView {
                             }
                             services_clone.set_focus(Some(my_uri));
                         }
-                        let _ = (this, entity, cx);
+                        // Focus edge: replay any directive deferred during a
+                        // just-ended IME composition (Amendment 3).
+                        this.replay_pending_directive(window, cx);
+                        let _ = entity;
                     }
                     InputEvent::Blur => {
                         #[cfg(feature = "mobile")]
@@ -213,6 +215,8 @@ impl EditorView {
                         let value = entity.read(cx).value().to_string();
                         let action = ctrl.lock().unwrap().on_blur(&value);
                         execute_action(action, &services_clone, this.input.entity_id(), cx);
+                        // Blur edge: replay any IME-deferred directive.
+                        this.replay_pending_directive(window, cx);
                         // Cursor position is no longer persisted on blur:
                         // editor focus + caret are pure
                         // in-memory UI state (ADR 0010),
@@ -262,6 +266,11 @@ impl EditorView {
                                 tracing::error!("apply_local_edit failed: {e}");
                             }
                         }
+
+                        // A committed IME composition ends here with
+                        // `ime_marked_range()` cleared — replay any deferred
+                        // converge (discarded if this edit superseded it).
+                        this.replay_pending_directive(window, cx);
 
                         cx.notify();
                     }
@@ -359,108 +368,23 @@ impl EditorView {
                         for window_handle in cx.windows() {
                             let _ = window_handle.update(cx, |_, window, cx| {
                                 view.update(cx, |this, cx| {
-                                    let input = this.input.clone();
-                                    let current = input.read(cx).value().to_string();
-                                    let last_local =
-                                        this.controller.lock().unwrap().last_local_seq();
-                                    match evaluate_data_sync_echo(
-                                        &current,
-                                        &new_value,
-                                        echo_seq,
-                                        last_local,
-                                    ) {
-                                        EchoDecision::InSync { advance_to } => {
-                                            // Echo of our own latest write (or a
-                                            // redundant emit). Advance the
-                                            // high-water mark so a later reordered
-                                            // echo of an even earlier keystroke is
-                                            // still seen as stale.
-                                            if let Some(s) = advance_to {
-                                                this.controller
-                                                    .lock()
-                                                    .unwrap()
-                                                    .advance_local_seq(s);
-                                            }
-                                        }
-                                        EchoDecision::DropNoSeq => {
-                                            // Content changed but the row carries
-                                            // no `write_seq` token — a schema /
-                                            // projection regression. Fail LOUD and
-                                            // DROP: converging blindly here is
-                                            // exactly the stale-echo data loss we
-                                            // are fixing.
-                                            tracing::error!(
-                                                target: "editor.data_sync",
-                                                row_id = %this.row_id,
-                                                current = %current,
-                                                new = %new_value,
-                                                "data-sync echo has no write_seq column; \
-                                                 dropping (schema/projection regression)"
-                                            );
-                                        }
-                                        EchoDecision::DropStale => {
-                                            if caret_probe() {
-                                                eprintln!(
-                                                    "[data-sync] DROP stale echo seq={echo_seq:?} \
-                                                     < last_local={} current={current:?} \
-                                                     new={new_value:?}",
-                                                    last_local
-                                                );
-                                            }
-                                        }
-                                        EchoDecision::AdoptBaseline { seq } => {
-                                            if caret_probe() {
-                                                eprintln!(
-                                                    "[data-sync] ADOPT-BASELINE (own \
-                                                     canonicalized echo) seq={seq} last_local={} \
-                                                     current={current:?} new={new_value:?} — \
-                                                     keeping typed buffer, rebaselining to canonical",
-                                                    last_local
-                                                );
-                                            }
-                                            // The echo is the SQL-canonicalized form of our OWN
-                                            // in-flight write (trailing whitespace trimmed on
-                                            // store). Do NOT converge — that would delete the
-                                            // just-typed trailing space from the focused buffer.
-                                            // Keep the visible text as typed; re-baseline the
-                                            // blur-commit change tracking to the canonical
-                                            // authority so a later blur/idle diffs against SQL
-                                            // truth (the buffer/authority divergence is then a
-                                            // single trailing space, never a phantom diff against
-                                            // a stale baseline). `rebaseline` dispatches nothing
-                                            // and does not advance the write-seq — the same no-op
-                                            // contract `converge_input` relies on. A single benign
-                                            // blur re-dispatch of "foo " (server-trimmed to "foo",
-                                            // idempotent) may follow; it cannot loop because the
-                                            // trimmed re-echo is itself AdoptBaseline/InSync.
-                                            let mut vm = this.controller.lock().unwrap();
-                                            vm.advance_local_seq(seq);
-                                            vm.rebaseline(&new_value);
-                                            drop(vm);
-                                        }
-                                        EchoDecision::Converge { seq } => {
-                                            if caret_probe() {
-                                                eprintln!(
-                                                    "[data-sync] apply seq={seq} last_local={} \
-                                                     current={current:?} new={new_value:?}",
-                                                    last_local
-                                                );
-                                            }
-                                            // Adopt the authority's seq as our new
-                                            // high-water mark and converge. Keeps
-                                            // `previous_text` in lockstep so the
-                                            // re-entrant Change writes nothing back.
-                                            this.controller
-                                                .lock()
-                                                .unwrap()
-                                                .advance_local_seq(seq);
-                                            this.converge_input(
-                                                "data_sync",
-                                                &new_value,
-                                                window,
-                                                cx,
-                                            );
-                                        }
+                                    // The convergence DECISION lives in the VM
+                                    // (`converge_from_data_sync`): it runs the
+                                    // op-versioned echo-suppression rule against
+                                    // the VM's own authoritative buffer, applies
+                                    // the safe mid-composition mutations
+                                    // (high-water advance / baseline adopt), and
+                                    // returns a directive only when the visible
+                                    // InputState must converge. The adapter
+                                    // applies it now, or defers it past an IME
+                                    // composition (Amendment 3).
+                                    let directive = this
+                                        .controller
+                                        .lock()
+                                        .unwrap()
+                                        .converge_from_data_sync(&new_value, echo_seq);
+                                    if let Some(directive) = directive {
+                                        this.converge_or_defer("data_sync", directive, window, cx);
                                     }
                                 });
                             });
@@ -519,18 +443,13 @@ impl EditorView {
                             let _ = window_handle.update(cx, |_, window, cx| {
                                 view.update(cx, |this, cx| {
                                     let input = this.input.clone();
-                                    let (ime_active, current, focused) = {
+                                    let (current, focused) = {
                                         let state = input.read(cx);
                                         (
-                                            state.ime_marked_range().is_some(),
                                             state.value().to_string(),
                                             state.focus_handle(cx).is_focused(window),
                                         )
                                     };
-                                    // IME guard: never converge mid-composition.
-                                    if ime_active {
-                                        return;
-                                    }
                                     // Focus/idle gate (mirrors the data path):
                                     // a focused, actively-typing editor keeps
                                     // its in-flight text; a focused-but-idle
@@ -538,18 +457,28 @@ impl EditorView {
                                     // target after a join — DOES converge, and
                                     // that is how it receives the merged
                                     // content. `user_idle` := no unflushed
-                                    // keystroke (previous_text == InputState).
+                                    // keystroke (VM buffer == InputState).
                                     let user_idle =
                                         this.controller.lock().unwrap().buffer() == current;
                                     if focused && !user_idle {
                                         return;
                                     }
-                                    this.converge_input(
-                                        "remote_delta",
-                                        &cell.current(),
-                                        window,
-                                        cx,
-                                    );
+                                    // Same VM directive path as the data-sync
+                                    // loop: build the directive (target = the
+                                    // live cell authority) and apply-or-defer it
+                                    // behind the adapter-side IME guard
+                                    // (Amendment 3). The structural payload of
+                                    // the delta stays discarded above.
+                                    let directive =
+                                        this.controller.lock().unwrap().remote_converge_directive();
+                                    if let Some(directive) = directive {
+                                        this.converge_or_defer(
+                                            "remote_delta",
+                                            directive,
+                                            window,
+                                            cx,
+                                        );
+                                    }
                                 });
                             });
                         }
@@ -635,6 +564,46 @@ impl EditorView {
         (just_focused, just_blurred)
     }
 
+    /// Apply a convergence `ConvergeDirective` now, or defer it on the view
+    /// model when an IME composition is in progress (`ime_marked_range()` is
+    /// `Some`). Deferred directives replay on the composition-end / focus edge
+    /// via `replay_pending_directive` (Amendment 3) — a converge that lands
+    /// mid-composition must never overwrite the in-flight composed text, but it
+    /// also must not be silently dropped, or the buffer stays stale until an
+    /// unrelated later echo.
+    fn converge_or_defer(
+        &mut self,
+        source: &'static str,
+        directive: ConvergeDirective,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.input.read(cx).ime_marked_range().is_some() {
+            self.controller
+                .lock()
+                .unwrap()
+                .set_pending_directive(directive);
+            return;
+        }
+        self.converge_input(source, &directive.target, window, cx);
+    }
+
+    /// Replay a directive deferred during an IME composition, once composition
+    /// has ended (`ime_marked_range()` is `None`). No-op when nothing is
+    /// pending or a newer local write superseded the deferred directive
+    /// (see `EditorViewModel::take_pending_directive`). Called on the
+    /// composition-end `InputEvent::Change` and on focus/blur edges of this
+    /// editor.
+    fn replay_pending_directive(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.input.read(cx).ime_marked_range().is_some() {
+            return; // still composing — wait for the end edge
+        }
+        let Some(directive) = self.controller.lock().unwrap().take_pending_directive() else {
+            return;
+        };
+        self.converge_input("ime_replay", &directive.target, window, cx);
+    }
+
     /// The single convergence entry point: set this editor's `InputState`
     /// from an external authority, absolutely and idempotently.
     ///
@@ -646,10 +615,12 @@ impl EditorView {
     /// the caret to end — only ever reachable when the editor is unfocused or
     /// focus just arrived, never mid-typing.
     ///
-    /// Sets `previous_text` in lockstep so the re-entrant `InputEvent::Change`
-    /// (gpui_component's "silent" splice is NOT silent — it emits Change
-    /// unconditionally) computes an empty delta and writes nothing back to the
-    /// authority. This is the "write only genuine user edits" invariant.
+    /// Syncs the VM `buffer` to the authority in lockstep (via
+    /// `set_buffer_from_authority`) BEFORE the absolute `set_value`, so the
+    /// re-entrant `InputEvent::Change` (gpui_component's "silent" splice is NOT
+    /// silent — it emits Change unconditionally) sees `new_text == buffer` in
+    /// `apply_local_edit` and writes nothing back. This is the "write only
+    /// genuine user edits" invariant.
     ///
     /// `source` names the caller (`"remote_delta"`, `"data_sync"`,
     /// `"render_backstop"`, `"focus_reload"`) and is recorded on the
