@@ -2067,7 +2067,11 @@ impl holon_frontend::reactive::BuilderServices for ReferenceState {
         _: holon_api::QueryLanguage,
         _: Option<holon_frontend::QueryContext>,
     ) -> anyhow::Result<holon_api::EnrichedChangeStream> {
-        panic!("watch_query not supported on ReferenceState")
+        // The reference model must never panic on a prod render path. An empty
+        // stream is the faithful mirror: the keystone oracle asserts on
+        // inv-blocks-match-ref, not on the watch stream itself.
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        Ok(tokio_stream::wrappers::ReceiverStream::new(rx))
     }
 
     /// Mirror the ref's tracked drawer/toggle open-state (`ToggleDrawer`
