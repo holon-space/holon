@@ -463,21 +463,118 @@ impl NavigationProvider {
         Ok(OperationResult::irreversible(vec![]))
     }
 
-    /// Soft-close a specific navigation_history row by id.
-    /// Used by sidebar X button.
+    /// Soft-close a specific navigation_history row by id, then follow the
+    /// cursor if that row was a region's active tab.
+    ///
+    /// Used by the sidebar / tab-strip X button. `close` carries only the row
+    /// handle (no region), so it looks the region up and, when the closed row
+    /// IS that region's `navigation_cursor` target, moves the cursor to a
+    /// still-open neighbor — LEFT preferred (the tab before it in stable
+    /// insertion order), then RIGHT. With no open tab left, the cursor row is
+    /// dropped so the cursor-joined main panel falls through to its default
+    /// render instead of pinning a closed row (a blank panel). Closing a
+    /// NON-active tab leaves the cursor untouched.
     async fn close(&self, history_id: i64) -> Result<OperationResult> {
         tracing::debug!("[NavigationProvider] close: history_id={}", history_id);
 
-        let mut params = HashMap::new();
-        params.insert("history_id".to_string(), Value::Integer(history_id));
+        let mut id_params = HashMap::new();
+        id_params.insert("history_id".to_string(), Value::Integer(history_id));
 
+        // One read: the region owning this row + that region's current cursor
+        // target. A missing row means it is already gone — nothing to close or
+        // follow.
+        let row = self
+            .db_handle
+            .query(
+                include_str!("../../sql/navigation/get_row_region_and_cursor.sql"),
+                id_params.clone(),
+            )
+            .await
+            .map_err(|e| {
+                format!("Failed to look up region/cursor for history row {history_id}: {e}")
+            })?;
+        let region: Option<String> = row
+            .first()
+            .and_then(|r| r.get("region"))
+            .and_then(|v| v.as_string_owned());
+        let active: Option<i64> = row
+            .first()
+            .and_then(|r| r.get("cursor_id"))
+            .and_then(|v| v.as_i64());
+
+        // Soft-close the row (drops it from focus_roots via CDC).
         self.db_handle
             .query(
                 include_str!("../../sql/navigation/close_history_id.sql"),
-                params,
+                id_params,
             )
             .await
             .map_err(|e| format!("Failed to close history row: {}", e))?;
+
+        let Some(region) = region else {
+            return Ok(OperationResult::irreversible(vec![]));
+        };
+        let region_val = Value::String(region.clone());
+
+        // Cursor-follow only when the closed row WAS this region's active tab.
+        if active != Some(history_id) {
+            return Ok(OperationResult::irreversible(vec![]));
+        }
+
+        // Cursor-follow: LEFT neighbor first, then RIGHT.
+        let mut neighbor_params = HashMap::new();
+        neighbor_params.insert("region".to_string(), region_val.clone());
+        neighbor_params.insert("history_id".to_string(), Value::Integer(history_id));
+        let mut neighbor = self
+            .db_handle
+            .query(
+                include_str!("../../sql/navigation/left_neighbor_open_tab.sql"),
+                neighbor_params.clone(),
+            )
+            .await
+            .map_err(|e| format!("Failed to find left neighbor tab: {e}"))?
+            .first()
+            .and_then(|row| row.get("id"))
+            .and_then(|v| v.as_i64());
+        if neighbor.is_none() {
+            neighbor = self
+                .db_handle
+                .query(
+                    include_str!("../../sql/navigation/right_neighbor_open_tab.sql"),
+                    neighbor_params,
+                )
+                .await
+                .map_err(|e| format!("Failed to find right neighbor tab: {e}"))?
+                .first()
+                .and_then(|row| row.get("id"))
+                .and_then(|v| v.as_i64());
+        }
+
+        match neighbor {
+            Some(neighbor_id) => {
+                let mut set_params = HashMap::new();
+                set_params.insert("region".to_string(), region_val);
+                set_params.insert("history_id".to_string(), Value::Integer(neighbor_id));
+                self.db_handle
+                    .query(
+                        include_str!("../../sql/navigation/set_cursor_to_history.sql"),
+                        set_params,
+                    )
+                    .await
+                    .map_err(|e| format!("Failed to move cursor to neighbor tab: {e}"))?;
+            }
+            None => {
+                let mut delete_params = HashMap::new();
+                delete_params.insert("region".to_string(), region_val);
+                self.db_handle
+                    .query(
+                        include_str!("../../sql/navigation/delete_cursor.sql"),
+                        delete_params,
+                    )
+                    .await
+                    .map_err(|e| format!("Failed to clear cursor after last tab: {e}"))?;
+            }
+        }
 
         Ok(OperationResult::irreversible(vec![]))
     }
