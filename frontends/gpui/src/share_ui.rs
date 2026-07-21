@@ -399,6 +399,48 @@ pub fn spawn_degraded_bus_bridge(
         .detach();
 }
 
+/// Bridge fire-and-forget op-execution failures (from `dispatch_intent`, which
+/// has no awaiting caller) to visible `CommandFailed` toasts. The
+/// frontend-agnostic engine holds the returned sink on its `UiState` and calls
+/// it — from a spawned tokio task, off the main thread — on every dropped op
+/// error; this drains the messages on GPUI's executor and renders a red toast
+/// carrying the op's VERBATIM error (e.g. the fail-closed delete's
+/// `delete_subtree` / `delete_keep_children` guidance). Mirrors
+/// [`spawn_degraded_bus_bridge`]; additive to the engine's `error_tracker` +
+/// `tracing::error!` monitoring seams.
+pub fn spawn_op_failure_toast_bridge(
+    toast_state: Entity<ShareUiState>,
+    window_handle: AnyWindowHandle,
+    async_cx: &AsyncApp,
+) -> Arc<dyn Fn(String) + Send + Sync> {
+    let (tx, mut rx) = futures::channel::mpsc::unbounded::<String>();
+
+    // GPUI side: drain mpsc on the main thread, push a CommandFailed toast.
+    async_cx
+        .spawn(async move |cx| {
+            use futures::StreamExt;
+            while let Some(detail) = rx.next().await {
+                let _ = cx.update_window(window_handle, |_, _window, cx| {
+                    toast_state.update(cx, |s, cx| {
+                        s.push_toast(DegradedToast {
+                            kind: DegradedKind::CommandFailed,
+                            shared_tree_id: "command".into(),
+                            detail,
+                        });
+                        cx.emit(NotifyShareUi);
+                        cx.notify();
+                    });
+                });
+            }
+        })
+        .detach();
+
+    // The sink the engine calls off-thread: forward into the mpsc channel.
+    Arc::new(move |detail: String| {
+        let _ = tx.unbounded_send(detail);
+    })
+}
+
 // ─── Pending connector-write approval (leases/read-write ruling, inc 4c) ────
 
 /// GPUI global holding the shared [`PendingWriteStore`] so the render pass and

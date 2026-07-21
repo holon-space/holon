@@ -1198,6 +1198,14 @@ pub struct UiState {
     /// driver detect a view-state write for a target that renders no
     /// `expand_toggle` (the write would otherwise be silently absorbed).
     expanded_view_observed: Mutex<std::collections::HashSet<String>>,
+    /// Sink for user-facing op-execution failure messages, installed by the
+    /// frontend shell (GPUI wires it to a `CommandFailed` toast bridge). Absent
+    /// in headless/test paths. Fire-and-forget `dispatch_intent` already
+    /// mutates the visible UI to reflect the user's gesture, so a dropped
+    /// op error reads as success — this is the fail-loud seam that turns it
+    /// into a visible toast. Additive to `error_tracker` +
+    /// `tracing::error!`, never a replacement.
+    op_failure_sink: Mutex<Option<Arc<dyn Fn(String) + Send + Sync>>>,
 }
 
 impl UiState {
@@ -1211,7 +1219,22 @@ impl UiState {
             main_nav_generation: Mutable::new(0),
             expanded_view: Mutex::new(HashMap::new()),
             expanded_view_observed: Mutex::new(std::collections::HashSet::new()),
+            op_failure_sink: Mutex::new(None),
         }
+    }
+
+    /// Install the op-execution failure sink (frontend shell wiring). Each
+    /// failure message is routed VERBATIM so the caller sees, e.g., the
+    /// fail-closed delete's `delete_subtree` / `delete_keep_children` guidance.
+    pub fn set_op_failure_sink(&self, sink: Arc<dyn Fn(String) + Send + Sync>) {
+        *self.op_failure_sink.lock().unwrap() = Some(sink);
+    }
+
+    /// Cloned handle to the op-failure sink for use inside a spawned dispatch
+    /// task (which can't borrow `&UiState`). `None` when no shell installed
+    /// one.
+    fn op_failure_sink_handle(&self) -> Option<Arc<dyn Fn(String) + Send + Sync>> {
+        self.op_failure_sink.lock().unwrap().clone()
     }
 
     /// Seed value for an `expand_toggle` whose `target_id` is `target_id`, or
@@ -2533,7 +2556,13 @@ impl BuilderServices for ReactiveEngine {
         // The backend still writes the SQL tables; this just keeps the
         // frontend-side signal graph in sync.
         maybe_mirror_navigation_focus(&self.ui_state, &intent);
-        maybe_clear_focus_on_delete(&self.ui_state, &intent);
+        // Focus is cleared only AFTER a delete SUCCEEDS (see the Ok arm below):
+        // a bare `delete` is fail-closed on a non-leaf, so an optimistic pre-op
+        // clear would orphan the caret on a block that stays.
+        let clear_focus_target = focus_clear_on_delete_target(&self.ui_state, &intent);
+        // User-visible surface for a dropped op error (fail-loud). Captured
+        // before the spawn because the task can't borrow `&self`.
+        let op_failure_sink = self.ui_state.op_failure_sink_handle();
 
         // Fire-and-forget execute. The result-hook projects a structural
         // op's focus result (`split_block`/`join_block`) straight onto the
@@ -2561,13 +2590,24 @@ impl BuilderServices for ReactiveEngine {
             {
                 Ok(response) => {
                     apply_structural_focus(&focused_block, &caret_seed, &op_name, &response);
+                    // The delete succeeded: now it is safe to drop focus from the
+                    // gone block (a refused delete never reaches this arm).
+                    if let Some(target) = &clear_focus_target {
+                        clear_focus_after_delete(&focused_block, target);
+                    }
                 }
                 Err(e) => {
                     // Disclose the failed write: the UI already reflects the
                     // user's gesture, so a dropped error would silently look
-                    // like success. The tracker is the PBT/monitoring seam.
-                    session.error_tracker().record_error();
-                    tracing::error!("Operation {entity_name}.{op_name} failed: {e}");
+                    // like success. Records + logs (PBT/monitoring seam) AND
+                    // routes the verbatim message to a CommandFailed toast.
+                    surface_op_failure(
+                        session.error_tracker(),
+                        &op_failure_sink,
+                        entity_name.as_str(),
+                        &op_name,
+                        &e,
+                    );
                 }
             }
         });
@@ -2625,7 +2665,9 @@ impl BuilderServices for ReactiveEngine {
         }
 
         maybe_mirror_navigation_focus(&self.ui_state, &intent);
-        maybe_clear_focus_on_delete(&self.ui_state, &intent);
+        // Deferred to op success (the `?` below returns early on failure, so a
+        // refused delete never clears focus).
+        let clear_focus_target = focus_clear_on_delete_target(&self.ui_state, &intent);
 
         let session = self.session.clone();
         let (focused_block, caret_seed) = self.ui_state.focus_handles();
@@ -2672,6 +2714,9 @@ impl BuilderServices for ReactiveEngine {
             );
             // Same in-process structural-focus projection as `dispatch_intent`.
             apply_structural_focus(&focused_block, &caret_seed, &intent.op_name, &response);
+            if let Some(target) = &clear_focus_target {
+                clear_focus_after_delete(&focused_block, target);
+            }
             Ok(())
         })
     }
@@ -2681,7 +2726,9 @@ impl BuilderServices for ReactiveEngine {
         intent: crate::operations::OperationIntent,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'static>> {
         maybe_mirror_navigation_focus(&self.ui_state, &intent);
-        maybe_clear_focus_on_delete(&self.ui_state, &intent);
+        // Deferred to op success (the Err arm returns without clearing, so a
+        // refused delete keeps focus).
+        let clear_focus_target = focus_clear_on_delete_target(&self.ui_state, &intent);
         let session = self.session.clone();
         let (focused_block, caret_seed) = self.ui_state.focus_handles();
         let entity_name = intent.entity_name.clone();
@@ -2701,6 +2748,9 @@ impl BuilderServices for ReactiveEngine {
             {
                 Ok(response) => {
                     apply_structural_focus(&focused_block, &caret_seed, &op_name, &response);
+                    if let Some(target) = &clear_focus_target {
+                        clear_focus_after_delete(&focused_block, target);
+                    }
                     Ok(())
                 }
                 Err(e) => {
@@ -3183,28 +3233,72 @@ fn maybe_mirror_navigation_focus(ui_state: &UiState, intent: &crate::operations:
     }
 }
 
-/// Clear focus when the focused block is being deleted.
+/// Whether `op_name` removes its target block from the tree, so a focus sitting
+/// on that block must be cleared once the op SUCCEEDS. `delete` removes the
+/// block; `delete_subtree` removes it plus its descendants;
+/// `delete_keep_children` reparents the children but still deletes the target.
+/// All three orphan a focus that sat on the target.
+fn op_deletes_target(op_name: &str) -> bool {
+    matches!(
+        op_name,
+        "delete" | "delete_subtree" | "delete_keep_children"
+    )
+}
+
+/// If `intent` deletes the currently-focused block, return that block so the
+/// caller can clear focus AFTER the op succeeds. `None` otherwise.
 ///
 /// Editor focus is in-memory UI state (ADR 0010), so the signal owner must keep
-/// it consistent with the store — the `current_editor_focus` matview used to do
-/// this implicitly via IVM recomputation. A dangling focus on a deleted block
-/// would mis-route chord ops and keep the render-variant switch pointed at a
-/// gone block. Mirrors the PBT reference model's `clear_focus_if_deleted`.
-/// Called from both `dispatch_intent` and `dispatch_intent_sync`.
-fn maybe_clear_focus_on_delete(ui_state: &UiState, intent: &crate::operations::OperationIntent) {
-    if intent.op_name != "delete" {
-        return;
+/// it consistent with the store — a dangling focus on a deleted block would
+/// mis-route chord ops and keep the render-variant switch pointed at a gone
+/// block. Mirrors the PBT reference model's `clear_focus_if_deleted`.
+///
+/// DECISION-ONLY — never mutates. A bare `delete` is fail-closed on a non-leaf
+/// (returns `Err`, block stays), so clearing focus before the op runs would
+/// orphan the caret on a block that still exists. The clear is applied by
+/// [`clear_focus_after_delete`] in each dispatch path's success arm.
+fn focus_clear_on_delete_target(
+    ui_state: &UiState,
+    intent: &crate::operations::OperationIntent,
+) -> Option<EntityUri> {
+    if !op_deletes_target(&intent.op_name) {
+        return None;
     }
-    let Some(id) = intent.params.get("id").and_then(|v| v.as_string()) else {
-        return;
-    };
-    // ALLOW(entity_uri_from_raw): id from intent.params Value map (operation-intent
-    // ingest)
+    let id = intent.params.get("id").and_then(|v| v.as_string())?;
+    // ALLOW(entity_uri_from_raw): id from op-intent params (ingest boundary)
     let deleted = EntityUri::from_raw(id);
-    if ui_state.focused_block().as_ref() == Some(&deleted) {
-        // ALLOW(direct_focus_mutation): clear focus of a deleted block, mirroring the
-        // reference model.
-        ui_state.set_focus(None);
+    (ui_state.focused_block().as_ref() == Some(&deleted)).then_some(deleted)
+}
+
+/// Apply the deferred focus clear after a delete op SUCCEEDS. No-op if focus
+/// has since moved off `target` (a concurrent navigation must win over a stale
+/// clear). Operates on the cloned focus `Mutable` so it runs inside a spawned
+/// dispatch task that can't borrow `&UiState`.
+fn clear_focus_after_delete(focused_block: &Mutable<Option<EntityUri>>, target: &EntityUri) {
+    if focused_block.get_cloned().as_ref() == Some(target) {
+        // ALLOW(direct_focus_mutation): clear focus of a deleted block (ref model)
+        focused_block.set(None);
+    }
+}
+
+/// Surface a fire-and-forget op-execution failure. Records it on the monitoring
+/// tracker and logs it (the PBT/monitoring seam), then — if the shell installed
+/// a sink — routes the op error's VERBATIM message to a user-visible
+/// `CommandFailed` toast. Additive fail-loud: a dropped `dispatch_intent` error
+/// would otherwise read as success because the UI already reflects the gesture
+/// (e.g. a refused non-leaf delete whose error names `delete_subtree` /
+/// `delete_keep_children` must reach the user, not just the log).
+fn surface_op_failure(
+    tracker: &holon_core::PublishErrorTracker,
+    sink: &Option<Arc<dyn Fn(String) + Send + Sync>>,
+    entity_name: &str,
+    op_name: &str,
+    err: &anyhow::Error,
+) {
+    tracker.record_error();
+    tracing::error!("Operation {entity_name}.{op_name} failed: {err:#}");
+    if let Some(sink) = sink {
+        sink(format!("{err:#}"));
     }
 }
 
@@ -3733,19 +3827,121 @@ mod tests {
     }
 
     #[test]
-    fn clear_focus_on_delete_only_clears_the_focused_block() {
+    fn delete_decision_must_not_clear_focus_before_the_op_runs() {
+        // The pre-op decision must NOT mutate focus. A fail-closed (refused)
+        // non-leaf delete leaves the block in place, so clearing focus
+        // optimistically would orphan the caret on a block that still exists.
+        // (RED against base: the old `maybe_clear_focus_on_delete` cleared
+        // synchronously here — see red_delete_… run in the fix report.)
         let ui = UiState::new();
         let a = EntityUri::block("a");
         ui.set_focus(Some(a.clone()));
-        // Deleting a different block leaves focus intact.
-        maybe_clear_focus_on_delete(&ui, &focus_intent("delete", "block:b"));
+        let target = focus_clear_on_delete_target(&ui, &focus_intent("delete", "block:a"));
+        assert_eq!(
+            target,
+            Some(a.clone()),
+            "the decision must identify the focused block as the clear target",
+        );
+        assert_eq!(
+            ui.focused_block(),
+            Some(a.clone()),
+            "focus must survive the delete DECISION; cleared only on op success",
+        );
+    }
+
+    #[test]
+    fn focus_clear_on_delete_target_only_targets_the_focused_block() {
+        let ui = UiState::new();
+        let a = EntityUri::block("a");
+        ui.set_focus(Some(a.clone()));
+        // Deleting a different block is not a clear target.
+        assert_eq!(
+            focus_clear_on_delete_target(&ui, &focus_intent("delete", "block:b")),
+            None,
+        );
+        // A non-delete op is never a clear target.
+        assert_eq!(
+            focus_clear_on_delete_target(&ui, &focus_intent("set_field", "block:a")),
+            None,
+        );
+        // The explicit destructive-delete variants also target the focused block.
+        for op in ["delete", "delete_subtree", "delete_keep_children"] {
+            assert_eq!(
+                focus_clear_on_delete_target(&ui, &focus_intent(op, "block:a")),
+                Some(a.clone()),
+                "{op} deletes its target, so a focus on it must be cleared on success",
+            );
+        }
+        // Decision never mutates focus.
         assert_eq!(ui.focused_block(), Some(a.clone()));
-        // A non-delete op never clears.
-        maybe_clear_focus_on_delete(&ui, &focus_intent("set_field", "block:a"));
-        assert_eq!(ui.focused_block(), Some(a.clone()));
-        // Deleting the focused block clears it.
-        maybe_clear_focus_on_delete(&ui, &focus_intent("delete", "block:a"));
-        assert_eq!(ui.focused_block(), None);
+    }
+
+    #[test]
+    fn clear_focus_after_delete_clears_on_success_and_respects_a_moved_focus() {
+        let a = EntityUri::block("a");
+        let b = EntityUri::block("b");
+        // A successful delete of the focused block clears focus.
+        let handle = Mutable::new(Some(a.clone()));
+        clear_focus_after_delete(&handle, &a);
+        assert_eq!(handle.get_cloned(), None);
+        // A concurrent focus move off the target wins: the stale clear is a no-op.
+        let handle = Mutable::new(Some(b.clone()));
+        clear_focus_after_delete(&handle, &a);
+        assert_eq!(handle.get_cloned(), Some(b));
+    }
+
+    #[test]
+    fn op_failure_routes_verbatim_message_to_the_command_failed_sink() {
+        use holon_core::PublishErrorTracker;
+        // The fail-closed non-leaf delete's error names the alternative ops; it
+        // must reach the user verbatim, not just the log (a dropped error would
+        // read as success because the UI already reflects the gesture).
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink_captured = captured.clone();
+        let sink: Arc<dyn Fn(String) + Send + Sync> =
+            Arc::new(move |m| sink_captured.lock().unwrap().push(m));
+
+        let tracker = PublishErrorTracker::new();
+        let err = anyhow::anyhow!(
+            "delete: block block:a has 2 child(ren); refusing to cascade. Use \
+             `delete_subtree` to delete the whole subtree, or \
+             `delete_keep_children` to reparent the children first."
+        );
+        surface_op_failure(&tracker, &Some(sink), "block", "delete", &err);
+
+        // Additive monitoring seam preserved.
+        assert_eq!(tracker.errors(), 1);
+        let msgs = captured.lock().unwrap();
+        assert_eq!(msgs.len(), 1, "exactly one CommandFailed surface");
+        assert!(
+            msgs[0].contains("delete_subtree") && msgs[0].contains("delete_keep_children"),
+            "the verbatim alternative-op guidance must reach the user: {}",
+            msgs[0],
+        );
+    }
+
+    #[test]
+    fn op_failure_without_a_sink_still_records_but_surfaces_nothing() {
+        use holon_core::PublishErrorTracker;
+        // Headless/test paths install no sink: the monitoring seam still fires,
+        // and nothing panics on the absent surface.
+        let tracker = PublishErrorTracker::new();
+        let err = anyhow::anyhow!("boom");
+        surface_op_failure(&tracker, &None, "block", "indent", &err);
+        assert_eq!(tracker.errors(), 1);
+    }
+
+    #[test]
+    fn ui_state_op_failure_sink_round_trips() {
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink_captured = captured.clone();
+        let ui = UiState::new();
+        // No sink installed → handle is None.
+        assert!(ui.op_failure_sink_handle().is_none());
+        ui.set_op_failure_sink(Arc::new(move |m| sink_captured.lock().unwrap().push(m)));
+        let handle = ui.op_failure_sink_handle().expect("sink installed");
+        handle("surfaced".to_string());
+        assert_eq!(captured.lock().unwrap().as_slice(), ["surfaced"]);
     }
 
     /// Build a `navigation.focus` intent targeting `region` at page `block_id`.

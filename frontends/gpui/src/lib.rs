@@ -2133,6 +2133,21 @@ fn launch_holon_window_impl(
         ));
     }
 
+    // Route fire-and-forget op-execution failures (`dispatch_intent`) to a
+    // visible CommandFailed toast. Without this the engine only records + logs
+    // the error, so a refused op (e.g. a fail-closed non-leaf delete) is
+    // invisible in the UI even though the gesture already moved the caret.
+    {
+        let toast_ui_entity = app_model.read(cx).share_ui.clone();
+        let async_cx = cx.to_async();
+        let op_failure_sink = share_ui::spawn_op_failure_toast_bridge(
+            toast_ui_entity,
+            window_handle.into(),
+            &async_cx,
+        );
+        engine.ui_state().set_op_failure_sink(op_failure_sink);
+    }
+
     // Wire the pending connector-write bus bridge (leases/read-write ruling,
     // increment 4c). The shared store is installed as a GPUI global in `main.rs`
     // from the DI-resolved handle; when MCP integrations are absent the global
