@@ -47,8 +47,35 @@
 //!   `tracing::debug!(target="holon_latency", stage="e2e", action, block,
 //!   source, ms)`
 //!
+//! # SLO endpoint: projection-visible, deliberately NOT frame-present
+//!
+//! The `stage="e2e"` span closes **here** — inside the `LiveData::subscribe`
+//! tokio actor, right after `apply_changes` lands the batch in the reactive
+//! mirror (see [`rows_delivered`]'s call site in `holon_api::live_data`). That
+//! is *projection-visible*: the data is committed and available for the view
+//! model to render. It is the endpoint the project SLO names
+//! ("interaction→projection-visible < 200ms", CLAUDE.md), and it is the stage
+//! the latency-slo oracle judges.
+//!
+//! We intentionally do **not** advance this endpoint to GPU frame-present. A
+//! backgrounded / occluded window defers presents indefinitely (the OS
+//! throttles the render loop), so anchoring the SLO on paint would convert OS
+//! scheduling into multi-second *false* SLO violations — exactly the "navigate
+//! 28.7s" artifact observed while a window was backgrounded for screenshotting
+//! (dogfood-round3 B3). Projection-visible is measured on the tokio CDC actor,
+//! independent of the render loop, so it reflects the pipeline the SLO is
+//! about.
+//!
+//! Honest boundary: when the *whole* foreground pipeline is stalled (the app is
+//! backgrounded and the write/re-projection work that feeds the CDC stream is
+//! itself throttled), even this projection-visible measurement inflates. That
+//! inflation is a real stall, so we **surface it, never suppress it** (the
+//! oracle still fires); distinguishing "user waited" from "OS throttled us"
+//! requires a foreground-state signal the correlator does not have.
+//!
 //! Boundary disclosures:
-//! - Final GPU paint is out of scope (same as every other stage).
+//! - Final GPU paint is out of scope (this is a feature, see above — not a
+//!   gap).
 //! - Ops without an `id` param, and deletes whose CDC `Deleted.id` is a rowid
 //!   rather than the entity id, are not correlated (no event).
 //! - Entries expire after 30s (op failed / never touched its target row). With
@@ -181,8 +208,11 @@ pub fn rows_delivered<'a>(
     PENDING_LEN.store(pending.len(), Ordering::Release);
     drop(pending);
     for c in closed {
-        // End-to-end (interaction -> visible-to-render): the prod counterpart
-        // of the harness-only `action_total` stage.
+        // End-to-end (interaction -> PROJECTION-VISIBLE): closes on the tokio
+        // CDC actor the moment the batch is applied to the reactive mirror —
+        // NOT at GPU frame-present (see the module-level "SLO endpoint"
+        // disclosure). This is the stage the latency-slo oracle judges. Prod
+        // counterpart of the harness-only `action_total` stage.
         tracing::debug!(
             target: "holon_latency",
             stage = "e2e",
@@ -440,5 +470,171 @@ mod tests {
             pending.iter().all(|p| p.target != "block:e2e-nav-test"),
             "navigation entry must be consumed when the page's rows land"
         );
+    }
+
+    /// Per-interaction emission lock: N sequential dispatch→delivery cycles on
+    /// the SAME target must each close and each produce ITS OWN measurement.
+    /// This locks the "e2e must fire per interaction, repeats included"
+    /// contract (dogfood-round3 B3) at the pure correlation core — a
+    /// regression that made the correlator emit only once (e.g. a once-cell
+    /// guard or a never-cleared entry) would drop the later closures and
+    /// turn this red.
+    #[test]
+    fn repeat_interactions_each_emit_their_own_measurement() {
+        let base = Instant::now();
+        let mut measured = Vec::new();
+        // Simulate three back-to-back navigations to the same page, each
+        // followed by a delivery of that page's rows.
+        for i in 0..3u64 {
+            let mut pending = vec![pend(
+                "navigate",
+                "block:repeat-page",
+                None,
+                base + Duration::from_millis(i * 100),
+            )];
+            let now = base + Duration::from_millis(i * 100 + 5);
+            let closed = close_delivered(&mut pending, &[("block:repeat-page", None)], now);
+            assert_eq!(
+                closed.len(),
+                1,
+                "cycle {i}: delivery must close the pending navigate"
+            );
+            assert_eq!(closed[0].ms, 5, "cycle {i}: each measures its own 5ms");
+            assert!(pending.is_empty(), "cycle {i}: entry consumed, none stuck");
+            measured.push(closed[0].ms);
+        }
+        assert_eq!(
+            measured.len(),
+            3,
+            "three interactions ⇒ three measurements — never collapsed to one"
+        );
+    }
+
+    /// Closure-point lock: the emitted event carries `stage="e2e"` and closes
+    /// from the DELIVERY (projection-visible) path — not a frame-present/paint
+    /// stage. Captures the real `tracing` event a subscriber sees, so a change
+    /// that re-anchored the SLO endpoint onto GPU paint (a different stage name
+    /// or a different emit site) would turn this red. Parallel-safe: keys on a
+    /// unique target and asserts only on its own captured event.
+    #[test]
+    fn emitted_e2e_event_closes_at_projection_visible_stage() {
+        use std::sync::Arc;
+        use std::sync::Mutex as StdMutex;
+
+        use tracing::Event;
+        use tracing::Subscriber;
+        use tracing::field::Field;
+        use tracing::field::Visit;
+        use tracing_subscriber::layer::Context;
+        use tracing_subscriber::layer::Layer;
+        use tracing_subscriber::prelude::*;
+
+        #[derive(Default)]
+        struct Captured {
+            stage: Option<String>,
+            action: Option<String>,
+            block: Option<String>,
+        }
+        impl Visit for Captured {
+            fn record_u64(&mut self, _: &Field, _: u64) {}
+            fn record_str(&mut self, field: &Field, value: &str) {
+                match field.name() {
+                    "stage" => self.stage = Some(value.to_string()),
+                    "action" => self.action = Some(value.to_string()),
+                    "block" => self.block = Some(value.to_string()),
+                    _ => {}
+                }
+            }
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                let v = format!("{value:?}");
+                let v = v.trim_matches('"').to_string();
+                match field.name() {
+                    "stage" => self.stage = Some(v),
+                    "action" => self.action = Some(v),
+                    "block" => self.block = Some(v),
+                    _ => {}
+                }
+            }
+        }
+
+        struct CaptureLayer(Arc<StdMutex<Vec<Captured>>>);
+        impl<S: Subscriber> Layer<S> for CaptureLayer {
+            // Register `holon_latency` callsites as ALWAYS-interested. Sibling
+            // latency tests in this binary hit `rows_delivered`'s `debug!`
+            // callsite with NO subscriber installed, which caches its process-
+            // global `Interest` as `never` — and a `never`-cached callsite is
+            // skipped before any thread-local subscriber is consulted, so a
+            // plain `enabled` override cannot rescue it. `always` (combined with
+            // the rebuild below) pins the callsite open; the event then always
+            // dispatches to whatever thread-local default is active — our sink
+            // on this thread, a no-op elsewhere.
+            fn register_callsite(
+                &self,
+                metadata: &tracing::Metadata<'_>,
+            ) -> tracing::subscriber::Interest {
+                if metadata.target() == "holon_latency" {
+                    tracing::subscriber::Interest::always()
+                } else {
+                    tracing::subscriber::Interest::never()
+                }
+            }
+            fn enabled(&self, metadata: &tracing::Metadata<'_>, _: Context<'_, S>) -> bool {
+                metadata.target() == "holon_latency"
+            }
+            fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
+                if event.metadata().target() != "holon_latency" {
+                    return;
+                }
+                let mut c = Captured::default();
+                event.record(&mut c);
+                self.0.lock().unwrap().push(c);
+            }
+        }
+
+        let sink = Arc::new(StdMutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer(sink.clone()));
+        // Retry-bounded: `rows_delivered` gates on the process-global
+        // `PENDING_LEN`, which other tests mutate under the parallel runner, so
+        // a single dispatch→deliver can lose the race and skip our emit. The
+        // real emit path is still exercised — we just repeat until our own
+        // target's event lands (deterministic single-threaded; a couple of
+        // iterations under contention).
+        tracing::subscriber::with_default(subscriber, || {
+            for _ in 0..100 {
+                // Re-register every callsite against THIS scoped dispatcher each
+                // iteration. A sibling latency test may register (or have
+                // registered) `rows_delivered`'s callsite as `never` while
+                // running under no subscriber — and that only becomes visible
+                // AFTER the callsite is first hit, which can happen after a
+                // one-time rebuild. Rebuilding in the loop re-flips it to our
+                // `always`; siblings never call rebuild, so once flipped it
+                // stays open and the next emit lands. Also covers the
+                // `PENDING_LEN` gate race (a lost dispatch→deliver retries).
+                tracing::callsite::rebuild_interest_cache();
+                interaction_dispatched("navigate", "block:proj-visible-lock", None);
+                // A CDC batch applied to the reactive mirror (projection-visible).
+                rows_delivered("block", [("block:proj-visible-lock", None)]);
+                if sink
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|c: &Captured| c.block.as_deref() == Some("block:proj-visible-lock"))
+                {
+                    break;
+                }
+            }
+        });
+
+        let events = sink.lock().unwrap();
+        let mine = events
+            .iter()
+            .find(|c| c.block.as_deref() == Some("block:proj-visible-lock"))
+            .expect("the delivery must emit a holon_latency event for our target");
+        assert_eq!(
+            mine.stage.as_deref(),
+            Some("e2e"),
+            "the SLO endpoint stage is projection-visible 'e2e', not a paint stage"
+        );
+        assert_eq!(mine.action.as_deref(), Some("navigate"));
     }
 }
