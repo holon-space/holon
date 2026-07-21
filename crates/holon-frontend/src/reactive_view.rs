@@ -3076,23 +3076,70 @@ mod tests {
             Arc::new(StubBuilderServices::new());
         view.start(services, &tokio::runtime::Handle::current());
 
-        let settle = || tokio::time::sleep(tokio::time::Duration::from_millis(50));
+        // Deterministic settle: yield to the spawned driver task until it has
+        // fully applied the pending diff (observed via the flat `MutableVec`),
+        // instead of a fixed sleep. A fixed sleep couples correctness to CPU
+        // scheduling — under parallel-nextest load the driver task can be
+        // starved past the deadline, dropping this test into a flaky failure.
+        // Breaks early on an observed driver panic so the assertions below
+        // report the real cause rather than a settle timeout.
+        macro_rules! settle_until {
+            ($ready:expr, $desc:expr) => {{
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    if !panics.lock().unwrap().is_empty() {
+                        break; // driver panicked — let the assertions report it
+                    }
+                    if $ready {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "tree driver did not settle within 10s waiting for {}; no panic \
+                         observed — the spawned driver task was starved or a diff was dropped",
+                        $desc,
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+            }};
+        }
 
         // InsertAt parent → InsertAt child → RemoveAt parent → UpdateAt child.
         rows.lock_mut().insert_cloned(0, keyed(parent));
-        settle().await;
+        settle_until!(
+            view.items.lock_ref().len() == 1,
+            "parent inserted (1 flat item)"
+        );
         rows.lock_mut().insert_cloned(1, keyed(child.clone()));
-        settle().await;
+        settle_until!(
+            view.items.lock_ref().len() == 2,
+            "child nested under parent (2 flat items)"
+        );
         rows.lock_mut().remove(0);
-        settle().await;
+        settle_until!(
+            view.items.lock_ref().len() == 1,
+            "parent removed, child re-rooted (1 flat item)"
+        );
 
+        // The update keeps the flat length at 1, so wait on the item's Arc
+        // identity changing — `MutableTree::update` installs a fresh `Arc` via
+        // `set_cloned`, which never runs if the driver panics reconciling it.
+        let before = view
+            .items
+            .lock_ref()
+            .first()
+            .map(std::sync::Arc::as_ptr)
+            .expect("child must be present as a root before its content edit");
         let mut edited = (*child).clone();
         edited.insert(
             "content".to_string(),
             Value::String("child-edited".to_string()),
         );
         rows.lock_mut().set_cloned(0, keyed(Arc::new(edited)));
-        settle().await;
+        settle_until!(
+            view.items.lock_ref().first().map(std::sync::Arc::as_ptr) != Some(before),
+            "child content update applied (item replaced)"
+        );
 
         std::panic::set_hook(previous_hook);
 
