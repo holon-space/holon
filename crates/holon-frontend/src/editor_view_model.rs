@@ -143,10 +143,33 @@ impl std::fmt::Debug for EditorAction {
 /// Each editable text node in the ViewModel gets one controller.
 /// The frontend creates it during reconciliation and calls its methods
 /// from platform event handlers.
+///
+/// # Buffer ownership (buffer-ownership inversion, Increment 1)
+///
+/// The view model owns the authoritative editable-text buffer (`buffer`) and
+/// the write-ordering high-water mark (`last_local_seq`). RAW-text coordinates:
+/// `buffer` holds raw Unicode scalars so the RAW `[[…]]` edit-mode feature can
+/// seed/commit through this same seam without a second migration.
+///
+/// ONE-DIRECTIONAL SHADOW INVARIANT (Increment 1 only): while GPUI's
+/// `InputState` is still the visible authority, this buffer is a shadow kept in
+/// lockstep by the adapter — `InputState` writes flow INTO the buffer
+/// (`apply_local_edit`), never yet the reverse. Increment 2 flips the buffer to
+/// the write authority; Increment 3 makes it the convergence authority via
+/// `set_buffer_from_authority`.
 pub struct EditorViewModel {
     handler: ViewEventHandler,
     triggers: Vec<InputTrigger>,
     cell: Option<Cell<String>>,
+    /// Authoritative editable-text buffer in RAW-text coordinates. See the
+    /// struct-level "Buffer ownership" note for the shadow invariant.
+    buffer: String,
+    /// Highest [`holon_api::write_seq::WriteSeq`] this editor has authored (via
+    /// a content keystroke) or accepted (from a converged external write). The
+    /// data-sync convergence guard drops any echo whose `write_seq` is strictly
+    /// less than this. Starts at `WriteSeq::ZERO`: before the user types, every
+    /// echo converges (correct seeding).
+    last_local_seq: i64,
 }
 
 impl EditorViewModel {
@@ -157,11 +180,14 @@ impl EditorViewModel {
         field: String,
         original_value: String,
     ) -> Self {
-        let handler = ViewEventHandler::new(operations, context_params, field, original_value);
+        let handler =
+            ViewEventHandler::new(operations, context_params, field, original_value.clone());
         Self {
             handler,
             triggers,
             cell: None,
+            buffer: original_value,
+            last_local_seq: holon_api::write_seq::WriteSeq::ZERO.get(),
         }
     }
 
@@ -171,6 +197,11 @@ impl EditorViewModel {
     /// `BlockCellRegistry`). Tests and headless paths leave it unattached
     /// — CRDT pass-throughs return `None` / `Err` in that case.
     pub fn attach_cell(&mut self, cell: Cell<String>) {
+        // Seed the authoritative buffer from the cell's current text so it
+        // matches the visible InputState (the CRDT text is the mount seed in
+        // cell mode). Without this the first keystroke would diff against the
+        // stale construction-time content.
+        self.buffer = cell.current();
         self.cell = Some(cell);
         // A Loro `Cell` is now the per-keystroke content writer, so the
         // handler must drop the redundant on-blur `set_field("content")` to
@@ -207,6 +238,108 @@ impl EditorViewModel {
     /// Current CRDT text snapshot. `None` when unattached.
     pub fn current_text(&self) -> Option<String> {
         self.cell.as_ref().map(|c| c.current())
+    }
+
+    /// Borrow the authoritative editable-text buffer (RAW-text coordinates).
+    /// See the struct-level "Buffer ownership" note.
+    pub fn buffer(&self) -> &str {
+        &self.buffer
+    }
+
+    /// Highest write-ordering sequence this editor has authored or accepted.
+    /// The convergence guard drops echoes strictly older than this.
+    pub fn last_local_seq(&self) -> i64 {
+        self.last_local_seq
+    }
+
+    /// Advance the write-ordering high-water mark to at least `seq` (never
+    /// regressing it). The convergence loop calls this when it accepts an
+    /// authority state (Converge) or confirms its own echo (InSync /
+    /// AdoptBaseline).
+    pub fn advance_local_seq(&mut self, seq: i64) {
+        self.last_local_seq = self.last_local_seq.max(seq);
+    }
+
+    /// Converge the authoritative buffer to a backend/authority `text` carrying
+    /// ordering token `seq` (the convergence sink). Advances the high-water
+    /// mark (never regressing it) and re-baselines the blur-commit change
+    /// tracking to the re-seeded text so an unmodified, re-seeded editor
+    /// does not diff as dirty and fire a spurious identical-content
+    /// `set_field` on the next blur. Folds in the former `rebaseline`
+    /// contract: not a local write — it does not stamp a new write-seq,
+    /// only adopts `seq` as the accepted high-water.
+    ///
+    /// RAW-seam hook: `text` MAY be a raw reconstruction
+    /// (`render_inline_marks`) once raw-edit mode lands; today callers pass
+    /// stored (stripped) content and the signature does not change when raw
+    /// seeding arrives.
+    pub fn set_buffer_from_authority(&mut self, text: &str, seq: i64) {
+        self.buffer = text.to_string();
+        self.last_local_seq = self.last_local_seq.max(seq);
+        self.handler.set_baseline(text.to_string());
+    }
+
+    /// Apply a local (user-typed) edit to the authoritative buffer — the single
+    /// keystroke sink. Mutates `buffer` to `new_text` and returns the
+    /// persistence intent the frontend must dispatch (its sole commit funnel):
+    ///
+    /// - **Cell mode** (Loro attached): computes the delta from the previous
+    ///   buffer and applies it through the CRDT (`apply_local`); returns
+    ///   `Ok(None)` — the Loro projection is the content writer.
+    /// - **No-cell mode** (SqlOnly), real block: stamps a monotonic
+    ///   `write_seq`, records it as `last_local_seq`, and returns
+    ///   `Ok(Some(set_field intent))` so the typed text lands in the backend
+    ///   before the next transition.
+    /// - **Creation placeholder** (`block:__virtual:<parent>`) or unchanged
+    ///   text: returns `Ok(None)` — a placeholder has no real block to write
+    ///   against (its text commits via `create` on Enter).
+    ///
+    /// RAW-seam hook: the `set_field` intent path is the single point where the
+    /// dispatcher re-extracts inline marks on commit; keep it the sole commit
+    /// funnel so raw→stripped extraction has exactly one home.
+    pub fn apply_local_edit(&mut self, new_text: &str) -> Result<Option<OperationIntent>> {
+        if new_text == self.buffer {
+            return Ok(None);
+        }
+        if self.cell.is_some() {
+            // Cell mode: apply the delta through the CRDT unless the cell
+            // already holds this text (our own echo).
+            if self.current_text().as_deref() != Some(new_text) {
+                for op in crate::cell::compute_text_delta(&self.buffer, new_text) {
+                    self.apply_local(op)?;
+                }
+            }
+            self.buffer = new_text.to_string();
+            return Ok(None);
+        }
+        // No cell (SqlOnly / no-Loro mode).
+        let is_placeholder = self
+            .handler
+            .context_id()
+            .is_some_and(|id| crate::row_origin::RowOrigin::from_id(id).is_creation_placeholder());
+        let id = self.handler.context_id().map(str::to_string);
+        self.buffer = new_text.to_string();
+        let Some(id) = id else {
+            return Ok(None);
+        };
+        if is_placeholder {
+            return Ok(None);
+        }
+        // Stamp a monotonic ordering token on this content write and record it
+        // as our last local sequence BEFORE the caller dispatches, so a fast
+        // CDC echo cannot race a not-yet-recorded seq.
+        let seq = holon_api::write_seq::next();
+        self.last_local_seq = seq.get();
+        let mut params = HashMap::new();
+        params.insert("id".into(), Value::String(id));
+        params.insert("field".into(), Value::String("content".to_string()));
+        params.insert("value".into(), Value::String(new_text.to_string()));
+        params.insert("write_seq".into(), Value::Integer(seq.get()));
+        Ok(Some(OperationIntent::new(
+            "block".into(),
+            "set_field".into(),
+            params,
+        )))
     }
 
     /// Apply a local edit to the CRDT (origin-tagged so the remote-delta
