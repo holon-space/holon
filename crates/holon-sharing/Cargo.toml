@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+anyhow.workspace = true
 holon-api.workspace = true
 # holon-loro inherited default-features = false (workspace root): gives the
 # unconditional `loro_backend::doc_lamport_height` without pulling iroh into the

@@ -143,6 +143,30 @@ impl CrossingLog {
         Ok(self.append(LogEntryBody::CrossingBegin(crossing)))
     }
 
+    /// Verify EVERY entry's owner signature under `owner`'s public key.
+    ///
+    /// The whole log lives inside one owner scope, so every entry — including
+    /// those merged from other devices — must be signed by the one owner key.
+    /// A single failure is a loud `Err` naming the offending entry: a forged or
+    /// stand-in-signed (`UnverifiedAuthority`) entry cannot masquerade as owner
+    /// authority. This is the read-side counterpart to signing at append.
+    pub fn verify_all(
+        &self,
+        owner: &holon_loro::owner_identity::OwnerPublicKey,
+    ) -> anyhow::Result<()> {
+        for entry in self.entries() {
+            let payload = canonical_bytes(&entry.key, &entry.body);
+            entry.sig.verify(&payload, owner).map_err(|e| {
+                anyhow::anyhow!(
+                    "owner signature invalid for log entry at (lamport={}, peer={}): {e}",
+                    entry.key.lamport,
+                    entry.key.peer.0
+                )
+            })?;
+        }
+        Ok(())
+    }
+
     /// All entries this device currently holds, sorted by the frozen tuple
     /// (ascending; max wins). Deserialized from the backing doc every call —
     /// the doc is the source of truth, this method never caches stale state.

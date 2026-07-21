@@ -34,6 +34,8 @@ pub mod degraded_signal_bus;
     not(all(target_arch = "wasm32", target_os = "unknown"))
 ))]
 pub mod device_key_store;
+/// A2 SAS device-pairing ceremony (ADR 0028 A2). Pure state machine, no iroh.
+pub mod device_pairing;
 pub mod event_bus;
 pub mod event_ring;
 
@@ -63,6 +65,15 @@ pub mod loro_sync_controller;
 pub mod loro_text_cell_backing;
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod multi_peer;
+/// Owner-identity key (ADR 0028 D1/OQ4). Ungated: the owner key signs durable
+/// authority objects (rosters, the crossing log) even without the iroh
+/// transport, so `holon-sharing` can back its `SigningAuthority` with it.
+pub mod owner_identity;
+#[cfg(all(
+    feature = "iroh-sync",
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+pub mod roster_sidecar;
 #[cfg(all(
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))
