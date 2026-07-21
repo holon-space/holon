@@ -37,6 +37,8 @@ use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::JOURNAL_READS;
 #[cfg(feature = "otel-testing")]
+use crate::pbt::transition_budgets::NAV_DML_READS;
+#[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::REACTIVE_BASE;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::docs_tolerance;
@@ -115,10 +117,14 @@ crate::cap_transition! {
         sut.unpin_block(me.history_id).await;
     }
     sql_budget: |_me, state| {
-        // close = single UPDATE statement; reactive watchers re-run on the CDC
-        // delta. No SELECT round-trip needed (the X button supplied the id).
+        // close = one combined region/cursor lookup (a single SELECT round-trip,
+        // NAV_DML_READS) + one UPDATE (soft-close), then the reactive watchers
+        // re-run on the CDC delta. The lookup resolves the row's region and its
+        // region cursor so `close` can follow the cursor when the ACTIVE tab is
+        // closed; the X button here only closes NON-cursor pins, so the
+        // cursor-follow neighbor reads never fire on this path.
         ExpectedSql {
-            reads: REACTIVE_BASE + JOURNAL_READS,
+            reads: REACTIVE_BASE + JOURNAL_READS + NAV_DML_READS,
             writes: 0,
             ddl: 0,
             tolerance: docs_tolerance(state),
