@@ -48,6 +48,7 @@ pub mod reference_state;
 // `crate::pbt::shadow_mesh::*` call sites (state_machine, reference_state,
 // ref_caps/peers) keep resolving.
 pub use holon_loro_testing::shadow_mesh;
+pub mod sharing_state;
 pub mod sql_loro_slice;
 pub mod sql_slice;
 pub mod state_machine;

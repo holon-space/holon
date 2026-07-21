@@ -6,6 +6,7 @@
 //! invariant tuple.
 
 pub mod advice_rows_woven;
+pub mod audience_never_over_approximates;
 pub mod block_ids_match_ref;
 pub mod block_tags_references_exist;
 pub mod displayed_text;
