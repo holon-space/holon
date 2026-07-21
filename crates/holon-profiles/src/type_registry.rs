@@ -476,6 +476,29 @@ mod tests {
         );
     }
 
+    /// Double-chevron fix (ruling 2026-07-21): both embedded-page variants must
+    /// opt their expand_toggle into the trailing hover-reveal chevron so it no
+    /// longer sits adjacent to the tree collapse chevron in the left gutter.
+    /// Guards the YAML wiring the GPUI builder relies on.
+    #[test]
+    fn embedded_page_variants_use_hover_reveal_toggle() {
+        let registry = create_default_registry().unwrap();
+        let block = registry.get("block").unwrap();
+        for name in ["embedded_page", "embedded_page_expanded"] {
+            let variant = block
+                .profile_variants
+                .iter()
+                .find(|v| v.name == name)
+                .unwrap_or_else(|| panic!("block profile missing `{name}` variant"));
+            assert!(
+                variant.render.contains("hover_reveal_toggle: true"),
+                "`{name}` must set hover_reveal_toggle on its expand_toggle \
+                 (double-chevron fix); render was:\n{}",
+                variant.render
+            );
+        }
+    }
+
     #[test]
     fn parse_person_yaml() {
         let yaml = std::fs::read_to_string("../../assets/default/types/person.yaml")
