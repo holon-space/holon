@@ -2963,47 +2963,113 @@ fn encode_rgba_to_png(width: u32, height: u32, rgba: Vec<u8>) -> Result<Vec<u8>,
     Ok(png_buf.into_inner())
 }
 
+/// Minimal window descriptor, decoupled from `xcap::Window` so the selection
+/// predicate can be unit-tested over a mocked window list.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, PartialEq)]
+struct WindowCandidate {
+    title: String,
+    app_name: String,
+    pid: u32,
+    width: u32,
+    height: u32,
+    minimized: bool,
+}
+
+/// Pick which window to capture, returning its index into `windows`.
+///
+/// GPUI spawns several windows on our pid: a full-size main window titled
+/// "Holon" PLUS tiny auxiliary/phantom windows (an untitled 500x500, an
+/// offscreen ~32px strip). The old predicate matched pid + `title == "Holon"`
+/// with `.find()`, which returned whichever such window enumerated FIRST —
+/// often a phantom — then `capture_image` failed with `minimized=true`.
+///
+/// Robust rule (both branches): keep only ONSCREEN candidates (not minimized,
+/// non-zero area) and pick the LARGEST by pixel area. Stable whether a phantom
+/// reports an empty title or duplicates "Holon". Fail loud listing every
+/// candidate when none qualifies — never silently grab a phantom.
+///
+/// - `explicit_title`: match any candidate whose title OR app-name contains the
+///   needle (case-insensitive), then largest-onscreen among them.
+/// - no title: our own process's largest onscreen, non-empty-titled window.
+#[cfg(target_os = "macos")]
+fn select_window_index(
+    windows: &[WindowCandidate],
+    our_pid: u32,
+    explicit_title: Option<&str>,
+) -> Result<usize, String> {
+    let onscreen = |w: &WindowCandidate| !w.minimized && w.width > 0 && w.height > 0;
+    let area = |w: &WindowCandidate| u64::from(w.width) * u64::from(w.height);
+
+    let (predicate_desc, matches): (String, Vec<usize>) = match explicit_title {
+        Some(title) => {
+            let needle = title.to_lowercase();
+            let idxs = windows
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| {
+                    onscreen(w)
+                        && (w.title.to_lowercase().contains(&needle)
+                            || w.app_name.to_lowercase().contains(&needle))
+                })
+                .map(|(i, _)| i)
+                .collect();
+            (format!("onscreen, title/app contains {title:?}"), idxs)
+        }
+        None => {
+            let idxs = windows
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| onscreen(w) && w.pid == our_pid && !w.title.is_empty())
+                .map(|(i, _)| i)
+                .collect();
+            (
+                format!("onscreen, own pid {our_pid}, non-empty title"),
+                idxs,
+            )
+        }
+    };
+
+    matches
+        .into_iter()
+        .max_by_key(|&i| area(&windows[i]))
+        .ok_or_else(|| {
+            let available: Vec<String> = windows
+                .iter()
+                .map(|w| {
+                    format!(
+                        "{:?} (app={:?}, pid={}, {}x{}, minimized={})",
+                        w.title, w.app_name, w.pid, w.width, w.height, w.minimized
+                    )
+                })
+                .collect();
+            format!("No window matched ({predicate_desc}). Candidates: {available:?}")
+        })
+}
+
 #[cfg(target_os = "macos")]
 fn capture_window_as_png(window_title: Option<&str>) -> Result<Vec<u8>, String> {
     let windows = xcap::Window::all().map_err(|e| format!("Failed to enumerate windows: {e}"))?;
 
     let our_pid = std::process::id();
 
-    let window = if let Some(title) = window_title {
-        let needle = title.to_lowercase();
-        windows.iter().find(|w| {
-            let t = w.title().unwrap_or_default().to_lowercase();
-            let a = w.app_name().unwrap_or_default().to_lowercase();
-            t.contains(&needle) || a.contains(&needle)
+    // Snapshot each xcap window into a plain descriptor (same order as
+    // `windows`) so the pure predicate's chosen index maps back 1:1.
+    // ALLOW(ok): OS window queries — a missing field defaults, never fatal.
+    let candidates: Vec<WindowCandidate> = windows
+        .iter()
+        .map(|w| WindowCandidate {
+            title: w.title().unwrap_or_default(),
+            app_name: w.app_name().unwrap_or_default(),
+            pid: w.pid().unwrap_or(0),
+            width: w.width().unwrap_or(0),
+            height: w.height().unwrap_or(0),
+            minimized: w.is_minimized().unwrap_or(false),
         })
-    } else {
-        // Match by PID + title "Holon" to skip GPUI's invisible auxiliary windows.
-        windows
-            .iter()
-            // ALLOW(ok): window queries — non-fatal
-            .find(|w| w.pid().ok() == Some(our_pid) && w.title().unwrap_or_default() == "Holon")
-    };
+        .collect();
 
-    let window = window.ok_or_else(|| {
-        // ALLOW(filter_map_ok): OS window queries — errors are not actionable
-        let available: Vec<String> = windows
-            .iter()
-            .filter_map(|w| {
-                let title = w.title().ok()?; // ALLOW(ok): window query
-                let app = w.app_name().ok().unwrap_or_default(); // ALLOW(ok): window query
-                let pid = w.pid().ok().unwrap_or(0); // ALLOW(ok): window query
-                let width = w.width().unwrap_or(0);
-                let height = w.height().unwrap_or(0);
-                Some(format!(
-                    "{title:?} (app={app:?}, pid={pid}, {width}x{height})"
-                ))
-            })
-            .collect();
-        format!(
-            "No window found (our pid={our_pid}, searched for {:?}). Available: {available:?}",
-            window_title.unwrap_or("(own process, largest window)")
-        )
-    })?;
+    let idx = select_window_index(&candidates, our_pid, window_title)?;
+    let window = &windows[idx];
 
     let win_title = window.title().unwrap_or_default();
     let win_app = window.app_name().unwrap_or_default();
@@ -3246,6 +3312,74 @@ impl HolonMcpServer {
             ),
             None,
         ))
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod window_select_tests {
+    use super::WindowCandidate;
+    use super::select_window_index;
+
+    fn win(title: &str, app: &str, pid: u32, w: u32, h: u32, minimized: bool) -> WindowCandidate {
+        WindowCandidate {
+            title: title.to_string(),
+            app_name: app.to_string(),
+            pid,
+            width: w,
+            height: h,
+            minimized,
+        }
+    }
+
+    /// The GPUI phantom cluster: an untitled 500x500, an offscreen strip, and
+    /// the real 3440x1440 "Holon". No title given ⇒ pick our own largest
+    /// onscreen non-empty-titled window (the real one), not the phantom that
+    /// enumerates first.
+    #[test]
+    fn own_process_picks_largest_onscreen_over_phantoms() {
+        let ours = 4242;
+        let wins = vec![
+            win("", "holon-gpui", ours, 500, 500, false), // phantom, first
+            win("Holon", "holon-gpui", ours, 3440, 32, false), // offscreen strip
+            win("Holon", "holon-gpui", ours, 3440, 1440, false), // the real one
+            win("Some Other App", "Other", 99, 4000, 4000, false), // not ours
+        ];
+        assert_eq!(select_window_index(&wins, ours, None), Ok(2));
+    }
+
+    /// A minimized main window is not silently captured — fail loud instead of
+    /// returning the phantom or a window `capture_image` would reject.
+    #[test]
+    fn own_process_minimized_main_fails_loud_not_phantom() {
+        let ours = 7;
+        let wins = vec![
+            win("", "holon-gpui", ours, 500, 500, false), // phantom onscreen
+            win("Holon", "holon-gpui", ours, 3440, 1440, true), // real but minimized
+        ];
+        let err = select_window_index(&wins, ours, None).unwrap_err();
+        assert!(err.contains("No window matched"), "got: {err}");
+        assert!(err.contains("Candidates"), "must list candidates: {err}");
+    }
+
+    /// Explicit title search matches title OR app-name (case-insensitive) and
+    /// prefers the largest onscreen match.
+    #[test]
+    fn explicit_title_matches_and_prefers_largest() {
+        let wins = vec![
+            win("holon — small", "x", 1, 200, 100, false),
+            win("HOLON — big", "x", 1, 1200, 800, false),
+            win("Unrelated", "Other", 2, 5000, 5000, false),
+        ];
+        assert_eq!(select_window_index(&wins, 999, Some("holon")), Ok(1));
+    }
+
+    /// No candidate at all ⇒ loud error listing every candidate window.
+    #[test]
+    fn no_match_lists_all_candidates() {
+        let wins = vec![win("Editor", "Zed", 1, 800, 600, false)];
+        let err = select_window_index(&wins, 4242, None).unwrap_err();
+        assert!(err.contains("No window matched"), "got: {err}");
+        assert!(err.contains("Editor"), "must name the candidate: {err}");
     }
 }
 
