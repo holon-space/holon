@@ -65,6 +65,10 @@ use std::fmt;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::owner_identity::OwnerIdentityKey;
+use crate::owner_identity::OwnerPublicKey;
+use crate::owner_identity::OwnerSignature;
+
 /// Domain separator folded into the capability id so the public handle can
 /// never collide with the proof keyed-hash domain.
 const CAPABILITY_ID_DOMAIN: &[u8] = b"holon.share.capability-id.v1";
@@ -283,6 +287,24 @@ impl fmt::Debug for PeerFingerprint {
     }
 }
 
+impl Serialize for PeerFingerprint {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&hex::encode(self.0))
+    }
+}
+
+impl<'de> Deserialize<'de> for PeerFingerprint {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
+        let arr: [u8; 32] = bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| serde::de::Error::custom("peer fingerprint must be 32 bytes"))?;
+        Ok(PeerFingerprint(arr))
+    }
+}
+
 /// Loud rejection reasons. Every variant is an authorization *failure*: the
 /// caller must surface it and refuse the connection. There is no "allow on
 /// doubt" path.
@@ -298,6 +320,16 @@ pub enum AuthzReject {
     /// A new, valid-capability peer arrived but the roster is already at
     /// `max_peers`. Bounds the blast radius of a leaked capability.
     RosterFull { max: usize },
+    /// (B1 owner-signed path) The owner signature over the device-roster entry
+    /// did not verify — the entry was not signed by this fleet's owner key.
+    UnauthorizedDevice,
+    /// (B1 owner-signed path) The owner-signed entry authorizes a *different*
+    /// device than the one on this connection (fingerprint mismatch). Stops a
+    /// captured entry for device X admitting device Y.
+    DeviceMismatch,
+    /// (B1 owner-signed path) This share has no owner public key configured, so
+    /// owner-signed admission is impossible. Fail closed.
+    NoOwnerRoster,
 }
 
 impl fmt::Display for AuthzReject {
@@ -321,6 +353,21 @@ impl fmt::Display for AuthzReject {
                     "share roster already at capacity ({max} peer(s)); enrollment refused"
                 )
             }
+            AuthzReject::UnauthorizedDevice => write!(
+                f,
+                "device-roster entry is not signed by this fleet's owner key; \
+                 owner-signed admission refused"
+            ),
+            AuthzReject::DeviceMismatch => write!(
+                f,
+                "owner-signed roster entry authorizes a different device than the \
+                 connecting peer; admission refused"
+            ),
+            AuthzReject::NoOwnerRoster => write!(
+                f,
+                "share has no owner key configured; owner-signed admission is \
+                 unavailable (fail closed)"
+            ),
         }
     }
 }
@@ -367,6 +414,69 @@ pub struct ShareRoster {
     expires_at: ExpiryTime,
     max_peers: usize,
     enrolled: Vec<PeerFingerprint>,
+    /// (B1) The fleet owner's public key. When set, this roster ALSO admits
+    /// devices the owner has signed into it ([`Self::authorize_owner_signed`]),
+    /// independent of the capability-TOFU path. `None` = capability-only share
+    /// (a plain third-party share with no self-device fast path).
+    owner: Option<OwnerPublicKey>,
+}
+
+/// (B1) An owner-signed device-roster entry: proof that the fleet owner
+/// authorized `device` to join the share at `added_at`. The signature is over
+/// the share id + device fingerprint + timestamp, so an entry minted for one
+/// share/device cannot be replayed onto another. Serializable for the C1 signed
+/// sidecar.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedDeviceEntry {
+    /// The QUIC node key the owner authorized. Admission requires the
+    /// connecting peer's authenticated fingerprint to equal this.
+    pub device: PeerFingerprint,
+    /// Unix seconds when the owner added the device (audit / ordering).
+    pub added_at: i64,
+    /// The owner's signature over [`device_admission_payload`].
+    pub sig: OwnerSignature,
+}
+
+/// Canonical bytes the owner signs to authorize a device into a share. Binds
+/// the share id, the device fingerprint, and the timestamp under a domain
+/// separator so a signature is useless outside its exact (share, device) slot.
+pub fn device_admission_payload(
+    shared_tree_id: &str,
+    device: &PeerFingerprint,
+    added_at: i64,
+) -> Vec<u8> {
+    let mut v = Vec::with_capacity(64 + shared_tree_id.len());
+    v.extend_from_slice(b"holon.share.device-roster.v1");
+    v.push(0);
+    v.extend_from_slice(shared_tree_id.as_bytes());
+    v.push(0);
+    v.extend_from_slice(device.as_bytes());
+    v.extend_from_slice(&added_at.to_be_bytes());
+    v
+}
+
+impl SignedDeviceEntry {
+    /// Owner-side: sign `device` into the share named by `shared_tree_id`.
+    pub fn sign(
+        owner: &OwnerIdentityKey,
+        shared_tree_id: &str,
+        device: PeerFingerprint,
+        added_at: i64,
+    ) -> Self {
+        let payload = device_admission_payload(shared_tree_id, &device, added_at);
+        SignedDeviceEntry {
+            device,
+            added_at,
+            sig: owner.sign(&payload),
+        }
+    }
+
+    /// Verify this entry against `owner` for `shared_tree_id`. Loud `Err` on
+    /// any mismatch.
+    pub fn verify(&self, owner: &OwnerPublicKey, shared_tree_id: &str) -> anyhow::Result<()> {
+        let payload = device_admission_payload(shared_tree_id, &self.device, self.added_at);
+        owner.verify(&payload, &self.sig)
+    }
 }
 
 impl ShareRoster {
@@ -386,7 +496,57 @@ impl ShareRoster {
             expires_at,
             max_peers: max_peers.max(1),
             enrolled: Vec::new(),
+            owner: None,
         }
+    }
+
+    /// Attach the fleet owner's public key, enabling the B1 owner-signed
+    /// self-device admission path in addition to capability-TOFU.
+    pub fn with_owner(mut self, owner: OwnerPublicKey) -> Self {
+        self.owner = Some(owner);
+        self
+    }
+
+    /// Rebuild a roster from persisted state (C1 sidecar rehydration): the
+    /// capability secret comes from the keychain, the public fields + already
+    /// -pinned peers come from the verified sidecar body. Restoring the pinned
+    /// set is what lets an already-enrolled peer reconnect after a restart
+    /// without re-proving.
+    pub fn rehydrate(
+        shared_tree_id: impl Into<String>,
+        capability_secret: CapabilitySecret,
+        expires_at: ExpiryTime,
+        max_peers: usize,
+        enrolled: Vec<PeerFingerprint>,
+        owner: Option<OwnerPublicKey>,
+    ) -> Self {
+        let capability_id = capability_secret.capability_id();
+        Self {
+            shared_tree_id: shared_tree_id.into(),
+            capability_id,
+            capability_secret,
+            expires_at,
+            max_peers: max_peers.max(1),
+            enrolled,
+            owner,
+        }
+    }
+
+    pub fn expires_at(&self) -> ExpiryTime {
+        self.expires_at
+    }
+    pub fn max_peers(&self) -> usize {
+        self.max_peers
+    }
+    /// The currently-pinned peer fingerprints (for sidecar persistence).
+    pub fn enrolled_peers(&self) -> &[PeerFingerprint] {
+        &self.enrolled
+    }
+
+    /// The configured owner public key, if this share supports owner-signed
+    /// admission.
+    pub fn owner(&self) -> Option<&OwnerPublicKey> {
+        self.owner.as_ref()
     }
 
     pub fn shared_tree_id(&self) -> &str {
@@ -446,6 +606,57 @@ impl ShareRoster {
         if &expected != presented_proof {
             return Err(AuthzReject::BadProof);
         }
+        if self.enrolled.len() >= self.max_peers {
+            return Err(AuthzReject::RosterFull {
+                max: self.max_peers,
+            });
+        }
+        self.enrolled.push(peer);
+        Ok(AuthorizedPeer {
+            peer,
+            capability_id: self.capability_id,
+            newly_enrolled: true,
+        })
+    }
+
+    /// (B1) Owner-signed admission — the self-device fast path. Instead of
+    /// proving a capability, the connecting peer presents an owner-signed
+    /// [`SignedDeviceEntry`]. Admission requires, in order:
+    ///
+    /// 1. an already-enrolled peer short-circuits (same as the capability
+    ///    path);
+    /// 2. this share has an owner key ([`AuthzReject::NoOwnerRoster`]
+    ///    otherwise);
+    /// 3. the entry authorizes THIS connection's QUIC-authenticated fingerprint
+    ///    ([`AuthzReject::DeviceMismatch`] otherwise — a captured entry for
+    ///    device X cannot admit device Y);
+    /// 4. the owner signature verifies ([`AuthzReject::UnauthorizedDevice`]);
+    /// 5. the peer cap is not exceeded.
+    ///
+    /// Yields the SAME [`AuthorizedPeer`] witness as the capability path, so a
+    /// downstream gate that requires `&AuthorizedPeer` treats both admissions
+    /// uniformly. Owner-signed devices are NOT subject to capability expiry:
+    /// the owner's signature is the authority, not a time-boxed enrollment
+    /// window.
+    pub fn authorize_owner_signed(
+        &mut self,
+        entry: &SignedDeviceEntry,
+        peer: PeerFingerprint,
+    ) -> Result<AuthorizedPeer, AuthzReject> {
+        if self.enrolled.contains(&peer) {
+            return Ok(AuthorizedPeer {
+                peer,
+                capability_id: self.capability_id,
+                newly_enrolled: false,
+            });
+        }
+        let owner = self.owner.as_ref().ok_or(AuthzReject::NoOwnerRoster)?;
+        if entry.device != peer {
+            return Err(AuthzReject::DeviceMismatch);
+        }
+        entry
+            .verify(owner, &self.shared_tree_id)
+            .map_err(|_| AuthzReject::UnauthorizedDevice)?;
         if self.enrolled.len() >= self.max_peers {
             return Err(AuthzReject::RosterFull {
                 max: self.max_peers,
@@ -520,10 +731,31 @@ impl EnrollmentProofMsg {
     not(all(target_arch = "wasm32", target_os = "unknown"))
 ))]
 mod wire {
+    use std::time::Duration;
+
     use anyhow::Context;
     use anyhow::Result;
+    use tokio::time::timeout;
 
     use super::*;
+
+    /// Upper bound on any single peer-dependent await in the enrollment
+    /// handshake. The handshake is a tiny fixed exchange (challenge → proof →
+    /// ack) on a loopback-or-LAN QUIC stream, so a peer that stalls this long
+    /// is misbehaving. A bound turns a silent/hostile peer into a loud error
+    /// instead of a hang — the same discipline the sync path applies with
+    /// `ACCEPT_IO_TIMEOUT`.
+    const ENROLL_IO_TIMEOUT: Duration = Duration::from_secs(10);
+
+    async fn bounded<F, T>(what: &str, fut: F) -> Result<T>
+    where
+        F: std::future::Future<Output = Result<T>>,
+    {
+        match timeout(ENROLL_IO_TIMEOUT, fut).await {
+            Ok(r) => r,
+            Err(_) => anyhow::bail!("enrollment {what} timed out after {ENROLL_IO_TIMEOUT:?}"),
+        }
+    }
 
     async fn write_frame(stream: &mut iroh::endpoint::SendStream, data: &[u8]) -> Result<()> {
         if data.len() > MAX_ENROLLMENT_FRAME {
@@ -562,8 +794,13 @@ mod wire {
     }
 
     /// Acceptor side: mint a challenge, read the initiator's proof, and
-    /// authorize against `roster`. Runs on its own dedicated bi-stream, opened
-    /// by the initiator *before* the sync stream. Returns the loud
+    /// authorize against `roster`. Runs on its own dedicated bi-stream that the
+    /// *acceptor* opens: challenge-response is acceptor-speaks-first, and QUIC
+    /// only surfaces a freshly-opened bidi stream to the peer once the opener
+    /// transmits — so the side that writes first (here, the challenge) must be
+    /// the side that opens, else `accept_bi`/`open_bi` mutually block. The sync
+    /// stream that follows is opened by the initiator (which writes first
+    /// there), so the two streams never collide. Returns the loud
     /// [`AuthzReject`] (wrapped) on any failure so the caller drops the
     /// connection without ever reaching the sync primitive.
     pub async fn acceptor_enroll(
@@ -571,15 +808,20 @@ mod wire {
         roster: &mut ShareRoster,
         now: i64,
     ) -> Result<AuthorizedPeer> {
-        let (mut send, mut recv) = conn
-            .accept_bi()
-            .await
-            .map_err(|e| anyhow::anyhow!("accept enrollment stream: {e}"))?;
+        let (mut send, mut recv) = bounded("open stream", async {
+            conn.open_bi()
+                .await
+                .map_err(|e| anyhow::anyhow!("open enrollment stream: {e}"))
+        })
+        .await?;
         let challenge = Challenge::generate();
-        write_frame(&mut send, challenge.as_bytes())
-            .await
-            .context("send enrollment challenge")?;
-        let proof_bytes = read_frame(&mut recv)
+        bounded(
+            "send challenge",
+            write_frame(&mut send, challenge.as_bytes()),
+        )
+        .await
+        .context("send enrollment challenge")?;
+        let proof_bytes = bounded("read proof", read_frame(&mut recv))
             .await
             .context("read enrollment proof")?;
         let msg = EnrollmentProofMsg::from_wire(&proof_bytes)?;
@@ -587,26 +829,30 @@ mod wire {
         let authorized = roster
             .authorize(now, &challenge, &msg.capability_id, &msg.proof, peer)
             .map_err(|reject| anyhow::anyhow!("enrollment rejected: {reject}"))?;
-        // Ack so the initiator knows it may open the sync stream.
-        write_frame(&mut send, b"OK")
+        // Ack so the initiator knows the sync stream may proceed.
+        bounded("send ack", write_frame(&mut send, b"OK"))
             .await
             .context("send enrollment ack")?;
         send.finish().context("finish enrollment ack stream")?;
         Ok(authorized)
     }
 
-    /// Initiator side: open the enrollment stream, read the challenge, prove
-    /// possession, await the ack. Call before opening the sync stream.
+    /// Initiator side: accept the acceptor-opened enrollment stream, read the
+    /// challenge, prove possession, await the ack. Runs to completion before
+    /// the initiator opens the sync stream (see `acceptor_enroll` for why
+    /// the acceptor is the opener here).
     pub async fn initiator_enroll(
         conn: &iroh::endpoint::Connection,
         capability: &CapabilitySecret,
         shared_tree_id: &str,
     ) -> Result<()> {
-        let (mut send, mut recv) = conn
-            .open_bi()
-            .await
-            .map_err(|e| anyhow::anyhow!("open enrollment stream: {e}"))?;
-        let challenge_bytes = read_frame(&mut recv)
+        let (mut send, mut recv) = bounded("accept stream", async {
+            conn.accept_bi()
+                .await
+                .map_err(|e| anyhow::anyhow!("accept enrollment stream: {e}"))
+        })
+        .await?;
+        let challenge_bytes = bounded("read challenge", read_frame(&mut recv))
             .await
             .context("read enrollment challenge")?;
         if challenge_bytes.len() != 32 {
@@ -619,11 +865,13 @@ mod wire {
         c.copy_from_slice(&challenge_bytes);
         let challenge = Challenge::from_bytes(c);
         let msg = EnrollmentProofMsg::build(capability, &challenge, shared_tree_id);
-        write_frame(&mut send, &msg.to_wire())
+        bounded("send proof", write_frame(&mut send, &msg.to_wire()))
             .await
             .context("send enrollment proof")?;
         send.finish().context("finish enrollment proof stream")?;
-        let ack = read_frame(&mut recv).await.context("read enrollment ack")?;
+        let ack = bounded("read ack", read_frame(&mut recv))
+            .await
+            .context("read enrollment ack")?;
         if ack != b"OK" {
             anyhow::bail!("acceptor did not acknowledge enrollment");
         }
@@ -659,6 +907,101 @@ mod tests {
         let cap = CapabilitySecret::generate();
         let r = ShareRoster::new("tree-abc", cap.clone(), ExpiryTime(expires_at), max);
         (r, cap)
+    }
+
+    // --- B1 owner-signed device roster admission ---
+
+    fn owner_roster(max: usize) -> (OwnerIdentityKey, ShareRoster) {
+        let owner = OwnerIdentityKey::generate();
+        let cap = CapabilitySecret::generate();
+        let r =
+            ShareRoster::new("tree-abc", cap, ExpiryTime(10_000), max).with_owner(owner.public());
+        (owner, r)
+    }
+
+    #[test]
+    fn owner_signed_device_is_admitted_and_idempotent() {
+        let (owner, mut r) = owner_roster(2);
+        let device = peer(5);
+        let entry = SignedDeviceEntry::sign(&owner, "tree-abc", device, 42);
+        let a = r
+            .authorize_owner_signed(&entry, device)
+            .expect("owner-signed device admitted");
+        assert!(a.newly_enrolled());
+        assert_eq!(r.enrolled_count(), 1);
+        // Reconnect: idempotent, no re-verify.
+        let a2 = r.authorize_owner_signed(&entry, device).unwrap();
+        assert!(!a2.newly_enrolled());
+        assert_eq!(r.enrolled_count(), 1);
+    }
+
+    #[test]
+    fn entry_for_other_device_cannot_admit_this_peer() {
+        let (owner, mut r) = owner_roster(2);
+        // Owner signed device 5, but device 6 connects presenting that entry.
+        let entry = SignedDeviceEntry::sign(&owner, "tree-abc", peer(5), 42);
+        assert_eq!(
+            r.authorize_owner_signed(&entry, peer(6)).unwrap_err(),
+            AuthzReject::DeviceMismatch
+        );
+    }
+
+    #[test]
+    fn entry_signed_by_wrong_owner_is_rejected() {
+        let (_owner, mut r) = owner_roster(2);
+        let attacker = OwnerIdentityKey::generate();
+        let device = peer(7);
+        let forged = SignedDeviceEntry::sign(&attacker, "tree-abc", device, 42);
+        assert_eq!(
+            r.authorize_owner_signed(&forged, device).unwrap_err(),
+            AuthzReject::UnauthorizedDevice
+        );
+    }
+
+    #[test]
+    fn entry_for_other_share_is_rejected() {
+        let (owner, mut r) = owner_roster(2);
+        let device = peer(8);
+        // Owner signed this device, but into a DIFFERENT share id.
+        let cross_share = SignedDeviceEntry::sign(&owner, "tree-other", device, 42);
+        assert_eq!(
+            r.authorize_owner_signed(&cross_share, device).unwrap_err(),
+            AuthzReject::UnauthorizedDevice
+        );
+    }
+
+    #[test]
+    fn owner_signed_admission_without_owner_key_fails_closed() {
+        let (mut r, _cap) = roster(2, 10_000); // no owner configured
+        let owner = OwnerIdentityKey::generate();
+        let device = peer(9);
+        let entry = SignedDeviceEntry::sign(&owner, "tree-abc", device, 42);
+        assert_eq!(
+            r.authorize_owner_signed(&entry, device).unwrap_err(),
+            AuthzReject::NoOwnerRoster
+        );
+    }
+
+    #[test]
+    fn owner_signed_respects_peer_cap() {
+        let (owner, mut r) = owner_roster(1);
+        let e5 = SignedDeviceEntry::sign(&owner, "tree-abc", peer(5), 1);
+        let e6 = SignedDeviceEntry::sign(&owner, "tree-abc", peer(6), 2);
+        r.authorize_owner_signed(&e5, peer(5)).unwrap();
+        assert_eq!(
+            r.authorize_owner_signed(&e6, peer(6)).unwrap_err(),
+            AuthzReject::RosterFull { max: 1 }
+        );
+    }
+
+    #[test]
+    fn signed_device_entry_serde_round_trips() {
+        let owner = OwnerIdentityKey::generate();
+        let entry = SignedDeviceEntry::sign(&owner, "tree-abc", peer(3), 99);
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: SignedDeviceEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(entry, back);
+        assert!(back.verify(&owner.public(), "tree-abc").is_ok());
     }
 
     #[test]
