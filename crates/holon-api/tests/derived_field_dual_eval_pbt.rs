@@ -11,11 +11,24 @@
 //!
 //! Staying in the unambiguous interior (see the property-based-testing skill's
 //! generator guidance):
-//!   * **float-only literals** (`n.0`) — so Rhai does float arithmetic
-//!     throughout, matching the subset evaluator's always-`f64` `Arith`;
-//!     integer vs float division (`5/2` = 2 vs 2.5) would otherwise diverge.
+//!   * **mixed int/float leaves** — integer leaves render WITHOUT a decimal
+//!     (`3`), float leaves WITH (`3.0`), so Rhai's int-vs-float semantics
+//!     (truncating integer division, mixed promotion) are exercised. The subset
+//!     evaluator mirrors this with type-faithful `Arith` (int op int stays
+//!     integer; any float operand promotes). See
+//!     `directed_integer_semantics_*`.
 //!   * **nonzero literal divisors** only — no `x/0` NaN/inf boundary.
-//!   * **small integral values** in the context — exact float ops, and `switch`
+//!   * **integer-valued COMPARISON operands** — `Cmp` (the conditions of `if`)
+//!     draws operands from `arb_int_num`, NOT `arb_num`. Rhai's float
+//!     comparison operators are relative-epsilon tolerant (NOT strict IEEE;
+//!     `rhai/src/func/builtin.rs` `impl_float`), so two float subexpressions
+//!     that are mathematically equal but differ by ~1 ULP flip Rhai's `<=`
+//!     while the subset (strict, SQL-faithful) does not. That regime's prod
+//!     semantics are pending a ruling (see
+//!     `directed_float_comparison_epsilon_divergence` and BugFunnel); value
+//!     results are unaffected (they cross int/float freely and compare via
+//!     `results_equiv`'s relative epsilon).
+//!   * **small integral values** in the context — exact ops, and `switch`
 //!     scrutinees land on case labels often enough to exercise both hit and
 //!     `_`-default arms.
 //! The rendered source is fully parenthesised, so Rhai re-parses the exact tree
@@ -211,6 +224,37 @@ fn arb_num() -> impl Strategy<Value = G> {
     })
 }
 
+/// Integer-VALUED numeric expressions: integer leaves and the integer-closed
+/// operators (`+`/`-`/`*` and truncating integer division). No floats, no
+/// `DivFloat` — so every value is an exact `i64` and comparisons over these are
+/// exact in ALL THREE engines (subset, SQLite, Rhai).
+///
+/// Used ONLY for comparison operands (`Cmp`), NOT for arithmetic value
+/// positions. Rhai's float comparison operators are relative-epsilon tolerant
+/// (see [`directed_float_comparison_epsilon_divergence`]), so comparing two
+/// float subexpressions that differ by ~1 ULP flips Rhai's result but not the
+/// subset's (strict, SQL-faithful) — a divergence in a regime whose prod
+/// semantics are pending a ruling. Restricting comparison operands to exact
+/// integers keeps the differential property inside the interior where the
+/// engines provably agree, WITHOUT weakening the oracle for value results
+/// (those still cross int/float freely and compare via `results_equiv`).
+fn arb_int_num() -> impl Strategy<Value = G> {
+    let leaf = prop_oneof![
+        (0i64..=5).prop_map(G::IntLit),
+        (0usize..INT_VARS.len()).prop_map(G::IntVar),
+    ];
+    leaf.prop_recursive(3, 24, 3, |inner| {
+        prop_oneof![
+            (binop(), inner.clone(), inner.clone()).prop_map(|(op, l, r)| G::Bin(
+                op,
+                Box::new(l),
+                Box::new(r)
+            )),
+            (inner, 1i64..=5).prop_map(|(l, d)| G::DivInt(Box::new(l), d)),
+        ]
+    })
+}
+
 /// Any subset expression: a numeric expr, or an `if`/`switch` whose *value
 /// positions* (branch bodies, arm results, else) recurse into any expression —
 /// so conditionals nest — while conditions and arithmetic operands stay
@@ -218,7 +262,14 @@ fn arb_num() -> impl Strategy<Value = G> {
 /// float+float).
 fn arb_expr() -> impl Strategy<Value = G> {
     arb_num().prop_recursive(3, 40, 4, |value| {
-        let cmp = (cmpkind(), arb_num(), arb_num()).prop_map(|(op, lhs, rhs)| Cmp { op, lhs, rhs });
+        // Comparison operands are integer-VALUED (exact in all three engines);
+        // see `arb_int_num`. Rhai's epsilon-tolerant float comparison would
+        // otherwise flip near-ULP-tie float comparisons (pending ruling).
+        let cmp = (cmpkind(), arb_int_num(), arb_int_num()).prop_map(|(op, lhs, rhs)| Cmp {
+            op,
+            lhs,
+            rhs,
+        });
         prop_oneof![
             (
                 prop::collection::vec((cmp, value.clone()), 1..=2),
@@ -265,6 +316,55 @@ fn results_equiv(
         },
         _ => false,
     }
+}
+
+/// DIRECTED regression for the **float-comparison epsilon divergence** — the
+/// reason `Cmp` operands are restricted to integer-valued arithmetic (see
+/// [`arb_int_num`] and the module header).
+///
+/// Rhai's `<`/`<=`/`>`/`>=`/`==`/`!=` on floats are **relative-epsilon
+/// tolerant** (`rhai-1.25.1/src/func/builtin.rs` `impl_float`: e.g. `<=` is
+/// `(y - x)/max > -FLOAT::EPSILON`), NOT strict IEEE. The subset evaluator
+/// ([`crate::computation::CmpOp::apply`] / `values_match`) is strict — matching
+/// SQLite, the SQL-lowering target that seat A exists to mirror. So when two
+/// float operands are mathematically equal but computed via different rounding
+/// paths (differ by ~1 ULP), the two engines pick different branches.
+///
+/// This case is FROZEN as the canonical demonstration: both engines compute the
+/// two operands to **bit-identical** f64 (LHS `0.4`, RHS `0.4 - 1 ULP`), yet
+/// Rhai's `<=` reports `true` (within epsilon) while the subset (and SQLite)
+/// reports `false`. Neither arithmetic side is wrong; the divergence lives
+/// entirely in Rhai's non-strict comparison operator. Prod semantics for this
+/// float-comparison regime are PENDING A RULING (see BugFunnel; whether prod
+/// `bounded_engine()` Rhai should be made strict to match SQL-lowered derived
+/// fields). Until then the equivalence property deliberately does not assert
+/// agreement here.
+#[test]
+fn directed_float_comparison_epsilon_divergence() {
+    let engine = bounded_engine();
+    let mut ctx = HashMap::new();
+    ctx.insert("x".to_string(), Value::Float(0.0));
+    ctx.insert("y".to_string(), Value::Float(2.0));
+
+    let src = "(((y / 5) / 1.0) <= (((x + 2) - (4 / 5.0)) / 3))";
+    let subset = expr_parser::parse(src).unwrap().eval(&ctx).unwrap();
+    let rhai = Computation::Script(CompiledExpr::compile(&engine, src).unwrap())
+        .eval(&ctx)
+        .unwrap();
+
+    // Subset (== SQLite) is strict IEEE: 0.4 <= (0.4 - 1 ULP) is false.
+    assert_eq!(
+        subset,
+        Value::Boolean(false),
+        "subset must be strict IEEE (SQL-faithful)"
+    );
+    // Rhai is epsilon-tolerant: treats the two near-equal floats as equal, so
+    // `<=` holds. This is the documented, out-of-spec-for-our-DSL behavior.
+    assert_eq!(
+        rhai,
+        Value::Boolean(true),
+        "Rhai comparison is relative-epsilon tolerant (FLOAT::EPSILON)"
+    );
 }
 
 proptest! {
