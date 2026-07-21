@@ -288,4 +288,22 @@ async fn slash_menu_entries_are_unique_by_label_and_op_id() {
             menu.iter().map(|i| &i.id).collect::<Vec<_>>()
         );
     }
+
+    // Regression lock (Martin dogfood 2026-07-21): `delete` was absent from the
+    // slash menu under LORO authority. Its `Listed` classification lives on the
+    // macro-generated `CrudOperations::delete` descriptor, which
+    // `LoroBlockOperations::operations()` sources via `crud_operations()`; the
+    // SqlOnly-only hand-written `Listed` delete descriptor is narrowed out under
+    // Loro by the `OperationSubset` allowlist (turso_seams). So delete must be
+    // (a) present and (b) rendered exactly once (not double-advertised) over the
+    // exact dual-authority Loro wiring — the SqlOnly `block_engine` presence test
+    // above could not catch a Loro-authority regression.
+    let delete_count = menu.iter().filter(|i| i.id == "delete").count();
+    assert_eq!(
+        delete_count,
+        1,
+        "block `delete` must render exactly once in the slash menu under Loro \
+         authority; got {delete_count} (menu ids: {:?})",
+        menu.iter().map(|i| &i.id).collect::<Vec<_>>()
+    );
 }

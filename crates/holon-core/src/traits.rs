@@ -526,6 +526,7 @@ where
     ) -> Result<(String, OperationResult)>;
 
     /// Delete entity (returns changes and inverse operation for undo)
+    #[holon_macros::menu_exposure(listed)]
     #[holon_macros::boundary_behavior(private_only)]
     async fn delete(&self, id: &str) -> Result<OperationResult>;
 
