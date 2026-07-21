@@ -190,6 +190,20 @@ pub fn text_style_font_size(style: &str) -> Option<f32> {
     }
 }
 
+/// Resolve what a `text(..)` widget shows: the real `content`, or a disclosed
+/// placeholder when `content` is empty. `empty_placeholder` is the `#{empty:
+/// ..}` named arg (`text(col("content"), #{empty: "(untitled)"})`). Returns the
+/// string to display plus whether it is the placeholder, so a caller can style
+/// the placeholder as degraded (muted/italic) — a genuinely empty value must
+/// never render as a blank row (fail-loud, never fake). Single source shared by
+/// every frontend, so the "no blank row" guarantee has one implementation.
+pub fn text_display<'a>(content: &'a str, empty_placeholder: Option<&'a str>) -> (&'a str, bool) {
+    match empty_placeholder {
+        Some(p) if content.is_empty() => (p, true),
+        _ => (content, false),
+    }
+}
+
 pub fn state_icon(state: &str) -> &'static str {
     if state.is_empty() {
         ""
@@ -1487,6 +1501,18 @@ mod mutation_gap_tests {
         // resolving to body size — the exact swallow that hid the title bug.
         assert_eq!(text_style_font_size("h7"), None);
         assert_eq!(text_style_font_size(""), None);
+    }
+
+    #[test]
+    fn text_display_shows_disclosed_placeholder_only_for_empty_content() {
+        // Non-empty content always wins — the placeholder never masks real text.
+        assert_eq!(text_display("hello", Some("(untitled)")), ("hello", false));
+        // Empty content with a placeholder discloses the stand-in (styled muted
+        // by the caller) so an empty Page can never render as a blank row.
+        assert_eq!(text_display("", Some("(untitled)")), ("(untitled)", true));
+        // No placeholder configured → empty stays empty (never fabricated).
+        assert_eq!(text_display("", None), ("", false));
+        assert_eq!(text_display("hello", None), ("hello", false));
     }
 
     #[test]
