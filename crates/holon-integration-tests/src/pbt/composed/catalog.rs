@@ -61,6 +61,13 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // every draw and RED-catches a generator/seed regression at the ref
         // boundary before `name_chain` bail!s in writeback.
         invariants::no_page_under_non_page::wire(),
+        // ADR 0028 C2/H3 directional-alignment tripwire: a block's effective
+        // (container) audience must never OVER-approximate its policy audience.
+        // `RefAudience` only — the ref always provides it, so this selects on
+        // every draw and RED-catches a wrong-order share migration at the ref
+        // boundary. Vacuously green on a ref modeling no crossings (default
+        // keystone), so it adds no false RED.
+        invariants::audience_never_over_approximates::wire(),
         invariants::no_errors::wire(),
         // Mark-bounds tripwire (dogfood 2026-07-20): every inline mark's span
         // must lie within its block content (`end <= content.chars().count()`),
@@ -271,7 +278,9 @@ const CENTRAL_INVARIANT_IDS_HEAD: &[&str] = &[
     "inv-companion-has-no-child-page-headings",
     "inv-every-page-has-its-own-file",
     "inv-no-page-under-non-page",
+    "inv-audience-never-over-approximates",
     "inv-no-errors",
+    "inv-mark-bounds-within-content",
     "inv-viewmodel-no-error-widgets",
     "inv-task-state-storage-coherence",
     "inv-frontend-bounds-rendered",

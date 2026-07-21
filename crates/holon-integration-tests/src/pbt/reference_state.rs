@@ -384,6 +384,12 @@ pub struct ReferenceState {
     /// Calendar-clock model for the `AdvanceDay` transition (ADR 0024 §6).
     pub clock: ClockState,
 
+    /// Sharing overlay (ADR 0028 C2/H3): per-block policy audience + per-doc
+    /// effective container audience + sharing epoch. Empty until a crossing
+    /// transition writes it; read by `inv-audience-never-over-approximates`
+    /// through the `RefAudience` cap.
+    pub sharing: super::sharing_state::SharingRefState,
+
     /// C2 history-oracle expectation (NOT model state proper): populated by the
     /// harness `run_report` from the id-reconcile map. `history_ever_created`
     /// = every real id the oracle minted (anchor for the phantom-history subset
@@ -523,6 +529,9 @@ impl ReferenceState {
         if let Some(editor) = resolved.ui.tab.active_editor.as_mut() {
             editor.block_id = resolve(&editor.block_id);
         }
+        // Sharing overlay keys are block/doc uris; remap into SUT id space so the
+        // audience oracle reads SUT-keyed audiences. A no-op on the empty default.
+        resolved.sharing = self.sharing.remapped(map);
         Resolved(resolved)
     }
 
@@ -542,6 +551,7 @@ impl ReferenceState {
             },
             loro: LoroRefExt::default(),
             clock: ClockState::new(),
+            sharing: super::sharing_state::SharingRefState::default(),
             history_ever_created: BTreeSet::new(),
             history_min_op_groups: 0,
         }
