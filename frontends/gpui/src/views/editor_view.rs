@@ -21,7 +21,8 @@ use gpui_component::menu::PopupMenuItem;
 use holon_api::widget_spec::DataRow;
 use holon_frontend::RowOrigin;
 use holon_frontend::cell::CursorBias;
-use holon_frontend::cell::compute_text_delta;
+use holon_frontend::echo::EchoDecision;
+use holon_frontend::echo::evaluate_data_sync_echo;
 use holon_frontend::editor_view_model::EditorAction;
 use holon_frontend::editor_view_model::EditorKey;
 use holon_frontend::editor_view_model::EditorViewModel;
@@ -37,101 +38,6 @@ use holon_frontend::reactive::BuilderServices;
 use crate::geometry::BoundsRegistry;
 use crate::navigation_state::NavigationState;
 use crate::share_ui::ShareTrigger;
-
-/// Outcome of applying the op-versioned echo-suppression rule to one data-sync
-/// emission. Pure and side-effect-free so the convergence policy is unit-tested
-/// directly (see the `echo_suppression` tests) without a live gpui window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EchoDecision {
-    /// Echo equals the editor's current InputState — nothing to change. If the
-    /// echo carried a sequence, advance the high-water mark to it so a later
-    /// reordered echo of an even earlier keystroke is still recognised as
-    /// stale.
-    InSync { advance_to: Option<i64> },
-    /// Converge InputState to the echo and adopt `seq` as the new high-water.
-    Converge { seq: i64 },
-    /// A reordered/lagged echo of an edit strictly older than the editor's last
-    /// local write. Drop it — this is the "typing resets the block" fix.
-    DropStale,
-    /// The echo carries the editor's OWN last write-seq AND its content is
-    /// exactly the trailing-whitespace canonicalization of the focused buffer
-    /// (`SqlOperationProvider::trimmed_content` strips trailing whitespace on
-    /// store). This is the SQL-canonicalized echo of the user's own in-flight
-    /// write, NOT a newer external authority — the two are indistinguishable by
-    /// seq alone because non-editor writers don't bump `write_seq`. Converging
-    /// would delete the just-typed trailing space from the focused buffer (the
-    /// "typed space vanishes ~100ms later" bug). Keep the visible buffer as
-    /// typed; adopt the canonical text as the change-tracking baseline so a
-    /// later blur/idle diffs against SQL truth, not a stale baseline.
-    AdoptBaseline { seq: i64 },
-    /// Content changed but the row carried no `write_seq` ordering token — a
-    /// schema/projection regression. Drop and report loudly (never converge
-    /// blindly: that is the stale-echo data loss we are preventing).
-    DropNoSeq,
-}
-
-/// Op-versioned echo suppression for the SqlOnly data-sync path.
-///
-/// Converge to an authority state only when it is **at least as new** as the
-/// editor's last local write (`echo_seq >= last_local_seq`). A stale/reordered
-/// echo of an earlier keystroke (`echo_seq < last_local_seq`) is dropped; a
-/// `split_block` truncation or peer edit issued after the last keystroke
-/// carries a greater-or-equal seq and still converges. Content equality
-/// short-circuits (the editor's own latest echo, or a redundant emit). Ordering
-/// — not content — is authoritative because the dispatcher's inline-mark
-/// stripping rewrites the stored value, so an editor's own echo legitimately
-/// differs from what it typed.
-pub(crate) fn evaluate_data_sync_echo(
-    current: &str,
-    new_value: &str,
-    echo_seq: Option<i64>,
-    last_local_seq: i64,
-) -> EchoDecision {
-    if current == new_value {
-        return EchoDecision::InSync {
-            advance_to: echo_seq,
-        };
-    }
-    let Some(seq) = echo_seq else {
-        return EchoDecision::DropNoSeq;
-    };
-    if seq < last_local_seq {
-        EchoDecision::DropStale
-    } else if seq == last_local_seq
-        && holon_api::content_canonical::canonicalize_stored_content(current, false) == new_value
-    {
-        // Same seq as our last local write AND the echo is exactly the SERVER
-        // canonicalization of the focused buffer. Non-editor writers
-        // (split/join/org) do NOT bump `write_seq`, so a genuine structural write
-        // echoes at `seq == last_local` too — but its content is a substantive
-        // change, never merely the whitespace-canonicalization of `current`. This
-        // branch is therefore the SQL-canonicalized echo of the user's OWN
-        // in-flight write. Converging would delete the just-typed whitespace (the
-        // "typed space vanishes ~100ms later" bug, whether at the end of the
-        // buffer or at the end of a multiline block's first line). Keep the
-        // buffer; the caller adopts the canonical baseline instead.
-        //
-        // The canonicalization MUST match what the store actually applied to
-        // produce this echo, so it delegates to the single shared definition
-        // (`holon_api::content_canonical`) that `SqlOperationProvider::trimmed_content`
-        // also calls — the two can never drift. `is_source = false` is a
-        // deliberate approximation: the provider resolves `is_source` from the
-        // block's REAL content_type via a live DB lookup
-        // (`SqlOperationProvider`, set_field paths ~:2152-2175 / ~:1636-1654),
-        // which this pure function cannot see. For text blocks both sides use
-        // the text rule (exact match). For SOURCE blocks the store applies only
-        // `trim_end`, so a pure-trailing trim still matches (the reported bug
-        // stays fixed) and a first-line/leading divergence falls through to
-        // Converge — the pre-fix behavior, disclosed gap, no new data loss.
-        EchoDecision::AdoptBaseline { seq }
-    } else {
-        // `seq > last_local` (a genuinely newer authority — a peer edit stamps a
-        // fresh seq), OR `seq == last_local` with a substantive external change
-        // (a split truncation "hello world" -> "hello" shares the editor's seq
-        // but is not a trailing-whitespace trim of the buffer). Converge.
-        EchoDecision::Converge { seq }
-    }
-}
 
 /// A persistent GPUI view for an editable text field.
 ///
@@ -154,21 +60,6 @@ pub struct EditorView {
     /// and grabs window focus when focus becomes this editor's `row_id`
     /// (ADR 0010: window focus follows the signal, never a Turso matview).
     _focus_subscription: Option<Task<()>>,
-    /// Snapshot of the text after the last local or remote change.
-    /// Used to compute the delta on `InputEvent::Change`. The
-    /// `MutableText` itself lives on the `EditorViewModel`.
-    previous_text: String,
-    /// Highest [`holon_api::write_seq::WriteSeq`] this editor has authored (via
-    /// a content keystroke) or accepted (from a converged external write).
-    /// The data-sync convergence guard drops any echo whose `write_seq` is
-    /// strictly less than this — a stale/reordered CDC echo of an earlier
-    /// keystroke — while still converging genuinely newer authority states
-    /// (a `split_block` truncation issued after the last keystroke carries
-    /// a greater seq). Starts at `WriteSeq::ZERO`: before the user types,
-    /// every echo converges (correct seeding). See `holon_api::write_seq`
-    /// for why content comparison cannot substitute (inline-mark stripping
-    /// rewrites the stored value).
-    last_local_seq: i64,
     /// Cancelled on drop. Subscribes to `MutableText.remote_deltas()`
     /// and splices remote edits into InputState via
     /// `replace_text_in_range_silent`.
@@ -352,71 +243,25 @@ impl EditorView {
                             .on_text_changed(current_line, cursor_byte);
                         execute_action(action, &services_clone, this.input.entity_id(), cx);
 
-                        // CRDT: compute local delta and apply through the
-                        // view model. The Loro-backed cell filters our own
-                        // writes via origin == "ui_local".
-                        let vm = ctrl.lock().unwrap();
-                        if vm.has_cell() {
-                            let prev = this.previous_text.clone();
-                            if text != prev {
-                                if vm.current_text().as_deref() != Some(text.as_str()) {
-                                    for op in compute_text_delta(&prev, &text) {
-                                        if let Err(e) = vm.apply_local(op) {
-                                            tracing::error!("apply_local failed: {}", e);
-                                        }
-                                    }
-                                }
-                                this.previous_text = text;
+                        // Local edit routes through the VM buffer — the write
+                        // authority (buffer-ownership inversion). `apply_local_edit`
+                        // mutates the authoritative buffer, and:
+                        //   - cell mode: applies the delta through the CRDT;
+                        //   - no-cell (SqlOnly) real block: stamps `write_seq`, records it as the
+                        //     VM's `last_local_seq`, and returns the `set_field("content")` intent
+                        //     the adapter dispatches (its sole commit funnel) so the typed text
+                        //     lands before the next transition;
+                        //   - creation placeholder / unchanged: returns `None`.
+                        // The write_seq stamp happens INSIDE `apply_local_edit`
+                        // before this dispatch, so a fast CDC echo cannot race a
+                        // not-yet-recorded seq.
+                        match ctrl.lock().unwrap().apply_local_edit(&text) {
+                            Ok(Some(intent)) => services_clone.dispatch_intent(intent),
+                            Ok(None) => {}
+                            Err(e) => {
+                                tracing::error!("apply_local_edit failed: {e}");
                             }
-                        } else if text != this.previous_text
-                            && !RowOrigin::from_id(&this.row_id).is_creation_placeholder()
-                        {
-                            // No Cell<String> attached (SqlOnly / no-Loro
-                            // mode). The per-keystroke Loro pipeline is
-                            // absent — fall back to `set_field("content")`
-                            // so the typed text lands in the backend before
-                            // the next transition. Without this, keystrokes
-                            // only mutate the local InputState and are
-                            // silently lost when the ReactiveRowSet rebuilds
-                            // (e.g. on a later SplitBlock on another row).
-                            //
-                            // NEVER for a creation slot (`block:__virtual:<parent>`):
-                            // it has no real block, so this `set_field` is a
-                            // silent no-op write against a nonexistent id that
-                            // ALSO poisons the undo stack with a virtual-id entry
-                            // (BugFunnel dogfood #4). The slot's text is committed
-                            // via `create` on Enter (`commit_creation_slot`); it
-                            // must not be persisted per-keystroke.
-                            // Stamp a monotonic ordering token on this content
-                            // write and record it as our last local sequence.
-                            // The provider persists it into `block_raw.write_seq`
-                            // (same UPDATE as `content`), it echoes back through
-                            // CDC, and the data-sync guard below drops any echo
-                            // whose seq is older than this — the fix for the
-                            // vault-scale "typing resets the block" reset. Must
-                            // be set BEFORE dispatch so a fast echo can't race a
-                            // not-yet-recorded seq.
-                            let seq = holon_api::write_seq::next();
-                            this.last_local_seq = seq.get();
-                            let mut params = std::collections::HashMap::new();
-                            params
-                                .insert("id".into(), holon_api::Value::String(this.row_id.clone()));
-                            params.insert(
-                                "field".into(),
-                                holon_api::Value::String("content".to_string()),
-                            );
-                            params.insert("value".into(), holon_api::Value::String(text.clone()));
-                            params.insert("write_seq".into(), holon_api::Value::Integer(seq.get()));
-                            services_clone.dispatch_intent(
-                                holon_frontend::operations::OperationIntent::new(
-                                    "block".into(),
-                                    "set_field".into(),
-                                    params,
-                                ),
-                            );
-                            this.previous_text = text;
                         }
-                        drop(vm);
 
                         cx.notify();
                     }
@@ -516,11 +361,13 @@ impl EditorView {
                                 view.update(cx, |this, cx| {
                                     let input = this.input.clone();
                                     let current = input.read(cx).value().to_string();
+                                    let last_local =
+                                        this.controller.lock().unwrap().last_local_seq();
                                     match evaluate_data_sync_echo(
                                         &current,
                                         &new_value,
                                         echo_seq,
-                                        this.last_local_seq,
+                                        last_local,
                                     ) {
                                         EchoDecision::InSync { advance_to } => {
                                             // Echo of our own latest write (or a
@@ -529,7 +376,10 @@ impl EditorView {
                                             // echo of an even earlier keystroke is
                                             // still seen as stale.
                                             if let Some(s) = advance_to {
-                                                this.last_local_seq = this.last_local_seq.max(s);
+                                                this.controller
+                                                    .lock()
+                                                    .unwrap()
+                                                    .advance_local_seq(s);
                                             }
                                         }
                                         EchoDecision::DropNoSeq => {
@@ -554,7 +404,7 @@ impl EditorView {
                                                     "[data-sync] DROP stale echo seq={echo_seq:?} \
                                                      < last_local={} current={current:?} \
                                                      new={new_value:?}",
-                                                    this.last_local_seq
+                                                    last_local
                                                 );
                                             }
                                         }
@@ -565,7 +415,7 @@ impl EditorView {
                                                      canonicalized echo) seq={seq} last_local={} \
                                                      current={current:?} new={new_value:?} — \
                                                      keeping typed buffer, rebaselining to canonical",
-                                                    this.last_local_seq
+                                                    last_local
                                                 );
                                             }
                                             // The echo is the SQL-canonicalized form of our OWN
@@ -583,25 +433,27 @@ impl EditorView {
                                             // blur re-dispatch of "foo " (server-trimmed to "foo",
                                             // idempotent) may follow; it cannot loop because the
                                             // trimmed re-echo is itself AdoptBaseline/InSync.
-                                            this.last_local_seq = this.last_local_seq.max(seq);
-                                            this.controller
-                                                .lock()
-                                                .unwrap()
-                                                .rebaseline(&new_value);
+                                            let mut vm = this.controller.lock().unwrap();
+                                            vm.advance_local_seq(seq);
+                                            vm.rebaseline(&new_value);
+                                            drop(vm);
                                         }
                                         EchoDecision::Converge { seq } => {
                                             if caret_probe() {
                                                 eprintln!(
                                                     "[data-sync] apply seq={seq} last_local={} \
                                                      current={current:?} new={new_value:?}",
-                                                    this.last_local_seq
+                                                    last_local
                                                 );
                                             }
                                             // Adopt the authority's seq as our new
                                             // high-water mark and converge. Keeps
                                             // `previous_text` in lockstep so the
                                             // re-entrant Change writes nothing back.
-                                            this.last_local_seq = seq;
+                                            this.controller
+                                                .lock()
+                                                .unwrap()
+                                                .advance_local_seq(seq);
                                             this.converge_input(
                                                 "data_sync",
                                                 &new_value,
@@ -636,11 +488,6 @@ impl EditorView {
         // deltas. Cursor preservation uses Loro's `Cursor` anchoring via
         // the VM's `anchor_cursor` / `resolve_cursor` pass-throughs.
         let _ = field_for_subscription;
-        let previous_text = controller
-            .lock()
-            .unwrap()
-            .current_text()
-            .unwrap_or_default();
         let cell_for_remote = controller.lock().unwrap().cell().cloned();
         let _remote_delta_subscription: Option<Task<()>> = cell_for_remote.map(|cell| {
             cx.spawn(async move |this, cx| {
@@ -692,7 +539,8 @@ impl EditorView {
                                     // that is how it receives the merged
                                     // content. `user_idle` := no unflushed
                                     // keystroke (previous_text == InputState).
-                                    let user_idle = this.previous_text == current;
+                                    let user_idle =
+                                        this.controller.lock().unwrap().buffer() == current;
                                     if focused && !user_idle {
                                         return;
                                     }
@@ -744,9 +592,7 @@ impl EditorView {
             popup_scrolled_index: std::cell::Cell::new(None),
             _data_subscription,
             _focus_subscription,
-            previous_text,
             _remote_delta_subscription,
-            last_local_seq: holon_api::write_seq::WriteSeq::ZERO.get(),
             prev_focused: std::cell::Cell::new(false),
             #[cfg(feature = "mobile")]
             focus_gen: std::cell::Cell::new(0),
@@ -834,7 +680,17 @@ impl EditorView {
         // `set_field("content")` that nulls live link marks and pollutes the
         // undo stack (BugFunnel 2026-07-13 defect (a)). Pure baseline update:
         // it dispatches nothing and does NOT advance `last_local_seq`.
-        self.controller.lock().unwrap().rebaseline(&target);
+        // Sync the VM buffer to the authority we are converging onto (the
+        // write-authority buffer is also the self-echo sentinel: setting it
+        // BEFORE `set_value` below makes the re-entrant Change a no-op, since
+        // `apply_local_edit` sees `new_text == buffer`). Folds in the former
+        // `rebaseline` — a pure baseline update that dispatches nothing and does
+        // not advance the write-seq (passes the current high-water unchanged).
+        {
+            let mut vm = self.controller.lock().unwrap();
+            let seq = vm.last_local_seq();
+            vm.set_buffer_from_authority(&target, seq);
+        }
         let input = self.input.clone();
         let current = input.read(cx).value().to_string();
         if current == target {
@@ -876,9 +732,9 @@ impl EditorView {
             let pos = state.text().offset_to_position(byte_offset);
             state.set_cursor_position(pos, window, cx);
         });
-        // Lockstep: the deferred re-entrant Change now sees text ==
-        // previous_text → empty delta → no spurious write-back.
-        self.previous_text = target;
+        // The VM buffer was already synced to `target` above, so the deferred
+        // re-entrant Change sees `new_text == buffer` → `apply_local_edit`
+        // returns `None` → no spurious write-back.
     }
 }
 
@@ -2084,190 +1940,6 @@ mod popup_layout {
         // Below the floor we stop shrinking (a popup with no usable rows is
         // useless); `anchored` still snaps it into the window.
         assert_eq!(popup_max_height_px(10.0), POPUP_MIN_HEIGHT_PX);
-    }
-}
-
-#[cfg(test)]
-mod echo_suppression {
-    //! Directed regression tests for the op-versioned data-sync echo guard —
-    //! the fix for the vault-scale P1 "typing `[[` (or any edit) resets the
-    //! whole block to its pre-typing content".
-    //!
-    //! The failure is a focused editor converging to a STALE/reordered CDC echo
-    //! of an earlier keystroke. These exercise the pure decision function
-    //! [`evaluate_data_sync_echo`] the data-sync closure delegates to,
-    //! modelling an INJECTED-DELAY, in-flight-typing timeline
-    //! deterministically (no gpui window, no real latency needed).
-    //!
-    //! RED-FIRST equivalence: the old policy converged whenever the editor was
-    //! "idle" (`prev_synced == current`), which is true the instant a keystroke
-    //! settles — so `stale_echo_while_typing_ahead_is_dropped` below would have
-    //! CONVERGED (reset the block) under the old code. The seq guard makes it a
-    //! drop.
-
-    use super::EchoDecision;
-    use super::evaluate_data_sync_echo;
-
-    // A block seeded at boot carries write_seq 0 (the column default) until the
-    // editor writes it. The editor's own keystrokes carry strictly-increasing
-    // process-global sequences (holon_api::write_seq::next()).
-    const SEED: i64 = 0;
-
-    #[test]
-    fn stale_echo_while_typing_ahead_is_dropped() {
-        // Timeline: user typed "ab" (seq 10) then "abc" (seq 11); InputState is
-        // now "abc" and last_local_seq is 11. The CDC echo of the EARLIER "ab"
-        // write (seq 10) arrives late. It must be DROPPED — converging would
-        // reset the visible text backwards to "ab". This is the exact P1.
-        let d = evaluate_data_sync_echo("abc", "ab", Some(10), 11);
-        assert_eq!(d, EchoDecision::DropStale);
-    }
-
-    #[test]
-    fn pre_typing_stale_echo_is_dropped() {
-        // The reported symptom: block content is "Block 07-010 ..." pre-typing.
-        // The user types, advancing last_local_seq to 600. A lagged echo of the
-        // pre-typing content (an older, smaller seq) must not resurrect it.
-        let d = evaluate_data_sync_echo(
-            "Block 07-010 ...hello",
-            "Block 07-010 ...", // pre-typing content
-            Some(305),
-            600,
-        );
-        assert_eq!(d, EchoDecision::DropStale);
-    }
-
-    #[test]
-    fn split_truncation_after_last_keystroke_still_converges() {
-        // A split_block issued AFTER the last keystroke gets a greater seq, so
-        // the surviving (reused) editor still converges to the truncated content
-        // while it owns focus — the property the old idle-heuristic preserved and
-        // the seq guard must keep.
-        let d = evaluate_data_sync_echo("hello world", "hello", Some(12), 11);
-        assert_eq!(d, EchoDecision::Converge { seq: 12 });
-    }
-
-    #[test]
-    fn equal_seq_external_write_converges() {
-        // Non-editor writers (split/join/org) don't bump write_seq, so the row
-        // retains the editor's last seq; their echo carries seq == last_local and
-        // a DIFFERENT value → converge (they changed content, not the token).
-        // The truncation "hello world" -> "hello" is NOT a trailing-whitespace
-        // canonicalization of the buffer (`"hello world".trim_end()` != "hello"),
-        // so it is a genuine external change and still converges even though it
-        // shares the editor's seq. This is the discriminator that keeps the
-        // trailing-space fix from swallowing real structural writes.
-        let d = evaluate_data_sync_echo("hello world", "hello", Some(11), 11);
-        assert_eq!(d, EchoDecision::Converge { seq: 11 });
-    }
-
-    #[test]
-    fn same_seq_trailing_space_echo_adopts_baseline_not_converge() {
-        // THE TRAILING-SPACE BUG. The user typed "foo " (trailing space); the
-        // editor stamped write_seq 11 on that content write. The SQL provider
-        // trims trailing whitespace on store ("foo") and echoes it back through
-        // CDC carrying the SAME write_seq 11 (the trim does not re-stamp). At the
-        // moment the echo arrives the focused buffer is still "foo " and
-        // last_local_seq is 11. This echo is the SQL-canonicalized form of the
-        // user's OWN in-flight write, distinguished from a genuine same-seq
-        // external write by `"foo ".trim_end() == "foo"`. Converging would delete
-        // the just-typed space; the correct decision keeps the buffer and adopts
-        // the canonical baseline.
-        let d = evaluate_data_sync_echo("foo ", "foo", Some(11), 11);
-        assert_eq!(d, EchoDecision::AdoptBaseline { seq: 11 });
-    }
-
-    #[test]
-    fn same_seq_multiple_trailing_spaces_echo_adopts_baseline() {
-        // Multiple trailing spaces collapse to the same canonical form, so the
-        // discriminator (`trim_end`) still recognises the echo as our own write.
-        let d = evaluate_data_sync_echo("hello world   ", "hello world", Some(42), 42);
-        assert_eq!(d, EchoDecision::AdoptBaseline { seq: 42 });
-    }
-
-    #[test]
-    fn same_seq_first_line_trailing_space_in_multiline_adopts_baseline() {
-        // CLASS EXTENSION. The server ALSO trims the FIRST line's trailing
-        // whitespace in multiline text content (the first line becomes the org
-        // headline). A space typed at the end of a multiline block's first line
-        // echoes back canonicalized ("foo \nbar" -> "foo\nbar") at the SAME seq.
-        // `current.trim_end()` cannot see this — the stripped space is interior
-        // to the whole string — so the discriminator must use the FULL server
-        // canonicalization (`holon_api::content_canonical`). Without it this
-        // narrower instance of the same bug still eats the space.
-        let d = evaluate_data_sync_echo("foo \nbar", "foo\nbar", Some(11), 11);
-        assert_eq!(d, EchoDecision::AdoptBaseline { seq: 11 });
-    }
-
-    #[test]
-    fn blur_reecho_after_adopt_does_not_loop() {
-        // BLUR-AFTER-ADOPT LIVENESS. After AdoptBaseline the buffer ("foo ") and
-        // SQL truth ("foo") diverge by a trailing space while focused. On blur
-        // the change-tracking (baselined to "foo") diffs the live "foo " and
-        // re-dispatches ONE set_field("foo ") — a blur intent carries NO
-        // write_seq, so the provider trims to "foo" and leaves the write_seq
-        // column at the editor's last value N. The re-echo is therefore
-        // ("foo", seq N) at last_local N. Two terminal buffer states are
-        // possible when that re-echo lands, and NEITHER re-converges — so the
-        // "own canonicalized echo" cannot become an infinite Converge loop:
-        //
-        //   (1) the unfocused render backstop has already canonicalized the
-        //       buffer to "foo": the re-echo equals the buffer → InSync.
-        let settled = evaluate_data_sync_echo("foo", "foo", Some(600), 600);
-        assert_eq!(
-            settled,
-            EchoDecision::InSync {
-                advance_to: Some(600)
-            }
-        );
-        //   (2) the backstop has not run yet and the buffer is still "foo ":
-        //       the re-echo is again the trailing-whitespace canonicalization →
-        //       AdoptBaseline (a no-op re-baseline, still no set_value).
-        let still_focused = evaluate_data_sync_echo("foo ", "foo", Some(600), 600);
-        assert_eq!(still_focused, EchoDecision::AdoptBaseline { seq: 600 });
-        // The trim is idempotent server-side, so a single benign blur
-        // re-dispatch is acceptable; the absence of any Converge here is what
-        // rules out the pathological echo loop.
-        assert!(!matches!(settled, EchoDecision::Converge { .. }));
-        assert!(!matches!(still_focused, EchoDecision::Converge { .. }));
-    }
-
-    #[test]
-    fn self_echo_is_in_sync_and_advances_high_water() {
-        // The confirming echo of our own latest write equals current InputState.
-        let d = evaluate_data_sync_echo("abc", "abc", Some(11), 11);
-        assert_eq!(
-            d,
-            EchoDecision::InSync {
-                advance_to: Some(11)
-            }
-        );
-    }
-
-    #[test]
-    fn pre_typing_editor_converges_to_external_seed() {
-        // Before the user types (last_local_seq == SEED == 0) every external
-        // state is at least as new → converge. This is correct seeding: a
-        // freshly focused editor adopts the authority content.
-        let d = evaluate_data_sync_echo("stale", "fresh from peer", Some(1), SEED);
-        assert_eq!(d, EchoDecision::Converge { seq: 1 });
-    }
-
-    #[test]
-    fn missing_seq_on_changed_content_fails_loud_and_drops() {
-        // A content change with no write_seq token is a schema/projection
-        // regression: drop (never converge blindly) — the loud tracing::error!
-        // lives at the call site.
-        let d = evaluate_data_sync_echo("abc", "different", None, 11);
-        assert_eq!(d, EchoDecision::DropNoSeq);
-    }
-
-    #[test]
-    fn missing_seq_but_in_sync_is_noop_without_advance() {
-        // No token, but the echo equals current — a benign redundant emit. In
-        // sync, and there is no seq to advance the high-water mark to.
-        let d = evaluate_data_sync_echo("abc", "abc", None, 11);
-        assert_eq!(d, EchoDecision::InSync { advance_to: None });
     }
 }
 
