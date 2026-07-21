@@ -458,6 +458,7 @@ mod tests {
                 affected_fields: vec![],
                 param_mappings: vec![],
                 target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
                 menu_exposure: holon_api::MenuExposure::Listed {
                     surfaces: holon_api::SurfaceSet {
                         slash_menu: true,
@@ -677,6 +678,7 @@ mod tests {
                 description: String::new(),
                 affected_fields: vec![],
                 target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
                 menu_exposure: holon_api::MenuExposure::Listed {
                     surfaces: holon_api::SurfaceSet {
                         slash_menu: true,
