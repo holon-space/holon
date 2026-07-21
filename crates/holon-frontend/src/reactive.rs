@@ -3183,7 +3183,12 @@ fn maybe_mirror_navigation_focus(ui_state: &UiState, intent: &crate::operations:
         // into `UiState`, so mirror it here. (Editor focus is no longer a
         // dispatched op — clicks call `set_focus` directly and split/join set
         // it from their op result; see ADR 0010.)
-        Ok(NavigationOp::Focus) => {
+        // `open_tab` (modifier-click) is a page navigation like `focus` — it
+        // shows a new page (new content → scroll reset is correct) and carries
+        // the target `block_id` — so it mirrors identically. It differs from
+        // `focus` only in the SQL layer (it does NOT close the region's other
+        // open rows); the UiState value-fn mirror is the same.
+        Ok(NavigationOp::Focus | NavigationOp::OpenTab) => {
             let block_id = intent.params.get("block_id").and_then(|v| v.as_string());
             // End-to-end latency: navigation is a first-class interaction.
             // Start the interaction clock keyed on the focused block; the
@@ -3219,15 +3224,21 @@ fn maybe_mirror_navigation_focus(ui_state: &UiState, intent: &crate::operations:
             ui_state.set_focus(None);
             ui_state.bump_main_nav();
         }
-        // `focus_pin` / `close` / `go_back` / `go_forward` would require reading
-        // `navigation_history` to know the target — leave them alone until the
-        // backend grows a synchronous "current focus" accessor. `Err` is a
+        // `focus_pin` / `close` / `go_back` / `go_forward` / `activate` would
+        // require reading `navigation_history` to know the target — leave them
+        // alone until the backend grows a synchronous "current focus" accessor.
+        // `activate` (tab switch) is the same class as `go_back`/`go_forward`:
+        // it moves the cursor within the existing open set (no `block_id` in
+        // the intent), so it deliberately does NOT bump `main_nav_generation`
+        // (the switched-to tab keeps its scroll); the main panel re-renders via
+        // the CDC path from the `navigation_cursor` change. `Err` is a
         // non-navigation op (the `entity_name` guard above keeps it out here).
         Ok(
             NavigationOp::FocusPin
             | NavigationOp::Close
             | NavigationOp::GoBack
-            | NavigationOp::GoForward,
+            | NavigationOp::GoForward
+            | NavigationOp::Activate,
         )
         | Err(_) => {}
     }
@@ -4002,6 +4013,52 @@ mod tests {
         );
         maybe_mirror_navigation_focus(&ui, &go_home);
         assert_eq!(ui.main_nav_generation(), 3);
+    }
+
+    /// Tab semantics (ADR-0026, risk register #1): `open_tab` shows a NEW page
+    /// in main, so it bumps `main_nav_generation` (scroll reset, like `focus`);
+    /// `activate` only switches which already-open tab renders, so it must NOT
+    /// bump it — the switched-to tab keeps its scroll position.
+    #[test]
+    fn open_tab_bumps_main_nav_but_activate_does_not() {
+        let ui = UiState::new();
+        assert_eq!(ui.main_nav_generation(), 0);
+
+        // open_tab into main = a new page → bump (mirrors `focus`).
+        let mut params = HashMap::new();
+        params.insert("region".to_string(), Value::String("main".to_string()));
+        params.insert(
+            "block_id".to_string(),
+            Value::String("block:page-a".to_string()),
+        );
+        let open_tab = crate::operations::OperationIntent::new(
+            "navigation".into(),
+            "open_tab".to_string(),
+            params,
+        );
+        maybe_mirror_navigation_focus(&ui, &open_tab);
+        assert_eq!(
+            ui.main_nav_generation(),
+            1,
+            "open_tab shows a new page → bump"
+        );
+
+        // activate (tab switch) carries only history_id and must NOT bump —
+        // preserving the switched-to tab's scroll.
+        let mut params = HashMap::new();
+        params.insert("region".to_string(), Value::String("main".to_string()));
+        params.insert("history_id".to_string(), Value::Integer(7));
+        let activate = crate::operations::OperationIntent::new(
+            "navigation".into(),
+            "activate".to_string(),
+            params,
+        );
+        maybe_mirror_navigation_focus(&ui, &activate);
+        assert_eq!(
+            ui.main_nav_generation(),
+            1,
+            "activate is a cursor-only tab switch → must NOT reset main scroll"
+        );
     }
 
     fn make_row(id: &str, content: &str) -> DataRow {

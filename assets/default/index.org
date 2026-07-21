@@ -8,7 +8,7 @@
 :collapse_to: drawer
 :END:
 #+BEGIN_SRC render :id left_sidebar::render::0
-column(tree(#{parent_id: col("parent_id"), sortkey: col("content"), item_template: selectable(row(icon("notebook"), spacer(6), text(col("content"), #{empty: "(untitled)"})), #{action: navigation_focus(#{region: "main", block_id: col("id")})})}), divider(), row(icon("sync"), spacer(6), text("Integrations", #{bold: true})), live_query(#{sql: "SELECT provider_name, updated_at FROM sync_states ORDER BY provider_name ASC", item_template: row(spacer(6), icon("link"), spacer(6), text(col("provider_name")), spacer(8), text(col("updated_at")))}))
+column(tree(#{parent_id: col("parent_id"), sortkey: col("content"), item_template: selectable(row(icon("notebook"), spacer(6), text(col("content"), #{empty: "(untitled)"})), #{action: navigation_focus(#{region: "main", block_id: col("id")}), cmd_action: navigation_open_tab(#{region: "main", block_id: col("id")}), ctrl_action: navigation_open_tab(#{region: "main", block_id: col("id")})})}), divider(), row(icon("sync"), spacer(6), text("Integrations", #{bold: true})), live_query(#{sql: "SELECT provider_name, updated_at FROM sync_states ORDER BY provider_name ASC", item_template: row(spacer(6), icon("link"), spacer(6), text(col("provider_name")), spacer(8), text(col("updated_at")))}))
 #+END_SRC
 #+BEGIN_SRC holon_sql :id left_sidebar::src::0
 SELECT b.* FROM block b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = 'Page' AND b.id != 'block:__default__' ORDER BY b.content ASC
@@ -18,10 +18,27 @@ SELECT b.* FROM block b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = 
 :ID: default-main-panel
 :END:
 #+BEGIN_SRC render :id default-main-panel::render::0
-column(collection_view(), divider(), row(icon("link"), spacer(6), text("Linked references", #{bold: true})), live_query(#{sql: "SELECT bl.id AS id, bl.content AS content, bl.parent_id AS parent_id FROM backlinks bl JOIN focus_roots fr ON bl.target_id = fr.root_id WHERE fr.region = 'main' ORDER BY bl.content ASC", item_template: selectable(row(icon("orgmode"), spacer(6), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})}))
+column(collection_view(), divider(), row(icon("link"), spacer(6), text("Linked references", #{bold: true})), live_query(#{sql: "SELECT bl.id AS id, bl.content AS content, bl.parent_id AS parent_id FROM backlinks bl JOIN focus_roots fr ON bl.target_id = fr.root_id JOIN navigation_cursor nc ON nc.region = fr.region AND nc.history_id = fr.history_id WHERE fr.region = 'main' ORDER BY bl.content ASC", item_template: selectable(row(icon("orgmode"), spacer(6), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})}))
 #+END_SRC
-#+BEGIN_SRC holon_gql :id default-main-panel::src::0
-MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..20]-(d:block) WHERE fr.region = 'main' AND root.id = fr.root_id RETURN d
+#+BEGIN_SRC holon_sql :id default-main-panel::src::0
+WITH RECURSIVE focus_descendants AS (
+  SELECT b.id AS node_id, b.id AS source_id, 0 AS depth, CAST(b.id AS TEXT) AS visited
+  FROM block b
+  JOIN focus_roots fr ON b.id = fr.root_id
+  UNION ALL
+  SELECT child.id, focus_descendants.source_id, focus_descendants.depth + 1, focus_descendants.visited || ',' || CAST(child.id AS TEXT)
+  FROM focus_descendants
+  JOIN block child ON child.parent_id = focus_descendants.node_id
+  WHERE focus_descendants.depth < 20
+    AND ',' || focus_descendants.visited || ',' NOT LIKE '%,' || CAST(child.id AS TEXT) || ',%'
+)
+SELECT d.*
+FROM focus_roots fr
+JOIN block root ON root.id = fr.root_id
+JOIN focus_descendants ON focus_descendants.source_id = root.id
+JOIN block d ON d.id = focus_descendants.node_id
+JOIN navigation_cursor nc ON nc.region = fr.region AND nc.history_id = fr.history_id
+WHERE fr.region = 'main'
 #+END_SRC
 ** Right Sidebar
 :PROPERTIES:

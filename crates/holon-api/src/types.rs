@@ -329,6 +329,16 @@ pub enum NavigationOp {
     GoForward,
     /// Return to the navigation root (clears focus).
     GoHome,
+    /// Set a region's cursor to an already-open `navigation_history` row
+    /// (tab switch). Unlike `Focus` it inserts no row, closes no row, and does
+    /// not reorder the open set — it moves ONLY the cursor, so the open tabs
+    /// keep their stable insertion order and per-tab scroll survives.
+    Activate,
+    /// Open a block as an ADDITIONAL open tab in a region (modifier-click).
+    /// Unlike `Focus` (replace-on-focus) it does NOT close the region's other
+    /// open rows; if the block is already open it just activates that tab
+    /// (no duplicate). The sole multi-open producer (ADR-0026 tab model, Q2).
+    OpenTab,
 }
 
 impl NavigationOp {
@@ -339,6 +349,8 @@ impl NavigationOp {
         NavigationOp::GoBack,
         NavigationOp::GoForward,
         NavigationOp::GoHome,
+        NavigationOp::Activate,
+        NavigationOp::OpenTab,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -349,6 +361,8 @@ impl NavigationOp {
             NavigationOp::GoBack => "go_back",
             NavigationOp::GoForward => "go_forward",
             NavigationOp::GoHome => "go_home",
+            NavigationOp::Activate => "activate",
+            NavigationOp::OpenTab => "open_tab",
         }
     }
 }
@@ -370,6 +384,8 @@ impl FromStr for NavigationOp {
             "go_back" => Ok(NavigationOp::GoBack),
             "go_forward" => Ok(NavigationOp::GoForward),
             "go_home" => Ok(NavigationOp::GoHome),
+            "activate" => Ok(NavigationOp::Activate),
+            "open_tab" => Ok(NavigationOp::OpenTab),
             other => anyhow::bail!("Not a navigation op: {other:?}"),
         }
     }
