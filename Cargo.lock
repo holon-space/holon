@@ -5696,6 +5696,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "holon-sharing"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "holon-api",
+ "holon-loro",
+ "iroh",
+ "loro",
+ "proptest 1.11.0",
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
 name = "holon-tools"
 version = "0.1.0"
 dependencies = [

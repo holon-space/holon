@@ -27,6 +27,7 @@ members = [
     "crates/holon-petri",
     "crates/holon-profiles",
     "crates/holon-loro",
+    "crates/holon-sharing",
     "crates/holon-architecture-tests",
     "frontends/tui",
     "frontends/mcp",
