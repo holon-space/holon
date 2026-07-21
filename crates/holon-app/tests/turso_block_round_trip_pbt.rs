@@ -104,6 +104,25 @@ proptest! {
             let doc_id = holon_api::EntityUri::block(&Uuid::new_v4().to_string());
             let blocks = build_blocks(&doc_id, &headlines);
 
+            // Seed the document root the generated roots hang under (their
+            // `parent_id` is `doc_id`), parented at the `sentinel:no_parent`
+            // anchor. Without it the generated roots reference a nonexistent
+            // parent and the `block_raw` parent FK rejects them — the same
+            // seeding the directed test and the sibling
+            // `turso_block_query_source_round_trip_pbt` write path do.
+            let doc = Block::new_text(doc_id.clone(), holon_api::EntityUri::no_parent(), "Doc");
+            provider
+                .execute_operation(
+                    &entity,
+                    "create",
+                    block_to_params(&holon::api::SnapshotBlock {
+                        block: doc,
+                        sort_key: "0000000000".to_string(),
+                    }),
+                )
+                .await
+                .map_err(|e| TestCaseError::fail(format!("create doc root {doc_id}: {e}")))?;
+
             let mut expected_pairs: BTreeSet<(String, String)> = BTreeSet::new();
             for b in &blocks {
                 for tag in b.tags.iter() {
@@ -177,6 +196,25 @@ proptest! {
 
             let doc_id = holon_api::EntityUri::block(&Uuid::new_v4().to_string());
             let blocks = build_blocks(&doc_id, &headlines);
+
+            // Seed the document root the generated roots hang under (their
+            // `parent_id` is `doc_id`), parented at the `sentinel:no_parent`
+            // anchor. Without it the generated roots reference a nonexistent
+            // parent and the `block_raw` parent FK rejects them. `get_blocks`
+            // reads only descendants of `doc_id`, so the doc block never enters
+            // the round-tripped set.
+            let doc = Block::new_text(doc_id.clone(), holon_api::EntityUri::no_parent(), "Doc");
+            provider
+                .execute_operation(
+                    &entity,
+                    "create",
+                    block_to_params(&holon::api::SnapshotBlock {
+                        block: doc,
+                        sort_key: "0000000000".to_string(),
+                    }),
+                )
+                .await
+                .map_err(|e| TestCaseError::fail(format!("create doc root {doc_id}: {e}")))?;
 
             // Production write path with edge resolver fans tags into
             // `block_tags` and requires into `block_requires`.
