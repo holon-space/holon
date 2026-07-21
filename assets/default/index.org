@@ -17,6 +17,9 @@ SELECT b.* FROM block b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = 
 :PROPERTIES:
 :ID: default-main-panel
 :END:
+#+BEGIN_SRC render :id default-main-panel::render::0
+column(collection_view(), divider(), row(icon("link"), spacer(6), text("Linked references", #{bold: true})), live_query(#{sql: "SELECT bl.id AS id, bl.content AS content, bl.parent_id AS parent_id FROM backlinks bl JOIN focus_roots fr ON fr.region = 'main' WHERE bl.target_id = fr.root_id ORDER BY bl.content ASC", item_template: selectable(row(icon("orgmode"), spacer(6), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})}))
+#+END_SRC
 #+BEGIN_SRC holon_sql :id default-main-panel::src::0
 WITH RECURSIVE focus_descendants AS (
   SELECT b.*, 0 AS _depth

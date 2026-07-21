@@ -63,7 +63,7 @@ impl<'a> BlockDomain<'a> {
 
         // ALLOW(fallback): pre-existing comment-only — block_id used as path when
         // block_with_path lookup races Block not in block_with_path yet - use
-        // block_id as fallback path
+        // block_id as the path
         Ok(format!("/{}", block_id))
     }
 
@@ -148,29 +148,53 @@ impl<'a> BlockDomain<'a> {
             .get("render_source")
             .is_some_and(|v| !v.is_null());
 
+        // A render source may embed the `collection_view()` marker to compose
+        // the block's profile-derived default collection view (tree/table/board
+        // switcher) with surrounding chrome — e.g. the main panel wraps its
+        // outline in `column(collection_view(), …, live_query(backlinks))`. When
+        // the marker is present the composed layout owns its own view-mode
+        // switcher, so we skip the auto query-source switcher wrap (which would
+        // nest a second result/source switcher above it).
+        let mut composes_collection_view = false;
         let result_expr = if has_render_source {
-            Self::parse_render_source(&block_info)
+            let parsed = Self::parse_render_source(&block_info);
+            if contains_collection_view(&parsed) {
+                composes_collection_view = true;
+                let collection = self.collection_render_expr(block_id).await?;
+                substitute_collection_view(parsed, &collection)
+            } else {
+                parsed
+            }
         } else {
-            // A panel of the active perspective resolves its collection
-            // variants through the perspective's profile_override (when set):
-            // switching perspective re-points which variants / default view
-            // mode every collection panel offers, not just which queries run.
-            let profile_override = self.active_perspective_profile_override(block_id).await?;
-            Self::collection_render_from_profile(
-                self.engine.profile_resolver().as_ref(),
+            self.collection_render_expr(block_id).await?
+        };
+
+        let render_expr = if composes_collection_view {
+            result_expr
+        } else {
+            Self::wrap_in_query_source_switcher(
                 block_id,
-                profile_override.as_ref(),
+                result_expr,
+                &query_source,
+                query_language,
             )
         };
 
-        let render_expr = Self::wrap_in_query_source_switcher(
-            block_id,
-            result_expr,
-            &query_source,
-            query_language,
-        );
-
         Ok((render_expr, change_stream))
+    }
+
+    /// The block's profile-derived default collection view (tree/table/board
+    /// view-mode switcher). A panel of the active perspective resolves its
+    /// collection variants through the perspective's profile_override (when
+    /// set): switching perspective re-points which variants / default view mode
+    /// every collection panel offers, not just which queries run.
+    async fn collection_render_expr(&self, block_id: &EntityUri) -> Result<RenderExpr> {
+        let profile_override = self.active_perspective_profile_override(block_id).await?;
+        Ok(Self::collection_render_from_profile(
+            self.engine.profile_resolver().as_ref(),
+            block_id,
+            profile_override.as_ref(),
+        ))
     }
 
     /// Resolve collection-level render expression from entity profile variants.
@@ -310,7 +334,7 @@ impl<'a> BlockDomain<'a> {
 
     // ALLOW(fallback): pre-existing comment-only — outer-wrap path when inner expr
     // isn't a VMS
-    /// Fallback for when the inner expression isn't a `view_mode_switcher`:
+    /// Used when the inner expression isn't a `view_mode_switcher`:
     /// wrap with a 2-mode (result, source) switcher. The `#qsrc` URI fragment
     /// keeps the wrap's state separate from any inner per-entity state.
     pub(crate) fn wrap_with_outer_switcher(
@@ -571,6 +595,69 @@ pub(crate) fn default_table_expr() -> holon_api::render_types::RenderExpr {
     holon_api::render_types::RenderExpr::FunctionCall {
         name: "table".to_string(),
         args: Vec::new(),
+    }
+}
+
+/// The render-DSL marker a composed panel render uses to stand in for the
+/// block's profile-derived default collection view (see `render_entity`).
+const COLLECTION_VIEW_MARKER: &str = "collection_view";
+
+/// True if `expr` embeds a `collection_view()` marker anywhere in its tree.
+fn contains_collection_view(expr: &holon_api::render_types::RenderExpr) -> bool {
+    use holon_api::render_types::RenderExpr as RE;
+    match expr {
+        RE::FunctionCall { name, args } => {
+            name == COLLECTION_VIEW_MARKER
+                || args.iter().any(|a| contains_collection_view(&a.value))
+        }
+        RE::Array { items } => items.iter().any(contains_collection_view),
+        RE::Object { fields } => fields.values().any(contains_collection_view),
+        RE::BinaryOp { left, right, .. } => {
+            contains_collection_view(left) || contains_collection_view(right)
+        }
+        RE::LiveBlock { .. } | RE::ColumnRef { .. } | RE::Literal { .. } => false,
+    }
+}
+
+/// Replace every `collection_view()` marker node in `expr` with `replacement`
+/// (the block's profile-derived default collection view), recursing through the
+/// whole render tree.
+fn substitute_collection_view(
+    expr: holon_api::render_types::RenderExpr,
+    replacement: &holon_api::render_types::RenderExpr,
+) -> holon_api::render_types::RenderExpr {
+    use holon_api::render_types::Arg;
+    use holon_api::render_types::RenderExpr as RE;
+    match expr {
+        RE::FunctionCall { name, .. } if name == COLLECTION_VIEW_MARKER => replacement.clone(),
+        RE::FunctionCall { name, args } => RE::FunctionCall {
+            name,
+            args: args
+                .into_iter()
+                .map(|a| Arg {
+                    name: a.name,
+                    value: substitute_collection_view(a.value, replacement),
+                })
+                .collect(),
+        },
+        RE::Array { items } => RE::Array {
+            items: items
+                .into_iter()
+                .map(|i| substitute_collection_view(i, replacement))
+                .collect(),
+        },
+        RE::Object { fields } => RE::Object {
+            fields: fields
+                .into_iter()
+                .map(|(k, v)| (k, substitute_collection_view(v, replacement)))
+                .collect(),
+        },
+        RE::BinaryOp { op, left, right } => RE::BinaryOp {
+            op,
+            left: Box::new(substitute_collection_view(*left, replacement)),
+            right: Box::new(substitute_collection_view(*right, replacement)),
+        },
+        leaf @ (RE::LiveBlock { .. } | RE::ColumnRef { .. } | RE::Literal { .. }) => leaf,
     }
 }
 
