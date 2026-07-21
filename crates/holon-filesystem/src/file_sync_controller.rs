@@ -1021,16 +1021,65 @@ impl FileSyncController {
         let bare_id_in_file = self.format.doc_id_from_content(&disk_content);
         let segments = path_to_name_chain(rel_path);
         let segment_refs: Vec<&str> = segments.iter().map(|s| s.as_str()).collect();
+        // Filename-derived page title: the last path segment with the extension
+        // stripped — the SAME default `parse_org_file` applies when a file has
+        // no `#+TITLE:`. A `Page` must never carry empty content.
+        let filename_title = segments
+            .last()
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+        // Set to the healed doc-root when we repair a title-less/orphaned `Page`
+        // below, so an explicit update op converges the degraded store row.
+        let mut heal_doc_root: Option<Block> = None;
         let document = match bare_id_in_file.as_deref() {
             Some(bare) => {
                 let id = EntityUri::block(bare);
                 match self.doc_manager.get_by_id(&id).await? {
-                    Some(doc) => doc,
+                    Some(mut doc) => {
+                        // Heal a title-less `Page` doc-root (dogfood 2026-07-21).
+                        // `convert_block_to_page` (and delete-that-leaves-the-file
+                        // -on-disk) can persist a `Page` whose content is empty;
+                        // on reingest the `#+ID` resolves, so the filename-title
+                        // default in the `None` arm below is BYPASSED and the page
+                        // renders as a blank sidebar row seeded at depth 0 (an
+                        // orphaned root). An empty-content `Page` is never legal —
+                        // re-derive its title from the filename, and when it is
+                        // also orphaned (parent lost to the root sentinel) its
+                        // folder parent, through the SAME derivation the create arm
+                        // uses. Belt-and-suspenders for already-broken vaults;
+                        // composes with the writeback-side `#+TITLE:` persistence
+                        // fix (which stops NEW title-less files being written).
+                        // Disclosed loudly — never a silent empty-content page.
+                        if doc.content.trim().is_empty() {
+                            let derived_parent = if (doc.parent_id == EntityUri::no_parent()
+                                || doc.parent_id.is_sentinel())
+                                && segments.len() > 1
+                            {
+                                let parent_segments: Vec<&str> =
+                                    segment_refs[..segments.len() - 1].to_vec();
+                                self.doc_manager
+                                    .get_or_create_by_name_chain(&parent_segments)
+                                    .await?
+                                    .id
+                            } else {
+                                doc.parent_id.clone()
+                            };
+                            tracing::warn!(
+                                doc_id = %doc.id,
+                                filename_title = %filename_title,
+                                old_parent = %doc.parent_id,
+                                new_parent = %derived_parent,
+                                path = %path.display(),
+                                "healing title-less Page doc-root: empty content re-derived from \
+                                 filename (broken convert/delete product); reparenting when orphaned"
+                            );
+                            doc.content = filename_title.clone();
+                            doc.parent_id = derived_parent;
+                            heal_doc_root = Some(doc.clone());
+                        }
+                        doc
+                    }
                     None => {
-                        let title = segments
-                            .last()
-                            .cloned()
-                            .unwrap_or_else(|| "unknown".to_string());
                         let parent_id = if segments.len() > 1 {
                             let parent_segments: Vec<&str> =
                                 segment_refs[..segments.len() - 1].to_vec();
@@ -1041,7 +1090,7 @@ impl FileSyncController {
                         } else {
                             EntityUri::no_parent()
                         };
-                        let mut new_doc = Block::new_text(id, parent_id, title);
+                        let mut new_doc = Block::new_text(id, parent_id, filename_title.clone());
                         new_doc.set_page(true);
                         // FORCE the `#+ID` as the page identity. A sibling file
                         // scanned earlier under a same-named subdirectory (e.g.
@@ -1292,6 +1341,32 @@ impl FileSyncController {
         // Collect all block operations into a batch
         let mut operations: Vec<(String, holon_api::StorageEntity)> = Vec::new();
         let mut has_structural_changes = false;
+
+        // Converge a healed title-less doc-root through the store mutation seam.
+        // The doc-root is NOT in `new_parse.blocks` (it is `new_parse.document`,
+        // resolved separately above) and `create_in_tree` is position-only for an
+        // already-present node — so the repaired content/parent would never reach
+        // the store without this explicit update. A MINIMAL params map (no
+        // `tags`/`requires` keys) so `update_in_tree` leaves the `Page` tag +
+        // junctions untouched and only rewrites content + parent.
+        if let Some(healed) = heal_doc_root.take() {
+            let mut params = holon_api::StorageEntity::new();
+            params.insert("id".into(), Value::String(healed.id.to_string()));
+            params.insert(
+                "parent_id".into(),
+                Value::String(healed.parent_id.to_string()),
+            );
+            params.insert("content".into(), Value::String(healed.content.clone()));
+            params.insert(
+                "content_type".into(),
+                Value::String(healed.content_type.to_string()),
+            );
+            params.insert(
+                holon_api::ROUTING_DOC_URI_KEY.into(),
+                Value::String(document_uri.to_string()),
+            );
+            operations.push(("update".to_string(), params));
+        }
         // Set when the updates pass 3-way merged a concurrent file-vs-UI content
         // edit. A pure content update is not "structural", so the early-return
         // below would skip the disk write-back — but a merge produces content
