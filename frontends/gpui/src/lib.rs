@@ -24,6 +24,7 @@ pub mod render;
 pub mod reset;
 pub mod search_ui;
 pub mod share_ui;
+pub mod tab_strip;
 
 pub mod user_driver;
 pub mod views;
@@ -197,6 +198,30 @@ pub(crate) fn assert_icon_renderable_on_android(glyph: &'static str, source: &st
 // capture phase, before `InputState`'s own bubble-phase text-undo can run)
 // and route both to the engine-level `FrontendSession::undo`/`redo`.
 actions!(holon_gpui, [TriggerUndo, TriggerRedo, OpenSearch]);
+
+// Open-blocks tab navigation (Increment 2). Cycle next/prev through the open
+// MAIN tabs (cmd/ctrl-] / cmd/ctrl-[) and jump to the Nth open tab
+// (cmd/ctrl-1..9). Unit actions, bound globally (context None) like undo/redo
+// so they resolve regardless of which element holds focus; the app-level
+// `cx.on_action` handlers dispatch `navigation.activate` for the target tab.
+// Nine unit jump actions (the GPUI `actions!` macro emits unit structs; there
+// is no action payload here), one per digit.
+actions!(
+    holon_gpui,
+    [
+        CycleTabNext,
+        CycleTabPrev,
+        JumpToTab1,
+        JumpToTab2,
+        JumpToTab3,
+        JumpToTab4,
+        JumpToTab5,
+        JumpToTab6,
+        JumpToTab7,
+        JumpToTab8,
+        JumpToTab9,
+    ]
+);
 
 // "Turn into page" (engine-synthetic `convert_block_to_page`, Option B) as an
 // editor keybinding, sitting beside indent/outdent (`IndentInline`/
@@ -596,6 +621,11 @@ pub struct HolonApp {
     pub breadcrumb: Entity<breadcrumb::BreadcrumbState>,
     /// Last focus the breadcrumb was resolved for; a change re-resolves it.
     last_breadcrumb_focus: Option<holon_api::EntityUri>,
+    /// Open-blocks tab strip for the MAIN region.
+    pub tab_strip: Entity<tab_strip::TabStripState>,
+    /// Last focus the tab strip was resolved for; a change re-resolves it
+    /// (e.g. `navigation.open_tab` moves focus to the newly-opened tab).
+    last_tab_strip_focus: Option<holon_api::EntityUri>,
     /// Live-oracle violations (debug builds): mirrors the global
     /// `holon_oracles` status; rendered as an impossible-to-miss top banner.
     #[cfg(debug_assertions)]
@@ -696,6 +726,29 @@ impl Render for HolonApp {
                         });
                     }
                 }
+            }
+        }
+        // Re-resolve the open-tabs strip whenever the focused block changes.
+        // `navigation.open_tab` moves focus to the newly-opened tab, so this
+        // catches new/closed tabs. A plain `navigation.activate` (tab switch)
+        // does NOT change the focused block and so does NOT re-resolve here —
+        // the strip's active-tab highlight is kept in sync by the optimistic
+        // update in the click / keyboard handlers instead (see `tab_strip`).
+        {
+            let focused = self.app_model.read(cx).engine.ui_state().focused_block();
+            if focused != self.last_tab_strip_focus {
+                self.last_tab_strip_focus = focused;
+                let generation = self.tab_strip.update(cx, |s, _| {
+                    s.error = None;
+                    s.generation = s.generation.wrapping_add(1);
+                    s.generation
+                });
+                let session = self.session.clone();
+                let rt_handle = self.rt_handle.clone();
+                let state = self.tab_strip.clone();
+                let wh = window.window_handle();
+                let async_cx = cx.to_async();
+                tab_strip::resolve_tab_strip(generation, session, rt_handle, state, wh, &async_cx);
             }
         }
         let (view_model, shadow_ctx, services, show_settings, show_widget_gallery) = {
@@ -1196,6 +1249,16 @@ impl Render for HolonApp {
             16.0,
         );
 
+        // Open-blocks tab strip for the MAIN region, mounted ABOVE the
+        // breadcrumb bar (tabs on top, then breadcrumb, then content).
+        let tab_strip_bar = tab_strip::render_tab_strip(
+            self.tab_strip.read(cx),
+            self.tab_strip.clone(),
+            services.clone(),
+            search_theme,
+            16.0,
+        );
+
         let mut page = div()
             .size_full()
             .bg(page_background)
@@ -1204,6 +1267,9 @@ impl Render for HolonApp {
             .pt(px(self.safe_area_top))
             .pb(px(self.safe_area_bottom))
             .child(title_bar);
+        if let Some(bar) = tab_strip_bar {
+            page = page.child(bar);
+        }
         if let Some(bar) = breadcrumb_bar {
             page = page.child(bar);
         }
@@ -1578,12 +1644,36 @@ fn launch_holon_window_impl(
         // Quick-open / search — cmd-K (free chord; cmd-P is unbound too but
         // cmd-K matches the VS Code / Linear / Slack command-palette idiom).
         KeyBinding::new("cmd-k", OpenSearch, None),
+        // Open-blocks tab navigation (Increment 2).
+        KeyBinding::new("cmd-]", CycleTabNext, None),
+        KeyBinding::new("cmd-[", CycleTabPrev, None),
+        KeyBinding::new("cmd-1", JumpToTab1, None),
+        KeyBinding::new("cmd-2", JumpToTab2, None),
+        KeyBinding::new("cmd-3", JumpToTab3, None),
+        KeyBinding::new("cmd-4", JumpToTab4, None),
+        KeyBinding::new("cmd-5", JumpToTab5, None),
+        KeyBinding::new("cmd-6", JumpToTab6, None),
+        KeyBinding::new("cmd-7", JumpToTab7, None),
+        KeyBinding::new("cmd-8", JumpToTab8, None),
+        KeyBinding::new("cmd-9", JumpToTab9, None),
     ]);
     #[cfg(not(target_os = "macos"))]
     cx.bind_keys([
         KeyBinding::new("ctrl-z", TriggerUndo, None),
         KeyBinding::new("ctrl-y", TriggerRedo, None),
         KeyBinding::new("ctrl-k", OpenSearch, None),
+        // Open-blocks tab navigation (Increment 2).
+        KeyBinding::new("ctrl-]", CycleTabNext, None),
+        KeyBinding::new("ctrl-[", CycleTabPrev, None),
+        KeyBinding::new("ctrl-1", JumpToTab1, None),
+        KeyBinding::new("ctrl-2", JumpToTab2, None),
+        KeyBinding::new("ctrl-3", JumpToTab3, None),
+        KeyBinding::new("ctrl-4", JumpToTab4, None),
+        KeyBinding::new("ctrl-5", JumpToTab5, None),
+        KeyBinding::new("ctrl-6", JumpToTab6, None),
+        KeyBinding::new("ctrl-7", JumpToTab7, None),
+        KeyBinding::new("ctrl-8", JumpToTab8, None),
+        KeyBinding::new("ctrl-9", JumpToTab9, None),
     ]);
 
     // "Turn into page" — bound in the editor's "Input" context (same context
@@ -1613,6 +1703,13 @@ fn launch_holon_window_impl(
     let search_entity_slot: Arc<std::sync::OnceLock<Entity<search_ui::SearchUiState>>> =
         Arc::new(std::sync::OnceLock::new());
     let search_entity_slot_for_window = search_entity_slot.clone();
+
+    // Slot to carry the tab-strip entity out of the window-creation closure so
+    // the app-level tab keyboard action handlers (registered after the window
+    // exists) can read/update it.
+    let tab_strip_entity_slot: Arc<std::sync::OnceLock<Entity<tab_strip::TabStripState>>> =
+        Arc::new(std::sync::OnceLock::new());
+    let tab_strip_entity_slot_for_window = tab_strip_entity_slot.clone();
 
     // Slot to carry the oracle-UI entity out of the window-creation closure
     // so the status bridge (needs the window handle) can be wired after.
@@ -1826,6 +1923,10 @@ fn launch_holon_window_impl(
             .set(search_ui_entity.clone())
             .ok();
         let breadcrumb_entity = cx.new(|_cx| breadcrumb::BreadcrumbState::default());
+        let tab_strip_entity = cx.new(|_cx| tab_strip::TabStripState::default());
+        tab_strip_entity_slot_for_window
+            .set(tab_strip_entity.clone())
+            .ok();
         #[cfg(debug_assertions)]
         let oracle_ui_entity = cx.new(|_cx| oracles_ui::OracleUiState::default());
         #[cfg(debug_assertions)]
@@ -1923,6 +2024,13 @@ fn launch_holon_window_impl(
                 },
             )
             .detach();
+            cx.subscribe(
+                &tab_strip_entity,
+                move |_, _, _: &tab_strip::NotifyTabStrip, cx| {
+                    cx.notify();
+                },
+            )
+            .detach();
 
             // Search input → async query. Each keystroke bumps `generation`
             // (stale-response guard) and kicks off `run_search`, whose result
@@ -1980,6 +2088,8 @@ fn launch_holon_window_impl(
                 search_ui: search_ui_entity,
                 breadcrumb: breadcrumb_entity,
                 last_breadcrumb_focus: None,
+                tab_strip: tab_strip_entity,
+                last_tab_strip_focus: None,
                 #[cfg(debug_assertions)]
                 oracle_ui: oracle_ui_entity.clone(),
                 applied_theme: String::new(),
@@ -2070,6 +2180,56 @@ fn launch_holon_window_impl(
             });
             cx.stop_propagation();
         });
+    }
+
+    // App-level open-blocks tab navigation handlers (Increment 2). Each reads
+    // the ordered tabs + active cursor from `TabStripState`, computes the
+    // target `history_id`, dispatches `navigation.activate`, and optimistically
+    // updates the highlight. Registered globally (like undo/redo) so they fire
+    // regardless of focus. Cleanly no-op when there are 0 tabs / no Nth tab.
+    if let Some(tab_entity) = tab_strip_entity_slot.get().cloned() {
+        let tab_services: Arc<dyn BuilderServices> = app_model.read(cx).engine.clone();
+
+        macro_rules! on_cycle {
+            ($action:ty, $delta:expr) => {{
+                let entity = tab_entity.clone();
+                let services = tab_services.clone();
+                cx.on_action(move |_: &$action, cx: &mut App| {
+                    let entity = entity.clone();
+                    let services = services.clone();
+                    let _ = cx.update_window(wh, move |_, _window, cx| {
+                        tab_strip::apply_cycle(&entity, &services, $delta, cx);
+                    });
+                    cx.stop_propagation();
+                });
+            }};
+        }
+        on_cycle!(CycleTabNext, 1);
+        on_cycle!(CycleTabPrev, -1);
+
+        macro_rules! on_jump {
+            ($action:ty, $n:expr) => {{
+                let entity = tab_entity.clone();
+                let services = tab_services.clone();
+                cx.on_action(move |_: &$action, cx: &mut App| {
+                    let entity = entity.clone();
+                    let services = services.clone();
+                    let _ = cx.update_window(wh, move |_, _window, cx| {
+                        tab_strip::apply_jump(&entity, &services, $n, cx);
+                    });
+                    cx.stop_propagation();
+                });
+            }};
+        }
+        on_jump!(JumpToTab1, 1);
+        on_jump!(JumpToTab2, 2);
+        on_jump!(JumpToTab3, 3);
+        on_jump!(JumpToTab4, 4);
+        on_jump!(JumpToTab5, 5);
+        on_jump!(JumpToTab6, 6);
+        on_jump!(JumpToTab7, 7);
+        on_jump!(JumpToTab8, 8);
+        on_jump!(JumpToTab9, 9);
     }
 
     // Root layout signal — structural changes only (render_expr).
