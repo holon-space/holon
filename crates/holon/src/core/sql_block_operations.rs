@@ -1025,6 +1025,23 @@ impl CrudOperations<Block> for SqlBlockOperations {
     }
 
     async fn delete(&self, id: &str) -> Result<OperationResult> {
+        // Fail-closed on NON-LEAF (destructive-delete ruling 2026-07-21): a bare
+        // `delete` NEVER cascades a subtree. The caller must opt in explicitly
+        // via `delete_subtree` or `delete_keep_children`. Mirrors the Loro
+        // authority's guard so both providers refuse identically.
+        // ALLOW(entity_uri_from_raw): op-dispatch id string → EntityUri at the edge
+        let uri = EntityUri::from_raw(id);
+        let children = self.children_ordered(&uri).await?;
+        if !children.is_empty() {
+            return Err(format!(
+                "delete: block {id} has {} child(ren); refusing to cascade. Use \
+                 `delete_subtree` to delete the whole subtree, or \
+                 `delete_keep_children` to reparent the children first.",
+                children.len()
+            )
+            .into());
+        }
+
         let mut params: StorageEntity = HashMap::new();
         params.insert("id".into(), Value::String(id.to_string()));
         let entity = EntityName::new(Block::entity_name());
