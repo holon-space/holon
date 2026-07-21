@@ -200,6 +200,17 @@ async fn converge_projections(handle: &WideHandle, budget: Duration) {
     if let Some(comp) = &handle.frontend {
         comp.reactive().refresh_advice_sidecar().await;
     }
+
+    // Editor data-sync converge (Inc 4, EditorBufferOwnership plan): with CDC
+    // settled, the focused editor's cell-free VM buffer converges against the
+    // stored (trimmed) `block.content` carrying the same `write_seq` — the
+    // headless analogue of prod's data subscription. The own trailing-whitespace
+    // echo is kept (`AdoptBaseline`); a substantive external change converges.
+    // This is what makes the `inv-editor-text/mirror` echo composition
+    // observable headless (and red-capable on an echo-guard regression).
+    if let Some(comp) = &handle.frontend {
+        comp.converge_active_editors().await;
+    }
 }
 
 /// The working tree AS the boot org (page-rooted leaf siblings, pinned bare

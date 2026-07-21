@@ -14,6 +14,16 @@
 # keystone runs constantly. Runs first; must pass before the red case below is reached.
 {"name": "create-block-smoke", "description": "harness liveness: a lone clean create under the focused page passes the full invariant catalog", "transitions": [{"CreateBlockUnderFocus": {"content": "clean smoke", "id": "block:smoke0"}}]}
 #
+# --- editor same-seq trailing-whitespace echo (EditorBufferOwnership Inc 4) -----------------
+# Repro of the SqlOnly editor "typed trailing space vanishes ~100ms later" P1. Create a block
+# "foo", open its editor, type ONE trailing space. The cell-free editor VM stamps write_seq on
+# `set_field("foo ")`; the SQL provider trims trailing whitespace on store and echoes "foo" back
+# carrying the SAME write_seq. `evaluate_data_sync_echo` MUST recognise this as the editor's own
+# canonicalization (`AdoptBaseline`) and KEEP the typed "foo " buffer, not Converge to "foo".
+# GREEN with the guard's trim-shape discriminator present; RED (buffer regresses to "foo",
+# `inv-editor-text/mirror` mismatch on block:echo0) on a throwaway revert of that discriminator.
+{"name": "editor-trailing-space-echo-adopts-baseline", "description": "Inc4 echo lock: same-seq trailing-ws echo must keep the typed buffer (AdoptBaseline), not regress it (Converge)", "transitions": [{"CreateBlockUnderFocus": {"content": "foo", "id": "block:echo0"}}, {"FocusEditableText": {"block_id": "block:echo0"}}, {"TypeChars": {"text": " "}}]}
+
 # --- block-to-page on '/'-containing content (dogfood 2026-07-20, bug a1) -------------------
 # Repro: create a block whose content contains a trailing '/', then convert it to a page.
 # The planner (PageId::for_path) splits the origin content on '/', so a trailing '/' yields an
@@ -35,3 +45,4 @@
 # `pbt::composed::invariants::mark_bounds_within_content::tests`. A keystone RED needs a
 # fault-injection transition that writes a mark span decoupled from a shorter content (or a
 # store-divergence create) — tracked as a coverage follow-up.
+

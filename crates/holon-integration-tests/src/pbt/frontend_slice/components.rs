@@ -655,6 +655,19 @@ impl HeadlessFrontendComponent {
         self.reactive.clone()
     }
 
+    /// Converge the focused editor's cell-free VM buffer against the settled
+    /// SQL authority (Inc 4). Delegates to the concrete
+    /// `ReactiveEngineDriver` (its `HeadlessEditorMirror`), NOT the `dyn
+    /// UserDriver` accessor — the converge entry is inherent to the
+    /// concrete driver. Called from the composed settle
+    /// (`converge_projections`) after the projection fixed point.
+    pub(crate) async fn converge_active_editors(&self) {
+        self.driver
+            .converge_editors()
+            .await
+            .expect("[converge_active_editors] editor data-sync converge failed");
+    }
+
     /// The production headless [`UserDriver`] (`ReactiveEngineDriver`) — the
     /// SAME instance the editor/focus caps drive through, so it hosts the
     /// one live `HeadlessEditorMirror`. Handed to the headless
@@ -1695,6 +1708,17 @@ impl HeadlessFrontendComponent {
                 "[SutFocusWrite::apply_focus_editable_text] click_entity(main, {id}) failed: {e:#}"
             )
         });
+        // Inc 4: open the editor's VM seeded from authority even when the block
+        // was ALREADY focused (so `click_entity` skipped `seed_for_click`), e.g.
+        // a freshly-created block. Without this the VM is created lazily only on
+        // the first keystroke, and a focused-but-untyped editor falls back to
+        // the cell read — the VM read+converge path would be type-only. Seeds
+        // via the SAME concrete headless driver whose mirror `SutEditorMirrorRead`
+        // reads (self.driver), not the passed `driver` (which may be a window
+        // driver in the windowed overlay, where the editor lives elsewhere).
+        self.driver.seed_focused_editor(id).await.unwrap_or_else(|e| {
+            panic!("[SutFocusWrite::apply_focus_editable_text] seed editor VM for {id} failed: {e:#}")
+        });
     }
 }
 
@@ -1792,11 +1816,21 @@ impl SutEditorMirrorRead for HeadlessFrontendComponent {
     }
 
     fn editor_live_text(&self, block_id: &EntityUri) -> Result<String, String> {
+        // Inc 4: the authority is the block's cell-free editor VM buffer owned by
+        // the driver's `HeadlessEditorMirror` (the pre-commit value keystrokes
+        // mutate, which after an own trailing-whitespace echo can legitimately
+        // diverge from the SQL-trimmed `block.content`). Fall back to the Loro
+        // MutableText for a focused-but-not-yet-opened editor (no VM yet).
+        if let Some(text) = self.driver.editor_live_text(block_id) {
+            return Ok(text);
+        }
         let services: &dyn BuilderServices = self.reactive.as_ref();
         services
             .editable_text(block_id, "content")
             .map(|cell| cell.current())
-            .map_err(|e| format!("[editor_live_text] no MutableText for {block_id}: {e:#}"))
+            .map_err(|e| {
+                format!("[editor_live_text] no editor VM and no MutableText for {block_id}: {e:#}")
+            })
     }
 }
 
