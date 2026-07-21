@@ -21,6 +21,7 @@ workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
 proptest.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 # Re-enable iroh-sync for tests so `share_peer_id::stable_peer_id` (the REAL
 # ordering-tuple peer component) is reachable from the two-peer PBT harness.
 holon-loro = { workspace = true, features = ["iroh-sync"] }
