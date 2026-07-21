@@ -282,6 +282,8 @@ pub fn create_render_engine_with_names(widget_names: &[impl AsRef<str>]) -> Rhai
     register_widget_fn_aliased(&mut engine, "navigation_focus", "navigation.focus");
     register_widget_fn_aliased(&mut engine, "focus_pin", "navigation.focus_pin");
     register_widget_fn_aliased(&mut engine, "navigation_close", "navigation.close");
+    register_widget_fn_aliased(&mut engine, "navigation_activate", "navigation.activate");
+    register_widget_fn_aliased(&mut engine, "navigation_open_tab", "navigation.open_tab");
 
     engine
 }

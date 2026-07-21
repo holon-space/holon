@@ -175,6 +175,66 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             bound_params: Default::default(),
             precondition: None,
         },
+        OperationDescriptor {
+            entity_name: ENTITY_NAME.into(),
+            entity_short_name: SHORT_NAME.to_string(),
+            id_column: "region".to_string(),
+            name: NavigationOp::Activate.as_str().to_string(),
+            display_name: "Activate Tab".to_string(),
+            description: "Move a region's cursor to an already-open history row (tab switch; no \
+                          reorder, no scroll reset)"
+                .to_string(),
+            required_params: vec![
+                region_param(),
+                OperationParam {
+                    name: "history_id".to_string(),
+                    type_hint: TypeHint::Number,
+                    description: "navigation_history.id of the open tab to activate".to_string(),
+                },
+            ],
+            affected_fields: vec!["history_id".to_string()],
+            param_mappings: vec![],
+            target_scope: holon_api::TargetScope::Global,
+            // Navigation moves only the reader's own view cursor; it never
+            // touches a shared container or widens an audience (ADR 0028 A2).
+            boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
+            menu_exposure: holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::Navigation,
+            },
+            trigger: None,
+            bound_params: Default::default(),
+            precondition: None,
+        },
+        OperationDescriptor {
+            entity_name: ENTITY_NAME.into(),
+            entity_short_name: SHORT_NAME.to_string(),
+            id_column: "region".to_string(),
+            name: NavigationOp::OpenTab.as_str().to_string(),
+            display_name: "Open in New Tab".to_string(),
+            description: "Open a block as an additional tab without closing the region's other \
+                          open tabs (modifier-click)"
+                .to_string(),
+            required_params: vec![
+                region_param(),
+                OperationParam {
+                    name: "block_id".to_string(),
+                    type_hint: TypeHint::String,
+                    description: "Block ID to open in a new tab".to_string(),
+                },
+            ],
+            affected_fields: vec!["block_id".to_string()],
+            param_mappings: vec![],
+            target_scope: holon_api::TargetScope::Global,
+            // Opens a page in the reader's own view; no sharing boundary
+            // crossing (ADR 0028 A2).
+            boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
+            menu_exposure: holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::Navigation,
+            },
+            trigger: None,
+            bound_params: Default::default(),
+            precondition: None,
+        },
     ];
     manual_ops
 }
@@ -422,6 +482,109 @@ impl NavigationProvider {
         Ok(OperationResult::irreversible(vec![]))
     }
 
+    /// Set the region's cursor to an already-open history row (tab switch).
+    ///
+    /// Moves ONLY the cursor — no insert, no close, no reorder — so the open
+    /// set keeps its stable insertion order and `main_nav_generation` is not
+    /// bumped (per-tab scroll survives). The main panel query filters
+    /// `focus_roots` by this cursor, so activating flips which open tab
+    /// renders. See ADR-0026 tab model (Q3 stable order, risk register #1/#3).
+    async fn activate(&self, region: Region, history_id: i64) -> Result<OperationResult> {
+        tracing::debug!(
+            "[NavigationProvider] activate: region={}, history_id={}",
+            region,
+            history_id
+        );
+
+        let mut params = HashMap::new();
+        params.insert("region".to_string(), Value::from(region));
+        params.insert("history_id".to_string(), Value::Integer(history_id));
+
+        self.db_handle
+            .query(
+                include_str!("../../sql/navigation/set_cursor_to_history.sql"),
+                params,
+            )
+            .await
+            .map_err(|e| format!("Failed to activate history row {history_id}: {e}"))?;
+
+        Ok(OperationResult::irreversible(vec![]))
+    }
+
+    /// Open a block as an ADDITIONAL open tab in a region (multi-open).
+    ///
+    /// Idempotent by open row: if `(region, block_id)` is already open, point
+    /// the cursor at that existing tab (no duplicate row). Otherwise insert a
+    /// new open `navigation_history` row and point the cursor at it — WITHOUT
+    /// closing the region's other open rows (that is `focus`'s replace
+    /// semantics). The sole multi-open producer (ADR-0026 tab model, Q2).
+    async fn open_tab(&self, region: Region, block_id: &str) -> Result<OperationResult> {
+        tracing::debug!(
+            "[NavigationProvider] open_tab: region={}, block_id={}",
+            region,
+            block_id
+        );
+
+        let mut params = HashMap::new();
+        params.insert("region".to_string(), Value::from(region));
+        params.insert("block_id".to_string(), Value::String(block_id.to_string()));
+
+        // Already open? → activate that tab rather than inserting a duplicate.
+        let existing = self
+            .db_handle
+            .query(
+                include_str!("../../sql/navigation/get_open_history_id.sql"),
+                params.clone(),
+            )
+            .await
+            .map_err(|e| format!("Failed to look up open tab: {e}"))?;
+        if let Some(id) = existing
+            .first()
+            .and_then(|row| row.get("id"))
+            .and_then(|v| v.as_i64())
+        {
+            tracing::debug!(
+                "[NavigationProvider] open_tab: {block_id} already open (id={id}) — activating"
+            );
+            return self.activate(region, id).await;
+        }
+
+        // Insert a new open row (closed_at defaults NULL → open) WITHOUT
+        // closing the region's other open rows.
+        self.db_handle
+            .query(
+                include_str!("../../sql/navigation/insert_history.sql"),
+                params.clone(),
+            )
+            .await
+            .map_err(|e| format!("Failed to insert open tab: {e}"))?;
+
+        let max_result = self
+            .db_handle
+            .query(
+                include_str!("../../sql/navigation/get_max_history_id.sql"),
+                params.clone(),
+            )
+            .await
+            .map_err(|e| format!("Failed to get max history id: {e}"))?;
+        let new_history_id: i64 = max_result
+            .first()
+            .and_then(|row| row.get("max_id"))
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| "Failed to get new history_id after open_tab".to_string())?;
+
+        params.insert("new_id".to_string(), Value::Integer(new_history_id));
+        self.db_handle
+            .query(
+                include_str!("../../sql/navigation/upsert_cursor.sql"),
+                params,
+            )
+            .await
+            .map_err(|e| format!("Failed to update cursor after open_tab: {e}"))?;
+
+        Ok(OperationResult::irreversible(vec![]))
+    }
+
     /// Go back in navigation history
     async fn go_back(&self, region: Region) -> Result<OperationResult> {
         tracing::debug!("[NavigationProvider] go_back: region={}", region);
@@ -602,6 +765,23 @@ impl OperationProvider for NavigationProvider {
             Ok(NavigationOp::GoBack) => self.go_back(region).await,
             Ok(NavigationOp::GoForward) => self.go_forward(region).await,
             Ok(NavigationOp::GoHome) => self.go_home(region).await,
+            Ok(NavigationOp::Activate) => {
+                let history_id = params
+                    .get("history_id")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| "Missing required parameter 'history_id'".to_string())?;
+                self.activate(region, history_id).await
+            }
+            Ok(NavigationOp::OpenTab) => {
+                let block_id = params
+                    .get("block_id")
+                    .and_then(|v| match v {
+                        Value::String(s) => Some(s.as_str()),
+                        _ => None,
+                    })
+                    .ok_or_else(|| "Missing required parameter 'block_id'".to_string())?;
+                self.open_tab(region, block_id).await
+            }
             // `close` is dispatched before region extraction above.
             Ok(NavigationOp::Close) => {
                 unreachable!("close is handled before region extraction")
