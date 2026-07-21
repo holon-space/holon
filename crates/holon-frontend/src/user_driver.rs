@@ -505,6 +505,45 @@ impl ReactiveEngineDriver {
         }
     }
 
+    /// Headless live editor text (Inc 4): the block's cell-free editor VM
+    /// buffer (`HeadlessEditorMirror::live_text`) — the pre-commit value
+    /// keystrokes mutate, which after an own trailing-whitespace echo can
+    /// diverge from the SQL-trimmed `block.content`. `None` when no editor
+    /// VM is open. This is the
+    /// source `SutEditorMirrorRead::editor_live_text` reads for the frontend
+    /// SUT.
+    pub fn editor_live_text(&self, block_id: &EntityUri) -> Option<String> {
+        self.editor_mirror.live_text(&block_id.to_string())
+    }
+
+    /// Converge the currently-focused editor's buffer against the settled SQL
+    /// authority (Inc 4 — the headless data-sync loop). No-op when nothing is
+    /// focused or no VM is open. Called from the composed harness settle after
+    /// the projection fixed point so the buffer reflects the settled echo.
+    pub async fn converge_editors(&self) -> Result<()> {
+        if let Some(block) = self.engine.focused_block() {
+            self.editor_mirror
+                .converge_editor(&self.engine, &block.to_string())
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Seed the just-focused editor's VM from authority on OPEN (Inc 4). Called
+    /// by the editable-focus cap AFTER the production `click_entity` focus, so
+    /// a focused-but-not-yet-typed block already hosts a VM (exercising the
+    /// VM read+converge path even before any keystroke). `click_entity`
+    /// seeds via `seed_for_click` only when the target was NOT already
+    /// focused; a focus on an already-focused block (e.g. a freshly-created
+    /// block) would otherwise have no VM until the first keystroke. This
+    /// closes that gap and matches the reference's fresh
+    /// `open_active_editor`.
+    pub async fn seed_focused_editor(&self, block_id: &EntityUri) -> Result<()> {
+        self.editor_mirror
+            .reset_editor_from_authority(&self.engine, block_id)
+            .await
+    }
+
     /// Headless equivalent of GPUI `editor_view.rs`'s on-blur / authority-leave
     /// commit for the focused main panel's creation slot. Resolves the slot's
     /// parent the SAME way the render pipeline keys the `:__virtual:<parent>`
