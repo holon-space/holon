@@ -21,6 +21,17 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     let mut size = node.prop_f64("size").unwrap_or(14.0) as f32;
     let color = node.prop_str("color").map(|s| s.to_string());
 
+    // Disclosed placeholder: a genuinely empty col-bound value must never
+    // render as a blank row (fail-loud, never fake). `text(col(...),
+    // #{empty: "(untitled)"})` supplies the disclosed stand-in, shown muted +
+    // italic so a degraded value reads as degraded. Display-only: `content`
+    // stays the real (empty) value below, so mark spans and inv-displayed-text
+    // tracking still compare against the truth, not the placeholder.
+    let empty_placeholder = node.prop_str("empty");
+    let (display, is_placeholder) =
+        holon_api::render_eval::text_display(&content, empty_placeholder.as_deref());
+    let display = display.to_string();
+
     // A semantic `style` keyword (e.g. `#{style: "h1"}` on the page-title
     // variant) resolves to the heading type scale here at render time — the
     // single place both the initial build and the fast-path props recompute
@@ -57,6 +68,9 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     if let Some(ref color_name) = color {
         el = el.text_color(resolve_color(ctx, color_name));
     }
+    if is_placeholder {
+        el = el.text_color(tc(ctx, |t| t.muted_foreground)).italic();
+    }
 
     let inner: AnyElement = match marks {
         Some(ref m) if !m.is_empty() => {
@@ -66,7 +80,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
             )
             .into_any_element()
         }
-        _ => el.child(content.clone()).into_any_element(),
+        _ => el.child(display.clone()).into_any_element(),
     };
 
     // When this `text(...)` resolved a `col("content")` against a live row,
