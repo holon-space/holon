@@ -105,6 +105,9 @@ pub fn dismiss_advice_descriptor(
         menu_exposure: holon_api::MenuExposure::NotListed {
             surface: holon_api::NonMenuSurface::Internal,
         },
+        // Mutates the anchor block's `advice_suppressed` set within its
+        // container — never crosses an audience boundary.
+        boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
         trigger: None,
         bound_params: std::collections::HashMap::new(),
         precondition: None,
@@ -192,6 +195,10 @@ fn tag_descriptor(
         menu_exposure: holon_api::MenuExposure::NotListed {
             surface: holon_api::NonMenuSurface::Internal,
         },
+        // Element-wise tag edit within the block's container — never crosses an
+        // audience boundary. (add_tag("Page") topology is guarded separately by
+        // `page_under_non_page_prohibited`, not a container crossing.)
+        boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
         trigger: None,
         bound_params: std::collections::HashMap::new(),
         precondition: None,

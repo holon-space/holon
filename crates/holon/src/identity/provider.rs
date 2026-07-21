@@ -444,6 +444,7 @@ impl IdentityProvider {
             affected_fields: Vec::new(),
             param_mappings: Vec::new(),
             target_scope: holon_api::TargetScope::Block,
+            boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
             menu_exposure: holon_api::MenuExposure::NotListed {
                 surface: holon_api::NonMenuSurface::Internal,
             },
@@ -451,6 +452,22 @@ impl IdentityProvider {
             bound_params: Default::default(),
             precondition: None,
         }
+    }
+
+    /// Like [`Self::descriptor`], but classified `IdentityOp` (ADR 0028 C3/H6:
+    /// merge/alias mutations rebind identity and need boundary handling —
+    /// rename-as-grant is exactly the hole H6 closes). Only for ops that
+    /// MUTATE identity (merge, its undo, proposal application) — queue
+    /// bookkeeping stays fail-closed `Unclassified`.
+    fn identity_mutating_descriptor(
+        name: &str,
+        display_name: &str,
+        description: &str,
+        required: Vec<OperationParam>,
+    ) -> OperationDescriptor {
+        let mut d = Self::descriptor(name, display_name, description, required);
+        d.boundary_behavior = holon_api::BoundaryBehavior::IdentityOp;
+        d
     }
 
     fn string_param(name: &str, description: &str) -> OperationParam {
@@ -475,7 +492,7 @@ impl OperationProvider for IdentityProvider {
     fn operations(&self) -> Vec<OperationDescriptor> {
         vec![
             // -- User-facing --
-            Self::descriptor(
+            Self::identity_mutating_descriptor(
                 "merge_entities",
                 "Merge entities",
                 "Merge canonical_a into canonical_b: rewrite aliases and delete the merged-from \
@@ -502,7 +519,7 @@ impl OperationProvider for IdentityProvider {
                     Self::integer_param("created_at", "Creation timestamp (ms since epoch)"),
                 ],
             ),
-            Self::descriptor(
+            Self::identity_mutating_descriptor(
                 "accept_proposal",
                 "Accept proposal",
                 "Mark a proposal as accepted.",
@@ -516,7 +533,7 @@ impl OperationProvider for IdentityProvider {
             ),
             // -- Internal undo primitives (registered so the dispatcher routes
             //    inverse executions; not intended as user surfaces). --
-            Self::descriptor(
+            Self::identity_mutating_descriptor(
                 "restore_canonical_after_merge",
                 "Restore canonical after merge",
                 "Internal: undo of merge_entities. Re-inserts canonical and rewrites aliases.",

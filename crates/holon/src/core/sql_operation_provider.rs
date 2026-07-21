@@ -1839,6 +1839,7 @@ impl OperationProvider for SqlOperationProvider {
                 affected_fields: vec![],
                 param_mappings: vec![],
                 target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
                 menu_exposure: holon_api::MenuExposure::NotListed {
                     surface: holon_api::NonMenuSurface::Internal,
                 },
@@ -1857,6 +1858,7 @@ impl OperationProvider for SqlOperationProvider {
                 affected_fields: vec![],
                 param_mappings: vec![],
                 target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
                 menu_exposure: holon_api::MenuExposure::NotListed {
                     surface: holon_api::NonMenuSurface::Internal,
                 },
@@ -1879,6 +1881,7 @@ impl OperationProvider for SqlOperationProvider {
                 affected_fields: vec![],
                 param_mappings: vec![],
                 target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
                 menu_exposure: holon_api::MenuExposure::NotListed {
                     surface: holon_api::NonMenuSurface::Internal,
                 },
@@ -1901,6 +1904,7 @@ impl OperationProvider for SqlOperationProvider {
                 affected_fields: vec![],
                 param_mappings: vec![],
                 target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
                 menu_exposure: holon_api::MenuExposure::Listed {
                     surfaces: holon_api::SurfaceSet {
                         slash_menu: true,
@@ -1926,6 +1930,7 @@ impl OperationProvider for SqlOperationProvider {
                 id_column: "id".to_string(),
                 param_mappings: vec![],
                 target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
                 menu_exposure: holon_api::MenuExposure::Listed {
                     surfaces: holon_api::SurfaceSet {
                         slash_menu: true,
@@ -1951,6 +1956,7 @@ impl OperationProvider for SqlOperationProvider {
                 affected_fields: vec![],
                 param_mappings: vec![],
                 target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
                 menu_exposure: holon_api::MenuExposure::NotListed {
                     surface: holon_api::NonMenuSurface::Internal,
                 },
@@ -1980,6 +1986,7 @@ impl OperationProvider for SqlOperationProvider {
                 affected_fields: vec![],
                 param_mappings: vec![],
                 target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::IdentityOp,
                 menu_exposure: holon_api::MenuExposure::NotListed {
                     surface: holon_api::NonMenuSurface::Internal,
                 },
@@ -2004,6 +2011,7 @@ impl OperationProvider for SqlOperationProvider {
                 affected_fields: vec![],
                 param_mappings: vec![],
                 target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::IdentityOp,
                 menu_exposure: holon_api::MenuExposure::NotListed {
                     surface: holon_api::NonMenuSurface::Internal,
                 },
@@ -2026,6 +2034,7 @@ impl OperationProvider for SqlOperationProvider {
                 affected_fields: vec![],
                 param_mappings: vec![],
                 target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
                 menu_exposure: holon_api::MenuExposure::NotListed {
                     surface: holon_api::NonMenuSurface::Internal,
                 },
