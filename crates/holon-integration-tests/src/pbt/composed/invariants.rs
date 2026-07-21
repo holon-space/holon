@@ -22,6 +22,7 @@
 //! the `pbt-composition` skill (`.claude/skills/pbt-composition/`).
 
 pub mod advice_rows_woven;
+pub mod audience_never_over_approximates;
 pub mod companion_has_no_child_page_headings;
 pub mod display_placement_canonical_inert;
 pub mod displayed_text;

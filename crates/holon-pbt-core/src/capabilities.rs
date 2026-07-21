@@ -488,6 +488,92 @@ pub trait RefClockMut: RefClock {
     fn advance_day(&mut self, days: i64);
 }
 
+// ─── Reference-side: Sharing audience (ADR 0028 C2/H3) ───────────────
+
+/// A sharing **audience**: the set of NON-OWNER members a container or a
+/// block's policy extends visibility to. The owner is implicit and always a
+/// member (never stored). `Audience::default()` = local-only (owner-only).
+///
+/// Members are opaque labels (device / recipient ids). The C2/H3 directional
+/// alignment oracle compares these member sets: a block's *effective* audience
+/// (the audience of the container it is observably in) must never
+/// OVER-approximate its *policy* audience (owner intent) — i.e. effective ⊆
+/// policy at every observable point (ADR 0028 §H3; the directional restatement
+/// of the unsatisfiable-as-literal C2).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Audience(pub BTreeSet<String>);
+
+impl Audience {
+    /// The owner-only audience (no extra members).
+    pub fn local_only() -> Self {
+        Self(BTreeSet::new())
+    }
+
+    /// Build from an iterator of member labels.
+    pub fn from_members<I, S>(members: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self(members.into_iter().map(Into::into).collect())
+    }
+
+    /// The non-owner members.
+    pub fn members(&self) -> &BTreeSet<String> {
+        &self.0
+    }
+
+    /// True when only the owner is in the audience.
+    pub fn is_local_only(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Members present in `self` but ABSENT from `policy` — the
+    /// over-approximation (leak) set. Empty ⇔ `self ⊆ policy` (aligned).
+    pub fn over_approximation_of(&self, policy: &Audience) -> BTreeSet<String> {
+        self.0.difference(&policy.0).cloned().collect()
+    }
+}
+
+/// C2/H3 directional-alignment oracle surface (ADR 0028). Exposes, per block,
+/// the POLICY audience (owner intent) and the EFFECTIVE audience (the audience
+/// of the container the block is observably in). The keystone oracle
+/// (`inv-audience-never-over-approximates`) asserts effective never
+/// OVER-approximates policy — the correctness spine every future share
+/// migration must keep green (widening = create-in-shared FIRST; narrowing =
+/// delete-from-shared FIRST; quiescent form at an epoch barrier: membership =
+/// policy extension).
+///
+/// Ref-only (no SUT twin yet): there is no share machinery in prod, so the
+/// EFFECTIVE audience is derived from the reference model's
+/// container-membership map, not from a SUT observation. When real crossings
+/// land (Inc 4) the SUT side can observe effective audience via
+/// `list_loro_documents` / `inspect_loro_blocks` (which peers replicate a doc)
+/// and this becomes a SUT⇄ref differential; today it is the migration model's
+/// own tripwire (same shape as `inv-no-page-under-non-page`).
+///
+/// `#[capmap_adapter]` hosts this on `CapMap` (sync trait → no async-trait) so
+/// the bridged invariant can read it from the ref `CapMap`.
+#[holon_macros::capmap_adapter]
+pub trait RefAudience {
+    /// The current sharing epoch. Crossings are ordered; at an epoch barrier
+    /// the quiescent invariant is membership = policy extension.
+    fn audience_epoch(&self) -> u64;
+
+    /// Blocks with a non-local effective OR policy audience — the only blocks
+    /// the over-approximation check is meaningful for (a local-only block is
+    /// vacuously aligned: ∅ ⊆ ∅). Empty on a ref modeling no crossings (the
+    /// default keystone), so the oracle is vacuously green there.
+    fn shared_block_ids(&self) -> BTreeSet<EntityUri>;
+
+    /// The owner-intended audience for this block. Absent ⇒ local-only.
+    fn block_policy_audience(&self, block: &EntityUri) -> Audience;
+
+    /// The effective audience = the audience of the container (doc) the block
+    /// is observably in. Absent container / local-only doc ⇒ local-only.
+    fn block_effective_audience(&self, block: &EntityUri) -> Audience;
+}
+
 // ─── Reference-side: Lifecycle (admin gates) ─────────────────────────
 
 /// Setup/lifecycle predicates that wide-PBT transitions gate on.

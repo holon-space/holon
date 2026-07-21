@@ -57,6 +57,7 @@ use super::reference_state::ReferenceState;
 use super::reference_state::Resolved;
 
 mod advice;
+mod audience;
 mod blocks;
 mod boot;
 mod clock;
@@ -176,7 +177,15 @@ impl holon_pbt_core::composition::CapProvider for ReferenceState {
         // SUT∧ref cap sets, and only a Turso arm supplying the matching
         // `SutHistory` selects the history invariants.
         caps.insert(self.clone() as Arc<dyn RefHistoryExpectation>);
-        caps.insert(self as Arc<dyn RefGlobalFocus>);
+        caps.insert(self.clone() as Arc<dyn RefGlobalFocus>);
+        // `RefAudience` carries the ADR 0028 C2/H3 sharing overlay (per-block
+        // policy audience + per-container effective audience + epoch) the
+        // `inv-audience-never-over-approximates` keystone oracle reads. Ref-only
+        // (no SUT twin yet — no share machinery in prod), so it selects on every
+        // composed draw like `inv-no-page-under-non-page`; `shared_block_ids()`
+        // is empty on a ref modeling no crossings, so the oracle is vacuously
+        // green and adds no false RED to the keystone.
+        caps.insert(self as Arc<dyn holon_pbt_core::capabilities::RefAudience>);
     }
 }
 
