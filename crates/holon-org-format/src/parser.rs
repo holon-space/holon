@@ -215,6 +215,20 @@ pub fn parse_org_file(
         &done_kws,
     )?;
 
+    // Parse boundary (F8, dogfood 2026-07-21): a single file must project to a
+    // valid FOREST. Every block id must be distinct from the document id and
+    // from every other block id in the file. A duplicate id makes a block its
+    // own ancestor -- the classic case is a doc `#+ID:` equal to a heading `:ID:`,
+    // which sets `block.parent_id == block.id` (a self-parent 1-cycle); two
+    // headings sharing an `:ID:` likewise tie one identity to two nodes.
+    // Downstream the recursive `focus_descendants` tree projection walks
+    // `child.parent_id = fd.id` with no cycle guard, so a self-parent recurses
+    // without bound -- boot stack-overflow that kills the whole app. Parse,
+    // don't validate: reject the malformed file HERE with an enriched error so
+    // the ingest boundary quarantines it (loud + disclosed, other files keep
+    // syncing) instead of writing the cyclic row the projection then crashes on.
+    reject_id_cycles(path, &document, &blocks)?;
+
     // Sibling order is conveyed positionally — blocks are pushed in document
     // DFS order, so the org sync controller derives each block's
     // `after_block_id` from that order and the order owner mints the
@@ -227,6 +241,42 @@ pub fn parse_org_file(
         blocks,
         headlines_needing_ids,
     })
+}
+
+/// Parse-boundary forest check (F8, dogfood 2026-07-21): reject a file whose
+/// parsed blocks do not form a valid forest under the document root. A
+/// duplicate id -- a heading `:ID:` equal to the doc `#+ID:`, or to another
+/// heading's `:ID:` -- makes a block its own ancestor; the recursive
+/// `focus_descendants` projection then recurses without bound and crashes the
+/// app on boot. Fail loud here so the offending file is quarantined at ingest,
+/// never written to the store where the projection would overflow the stack.
+fn reject_id_cycles(path: &Path, document: &Block, blocks: &[Block]) -> Result<()> {
+    let mut owners: HashMap<&str, &'static str> = HashMap::new();
+    owners.insert(document.id.as_str(), "the document root (#+ID:)");
+    for block in blocks {
+        if let Some(prev) = owners.insert(block.id.as_str(), "a heading/block (:ID:)") {
+            anyhow::bail!(
+                "org id collision in {}: id {:?} is claimed by both {} and a heading/block -- \
+                 duplicate ids make a block its own ancestor (self-parent cycle), which recurses \
+                 the tree projection without bound and crashes the app on boot. Give the colliding \
+                 heading a distinct :ID: (or drop the file's #+ID:).",
+                path.display(),
+                block.id.as_str(),
+                prev,
+            );
+        }
+        // Direct 1-cycle backstop: any block naming itself as parent, however
+        // its id was assigned.
+        if block.id == block.parent_id {
+            anyhow::bail!(
+                "org self-parent in {}: block {:?} lists itself as its own parent -- a 1-cycle \
+                 that recurses the tree projection without bound and crashes the app on boot.",
+                path.display(),
+                block.id.as_str(),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Split a headline TITLE LINE into (title, tags) exactly the way the org
@@ -959,6 +1009,60 @@ mod tests {
         let path = PathBuf::from("/test/file.org");
         let root = PathBuf::from("/test");
         parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap()
+    }
+
+    /// F8 (dogfood 2026-07-21): a doc `#+ID:` equal to a heading `:ID:` makes
+    /// the heading its own parent (`block.parent_id == block.id`). Before
+    /// the fix the parser happily emitted that self-parent block and the
+    /// recursive `focus_descendants` projection blew the stack on boot.
+    /// Parse must now reject it loudly (â ingest quarantine) naming the
+    /// file and colliding id.
+    #[test]
+    fn parse_rejects_doc_id_equal_to_heading_id_self_parent() {
+        let content = "#+ID: cyc-id\n* Cyc\n:PROPERTIES:\n:ID: cyc-id\n:END:\n";
+        let path = PathBuf::from("/test/file.org");
+        let root = PathBuf::from("/test");
+        let err = match parse_org_file(&path, content, &EntityUri::no_parent(), &root) {
+            Ok(_) => {
+                panic!("doc-id == heading-id collision must be rejected, not silently ingested")
+            }
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("cyc-id") && msg.contains("file.org"),
+            "error must name the colliding id and the file: {msg}"
+        );
+    }
+
+    /// Two headings sharing an `:ID:` tie one identity to two nodes --
+    /// ambiguous parenthood that can cycle the projection. Reject at parse.
+    #[test]
+    fn parse_rejects_duplicate_heading_ids() {
+        let content =
+            "* One\n:PROPERTIES:\n:ID: dup\n:END:\n* Two\n:PROPERTIES:\n:ID: dup\n:END:\n";
+        let path = PathBuf::from("/test/file.org");
+        let root = PathBuf::from("/test");
+        let err = match parse_org_file(&path, content, &EntityUri::no_parent(), &root) {
+            Ok(_) => panic!("duplicate heading :ID: must be rejected"),
+            Err(e) => e,
+        };
+        assert!(
+            format!("{err:#}").contains("dup"),
+            "error must name the duplicate id"
+        );
+    }
+
+    /// A well-formed file (distinct ids, no `#+ID:` collision) still parses.
+    #[test]
+    fn parse_accepts_distinct_ids() {
+        let content = "#+ID: doc-root\n* A\n:PROPERTIES:\n:ID: a1\n:END:\n* B\n:PROPERTIES:\n:ID: b1\n:END:\n";
+        let path = PathBuf::from("/test/file.org");
+        let root = PathBuf::from("/test");
+        assert!(
+            parse_org_file(&path, content, &EntityUri::no_parent(), &root).is_ok(),
+            "distinct ids must parse cleanly"
+        );
     }
 
     #[test]
