@@ -514,16 +514,19 @@ where
     /// Set single field (returns changes and inverse operation for undo)
     /// Note: affected_fields is determined dynamically based on the field
     /// parameter
+    #[holon_macros::boundary_behavior(private_only)]
     async fn set_field(&self, id: &str, field: &str, value: Value) -> Result<OperationResult>;
 
     /// Create new entity (returns new ID, changes, and inverse operation for
     /// undo)
+    #[holon_macros::boundary_behavior(private_only)]
     async fn create(
         &self,
         fields: crate::storage::types::StorageEntity,
     ) -> Result<(String, OperationResult)>;
 
     /// Delete entity (returns changes and inverse operation for undo)
+    #[holon_macros::boundary_behavior(private_only)]
     async fn delete(&self, id: &str) -> Result<OperationResult>;
 
     /// Get operations metadata (automatically delegates to entity type)
@@ -873,6 +876,7 @@ where
     /// inline implementation was missing.
     #[holon_macros::affects("parent_id", "depth", "sort_key")]
     #[holon_macros::menu_exposure(listed)]
+    #[holon_macros::boundary_behavior(crossing_widens)]
     async fn indent(&self, id: &EntityUri) -> Result<OperationResult> {
         let id_str = id.as_str();
         let block = self
@@ -915,6 +919,7 @@ where
     /// Position `id` under `parent_id`, immediately after `after_block_id`
     /// (or first when `None`). Delegates to the impl's `BlockOrdering` —
     /// see `crates/holon-core/src/block_ordering.rs`.
+    #[holon_macros::boundary_behavior(crossing_widens)]
     async fn move_to_position(
         &self,
         id: &EntityUri,
@@ -943,6 +948,7 @@ where
     #[holon_macros::triggered_by(availability_of = "tree_position", providing = ["parent_id", "after_block_id"])]
     #[holon_macros::triggered_by(availability_of = "selected_id", providing = ["parent_id"])]
     #[holon_macros::menu_exposure(pointer_gesture)]
+    #[holon_macros::boundary_behavior(crossing_widens)]
     async fn move_block(
         &self,
         id: &EntityUri,
@@ -1036,6 +1042,7 @@ where
     /// Move block out to parent's level (decrease indentation)
     #[holon_macros::affects("parent_id", "depth", "sort_key")]
     #[holon_macros::menu_exposure(listed)]
+    #[holon_macros::boundary_behavior(forbidden_at_page_boundary)]
     async fn outdent(&self, id: &EntityUri) -> Result<OperationResult> {
         let id_str = id.as_str();
         let maybe_block: Option<T> = self.get_by_id(id_str).await?;
@@ -1107,6 +1114,7 @@ where
     ///   to usize)
     #[holon_macros::affects("content")]
     #[holon_macros::menu_exposure(keyboard_gesture)]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn split_block(&self, id: &EntityUri, position: i64) -> Result<OperationResult> {
         use uuid::Uuid;
 
@@ -1417,6 +1425,7 @@ where
     ///   cursor is at byte 0, but the SQL caller path may pass through stale
     ///   positions, so we re-check here.
     #[holon_macros::affects("content", "parent_id", "sort_key")]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn join_block(&self, id: &EntityUri, position: i64) -> Result<OperationResult> {
         if position != 0 {
             return Ok(OperationResult::irreversible(vec![]));
@@ -1625,6 +1634,7 @@ where
     /// which for a deterministic minter reproduces the original `sort_key`
     /// byte-for-byte between the same neighbours.
     #[holon_macros::affects("content", "parent_id", "sort_key")]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn restore_split(
         &self,
         target_id: &EntityUri,
@@ -1716,6 +1726,7 @@ where
     /// leaf, and `join_block` only chooses this inverse for the leaf case, so
     /// the guard never trips on the sanctioned paths.
     #[holon_macros::affects("content", "parent_id", "sort_key")]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn restore_join(
         &self,
         target_id: &EntityUri,
@@ -1810,6 +1821,7 @@ where
     /// Move a block up (swap with previous sibling)
     #[holon_macros::affects("parent_id", "sort_key")]
     #[holon_macros::menu_exposure(listed)]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn move_up(&self, id: &EntityUri) -> Result<OperationResult> {
         let id_str = id.as_str();
         // Capture old state
@@ -1869,6 +1881,7 @@ where
     #[holon_macros::affects("content")]
     #[holon_macros::triggered_by(availability_of = "selected_id", providing = ["target_uri"])]
     #[holon_macros::menu_exposure(listed)]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn embed_entity(
         &self,
         id: &EntityUri,
@@ -1916,6 +1929,7 @@ where
     /// Move a block down (swap with next sibling)
     #[holon_macros::affects("parent_id", "sort_key")]
     #[holon_macros::menu_exposure(listed)]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn move_down(&self, id: &EntityUri) -> Result<OperationResult> {
         let id_str = id.as_str();
         // Capture old state
@@ -1972,6 +1986,7 @@ where
 {
     /// Rename an entity
     #[holon_macros::affects("name")]
+    #[holon_macros::boundary_behavior(identity_op)]
     async fn rename(&self, id: &str, name: String) -> Result<OperationResult>;
 }
 
@@ -1993,6 +2008,7 @@ where
     /// * `after_id` - Optional anchor entity (move after this entity, or
     ///   beginning if None)
     #[holon_macros::affects("parent_id", "depth", "sort_key")]
+    #[holon_macros::boundary_behavior(crossing_widens)]
     async fn move_entity(
         &self,
         id: &str,
@@ -2019,10 +2035,12 @@ where
 {
     /// Insert `text` at Unicode-scalar offset `pos` in the entity's text.
     #[holon_macros::affects("content")]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn insert_text(&self, id: &str, pos: i64, text: String) -> Result<OperationResult>;
 
     /// Delete `len` Unicode scalars starting at `pos`.
     #[holon_macros::affects("content")]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn delete_text(&self, id: &str, pos: i64, len: i64) -> Result<OperationResult>;
 }
 
@@ -2055,6 +2073,7 @@ where
     /// project convention used by `split_block` etc.); implementations
     /// validate non-negativity and convert to `usize` internally.
     #[holon_macros::affects("marks")]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn apply_mark(
         &self,
         id: &str,
@@ -2067,6 +2086,7 @@ where
     /// range_end)`. Existing same-key spans that overlap the range are
     /// split or shortened; disjoint portions remain.
     #[holon_macros::affects("marks")]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn remove_mark(
         &self,
         id: &str,
@@ -2090,6 +2110,7 @@ where
     /// Set task title
     #[holon_macros::affects("title")]
     #[holon_macros::triggered_by(availability_of = "title")]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn set_title(&self, id: &str, title: &str) -> Result<OperationResult>;
 
     /// Returns the valid states for this task type with progress information
@@ -2105,19 +2126,23 @@ where
     #[holon_macros::affects("task_state")]
     #[holon_macros::triggered_by(availability_of = "task_state")]
     #[holon_macros::enum_from(method = "completion_states_with_progress", param = "task_state")]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn set_state(&self, id: &str, task_state: String) -> Result<OperationResult>;
 
     /// Cycle to the next task state. "" → TODO → DOING → DONE → "".
     #[holon_macros::affects("task_state")]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn cycle_task_state(&self, id: &str) -> Result<OperationResult>;
 
     /// Set task priority (1=highest, 4=lowest)
     #[holon_macros::affects("priority")]
     #[holon_macros::triggered_by(availability_of = "priority")]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn set_priority(&self, id: &str, priority: i64) -> Result<OperationResult>;
 
     /// Set task due date
     #[holon_macros::affects("due_date")]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn set_due_date(
         &self,
         id: &str,
@@ -2404,6 +2429,7 @@ pub fn generate_sync_operation(provider_name: &str) -> OperationDescriptor {
         affected_fields: vec![], // Sync operations don't affect specific fields
         param_mappings: vec![],
         target_scope: holon_api::TargetScope::Block,
+        boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
         menu_exposure: holon_api::MenuExposure::NotListed {
             surface: holon_api::NonMenuSurface::External,
         },
