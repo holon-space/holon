@@ -979,6 +979,12 @@ impl LoroShareBackend {
                 doc,
                 Some(self.peer_connected_callback()),
                 preferred_port,
+                // Enrollment gate not yet flipped ON in the backend hot path
+                // (share_subtree/accept/resync/rehydrate must all enroll in
+                // lockstep first — the enrollment MECHANISM lands here and is
+                // proven at the transport layer; wiring the backend to pass a
+                // real roster is the remaining integration). Un-gated = legacy.
+                None,
             )
             .await?;
         let bound_port = addr.addrs.iter().find_map(|t| match t {

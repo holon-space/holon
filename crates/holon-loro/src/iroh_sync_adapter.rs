@@ -239,6 +239,40 @@ mod adapter {
             .connect(peer_addr, alpn)
             .await
             .context("Failed to connect to peer")?;
+        sync_on_connection_initiator(conn, doc).await
+    }
+
+    /// Initiator side WITH enrollment (ADR 0028 H5 acceptor gate): connect,
+    /// prove capability possession on a dedicated enrollment stream FIRST, then
+    /// run the VV sync. The acceptor's gated `accept_loop` reads the enrollment
+    /// stream before the sync stream, so a peer that cannot prove the
+    /// capability never reaches the sync primitive — closing the
+    /// bearer-`shared_tree_id` forgery hole.
+    pub async fn sync_doc_initiate_enrolled(
+        endpoint: &Endpoint,
+        doc: &LoroDoc,
+        alpn: &[u8],
+        peer_addr: EndpointAddr,
+        capability: &crate::share_enrollment::CapabilitySecret,
+        shared_tree_id: &str,
+    ) -> Result<iroh::endpoint::Connection> {
+        debug!("[init] connecting (enrolled)...");
+        let conn = endpoint
+            .connect(peer_addr, alpn)
+            .await
+            .context("Failed to connect to peer")?;
+        crate::share_enrollment::initiator_enroll(&conn, capability, shared_tree_id)
+            .await
+            .context("[init] enrollment rejected by acceptor")?;
+        sync_on_connection_initiator(conn, doc).await
+    }
+
+    /// Run the initiator side of the VV sync protocol on an already-connected
+    /// (and, on the gated path, already-enrolled) connection.
+    async fn sync_on_connection_initiator(
+        conn: iroh::endpoint::Connection,
+        doc: &LoroDoc,
+    ) -> Result<iroh::endpoint::Connection> {
         debug!("[init] connected, opening bi...");
         let (mut send, mut recv) = conn
             .open_bi()
@@ -1000,3 +1034,4 @@ pub use adapter::sync_doc_accept;
 pub use adapter::sync_doc_handle_connection;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use adapter::sync_doc_initiate;
+pub use adapter::sync_doc_initiate_enrolled;
