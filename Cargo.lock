@@ -4707,7 +4707,7 @@ dependencies = [
 [[package]]
 name = "gql-parser"
 version = "0.1.0"
-source = "git+https://github.com/holon-space/gql-to-sql.git?branch=main#5da29752411642cd359c14d3f15903e8224918c4"
+source = "git+https://github.com/holon-space/gql-to-sql.git?branch=main#082dc4364fa800aed445a843af8fca97a72abb7a"
 dependencies = [
  "logos",
 ]
@@ -4715,7 +4715,7 @@ dependencies = [
 [[package]]
 name = "gql-transform"
 version = "0.1.0"
-source = "git+https://github.com/holon-space/gql-to-sql.git?branch=main#5da29752411642cd359c14d3f15903e8224918c4"
+source = "git+https://github.com/holon-space/gql-to-sql.git?branch=main#082dc4364fa800aed445a843af8fca97a72abb7a"
 dependencies = [
  "gql-parser",
 ]
