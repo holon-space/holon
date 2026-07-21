@@ -473,11 +473,40 @@ impl MutableTree {
     }
 
     fn walk_dfs_into(&self, ids: &[RowKey], out: &mut Vec<RowKey>) {
+        // F8 backstop (dogfood 2026-07-21): a cyclic parent graph -- e.g. a node
+        // that is its own child, the shape a doc `#+ID:` colliding a heading
+        // `:ID:` produces -- would recurse this DFS without bound and overflow
+        // the stack, aborting the whole app. A valid outline is acyclic, so a
+        // repeat visit is a structural cycle. Loud rejection of the org-ingest
+        // route lives at the parser boundary (`reject_id_cycles`); this guards a
+        // cycle arriving via ANY OTHER route (CRDT merge, direct SQL): surface it
+        // loudly and prune the back-edge (disclosed degrade -- the tree still
+        // renders, minus the impossible cycle) instead of crashing.
+        let mut visited = std::collections::HashSet::new();
+        self.walk_dfs_guarded(ids, out, &mut visited);
+    }
+
+    fn walk_dfs_guarded(
+        &self,
+        ids: &[RowKey],
+        out: &mut Vec<RowKey>,
+        visited: &mut std::collections::HashSet<RowKey>,
+    ) {
         for id in ids {
+            if !visited.insert(id.clone()) {
+                tracing::error!(
+                    node = ?id,
+                    "MutableTree::walk_dfs_into: parent-graph CYCLE detected (node is its own \
+                     ancestor) -- pruning the back-edge to avoid a stack-overflow crash. A valid \
+                     outline is acyclic; the org-ingest boundary rejects self-parent files, so a \
+                     cycle here arrived via another route (CRDT merge / direct SQL)."
+                );
+                continue;
+            }
             out.push(id.clone());
             if let Some(child_set) = self.children.get(&Some(id.clone())) {
                 let child_ids: Vec<RowKey> = child_set.iter().map(|sc| sc.id.clone()).collect();
-                self.walk_dfs_into(&child_ids, out);
+                self.walk_dfs_guarded(&child_ids, out, visited);
             }
         }
     }
@@ -653,6 +682,31 @@ mod tests {
         let flat = MutableVec::new();
         let tree = MutableTree::new(flat.clone());
         (tree, flat)
+    }
+
+    /// F8 (dogfood 2026-07-21): a self-parent node (its own child) -- the shape
+    /// a doc `#+ID:` colliding a heading `:ID:` yields -- used to recurse
+    /// `walk_dfs_into` without bound and overflow the stack, aborting the app
+    /// on boot. The visited-set guard must prune the back-edge: the node is
+    /// walked exactly once and the call TERMINATES.
+    #[test]
+    fn walk_dfs_into_survives_self_parent_cycle() {
+        let (mut tree, _) = make_tree();
+        // Wire a self-parent directly in the children map (a non-org route:
+        // CRDT merge / direct SQL could deliver this cyclic row).
+        tree.children
+            .entry(Some(eu("x")))
+            .or_default()
+            .insert(SortedChild::new("0.0".into(), eu("x")));
+
+        let mut out = Vec::new();
+        tree.walk_dfs_into(&[eu("x")], &mut out);
+
+        assert_eq!(
+            out,
+            vec![eu("x")],
+            "a self-parent must be walked exactly once, not infinitely"
+        );
     }
 
     #[test]
