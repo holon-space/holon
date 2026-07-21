@@ -221,6 +221,19 @@ pub fn activate_intent(history_id: i64) -> OperationIntent {
     )
 }
 
+/// The `navigation.close` intent for a tab (`history_id`): soft-close that open
+/// navigation-history row. When it is the active tab, the engine follows the
+/// cursor to a neighbor (left, then right) so the panel never goes blank.
+pub fn close_intent(history_id: i64) -> OperationIntent {
+    OperationIntent::new(
+        "navigation".into(),
+        "close".to_string(),
+        [("history_id".to_string(), Value::Integer(history_id))]
+            .into_iter()
+            .collect(),
+    )
+}
+
 /// Index of the active tab within `tabs`, if the cursor points at an open tab.
 fn active_index(tabs: &[TabEntry], active: Option<i64>) -> Option<usize> {
     let active = active?;
@@ -256,6 +269,31 @@ pub fn jump_target(tabs: &[TabEntry], n: usize) -> Option<i64> {
 fn optimistic_activate(entity: &Entity<TabStripState>, history_id: i64, cx: &mut gpui::App) {
     entity.update(cx, |s, cx| {
         s.active_history_id = Some(history_id);
+        cx.emit(NotifyTabStrip);
+        cx.notify();
+    });
+}
+
+/// Highlight the cursor should follow to after `closed_id` is removed,
+/// mirroring the engine's cursor-follow (LEFT neighbor first, then RIGHT).
+/// `None` when no tab remains. Pure, so it is unit-tested without a window.
+pub fn neighbor_after_close(tabs: &[TabEntry], closed_id: i64) -> Option<i64> {
+    let idx = tabs.iter().position(|t| t.history_id == closed_id)?;
+    if idx > 0 {
+        return Some(tabs[idx - 1].history_id);
+    }
+    tabs.get(idx + 1).map(|t| t.history_id)
+}
+
+/// Optimistically remove a closed tab from the strip and, if it was the active
+/// tab, move the highlight to the neighbor the engine will follow to. The
+/// content + a full re-resolve follow via the engine's CDC path.
+fn optimistic_close(entity: &Entity<TabStripState>, history_id: i64, cx: &mut gpui::App) {
+    entity.update(cx, |s, cx| {
+        if s.active_history_id == Some(history_id) {
+            s.active_history_id = neighbor_after_close(&s.tabs, history_id);
+        }
+        s.tabs.retain(|t| t.history_id != history_id);
         cx.emit(NotifyTabStrip);
         cx.notify();
     });
@@ -357,9 +395,29 @@ pub fn render_tab_strip(
     for tab in &state_read.tabs {
         let is_active = Some(tab.history_id) == active;
         let history_id = tab.history_id;
-        let services = services.clone();
-        let entity = state_entity.clone();
         let chip_fg = if is_active { theme.fg } else { theme.muted_fg };
+
+        // Close button — dispatches `navigation.close` and optimistically drops
+        // the tab (the engine follows the cursor to a neighbor when the closed
+        // tab was active). `stop_propagation` so clicking it on an inactive tab
+        // does not ALSO activate that tab.
+        let close_services = services.clone();
+        let close_entity = state_entity.clone();
+        let close_btn = div()
+            .id(SharedString::from(format!("tab-close-{history_id}")))
+            .ml(px(6.0))
+            .px(px(3.0))
+            .rounded(px(3.0))
+            .cursor_pointer()
+            .text_color(theme.muted_fg)
+            .hover(|s| s.bg(gpui::rgba(0xffffff22)).text_color(theme.fg))
+            .child("×")
+            .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                cx.stop_propagation();
+                close_services.dispatch_intent(close_intent(history_id));
+                optimistic_close(&close_entity, history_id, cx);
+            });
+
         let mut chip = div()
             .id(SharedString::from(format!("tab-{history_id}")))
             .flex()
@@ -373,6 +431,8 @@ pub fn render_tab_strip(
             // Active tab: subtle filled background (the cursor row).
             chip = chip.bg(theme.selected_bg);
         } else {
+            let services = services.clone();
+            let entity = state_entity.clone();
             chip = chip
                 .cursor_pointer()
                 .hover(|s| s.bg(gpui::rgba(0xffffff14)))
@@ -381,6 +441,7 @@ pub fn render_tab_strip(
                     optimistic_activate(&entity, history_id, cx);
                 });
         }
+        chip = chip.child(close_btn);
         bar = bar.child(chip);
     }
 
@@ -427,5 +488,25 @@ mod tests {
         assert_eq!(jump_target(&t, 3), Some(30));
         assert_eq!(jump_target(&t, 4), None);
         assert_eq!(jump_target(&t, 0), None);
+    }
+
+    #[test]
+    fn neighbor_after_close_prefers_left() {
+        let t = tabs(&[10, 20, 30]);
+        // Closing the middle tab follows LEFT to its predecessor.
+        assert_eq!(neighbor_after_close(&t, 20), Some(10));
+        // Closing the last tab follows LEFT to its predecessor.
+        assert_eq!(neighbor_after_close(&t, 30), Some(20));
+    }
+
+    #[test]
+    fn neighbor_after_close_falls_back_right_then_none() {
+        let t = tabs(&[10, 20, 30]);
+        // Closing the leftmost tab has no left neighbor -> falls back RIGHT.
+        assert_eq!(neighbor_after_close(&t, 10), Some(20));
+        // The only tab -> nothing to follow to.
+        assert_eq!(neighbor_after_close(&tabs(&[10]), 10), None);
+        // Unknown id -> None.
+        assert_eq!(neighbor_after_close(&t, 999), None);
     }
 }
