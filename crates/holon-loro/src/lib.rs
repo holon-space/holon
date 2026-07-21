@@ -17,6 +17,7 @@
 pub mod block_cell_registry;
 pub mod capability;
 pub mod consolidator;
+pub mod container_registry;
 pub mod durable_state;
 
 #[cfg(all(
@@ -101,6 +102,9 @@ pub use capability::CapabilityProfile;
 pub use capability::Consolidator;
 pub use capability::SessionCapabilities;
 pub use consolidator::BlockConsolidator;
+pub use container_registry::ContainerRegistry;
+pub use container_registry::RegisteredContainer;
+pub use container_registry::SubtreeIndex;
 #[cfg(all(
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))
