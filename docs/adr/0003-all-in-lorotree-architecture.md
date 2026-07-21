@@ -1,6 +1,6 @@
 # ADR 0003: All-in-LoroTree Architecture
 
-**Status:** Accepted (2026-03-26)
+**Status:** Accepted (2026-03-26) — **Amended 2026-07-21** by [ADR 0003 Amendment: Per-container LoroTrees + stitching layer](0003-amendment-multi-tree.md) (the single-global-tree decision is reopened for the multi-container sharing shape; see ADR 0028 §5/§7)
 **Deciders:** Martin
 **Context:** Cross-device sync, collaboration, block/document unification
 
