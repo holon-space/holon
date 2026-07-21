@@ -38,6 +38,18 @@ holon_macros::widget_builder! {
             Ok(v) => v.unwrap_or(false),
             Err(msg) => return ViewModel::error("expand_toggle", msg),
         };
+        // Placement of the toggle affordance. Default (false): a LEADING
+        // chevron in the left gutter, always visible. When true: the chevron
+        // moves to the RIGHT of the header and is revealed only while the
+        // header row is hovered — used for embedded pages that ALSO carry a
+        // tree collapse chevron so the two affordances don't sit adjacent in
+        // the gutter (double-chevron bug, ruling 2026-07-21). The GPUI builder
+        // reads this prop and, when set, drives the `hovered` gate seeded
+        // below (same idiom as the `on_hover` widget).
+        let hover_reveal_toggle = match ba.args.get_bool_strict("hover_reveal_toggle") {
+            Ok(v) => v.unwrap_or(false),
+            Err(msg) => return ViewModel::error("expand_toggle", msg),
+        };
         let initial_collapsed = row_collapsed(ba.ctx.row());
         // Seed the gate from the engine's view-local expansion store (RATIFIED
         // 2026-07-16, Option B) when the user has driven this toggle; otherwise
@@ -76,10 +88,19 @@ holon_macros::widget_builder! {
 
         let mut __props = std::collections::HashMap::new();
         __props.insert("target_id".to_string(), Value::String(target_id));
+        __props.insert(
+            "hover_reveal_toggle".to_string(),
+            Value::Boolean(hover_reveal_toggle),
+        );
 
         let data = ba.ctx.data_mutable();
         let mut vm = ViewModel {
             expanded: Some(expanded.clone()),
+            // Per-render-slot hover gate (only in trailing-reveal mode) — same
+            // Mutable idiom as `on_hover`; carried across rebuilds so a hover
+            // survives repaints (see `with_update`/`push_down_children`).
+            hovered: hover_reveal_toggle
+                .then(|| futures_signals::signal::Mutable::new(false)),
             lazy_slot,
             children,
             operations: ba.ctx.operations.clone(),
@@ -111,5 +132,58 @@ holon_macros::widget_builder! {
         }
 
         vm
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use holon_api::Value;
+    use holon_api::widget_spec::DataRow;
+
+    use crate::reactive::BuilderServices;
+    use crate::reactive::StubBuilderServices;
+
+    fn interpret_toggle(src: &str) -> crate::reactive_view_model::ReactiveViewModel {
+        crate::shadow_builders::register_render_dsl_widget_names();
+        let expr = holon_api::render_dsl::parse_render_dsl(src).expect("render DSL parses");
+        let mut row = DataRow::new();
+        row.insert("id".into(), Value::String("block:page-a".into()));
+        row.insert("content".into(), Value::String("A Page".into()));
+        let ctx = crate::RenderContext::default().with_row(Arc::new(row));
+        let services = StubBuilderServices::new();
+        let vm = services.interpret(&expr, &ctx);
+        assert_eq!(vm.widget_name().as_deref(), Some("expand_toggle"));
+        vm
+    }
+
+    /// The `hover_reveal_toggle` knob plumbs from the render DSL through to the
+    /// VM: the prop is set AND a `hovered` gate is seeded (the GPUI builder
+    /// keys its trailing hover-reveal chevron off both). Guards the
+    /// double-chevron fix (ruling 2026-07-21) at the model layer.
+    #[test]
+    fn hover_reveal_toggle_plumbs_prop_and_seeds_hover_gate() {
+        let vm = interpret_toggle(
+            r#"expand_toggle(#{hover_reveal_toggle: true, header: text("A Page"), content: text("body")})"#,
+        );
+        assert_eq!(vm.prop_bool("hover_reveal_toggle"), Some(true));
+        assert!(
+            vm.hovered.is_some(),
+            "trailing hover-reveal mode must seed a `hovered` Mutable"
+        );
+    }
+
+    /// Default expand_toggle (no knob) keeps the leading-chevron shape: the
+    /// prop is false and NO hover gate is allocated.
+    #[test]
+    fn default_expand_toggle_has_no_hover_gate() {
+        let vm =
+            interpret_toggle(r#"expand_toggle(#{header: text("A Page"), content: text("body")})"#);
+        assert_eq!(vm.prop_bool("hover_reveal_toggle"), Some(false));
+        assert!(
+            vm.hovered.is_none(),
+            "leading-chevron mode must not allocate a `hovered` gate"
+        );
     }
 }

@@ -19,6 +19,18 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     let chevron = if is_expanded { "\u{25BC}" } else { "\u{25B6}" };
     let color = tc(ctx, |t| t.muted_foreground);
 
+    // Trailing hover-reveal mode: chevron sits to the RIGHT of the header and
+    // is visible only while the header row is hovered. Kept in layout (opacity
+    // gated, not conditionally rendered) so its bounds stay registered — PBT
+    // `ToggleCollapse` and hit-testing still locate it. Ruling 2026-07-21.
+    let hover_reveal = node.prop_bool("hover_reveal_toggle").unwrap_or(false);
+    let is_hovered = node.hovered.as_ref().map(|h| h.get()).unwrap_or(false);
+    let chevron_opacity = if hover_reveal && !is_hovered {
+        0.0
+    } else {
+        1.0
+    };
+
     let expanded_handle = expanded.clone();
     let el_id = format!("expand-toggle-{}", target_id);
 
@@ -53,6 +65,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
         .justify_center()
         .text_size(px(ctx.style().tree_chevron_font_size))
         .text_color(color)
+        .opacity(chevron_opacity)
         .on_mouse_down(gpui::MouseButton::Left, move |_, window, _cx| {
             let new_val = !expanded_handle.get();
             expanded_handle.set(new_val);
@@ -88,14 +101,45 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     let mut container = div().w_full().flex().flex_col();
 
     if let Some(header) = children.first() {
-        let header_row = div()
-            .w_full()
-            .flex()
-            .flex_row()
-            .items_start()
-            .gap(px(4.0))
-            .child(tracked_chevron)
-            .child(div().flex_1().child(super::render(header, ctx)));
+        let header_el = div().flex_1().child(super::render(header, ctx));
+        let header_row = if hover_reveal {
+            // Header first, chevron trailing; the whole row is the hover zone
+            // that reveals the (already laid-out) chevron. `on_hover` flips the
+            // node's shared `hovered` Mutable and refreshes — the same idiom
+            // the `on_hover` builder uses (GPUI has no descendant-hover style).
+            let hovered = node
+                .hovered
+                .as_ref()
+                .expect("hover_reveal_toggle requires hovered state");
+            let hovered_handle = hovered.clone();
+            let hover_id = format!("expand-toggle-hover-{}", target_id);
+            div()
+                .id(hashed_id(&hover_id))
+                .w_full()
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap(px(4.0))
+                .on_hover(move |is_over, window, _cx| {
+                    if hovered_handle.get() != *is_over {
+                        hovered_handle.set(*is_over);
+                        window.refresh();
+                    }
+                })
+                .child(header_el)
+                .child(tracked_chevron)
+                .into_any_element()
+        } else {
+            div()
+                .w_full()
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap(px(4.0))
+                .child(tracked_chevron)
+                .child(header_el)
+                .into_any_element()
+        };
         container = container.child(header_row);
     }
 
