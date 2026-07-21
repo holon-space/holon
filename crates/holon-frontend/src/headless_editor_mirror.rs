@@ -25,9 +25,9 @@ use anyhow::Context;
 use anyhow::Result;
 use holon_api::Value;
 
-use crate::cell::TextOp;
 use crate::editor_caret;
 use crate::editor_view_model::EditorKey;
+use crate::editor_view_model::EditorViewModel;
 use crate::editor_view_model::structural_block_action;
 use crate::operations::OperationIntent;
 use crate::reactive::BuilderServices;
@@ -44,8 +44,35 @@ use crate::reactive::ReactiveEngine;
 /// occurrence, edit to canonical home.
 type CursorKey = (String, Option<u32>);
 
+/// Construct a cell-free editor [`EditorViewModel`] for `block_id` seeded with
+/// `seed` content. No Loro cell is attached, so `apply_local_edit` takes the
+/// SqlOnly `set_field("content")`+`write_seq` branch — the production GPUI
+/// SqlOnly editor the headless keystone models (Inc 4).
+fn new_editor_vm(block_id: &str, seed: &str) -> EditorViewModel {
+    let mut ctx = HashMap::new();
+    ctx.insert("id".to_string(), Value::String(block_id.to_string()));
+    EditorViewModel::new(
+        Vec::new(),
+        Vec::new(),
+        ctx,
+        "content".to_string(),
+        seed.to_string(),
+    )
+}
+
 pub struct HeadlessEditorMirror {
     cursors: Mutex<HashMap<CursorKey, usize>>,
+    /// Per-block authoritative editor buffers (Inc 4). Each focused/typed block
+    /// gets a cell-free [`EditorViewModel`] that OWNS the visible buffer,
+    /// `last_local_seq`, and the echo/convergence decision — the headless
+    /// analogue of production GPUI's SqlOnly editor (`InputState` buffer + the
+    /// `set_field`/`write_seq` write path + the data-sync echo guard). Keyed by
+    /// the canonical block id string (occurrence-independent: the write always
+    /// targets the canonical home). Deliberately NO Loro cell is attached so
+    /// `apply_local_edit` takes the `set_field`+`write_seq` branch and the
+    /// echo composition (`evaluate_data_sync_echo`) is the live headless typing
+    /// path — the composition the keystone was structurally blind to before.
+    editors: Mutex<HashMap<String, EditorViewModel>>,
 }
 
 impl Default for HeadlessEditorMirror {
@@ -58,6 +85,7 @@ impl HeadlessEditorMirror {
     pub fn new() -> Self {
         Self {
             cursors: Mutex::new(HashMap::new()),
+            editors: Mutex::new(HashMap::new()),
         }
     }
 
@@ -68,6 +96,9 @@ impl HeadlessEditorMirror {
             .lock()
             .unwrap()
             .remove(&(block_id.to_string(), occ));
+        // The editor buffer is occurrence-independent (canonical write home), so
+        // any focus-loss / structural-op forget on this block retires its VM.
+        self.editors.lock().unwrap().remove(block_id);
     }
 
     /// Read-only view of the tracked cursor for a block's CANONICAL occurrence.
@@ -93,6 +124,110 @@ impl HeadlessEditorMirror {
             .insert((block_id.to_string(), occ), byte);
     }
 
+    /// The live authoritative editor buffer for `block_id` (Inc 4): the VM's
+    /// owned buffer — the pre-commit value keystrokes mutate, which after a
+    /// same-seq trailing-whitespace echo can legitimately diverge from the
+    /// SQL-stored (trimmed) `block.content`. `None` when no editor VM is open
+    /// for the block. This is the exact source `SutEditorMirrorRead::
+    /// editor_live_text` reads for the headless frontend.
+    pub fn live_text(&self, block_id: &str) -> Option<String> {
+        self.editors
+            .lock()
+            .unwrap()
+            .get(block_id)
+            .map(|vm| vm.buffer().to_string())
+    }
+
+    /// Open (idempotently) a cell-free editor VM for `block_id` seeded with
+    /// `seed` (the block's current authority content). Called on focus so a
+    /// focused-but-not-yet-typed editor already mirrors the block content.
+    pub fn ensure_editor(&self, block_id: &str, seed: &str) {
+        self.editors
+            .lock()
+            .unwrap()
+            .entry(block_id.to_string())
+            .or_insert_with(|| new_editor_vm(block_id, seed));
+    }
+
+    /// (Re)seed a block's editor VM from the CURRENT backend authority — the
+    /// fresh-mount seed prod applies when an editor OPENS on a block
+    /// (`open_active_editor`: a clean editor whose buffer == the block's stored
+    /// content). OVERWRITES any prior (possibly stale post-`AdoptBaseline`) VM
+    /// so a re-focus reads authority, matching the reference's fresh
+    /// `open_active_editor`. Reads the SAME source the production editor seeds
+    /// from — the Loro cell when present, else the SQL-projected content — so a
+    /// focused-but-not-yet-typed block already exercises the VM read+converge
+    /// path (Inc 4). Idempotent-`ensure_editor` would NOT do here: a lingering
+    /// VM that adopted a trailing-ws baseline would keep the trailing space and
+    /// diverge from the ref's freshly-opened (trimmed) buffer.
+    pub async fn reset_editor_from_authority(
+        &self,
+        engine: &Arc<ReactiveEngine>,
+        block_uri: &holon_api::EntityUri,
+    ) -> Result<()> {
+        let block_id = block_uri.to_string();
+        let services: &dyn BuilderServices = engine.as_ref();
+        let content = match services.editable_text(block_uri, "content") {
+            Ok(mt) => mt.current(),
+            Err(_) => self.sql_block_content(engine, &block_id).await?,
+        };
+        self.editors
+            .lock()
+            .unwrap()
+            .insert(block_id.clone(), new_editor_vm(&block_id, &content));
+        Ok(())
+    }
+
+    /// Apply one user-typed buffer edit through the VM (the single keystroke
+    /// sink): mutate the owned buffer to `new_text`, stamp `write_seq`, and
+    /// dispatch the resulting `set_field("content")` intent through the real op
+    /// pipeline (`dispatch_intent_sync`). The lock is released BEFORE the await
+    /// so no VM guard is held across the dispatch.
+    async fn vm_commit_edit(
+        &self,
+        engine: &Arc<ReactiveEngine>,
+        block_id: &str,
+        seed: &str,
+        new_text: &str,
+    ) -> Result<()> {
+        self.ensure_editor(block_id, seed);
+        let intent = {
+            let mut eds = self.editors.lock().unwrap();
+            let vm = eds
+                .get_mut(block_id)
+                .expect("ensure_editor just guaranteed a VM for this block");
+            vm.apply_local_edit(new_text)?
+        };
+        if let Some(intent) = intent {
+            engine.dispatch_intent_sync(intent).await?;
+        }
+        Ok(())
+    }
+
+    /// Converge one editor's buffer against the settled SQL authority (Inc 4 —
+    /// the headless data-sync loop). Reads the block's stored (trimmed)
+    /// `content` and runs the VM's `converge_from_data_sync` against its own
+    /// `last_local_seq`; a `Converge` directive re-seeds the buffer, while the
+    /// own trailing-whitespace echo (`AdoptBaseline`) and in-sync/stale cases
+    /// leave the typed buffer intact. `echo_seq` is the VM's high-water: no
+    /// non-editor writer bumps the `write_seq` column, so the CDC row an echo
+    /// carries always holds exactly this value.
+    pub async fn converge_editor(
+        &self,
+        engine: &Arc<ReactiveEngine>,
+        block_id: &str,
+    ) -> Result<()> {
+        let content = self.sql_block_content(engine, block_id).await?;
+        let mut eds = self.editors.lock().unwrap();
+        if let Some(vm) = eds.get_mut(block_id) {
+            let seq = vm.last_local_seq();
+            if let Some(directive) = vm.converge_from_data_sync(&content, Some(seq)) {
+                vm.set_buffer_from_authority(&directive.target, directive.seq);
+            }
+        }
+        Ok(())
+    }
+
     /// Mirror a user click on a block: seed the tracked caret for
     /// `block_uri` to end-of-text. Chord dispatch clicks the entity before
     /// pressing the chord, which re-opens its editor at the click position
@@ -115,6 +250,14 @@ impl HeadlessEditorMirror {
             Err(_) => self.sql_block_content(engine, &block_id).await?,
         };
         self.set_cursor(&block_id, occ, current_text.len());
+        // A click re-mounts the editor: (re)seed its buffer VM from the current
+        // authority content, discarding any stale buffer from an earlier editor
+        // session on this block (mirrors GPUI re-seeding `InputState` on
+        // focus-gain). Keyed by canonical id (occurrence-independent write home).
+        self.editors
+            .lock()
+            .unwrap()
+            .insert(block_id.clone(), new_editor_vm(&block_id, &current_text));
         Ok(())
     }
 
@@ -179,30 +322,13 @@ impl HeadlessEditorMirror {
                 None
             }
         };
-        // Char keystrokes and mid-line backspace need a `MutableText` to land
-        // anywhere. Without one, silently no-op'ing the keystroke makes the
-        // ref→prod divergence look like a CDC race when it's really the loro
-        // consumer not having applied the block's create event yet. Fail
-        // loud so the runner barrier (`pre_inv16_settle`) surfaces the real
-        // gap. SqlOnly variants don't trigger char-typing transitions
-        // (`TypeChars`/`PressKey` gate on `enable_loro`), so this only fires
-        // on real races in Full.
-        let needs_mt = !modifiers
-            .iter()
-            .any(|m| matches!(*m, "ctrl" | "alt" | "cmd"))
-            && ((keystroke == "backspace"
-                && self.tracked_cursor_at(&block_id, occ).unwrap_or(0) > 0)
-                || (keystroke.chars().count() == 1
-                    && !matches!(keystroke, "home" | "end" | "left" | "right" | "tab")));
-        if needs_mt && mt.is_none() {
-            anyhow::bail!(
-                "headless send_raw_keystroke({keystroke:?}) — no MutableText for focused block \
-                 {block_id}. Its Loro `content_raw` text container isn't resolvable yet (the \
-                 block's create intent hasn't landed in the Loro tree). The PBT runner's \
-                 `pre_inv16_settle` barrier should have waited for it; increase that timeout or \
-                 check why the block create is stuck."
-            );
-        }
+        // Char keystrokes and mid-line backspace route through the block's
+        // cell-free editor VM (Inc 4): the VM owns the buffer and dispatches a
+        // `set_field("content")`+`write_seq` write through the real op pipeline.
+        // No `MutableText` is required — the SqlOnly editor path the composed
+        // keystone models has no Loro cell. A block whose create intent has not
+        // landed yet surfaces as a loud `dispatch_intent_sync` error, not a
+        // silent no-op.
         // SqlOnly variant has no `MutableText` — read the block's
         // SQL-projected `content` directly so the headless cursor walks the
         // same byte string a production GPUI editor would after
@@ -212,11 +338,14 @@ impl HeadlessEditorMirror {
         // `split_block(.., position=0)` — the SqlOnly SplitBlock content-
         // routing divergence first surfaced by `split_block_content_pbt`
         // (commit aa636444).
-        let current_text = if let Some(ref m) = mt {
+        let current_text = if let Some(buffered) = self.live_text(&block_id) {
+            // An editor VM already owns this block's buffer (a prior keystroke
+            // this focus session, or a focus-time `ensure_editor` seed) — it is
+            // the authority, not the possibly-mid-settle SQL/cell snapshot.
+            buffered
+        } else if let Some(ref m) = mt {
             m.current()
         } else {
-            // We can use Loro CRDT even when Loro as storage / P2P transport is disabled,
-            // so MutableText should be available
             self.sql_block_content(engine, &block_id).await?
         };
         // First keystroke since focus: adopt the armed caret seed (split → 0,
@@ -273,16 +402,10 @@ impl HeadlessEditorMirror {
                 // `cursor_byte > 0` guarantees a preceding char, so `move_left`
                 // always retreats by exactly one codepoint here.
                 let new_cursor_byte = editor_caret::move_left(&current_text, cursor_byte);
-                if let Some(cell) = mt.as_ref() {
-                    let pos_codepoint =
-                        editor_caret::byte_to_codepoint(&current_text, new_cursor_byte);
-                    let len_codepoint =
-                        editor_caret::codepoint_len(&current_text, new_cursor_byte, cursor_byte);
-                    cell.apply_text_op(TextOp::Delete {
-                        pos_codepoint,
-                        len_codepoint,
-                    })?;
-                }
+                let mut new_text = current_text.clone();
+                new_text.replace_range(new_cursor_byte..cursor_byte, "");
+                self.vm_commit_edit(engine, &block_id, &current_text, &new_text)
+                    .await?;
                 self.set_cursor(&block_id, occ, new_cursor_byte);
             }
             "enter" if !has_ctrl_alt_cmd && !has_shift => {
@@ -325,13 +448,10 @@ impl HeadlessEditorMirror {
                     raw
                 };
                 let inserted = ch.to_string();
-                if let Some(cell) = mt.as_ref() {
-                    let pos_codepoint = editor_caret::byte_to_codepoint(&current_text, cursor_byte);
-                    cell.apply_text_op(TextOp::Insert {
-                        pos_codepoint,
-                        text: inserted.clone(),
-                    })?;
-                }
+                let mut new_text = current_text.clone();
+                new_text.insert_str(cursor_byte, &inserted);
+                self.vm_commit_edit(engine, &block_id, &current_text, &new_text)
+                    .await?;
                 self.set_cursor(&block_id, occ, cursor_byte + inserted.len());
             }
             _ => {

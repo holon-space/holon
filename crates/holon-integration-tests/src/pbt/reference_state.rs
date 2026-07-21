@@ -704,20 +704,37 @@ impl ReferenceState {
     /// untouched — the ref must do the same or `inv-editor-caret/mirror` would
     /// diverge on a `MoveCursor`-then-external-update sequence.
     pub fn refresh_clean_active_editor(&mut self, block_id: &EntityUri) {
-        let Some(new_content) = self
-            .domain
-            .block_state
-            .blocks
-            .get(block_id)
-            .map(|b| b.content.clone())
-        else {
+        let Some(block) = self.domain.block_state.blocks.get(block_id) else {
             return;
         };
+        let new_content = block.content.clone();
+        let content_type = block.content_type;
         if let Some(editor) = self.ui.tab.active_editor.as_mut()
             && &editor.block_id == block_id
             && !editor.dirty
         {
-            editor.in_memory_content = new_content;
+            // Seq/trim-discriminator-aware echo model (Inc 4, EditorBufferOwnership
+            // plan). A clean editor is normally re-seeded to the block's stored
+            // content — prod's data subscription refreshes idle editors. BUT the
+            // stored content may be the SQL trailing-whitespace canonicalization of
+            // THIS editor's OWN just-committed text, echoed back carrying the SAME
+            // `write_seq` (non-editor writers do NOT bump `write_seq`, so seq alone
+            // cannot distinguish an own-echo from a genuine external write — the
+            // TRIM SHAPE is the load-bearing discriminator, mirroring the SUT's
+            // `evaluate_data_sync_echo`). When the divergence is EXACTLY that
+            // canonicalization, prod keeps the typed buffer
+            // (`EchoDecision::AdoptBaseline`) instead of regressing the trailing
+            // whitespace, so the ref must not regress it either; any SUBSTANTIVE
+            // external change (split/join/org/peer) still converges (refreshes).
+            let (canonical, _) = super::types::normalize_content_for_org_roundtrip(
+                &editor.in_memory_content,
+                content_type,
+            );
+            let is_own_trailing_ws_echo =
+                canonical == new_content && editor.in_memory_content != new_content;
+            if !is_own_trailing_ws_echo {
+                editor.in_memory_content = new_content;
+            }
         }
     }
 
