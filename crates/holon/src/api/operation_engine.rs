@@ -786,6 +786,10 @@ impl DispatchingOperationEngine {
                     action_bar: false,
                 },
             },
+            // Restructures a block into a new page at the same placement, within
+            // the SAME replication container (C1 containers are replication
+            // units, not every page) — content stays in its current audience.
+            boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
             trigger: None,
             bound_params: Default::default(),
             affected_fields: vec![],
@@ -838,6 +842,9 @@ impl DispatchingOperationEngine {
             menu_exposure: holon_api::MenuExposure::PickerBacked {
                 picker: holon_api::PickerKind::Template,
             },
+            // Deep-copies a template subtree under target_parent within the same
+            // container — never crosses an audience boundary.
+            boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
             trigger: None,
             bound_params: Default::default(),
             precondition: None,

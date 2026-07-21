@@ -246,6 +246,26 @@ pub fn extract_menu_exposure(attrs: &[syn::Attribute]) -> Option<String> {
     None
 }
 
+/// Extract the `#[boundary_behavior(<variant>)]` marker on a macro-generated
+/// operation, returning the bare variant identifier (e.g. `"private_only"`,
+/// `"crossing_widens"`). `None` means the op did not classify itself — the
+/// operations_trait macro then emits the fail-closed `Unclassified` behaviour.
+pub fn extract_boundary_behavior(attrs: &[syn::Attribute]) -> Option<String> {
+    for attr in attrs {
+        let is_boundary_attr = attr.path().is_ident("boundary_behavior")
+            || (attr.path().segments.len() == 2
+                && attr.path().segments[0].ident == "holon_macros"
+                && attr.path().segments[1].ident == "boundary_behavior");
+        if is_boundary_attr
+            && let syn::Meta::List(meta_list) = &attr.meta
+            && let Ok(ident) = meta_list.parse_args::<syn::Ident>()
+        {
+            return Some(ident.to_string());
+        }
+    }
+    None
+}
+
 pub fn extract_affected_fields(attrs: &[syn::Attribute]) -> Vec<String> {
     for attr in attrs {
         // Check for standalone #[affects("field1", "field2")]

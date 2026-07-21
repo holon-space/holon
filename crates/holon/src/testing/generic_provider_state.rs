@@ -325,6 +325,7 @@ mod tests {
                 affected_fields: vec![],
                 param_mappings: vec![],
                 target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
                 menu_exposure: holon_api::MenuExposure::NotListed {
                     surface: holon_api::NonMenuSurface::Test,
                 },
@@ -349,6 +350,7 @@ mod tests {
                 affected_fields: vec![],
                 param_mappings: vec![],
                 target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
                 menu_exposure: holon_api::MenuExposure::NotListed {
                     surface: holon_api::NonMenuSurface::Test,
                 },
