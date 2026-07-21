@@ -136,8 +136,14 @@ impl<S: Subscriber> Layer<S> for LatencySloLayer {
             return;
         }
         if stage == "e2e" {
-            // PRIMARY SLO signal: true interaction -> visible-to-render wall
-            // time (see holon_api::latency_e2e). Violation = banner + error.
+            // PRIMARY SLO signal: true interaction -> PROJECTION-VISIBLE wall
+            // time (see holon_api::latency_e2e). The `e2e` stage closes when a
+            // CDC batch is applied to the reactive mirror — data available for
+            // render — NOT at GPU frame-present. Anchoring the SLO verdict on
+            // paint would let a backgrounded/occluded window (presents deferred
+            // by the OS) manufacture multi-second false violations; only `e2e`
+            // reaches this violation branch, so no paint/frame stage can ever
+            // be the SLO verdict. Violation = banner + error.
             let message = format!(
                 "[latency-slo] interaction '{}' on {} took {ms}ms end-to-end (SLO: p95 <{}ms)",
                 fields.action.as_deref().unwrap_or("?"),
@@ -166,5 +172,78 @@ impl<S: Subscriber> Layer<S> for LatencySloLayer {
                 }
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tracing_subscriber::prelude::*;
+
+    use super::*;
+
+    /// Drive one over-budget `holon_latency` event of `stage` through the layer
+    /// and return the count of latency violations that carry `marker` (the
+    /// unique `block` id) — parallel-safe against the process-global
+    /// `OracleStatus`.
+    fn violations_for(stage: &'static str, marker: &str) -> usize {
+        let before = OracleStatus::global()
+            .snapshot()
+            .into_iter()
+            .filter(|v| v.oracle == "latency-slo" && v.message.contains(marker))
+            .count();
+        let layer = LatencySloLayer::new(200);
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::debug!(
+                target: "holon_latency",
+                stage = stage,
+                action = "navigate",
+                block = marker,
+                ms = 5000u64,
+                "holon_latency",
+            );
+        });
+        OracleStatus::global()
+            .snapshot()
+            .into_iter()
+            .filter(|v| v.oracle == "latency-slo" && v.message.contains(marker))
+            .count()
+            - before
+    }
+
+    /// The SLO verdict is anchored on the projection-visible `e2e` stage: an
+    /// over-budget `e2e` event records a sticky latency violation.
+    #[test]
+    fn e2e_over_budget_records_violation() {
+        assert_eq!(
+            violations_for("e2e", "block:oracle-e2e-marker"),
+            1,
+            "over-budget projection-visible e2e must fire the SLO verdict"
+        );
+    }
+
+    /// A per-stage component (`rows`) over budget is a DIAGNOSTIC only — it
+    /// must NOT record an SLO violation. The `e2e` stage carries the
+    /// verdict.
+    #[test]
+    fn component_stage_over_budget_is_diagnostic_not_violation() {
+        assert_eq!(
+            violations_for("rows", "block:oracle-rows-marker"),
+            0,
+            "component stages warn-diagnose; only e2e is the SLO verdict"
+        );
+    }
+
+    /// Guard against the exact regression this lane prevents: if someone
+    /// re-anchored the SLO onto a GPU paint/frame stage, that stage would have
+    /// to reach the violation branch. It must not — a `frame_present` event is
+    /// diagnostic-only, so paint can never manufacture an SLO violation.
+    #[test]
+    fn frame_present_stage_cannot_be_the_slo_verdict() {
+        assert_eq!(
+            violations_for("frame_present", "block:oracle-paint-marker"),
+            0,
+            "paint/frame-present must never be judged as the SLO endpoint"
+        );
     }
 }
