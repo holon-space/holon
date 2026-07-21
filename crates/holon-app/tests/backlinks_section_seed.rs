@@ -319,6 +319,10 @@ fn backlinks_query_lists_incoming_links_for_focused_page() {
         create_linking_block(&engine, "ref-a", "alpha mentions", "alice", "Alice").await;
 
         let db = engine.db_handle();
+        let render = main_panel_render_content(&db)
+            .await
+            .expect("main panel must have a seeded render block");
+        let sql = extract_backlinks_sql(&render);
 
         // Bind the executed query to the SEEDED asset, not a hand-copied const.
         let render = main_panel_render_content(&db)
@@ -434,6 +438,42 @@ fn every_seeded_source_block_compiles_and_executes_against_booted_vault() {
             "seeded query source blocks failed to compile/execute against a booted \
              vault (seed rot):\n{}",
             failures.join("\n")
+        );
+    });
+}
+
+/// Structural lock on the SHIPPED backlinks SQL: it must join `backlinks` to
+/// `focus_roots` on the **equi-join ON** shape `ON bl.target_id = fr.root_id`.
+/// Turso IVM can only maintain the join incrementally when the join key is in
+/// the ON clause; the region filter must be a WHERE predicate, not the ON. The
+/// earlier constant-ON form (`... ON fr.region = 'main' WHERE bl.target_id =
+/// fr.root_id`) made the join a cross-join-then-filter that IVM cannot
+/// maintain. Extracting from the asset (not a copied constant) means a
+/// regression to that form in `assets/default/index.org` fails HERE.
+#[test]
+fn section_sql_locks_ivm_equijoin_on_shape() {
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (engine, ordering) = fresh_engine(dir.path().join("fresh.db")).await;
+        holon_app::seed_default_layout(&engine, ordering, false)
+            .await
+            .expect("seed_default_layout");
+
+        let db = engine.db_handle();
+        let render = main_panel_render_content(&db)
+            .await
+            .expect("main panel must have a seeded render block");
+        let sql = extract_backlinks_sql(&render);
+
+        assert!(
+            sql.contains("backlinks") && sql.contains("focus_roots"),
+            "backlinks section must join the backlinks matview to focus_roots: {sql}"
+        );
+        assert!(
+            sql.contains("ON bl.target_id = fr.root_id"),
+            "IVM-load-bearing: join key must be in the ON clause \
+             (ON bl.target_id = fr.root_id), not a constant-ON cross-join: {sql}"
         );
     });
 }
