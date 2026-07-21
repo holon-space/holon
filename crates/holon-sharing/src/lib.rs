@@ -68,6 +68,7 @@ pub mod lease;
 pub mod log;
 pub mod policy;
 pub mod projection;
+pub mod registry_binding;
 pub mod types;
 
 pub use alias_ledger::AliasLedger;
@@ -111,6 +112,8 @@ pub use policy::VerifyingAuthority;
 pub use policy::evaluate_grant;
 pub use projection::OrphanRowError;
 pub use projection::assert_no_orphan_rows;
+pub use registry_binding::RegistryContainment;
+pub use registry_binding::assert_registry_no_orphan_rows;
 pub use types::BlockContent;
 pub use types::BlockId;
 pub use types::ContainerId;
