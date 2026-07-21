@@ -972,61 +972,67 @@ impl CrudOperations<Block> for LoroBlockOperations {
         // identity-invertible: the inverse is a `create` with the SAME id,
         // parent_id, content+marks, tags/edges, and properties, restored at the
         // SAME sibling position (ADR 0024 — preserve identity, never
-        // delete+recreate). A delete that CASCADES to descendants stays
-        // `DeclaredIrreversible` (fail-loud, never lossy): faithfully
-        // resurrecting an ordered subtree is out of scope, exactly the line the
-        // SqlOnly authority draws.
-        let captured = match backend.get_block(id).await {
-            Ok(block) => Some(block),
+        // delete+recreate).
+        //
+        // Fail-closed on NON-LEAF (destructive-delete ruling 2026-07-21): a bare
+        // `delete` NEVER cascades a subtree away silently. When the target has
+        // children the caller must opt in explicitly via `delete_subtree` (drop
+        // the whole subtree) or `delete_keep_children` (reparent the children
+        // first). This is the loud, fail-closed backstop that also protects the
+        // MCP/agent path — no caller can cascade by accident.
+        let block = match backend.get_block(id).await {
+            Ok(block) => block,
             // Absent (never seeded / already deleted): `delete_block` is an
             // idempotent no-op and there is nothing to resurrect.
-            Err(ApiError::BlockNotFound { .. }) => None,
+            Err(ApiError::BlockNotFound { .. }) => {
+                return Ok(OperationResult::declared_irreversible(
+                    vec![],
+                    "delete: target block absent (nothing to resurrect)",
+                ));
+            }
             Err(e) => return Err(format!("delete: capture block {id}: {e}").into()),
         };
 
-        // Leaf-vs-subtree and the pre-delete sibling predecessor are read
-        // BEFORE the delete removes the node from the tree.
-        let inverse = match &captured {
-            Some(block) => {
-                let has_children = !backend
-                    .list_children(id)
-                    .await
-                    .map_err(|e| format!("delete: list children of {id}: {e}"))?
-                    .is_empty();
-                if has_children {
-                    None
-                } else {
-                    let siblings = backend
-                        .list_children(block.parent_id.as_str())
-                        .await
-                        .map_err(|e| {
-                            format!("delete: list siblings under {}: {e}", block.parent_id)
-                        })?;
-                    // ALLOW(entity_uri_from_raw): sibling ids read back from the Loro tree
-                    let target = EntityUri::from_raw(id);
-                    let idx = siblings
-                        .iter()
-                        // ALLOW(entity_uri_from_raw): sibling ids read back from the Loro tree
-                        .position(|s| EntityUri::from_raw(s) == target)
-                        .ok_or_else(|| {
-                            format!(
-                                "delete: block {id} not among parent {} children",
-                                block.parent_id
-                            )
-                        })?;
-                    let predecessor = if idx == 0 {
-                        None
-                    } else {
-                        Some(siblings[idx - 1].clone())
-                    };
-                    Some(block_op(
-                        "create",
-                        Self::delete_inverse_create_params(block, predecessor),
-                    ))
-                }
-            }
-            None => None,
+        let children = backend
+            .list_children(id)
+            .await
+            .map_err(|e| format!("delete: list children of {id}: {e}"))?;
+        if !children.is_empty() {
+            return Err(format!(
+                "delete: block {id} has {} child(ren); refusing to cascade. Use \
+                 `delete_subtree` to delete the whole subtree, or \
+                 `delete_keep_children` to reparent the children first.",
+                children.len()
+            )
+            .into());
+        }
+
+        // Leaf: read the pre-delete sibling predecessor for the exact inverse.
+        let siblings = backend
+            .list_children(block.parent_id.as_str())
+            .await
+            .map_err(|e| format!("delete: list siblings under {}: {e}", block.parent_id))?;
+        // ALLOW(entity_uri_from_raw): sibling ids read back from the Loro tree
+        let target = EntityUri::from_raw(id);
+        let idx = siblings
+            .iter()
+            // ALLOW(entity_uri_from_raw): sibling ids read back from the Loro tree
+            .position(|s| EntityUri::from_raw(s) == target)
+            .ok_or_else(|| {
+                format!(
+                    "delete: block {id} not among parent {} children",
+                    block.parent_id
+                )
+            })?;
+        let predecessor = if idx == 0 {
+            None
+        } else {
+            Some(siblings[idx - 1].clone())
         };
+        let create_op = block_op(
+            "create",
+            Self::delete_inverse_create_params(&block, predecessor),
+        );
 
         backend
             .delete_block(id)
@@ -1035,29 +1041,19 @@ impl CrudOperations<Block> for LoroBlockOperations {
 
         self.save_doc(&doc_path).await?;
 
-        match (captured, inverse) {
-            // Leaf: exact create-inverse. Forward fingerprint mirrors the
-            // SqlOnly authority — the `id` field is present pre-delete and
-            // absent after, so an undo (`create`) drops loudly if the id was
-            // resurrected under it before the undo ran.
-            (Some(_), Some(create_op)) => Ok(OperationResult::new(
-                vec![FieldDelta::new(
-                    id.to_string(),
-                    "id",
-                    Value::String(id.to_string()),
-                    Value::Null,
-                )],
-                create_op,
-            )),
-            (Some(_), None) => Ok(OperationResult::declared_irreversible(
-                vec![],
-                "delete: subtree resurrection not yet implemented (Loro authority)",
-            )),
-            (None, _) => Ok(OperationResult::declared_irreversible(
-                vec![],
-                "delete: target block absent (nothing to resurrect)",
-            )),
-        }
+        // Leaf: exact create-inverse. Forward fingerprint mirrors the SqlOnly
+        // authority — the `id` field is present pre-delete and absent after, so
+        // an undo (`create`) drops loudly if the id was resurrected under it
+        // before the undo ran.
+        Ok(OperationResult::new(
+            vec![FieldDelta::new(
+                id.to_string(),
+                "id",
+                Value::String(id.to_string()),
+                Value::Null,
+            )],
+            create_op,
+        ))
     }
 }
 
@@ -2331,7 +2327,7 @@ mod advice_dismiss_tests {
     /// A SUBTREE delete (target has children) stays `DeclaredIrreversible` —
     /// fail-loud, never a lossy or wrong-shaped inverse.
     #[tokio::test]
-    async fn subtree_delete_is_declared_irreversible() {
+    async fn bare_delete_of_non_leaf_is_refused_fail_closed() {
         let (ops, _dir, anchor) = ops_with_anchor().await;
         let backend = ops.get_backend("").await.expect("backend");
 
@@ -2339,13 +2335,20 @@ mod advice_dismiss_tests {
         let _gc = seed_child(&backend, &parent, "gc", "grandchild").await;
         ops.save_doc("").await.expect("save");
 
-        let result = ops.delete(&parent).await.expect("delete subtree");
-        match &result.undo {
-            UndoAction::DeclaredIrreversible(reason) => {
-                assert!(reason.contains("subtree"), "reason: {reason}");
-            }
-            other => panic!("subtree delete must be DeclaredIrreversible, got {other:?}"),
-        }
+        // Destructive-delete ruling 2026-07-21: a bare `delete` NEVER cascades a
+        // subtree — it fails loud and names the two explicit opt-in ops. The
+        // grandchild must still be present afterwards (no partial mutation).
+        let err = ops
+            .delete(&parent)
+            .await
+            .expect_err("bare delete of a non-leaf must be refused, not cascade");
+        let msg = err.to_string();
+        assert!(msg.contains("delete_subtree"), "err: {msg}");
+        assert!(msg.contains("delete_keep_children"), "err: {msg}");
+        assert!(
+            backend.get_block(&parent).await.is_ok(),
+            "refused delete must leave the parent intact"
+        );
     }
 
     /// A NAMED source block (`#+NAME:` → `source_name`) must survive a leaf

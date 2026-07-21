@@ -133,6 +133,8 @@ async fn slash_menu_equals_the_listed_ops_resolvable_from_id_context() {
         "move_up",
         "move_down",
         "delete",
+        "delete_subtree",
+        "delete_keep_children",
         "convert_block_to_page",
     ] {
         assert!(
@@ -278,7 +280,15 @@ async fn slash_menu_entries_are_unique_by_label_and_op_id() {
 
     // Non-vacuity: the structural ops the two authorities BOTH advertise must
     // each still be present exactly once.
-    for op in ["indent", "outdent", "move_up", "move_down", "embed_entity"] {
+    for op in [
+        "indent",
+        "outdent",
+        "move_up",
+        "move_down",
+        "embed_entity",
+        "delete_subtree",
+        "delete_keep_children",
+    ] {
         let count = menu.iter().filter(|i| i.id == op).count();
         assert_eq!(
             count,

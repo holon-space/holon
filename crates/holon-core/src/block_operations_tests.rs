@@ -533,6 +533,71 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Destructive-delete ruling 2026-07-21: `delete_keep_children` reparents
+    /// the deleted block's children into ITS OWN sibling slot, preserving their
+    /// relative order. P has [A, B, C]; B has [B1, B2]. Deleting B keeping
+    /// children yields [A, B1, B2, C] — the children take B's position IN
+    /// ORDER, not appended at the end (a naive append would give [A, C, B1,
+    /// B2]).
+    #[tokio::test]
+    async fn delete_keep_children_reparents_into_slot_preserving_order() {
+        let store = MemStore::new();
+        insert_block(&store, "P", None, None);
+        insert_block(&store, "A", Some("P"), None);
+        let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
+        insert_block(&store, "B", Some("P"), Some(&key_a));
+        let key_b = store.sorted_children("P").last().unwrap().sort_key.clone();
+        insert_block(&store, "C", Some("P"), Some(&key_b));
+        insert_block(&store, "B1", Some("B"), None);
+        let key_b1 = store.sorted_children("B").last().unwrap().sort_key.clone();
+        insert_block(&store, "B2", Some("B"), Some(&key_b1));
+
+        store
+            .delete_keep_children(&EntityUri::block("B"))
+            .await
+            .unwrap();
+
+        assert!(store.get("B").is_none(), "B itself must be deleted");
+        let ids: Vec<EntityUri> = store
+            .sorted_children("P")
+            .iter()
+            .map(|c| c.id.clone())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                EntityUri::block("A"),
+                EntityUri::block("B1"),
+                EntityUri::block("B2"),
+                EntityUri::block("C"),
+            ]
+        );
+    }
+
+    /// `delete_subtree` removes the target AND every descendant, leaving
+    /// siblings untouched. P has [A, B]; B has [B1, B2]. Deleting B's subtree
+    /// leaves P with just [A].
+    #[tokio::test]
+    async fn delete_subtree_removes_target_and_all_descendants() {
+        let store = MemStore::new();
+        insert_block(&store, "P", None, None);
+        insert_block(&store, "A", Some("P"), None);
+        let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
+        insert_block(&store, "B", Some("P"), Some(&key_a));
+        insert_block(&store, "B1", Some("B"), None);
+        let key_b1 = store.sorted_children("B").last().unwrap().sort_key.clone();
+        insert_block(&store, "B2", Some("B"), Some(&key_b1));
+
+        store.delete_subtree(&EntityUri::block("B")).await.unwrap();
+
+        assert!(store.get("B").is_none());
+        assert!(store.get("B1").is_none());
+        assert!(store.get("B2").is_none());
+        let remaining = store.sorted_children("P");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, EntityUri::block("A"));
+    }
+
     /// ADR 0028 D1: outdenting a DIRECT PAGE CHILD is rejected — it would move
     /// the block out of its page container, escaping the page. Structurally a
     /// grandparent exists (GP), so the ONLY reason this must fail is the

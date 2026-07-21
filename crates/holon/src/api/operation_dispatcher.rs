@@ -206,6 +206,8 @@ const STRUCTURAL_BLOCK_OP_DUP_ALLOWLIST: &[&str] = &[
     "restore_split",
     "restore_join",
     "embed_entity",
+    "delete_subtree",
+    "delete_keep_children",
 ];
 
 /// Return the `entity::op` keys advertised more than once across `ops`.
