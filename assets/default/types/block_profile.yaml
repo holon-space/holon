@@ -67,7 +67,7 @@ variants:
     render: >-
       expand_toggle(#{
         default_expanded: true,
-        header: selectable(row(icon("orgmode"), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})}),
+        header: selectable(row(icon("orgmode", #{size: 12}), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})}),
         content: live_query(#{
           prql: "from descendants",
           item_template: tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: render_entity()})
@@ -83,7 +83,7 @@ variants:
     condition: 'is_page_row && (!is_def_var("role") || role != "page_title")'
     render: >-
       expand_toggle(#{
-        header: row(icon("orgmode"), text(col("content"))),
+        header: row(icon("orgmode", #{size: 12}), text(col("content"))),
         content: live_query(#{
           prql: "from descendants",
           item_template: tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: render_entity()})
@@ -128,14 +128,14 @@ variants:
   - name: editing
     priority: -1
     condition: 'is_focused'
-    render: 'column(row(selectable(draggable(icon("orgmode")), #{shift_action: focus_pin(#{region: "right", block_id: col("id")})}), state_toggle(col("task_state"), #{states: col("todo_states")}), spacer(8), editable_text(col("content"))), drop_zone())'
+    render: 'column(row(selectable(draggable(icon("orgmode", #{size: 12})), #{shift_action: focus_pin(#{region: "right", block_id: col("id")})}), state_toggle(col("task_state"), #{states: col("todo_states")}), spacer(8), editable_text(col("content"))), drop_zone())'
   - name: source
     priority: -1
     condition: 'is_source && !is_program'
     render: 'query_result(#{language: col("source_language")})'
   - name: default
     priority: -1
-    render: 'column(row(selectable(draggable(icon("orgmode")), #{shift_action: focus_pin(#{region: "right", block_id: col("id")})}), state_toggle(col("task_state"), #{states: col("todo_states")}), spacer(8), rendered_text(col("content"))), drop_zone())'
+    render: 'column(row(selectable(draggable(icon("orgmode", #{size: 12})), #{shift_action: focus_pin(#{region: "right", block_id: col("id")})}), state_toggle(col("task_state"), #{states: col("todo_states")}), spacer(8), rendered_text(col("content"))), drop_zone())'
 
 virtual_child:
   defaults:
