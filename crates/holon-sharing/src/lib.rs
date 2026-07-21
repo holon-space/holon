@@ -49,13 +49,16 @@
 //!   incl. the `Unclassified` fail-closed contract and the descriptor-less-op
 //!   classification design.
 //!
-//! ## Signature shape (OQ4) — DISCLOSED not-yet-verifiable
+//! ## Signature shape (OQ4) — REAL as of the W4 ceremony work
 //! Every entry carries an [`types::OwnerSig`] produced by a
-//! [`types::SigningAuthority`]. At Inc 4 the only impl is
-//! [`types::UnverifiedAuthority`] (a blake3 stand-in): entries are
-//! signed-*shaped* but the signature does not yet verify owner identity. Real
-//! owner-identity key custody lands with Inc 5 (OQ4) — swapping the authority
-//! impl requires no log-layout change.
+//! [`types::SigningAuthority`]. The production impl is
+//! [`types::OwnerKeyAuthority`], backed by the durable Ed25519
+//! [`holon_loro::owner_identity::OwnerIdentityKey`]; its signatures verify
+//! under the owner's public key via [`types::OwnerSig::verify`] and
+//! [`log::CrossingLog::verify_all`]. [`types::UnverifiedAuthority`] (a blake3
+//! stand-in) remains ONLY as a test double and its output is REJECTED by
+//! verification. Swapping authorities required no log-layout change (the field
+//! shape was committed at Inc 4).
 
 pub mod alias_ledger;
 pub mod arbitration;
@@ -116,6 +119,7 @@ pub use types::CrossingId;
 pub use types::CrossingKey;
 pub use types::LogEntry;
 pub use types::LogEntryBody;
+pub use types::OwnerKeyAuthority;
 pub use types::OwnerSig;
 pub use types::PolicyChange;
 pub use types::PolicyEdit;

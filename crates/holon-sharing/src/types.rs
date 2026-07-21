@@ -154,15 +154,36 @@ pub enum LogEntryBody {
     PolicyEdit(PolicyEdit),
 }
 
-/// Opaque owner-identity signature (OQ4 ratified — a *distinct* owner-identity
-/// key, custody/recovery pending the W4 enrollment-ceremony ruling).
+/// Owner-identity signature over a log entry's canonical bytes.
 ///
-/// DISCLOSED: at Inc 4 the signature is **structurally present but not yet
-/// verifiable** — real key wiring lands with Inc 5. Committing the field shape
-/// now means Inc 5 swaps [`SigningAuthority`]'s impl without a log-layout
-/// change.
+/// As of the W4 enrollment-ceremony work this is a **real, verifiable** Ed25519
+/// signature when produced by [`OwnerKeyAuthority`] (backed by
+/// [`holon_loro::owner_identity::OwnerIdentityKey`]). The `UnverifiedAuthority`
+/// stand-in remains ONLY as a test double. Verify with [`OwnerSig::verify`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnerSig(pub Vec<u8>);
+
+impl OwnerSig {
+    /// Verify this signature over `payload` under the owner's public key.
+    /// Loud `Err` on any mismatch (wrong signer, tampered payload, malformed
+    /// signature length). A stand-in (blake3) signature never verifies here.
+    pub fn verify(
+        &self,
+        payload: &[u8],
+        owner: &holon_loro::owner_identity::OwnerPublicKey,
+    ) -> anyhow::Result<()> {
+        let bytes: [u8; 64] = self.0.as_slice().try_into().map_err(|_| {
+            anyhow::anyhow!(
+                "owner signature must be 64 bytes (Ed25519), got {}",
+                self.0.len()
+            )
+        })?;
+        owner.verify(
+            payload,
+            &holon_loro::owner_identity::OwnerSignature::from_bytes(bytes),
+        )
+    }
+}
 
 /// Seam for the owner-identity key (OQ4). Device keys are transport/session
 /// identity only; this trait signs durable authority objects (crossings,
@@ -173,17 +194,86 @@ pub trait SigningAuthority {
     fn sign(&self, payload: &[u8]) -> OwnerSig;
 }
 
-/// Inc-4 placeholder authority: blake3-hashes the payload as a stand-in
+/// The REAL owner-identity authority (OQ4): signs with the durable Ed25519
+/// owner key. This is the production authority — its signatures verify under
+/// the owner's [`holon_loro::owner_identity::OwnerPublicKey`] via
+/// [`OwnerSig::verify`], unlike the [`UnverifiedAuthority`] stand-in.
+pub struct OwnerKeyAuthority {
+    key: holon_loro::owner_identity::OwnerIdentityKey,
+}
+
+impl OwnerKeyAuthority {
+    pub fn new(key: holon_loro::owner_identity::OwnerIdentityKey) -> Self {
+        Self { key }
+    }
+
+    /// The public key entries signed by this authority verify against.
+    pub fn public(&self) -> holon_loro::owner_identity::OwnerPublicKey {
+        self.key.public()
+    }
+}
+
+impl SigningAuthority for OwnerKeyAuthority {
+    fn sign(&self, payload: &[u8]) -> OwnerSig {
+        OwnerSig(self.key.sign(payload).to_bytes().to_vec())
+    }
+}
+
+/// TEST-ONLY placeholder authority: blake3-hashes the payload as a stand-in
 /// signature.
 ///
 /// DISCLOSED: this does **not** verify owner identity — it only makes entries
-/// signed-*shaped*. Real key custody lands with Inc 5 (OQ4 owner-identity key).
-/// A verifier that ran today would find every entry "signed" by an unowned key;
-/// callers MUST NOT treat an `UnverifiedAuthority` signature as authorization.
+/// signed-*shaped*, and [`OwnerSig::verify`] REJECTS its output (wrong length /
+/// not an Ed25519 signature). Production code MUST use [`OwnerKeyAuthority`];
+/// this exists so tests can drive the log without provisioning an owner key.
 pub struct UnverifiedAuthority;
 
 impl SigningAuthority for UnverifiedAuthority {
     fn sign(&self, payload: &[u8]) -> OwnerSig {
         OwnerSig(blake3::hash(payload).as_bytes().to_vec())
+    }
+}
+
+#[cfg(test)]
+mod authority_tests {
+    use holon_loro::owner_identity::OwnerIdentityKey;
+
+    use super::*;
+
+    #[test]
+    fn owner_key_authority_signature_verifies() {
+        let key = OwnerIdentityKey::generate();
+        let pubkey = key.public();
+        let authority = OwnerKeyAuthority::new(key);
+        let payload = b"canonical log entry bytes";
+        let sig = authority.sign(payload);
+        assert!(sig.verify(payload, &pubkey).is_ok());
+    }
+
+    #[test]
+    fn owner_key_authority_rejects_tampered_payload() {
+        let key = OwnerIdentityKey::generate();
+        let pubkey = key.public();
+        let authority = OwnerKeyAuthority::new(key);
+        let sig = authority.sign(b"entry A");
+        assert!(sig.verify(b"entry B", &pubkey).is_err());
+    }
+
+    #[test]
+    fn unverified_stand_in_is_rejected_by_verification() {
+        // The blake3 stand-in produces a 32-byte tag, not a 64-byte Ed25519
+        // signature, and never verifies as owner authority.
+        let owner = OwnerIdentityKey::generate().public();
+        let sig = UnverifiedAuthority.sign(b"payload");
+        let err = sig.verify(b"payload", &owner).unwrap_err();
+        assert!(format!("{err}").contains("64 bytes"));
+    }
+
+    #[test]
+    fn wrong_owner_key_does_not_verify() {
+        let signer = OwnerIdentityKey::generate();
+        let other = OwnerIdentityKey::generate().public();
+        let sig = OwnerKeyAuthority::new(signer).sign(b"x");
+        assert!(sig.verify(b"x", &other).is_err());
     }
 }
