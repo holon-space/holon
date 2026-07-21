@@ -1268,6 +1268,64 @@ impl ReactiveView {
                         tree.update(&id, parent, sk, w, ov);
                     }
                 };
+                // `tree.remove` evicts the node's whole subtree, but upstream
+                // only dropped the one key — the survivors are still live in
+                // `row_map`/`key_index`. Re-insert them (DFS order, so parents
+                // land before children); each becomes a root until its own
+                // parent reappears, at which point `adopt_orphans` re-attaches
+                // it. Skipping this desyncs `key_index` from upstream indices
+                // and strands the survivors for `tree.update` to trip over.
+                let reinstate_evicted = |tree: &mut crate::mutable_tree::MutableTree,
+                                         row_map: &HashMap<
+                    holon_api::RowKey,
+                    Arc<holon_api::widget_spec::DataRow>,
+                >,
+                                         evicted: Vec<holon_api::RowKey>,
+                                         interpret_row: &dyn Fn(
+                    Arc<holon_api::widget_spec::DataRow>,
+                    usize,
+                    holon_api::Occurrence,
+                ) -> (
+                    Arc<ReactiveViewModel>,
+                    HashMap<String, holon_api::Value>,
+                ),
+                                         get_sort_key: &dyn Fn(
+                    &holon_api::widget_spec::DataRow,
+                ) -> String| {
+                    for id in evicted {
+                        let row = row_map
+                            .get(&id)
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "tree evicted {id:?} as a descendant of a removed node, but \
+                                     it is absent from row_map — the driver's row_map and the \
+                                     tree have diverged"
+                                )
+                            })
+                            .clone();
+                        let parent = parent_key(&row);
+                        let sk = get_sort_key(&row);
+                        let depth = rowset_depth(row_map, &row);
+                        let (w, ov) = interpret_row(row, depth, id.1.clone());
+                        let adopted = tree.insert(id, parent, sk, w, ov);
+                        for aid in adopted {
+                            let arow = row_map
+                                .get(&aid)
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "reinstated node adopted {aid:?}, which is absent from \
+                                         row_map — the driver's row_map and the tree have diverged"
+                                    )
+                                })
+                                .clone();
+                            let aparent = parent_key(&arow);
+                            let ask = get_sort_key(&arow);
+                            let adepth = rowset_depth(row_map, &arow);
+                            let (aw, aov) = interpret_row(arow, adepth, aid.1.clone());
+                            tree.update(&aid, aparent, ask, aw, aov);
+                        }
+                    }
+                };
                 match diff {
                     VecDiff::Replace { values } => {
                         row_map.clear();
@@ -1323,7 +1381,14 @@ impl ReactiveView {
                     VecDiff::RemoveAt { index } => {
                         let key = key_index.remove(index);
                         row_map.remove(&key);
-                        tree.remove(&key);
+                        let evicted = tree.remove(&key);
+                        reinstate_evicted(
+                            &mut tree,
+                            &row_map,
+                            evicted,
+                            interpret_row.as_ref(),
+                            get_sort_key.as_ref(),
+                        );
                     }
                     VecDiff::Push { value: (key, row) } => {
                         row_map.insert(key.clone(), row.clone());
@@ -1344,7 +1409,14 @@ impl ReactiveView {
                     VecDiff::Pop {} => {
                         if let Some(key) = key_index.pop() {
                             row_map.remove(&key);
-                            tree.remove(&key);
+                            let evicted = tree.remove(&key);
+                            reinstate_evicted(
+                                &mut tree,
+                                &row_map,
+                                evicted,
+                                interpret_row.as_ref(),
+                                get_sort_key.as_ref(),
+                            );
                         }
                     }
                     VecDiff::Clear {} => {
@@ -2906,5 +2978,138 @@ mod tests {
             Some("c1-edited"),
             "placed occurrence tracks the canonical block's live cell (converged by construction)"
         );
+    }
+
+    /// A keyed provider whose diff stream the test scripts directly, so the
+    /// tree driver sees an exact `VecDiff` sequence rather than whatever a
+    /// `ReactiveRowSet` happens to emit.
+    struct ScriptedRows(MutableVec<(holon_api::RowKey, Arc<DataRow>)>);
+
+    impl ReactiveRowProvider for ScriptedRows {
+        fn rows_snapshot(&self) -> Vec<Arc<DataRow>> {
+            self.0.lock_ref().iter().map(|(_, r)| r.clone()).collect()
+        }
+        fn rows_signal_vec(
+            &self,
+        ) -> std::pin::Pin<
+            Box<dyn futures_signals::signal_vec::SignalVec<Item = Arc<DataRow>> + Send>,
+        > {
+            use futures_signals::signal_vec::SignalVecExt;
+            Box::pin(self.0.signal_vec_cloned().map(|(_, r)| r))
+        }
+        fn keyed_rows_signal_vec(
+            &self,
+        ) -> std::pin::Pin<
+            Box<
+                dyn futures_signals::signal_vec::SignalVec<Item = (holon_api::RowKey, Arc<DataRow>)>
+                    + Send,
+            >,
+        > {
+            Box::pin(self.0.signal_vec_cloned())
+        }
+        fn cache_identity(&self) -> u64 {
+            0
+        }
+    }
+
+    fn keyed(row: Arc<DataRow>) -> (holon_api::RowKey, Arc<DataRow>) {
+        (
+            (
+                holon_api::data_row_entity_uri(&row).expect("row has id"),
+                holon_api::Occurrence::Canonical,
+            ),
+            row,
+        )
+    }
+
+    /// Boot-crash reproducer at the driver+tree PAIR level — the layer with no
+    /// coverage until now (every `mutable_tree` test drives `MutableTree`
+    /// directly, so the driver's bookkeeping was never exercised).
+    ///
+    /// `MutableTree::remove` evicts the node AND its whole subtree, but used to
+    /// return `()`. The driver dropped exactly ONE key from `key_index`/
+    /// `row_map`, so surviving descendants stayed live upstream while being
+    /// gone from the tree. The next CDC touch of such a descendant arrives as
+    /// `UpdateAt` (upstream still has the key) → `tree.update` → panic
+    /// `MutableTree::update on unknown node`.
+    #[tokio::test]
+    async fn tree_driver_survives_update_of_child_whose_parent_was_removed() {
+        crate::shadow_builders::register_render_dsl_widget_names();
+
+        let parent = Arc::new(make_row("p", "parent"));
+        let mut child_row = make_row("c", "child");
+        child_row.insert("parent_id".to_string(), Value::String("p".to_string()));
+        let child = Arc::new(child_row);
+
+        let rows = MutableVec::new();
+        let source = Arc::new(ScriptedRows(rows.clone()));
+        let data_source: Arc<dyn holon_api::ReactiveRowProvider> = source.clone();
+
+        let view = ReactiveView::new_collection(
+            CollectionConfig {
+                layout: CollectionVariant::from_name("tree", 0.0)
+                    .expect("`tree` layout is registered as a builtin"),
+                item_template: RenderExpr::FunctionCall {
+                    name: "row".to_string(),
+                    args: vec![],
+                },
+                sort_key: None,
+                virtual_child: None,
+                rules: Vec::new(),
+            },
+            data_source,
+            None,
+            None,
+        );
+
+        // The driver runs in a spawned task; a panic there aborts only that
+        // task, so capture it through the panic hook to assert on it here.
+        // (nextest gives each test its own process, so the global hook is safe.)
+        let panics: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = panics.clone();
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            sink.lock().unwrap().push(info.to_string());
+        }));
+
+        let services: Arc<dyn crate::reactive::BuilderServices> =
+            Arc::new(StubBuilderServices::new());
+        view.start(services, &tokio::runtime::Handle::current());
+
+        let settle = || tokio::time::sleep(tokio::time::Duration::from_millis(50));
+
+        // InsertAt parent → InsertAt child → RemoveAt parent → UpdateAt child.
+        rows.lock_mut().insert_cloned(0, keyed(parent));
+        settle().await;
+        rows.lock_mut().insert_cloned(1, keyed(child.clone()));
+        settle().await;
+        rows.lock_mut().remove(0);
+        settle().await;
+
+        let mut edited = (*child).clone();
+        edited.insert(
+            "content".to_string(),
+            Value::String("child-edited".to_string()),
+        );
+        rows.lock_mut().set_cloned(0, keyed(Arc::new(edited)));
+        settle().await;
+
+        std::panic::set_hook(previous_hook);
+
+        let observed = panics.lock().unwrap().clone();
+        assert!(
+            observed.is_empty(),
+            "tree driver panicked reconciling an update to a child whose parent was removed — \
+             the remove cascade evicted the child from the tree without telling the driver. \
+             Panics: {observed:?}"
+        );
+        assert_eq!(
+            view.items.lock_ref().len(),
+            1,
+            "the child is still in the upstream row set, so it must still render — as a root, \
+             its removed parent gone"
+        );
+
+        view.stop();
     }
 }

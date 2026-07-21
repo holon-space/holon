@@ -352,9 +352,16 @@ impl MutableTree {
     }
 
     /// Remove a node and all its descendants.
-    pub fn remove(&mut self, id: &RowKey) {
+    ///
+    /// Returns the ids of the DESCENDANTS the cascade evicted (DFS order,
+    /// `id` itself excluded — the caller asked for that one and already knows).
+    /// Callers holding their own view of the row set MUST reconcile these:
+    /// the tree dropped them, but upstream may still consider them live, and a
+    /// later update to one would otherwise hit `update` on an unknown node.
+    /// Mirrors `insert`, which returns the ids it adopted.
+    pub fn remove(&mut self, id: &RowKey) -> Vec<RowKey> {
         let Some(pos) = self.pos_of(id) else {
-            return;
+            panic!("MutableTree::remove on unknown node {id:?}");
         };
 
         let subtree_end = self.subtree_end(pos);
@@ -392,6 +399,8 @@ impl MutableTree {
                 self.update_has_children(pid);
             }
         }
+
+        subtree_ids[1..].to_vec()
     }
 
     /// Rebuild from scratch. Emits a single `VecDiff::Replace`.
@@ -1079,9 +1088,30 @@ mod tests {
             HashMap::new(),
         );
 
-        tree.remove(&eu("root"));
+        let evicted = tree.remove(&eu("root"));
 
         assert_eq!(tree.flat_ids(), vec![eu("other")]);
+        assert_eq!(
+            evicted,
+            vec![eu("child"), eu("grandchild")],
+            "the cascade must DISCLOSE the descendants it evicted (DFS order, the removed node \
+             itself excluded) so callers tracking their own row set can reconcile"
+        );
+    }
+
+    #[test]
+    fn remove_leaf_discloses_no_descendants() {
+        let (mut tree, _) = make_tree();
+        tree.insert(eu("a"), None, "0.0".into(), widget("A"), HashMap::new());
+
+        assert!(tree.remove(&eu("a")).is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "MutableTree::remove on unknown node")]
+    fn remove_unknown_node_panics() {
+        let (mut tree, _) = make_tree();
+        tree.remove(&eu("never-inserted"));
     }
 
     #[test]
