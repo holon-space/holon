@@ -26,6 +26,7 @@ turso_core.workspace = true
 turso_sdk_kit.workspace = true
 sqlparser.workspace = true
 gql-transform.workspace = true
+gql-parser.workspace = true
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
