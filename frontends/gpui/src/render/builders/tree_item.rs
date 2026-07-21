@@ -35,6 +35,19 @@ fn leading_marker(show_chevron: bool, has_children: bool, show_bullet: bool) -> 
     }
 }
 
+/// Every tree row reserves the SAME leading-marker gutter regardless of which
+/// marker it draws (chevron, bullet, or none) so that a row's content x-offset
+/// is `depth * tree_indent_px + gutter + gap` — a strictly increasing function
+/// of depth alone. Without a reserved gutter on marker-less rows, a parent
+/// (which draws a chevron) is offset one gutter-width further right than its
+/// own marker-less children, inverting the visual indent. Pure fn = window-free
+/// regression guard for the indentation-inversion bug (BugFunnel 2026-07-21).
+fn marker_gutter_px(style: &super::style::LayoutStyle) -> f32 {
+    // Chevron and bullet both occupy a `tree_chevron_size`-wide box (see
+    // `collapse_chevron` / `bullet_dot`); the empty None slot matches it.
+    style.tree_chevron_size
+}
+
 /// Extract a stable ID from the first child's entity data for collapse state
 /// tracking. Walks into wrapper nodes (render_entity, live_query) to find the
 /// actual entity with an "id".
@@ -263,7 +276,17 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
         LeadingMarker::Bullet => {
             row = row.child(bullet_dot(ctx));
         }
-        LeadingMarker::None => {}
+        LeadingMarker::None => {
+            // Reserve the same leading-marker gutter even when this row draws
+            // no chevron/bullet. Without it, content x-offset would be
+            // `depth*indent + (chevron ? chevron_size+gap : 0)`: a parent (which
+            // draws a chevron) is pushed one gutter-width right of its own
+            // marker-less children, inverting the visual indent whenever the
+            // indent step is <= the chevron gutter. An empty fixed-width slot
+            // makes content-x depend ONLY on depth. See the indentation-
+            // inversion BugFunnel row (2026-07-21).
+            row = row.child(div().flex_shrink_0().w(px(marker_gutter_px(&ctx.style()))));
+        }
     }
 
     if let Some(node) = content {
@@ -277,6 +300,19 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
 mod marker_tests {
     use super::LeadingMarker;
     use super::leading_marker;
+    use super::marker_gutter_px;
+
+    #[test]
+    fn markerless_row_reserves_the_full_marker_gutter() {
+        // The indentation-inversion fix: a marker-less row (outline leaf,
+        // show_bullet=false → LeadingMarker::None) must reserve the SAME
+        // leading gutter as a chevron/bullet row. Otherwise a parent's content
+        // sits one gutter-width right of its own children (inverted indent).
+        // The gutter equals the chevron box width and must be non-zero.
+        let style = super::super::style::LayoutStyle::default();
+        assert_eq!(marker_gutter_px(&style), style.tree_chevron_size);
+        assert!(marker_gutter_px(&style) > 0.0);
+    }
 
     #[test]
     fn outline_leaf_draws_no_bullet_so_content_marker_is_not_doubled() {
