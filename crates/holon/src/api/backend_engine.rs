@@ -340,6 +340,8 @@ impl BackendEngine {
             .graph_schema_cache
             .read()
             .expect("graph_schema_cache poisoned");
+        crate::storage::graph_schema::validate_referenced_edges(&schema, &query)
+            .map_err(|e| anyhow::anyhow!("GQL edge validation error: {e}"))?;
         let sql = gql_transform::transform(&query, &schema)
             .map_err(|e| anyhow::anyhow!("GQL transform error: {:?}", e))?;
         Ok(Self::gql_params_to_dollar(&sql))
