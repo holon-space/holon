@@ -8,6 +8,9 @@
 
 use std::collections::HashMap;
 
+use gql_parser::Clause;
+use gql_parser::PathElement;
+use gql_parser::Query;
 use gql_transform::resolver::ColumnMapping;
 use gql_transform::resolver::EavEdgeResolver;
 use gql_transform::resolver::EavNodeResolver;
@@ -226,6 +229,61 @@ impl GraphSchemaRegistry {
     }
 }
 
+/// Error returned when a GQL query references relationship (edge) types that
+/// are not registered in the `GraphSchema`.
+///
+/// Without this check an unregistered edge name silently falls through to the
+/// EAV `default_edge_resolver`, which joins the (in holon, absent/empty) EAV
+/// `edges` table and yields 0 rows with no error — a "fail loud, never fake"
+/// violation. holon populates NO EAV graph tables; every real edge is
+/// registered via `register_type`/`register_edges`/`register_edge_fields`, so a
+/// named edge absent from the registry is always a typo/unknown, never a valid
+/// EAV lookup.
+#[derive(Debug, thiserror::Error)]
+#[error("unknown GQL edge type(s) {unknown:?} in MATCH pattern; registered edges: {registered:?}")]
+pub struct UnknownEdgeError {
+    pub unknown: Vec<String>,
+    pub registered: Vec<String>,
+}
+
+/// Fail loud on any MATCH-clause relationship type absent from `schema`.
+///
+/// Parse-don't-validate at the GQL compile boundary: reject an unregistered
+/// edge name up front rather than letting it silently lower to the empty EAV
+/// path.
+pub fn validate_referenced_edges(
+    schema: &GraphSchema,
+    query: &Query,
+) -> Result<(), UnknownEdgeError> {
+    let mut unknown: Vec<String> = Vec::new();
+    for clause in &query.clauses {
+        let Clause::Match(match_clause) = clause else {
+            continue;
+        };
+        for path in &match_clause.pattern {
+            for element in &path.elements {
+                let PathElement::Rel(rel) = element else {
+                    continue;
+                };
+                for rel_type in &rel.rel_types {
+                    if !schema.edges.contains_key(rel_type) && !unknown.contains(rel_type) {
+                        unknown.push(rel_type.clone());
+                    }
+                }
+            }
+        }
+    }
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    let mut registered: Vec<String> = schema.edges.keys().cloned().collect();
+    registered.sort();
+    Err(UnknownEdgeError {
+        unknown,
+        registered,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use holon_api::FieldSchema;
@@ -332,5 +390,49 @@ mod tests {
 
         let schema = registry.build();
         assert!(schema.edges.contains_key("FOCUSES_ON"));
+    }
+
+    fn schema_with_child_of() -> GraphSchema {
+        let mut registry = GraphSchemaRegistry::new();
+        registry.register_type(block_type_def_with_edge());
+        registry.build()
+    }
+
+    fn parse_query(gql: &str) -> Query {
+        match gql_parser::parse(gql).expect("parse") {
+            gql_parser::QueryOrUnion::Query(q) => q,
+            gql_parser::QueryOrUnion::Union(_) => panic!("union"),
+        }
+    }
+
+    #[test]
+    fn unknown_edge_fails_loud() {
+        let schema = schema_with_child_of();
+        let query = parse_query("MATCH (a:block)-[:CHILD_OFF]->(b:block) RETURN a");
+        let err = validate_referenced_edges(&schema, &query)
+            .expect_err("unregistered edge must fail loud, not silently return empty");
+        assert!(
+            err.unknown.contains(&"CHILD_OFF".to_string()),
+            "error names the offending edge: {err:?}"
+        );
+        assert!(
+            err.registered.contains(&"CHILD_OF".to_string()),
+            "error names the valid set: {err:?}"
+        );
+    }
+
+    #[test]
+    fn registered_edge_passes() {
+        let schema = schema_with_child_of();
+        let query = parse_query("MATCH (a:block)-[:CHILD_OF]->(b:block) RETURN a");
+        validate_referenced_edges(&schema, &query).expect("registered edge compiles");
+    }
+
+    #[test]
+    fn untyped_edge_passes() {
+        // A relationship with no rel_type legitimately uses the default path.
+        let schema = schema_with_child_of();
+        let query = parse_query("MATCH (a:block)-[]->(b:block) RETURN a");
+        validate_referenced_edges(&schema, &query).expect("untyped edge is not validated");
     }
 }

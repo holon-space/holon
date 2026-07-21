@@ -688,6 +688,8 @@ mod bundled_gql_query_smoke {
                 return Err("UNION queries not supported".into());
             }
         };
+        crate::storage::graph_schema::validate_referenced_edges(schema, &query)
+            .map_err(|e| format!("GQL edge validation error: {e}"))?;
         gql_transform::transform(&query, schema)
             .map(|_| ())
             .map_err(|e| format!("GQL transform error: {e:?}"))
