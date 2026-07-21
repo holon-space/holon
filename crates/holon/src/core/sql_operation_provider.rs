@@ -2956,7 +2956,32 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     )
                     .into());
                 }
-                let leaf_name = origin_content.trim();
+                // The origin content is the page TITLE, and a page's title rides
+                // its FILENAME on disk (the vault convention: zero `.org` files
+                // carry `#+TITLE:`; the parser derives the title from the file
+                // stem and the PBT model normalizes on it). A TRAILING `/` (the
+                // slash-menu trigger still trailing at plan time, or a stray
+                // separator) is retained in the DB title but DROPPED by path
+                // normalization when the filename is formed — so an unsanitized
+                // title reingests DIVERGENT from what convert wrote. Sanitize the
+                // trailing `/` ONCE here (parse-don't-validate) so the page
+                // title, its deterministic id, AND its filename all agree.
+                // Interior `/` is left intact (namespace-meaningful; the
+                // page-hierarchy ruling is PARKED).
+                let raw_leaf = origin_content.trim();
+                let mut leaf_name = raw_leaf;
+                while leaf_name.ends_with('/') {
+                    leaf_name = leaf_name[..leaf_name.len() - 1].trim_end();
+                }
+                if leaf_name != raw_leaf {
+                    tracing::warn!(
+                        origin = %origin_id,
+                        raw = %raw_leaf,
+                        sanitized = %leaf_name,
+                        "block_to_page_plan: stripped trailing '/' from the page title so the \
+                         title, its id, and its filename agree"
+                    );
+                }
                 if leaf_name.is_empty() {
                     return Err(format!(
                         "block_to_page_plan: origin '{origin_id}' has empty content — a page needs \
@@ -2964,6 +2989,8 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     )
                     .into());
                 }
+                // The sanitized leaf is the page's authoritative title/content.
+                let page_title = leaf_name.to_string();
 
                 // Destination: an explicit `destination_path` (from the picker /
                 // MCP) wins; otherwise PRE-SELECT the origin's nearest page
@@ -2999,7 +3026,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
 
                 let plan = BlockToPagePlan {
                     origin_id,
-                    origin_content,
+                    origin_content: page_title,
                     origin_marks,
                     page_id,
                     page_depth,
