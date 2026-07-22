@@ -2,6 +2,8 @@
 - Whenever there's a bug in the UI, always check if the E2E test in crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs (the ONE composed keystone PBT) can reproduce it.
 - If the E2E test doesn't reproduce the issue think about how prod and E2E test can be made more similar, so that the E2E test can reproduce it.
 - Every bug discovered OUTSIDE an automated test (dogfooding, agent exploration, user report) MUST be triaged with the `bug-gap-triage` skill (.claude/skills/bug-gap-triage/SKILL.md) and appended to docs/Testing/BugFunnel.md before/alongside the fix. Latency above the SLO (p95 interaction→projection-visible < 200ms) counts as such a bug.
+- Every NEW feature or behavior change follows the `holon-feature` skill (.claude/skills/holon-feature/SKILL.md): a red-for-the-right-reason keystone (headless) or GPUI (windowed) PBT BEFORE implementation, green after, the red log in the PR. Implementing without a covering PBT is a rare exception that MUST be escalated to Martin BEFORE landing.
+- `dogfood-explorer` is the FINAL quality gate — it should catch ~90% of bugs before Martin does. A dogfood-found bug sends the feature BACK: first enhance the PBTs to catch it (red-for-the-right-reason as proof), then fix, then re-run dogfood. See the `holon-feature` skill.
 - **NEVER** swallow errors!! Use `Result` and enrich the error message with information.
 - **ALWAYS** `tee` before filtering output
 - Before writing ANY org blocks into the vault (/Users/martin/Workspaces/pkm/holon-pkm) — task tracking, progress notes, handoffs — load the `holon-handoff` skill first and follow its structuring rules (imperative titles, details as child blocks, parent state derives from children). Never write vault org structure from memory.
