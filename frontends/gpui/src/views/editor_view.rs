@@ -169,12 +169,33 @@ impl EditorView {
 
         let input = cx.new(|cx| {
             let row_id_for_menu = row_id.clone();
+            // Bare block UUID (no `block:` scheme) — the form org files store and
+            // the form the user pastes into org refs / hands to agents. Parsed
+            // once here at the render boundary.
+            // ALLOW(entity_uri_from_raw): EditorView.row_id from render-spec node
+            let bare_block_id = holon_api::EntityUri::from_raw(&row_id).id().to_string();
             InputState::new(window, cx)
                 .auto_grow(1, usize::MAX)
                 .default_value(&seed_value)
                 .context_menu_extender(move |menu, _window, _cx| {
                     let row_id_for_click = row_id_for_menu.clone();
+                    let bare_for_copy = bare_block_id.clone();
                     menu.separator()
+                        .item(PopupMenuItem::new("Copy block ID").on_click(
+                            move |_, _window, cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    bare_for_copy.clone(),
+                                ));
+                                crate::share_ui::DegradedToastSink::push(
+                                    crate::share_ui::DegradedToast {
+                                        kind: crate::share_ui::DegradedKind::Info,
+                                        shared_tree_id: bare_for_copy.clone(),
+                                        detail: format!("Copied block ID {bare_for_copy}"),
+                                    },
+                                    cx,
+                                );
+                            },
+                        ))
                         .item(PopupMenuItem::new("Share subtree…").on_click(
                             move |_, _window, cx| {
                                 ShareTrigger::trigger(row_id_for_click.clone(), cx);

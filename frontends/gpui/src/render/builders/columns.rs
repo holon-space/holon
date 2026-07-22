@@ -109,7 +109,9 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
             overlay_elements.push((is_right, super::render(item, ctx)));
         } else if is_shrink_drawer(item) {
             let block_id = item.prop_str("block_id").unwrap_or_else(|| "".to_string());
-            let width = item.prop_f64("width").unwrap_or(300.0) as f32;
+            let prop_width = item.prop_f64("width").unwrap_or(300.0) as f32;
+            let width =
+                super::drawer::effective_drawer_width(&*ctx.services, &block_id, prop_width);
             let child = item.children.first();
 
             let is_first_shrink = Some(i) == first_shrink;
@@ -147,8 +149,18 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
                 // (typically left sidebar) the toggle sits on the
                 // right of the panel; for the `last_shrink` (right
                 // sidebar) it sits on the left.
-                let tracked_toggle =
-                    super::drawer::drawer_toggle_widget(&block_id, "col", DrawerMode::Shrink, ctx);
+                let resize_anchor = if is_first_shrink {
+                    super::drawer::ResizeAnchor::Left
+                } else {
+                    super::drawer::ResizeAnchor::Right
+                };
+                let tracked_toggle = super::drawer::drawer_toggle_widget(
+                    &block_id,
+                    "col",
+                    DrawerMode::Shrink,
+                    resize_anchor,
+                    ctx,
+                );
                 let toggle_w = super::drawer::DRAWER_TOGGLE_WIDTH;
 
                 // Container layout differs by open/closed: when open,
