@@ -570,6 +570,7 @@ async fn finish_integration(
                     list_resource: Some(meta.uri_template),
                     uri_params: HashMap::new(),
                     interval: None,
+                    project: HashMap::new(),
                 })
             } else {
                 info!(
@@ -1361,6 +1362,7 @@ mod integration_resilience_tests {
             list_resource: None,
             uri_params: HashMap::new(),
             interval: None,
+            project: HashMap::new(),
         }
     }
 
@@ -1375,6 +1377,7 @@ mod integration_resilience_tests {
             list_resource: Some("claude-history://projects/{project_id}/plan".into()),
             uri_params: HashMap::new(),
             interval: None,
+            project: HashMap::new(),
         }
     }
 

@@ -194,6 +194,80 @@ entities:
 - **Response → block shape**: the selected array's objects map field-by-field
   onto the entity `schema`, exactly as for the MCP transports.
 
+#### Auth: `static header` | `oauth2`
+
+The `rest` transport's `auth:` is one of two arms (secrets never inlined):
+
+```yaml
+transport:
+  rest:
+    auth:                                       # static-header arm (back-compat)
+      header: Authorization
+      value: "Bearer ${EXAMPLE_TOKEN}"          # ${VAR} from env / settings
+```
+
+```yaml
+transport:
+  rest:
+    auth:
+      oauth2:                                   # OAuth2 refresh-token grant
+        token_url: https://oauth2.googleapis.com/token
+        client_id_env: GCAL_CLIENT_ID           # or client_id_file
+        client_secret_env: GCAL_CLIENT_SECRET   # or client_secret_file
+        refresh_token_file: ~/.config/holon/gcal-refresh-token   # mode 0600
+        scopes: [https://www.googleapis.com/auth/calendar.readonly]  # informational
+```
+
+The `oauth2` arm exchanges a long-lived **refresh token** for short-lived
+**access tokens** at `token_url`, caches them in memory (refreshing at ~90% of
+their lifetime and once more on a 401), and attaches
+`Authorization: Bearer <token>`. Security invariants: access tokens **never**
+touch disk (only the refresh token is a file, written by *your* bootstrap
+helper, never by Holon); a group/world-readable credential file is **refused
+loudly** at startup; no token or secret is ever logged (error messages redact
+token-request query strings and never echo request/response bodies). A missing
+env var / absent refresh-token file is a disclosed skip ("not configured yet");
+a misconfigured one (bad perms, unreadable, empty) is a hard error. Nothing
+Google-specific lives in the engine — `gcal.yaml` (+ `scripts/gcal-oauth-bootstrap.sh`)
+is the first consumer.
+
+#### Query enrichment: now-tokens, pagination, field projection
+
+Three generic knobs cover common JSON-API needs (each optional, opt-in):
+
+- **Now-tokens** in any `path`/`query` value: `{now}`, `{now-1d}`, `{now+14d}`,
+  `{now+30m}` render to an RFC 3339 UTC timestamp at request time (a rolling
+  window without a dynamic clock in YAML). Distinct from `${VAR}` (startup
+  secret) and `{arg}` (per-call data); a malformed offset fails loud.
+- **Pagination** on a `json` call follows a response continuation token across
+  pages, concatenating each page's item array, bounded fail-loud by `max_pages`:
+
+  ```yaml
+  calls:
+    list-events:
+      method: GET
+      path: /calendars/{calendar_id}/events
+      query: { timeMin: "{now-1d}", timeMax: "{now+14d}", singleEvents: "true" }
+      pagination:
+        items_path: items          # array concatenated across pages
+        next_token_path: nextPageToken
+        token_param: pageToken     # sent as ?pageToken=<token> on the next call
+        max_pages: 50              # exceeding it (token still present) is a loud error
+  ```
+
+- **Field projection** under an entity's `sync:` lifts nested JSON scalars into
+  flat, comparable columns (and derives simple flags) — needed when an API
+  nests values (e.g. Google's `start.dateTime`):
+
+  ```yaml
+  sync:
+    list_tool: list-events
+    extract_path: items
+    project:
+      start:   { path: ["start.dateTime", "start.date"] }  # first present wins
+      all_day: { exists: "start.date" }                     # 1 if present, else 0
+  ```
+
 Worked read-only example: **`jsonplaceholder.yaml`** — the public
 `https://jsonplaceholder.typicode.com/posts` API (no auth), exercised
 end-to-end against a local mock server in
