@@ -14,6 +14,13 @@ embedded MCP server and cross-check rendered state against internal state.
 Pairs with `bug-gap-triage` (`.claude/skills/bug-gap-triage/SKILL.md`): every finding gets
 classified and written to `docs/Testing/BugFunnel.md`.
 
+**Gate role (Martin's rule 5, 2026-07-22).** For a new feature this pass is the LAST quality gate
+before Martin sees it, and it should discover ~90% of the bugs before he does. A bug found here
+does not get a quick patch and a pass — it sends the feature BACK: FIRST enhance the covering PBT
+so a test goes red-for-the-right-reason (that red run is the proof the gap is now covered), THEN
+fix the bug, THEN re-run dogfood to confirm. See the `holon-feature` skill
+(`.claude/skills/holon-feature/SKILL.md`) for the full red-first feature contract.
+
 Proven end-to-end 2026-07-07: found 1 P1 (block-create panics, swallowed), 1 undo-ordering bug,
 2 fresh-boot data bugs, 2 visual bugs in a single ~30-min session. Session evidence:
 `logs/dogfood-session-2026-07-07/` (screenshots + app logs).
