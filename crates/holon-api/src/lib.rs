@@ -115,6 +115,21 @@ pub fn default_doc_block_uri() -> EntityUri {
     EntityUri::block("__default__")
 }
 
+/// True when `id` is a copy-on-write seed-origin document root — the bundled
+/// default layout that ships in `assets/default/` and is re-seeded on every
+/// boot. Such a doc is VIRTUAL: it lives only in Loro/SQL, is refreshed from
+/// the current asset on boot, and is NEVER auto-materialized to a vault `.org`
+/// file. The first user edit materializes the file (via the runtime page
+/// write-back path), and from then on that file wins and suppresses re-seeding.
+///
+/// Anchored on `block:__default__` (the ruled anchor case): the layout
+/// container is the only seed-origin root today. A general seed-provenance flag
+/// would snowball through Block/SQL/Loro; this typed predicate is the single
+/// source of truth callers consult instead of re-matching the id string.
+pub fn is_seed_layout_doc(id: &EntityUri) -> bool {
+    *id == default_doc_block_uri()
+}
+
 // Re-export block types
 // Re-export auth types
 pub use auth::ProviderAuthStatus;

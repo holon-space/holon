@@ -128,7 +128,7 @@ fn fresh_seed_places_integrations_section_below_hierarchy() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (engine, ordering) = fresh_engine(dir.path().join("fresh.db")).await;
 
-        holon_app::seed_default_layout(&engine, ordering, false)
+        holon_app::seed_default_layout(&engine, ordering, false, false)
             .await
             .expect("seed_default_layout must complete on a fresh file DB");
 
@@ -249,7 +249,7 @@ fn deleted_integrations_section_does_not_resurrect_on_reseed() {
         let (engine, ordering) = fresh_engine(db_path).await;
 
         // First (fresh) boot seeds the full layout incl. the integrations section.
-        holon_app::seed_default_layout(&engine, ordering.clone(), false)
+        holon_app::seed_default_layout(&engine, ordering.clone(), false, false)
             .await
             .expect("first seed");
         let db = engine.db_handle();
@@ -281,7 +281,7 @@ fn deleted_integrations_section_does_not_resurrect_on_reseed() {
         );
 
         // Every-boot reseed (root layout now exists → fresh=false).
-        holon_app::seed_default_layout(&engine, ordering, false)
+        holon_app::seed_default_layout(&engine, ordering, false, false)
             .await
             .expect("reseed on already-seeded DB");
 

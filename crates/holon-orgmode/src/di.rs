@@ -786,6 +786,10 @@ pub async fn run_file_sync_controller(
             error!("[OrgMode] fileless-page materialization failed: {}", e);
             failures.push((root_directory.clone(), e));
         }
+        // Boot seed/re-seed phase is over. From here a runtime user edit to a
+        // copy-on-write seed doc (e.g. `block:__default__`) materializes its
+        // vault file (copy-on-write); every boot re-seed write stayed virtual.
+        controller.finish_boot_seeding();
         tracing::debug!(
             target: "holon_latency",
             stage = "boot_ingest_total",

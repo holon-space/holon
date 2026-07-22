@@ -127,7 +127,7 @@ fn fresh_db_boot_reaches_seed_without_history_tables_panic() {
 
         // The regression fires HERE: the first history-recording op during
         // seeding hit a missing `block_history` table before the fix.
-        holon_app::seed_default_layout(&engine, ordering, false)
+        holon_app::seed_default_layout(&engine, ordering, false, false)
             .await
             .expect(
                 "seed_default_layout must complete on a fresh file DB — a panic/error here means \

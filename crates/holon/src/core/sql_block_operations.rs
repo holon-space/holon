@@ -729,6 +729,13 @@ impl BlockOrdering for SqlBlockOperations {
         Ok(())
     }
 
+    async fn reseed_content(&self, blocks: &[(EntityUri, String)]) -> Result<usize> {
+        self.cell_registry
+            .reseed_content(blocks)
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })
+    }
+
     /// Apply a whole file's ingest ops in ONE transaction (BugFunnel row 32).
     ///
     /// The historic boot loop applied each block through

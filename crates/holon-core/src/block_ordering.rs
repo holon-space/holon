@@ -184,6 +184,18 @@ pub trait BlockOrdering: Send + Sync {
     /// SqlOnly impls delete the SQL row directly.
     async fn delete_in_tree(&self, params: holon_api::StorageEntity) -> Result<()>;
 
+    /// Copy-on-write seed refresh: for each `(id, content)` whose block exists
+    /// in the authority with DIFFERENT content, rewrite it to the current
+    /// shipped-asset value (compares first, so an unchanged block emits no op).
+    /// Used by `seed_default_layout` to auto-update the VIRTUAL default layout
+    /// (`block:__default__`) from the bundled asset while the persisted Loro
+    /// snapshot would otherwise pin a stale copy. Returns how many were
+    /// refreshed. Default: `Ok(0)` — no separate authority to reconcile
+    /// (SqlOnly / test stubs).
+    async fn reseed_content(&self, _blocks: &[(EntityUri, String)]) -> Result<usize> {
+        Ok(0)
+    }
+
     /// Apply a whole file's worth of ordered ingest ops in one shot.
     ///
     /// `ops` is the org reconciler's `(op, params)` vector in **document

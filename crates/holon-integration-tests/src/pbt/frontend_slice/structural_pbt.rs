@@ -1125,6 +1125,45 @@ mod teeth {
         );
     }
 
+    /// **Copy-on-write default layout (F4 stale-seed remedy).** The bundled
+    /// default layout (`block:__default__`) is a VIRTUAL seed doc: it is seeded
+    /// into the store on boot but must NOT be auto-materialized to a vault
+    /// `.org` file. The Fork B B2 fileless-page sweep (a92d7eb7, 2026-07-12)
+    /// used to write `__default__.org`, pinning Martin's vault to a stale
+    /// Jul-12 seed (the F4 backlinks-invisible saga). The seed doc now
+    /// stays virtual until a user edit materializes it (copy-on-write); the
+    /// runtime page write-back — not the boot sweep — owns that first file.
+    ///
+    /// Guards BOTH materialization sites: `materialize_missing_page_files` (B2
+    /// boot sweep) skips `is_seed_layout_doc`, and
+    /// `materialize_page_identity_file` skips it while `boot_seeding`.
+    /// Booting over an unrelated companion, the default layout must reach
+    /// the STORE (seeded, virtual) yet own NO file on disk.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn seed_default_layout_is_virtual_not_materialized_on_boot() {
+        let (_caps, comp) =
+            boot_companion_topology(&[("notes.org", "#+ID: notes\n* hello\n")]).await;
+
+        // Seeded into the store (virtual layout is present)...
+        let store_ids = comp.store_block_ids().await;
+        assert!(
+            store_ids.iter().any(|id| id.contains("__default__")),
+            "the default layout must be SEEDED into the store (virtual), even though it owns no              file; store ids = {store_ids:?}",
+        );
+
+        // ...but NOT written to disk (copy-on-write: no auto-materialization).
+        let default_on_disk =
+            comp.disk_org_files().await.into_iter().any(|(path, _)| {
+                path.file_name().and_then(|n| n.to_str()) == Some("__default__.org")
+            });
+        assert!(
+            !default_on_disk,
+            "the virtual seed layout must NOT be materialized to `__default__.org` on boot \
+             (copy-on-write; F4 stale-seed pin) — on-disk org files = {:?}",
+            comp.disk_org_files().await,
+        );
+    }
+
     /// **Increment-3 fresh-drive + ORG-SEED probe — the full catalog is green
     /// over `compose_sut(frontend)`.** The store-only
     /// seed left the working tree absent from the org files `SutOrgRead`
