@@ -124,6 +124,12 @@ pub struct SyncConfig {
     pub list_params: HashMap<String, serde_json::Value>,
     /// Optional cursor-based incremental sync configuration (tool sync only).
     pub cursor: Option<CursorConfig>,
+    /// Optional per-column field projection (tool sync only): lifts nested JSON
+    /// scalars into flat columns (e.g. Google Calendar's `start.dateTime` →
+    /// `start`, `start.date` presence → `all_day`). See
+    /// [`crate::mcp_sync_strategy::Projection`].
+    #[serde(default)]
+    pub project: HashMap<String, crate::mcp_sync_strategy::Projection>,
     /// MCP resource URI (or URI template) to read for listing records.
     /// Required for resource-based sync.
     pub list_resource: Option<String>,
@@ -233,6 +239,7 @@ impl SyncConfig {
                 extract_path,
                 list_params: self.list_params.clone(),
                 cursor: self.cursor.clone(),
+                project: self.project.clone(),
             }))
         } else if let Some(ref list_resource) = self.list_resource {
             let uri = expand_uri_template(list_resource, &self.uri_params)?;

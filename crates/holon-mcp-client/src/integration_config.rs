@@ -11,6 +11,8 @@ use crate::mcp_integration::McpTransport;
 use crate::mcp_sidecar::EntityConfig;
 use crate::mcp_sidecar::McpSidecar;
 use crate::mcp_sidecar::ToolConfig;
+use crate::rest_oauth2::RestOAuth2Config;
+use crate::rest_transport::RestAuth;
 
 /// Transport configuration as declared in the YAML file.
 ///
@@ -78,14 +80,58 @@ pub struct RestTransport {
     pub poll_interval: Option<crate::mcp_sidecar::SyncInterval>,
 }
 
-/// A single auth header, e.g. `{ header: Authorization, value: "Bearer
-/// ${TOKEN}" }`.
+/// Auth for the `rest` transport. Exactly one arm must be set:
+///
+/// - a **static header** — `{ header: Authorization, value: "Bearer ${TOKEN}"
+///   }` (back-compatible), or
+/// - **OAuth2** — `{ oauth2: { token_url, client_id_env, …, refresh_token_file
+///   } }` (refresh-token grant; see [`RestOAuth2Config`]).
+///
+/// Modeled as optional fields (rather than a serde-tagged enum) so both shapes
+/// parse cleanly under `deny_unknown_fields` and a mistake yields a precise
+/// error at [`RestAuthConfig::resolve`] rather than a "did not match any
+/// variant".
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RestAuthConfig {
-    pub header: String,
-    /// Header value; `${VAR}`-expanded at startup. Keep the secret out of YAML.
-    pub value: String,
+    /// Static-header arm: the header name (e.g. `Authorization`).
+    #[serde(default)]
+    pub header: Option<String>,
+    /// Static-header arm: the header value; `${VAR}`-expanded at startup. Keep
+    /// the secret out of YAML.
+    #[serde(default)]
+    pub value: Option<String>,
+    /// OAuth2 arm: refresh-token-grant configuration.
+    #[serde(default)]
+    pub oauth2: Option<RestOAuth2Config>,
+}
+
+impl RestAuthConfig {
+    /// Resolve into the runtime [`RestAuth`], expanding `${VAR}` in a static
+    /// value and building the OAuth2 provider (reading credential files,
+    /// running the 0600 checks) for the OAuth2 arm. Fails loud on an
+    /// ambiguous or empty arm; surfaces [`UnresolvedVar`] when an OAuth2
+    /// integration is simply not configured yet (disclosed skip).
+    fn resolve(self, lookup: &VarLookup<'_>) -> anyhow::Result<RestAuth> {
+        match (self.header, self.value, self.oauth2) {
+            (Some(header), Some(value), None) => Ok(RestAuth::Static {
+                header,
+                value: expand_vars(&value, lookup)?,
+            }),
+            (None, None, Some(oauth2)) => {
+                let provider = crate::rest_oauth2::build_provider(&oauth2, lookup)?;
+                Ok(RestAuth::OAuth2(provider))
+            }
+            (None, None, None) => anyhow::bail!(
+                "transport.rest.auth is empty — set either a static `{{ header, value }}` or an \
+                 `oauth2` block"
+            ),
+            _ => anyhow::bail!(
+                "transport.rest.auth must set EXACTLY ONE of a static `{{ header, value }}` pair \
+                 or an `oauth2` block (not a mix)"
+            ),
+        }
+    }
 }
 
 /// A single GET endpoint. `path` and `query` values may contain `{arg}`
@@ -110,6 +156,11 @@ pub struct RestCallConfig {
     /// `entries`).
     #[serde(default)]
     pub result_key: Option<String>,
+    /// Optional response-token pagination (`json` only): follow a continuation
+    /// token (e.g. `nextPageToken`) across pages, bounded fail-loud by
+    /// `max_pages`.
+    #[serde(default)]
+    pub pagination: Option<crate::rest_transport::Pagination>,
 }
 
 /// Authentication configuration (only meaningful for HTTP transport).
@@ -234,9 +285,9 @@ impl IntegrationFileConfig {
                 uri: expand_vars(&http.uri, lookup)?,
             }
         } else if let Some(rest) = self.transport.rest {
-            let auth_header = match rest.auth {
-                Some(a) => Some((a.header, expand_vars(&a.value, lookup)?)),
-                None => None,
+            let auth = match rest.auth {
+                Some(a) => a.resolve(lookup)?,
+                None => RestAuth::None,
             };
             let mut calls = HashMap::with_capacity(rest.calls.len());
             for (name, c) in rest.calls {
@@ -248,13 +299,14 @@ impl IntegrationFileConfig {
                         query: c.query,
                         format: c.format,
                         result_key: c.result_key,
+                        pagination: c.pagination,
                     },
                 );
             }
             McpTransport::Rest {
                 manual: crate::rest_transport::RestManual {
                     base_url: expand_vars(&rest.base_url, lookup)?,
-                    auth_header,
+                    auth,
                     calls,
                 },
                 poll_interval: rest.poll_interval,
