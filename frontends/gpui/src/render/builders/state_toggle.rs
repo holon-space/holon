@@ -24,6 +24,15 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
         .unwrap_or_else(|| "task_state".to_string());
     let current = node.prop_str("current").unwrap_or_default();
     let states = node.prop_str("states").unwrap_or_default();
+    let mt = node.prop_f64("mt").unwrap_or(0.0) as f32;
+
+    // Non-task block: no task_state, so there is no checkbox to show. Collapse
+    // the placeholder to zero width instead of reserving a full icon box —
+    // otherwise every ordinary block carries a wide empty gutter before its
+    // text (dogfood PHASE 3 bug 8).
+    if current.is_empty() {
+        return div().flex_shrink_0();
+    }
 
     let (_label, semantic) = state_display(&current);
     let color = semantic_color(ctx, semantic);
@@ -32,6 +41,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     let Some(op) = find_set_field_op(&field, &node.operations) else {
         return div()
             .flex_shrink_0()
+            .mt(px(mt))
             .w(px(ctx.style().icon_size + ctx.style().icon_box_padding))
             .h(px(ctx.style().icon_size))
             .flex()
@@ -52,10 +62,11 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     let el_id = format!("state-toggle-{}", row_id.as_deref().unwrap_or("unknown"));
     let services = ctx.services.clone();
 
-    // The outer div is sized exactly like icon::render (20×16) so it
-    // occupies the same space as the orgmode bullet in non-task blocks.
+    // The outer div is sized exactly like icon::render (20×16) so the task
+    // checkbox lines up with the orgmode bullet's box.
     div()
         .flex_shrink_0()
+        .mt(px(mt))
         .w(px(ctx.style().icon_size + ctx.style().icon_box_padding))
         .h(px(ctx.style().icon_size))
         .flex()

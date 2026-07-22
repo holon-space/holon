@@ -11,6 +11,11 @@ use holon_frontend::reactive_view_model::ReactiveViewModel;
 use super::prelude::*;
 use crate::geometry::TransparentTracker;
 
+/// Top offset (px) that lifts the disclosure chevron onto the first text
+/// line's center, matching the block bullet's `mt` in `block_profile.yaml`.
+/// Pixel value pending Martin's live visual pass.
+const CHEVRON_TOP_OFFSET: f32 = 8.0;
+
 /// The single leading chrome element a tree row draws, if any. A row draws at
 /// most ONE of these — chevron and bullet are mutually exclusive, and a row may
 /// draw neither. The outline sets `show_bullet: false` on every row (the block
@@ -123,6 +128,7 @@ fn collapse_chevron(
     el_id: String,
     expanded: Mutable<bool>,
     persist: Option<(Arc<dyn BuilderServices>, String)>,
+    opacity: f32,
     ctx: &GpuiRenderContext,
 ) -> gpui::Stateful<Div> {
     let chevron = if collapsed {
@@ -136,11 +142,21 @@ fn collapse_chevron(
         .id(hashed_id(&format!("tree-toggle-{el_id}")))
         .cursor_pointer()
         .flex_shrink_0()
+        // Align the chevron's vertical center with the block bullet, which sits
+        // on the first text line's center (row is top-aligned). The chevron box
+        // (tree_chevron_size tall) centers its glyph at box/2; the offset lifts
+        // that onto the same line as the bullet.
+        .mt(px(CHEVRON_TOP_OFFSET))
         .w(px(ctx.style().tree_chevron_size))
         .h(px(ctx.style().tree_chevron_size))
         .flex()
         .items_center()
         .justify_center()
+        // Hover-reveal (Logseq convention): the disclosure triangle is
+        // transparent until the row is hovered. Kept in layout (opacity, not
+        // conditional render) so its bounds stay registered for PBT
+        // `ToggleCollapse` and hit-testing.
+        .opacity(opacity)
         .text_size(px(ctx.style().tree_chevron_font_size))
         .text_color(color)
         .on_mouse_down(gpui::MouseButton::Left, move |_, window, _cx| {
@@ -200,7 +216,7 @@ pub fn collapse_state(node: &ReactiveViewModel, _ctx: &GpuiRenderContext) -> Opt
 /// chevron). The single child in `children` is the content widget.
 /// Collapse state is tracked per-node; the *tree collection* renderer skips
 /// descendants of collapsed nodes (see `tree.rs` / `collection_view.rs`).
-pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
+pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     let depth = node.prop_f64("depth").unwrap_or(0.0) as usize;
     let has_children = node.prop_bool("has_children").unwrap_or(false);
     // Chrome props from tree builder rules: per-row override map. Defaults
@@ -239,6 +255,24 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
 
     let indent = (depth as f32) * ctx.style().tree_indent_px;
 
+    let marker = leading_marker(show_chevron, has_children, show_bullet);
+
+    // Hover-reveal state for the disclosure chevron. `wrap_tree_item` seeds a
+    // `hovered` Mutable on production rows; when present the chevron is
+    // transparent until the whole ROW is hovered (the hover zone is the row,
+    // not the chevron box). Absent (static gallery / shadow) → always visible.
+    let hovered_handle = node.hovered.clone();
+    let chevron_opacity = match (&marker, &hovered_handle) {
+        (LeadingMarker::Chevron, Some(h)) => {
+            if h.get() {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        _ => 1.0,
+    };
+
     let mut row = div()
         .w_full()
         .flex()
@@ -248,7 +282,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
         .min_h(px(ctx.style().tree_item_min_height))
         .pl(px(indent));
 
-    match leading_marker(show_chevron, has_children, show_bullet) {
+    match marker {
         LeadingMarker::Chevron => {
             let el_id = id.clone().unwrap_or_else(|| "tree-toggle".to_string());
             // Fall back to a fresh standalone Mutable when the node has no
@@ -258,7 +292,8 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
             // Persist through set_field(collapsed) when the row is identifiable;
             // rows without an id (synthetic gallery items) fold view-locally.
             let persist = id.clone().map(|row_id| (ctx.services.clone(), row_id));
-            let chevron_el = collapse_chevron(collapsed, el_id, mutable, persist, ctx);
+            let chevron_el =
+                collapse_chevron(collapsed, el_id, mutable, persist, chevron_opacity, ctx);
             if let Some(target_id) = explicit_target.as_deref() {
                 // Register the chevron in the bounds registry under the
                 // canonical id so layout-PBT `ToggleCollapse` transitions
@@ -293,7 +328,22 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
         row = row.child(div().flex_1().child(node));
     }
 
-    row
+    // Scope the hover to the whole row: hovering anywhere on the row reveals
+    // the chevron. Only wired for chevron rows that carry a `hovered` cell.
+    match (marker, hovered_handle) {
+        (LeadingMarker::Chevron, Some(hovered)) => {
+            let hover_id = format!("tree-item-hover-{}", id.unwrap_or_default());
+            row.id(hashed_id(&hover_id))
+                .on_hover(move |is_over, window, _cx| {
+                    if hovered.get() != *is_over {
+                        hovered.set(*is_over);
+                        window.refresh();
+                    }
+                })
+                .into_any_element()
+        }
+        _ => row.into_any_element(),
+    }
 }
 
 #[cfg(test)]

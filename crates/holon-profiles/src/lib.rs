@@ -1404,6 +1404,58 @@ variants:
         assert_eq!(resolved.name, "default");
     }
 
+    /// The `bullet_shape` computed field (block_profile.yaml) picks the ringed
+    /// `orgmode` glyph for a collapsed block (which always has hidden children)
+    /// and the plain `circle` dot otherwise. A missing `collapsed` column
+    /// leaves the field unbound, so `icon`'s `"circle"` default takes over
+    /// — the dot.
+    #[test]
+    fn bullet_shape_ring_when_collapsed_else_dot() {
+        let profile = make_test_profile(
+            r#"
+entity_name: block
+computed:
+  bullet_shape: 'if collapsed != () && collapsed != 0 { "orgmode" } else { "circle" }'
+variants:
+  - name: default
+    render: 'row(col("content"))'
+"#,
+        );
+        let engine = RhaiEngine::new();
+
+        let row = |collapsed: Option<i64>| {
+            let mut r = HashMap::new();
+            r.insert("id".to_string(), Value::String("block:x".to_string()));
+            if let Some(c) = collapsed {
+                r.insert("collapsed".to_string(), Value::Integer(c));
+            }
+            r
+        };
+
+        assert_eq!(
+            profile
+                .compute_fields_only(&row(Some(1)), &engine)
+                .get("bullet_shape"),
+            Some(&Value::String("orgmode".to_string())),
+            "collapsed block → ringed orgmode bullet"
+        );
+        assert_eq!(
+            profile
+                .compute_fields_only(&row(Some(0)), &engine)
+                .get("bullet_shape"),
+            Some(&Value::String("circle".to_string())),
+            "expanded/leaf block → plain circle dot"
+        );
+        // Absent `collapsed`: the field is unbound (not a "orgmode"), so the
+        // icon name falls back to its default dot.
+        let out = profile.compute_fields_only(&row(None), &engine);
+        assert_ne!(
+            out.get("bullet_shape"),
+            Some(&Value::String("orgmode".to_string())),
+            "missing collapsed must never yield the ring"
+        );
+    }
+
     #[test]
     fn test_resolve_variant() {
         let profile = make_test_profile(
