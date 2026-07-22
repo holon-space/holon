@@ -199,6 +199,17 @@ async fn focus_main(db: &holon::storage::DbHandle, block_local: &str) {
     )
     .await
     .expect("insert main focus row");
+    // Point the cursor at the just-opened row so the cursor-joined section
+    // query (navigation_cursor equi-join, added with tabs) resolves the active
+    // tab — mirrors focus_replace moving the cursor onto the new focus.
+    db.execute_values(
+        "INSERT OR REPLACE INTO navigation_cursor (region, history_id) \
+         SELECT 'main', MAX(id) FROM navigation_history \
+         WHERE region = 'main' AND closed_at IS NULL",
+        vec![],
+    )
+    .await
+    .expect("point cursor at active main tab");
 }
 
 async fn section_result_ids(db: &holon::storage::DbHandle, sql: &str) -> Vec<String> {
@@ -441,7 +452,6 @@ fn every_seeded_source_block_compiles_and_executes_against_booted_vault() {
         );
     });
 }
-
 
 /// Structural lock on the SHIPPED backlinks SQL: it must join `backlinks` to
 /// `focus_roots` on the **equi-join ON** shape `ON bl.target_id = fr.root_id`.
