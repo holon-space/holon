@@ -1440,7 +1440,130 @@ impl FileSyncController {
             self.doc_manager.update_metadata(&doc).await?;
         }
 
-        let new_blocks_vec = new_parse.blocks;
+        let mut new_blocks_vec = new_parse.blocks;
+
+        // ── ID-less headline reconciliation (external re-edit duplicate guard) ──
+        // An org headline with no `:ID:` is minted a FRESH `Uuid::new_v4()` on
+        // EVERY parse (`parser::extract_or_generate_id`). So the classic
+        // external-editor workflow — write an ID-less headline, let the app
+        // ingest + write it back (minting id A), then write a STALE pre-mint copy
+        // of the same text — re-parses that headline to a DIFFERENT id B, and the
+        // by-id diff below sees `B ∉ old_blocks` → CREATE. In the steady state the
+        // delete pass then removes the orphaned twin A (a churned identity, but no
+        // duplicate); under a CONCURRENT external re-write the writeback of the
+        // minted `:ID:`s is skipped by the TOCTOU guard, so `last_projection`
+        // (hence the diff base `old_blocks`) desyncs from the store and the twin
+        // survives — the block DUPLICATES under two ids (observed at ~60-block
+        // scale on the live vault; see BugFunnel 2026-07-22 / PR #76).
+        //
+        // Remedy: before the id-keyed diff runs, remap an ID-less incoming block
+        // (`blocks_needing_ids`) onto its already-minted twin when that twin sits
+        // under the SAME parent at the SAME sibling position with EXACTLY equal
+        // content, so the stale re-write reconciles as an idempotent update
+        // instead of a re-mint (which churns identity or, on base desync,
+        // duplicates). We match against the STORE's CURRENT children (ground
+        // truth), NOT the diff base `old_blocks`: the base is parsed from
+        // `last_projection` and desyncs precisely in the duplicating case, holding
+        // throwaway ids that match neither the real twin nor the new mint — so
+        // matching the base cannot find the twin and the duplicate still lands.
+        // Deterministic + conservative: positional 1:1, so two genuinely-distinct
+        // ID-less siblings with identical content stay two blocks; a content match
+        // at a DIFFERENT position is disclosed (WARN) and left to mint rather than
+        // guessed into a merge.
+        if !new_parse.blocks_needing_ids.is_empty() {
+            let existing_children = self
+                .block_reader
+                .get_blocks(&document_uri)
+                .await
+                .with_context(|| {
+                    format!("read store children for ID-less reconcile (doc {document_uri})")
+                })?;
+
+            let minted: HashSet<&str> = new_parse
+                .blocks_needing_ids
+                .iter()
+                .map(String::as_str)
+                .collect();
+
+            let existing: Vec<ExistingChild> = existing_children
+                .iter()
+                .map(|b| ExistingChild {
+                    id: b.id.clone(),
+                    parent: b.parent_id.clone(),
+                    seq: b
+                        .get_property("sequence")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    content: b.content.clone(),
+                })
+                .collect();
+
+            // Top-level headlines parse with `parent_id == new_parse.document.id`;
+            // the store keys the same children under `document_uri` — normalise so
+            // they group together for positional matching.
+            let incoming: Vec<IncomingIdentity> = new_blocks_vec
+                .iter()
+                .map(|b| IncomingIdentity {
+                    id: b.id.clone(),
+                    parent: if b.parent_id == new_parse.document.id {
+                        document_uri.clone()
+                    } else {
+                        b.parent_id.clone()
+                    },
+                    content: b.content.clone(),
+                    minted: minted.contains(b.id.id()),
+                })
+                .collect();
+
+            let IdlessRemap { remaps, ambiguous } = compute_idless_remaps(&existing, &incoming);
+
+            if !remaps.is_empty() {
+                // Apply id + parent remaps IN PLACE. A child of a remapped ID-less
+                // headline has `parent_id == <old minted parent>` (a remap key), so
+                // rewriting parent links here reparents it onto the existing twin.
+                for block in new_blocks_vec.iter_mut() {
+                    if let Some(existing_id) = remaps.get(&block.parent_id) {
+                        block.parent_id = existing_id.clone();
+                    }
+                    if let Some(existing_id) = remaps.get(&block.id) {
+                        debug!(
+                            "[FileSyncController] reconciled ID-less headline onto its \
+                             already-minted store twin by content+position (file {}, headline \
+                             {:?}): {} -> {}",
+                            path.display(),
+                            block.content,
+                            block.id,
+                            existing_id,
+                        );
+                        block.id = existing_id.clone();
+                        // Keep the flat `ID` property consistent with the remapped
+                        // id (build_block_params falls back to `block.id.id()`, but
+                        // a future reader of the parse block must not see the stale
+                        // mint).
+                        block.set_property("ID", Value::String(existing_id.id().to_string()));
+                    }
+                }
+            }
+            for minted_id in &ambiguous {
+                let headline = new_blocks_vec
+                    .iter()
+                    .find(|b| &b.id == minted_id)
+                    .map(|b| b.content.as_str())
+                    .unwrap_or("");
+                // Content matched an existing store sibling but at a DIFFERENT
+                // position — ambiguous, not deterministically resolvable. Prefer
+                // minting (current behavior) over guessing a merge, disclosed.
+                warn!(
+                    "[FileSyncController] ID-less headline content matches an existing store \
+                     sibling at a DIFFERENT position — minting a fresh id rather than guessing a \
+                     merge (external-edit dup guard). file={}, headline={:?}, minted_id={}",
+                    path.display(),
+                    headline,
+                    minted_id,
+                );
+            }
+        }
+
         let new_blocks: HashMap<EntityUri, Block> = new_blocks_vec
             .iter()
             .map(|b| (b.id.clone(), b.clone()))
@@ -3933,6 +4056,276 @@ fn three_way_text_content(
         .merge_text(base, theirs, mine)
         .with_context(|| "3-way text merge of concurrent file-vs-UI edit failed")?;
     Ok((merged, true))
+}
+
+/// One existing store child, as the ID-less reconcile sees it.
+#[derive(Debug, Clone)]
+struct ExistingChild {
+    id: EntityUri,
+    parent: EntityUri,
+    /// The org parser's DFS `sequence` property — orders siblings within a
+    /// parent (children are otherwise unordered in the store snapshot).
+    seq: i64,
+    content: String,
+}
+
+/// One incoming parsed block's identity, as the ID-less reconcile sees it.
+#[derive(Debug, Clone)]
+struct IncomingIdentity {
+    id: EntityUri,
+    /// Top-level headlines are normalised by the caller to the document uri so
+    /// they group with the store's top-level children.
+    parent: EntityUri,
+    content: String,
+    /// The id was freshly minted this parse (an ID-less headline).
+    minted: bool,
+}
+
+/// Outcome of the ID-less content+position reconcile.
+#[derive(Debug, Default)]
+struct IdlessRemap {
+    /// minted incoming id → existing store id it reconciles onto.
+    remaps: HashMap<EntityUri, EntityUri>,
+    /// minted incoming ids whose content matched an existing sibling only at a
+    /// DIFFERENT position — left to mint, caller discloses via WARN.
+    ambiguous: Vec<EntityUri>,
+}
+
+/// Match ID-less (freshly-minted) incoming headlines onto their already-minted
+/// twins among the store's CURRENT children, by exact content at the same
+/// sibling position under the same parent.
+///
+/// Pure and deterministic. Positional 1:1: two genuinely-distinct ID-less
+/// siblings with identical content match their two twins in order (never merged
+/// to one), and true surplus mints. A content match at a DIFFERENT position is
+/// reported `ambiguous` (caller keeps the mint) rather than guessed into a
+/// merge. `incoming` MUST be in document order (parents before children) so a
+/// remapped ID-less parent regroups its subtree before the children are
+/// matched.
+fn compute_idless_remaps(existing: &[ExistingChild], incoming: &[IncomingIdentity]) -> IdlessRemap {
+    let mut by_parent: HashMap<EntityUri, Vec<&ExistingChild>> = HashMap::new();
+    for e in existing {
+        by_parent.entry(e.parent.clone()).or_default().push(e);
+    }
+    for sibs in by_parent.values_mut() {
+        sibs.sort_by_key(|e| e.seq);
+    }
+
+    // Existing ids the incoming set already matches verbatim by id are claimed —
+    // an ID-less block cannot also absorb one of those.
+    let incoming_ids: HashSet<&EntityUri> = incoming.iter().map(|i| &i.id).collect();
+    let mut claimed: HashSet<EntityUri> = existing
+        .iter()
+        .filter(|e| incoming_ids.contains(&e.id))
+        .map(|e| e.id.clone())
+        .collect();
+
+    let mut out = IdlessRemap::default();
+    let mut pos_in_parent: HashMap<EntityUri, usize> = HashMap::new();
+    for inc in incoming {
+        // A parent that is itself a remapped ID-less headline regroups onto its
+        // existing twin before its children are positioned/matched.
+        let parent = out
+            .remaps
+            .get(&inc.parent)
+            .cloned()
+            .unwrap_or_else(|| inc.parent.clone());
+        let pos = {
+            let counter = pos_in_parent.entry(parent.clone()).or_insert(0);
+            let p = *counter;
+            *counter += 1;
+            p
+        };
+        if !inc.minted {
+            continue; // authored `:ID:` — the by-id diff handles it
+        }
+        let sibs = by_parent.get(&parent);
+        let twin = sibs
+            .and_then(|s| s.get(pos))
+            .filter(|e| e.content == inc.content && !claimed.contains(&e.id));
+        if let Some(e) = twin {
+            claimed.insert(e.id.clone());
+            out.remaps.insert(inc.id.clone(), e.id.clone());
+        } else if sibs
+            .map(|s| {
+                s.iter()
+                    .any(|e| e.content == inc.content && !claimed.contains(&e.id))
+            })
+            .unwrap_or(false)
+        {
+            out.ambiguous.push(inc.id.clone());
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod idless_reconcile_tests {
+    use holon_api::EntityUri;
+
+    use super::ExistingChild;
+    use super::IncomingIdentity;
+    use super::compute_idless_remaps;
+
+    fn doc() -> EntityUri {
+        EntityUri::block("doc")
+    }
+
+    fn existing(id: &str, parent: &EntityUri, seq: i64, content: &str) -> ExistingChild {
+        ExistingChild {
+            id: EntityUri::block(id),
+            parent: parent.clone(),
+            seq,
+            content: content.to_string(),
+        }
+    }
+
+    fn incoming(id: &str, parent: &EntityUri, content: &str, minted: bool) -> IncomingIdentity {
+        IncomingIdentity {
+            id: EntityUri::block(id),
+            parent: parent.clone(),
+            content: content.to_string(),
+            minted,
+        }
+    }
+
+    /// The core dup guard: a freshly-minted ID-less headline whose content +
+    /// position matches an existing store twin remaps onto that twin — so the
+    /// stale re-write updates in place instead of re-minting (which churns
+    /// identity or, on base desync, duplicates).
+    #[test]
+    fn minted_headline_remaps_onto_positional_twin() {
+        let d = doc();
+        let existing = vec![existing("A", &d, 0, "Prepare personal usage")];
+        let incoming = vec![incoming("B", &d, "Prepare personal usage", true)];
+        let out = compute_idless_remaps(&existing, &incoming);
+        assert_eq!(
+            out.remaps.get(&EntityUri::block("B")),
+            Some(&EntityUri::block("A")),
+            "minted headline must reconcile onto its store twin"
+        );
+        assert!(out.ambiguous.is_empty());
+    }
+
+    /// The flagged caveat: two genuinely-distinct ID-less siblings with
+    /// IDENTICAL content match their two twins 1:1 IN ORDER — never both
+    /// onto the first twin (which would drop one) and never merged.
+    #[test]
+    fn two_identical_idless_siblings_match_1to1() {
+        let d = doc();
+        let existing = vec![existing("A1", &d, 0, "Foo"), existing("A2", &d, 1, "Foo")];
+        let incoming = vec![
+            incoming("B1", &d, "Foo", true),
+            incoming("B2", &d, "Foo", true),
+        ];
+        let out = compute_idless_remaps(&existing, &incoming);
+        assert_eq!(
+            out.remaps.get(&EntityUri::block("B1")),
+            Some(&EntityUri::block("A1"))
+        );
+        assert_eq!(
+            out.remaps.get(&EntityUri::block("B2")),
+            Some(&EntityUri::block("A2"))
+        );
+        assert_eq!(out.remaps.len(), 2, "each sibling maps to its own twin");
+    }
+
+    /// Fresh ingest (no existing twins): two identical ID-less siblings both
+    /// mint (no remap, no false merge) — they stay two distinct blocks.
+    #[test]
+    fn identical_siblings_without_twins_both_mint() {
+        let d = doc();
+        let existing: Vec<ExistingChild> = vec![];
+        let incoming = vec![
+            incoming("B1", &d, "Foo", true),
+            incoming("B2", &d, "Foo", true),
+        ];
+        let out = compute_idless_remaps(&existing, &incoming);
+        assert!(out.remaps.is_empty(), "no twins → nothing to remap");
+        assert!(out.ambiguous.is_empty());
+    }
+
+    /// Surplus: one existing twin, two incoming identical ID-less siblings —
+    /// the first matches positionally, the second is genuine surplus and
+    /// mints.
+    #[test]
+    fn surplus_idless_sibling_mints() {
+        let d = doc();
+        let existing = vec![existing("A1", &d, 0, "Foo")];
+        let incoming = vec![
+            incoming("B1", &d, "Foo", true),
+            incoming("B2", &d, "Foo", true),
+        ];
+        let out = compute_idless_remaps(&existing, &incoming);
+        assert_eq!(
+            out.remaps.get(&EntityUri::block("B1")),
+            Some(&EntityUri::block("A1"))
+        );
+        assert!(!out.remaps.contains_key(&EntityUri::block("B2")));
+        // B2's content matches A1 but A1 is claimed → not ambiguous, just mints.
+        assert!(out.ambiguous.is_empty());
+    }
+
+    /// A content match at a DIFFERENT position is ambiguous: we do NOT guess a
+    /// merge — the id is reported so the caller keeps the mint and WARNs.
+    #[test]
+    fn content_match_at_other_position_is_ambiguous() {
+        let d = doc();
+        let existing = vec![existing("A", &d, 0, "Foo"), existing("X", &d, 1, "Bar")];
+        // Incoming order swapped: Bar at pos0, Foo at pos1.
+        let incoming = vec![
+            incoming("Y", &d, "Bar", true),
+            incoming("B", &d, "Foo", true),
+        ];
+        let out = compute_idless_remaps(&existing, &incoming);
+        assert!(
+            out.remaps.is_empty(),
+            "no positional twins → no remap, got {:?}",
+            out.remaps
+        );
+        let mut amb: Vec<String> = out.ambiguous.iter().map(|u| u.id().to_string()).collect();
+        amb.sort();
+        assert_eq!(amb, vec!["B".to_string(), "Y".to_string()]);
+    }
+
+    /// Nested: a remapped ID-less parent regroups its subtree onto the existing
+    /// parent, so an ID-less child then matches the existing child.
+    #[test]
+    fn nested_child_regroups_after_parent_remap() {
+        let d = doc();
+        let p_old = EntityUri::block("Bp"); // minted parent id this parse
+        let existing = vec![
+            existing("P", &d, 0, "Parent"),
+            existing("C", &EntityUri::block("P"), 0, "Child"),
+        ];
+        let incoming = vec![
+            incoming("Bp", &d, "Parent", true),
+            incoming("Bc", &p_old, "Child", true),
+        ];
+        let out = compute_idless_remaps(&existing, &incoming);
+        assert_eq!(
+            out.remaps.get(&EntityUri::block("Bp")),
+            Some(&EntityUri::block("P"))
+        );
+        assert_eq!(
+            out.remaps.get(&EntityUri::block("Bc")),
+            Some(&EntityUri::block("C")),
+            "child must regroup under the remapped parent and match the store child"
+        );
+    }
+
+    /// An authored (`:ID:`-carrying, non-minted) incoming headline is never
+    /// remapped, even if its content collides with a store sibling — the by-id
+    /// diff owns it.
+    #[test]
+    fn authored_headline_is_never_remapped() {
+        let d = doc();
+        let existing = vec![existing("A", &d, 0, "Foo")];
+        let incoming = vec![incoming("authored", &d, "Foo", false)];
+        let out = compute_idless_remaps(&existing, &incoming);
+        assert!(out.remaps.is_empty());
+        assert!(out.ambiguous.is_empty());
+    }
 }
 
 #[cfg(test)]
