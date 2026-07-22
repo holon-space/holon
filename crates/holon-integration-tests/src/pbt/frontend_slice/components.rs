@@ -222,6 +222,26 @@ pub struct HeadlessFrontendComponent {
     /// `SutClockAdvance` advances THIS clock and re-runs the scheduler's own
     /// `reconcile_clock`, so a day-rollover CDC re-fires the journal rule.
     clock: Option<Arc<holon_api::TestClock>>,
+    /// Per-tick memo of the headless `widget_tree_snapshot` (the expensive
+    /// recursive `interpret_pure` + resample pass). ~12 ViewModel/render
+    /// invariants read the SAME root tree each check tick; without sharing,
+    /// each recomputes the full snapshot — measured at ~96% of per-tick wall
+    /// (median ~1.9s/tick) on the composed keystone. Populated on the first
+    /// snapshot read of a tick, served to the rest, and CLEARED before every
+    /// mutation (`ComposedSlice::invalidate_render_caches`, called in the
+    /// harness `apply` BEFORE `apply_transition`). Because the memo is empty
+    /// throughout every mutate+settle window, it can only ever hold a snapshot
+    /// of already-settled state — a stale frame is unrepresentable.
+    ///
+    /// Only consulted/populated when `render_cache_enabled` is set (armed by
+    /// the composed builder, whose harness guarantees the before-mutation
+    /// invalidation contract). OFF for every other consumer of this component
+    /// (e.g. the frontend structural slice), which recomputes each snapshot as
+    /// before — so no consumer can accidentally observe a stale memo.
+    render_snapshot_cache: Mutex<Option<WidgetSnapshot>>,
+    /// Arms `render_snapshot_cache`. OFF by default; the composed builder turns
+    /// it on via `enable_render_cache` after boot.
+    render_cache_enabled: std::sync::atomic::AtomicBool,
 }
 
 impl HeadlessFrontendComponent {
@@ -625,6 +645,8 @@ impl HeadlessFrontendComponent {
             current_view: Mutex::new("all".to_string()),
             resolver: std::sync::OnceLock::new(),
             clock,
+            render_snapshot_cache: Mutex::new(None),
+            render_cache_enabled: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -644,6 +666,33 @@ impl HeadlessFrontendComponent {
     /// attaches the window as a pure renderer (§ Round 5).
     pub(crate) fn session(&self) -> Arc<FrontendSession> {
         self.session.clone()
+    }
+
+    /// Drop the per-tick `widget_tree_snapshot` memo. Invoked before every SUT
+    /// mutation (`ComposedSlice::invalidate_render_caches`, called in the
+    /// harness `apply` just before `apply_transition`), so the memo is
+    /// empty across the entire mutate+settle window and can never serve a
+    /// pre-mutation frame.
+    pub(crate) fn invalidate_render_cache(&self) {
+        *self
+            .render_snapshot_cache
+            .lock()
+            .expect("render cache lock") = None;
+    }
+
+    /// Arm the per-tick `widget_tree_snapshot` memo. Called by the composed
+    /// builder after boot; the composed harness then invalidates the memo
+    /// before every mutation, so an armed memo only ever caches settled state.
+    /// Left OFF for standalone consumers of this component.
+    pub(crate) fn enable_render_cache(&self) {
+        // Escape hatch / A-B toggle: `HOLON_PBT_RENDER_CACHE=0` keeps the memo
+        // OFF so a run recomputes every snapshot exactly as it did before the
+        // memo existed (used to prove the memo is behaviour-preserving).
+        if std::env::var("HOLON_PBT_RENDER_CACHE").as_deref() == Ok("0") {
+            return;
+        }
+        self.render_cache_enabled
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// The production `ReactiveEngine` (the `BuilderServices` host). The wide
@@ -1171,6 +1220,25 @@ impl SutRenderer for HeadlessFrontendComponent {
     }
 
     async fn widget_tree_snapshot(&self) -> WidgetSnapshot {
+        // Per-tick memo (see `render_snapshot_cache` docs): when ARMED on the
+        // composed path, all snapshot-reading invariants in one check tick share
+        // ONE recompute. OFF by default, so every other consumer recomputes the
+        // snapshot exactly as before — no stale-frame risk. The composed harness
+        // clears the memo before each mutation, so an armed memo only ever holds
+        // settled state.
+        let armed = self
+            .render_cache_enabled
+            .load(std::sync::atomic::Ordering::Acquire);
+        if armed {
+            if let Some(cached) = self
+                .render_snapshot_cache
+                .lock()
+                .expect("render cache lock")
+                .clone()
+            {
+                return cached;
+            }
+        }
         let empty = || WidgetSnapshot {
             kind: "empty".into(),
             entity_id: None,
@@ -1180,7 +1248,14 @@ impl SutRenderer for HeadlessFrontendComponent {
         };
         let root_uri = holon_api::root_layout_block_uri();
         if self.resolve_watch(&root_uri).await.is_none() {
-            return empty();
+            let out = empty();
+            if armed {
+                *self
+                    .render_snapshot_cache
+                    .lock()
+                    .expect("render cache lock") = Some(out.clone());
+            }
+            return out;
         }
         // Resolve the FULL tree via the engine's RECURSIVE `snapshot` — NOT the
         // shallow `interpret_pure` (whose `live_block` regions stay placeholders).
@@ -1215,14 +1290,28 @@ impl SutRenderer for HeadlessFrontendComponent {
                 // the cautious exit (4 stable samples at 120 ms) so slow
                 // watch delivery isn't cut short.
                 if pending == 0 || stable >= 4 {
-                    return inject_display_placed(snap);
+                    let out = inject_display_placed(snap);
+                    if armed {
+                        *self
+                            .render_snapshot_cache
+                            .lock()
+                            .expect("render cache lock") = Some(out.clone());
+                    }
+                    return out;
                 }
             } else {
                 stable = 0;
                 last = (total, pending);
             }
             if tokio::time::Instant::now() >= deadline {
-                return inject_display_placed(snap);
+                let out = inject_display_placed(snap);
+                if armed {
+                    *self
+                        .render_snapshot_cache
+                        .lock()
+                        .expect("render cache lock") = Some(out.clone());
+                }
+                return out;
             }
             // Keep the proven 120 ms cadence: each resample drives
             // `ensure_watching` (watch views + SQL), and sampling faster was
