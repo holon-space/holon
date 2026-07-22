@@ -33,6 +33,20 @@ Based on: https://www.harudagondi.space/blog/parse-dont-validate-and-type-driven
 - Be suspicious of `match str.as_str() { ... }` scattered across multiple files — it's a sign that a string should be an enum
 - Be suspicious of `.ok()` or `_ => default` on parse results — this silently swallows invalid data. Fail loudly at the boundary instead.
 
+# VCS: how PRs get "merged" (linear history, no GitHub merges)
+
+We never merge PRs through the GitHub UI (no merge commits, no squash-merges).
+Instead:
+1. Incorporate the PR branch's changes into the linear integration chain
+   (stacked-workstreams weave onto `integration`, gates green), then land so
+   `main` advances along the straight line.
+2. Re-point the PR's bookmark to the corresponding rev IN the landed linear
+   chain (`jj bookmark set <name> -r <rev-in-chain> --allow-backwards` if
+   needed) and push BOTH `main` and the updated bookmark.
+3. GitHub then sees the PR's head as reachable from `main` and marks the PR
+   merged on its own — we keep a clean linear history AND GitHub's PR
+   bookkeeping.
+
 # `holon` MCP
 
 Every frontend automatically launches an MCP server which is available to you as `holon`.
