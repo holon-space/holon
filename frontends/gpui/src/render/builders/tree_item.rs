@@ -325,7 +325,14 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     }
 
     if let Some(node) = content {
-        row = row.child(div().flex_1().child(node));
+        // `min_w(0)` is load-bearing: a flex item defaults to `min-width: auto`
+        // (its content's intrinsic min size), so without this the content
+        // wrapper refuses to shrink below the natural width of a long line and
+        // the `w_full` text inside never gets a bounded width to wrap against —
+        // long block content ran off the right edge instead of reflowing
+        // (BugFunnel 2026-07-22, dogfood). With `min_w(0)` the wrapper can
+        // shrink to the row's available width and the text wraps.
+        row = row.child(div().flex_1().min_w(px(0.0)).child(node));
     }
 
     // Scope the hover to the whole row: hovering anywhere on the row reveals
