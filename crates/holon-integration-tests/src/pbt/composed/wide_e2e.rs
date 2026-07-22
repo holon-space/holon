@@ -131,10 +131,16 @@ impl WideHandle {
     /// engine/frontend so its per-apply settle converges the same three
     /// projections as the headless path.
     pub fn from_bundle(bundle: &crate::pbt::composed::builder::ComposedSut) -> Self {
-        Self {
+        let handle = Self {
             engine: bundle.engine.clone(),
             frontend: bundle.frontend.clone(),
+        };
+        // Arm the per-tick snapshot memo — the WideE2E harness clears it before
+        // every mutation, so an armed memo only ever caches settled state.
+        if let Some(frontend) = &handle.frontend {
+            frontend.enable_render_cache();
         }
+        handle
     }
 }
 
@@ -839,6 +845,11 @@ pub async fn boot_and_seed_wide(
         engine: bundle.engine.clone(),
         frontend: bundle.frontend.clone(),
     };
+    // Arm the per-tick snapshot memo now that the WideE2E harness (which clears
+    // it before every mutation) owns this component — see `WideHandle`.
+    if let Some(frontend) = &handle.frontend {
+        frontend.enable_render_cache();
+    }
     let mut caps = bundle.caps;
 
     // Scale-soak: drain the WHOLE seeded vault into `block_raw` BEFORE the scaffold
@@ -1428,6 +1439,16 @@ impl ComposedSlice for WideE2E {
     /// so it never over-waits vs the old sleep.
     async fn settle_after_apply(handle: &WideHandle, _: &CapMap) {
         converge_projections(handle, crate::pbt::composed::soak_seed::soak_settle()).await;
+    }
+
+    /// Clear the frontend component's per-tick `widget_tree_snapshot` memo
+    /// before the next mutation, so the ~12 snapshot-reading ViewModel/render
+    /// invariants share ONE recompute per settle tick without ever observing a
+    /// pre-mutation frame. No-op for a Loro-only (non-frontend) draw.
+    fn invalidate_render_caches(handle: &WideHandle) {
+        if let Some(comp) = &handle.frontend {
+            comp.invalidate_render_cache();
+        }
     }
 
     async fn apply_transition(

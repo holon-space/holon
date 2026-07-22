@@ -256,6 +256,16 @@ pub trait ComposedSlice {
         tokio::time::sleep(Self::SETTLE).await;
     }
 
+    /// Invalidate any per-tick render memo the SUT holds, called in `apply`
+    /// immediately BEFORE `apply_transition` — i.e. before the state mutates.
+    /// Default: nothing (a synchronous store has no memo). `WideE2E` clears the
+    /// frontend component's `widget_tree_snapshot` cache so that ~12
+    /// snapshot-reading invariants share ONE recompute per tick (the snapshot
+    /// is the same settled tree for all of them) while a stale frame stays
+    /// unrepresentable: the memo is empty across the whole mutate+settle window
+    /// and only ever repopulated by the first check-time read of settled state.
+    fn invalidate_render_caches(_: &Self::Handle) {}
+
     /// Align SUT-minted ids with the oracle. Called once after `build` (the
     /// initial seed) and after every apply. Default: nothing — the
     /// harness's generic per-tick reconcile already maps a uuid-minting
@@ -546,6 +556,11 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             let handle = &sut.handle;
             sut.rt.block_on(async move {
                 let before = sut_ids(caps).await;
+                // Drop the SUT's per-tick render memo BEFORE mutating, so the
+                // snapshot the invariants read this tick is recomputed against
+                // the post-transition settled state (never a stale pre-mutation
+                // frame). No-op for slices without a render memo.
+                S::invalidate_render_caches(handle);
                 let t_action = std::time::Instant::now();
                 S::apply_transition(&transition, ref_state, caps).await;
                 S::settle_after_apply(handle, caps).await;
