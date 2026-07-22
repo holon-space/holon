@@ -27,6 +27,16 @@ use super::traits::TypeDefinition;
 use super::traits::value_to_turso;
 use crate::storage::DbHandle;
 
+/// Double-quote a SQL identifier (table or column name) so identifiers that
+/// collide with SQL keywords (`end`, `order`, `primary`, …) are accepted by
+/// the engine. Every identifier the cache interpolates into generated SQL —
+/// CREATE, INSERT, SELECT, DELETE, ON CONFLICT targets, and `excluded.*`
+/// references — goes through here, mirroring the quoting
+/// `TypeDefinition::to_create_table_sql` already applies.
+fn q(ident: &str) -> String {
+    format!("\"{ident}\"")
+}
+
 /// A queryable cache backed by DbHandle (SQLite via database actor).
 ///
 /// QueryableCache receives data exclusively through change streams
@@ -211,16 +221,18 @@ where
 
         let update_clause = columns
             .iter()
-            .map(|c| format!("{} = excluded.{}", c, c))
+            .map(|c| format!("{} = excluded.{}", q(c), q(c)))
             .collect::<Vec<_>>()
             .join(", ");
 
+        let quoted_columns = columns.iter().map(|c| q(c)).collect::<Vec<_>>().join(", ");
+
         let sql = format!(
             "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT({}) DO UPDATE SET {}",
-            type_def.name,
-            columns.join(", "),
+            q(&type_def.name),
+            quoted_columns,
             placeholders.join(", "),
-            id_field,
+            q(id_field),
             update_clause
         );
 
@@ -242,7 +254,8 @@ where
 
         let sql = format!(
             "SELECT * FROM {} WHERE {} = $id LIMIT 1",
-            type_def.name, id_field
+            q(&type_def.name),
+            q(id_field)
         );
 
         let mut params = std::collections::HashMap::new();
@@ -274,7 +287,11 @@ where
             .map(|f| f.name.as_str())
             .expect("schema must have a primary_key field");
 
-        let sql = format!("DELETE FROM {} WHERE {} = ?", type_def.name, id_field);
+        let sql = format!(
+            "DELETE FROM {} WHERE {} = ?",
+            q(&type_def.name),
+            q(id_field)
+        );
         let params = vec![turso::Value::Text(id.to_string())];
 
         self.db_handle
@@ -300,7 +317,7 @@ where
             .map(|f| f.name.clone())
             .expect("schema must have a primary_key field");
 
-        let sql = format!("SELECT {} FROM {}", id_field, self.type_def.name);
+        let sql = format!("SELECT {} FROM {}", q(&id_field), q(&self.type_def.name));
         let rows = self
             .db_handle
             .query_positional(&sql, vec![])
@@ -324,7 +341,7 @@ where
     pub async fn clear(&self) -> Result<()> {
         let type_def = self.type_def.clone();
         let table_name = &type_def.name;
-        let sql = format!("DELETE FROM {}", table_name);
+        let sql = format!("DELETE FROM {}", q(table_name));
 
         self.db_handle
             .execute(&sql, vec![])
@@ -741,9 +758,10 @@ where
         let placeholders: Vec<&str> = (0..columns.len()).map(|_| "?").collect();
         let update_clause = columns
             .iter()
-            .map(|c| format!("{} = excluded.{}", c, c))
+            .map(|c| format!("{} = excluded.{}", q(c), q(c)))
             .collect::<Vec<_>>()
             .join(", ");
+        let quoted_columns = columns.iter().map(|c| q(c)).collect::<Vec<_>>().join(", ");
 
         // Created events use INSERT OR IGNORE: if a row with the same id OR any
         // other UNIQUE constraint (e.g., parent_id+name for documents) already exists,
@@ -751,19 +769,19 @@ where
         // block is re-created with a new UUID while the old one still exists.
         let insert_ignore_sql = format!(
             "INSERT OR IGNORE INTO {} ({}) VALUES ({})",
-            table_name,
-            columns.join(", "),
+            q(table_name),
+            quoted_columns,
             placeholders.join(", "),
         );
         let upsert_sql = format!(
             "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT({}) DO UPDATE SET {}",
-            table_name,
-            columns.join(", "),
+            q(table_name),
+            quoted_columns,
             placeholders.join(", "),
-            id_field,
+            q(id_field),
             update_clause
         );
-        let delete_sql = format!("DELETE FROM {} WHERE {} = ?", table_name, id_field);
+        let delete_sql = format!("DELETE FROM {} WHERE {} = ?", q(table_name), q(id_field));
 
         // Build statements for each change
         for change in changes {
@@ -919,9 +937,13 @@ where
         params: Vec<holon_api::Value>,
     ) -> Result<Vec<StorageEntity>> {
         let sql = if where_sql.is_empty() {
-            format!("SELECT * FROM {}", self.type_def.name)
+            format!("SELECT * FROM {}", q(&self.type_def.name))
         } else {
-            format!("SELECT * FROM {} WHERE {}", self.type_def.name, where_sql)
+            format!(
+                "SELECT * FROM {} WHERE {}",
+                q(&self.type_def.name),
+                where_sql
+            )
         };
         let params: Vec<turso::Value> = params.iter().map(value_to_turso).collect();
         self.db_handle
@@ -1009,7 +1031,7 @@ where
 {
     async fn get_all(&self) -> Result<Vec<T>> {
         let type_def = self.type_def.clone();
-        let sql = format!("SELECT * FROM {}", type_def.name);
+        let sql = format!("SELECT * FROM {}", q(&type_def.name));
 
         let rows = self
             .db_handle
@@ -1236,7 +1258,7 @@ fn generate_create_table_sql_with_change_origin(type_def: &TypeDefinition) -> St
 
     let mut columns = Vec::new();
     for field in &type_def.fields {
-        let mut col = format!("{} {}", field.name, field.sql_type);
+        let mut col = format!("{} {}", q(&field.name), field.sql_type);
         if field.primary_key && inline_pk {
             col.push_str(" PRIMARY KEY");
         }
@@ -1247,21 +1269,21 @@ fn generate_create_table_sql_with_change_origin(type_def: &TypeDefinition) -> St
     }
 
     // Add _change_origin column for trace context propagation
-    columns.push(format!("{} TEXT", CHANGE_ORIGIN_COLUMN));
+    columns.push(format!("{} TEXT", q(CHANGE_ORIGIN_COLUMN)));
 
     if pk_count >= 2 {
-        let pk_cols: Vec<&str> = type_def
+        let pk_cols: Vec<String> = type_def
             .fields
             .iter()
             .filter(|f| f.primary_key)
-            .map(|f| f.name.as_str())
+            .map(|f| q(&f.name))
             .collect();
         columns.push(format!("PRIMARY KEY ({})", pk_cols.join(", ")));
     }
 
     format!(
         "CREATE TABLE IF NOT EXISTS {} (\n  {}\n)",
-        type_def.name,
+        q(&type_def.name),
         columns.join(",\n  ")
     )
 }
@@ -1359,6 +1381,54 @@ mod tests {
         }
     }
 
+    /// A row whose columns are all SQL keywords (`end`, `order`) plus a
+    /// keyword-named indexed column, used to prove the QueryableCache SQL path
+    /// quotes identifiers everywhere (CREATE/INSERT/SELECT/DELETE/batch).
+    #[derive(Debug, Clone, PartialEq)]
+    struct KeywordRow {
+        id: String,
+        end: String,
+        order: i64,
+    }
+
+    impl holon_api::entity::IntoEntity for KeywordRow {
+        fn to_entity(&self) -> DynamicEntity {
+            DynamicEntity::new("keyword_row")
+                .with_field("id", self.id.clone())
+                .with_field("end", self.end.clone())
+                .with_field("order", self.order)
+        }
+
+        fn type_definition() -> TypeDefinition {
+            KeywordRow::type_definition()
+        }
+    }
+
+    impl holon_api::entity::TryFromEntity for KeywordRow {
+        fn from_entity(entity: DynamicEntity) -> Result<Self> {
+            Ok(KeywordRow {
+                id: entity.get_string("id").ok_or("Missing id")?,
+                end: entity.get_string("end").ok_or("Missing end")?,
+                order: entity.get_i64("order").ok_or("Missing order")?,
+            })
+        }
+    }
+
+    impl KeywordRow {
+        fn type_definition() -> TypeDefinition {
+            // `end` and `order` are SQLite reserved keywords; `end` is also
+            // indexed so the CREATE INDEX path is exercised too.
+            TypeDefinition::new(
+                "keyword_row",
+                vec![
+                    FieldSchema::new("id", "TEXT").primary_key(),
+                    FieldSchema::new("end", "TEXT").indexed(),
+                    FieldSchema::new("order", "INTEGER"),
+                ],
+            )
+        }
+    }
+
     /// Create a test DbHandle for testing QueryableCache.
     async fn create_test_db_handle() -> DbHandle {
         use crate::storage::turso::TursoBackend;
@@ -1384,6 +1454,74 @@ mod tests {
             QueryableCache::new(db_handle, TestTask::type_definition())
                 .await
                 .unwrap();
+    }
+
+    /// The whole QueryableCache SQL path must accept keyword-named columns:
+    /// CREATE TABLE + CREATE INDEX (cache construction), single-row INSERT and
+    /// SELECT (upsert / get_by_id), batch INSERT (apply_batch), SELECT * and
+    /// DELETE. Before quoting, this failed at CREATE with a syntax error on the
+    /// bare `end` column; quoting only CREATE would merely relocate the break
+    /// to INSERT, so the test drives every producer end-to-end.
+    #[tokio::test]
+    async fn keyword_named_columns_work_end_to_end() {
+        let db_handle = create_test_db_handle().await;
+
+        // CREATE TABLE + CREATE INDEX path.
+        let cache: QueryableCache<KeywordRow> =
+            QueryableCache::new(db_handle, KeywordRow::type_definition())
+                .await
+                .expect("keyword-named columns must produce valid CREATE TABLE/INDEX");
+
+        let row = KeywordRow {
+            id: "1".to_string(),
+            end: "2026-01-01".to_string(),
+            order: 7,
+        };
+
+        // Single-row INSERT/UPSERT path.
+        cache
+            .upsert_to_cache(&row)
+            .await
+            .expect("upsert must quote keyword columns");
+
+        // Single-row SELECT path.
+        let got = cache
+            .get_by_id("1")
+            .await
+            .expect("select must quote keyword columns");
+        assert_eq!(got, Some(row.clone()));
+
+        // Batch INSERT path (build_batch_statements).
+        let row2 = KeywordRow {
+            id: "2".to_string(),
+            end: "2026-02-02".to_string(),
+            order: 9,
+        };
+        cache
+            .apply_batch(
+                &[Change::Created {
+                    data: row2.clone(),
+                    origin: ChangeOrigin::local_with_current_span(),
+                }],
+                None,
+            )
+            .await
+            .expect("batch insert must quote keyword columns");
+
+        // SELECT * path.
+        let mut all = cache
+            .get_all()
+            .await
+            .expect("select-all must quote keyword columns");
+        all.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(all, vec![row.clone(), row2.clone()]);
+
+        // DELETE path.
+        cache
+            .delete_from_cache("1")
+            .await
+            .expect("delete must quote keyword columns");
+        assert_eq!(cache.get_by_id("1").await.unwrap(), None);
     }
 
     #[tokio::test]
