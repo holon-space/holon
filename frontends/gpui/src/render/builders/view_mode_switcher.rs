@@ -27,7 +27,11 @@ fn parse_modes(json: &str) -> Vec<ModeDesc> {
         .collect()
 }
 
-pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
+/// The absolutely-positioned mode-switcher icon bar (top-right overlay), or
+/// `None` when the node declares no modes. Shared by both the definite-height
+/// `render` path and the content-height `render_content_height` path so the
+/// click-to-switch behaviour is identical in either layout context.
+fn build_switcher_bar(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Option<gpui::Div> {
     let entity_uri_str = node
         .prop_str("entity_uri")
         .unwrap_or_else(|| "unknown".to_string());
@@ -39,12 +43,11 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
         .as_ref()
         .expect("view_mode_switcher requires a slot");
 
-    // active_mode and mode_templates are stored in props
     let active_mode_prop = node.prop_str("active_mode").unwrap_or_default();
     let render_ctx = node.render_ctx.as_ref();
 
     // Shadow builder stores mode templates as individual `tmpl_mode_*` props,
-    // each a JSON-serialized RenderExpr. Reconstruct the mode → expr map.
+    // each a JSON-serialized RenderExpr. Reconstruct the mode -> expr map.
     let mode_templates: std::collections::HashMap<String, holon_api::render_types::RenderExpr> = {
         let props = node.props.lock_ref();
         // ALLOW(filter_map_ok): malformed tmpl_ props are non-fatal reconstruction
@@ -54,7 +57,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
             .filter_map(|(k, v)| {
                 let mode_key = k.strip_prefix("tmpl_")?;
                 if let holon_api::Value::String(s) = v {
-                    // ALLOW(ok): see ALLOW(filter_map_ok) above — same rationale
+                    // ALLOW(ok): see ALLOW(filter_map_ok) above -- same rationale
                     serde_json::from_str::<holon_api::render_types::RenderExpr>(s)
                         .ok()
                         .map(|expr| (mode_key.to_string(), expr))
@@ -65,12 +68,9 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
             .collect()
     };
 
-    let slot_content = slot.content.lock_ref().clone();
-    let child_el = super::render(&slot_content, ctx);
-
     let mode_list = parse_modes(&modes);
     if mode_list.is_empty() {
-        return child_el;
+        return None;
     }
 
     // Use a Mutable for active_mode tracking if we have one stored,
@@ -163,13 +163,29 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
         icons_row = icons_row.child(tracked_button);
     }
 
-    let switcher_bar = div()
-        .absolute()
-        .top_0()
-        .right_0()
-        .pr(px(4.0))
-        .pt(px(2.0))
-        .child(icons_row);
+    Some(
+        div()
+            .absolute()
+            .top_0()
+            .right_0()
+            .pr(px(4.0))
+            .pt(px(2.0))
+            .child(icons_row),
+    )
+}
+
+pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
+    let slot = node
+        .slot
+        .as_ref()
+        .expect("view_mode_switcher requires a slot");
+    let slot_content = slot.content.lock_ref().clone();
+    let child_el = super::render(&slot_content, ctx);
+
+    let Some(switcher_bar) = build_switcher_bar(node, ctx) else {
+        // No modes -> nothing to switch; render the slot content directly.
+        return child_el;
+    };
 
     let slot_wrapper = div().flex_1().relative().child(
         div()
@@ -188,4 +204,35 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
         .child(slot_wrapper)
         .child(switcher_bar)
         .into_any_element()
+}
+
+/// Content-height variant used when a `view_mode_switcher` is a stacked child
+/// of a `column` (the seeded main panel: `column(collection_view(), divider(),
+/// header, live_query(backlinks))`). The default `render` path makes the outer
+/// element `size_full` and absolutely-positions the slot content to fill it,
+/// which resolves to 0 height in a content-sized `column` — so the outline
+/// vanished, leaving only the divider + backlinks header (BugFunnel
+/// 2026-07-22). Here the slot collection is rendered eagerly at content height
+/// (proven sidebar pattern) with the mode-switcher bar overlaid.
+pub(crate) fn render_content_height(
+    node: &ReactiveViewModel,
+    ctx: &GpuiRenderContext,
+) -> AnyElement {
+    let slot = node
+        .slot
+        .as_ref()
+        .expect("view_mode_switcher requires a slot");
+    let slot_content = slot.content.lock_ref().clone();
+    let content: AnyElement = match slot_content.collection.as_ref() {
+        Some(view) => super::column::eager_collection_div(view, ctx).into_any_element(),
+        // Slot is not a collection (unexpected in the composed path) -- fall
+        // back to the normal render of the slot content rather than dropping it.
+        None => super::render(&slot_content, ctx),
+    };
+
+    let mut container = div().flex().flex_col().w_full().relative().child(content);
+    if let Some(switcher_bar) = build_switcher_bar(node, ctx) {
+        container = container.child(switcher_bar);
+    }
+    container.into_any_element()
 }

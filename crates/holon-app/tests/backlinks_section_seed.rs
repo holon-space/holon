@@ -52,12 +52,27 @@ use holon_api::Value;
 
 const MAIN_PANEL_ID: &str = "block:default-main-panel";
 
-/// The exact query the seeded Linked-references section runs — kept in sync
-/// with `assets/default/index.org`. Backlinks for the block the main region is
-/// currently focused on (`focus_roots` region='main').
-const SECTION_SQL: &str = "SELECT bl.id AS id, bl.content AS content, bl.parent_id \
-     AS parent_id FROM backlinks bl JOIN focus_roots fr ON fr.region = 'main' \
-     WHERE bl.target_id = fr.root_id ORDER BY bl.content ASC";
+/// Extract the backlinks `live_query` SQL from the *seeded* main-panel render
+/// content — the actual shipped query, not a hand-copied duplicate. Binds this
+/// guard to `assets/default/index.org` so a drift in the section SQL can no
+/// longer slip past the test (the prior hardcoded `SECTION_SQL` const could).
+///
+/// The main-panel render composes exactly one `live_query(#{sql: "..."})` (the
+/// backlinks section), so scanning for the first `sql: "..."` string literal is
+/// unambiguous. The seeded SQL uses single-quoted string literals (`'main'`),
+/// so the closing double-quote is the section boundary.
+fn extract_backlinks_sql(render_content: &str) -> String {
+    let key = "sql: \"";
+    let start = render_content
+        .find(key)
+        .expect("main-panel render must contain a live_query sql literal")
+        + key.len();
+    let rest = &render_content[start..];
+    let end = rest
+        .find('"')
+        .expect("live_query sql literal must be terminated by a double quote");
+    rest[..end].to_string()
+}
 
 fn runtime() -> Arc<tokio::runtime::Runtime> {
     Arc::new(
@@ -186,9 +201,9 @@ async fn focus_main(db: &holon::storage::DbHandle, block_local: &str) {
     .expect("insert main focus row");
 }
 
-async fn section_result_ids(db: &holon::storage::DbHandle) -> Vec<String> {
+async fn section_result_ids(db: &holon::storage::DbHandle, sql: &str) -> Vec<String> {
     let rows = db
-        .query(SECTION_SQL, HashMap::new())
+        .query(sql, HashMap::new())
         .await
         .expect("backlinks section query must compile and run (fail loud, not empty)");
     rows.into_iter()
@@ -305,17 +320,120 @@ fn backlinks_query_lists_incoming_links_for_focused_page() {
 
         let db = engine.db_handle();
 
+        // Bind the executed query to the SEEDED asset, not a hand-copied const.
+        let render = main_panel_render_content(&db)
+            .await
+            .expect("main panel must have a seeded render block after fresh seed");
+        let section_sql = extract_backlinks_sql(&render);
+
         focus_main(&db, "alice").await;
         assert_eq!(
-            section_result_ids(&db).await,
+            section_result_ids(&db, &section_sql).await,
             vec!["block:ref-a".to_string(), "block:ref-b".to_string()],
             "focused on alice → its incoming links, ordered by content (alpha, beta)"
         );
 
         focus_main(&db, "bob").await;
         assert!(
-            section_result_ids(&db).await.is_empty(),
+            section_result_ids(&db, &section_sql).await.is_empty(),
             "focused on bob (no incoming links) → empty section, never fabricated"
+        );
+    });
+}
+
+/// Corpus guard: EVERY query source block shipped in the default seed
+/// (`holon_sql` / `holon_gql` / `holon_prql`) must compile to SQL and execute
+/// against a freshly-booted, freshly-seeded vault. Compile-only is the floor;
+/// this goes to the delivery floor — the query actually runs (empty result is
+/// fine; a compile or execution error is not).
+///
+/// This is the coverage that would have caught a seeded query body silently
+/// rotting (BugFunnel 2026-07-22 landmine 1: the main-panel recursive-CTE that
+/// never delivered). It binds directly to the SEEDED asset content (read back
+/// from the DB after `seed_default_layout`), so it auto-covers new src blocks
+/// with no test edit. It CANNOT catch the vault-scale never-deliver pathology
+/// (that only bites at ~real-vault size) — see the BugFunnel row.
+#[test]
+fn every_seeded_source_block_compiles_and_executes_against_booted_vault() {
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (engine, ordering) = fresh_engine(dir.path().join("fresh.db")).await;
+        holon_app::seed_default_layout(&engine, ordering, false)
+            .await
+            .expect("seed_default_layout");
+
+        let db = engine.db_handle();
+        let rows = db
+            .query(
+                &format!(
+                    "SELECT id, source_language, content FROM {BLOCK_READ_TABLE} \
+                     WHERE content_type = 'source' AND source_language IN \
+                     ('holon_sql', 'holon_gql', 'holon_prql')"
+                ),
+                HashMap::new(),
+            )
+            .await
+            .expect("query seeded source blocks");
+
+        assert!(
+            !rows.is_empty(),
+            "expected the default seed to contain query source blocks"
+        );
+
+        let mut failures: Vec<String> = Vec::new();
+        for row in &rows {
+            let id = row
+                .get("id")
+                .and_then(|v| v.as_string())
+                .expect("source block row has id")
+                .to_string();
+            let lang_str = row
+                .get("source_language")
+                .and_then(|v| v.as_string())
+                .expect("source block row has source_language")
+                .to_string();
+            let body = row
+                .get("content")
+                .and_then(|v| v.as_string())
+                .expect("source block row has content")
+                .to_string();
+
+            let lang: holon_api::QueryLanguage = match lang_str.parse() {
+                Ok(l) => l,
+                Err(e) => {
+                    failures.push(format!(
+                        "{id}: unparseable source_language {lang_str:?}: {e}"
+                    ));
+                    continue;
+                }
+            };
+
+            let sql = match engine.compile_to_sql(&body, lang) {
+                Ok(sql) => sql,
+                Err(e) => {
+                    failures.push(format!(
+                        "{id} ({lang_str}): compile failed: {e}\n    {body}"
+                    ));
+                    continue;
+                }
+            };
+
+            if let Err(e) = engine
+                .execute_query(sql.clone(), HashMap::new(), None)
+                .await
+            {
+                failures.push(format!(
+                    "{id} ({lang_str}): execute failed: {e}\n    body: {body}\n    sql: {sql}"
+                ));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "seeded query source blocks failed to compile/execute against a booted \
+             vault (seed rot):\n{}",
+            failures.join("\n")
         );
     });
 }
