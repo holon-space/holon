@@ -40,9 +40,23 @@ use crate::share_ui::ShareTrigger;
 
 /// A persistent GPUI view for an editable text field.
 ///
-/// Thin wrapper around `EditorViewModel` (framework-agnostic logic).
-/// GPUI-specific responsibilities: InputState entity, GPUI action capture,
-/// popup overlay rendering, signal watching, cursor manipulation.
+/// Thin render/IO adapter, NOT a buffer owner. `EditorView` translates GPUI
+/// input events into `EditorViewModel` calls and reflects the VM's decisions
+/// back into the `InputState` entity it drives — it holds no buffer text and
+/// no sequence counter of its own (the `previous_text` / `last_local_seq`
+/// authority fields were removed in Increment 2).
+///
+/// Authority split:
+/// - `EditorViewModel` (framework-agnostic) owns the buffer, the local write
+///   sequence, and the echo/convergence policy that decides when an incoming
+///   external value is adopted, converged, or ignored as a self-echo.
+/// - `EditorView` owns only GPUI/window state: the `InputState` entity, GPUI
+///   action capture, IME (`EntityInputHandler`) wiring, window focus, the
+///   slash/link popup overlay, and the subscriptions that splice external
+///   row/peer/remote-delta updates into `InputState` off the render path.
+///
+/// The render path never mutates the buffer: it reads VM decisions and applies
+/// them to `InputState`, keeping the VM the single source of truth for text.
 pub struct EditorView {
     input: Entity<InputState>,
     controller: Arc<Mutex<EditorViewModel>>,
