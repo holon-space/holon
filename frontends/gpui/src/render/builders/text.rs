@@ -119,8 +119,9 @@ fn resolve_color(ctx: &GpuiRenderContext, color_name: &str) -> Hsla {
 
 /// Convert mark spans (Unicode-scalar offsets) into a sorted, non-overlapping
 /// list of `(byte_range, HighlightStyle)` pairs suitable for
-/// `StyledText::with_highlights`.
-fn build_highlights(
+/// `StyledText::with_highlights`. Shared with the `rendered_text` read-mode
+/// builder so both read paths style marks identically.
+pub(crate) fn build_highlights(
     text: &str,
     marks: &[MarkSpan],
     ctx: &GpuiRenderContext,
