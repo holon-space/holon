@@ -1339,6 +1339,44 @@ impl Render for HolonApp {
             }
         }
 
+        // Full-window capture surface for an in-progress sidebar drag-resize.
+        // Present ONLY while the handle is held (drag global active) so it never
+        // intercepts normal input; it tracks the cursor beyond the 12px grip and
+        // finalizes on release (persist width, or toggle if it was a plain
+        // click). Mounted here so it sits above the content it resizes.
+        if cx
+            .try_global::<crate::render::builders::SidebarResizeState>()
+            .is_some_and(|s| s.active.is_some())
+        {
+            let move_services = services.clone();
+            let up_services = services.clone();
+            page = page.child(
+                div()
+                    .id("sidebar-resize-capture")
+                    .absolute()
+                    .inset_0()
+                    .size_full()
+                    .cursor_col_resize()
+                    .on_mouse_move(move |ev, window, cx| {
+                        if ev.dragging() {
+                            let cursor_x = f32::from(ev.position.x);
+                            let viewport_width = f32::from(window.viewport_size().width);
+                            if crate::render::builders::drag_sidebar_to(
+                                &*move_services,
+                                cursor_x,
+                                viewport_width,
+                                cx,
+                            ) {
+                                window.refresh();
+                            }
+                        }
+                    })
+                    .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                        crate::render::builders::finalize_sidebar_resize(&*up_services, window, cx);
+                    }),
+            );
+        }
+
         // Live-oracle violation banner (debug builds) — rendered LAST so it
         // sits on top of everything: a violation must be impossible to miss.
         #[cfg(debug_assertions)]

@@ -575,6 +575,29 @@ impl<T> FrontendSession<T> {
         });
     }
 
+    /// Set a widget's stored width.
+    ///
+    /// `persist == false` mutates the in-memory config only — used for the
+    /// per-frame updates of a live drag-resize, where writing `holon.toml` on
+    /// every mouse-move would hammer the disk. `persist == true` writes through
+    /// to disk (call it once, on drag release) so the chosen width survives a
+    /// restart.
+    pub fn set_widget_width(&self, block_id: &str, width: f32, persist: bool) {
+        if persist {
+            self.update_ui_settings(|s| {
+                s.widgets.entry(block_id.to_string()).or_default().width = Some(width);
+            });
+        } else {
+            let mut guard = self.holon_config.lock().unwrap();
+            guard
+                .ui
+                .widgets
+                .entry(block_id.to_string())
+                .or_default()
+                .width = Some(width);
+        }
+    }
+
     // =========================================================================
     // Preferences API
     // =========================================================================
