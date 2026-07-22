@@ -786,6 +786,20 @@ pub async fn run_file_sync_controller(
             error!("[OrgMode] fileless-page materialization failed: {}", e);
             failures.push((root_directory.clone(), e));
         }
+        // Store-health sweep (BugFunnel row 295): repair title-less
+        // (empty-content) `Page` doc-roots left by a broken convert/delete.
+        // UNCONDITIONAL, after the scan — the ingest byte-identity fast-path skips
+        // unchanged degraded files, so their heal cannot live in ingest; it is a
+        // separate store-health concern owned by this one sweep (which reaches the
+        // same heal implementation the file-watch path uses). Idempotent; a
+        // healthy vault writes nothing.
+        if let Err(e) = controller.heal_title_less_doc_roots().await {
+            error!(
+                "[OrgMode] title-less doc-root store-health sweep failed: {}",
+                e
+            );
+            failures.push((root_directory.clone(), e));
+        }
         // Boot seed/re-seed phase is over. From here a runtime user edit to a
         // copy-on-write seed doc (e.g. `block:__default__`) materializes its
         // vault file (copy-on-write); every boot re-seed write stayed virtual.
