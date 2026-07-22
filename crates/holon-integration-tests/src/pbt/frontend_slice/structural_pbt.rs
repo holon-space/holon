@@ -3367,4 +3367,85 @@ mod teeth {
             "one divider() per feed entry in the main panel: {root:#?}"
         );
     }
+
+    /// **Sidebar sort-order (dogfood phase-3 bug 4) — RED-first repro.**
+    ///
+    /// The left sidebar's seed query (`assets/default/index.org`
+    /// `left_sidebar:: src::0`) declares `ORDER BY b.content ASC`, so the
+    /// sidebar's page rows must render ALPHABETICALLY by content. But the
+    /// sidebar render (`left_sidebar::render::0`) is a `tree(sortkey:
+    /// col("sort_key"))`, and the tree builder re-sorts siblings by that
+    /// key — silently OVERRIDING the query's `ORDER BY`. So pages render in
+    /// `sort_key` (creation/ingest) order, not alphabetically.
+    ///
+    /// Repro seed: two sibling `Page` headings created NON-alphabetically —
+    /// `zzz-...` first (lower `sort_key`), `aaa-...` second (higher
+    /// `sort_key`). Content-ASC order is `[aaa, zzz]`; `sort_key` order is
+    /// `[zzz, aaa]`. The declared query order therefore DIVERGES from the
+    /// render sort. This test asserts the sidebar renders `aaa` before
+    /// `zzz` (the declared order):
+    ///   - RED on `sortkey: col("sort_key")` — renders `zzz` first (sort_key).
+    ///   - GREEN once the sidebar render honors the declared content order
+    ///     (`sortkey: col("content")`).
+    ///
+    /// @pbt kind harness
+    /// @pbt covers sidebar-sort-order — the left sidebar's rendered page order
+    /// must match its seed query's declared `ORDER BY content ASC`, not the
+    /// `tree()` render's `sort_key` override.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sidebar_renders_pages_in_declared_content_order() {
+        use holon_pbt_core::capabilities::SutRenderer;
+
+        // Two sibling Page headings under a container doc-root, authored in
+        // REVERSE-alphabetical order so file/ingest order (== sort_key) is the
+        // opposite of content-ASC order.
+        const ORG: &str = concat!(
+            "#+ID: ssort-container\n",
+            "* zzz-sidebar-zebra :Page:\n",
+            ":PROPERTIES:\n:ID: ssort-zebra\n:END:\n",
+            "* aaa-sidebar-apple :Page:\n",
+            ":PROPERTIES:\n:ID: ssort-apple\n:END:\n",
+        );
+
+        let comp = Arc::new(
+            HeadlessFrontendComponent::new(
+                &[("SsortContainer.org", ORG)],
+                Duration::from_millis(600),
+            )
+            .await,
+        );
+        tokio::time::sleep(SETTLE).await;
+
+        let root = comp.widget_tree_snapshot().await;
+
+        // Locate the left-sidebar subtree (scheme-agnostic match on the seeded
+        // layout block id).
+        let sidebar = root
+            .walk()
+            .find(|n| {
+                n.entity_id
+                    .as_deref()
+                    .is_some_and(|e| e.contains("default-left-sidebar"))
+            })
+            .unwrap_or(&root);
+
+        // The rendered page rows carry the page block id as entity_id, in
+        // pre-order (render) order.
+        let order: Vec<String> = sidebar.walk().filter_map(|n| n.entity_id.clone()).collect();
+        let pos = |needle: &str| order.iter().position(|e| e.contains(needle));
+        let apple = pos("ssort-apple");
+        let zebra = pos("ssort-zebra");
+
+        assert!(
+            apple.is_some() && zebra.is_some(),
+            "both seeded sidebar pages must render (apple={apple:?}, zebra={zebra:?}); \
+             rendered sidebar entity order = {order:?}"
+        );
+        assert!(
+            apple < zebra,
+            "the sidebar must render pages in the seed query's declared ORDER BY content ASC \
+             (aaa-sidebar-apple BEFORE zzz-sidebar-zebra), NOT the tree()'s sort_key/creation \
+             order. Got apple@{apple:?} zebra@{zebra:?}; rendered sidebar entity order = {order:?}"
+        );
+    }
 }
