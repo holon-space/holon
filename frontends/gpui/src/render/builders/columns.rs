@@ -70,6 +70,12 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
             .size_full()
             .gap(px(gap));
         for item in &items {
+            let entity = item.entity();
+            let scroll_id = entity
+                .get("id")
+                .and_then(|v| v.as_string())
+                .unwrap_or("panel");
+            let id = hashed_id(scroll_id);
             let rendered = super::render(item, ctx);
             match item.layout_hint {
                 LayoutHint::Fixed { px: fixed_px } => {
@@ -82,8 +88,17 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
                     );
                 }
                 LayoutHint::Flex { .. } => {
-                    container = container
-                        .child(panel_wrap(|inner| inner.child(rendered).into_any_element()));
+                    // Same content-height scroll viewport as the drawer flow
+                    // panel below (see the `overflow_y_scroll` note there):
+                    // the flow child may render an eager content-height
+                    // collection that must scroll within a definite viewport.
+                    container = container.child(panel_wrap(move |inner| {
+                        inner
+                            .id(id)
+                            .overflow_y_scroll()
+                            .child(rendered)
+                            .into_any_element()
+                    }));
                 }
             }
         }
@@ -234,6 +249,21 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
                     container = container.child(panel_wrap(move |inner| {
                         inner
                             .id(id)
+                            // The flow panel (main panel) content is now a
+                            // CONTENT-height eager column (`column.rs`
+                            // `eager_collection_div` / `view_mode_switcher::
+                            // render_content_height`), not a self-scrolling
+                            // `gpui::list`. Without an `overflow_y_scroll`
+                            // viewport here the overflowing outline is simply
+                            // clipped by the root `overflow_hidden` and wheel /
+                            // trackpad events no-op — the main panel stopped
+                            // scrolling (BugFunnel 2026-07-22). The shrink-drawer
+                            // sidebar branch above already scrolls for the same
+                            // reason; this is the matching viewport for the main
+                            // panel. Harmless in the virtualized case: a
+                            // `size_full` `gpui::list` never overflows this
+                            // wrapper, so the scroll is a no-op there.
+                            .overflow_y_scroll()
                             .flex_col()
                             .px(px(pad_x))
                             .py(px(pad_y))
