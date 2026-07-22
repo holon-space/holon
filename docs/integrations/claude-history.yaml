@@ -5,6 +5,38 @@ transport:
       CLAUDE_DATA_DIR: "/Users/martin/.claude"
 entity_prefix: "cc_"
 entities:
+  # Multi-project root. `claude-history://projects` lists every Claude Code
+  # project the local `~/.claude` knows about. This entity is SYNC-only (a
+  # static, param-free resource): the sync engine warms the `cc_project` cache
+  # table on connect and refreshes it on each `projects` change notification.
+  # `session`/`task` then `enumerate_from` this cache table to fan out across
+  # ALL projects (Martin orchestrates 3-4 at once) instead of the single pinned
+  # project this integration used to hard-code.
+  #
+  # SYNC-only (no `vtable.write_through`) is deliberate: an entity may declare a
+  # `sync` strategy OR a write-through vtable on its cache table, never both —
+  # the sync engine's in-memory mirror must be the sole writer (finish_integration
+  # clash check). Enumeration reads the cache TABLE directly, so no fdw is needed.
+  project:
+    profile_variants:
+      - name: default
+        render: 'row(text(col("original_path")))'
+    schema:
+      - name: id
+        sql_type: TEXT
+        primary_key: true
+      - name: original_path
+        sql_type: TEXT
+        nullable: true
+      - name: session_count
+        sql_type: INTEGER
+        nullable: true
+      - name: last_activity
+        sql_type: TEXT
+        nullable: true
+    sync:
+      list_resource: "claude-history://projects"
+
   session:
     profile_variants:
       - name: default
@@ -49,15 +81,35 @@ entities:
       - name: is_sidechain
         sql_type: INTEGER
         nullable: true
-    sync:
-      list_resource: "claude-history://projects/{project_id}/sessions"
-      uri_params:
-        project_id: "-Users-martin-Workspaces-pkm-holon"
+    # Sessions fan out over every cached project instead of one pinned id.
+    # When a query supplies `project_id` in WHERE, exactly one resource read
+    # happens; an unpinned `SELECT ... FROM cc_session_fdw` enumerates the
+    # `cc_project` cache table and fans out one read per matching project.
+    # write_through lands the fetched rows in `cc_session`, warming the cache
+    # (and the chained session_status views) for the desktop overview.
+    #
+    # Bounded + incremental (fail-loud, no silent truncation):
+    #   - `where` watermark (pure local SQL, correlated subquery): only
+    #     re-fetch a project whose `last_activity` is newer than the newest
+    #     session already cached for it. substr(cc_project.id, 12) strips the
+    #     'cc-project:' scheme prefix to match cc_session.project_id, which
+    #     stores raw ids.
+    #   - `order_by`/`limit`: most-recently-active projects first, capped.
+    #   - `max_fan_out`: FAILS LOUD if enumeration still exceeds the bound.
     vtable:
       list_resource: "claude-history://projects/{project_id}/sessions"
       uri_params:
-        project_id: "-Users-martin-Workspaces-pkm-holon"
+        project_id:
+          enumerate_from:
+            entity: project
+            field: id
+            where: >-
+              last_activity > COALESCE((SELECT MAX(s.modified) FROM cc_session s
+                                        WHERE s.project_id = substr(cc_project.id, 12)), '')
+            order_by: last_activity DESC
+            limit: 50
       write_through: true
+      max_fan_out: 50
 
   task:
     profile_variants:
@@ -88,23 +140,30 @@ entities:
       - name: completed_at
         sql_type: TEXT
         nullable: true
-    sync:
-      list_resource: "claude-history://projects/{project_id}/tasks"
-      uri_params:
-        project_id: "-Users-martin-Workspaces-pkm-holon"
+    # Tasks fan out over every cached project, same mechanism as `session`.
+    # Tasks carry no `modified` column, so there is no incremental watermark:
+    # each fan-out re-reads a bounded set of projects (most-recently-active
+    # first). Cheap — tasks are few, and the fan-out only fires on an unpinned
+    # query or a `tasks` change notification.
     vtable:
       list_resource: "claude-history://projects/{project_id}/tasks"
       uri_params:
-        project_id: "-Users-martin-Workspaces-pkm-holon"
+        project_id:
+          enumerate_from:
+            entity: project
+            field: id
+            order_by: last_activity DESC
+            limit: 50
       write_through: true
+      max_fan_out: 50
 
   message:
-    # OPT-IN (commented out below, inside the vtable block): unpinned fan-out
-    # over locally cached sessions. Today cc_message_fdw requires a pinned
-    # session_id (uri_params: session_id: ""), so `SELECT ... WHERE
-    # session_id = X` costs exactly one resource read. Swapping the empty
-    # value for the enumerate_from block makes unpinned queries work by
-    # fanning out one resource read per matching cached session.
+    # ENABLED: unpinned fan-out over locally cached sessions. A pinned query
+    # (`SELECT ... FROM cc_message_fdw WHERE session_id = X`, e.g. the session
+    # render's live_query) still costs exactly one resource read. An unpinned
+    # query enumerates the `cc_session` cache table and fans out one read per
+    # matching session — warming `cc_message` (and thus the session_status
+    # views) without Martin opening each session by hand.
     #
     # Trade-off: every unpinned query pays fan-out cost at the MCP server.
     # The knobs below keep it bounded and incremental:
@@ -116,21 +175,20 @@ entities:
     #   - `order_by`/`limit`: most-recently-modified sessions first, capped.
     #   - `max_fan_out`: FAILS LOUD (no silent truncation) if the enumeration
     #     still produces more parents than the bound.
-    #
-    # vtable:
-    #   list_resource: "claude-history://sessions/{session_id}/messages"
-    #   uri_params:
-    #     session_id:
-    #       enumerate_from:
-    #         entity: session
-    #         field: id
-    #         where: >-
-    #           modified > COALESCE((SELECT MAX(m.timestamp) FROM cc_message m
-    #                                WHERE m.session_id = substr(cc_session.id, 12)), '')
-    #         order_by: modified DESC
-    #         limit: 20
-    #   write_through: true
-    #   max_fan_out: 50
+    vtable:
+      list_resource: "claude-history://sessions/{session_id}/messages"
+      uri_params:
+        session_id:
+          enumerate_from:
+            entity: session
+            field: id
+            where: >-
+              modified > COALESCE((SELECT MAX(m.timestamp) FROM cc_message m
+                                   WHERE m.session_id = substr(cc_session.id, 12)), '')
+            order_by: modified DESC
+            limit: 20
+      write_through: true
+      max_fan_out: 50
     profile_variants:
       - name: default
         render: 'row(text(col("content")))'
@@ -165,11 +223,6 @@ entities:
       - name: cwd
         sql_type: TEXT
         nullable: true
-    vtable:
-      list_resource: "claude-history://sessions/{session_id}/messages"
-      uri_params:
-        session_id: ""
-      write_through: true
 
 tools: {}
 
