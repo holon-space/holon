@@ -997,3 +997,189 @@ async fn childless_runtime_page_materializes_its_identity_file() {
         "materialized file must carry the page identity header, got:\n{disk}"
     );
 }
+
+// ── Copy-on-write default-layout seeding (F4 stale-seed remedy) ──────────────
+// The bundled default layout (`block:__default__`,
+// `holon_api::is_seed_layout_doc`) is a VIRTUAL seed doc: boot seeds/re-seeds
+// it into the store from the shipped asset, but those writes must NOT
+// auto-materialize a vault `.org` file. That auto-materialization crept in via
+// the Fork B B2 fileless-page sweep (a92d7eb7, 2026-07-12) and pinned Martin's
+// vault to a stale Jul-12 seed (the F4 backlinks-invisible saga). The
+// controller now keeps the seed doc VIRTUAL through boot
+// (`gate_virtual_seed_write` records the pristine asset render and
+// skips the write) and only the FIRST user-originated edit — a render that
+// DIVERGES from the recorded pristine baseline — materializes the file
+// (copy-on-write). Once on disk that file is the durable "user owns the layout"
+// marker; the seed BOUNDARY reads its presence (`default_org_exists`) and
+// suppresses re-seeding, so a subsequent shipped-asset change never overrides
+// it (proven at the seed layer by
+// `holon-app::seed_copy_on_write::present_default_file_suppresses_default_layout_seed`).
+
+/// The default-layout doc-root (`block:__default__`) as a `Page` with two leaf
+/// children — the seed-doc shape. Distinct from `make_doc_and_blocks` only in
+/// its id: this is the doc `is_seed_layout_doc` gates.
+fn make_seed_doc_and_blocks() -> (Block, Vec<Block>) {
+    let doc_id = holon_api::default_doc_block_uri();
+    let mut doc = Block::new_text(doc_id.clone(), EntityUri::no_parent(), "__default__");
+    doc.set_page(true);
+    let b1 = Block::new_text(EntityUri::block("layout-a"), doc_id.clone(), "Layout A");
+    let b2 = Block::new_text(EntityUri::block("layout-b"), doc_id.clone(), "Layout B");
+    (doc, vec![b1, b2])
+}
+
+/// A doc-manager that resolves `block:__default__` to the vault-marker path
+/// `__default__.org` (single-segment name chain), so the gate's canonical key
+/// and the on-disk filename match the real seed-doc marker the seed boundary
+/// checks. Every other id fails loud (never exercised here).
+struct SeedDocManager {
+    doc: Block,
+}
+
+#[async_trait]
+impl DocumentManager for SeedDocManager {
+    async fn find_by_parent_and_name(
+        &self,
+        _: &EntityUri,
+        _: &str,
+    ) -> anyhow::Result<Option<Block>> {
+        Ok(None)
+    }
+    async fn create(&self, doc: Block) -> anyhow::Result<Block> {
+        Ok(doc)
+    }
+    async fn get_by_id(&self, id: &EntityUri) -> anyhow::Result<Option<Block>> {
+        Ok((self.doc.id == *id).then(|| self.doc.clone()))
+    }
+    async fn update_metadata(&self, _: &Block) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn name_chain(&self, id: &EntityUri) -> anyhow::Result<Vec<String>> {
+        if *id == self.doc.id {
+            Ok(vec!["__default__".to_string()])
+        } else {
+            anyhow::bail!("name_chain({id}): unexpected id in seed-doc harness")
+        }
+    }
+}
+
+fn build_seed_harness() -> Harness {
+    let (doc, blocks) = make_seed_doc_and_blocks();
+    let reader = Arc::new(CountingBlockReader::new(doc.id.clone(), blocks));
+    let doc_manager = Arc::new(SeedDocManager { doc: doc.clone() });
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let fs = Arc::new(RealFileSystem);
+    let controller = new_org_sync_controller(
+        reader.clone(),
+        doc_manager,
+        root.clone(),
+        Arc::new(LiveOrderOrdering {
+            reader: reader.clone(),
+        }),
+        fs,
+    );
+    let path = holon_core::CanonicalPath::new(&root)
+        .into_path_buf()
+        .join("__default__.org");
+    Harness {
+        controller,
+        reader,
+        doc,
+        path,
+        _tmp: tmp,
+    }
+}
+
+/// **PAYOFF #2 (copy-on-write materialization moment).** The VIRTUAL default
+/// layout (`block:__default__`) stays off disk through the boot seed/re-seed
+/// phase, and the FIRST user-originated edit — a render that diverges from the
+/// pristine shipped-asset baseline — MATERIALIZES `__default__.org`, after
+/// which the on-disk file exists as the durable "user owns the layout" marker.
+///
+/// Mirrors payoff #1 (`content_only_edit_...`, this harness): drive the real
+/// `on_block_changed` write-back over `RealFileSystem`, assert on disk truth.
+/// The complementary half — a subsequent shipped-asset/seed change does NOT
+/// override the materialized file (file-wins) — is enforced at the SEED
+/// boundary and proven by
+/// `holon-app::seed_copy_on_write::present_default_file_suppresses_default_layout_seed`
+/// (a present `__default__.org` → `default_org_exists` → no re-seed).
+#[tokio::test]
+async fn user_edit_materializes_virtual_seed_doc_copy_on_write() {
+    assert!(
+        holon_api::is_seed_layout_doc(&holon_api::default_doc_block_uri()),
+        "test premise: block:__default__ must be a copy-on-write seed doc"
+    );
+
+    let mut h = build_seed_harness();
+    let upsert = |b: &Block| BlockDelta::Upsert(b.clone());
+
+    // 1) BOOT seed write (`boot_seeding` = true, the ctor default): seeding the
+    //    default layout into the store must NOT materialize the vault file. The
+    //    gate records the pristine asset render and skips the write.
+    let b1_pristine = h.reader.blocks.lock().unwrap()[0].clone();
+    h.controller
+        .on_block_changed(&h.doc.id, &upsert(&b1_pristine))
+        .await
+        .unwrap();
+    assert!(
+        !h.path.exists(),
+        "boot seed of the VIRTUAL default layout must NOT auto-materialize \
+         __default__.org (F4 stale-seed pin); found {}",
+        h.path.display()
+    );
+
+    // 2) Boot phase is over.
+    h.controller.finish_boot_seeding();
+
+    // 3) RACE-FREE: a late boot-seed delta arriving after `boot_seeding` flipped
+    //    still renders == pristine, so it is NOT mistaken for a user edit — the doc
+    //    stays virtual (no file).
+    h.controller
+        .on_block_changed(&h.doc.id, &upsert(&b1_pristine))
+        .await
+        .unwrap();
+    assert!(
+        !h.path.exists(),
+        "a post-boot re-seed whose render still equals the pristine asset must \
+         stay VIRTUAL (content baseline, not a time flag); found {}",
+        h.path.display()
+    );
+
+    // 4) USER EDIT: a real edit routed to the seed doc diverges from the pristine
+    //    baseline → copy-on-write materializes the file with the user's content.
+    let mut b2_edited = h.reader.blocks.lock().unwrap()[1].clone();
+    b2_edited.content = "Layout B EDITED BY USER".to_string();
+    h.reader.set_block(b2_edited.clone());
+    h.controller
+        .on_block_changed(&h.doc.id, &upsert(&b2_edited))
+        .await
+        .unwrap();
+
+    let materialized = std::fs::read_to_string(&h.path).expect(
+        "the first user edit to the seed doc must MATERIALIZE __default__.org (copy-on-write)",
+    );
+    assert!(
+        materialized.contains("Layout B EDITED BY USER"),
+        "the materialized file must carry the user's edit; got:\n{materialized}"
+    );
+
+    // 5) FILE WINS (at this layer): the file now exists and is a normal tracked doc
+    //    — a subsequent identical edit keeps it on disk (no re-virtualizing, no
+    //    clobber). Its presence is the `default_org_exists` marker the seed
+    //    boundary reads to suppress re-seeding.
+    h.controller
+        .on_block_changed(&h.doc.id, &upsert(&b2_edited))
+        .await
+        .unwrap();
+    assert!(
+        h.path.exists(),
+        "once materialized, the seed doc's file must persist (it now wins); \
+         missing {}",
+        h.path.display()
+    );
+    let after = std::fs::read_to_string(&h.path).unwrap();
+    assert!(
+        after.contains("Layout B EDITED BY USER"),
+        "the materialized file must keep the user's content; got:\n{after}"
+    );
+}

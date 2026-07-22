@@ -225,6 +225,45 @@ impl BlockCellRegistry {
     /// the outbound projector are control metadata, not field writes).
     /// On `Ok(false)` the caller falls through to the SQL `set_field`
     /// path. On `Err` the error is loud and the SQL path is NOT tried.
+    /// Copy-on-write seed refresh. For each `(id, content)` whose block already
+    /// exists in the Loro authority with DIFFERENT content, rewrite the content
+    /// to the current shipped-asset value via `update_block_text` (which routes
+    /// Source → `SOURCE_CODE`, Text → `CONTENT_RAW` by the block's stored
+    /// content_type). Compares against the authority FIRST, so re-seeding an
+    /// UNCHANGED default layout emits NO Loro op — boot re-seed is churn-free.
+    /// A block with no tree node yet is skipped (the create pass seeds it
+    /// fresh). Returns how many blocks were refreshed. SqlOnly: `Ok(0)` — there
+    /// is no separate Loro authority to reconcile against.
+    pub async fn reseed_content(&self, blocks: &[(EntityUri, String)]) -> Result<usize> {
+        let backend = match &self.backing_source {
+            BackingSource::Loro { backend, .. } => backend.clone(),
+            BackingSource::SqlOnly { .. } => return Ok(0),
+        };
+        let mut refreshed = 0usize;
+        for (id, content) in blocks {
+            if backend.resolve_to_tree_id(id.id()).await.is_none() {
+                continue;
+            }
+            let current = backend
+                .get_block(id.id())
+                .await
+                .map_err(|e| anyhow!("reseed_content get_block({id}): {e:#}"))?;
+            if &current.content != content {
+                backend
+                    .update_block_text(id.id(), content)
+                    .await
+                    .map_err(|e| anyhow!("reseed_content update_block_text({id}): {e:#}"))?;
+                tracing::info!(
+                    "[seed] copy-on-write refresh: {id} default-layout content updated from the                      shipped asset ({} -> {} chars)",
+                    current.content.len(),
+                    content.len()
+                );
+                refreshed += 1;
+            }
+        }
+        Ok(refreshed)
+    }
+
     pub async fn write_field(&self, uri: &EntityUri, field: &str, value: Value) -> Result<bool> {
         let backend = match &self.backing_source {
             BackingSource::Loro { backend, .. } => backend.clone(),
@@ -1232,6 +1271,73 @@ mod tests {
             doc.oplog_frontiers(),
             "a changed tag set must still be written through"
         );
+        Ok(())
+    }
+
+    /// Copy-on-write auto-update (F4 stale-seed remedy): `reseed_content`
+    /// refreshes a virtual seed-layout block whose PERSISTED content drifted
+    /// from the current bundled asset, is a genuine NO-OP (no Loro op) when the
+    /// content already matches, and skips a block with no tree node. This is
+    /// the engine behind `seed_default_layout`'s default-layout auto-update
+    /// over a stale persisted Loro snapshot.
+    #[tokio::test]
+    async fn reseed_content_refreshes_drift_and_is_churn_free() -> Result<()> {
+        use std::collections::HashMap;
+
+        let doc = make_loro_doc_with_block("parent");
+        let registry = BlockCellRegistry::with_loro_doc(doc.clone());
+        let parent = EntityUri::block("parent");
+        let child = EntityUri::block("root-layout");
+
+        // First boot seeded the layout block with the THEN-current asset text.
+        let wrote = registry
+            .create_entity(
+                &parent,
+                None,
+                &child,
+                holon_api::BlockContent::text("OLD layout"),
+                &HashMap::new(),
+                &Tags::default(),
+                &[],
+                &[],
+            )
+            .await?;
+        assert!(wrote, "loro-mode create must persist");
+        let seeded = (&registry as &dyn EntityCellRegistry)
+            .live_field::<String>(&child, "content")?
+            .current();
+        assert_eq!(seeded, "OLD layout", "create must write the seed content");
+
+        // A NEWER shipped asset carries different content → reseed refreshes it.
+        let refreshed = registry
+            .reseed_content(&[(child.clone(), "NEW layout".to_string())])
+            .await?;
+        assert_eq!(
+            refreshed, 1,
+            "drifted seed block must refresh from the asset"
+        );
+        let now = (&registry as &dyn EntityCellRegistry)
+            .live_field::<String>(&child, "content")?
+            .current();
+        assert_eq!(now, "NEW layout", "content updated to the current asset");
+
+        // Idempotent: re-seeding the SAME content emits NO Loro op (boot churn).
+        let before = doc.oplog_frontiers();
+        let refreshed2 = registry
+            .reseed_content(&[(child.clone(), "NEW layout".to_string())])
+            .await?;
+        assert_eq!(refreshed2, 0, "unchanged content must not be refreshed");
+        assert_eq!(
+            before,
+            doc.oplog_frontiers(),
+            "re-seeding unchanged content must emit NO Loro op (churn-free boot)"
+        );
+
+        // A block absent from the tree is skipped — the create pass owns it.
+        let refreshed3 = registry
+            .reseed_content(&[(EntityUri::block("not-seeded"), "x".to_string())])
+            .await?;
+        assert_eq!(refreshed3, 0, "untracked block must be skipped");
         Ok(())
     }
 

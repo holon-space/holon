@@ -32,6 +32,7 @@ pub async fn seed_default_layout(
     engine: &BackendEngine,
     ordering: Arc<dyn holon_core::block_ordering::BlockOrdering>,
     user_index_org_exists: bool,
+    default_org_exists: bool,
 ) -> Result<()> {
     let db = engine.db_handle();
     let default_doc_uri = FrontendSession::<()>::default_doc_uri();
@@ -55,12 +56,26 @@ pub async fn seed_default_layout(
             .await?
             .is_empty();
 
-    // Build the seed entries from the bundled Org assets.
-    let mut entries = FrontendSession::<()>::build_default_layout_blocks(fresh)?;
+    // Copy-on-write: the default layout (`block:__default__`) is a VIRTUAL
+    // seed doc. It re-seeds from the bundled asset UNLESS the user has
+    // materialized it — the durable marker for which is a `__default__.org`
+    // file in the vault. When that file exists it WINS (the org scan owns the
+    // doc), so the default layout is neither seeded nor replaced here.
+    let reseed_default = fresh && !default_org_exists;
+    if fresh && default_org_exists {
+        tracing::info!(
+            "[holon-app] __default__.org present on disk — the materialized (user-owned) default              layout wins; skipping default-layout seed/re-seed (copy-on-write)."
+        );
+    }
+
+    // Build the seed entries from the bundled Org assets. `reseed_default`
+    // gates the `__default__` page + parsed `index.org` layout; the journals
+    // machinery is seeded regardless (see `build_default_layout_blocks`).
+    let mut entries = FrontendSession::<()>::build_default_layout_blocks(reseed_default)?;
 
     // Parse the bundled index.org layout (root-layout + sidebars + sources).
     // Top-level blocks reparent from the file doc to `__default__`.
-    if fresh {
+    if reseed_default {
         let content = include_str!("../../../assets/default/index.org");
         let parse_result = holon_orgmode::parse_org_file(
             Path::new("index.org"),
@@ -131,6 +146,32 @@ pub async fn seed_default_layout(
                     )
                     .await?;
             }
+        }
+    }
+
+    // Copy-on-write auto-update: the default layout (`block:__default__`) is a
+    // VIRTUAL seed doc, but the persisted Loro snapshot pins whatever content
+    // it was first seeded with — `create_in_tree` above is idempotent and does
+    // NOT rewrite an existing block's content. Refresh every default-layout
+    // block whose persisted content DRIFTED from the current bundled asset, so
+    // a shipped-asset change (e.g. a new/edited layout query) reaches an
+    // unmodified vault on the next boot. Churn-free: `reseed_content` compares
+    // against the authority and writes only on a real diff. Skipped when a
+    // `__default__.org` file wins (`reseed_default` is false).
+    if reseed_default {
+        let refresh: Vec<(EntityUri, String)> = entries
+            .iter()
+            .filter(|b| routing_docs.get(&b.id) == Some(&default_doc_uri))
+            .map(|b| (b.id.clone(), b.content.clone()))
+            .collect();
+        let refreshed = ordering
+            .reseed_content(&refresh)
+            .await
+            .map_err(|e| anyhow::anyhow!("seed reseed_content: {e:#}"))?;
+        if refreshed > 0 {
+            tracing::info!(
+                "[holon-app] copy-on-write: refreshed {refreshed} default-layout block(s) from                  the current bundled asset (stale Loro snapshot healed)"
+            );
         }
     }
 

@@ -226,7 +226,7 @@ fn fresh_seed_places_backlinks_section_below_outline() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (engine, ordering) = fresh_engine(dir.path().join("fresh.db")).await;
 
-        holon_app::seed_default_layout(&engine, ordering, false)
+        holon_app::seed_default_layout(&engine, ordering, false, false)
             .await
             .expect("seed_default_layout must complete on a fresh file DB");
 
@@ -271,7 +271,7 @@ fn render_entity_expands_collection_view_marker() {
     rt.clone().block_on(async {
         let dir = tempfile::tempdir().expect("tempdir");
         let (engine, ordering) = fresh_engine(dir.path().join("fresh.db")).await;
-        holon_app::seed_default_layout(&engine, ordering, false)
+        holon_app::seed_default_layout(&engine, ordering, false, false)
             .await
             .expect("seed_default_layout");
 
@@ -310,7 +310,7 @@ fn backlinks_query_lists_incoming_links_for_focused_page() {
     rt.clone().block_on(async {
         let dir = tempfile::tempdir().expect("tempdir");
         let (engine, ordering) = fresh_engine(dir.path().join("fresh.db")).await;
-        holon_app::seed_default_layout(&engine, ordering.clone(), false)
+        holon_app::seed_default_layout(&engine, ordering.clone(), false, false)
             .await
             .expect("seed_default_layout");
 
@@ -363,7 +363,7 @@ fn every_seeded_source_block_compiles_and_executes_against_booted_vault() {
     rt.clone().block_on(async {
         let dir = tempfile::tempdir().expect("tempdir");
         let (engine, ordering) = fresh_engine(dir.path().join("fresh.db")).await;
-        holon_app::seed_default_layout(&engine, ordering, false)
+        holon_app::seed_default_layout(&engine, ordering, false, false)
             .await
             .expect("seed_default_layout");
 
@@ -456,7 +456,7 @@ fn section_sql_locks_ivm_equijoin_on_shape() {
     rt.clone().block_on(async {
         let dir = tempfile::tempdir().expect("tempdir");
         let (engine, ordering) = fresh_engine(dir.path().join("fresh.db")).await;
-        holon_app::seed_default_layout(&engine, ordering, false)
+        holon_app::seed_default_layout(&engine, ordering, false, false)
             .await
             .expect("seed_default_layout");
 
