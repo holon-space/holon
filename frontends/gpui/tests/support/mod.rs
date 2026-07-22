@@ -149,6 +149,14 @@ pub struct TestServices {
     /// detector. Defaults to `false` so editor / popup tests that
     /// genuinely need async execution keep using the real runtime.
     quiescent_runtime: bool,
+    /// One-shot initial caret seed recorded by `set_focus_with_caret` — the
+    /// same authority `UiState` owns in production, mirrored here so windowed
+    /// click tests can assert where a click placed the caret. `None` = no seed
+    /// armed (a plain `set_focus`, i.e. caret defaults to end-of-text on
+    /// mount).
+    caret_seed: std::sync::Mutex<Option<(EntityUri, usize)>>,
+    /// Last block handed to `set_focus` / `set_focus_with_caret`.
+    focused: std::sync::Mutex<Option<EntityUri>>,
 }
 
 impl TestServices {
@@ -160,6 +168,8 @@ impl TestServices {
             drawer_states: std::sync::Mutex::new(std::collections::HashMap::new()),
 
             quiescent_runtime: false,
+            caret_seed: std::sync::Mutex::new(None),
+            focused: std::sync::Mutex::new(None),
         })
     }
 
@@ -177,6 +187,8 @@ impl TestServices {
             drawer_states: std::sync::Mutex::new(std::collections::HashMap::new()),
 
             quiescent_runtime: true,
+            caret_seed: std::sync::Mutex::new(None),
+            focused: std::sync::Mutex::new(None),
         })
     }
 
@@ -191,6 +203,8 @@ impl TestServices {
             drawer_states: std::sync::Mutex::new(std::collections::HashMap::new()),
 
             quiescent_runtime: false,
+            caret_seed: std::sync::Mutex::new(None),
+            focused: std::sync::Mutex::new(None),
         })
     }
 
@@ -201,6 +215,19 @@ impl TestServices {
         let new_state = !current;
         states.insert(block_id.to_string(), new_state);
         new_state
+    }
+
+    /// The `(block, offset)` caret seed a click armed via
+    /// `set_focus_with_caret`, or `None` if the last focus move was a plain
+    /// `set_focus` (no caret). Windowed click tests assert on this to prove the
+    /// click position plumbed through to caret placement.
+    pub fn recorded_caret(&self) -> Option<(EntityUri, usize)> {
+        self.caret_seed.lock().unwrap().clone()
+    }
+
+    /// The block last focused (with or without a caret seed).
+    pub fn focused_block(&self) -> Option<EntityUri> {
+        self.focused.lock().unwrap().clone()
     }
 }
 
@@ -304,6 +331,46 @@ impl BuilderServices for TestServices {
         }
         out
     }
+
+    // ── Focus + caret seed (mirrors `UiState`) ─────────────────────────────
+    // The default trait bodies drop the caret offset and return `None`; these
+    // overrides record it so windowed click tests can assert caret placement.
+
+    fn set_focus(&self, block: Option<EntityUri>) {
+        // Age out a stale seed unless it targets the block we're focusing —
+        // matches `UiState::set_focus` so a plain click on a block defaults
+        // that block's caret to end-of-text.
+        {
+            let mut seed = self.caret_seed.lock().unwrap();
+            if let Some((ref seed_block, _)) = *seed {
+                if Some(seed_block) != block.as_ref() {
+                    *seed = None;
+                }
+            }
+        }
+        *self.focused.lock().unwrap() = block;
+    }
+
+    fn set_focus_with_caret(&self, block: EntityUri, offset: usize) {
+        *self.caret_seed.lock().unwrap() = Some((block.clone(), offset));
+        *self.focused.lock().unwrap() = Some(block);
+    }
+
+    fn peek_caret_seed(&self, block: &EntityUri) -> Option<usize> {
+        match &*self.caret_seed.lock().unwrap() {
+            Some((seed_block, offset)) if seed_block == block => Some(*offset),
+            _ => None,
+        }
+    }
+
+    fn consume_caret_seed(&self, block: &EntityUri) {
+        let mut seed = self.caret_seed.lock().unwrap();
+        if let Some((ref seed_block, _)) = *seed {
+            if seed_block == block {
+                *seed = None;
+            }
+        }
+    }
 }
 
 /// A process-global `current_thread` tokio runtime used solely for its
@@ -336,6 +403,23 @@ pub struct FixtureView {
     vm: Arc<ReactiveViewModel>,
     services: Arc<dyn BuilderServices>,
     bounds: BoundsRegistry,
+}
+
+impl FixtureView {
+    /// Host `vm` in a window with caller-supplied `services` (e.g. a
+    /// `TestServices` whose caret seed the test asserts on) and a shared
+    /// `bounds` registry the caller snapshots after `run_until_parked`.
+    pub fn new(
+        vm: Arc<ReactiveViewModel>,
+        services: Arc<dyn BuilderServices>,
+        bounds: BoundsRegistry,
+    ) -> Self {
+        Self {
+            vm,
+            services,
+            bounds,
+        }
+    }
 }
 
 impl Render for FixtureView {
