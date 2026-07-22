@@ -8,6 +8,8 @@ use holon_core::SyncTokenStore;
 use rmcp::model::CallToolRequestParam;
 use rmcp::model::ReadResourceRequestParam;
 use rmcp::model::ResourceContents;
+use serde::Deserialize;
+use serde::Serialize;
 use tracing::Instrument;
 use tracing::debug;
 use tracing::info;
@@ -79,6 +81,96 @@ pub struct ToolSync {
     pub extract_path: String,
     pub list_params: HashMap<String, serde_json::Value>,
     pub cursor: Option<CursorConfig>,
+    /// Optional per-column field projection applied to each record after
+    /// extraction: lifts nested JSON scalars into flat top-level columns (e.g.
+    /// Google's `start.dateTime` → `start`). Empty ⇒ records are mapped by name
+    /// unchanged.
+    pub project: HashMap<String, Projection>,
+}
+
+/// A generic record-shaping rule (transport-agnostic): projects a nested JSON
+/// value into a flat top-level column. Two primitives cover the common
+/// nested-REST shapes without a bespoke transform:
+///
+/// - `path: [a.b, a.c]` — the FIRST present, non-null value along the listed
+///   dotted paths wins (e.g. an event's `start.dateTime` for timed events,
+///   falling back to `start.date` for all-day).
+/// - `exists: a.b` — `1` when the dotted path is present and non-null, else `0`
+///   (e.g. an all-day flag from the presence of `start.date`).
+///
+/// Exactly one primitive must be set; both/neither is a loud error at apply.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Projection {
+    #[serde(default)]
+    pub path: Vec<String>,
+    #[serde(default)]
+    pub exists: Option<String>,
+}
+
+impl Projection {
+    /// Resolve this projection against a record, returning the value to store
+    /// in the flat column.
+    fn resolve(
+        &self,
+        record: &serde_json::Map<String, serde_json::Value>,
+    ) -> anyhow::Result<serde_json::Value> {
+        match (self.path.is_empty(), &self.exists) {
+            (false, None) => {
+                for p in &self.path {
+                    if let Some(v) = lookup_dotted(record, p)
+                        && !v.is_null()
+                    {
+                        return Ok(v.clone());
+                    }
+                }
+                Ok(serde_json::Value::Null)
+            }
+            (true, Some(path)) => {
+                let present = lookup_dotted(record, path).is_some_and(|v| !v.is_null());
+                Ok(serde_json::Value::Number((present as i64).into()))
+            }
+            (true, None) => {
+                anyhow::bail!("projection must set one of `path` or `exists`")
+            }
+            (false, Some(_)) => {
+                anyhow::bail!("projection must set only one of `path` or `exists`, not both")
+            }
+        }
+    }
+}
+
+/// Look up a dotted JSON path (`a.b.c`) within a record. Returns `None` if any
+/// segment is missing or a non-object is traversed.
+fn lookup_dotted<'a>(
+    record: &'a serde_json::Map<String, serde_json::Value>,
+    path: &str,
+) -> Option<&'a serde_json::Value> {
+    let mut segments = path.split('.');
+    let first = segments.next()?;
+    let mut cur = record.get(first)?;
+    for seg in segments {
+        cur = cur.as_object()?.get(seg)?;
+    }
+    Some(cur)
+}
+
+/// Apply a field projection to every column rule against `record`, computing
+/// all values from the ORIGINAL record before writing (so a rule that reads
+/// `start` and writes `start` sees the nested source, not a half-applied
+/// column).
+pub fn apply_projection(
+    record: &mut serde_json::Map<String, serde_json::Value>,
+    project: &HashMap<String, Projection>,
+) -> anyhow::Result<()> {
+    let mut writes: Vec<(String, serde_json::Value)> = Vec::with_capacity(project.len());
+    for (col, spec) in project {
+        writes.push((col.clone(), spec.resolve(record)?));
+    }
+    for (col, val) in writes {
+        record.insert(col, val);
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -152,8 +244,16 @@ impl SyncStrategy for ToolSync {
                 anyhow::anyhow!("Response missing '{}' array field", self.extract_path)
             })?;
 
-        let records = json_array_to_records(records_json)
+        let mut records = json_array_to_records(records_json)
             .map_err(|e| anyhow::anyhow!("Tool '{}' response: {e}", self.list_tool))?;
+
+        if !self.project.is_empty() {
+            for rec in &mut records {
+                apply_projection(rec, &self.project).map_err(|e| {
+                    anyhow::anyhow!("Tool '{}' field projection: {e}", self.list_tool)
+                })?;
+            }
+        }
 
         let new_cursor = self.cursor.as_ref().and_then(|cc| {
             response
@@ -344,6 +444,121 @@ pub fn match_uri_template(template: &str, uri: &str) -> Option<HashMap<String, S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rec(json: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        json.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn projection_lifts_nested_path_first_present() {
+        // A timed Google event: start.dateTime present.
+        let mut r = rec(serde_json::json!({
+            "id": "e1",
+            "start": {"dateTime": "2026-07-22T10:00:00+02:00", "timeZone": "Europe/Berlin"},
+            "end": {"date": "2026-07-23"}
+        }));
+        let mut project = HashMap::new();
+        project.insert(
+            "start".to_string(),
+            Projection {
+                path: vec!["start.dateTime".into(), "start.date".into()],
+                exists: None,
+            },
+        );
+        project.insert(
+            "end".to_string(),
+            Projection {
+                path: vec!["end.dateTime".into(), "end.date".into()],
+                exists: None,
+            },
+        );
+        project.insert(
+            "all_day".to_string(),
+            Projection {
+                path: vec![],
+                exists: Some("start.date".into()),
+            },
+        );
+        apply_projection(&mut r, &project).unwrap();
+        assert_eq!(r["start"], serde_json::json!("2026-07-22T10:00:00+02:00"));
+        // end fell back to end.date (all-day-style end).
+        assert_eq!(r["end"], serde_json::json!("2026-07-23"));
+        // Not an all-day event (start.date absent) → 0.
+        assert_eq!(r["all_day"], serde_json::json!(0));
+    }
+
+    #[test]
+    fn projection_all_day_flag_and_date_fallback() {
+        // An all-day event: start.date present, start.dateTime absent.
+        let mut r = rec(serde_json::json!({
+            "id": "e2",
+            "start": {"date": "2026-07-22"},
+            "end": {"date": "2026-07-23"}
+        }));
+        let mut project = HashMap::new();
+        project.insert(
+            "start".to_string(),
+            Projection {
+                path: vec!["start.dateTime".into(), "start.date".into()],
+                exists: None,
+            },
+        );
+        project.insert(
+            "all_day".to_string(),
+            Projection {
+                path: vec![],
+                exists: Some("start.date".into()),
+            },
+        );
+        apply_projection(&mut r, &project).unwrap();
+        assert_eq!(r["start"], serde_json::json!("2026-07-22"));
+        assert_eq!(r["all_day"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn projection_absent_path_yields_null_not_error() {
+        let mut r = rec(serde_json::json!({"id": "e3"}));
+        let mut project = HashMap::new();
+        project.insert(
+            "start".to_string(),
+            Projection {
+                path: vec!["start.dateTime".into(), "start.date".into()],
+                exists: None,
+            },
+        );
+        apply_projection(&mut r, &project).unwrap();
+        assert_eq!(r["start"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn projection_both_primitives_fails_loud() {
+        let mut r = rec(serde_json::json!({"a": 1}));
+        let mut project = HashMap::new();
+        project.insert(
+            "x".to_string(),
+            Projection {
+                path: vec!["a".into()],
+                exists: Some("a".into()),
+            },
+        );
+        let err = apply_projection(&mut r, &project).unwrap_err();
+        assert!(err.to_string().contains("only one"), "{err}");
+    }
+
+    #[test]
+    fn projection_neither_primitive_fails_loud() {
+        let mut r = rec(serde_json::json!({"a": 1}));
+        let mut project = HashMap::new();
+        project.insert(
+            "x".to_string(),
+            Projection {
+                path: vec![],
+                exists: None,
+            },
+        );
+        let err = apply_projection(&mut r, &project).unwrap_err();
+        assert!(err.to_string().contains("one of"), "{err}");
+    }
 
     #[test]
     fn expand_uri_template_basic() {

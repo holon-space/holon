@@ -233,6 +233,7 @@ async fn build_handle(db_handle: DbHandle) -> anyhow::Result<FakeMcpHandle> {
                 },
             ],
             sync: Some(SyncConfig {
+                project: Default::default(),
                 list_tool: None,
                 extract_path: None,
                 list_params: HashMap::new(),
