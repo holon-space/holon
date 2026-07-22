@@ -82,7 +82,7 @@ pub fn model_chord_click_focus<
 mod advance_day;
 pub mod apply_mutation;
 mod arrow_navigate;
-mod block_to_page;
+pub(crate) mod block_to_page;
 pub mod bulk_external_add;
 pub mod click_block;
 mod concurrent_schema_init;
