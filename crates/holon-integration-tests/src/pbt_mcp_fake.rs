@@ -229,6 +229,7 @@ impl PbtMcpIntegration {
                     },
                 ],
                 sync: Some(SyncConfig {
+                    project: Default::default(),
                     list_tool: None,
                     extract_path: None,
                     list_params: HashMap::new(),
