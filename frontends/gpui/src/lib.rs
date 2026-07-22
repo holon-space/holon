@@ -859,6 +859,18 @@ impl Render for HolonApp {
         let settings_overlay = if show_settings {
             let (render_expr, rows) = self.session.preferences_render_data();
             let content = interpret_and_render(&render_expr, rows, &gpui_ctx);
+            let build_stamp = div()
+                .pt_3()
+                .mt_2()
+                .text_size(px(11.0))
+                .text_color(theme.muted_foreground)
+                .child(concat!(
+                    "Build ",
+                    env!("HOLON_BUILD_TIME"),
+                    " · ",
+                    env!("HOLON_BUILD_SHA")
+                ));
+            let content = div().flex_col().child(content).child(build_stamp);
             Some(modal_overlay(
                 "settings",
                 "Settings",
