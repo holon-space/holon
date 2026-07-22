@@ -671,6 +671,175 @@ impl FileSyncController {
         Ok(present.unwrap_or(true))
     }
 
+    /// Boot store-health sweep (dogfood 2026-07-21, BugFunnel row 295): repair
+    /// every title-less (empty-content) `Page` doc-root a broken
+    /// `convert_block_to_page`/delete left behind, UNCONDITIONALLY after the
+    /// initial scan and INDEPENDENT of the ingest byte-identity fast-path.
+    ///
+    /// Why a dedicated sweep and not a fast-path predicate: the skip certifies
+    /// byte-identity only; a degraded empty-content `Page` is byte-identical to
+    /// a healthy `#+ID:`-only sibling (the discriminator is STORE state, not
+    /// disk bytes), so an unchanged degraded file is skipped by ingest on
+    /// every boot. Its repair therefore cannot live inside ingest — it
+    /// belongs to this store-health seam, which reaches the same
+    /// [`heal_title_less_doc_root`] implementation the file-watch path
+    /// uses.
+    ///
+    /// Iterates the vault's org files because the file PATH is the
+    /// authoritative title source that an orphaned empty root cannot supply
+    /// from the store. Idempotent: a healthy vault writes nothing.
+    pub async fn heal_title_less_doc_roots(&mut self) -> Result<()> {
+        let scanned = self
+            .fs
+            .scan_directory(&self.root_dir)
+            .await
+            .with_context(|| {
+                format!(
+                    "[FileSyncController] store-health sweep: scan {}",
+                    self.root_dir.display()
+                )
+            })?;
+        let mut healed = 0usize;
+        for file in scanned.files {
+            if file.extension().and_then(|e| e.to_str()) != Some("org") {
+                continue;
+            }
+            if self
+                .heal_title_less_doc_root(&file)
+                .await
+                .with_context(|| {
+                    format!(
+                        "[FileSyncController] store-health sweep at {}",
+                        file.display()
+                    )
+                })?
+            {
+                healed += 1;
+            }
+        }
+        if healed > 0 {
+            info!("[FileSyncController] store-health sweep healed {healed} title-less doc-root(s)");
+        }
+        Ok(())
+    }
+
+    /// The SINGLE title-less doc-root heal (BugFunnel row 295). Resolve
+    /// `path`'s `#+ID` doc-root; if it is an empty-content `Page` (the
+    /// broken convert/delete product — an empty-content `Page` is never
+    /// legal), re-derive its title from the filename and, when it is
+    /// orphaned (parent lost to the root sentinel), reparent it under its
+    /// folder chain — through the SAME `update_in_tree` seam a normal block
+    /// update uses. Idempotent: a healthy / absent / non-`#+ID` doc-root is
+    /// a no-op (returns `false`). Fail-loud WARN when the filename has no
+    /// derivable stem (the disclosed render-side `(untitled)` placeholder
+    /// from PR #59 covers that row).
+    ///
+    /// Invoked ONLY from the store-health seam — the boot sweep
+    /// ([`heal_title_less_doc_roots`]) and the runtime file-watch reingest —
+    /// never from the ingest fast-path, which certifies byte-identity only.
+    /// Returns whether a heal was written.
+    async fn heal_title_less_doc_root(&mut self, path: &Path) -> Result<bool> {
+        let disk_content = match self.fs.read_to_string(path).await {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!("[FileSyncController] heal: cannot read {}", path.display())
+                });
+            }
+        };
+        let Some(bare) = self.format.doc_id_from_content(&disk_content) else {
+            return Ok(false);
+        };
+        let id = EntityUri::block(&bare);
+        let Some(mut doc) = self.doc_manager.get_by_id(&id).await? else {
+            return Ok(false);
+        };
+        if !doc.content.trim().is_empty() {
+            return Ok(false); // healthy doc-root — nothing to heal
+        }
+        let rel_path = path.strip_prefix(&self.root_dir).map_err(|e| {
+            anyhow::anyhow!(
+                "File {} not under root {}: {}",
+                path.display(),
+                self.root_dir.display(),
+                e
+            )
+        })?;
+        let segments = path_to_name_chain(rel_path);
+        let segment_refs: Vec<&str> = segments.iter().map(|s| s.as_str()).collect();
+        let filename_title = segments.last().cloned().unwrap_or_default();
+        if filename_title.trim().is_empty() {
+            // Residual case: an empty-content `Page` whose file name has NO
+            // derivable stem (a pathological empty stem, e.g. a bare `.org`).
+            // Re-deriving an empty title would silently re-leave the blank row,
+            // so disclose loudly by doc id and leave content empty; the sidebar
+            // row is covered by the disclosed render-side `(untitled)` placeholder
+            // (`render_eval` `empty:` named-arg, PR #59).
+            tracing::warn!(
+                doc_id = %doc.id,
+                path = %path.display(),
+                "cannot heal title-less Page doc-root: the file name has no derivable stem, so no \
+                 title can be re-derived — leaving content empty. The disclosed render-side \
+                 '(untitled)' placeholder covers the sidebar row; fix the file name or re-title \
+                 the page."
+            );
+            return Ok(false);
+        }
+        let derived_parent = if (doc.parent_id == EntityUri::no_parent()
+            || doc.parent_id.is_sentinel())
+            && segments.len() > 1
+        {
+            let parent_segments: Vec<&str> = segment_refs[..segments.len() - 1].to_vec();
+            self.doc_manager
+                .get_or_create_by_name_chain(&parent_segments)
+                .await?
+                .id
+        } else {
+            doc.parent_id.clone()
+        };
+        tracing::warn!(
+            doc_id = %doc.id,
+            filename_title = %filename_title,
+            old_parent = %doc.parent_id,
+            new_parent = %derived_parent,
+            path = %path.display(),
+            "healing title-less Page doc-root: empty content re-derived from filename (broken \
+             convert/delete product); reparenting when orphaned"
+        );
+        doc.content = filename_title;
+        doc.parent_id = derived_parent;
+        // Converge through the single org→block write seam a normal block update
+        // uses. A MINIMAL params map (no `tags`/`requires` keys) so `update_in_tree`
+        // leaves the `Page` tag + junctions untouched and only rewrites content +
+        // parent. `ROUTING_DOC_URI_KEY` is the doc-root's own id (it IS the doc).
+        let mut params = holon_api::StorageEntity::new();
+        params.insert("id".into(), Value::String(doc.id.to_string()));
+        params.insert("parent_id".into(), Value::String(doc.parent_id.to_string()));
+        params.insert("content".into(), Value::String(doc.content.clone()));
+        params.insert(
+            "content_type".into(),
+            Value::String(doc.content_type.to_string()),
+        );
+        params.insert(
+            holon_api::ROUTING_DOC_URI_KEY.into(),
+            Value::String(doc.id.to_string()),
+        );
+        self.ordering
+            .apply_ingest_batch(vec![("update".to_string(), params)])
+            .await
+            .map_err(|e| anyhow::anyhow!("heal update for {}: {e:#}", path.display()))?;
+        // Publish the healed row to the SQL sink (same single-sink-writer
+        // contract as the ingest / delete paths' flush).
+        if let Some(downstream) = &self.downstream {
+            downstream
+                .flush()
+                .await
+                .map_err(|e| anyhow::anyhow!("downstream flush after title-less heal: {e}"))?;
+        }
+        Ok(true)
+    }
+
     /// Handle an EXTERNAL file deletion (the user removed the org file outside
     /// Holon — `rm` in the vault, a file manager, a git checkout). Reached from
     /// `on_file_changed` when the changed path no longer exists, and from
@@ -827,6 +996,15 @@ impl FileSyncController {
     /// banner / survival logic is unchanged.
     pub async fn on_file_changed(&mut self, path: &Path) -> Result<()> {
         let canonical = CanonicalPath::new(path);
+        // Store-health seam (BugFunnel row 295): a runtime file-watch reingest of
+        // a title-less doc-root heals it through the SAME single implementation
+        // the boot sweep uses. Gated to post-boot edits — during the initial scan
+        // the one-shot `heal_title_less_doc_roots` sweep runs once after the scan
+        // instead, so per-file healing here would be redundant. Never in the
+        // ingest fast-path, which certifies byte-identity only.
+        if !self.in_initial_scan() {
+            self.heal_title_less_doc_root(path).await?;
+        }
         match self.ingest_file(path).await {
             Ok(()) => {
                 if self.quarantined.remove(&canonical) {
@@ -1042,6 +1220,13 @@ impl FileSyncController {
             // tree (the 2026-07-06 reset hole: fresh `.loro` + retained SQL row)
             // must NOT skip — skipping leaves SQL and Loro silently diverged and
             // the next Loro create fails at `resolve_parent_tree_id`.
+            //
+            // This predicate certifies ONLY byte-identity + store presence. It
+            // deliberately does NOT reason about store HEALTH (e.g. a title-less
+            // doc-root) — encoding a specific degradation here would leak the
+            // next degradation class through the same skip. Store-health repair
+            // is a separate, unconditional concern owned by
+            // `heal_title_less_doc_roots` (boot sweep) + the file-watch heal seam.
             if stored == &disk_hash && self.content_present_in_all_stores(&disk_content).await? {
                 debug!(
                     "[FileSyncController] Skipping {} — disk hash matches stored \
@@ -1099,57 +1284,18 @@ impl FileSyncController {
             .last()
             .cloned()
             .unwrap_or_else(|| "unknown".to_string());
-        // Set to the healed doc-root when we repair a title-less/orphaned `Page`
-        // below, so an explicit update op converges the degraded store row.
-        let mut heal_doc_root: Option<Block> = None;
+        // A title-less (empty-content) `Page` doc-root left by a broken
+        // convert/delete is NOT repaired here — the byte-identity fast-path above
+        // skips an unchanged degraded file before this point, so healing in ingest
+        // would be unreachable exactly for the case that needs it. Repair is the
+        // store-health seam's job (`heal_title_less_doc_roots` boot sweep +
+        // the file-watch heal in `on_file_changed`), which runs before/around this
+        // ingest, so the doc resolved here is already healed in the store.
         let document = match bare_id_in_file.as_deref() {
             Some(bare) => {
                 let id = EntityUri::block(bare);
                 match self.doc_manager.get_by_id(&id).await? {
-                    Some(mut doc) => {
-                        // Heal a title-less `Page` doc-root (dogfood 2026-07-21).
-                        // `convert_block_to_page` (and delete-that-leaves-the-file
-                        // -on-disk) can persist a `Page` whose content is empty;
-                        // on reingest the `#+ID` resolves, so the filename-title
-                        // default in the `None` arm below is BYPASSED and the page
-                        // renders as a blank sidebar row seeded at depth 0 (an
-                        // orphaned root). An empty-content `Page` is never legal —
-                        // re-derive its title from the filename, and when it is
-                        // also orphaned (parent lost to the root sentinel) its
-                        // folder parent, through the SAME derivation the create arm
-                        // uses. Belt-and-suspenders for already-broken vaults;
-                        // composes with the writeback-side `#+TITLE:` persistence
-                        // fix (which stops NEW title-less files being written).
-                        // Disclosed loudly — never a silent empty-content page.
-                        if doc.content.trim().is_empty() {
-                            let derived_parent = if (doc.parent_id == EntityUri::no_parent()
-                                || doc.parent_id.is_sentinel())
-                                && segments.len() > 1
-                            {
-                                let parent_segments: Vec<&str> =
-                                    segment_refs[..segments.len() - 1].to_vec();
-                                self.doc_manager
-                                    .get_or_create_by_name_chain(&parent_segments)
-                                    .await?
-                                    .id
-                            } else {
-                                doc.parent_id.clone()
-                            };
-                            tracing::warn!(
-                                doc_id = %doc.id,
-                                filename_title = %filename_title,
-                                old_parent = %doc.parent_id,
-                                new_parent = %derived_parent,
-                                path = %path.display(),
-                                "healing title-less Page doc-root: empty content re-derived from \
-                                 filename (broken convert/delete product); reparenting when orphaned"
-                            );
-                            doc.content = filename_title.clone();
-                            doc.parent_id = derived_parent;
-                            heal_doc_root = Some(doc.clone());
-                        }
-                        doc
-                    }
+                    Some(doc) => doc,
                     None => {
                         let parent_id = if segments.len() > 1 {
                             let parent_segments: Vec<&str> =
@@ -1413,31 +1559,6 @@ impl FileSyncController {
         let mut operations: Vec<(String, holon_api::StorageEntity)> = Vec::new();
         let mut has_structural_changes = false;
 
-        // Converge a healed title-less doc-root through the store mutation seam.
-        // The doc-root is NOT in `new_parse.blocks` (it is `new_parse.document`,
-        // resolved separately above) and `create_in_tree` is position-only for an
-        // already-present node — so the repaired content/parent would never reach
-        // the store without this explicit update. A MINIMAL params map (no
-        // `tags`/`requires` keys) so `update_in_tree` leaves the `Page` tag +
-        // junctions untouched and only rewrites content + parent.
-        if let Some(healed) = heal_doc_root.take() {
-            let mut params = holon_api::StorageEntity::new();
-            params.insert("id".into(), Value::String(healed.id.to_string()));
-            params.insert(
-                "parent_id".into(),
-                Value::String(healed.parent_id.to_string()),
-            );
-            params.insert("content".into(), Value::String(healed.content.clone()));
-            params.insert(
-                "content_type".into(),
-                Value::String(healed.content_type.to_string()),
-            );
-            params.insert(
-                holon_api::ROUTING_DOC_URI_KEY.into(),
-                Value::String(document_uri.to_string()),
-            );
-            operations.push(("update".to_string(), params));
-        }
         // Set when the updates pass 3-way merged a concurrent file-vs-UI content
         // edit. A pure content update is not "structural", so the early-return
         // below would skip the disk write-back — but a merge produces content

@@ -250,3 +250,51 @@ async fn idonly_root_page_heals_title_and_stays_root() {
         "a top-level page has no folder parent — the heal must keep it root-parented"
     );
 }
+
+/// BOOT store-health sweep (BugFunnel row 295): on a NORMAL boot the degraded
+/// file is byte-unchanged, so the ingest byte-identity fast-path skips it and
+/// no heal runs from ingest — the blank sidebar row (`Resources` / `Agentic
+/// DPL`) would survive every boot. The UNCONDITIONAL store-health sweep
+/// (`heal_title_less_doc_roots`), which the boot driver runs after the scan and
+/// independent of that fast-path, must repair the empty-content doc-root
+/// through the SAME single heal the file-watch path uses.
+///
+/// This is the boot proof. GREEN with the sweep (title re-derived); RED without
+/// it (the fast-path skip leaves the store untouched — `doc_root_update` panics
+/// with `recorded updates = []`). It drives the sweep directly rather than the
+/// fast-path, so it does not depend on reproducing the exact stored hash.
+#[tokio::test]
+async fn idonly_root_page_heals_on_boot_store_health_sweep() {
+    let doc_id = "a9163ed8-c431-115c-ff92-3faba5400000";
+    let (uri, dm) = empty_orphan_page(doc_id);
+
+    let ordering = RecordingOrdering::default();
+    let updates = ordering.updates.clone();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let path = root.join("Resources.org");
+    // The exact live shape: a single `#+ID:` line, no `#+TITLE:`.
+    std::fs::write(&path, format!("#+ID: {doc_id}\n")).unwrap();
+
+    let mut controller = new_org_sync_controller(
+        Arc::new(EmptyReader),
+        Arc::new(dm),
+        root.clone(),
+        Arc::new(ordering),
+        Arc::new(RealFileSystem),
+    );
+    controller
+        .heal_title_less_doc_roots()
+        .await
+        .expect("store-health sweep must not error");
+
+    let recorded = updates.lock().unwrap().clone();
+    let update = doc_root_update(&recorded, &uri);
+    assert_eq!(
+        update.get("content").and_then(|v| v.as_string()),
+        Some("Resources"),
+        "the unconditional boot store-health sweep must heal an empty-content Page doc-root the \
+         ingest byte-identity fast-path skips — not only the file-watch reingest path"
+    );
+}
