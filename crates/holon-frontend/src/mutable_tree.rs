@@ -655,6 +655,9 @@ fn wrap_tree_item(
         children: vec![widget.clone()],
         data: futures_signals::signal::Mutable::new(row).read_only(),
         expanded: Some(futures_signals::signal::Mutable::new(!collapsed)),
+        // Hover-reveal cell for the disclosure chevron (row-scoped hover flips
+        // it; `tree_item` reads it to gate chevron opacity — Logseq convention).
+        hovered: Some(futures_signals::signal::Mutable::new(false)),
         ..ReactiveViewModel::from_widget("tree_item", props)
     }
 }

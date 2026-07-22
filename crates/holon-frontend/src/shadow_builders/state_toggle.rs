@@ -27,11 +27,14 @@ holon_macros::widget_builder! {
         let (label, _semantic) = state_display(&current);
         let label = label.to_string();
 
+        let mt = ba.args.get_f64("mt").unwrap_or(0.0);
+
         let mut __props = std::collections::HashMap::new();
         __props.insert("field".to_string(), Value::String(field.clone()));
         __props.insert("current".to_string(), Value::String(current));
         __props.insert("label".to_string(), Value::String(label));
         __props.insert("states".to_string(), Value::String(states));
+        __props.insert("mt".to_string(), Value::Float(mt));
 
         // Wire the leaf to the shared per-row signal cell. `data_mutable()`
         // returns a `ReadOnlyMutable` clone of the cell owned by
