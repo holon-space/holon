@@ -73,14 +73,17 @@ impl QueryEngine for BackendEngine {
         use crate::storage::BLOCK_READ_TABLE;
         let escaped = filter.replace('\'', "''");
         // Subquery wrapping required — Turso rejects bare UNION.
-        // Page rows: block has a 'Page' tag in block_tags junction table;
-        // surface the first content line as the label.
+        // The two branches are DISJOINT so no entity is listed twice: the
+        // content branch excludes Page-tagged blocks (which the page branch
+        // owns). A Page-tagged block matching both branches otherwise appeared
+        // twice in the `[[` popup — once as a block, once as a page.
+        // Page rows surface the first content line (the title) as the label.
         let sql = format!(
             "SELECT * FROM (SELECT id, content AS label FROM {BLOCK_READ_TABLE} WHERE content \
-             LIKE '%{escaped}%' LIMIT 15) UNION ALL SELECT * FROM (SELECT b.id, substr(b.content, \
-             1, instr(b.content || char(10), char(10)) - 1) AS label FROM {BLOCK_READ_TABLE} b \
-             JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = 'Page' AND b.content LIKE \
-             '%{escaped}%' LIMIT 5)"
+             LIKE '%{escaped}%' AND id NOT IN (SELECT block_id FROM block_tags WHERE tag = 'Page') \
+             LIMIT 15) UNION ALL SELECT * FROM (SELECT b.id, substr(b.content, 1, instr(b.content \
+             || char(10), char(10)) - 1) AS label FROM {BLOCK_READ_TABLE} b JOIN block_tags bt ON \
+             bt.block_id = b.id WHERE bt.tag = 'Page' AND b.content LIKE '%{escaped}%' LIMIT 5)"
         );
         let rows = BackendEngine::execute_query(self, sql, HashMap::new(), None).await?;
         parse_link_candidates(rows)
