@@ -4,6 +4,7 @@
 - Every bug discovered OUTSIDE an automated test (dogfooding, agent exploration, user report) MUST be triaged with the `bug-gap-triage` skill (.claude/skills/bug-gap-triage/SKILL.md) and appended to docs/Testing/BugFunnel.md before/alongside the fix. Latency above the SLO (p95 interaction→projection-visible < 200ms) counts as such a bug.
 - **NEVER** swallow errors!! Use `Result` and enrich the error message with information.
 - **ALWAYS** `tee` before filtering output
+- Before writing ANY org blocks into the vault (/Users/martin/Workspaces/pkm/holon-pkm) — task tracking, progress notes, handoffs — load the `holon-handoff` skill first and follow its structuring rules (imperative titles, details as child blocks, parent state derives from children). Never write vault org structure from memory.
 
 ## Error Handling Philosophy: Fail Loud, Never Fake
 
