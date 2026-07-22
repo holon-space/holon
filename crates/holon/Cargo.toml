@@ -125,6 +125,10 @@ name = "convert_block_to_page_e2e"
 required-features = ["test-helpers"]
 
 [[test]]
+name = "link_candidate_dedup_e2e"
+required-features = ["test-helpers"]
+
+[[test]]
 name = "turso_block_query_source_round_trip_pbt"
 required-features = ["test-helpers"]
 
