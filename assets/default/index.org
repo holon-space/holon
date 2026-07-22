@@ -8,7 +8,7 @@
 :collapse_to: drawer
 :END:
 #+BEGIN_SRC render :id left_sidebar::render::0
-column(tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: selectable(row(icon("notebook"), spacer(6), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})}), divider(), row(icon("sync"), spacer(6), text("Integrations", #{bold: true})), live_query(#{sql: "SELECT provider_name, updated_at FROM sync_states ORDER BY provider_name ASC", item_template: row(spacer(6), icon("link"), spacer(6), text(col("provider_name")), spacer(8), text(col("updated_at")))}))
+column(tree(#{parent_id: col("parent_id"), sortkey: col("content"), item_template: selectable(row(icon("notebook"), spacer(6), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})}), divider(), row(icon("sync"), spacer(6), text("Integrations", #{bold: true})), live_query(#{sql: "SELECT provider_name, updated_at FROM sync_states ORDER BY provider_name ASC", item_template: row(spacer(6), icon("link"), spacer(6), text(col("provider_name")), spacer(8), text(col("updated_at")))}))
 #+END_SRC
 #+BEGIN_SRC holon_sql :id left_sidebar::src::0
 SELECT b.* FROM block b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = 'Page' AND b.id != 'block:__default__' ORDER BY b.content ASC
