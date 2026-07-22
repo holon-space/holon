@@ -1,5 +1,8 @@
 use std::ops::Range;
 
+use gpui::InteractiveText;
+use gpui::SharedString;
+use gpui::StyledText;
 use holon_api::EntityRef;
 use holon_api::EntityUri;
 use holon_api::InlineMark;
@@ -9,6 +12,7 @@ use holon_api::marks_from_json;
 use holon_frontend::operations::OperationIntent;
 
 use super::prelude::*;
+use crate::render::builders::text::build_highlights;
 use crate::render::rich_text_runs::scalar_range_to_bytes;
 
 /// Read-only sibling of `editable_text`. Renders the block's content as
@@ -46,13 +50,8 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
         _ => None,
     };
 
-    let has_links = marks.as_ref().map_or(false, |m| {
-        m.iter()
-            .any(|ms| matches!(ms.mark, InlineMark::Link { .. }))
-    });
-
-    let inner: AnyElement = if !has_content || !has_links {
-        // Empty block or no link marks: use existing behavior.
+    let inner: AnyElement = if !wants_styled_render(has_content, marks.as_deref()) {
+        // Empty block or no marks: plain text, click to focus.
         click_to_focus(
             &el_id,
             static_inner(&content, ctx).into_any_element(),
@@ -61,7 +60,7 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
         )
         .into_any_element()
     } else {
-        link_aware_render(&content, &marks.unwrap(), &block_uri, services)
+        styled_run_render(&el_id, &content, &marks.unwrap(), &block_uri, services, ctx)
     };
 
     crate::geometry::tracked(
@@ -76,20 +75,32 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
     .into_any_element()
 }
 
-/// Render content with link marks as clickable, distinct runs.
-fn link_aware_render(
+/// Read mode renders styled runs whenever the block has content AND any mark of
+/// any kind. The bug this replaced (dogfood 2026-07-22 bug 1) gated styling on
+/// a *Link* mark only, so a block whose marks were Bold/Italic/Underline fell
+/// to `static_inner` (plain text) and its formatting silently vanished — even
+/// though the editor styled the same marks. Gate on presence of any mark.
+fn wants_styled_render(has_content: bool, marks: Option<&[MarkSpan]>) -> bool {
+    has_content && marks.is_some_and(|m| !m.is_empty())
+}
+
+/// Render content with marks as a single wrapping styled-text flow.
+///
+/// One `StyledText` carries every mark kind (bold/italic/underline/strike/code
+/// and link color, via the shared `text::build_highlights`), so inline links no
+/// longer split the block into separate `flex_row` children that stack onto
+/// their own lines (dogfood F3). It is wrapped in `InteractiveText` so link
+/// spans stay clickable (navigate / follow dangling link) while a click on any
+/// non-link span focuses the block to enter edit mode — the same behavior the
+/// old per-segment `on_mouse_down` handlers provided, kept in-flow.
+fn styled_run_render(
+    el_id: &str,
     content: &str,
     marks: &[MarkSpan],
     block_uri: &EntityUri,
     services: std::sync::Arc<dyn holon_frontend::reactive::BuilderServices>,
+    ctx: &GpuiRenderContext,
 ) -> AnyElement {
-    let link_color = Hsla {
-        h: 0.6,
-        s: 0.7,
-        l: 0.6,
-        a: 1.0,
-    };
-
     // Never abort on a corrupt persisted mark. A mark span outliving its
     // content ("N..M exceeds text length K") aborts EVERY paint of this block —
     // a page permanently un-openable. Disclosed degraded render: log loud with
@@ -129,114 +140,62 @@ fn link_aware_render(
         }
     }
 
-    let segments = build_content_segments(content, marks);
+    // One flowing, wrapping styled text: all marks become highlight runs.
+    let highlights = build_highlights(content, marks, ctx);
+    let styled =
+        StyledText::new(SharedString::from(content.to_string())).with_highlights(highlights);
 
-    let mut el = div()
-        .flex_row()
+    // Partition into non-overlapping ordered segments covering the whole
+    // content; each becomes one clickable range. `InteractiveText::on_click`
+    // yields the index of the (single) range containing the click, so exactly
+    // one action fires: navigate for a link segment, focus the block otherwise.
+    let segments = build_content_segments(content, marks);
+    let ranges: Vec<Range<usize>> = segments.iter().map(|s| s.byte_range.clone()).collect();
+    let targets: Vec<Option<EntityRef>> = segments.iter().map(|s| s.link_target.clone()).collect();
+
+    let block_focus = block_uri.clone();
+    let interactive =
+        InteractiveText::new(hashed_id(el_id), styled).on_click(ranges, move |ix, _window, _cx| {
+            match &targets[ix] {
+                None => services.set_focus(Some(block_focus.clone())),
+                Some(EntityRef::Internal { id }) => {
+                    services.dispatch_intent(nav_focus(id.to_string()));
+                }
+                Some(EntityRef::External { url }) => {
+                    services.dispatch_intent(nav_focus(url.clone()));
+                }
+                Some(EntityRef::Name { name }) => {
+                    // Dangling link: create the page chain for this name (lazy
+                    // page-create, 2026-07-10 links ruling) and navigate the main
+                    // region to the new leaf; the next render re-resolves the healed
+                    // junction and this segment becomes `Internal`.
+                    services.follow_dangling_link(name.clone(), "main".to_string());
+                }
+            }
+        });
+
+    div()
         .w_full()
         .px(px(12.0))
         .py(px(8.0))
         .text_sm()
-        .line_height(gpui::Rems(1.25));
+        .line_height(gpui::Rems(1.25))
+        .child(interactive)
+        .into_any_element()
+}
 
-    for seg in &segments {
-        if seg.is_link {
-            let target = seg
-                .link_target
-                .as_ref()
-                .expect("link segment must have target");
-            let link_text = seg.text.clone();
-            let child = match target {
-                EntityRef::Internal { id } => {
-                    let target_id = id.to_string();
-                    div()
-                        .child(link_text)
-                        .text_color(link_color)
-                        .underline()
-                        .cursor_pointer()
-                        .on_mouse_down(gpui::MouseButton::Left, {
-                            let s = services.clone();
-                            let tid = target_id.clone();
-                            move |_, _, _| {
-                                s.dispatch_intent(OperationIntent::new(
-                                    "navigation".into(),
-                                    "focus".into(),
-                                    [
-                                        ("region".into(), Value::String("main".into())),
-                                        ("block_id".into(), Value::String(tid.clone())),
-                                    ]
-                                    .into_iter()
-                                    .collect(),
-                                ));
-                            }
-                        })
-                        .into_any_element()
-                }
-                EntityRef::External { url } => {
-                    let url = url.clone();
-                    div()
-                        .child(link_text)
-                        .text_color(link_color)
-                        .underline()
-                        .cursor_pointer()
-                        .on_mouse_down(gpui::MouseButton::Left, {
-                            let s = services.clone();
-                            let u = url.clone();
-                            move |_, _, _| {
-                                s.dispatch_intent(OperationIntent::new(
-                                    "navigation".into(),
-                                    "focus".into(),
-                                    [
-                                        ("region".into(), Value::String("main".into())),
-                                        ("block_id".into(), Value::String(u.clone())),
-                                    ]
-                                    .into_iter()
-                                    .collect(),
-                                ));
-                            }
-                        })
-                        .into_any_element()
-                }
-                EntityRef::Name { name } => {
-                    // Dangling link: create the page chain for this name (lazy
-                    // page-create, 2026-07-10 links ruling) and navigate the main
-                    // region to the new leaf, so the click feels identical to
-                    // clicking a resolved link. The next render re-resolves the
-                    // healed junction and this arm becomes `Internal`.
-                    let target = name.clone();
-                    div()
-                        .child(link_text)
-                        .text_color(link_color)
-                        .underline()
-                        .cursor_pointer()
-                        .on_mouse_down(gpui::MouseButton::Left, {
-                            let s = services.clone();
-                            move |_, _, _| {
-                                s.follow_dangling_link(target.clone(), "main".to_string());
-                            }
-                        })
-                        .into_any_element()
-                }
-            };
-            el = el.child(child);
-        } else {
-            let text = seg.text.clone();
-            el = el.child(
-                div()
-                    .child(text)
-                    .on_mouse_down(gpui::MouseButton::Left, {
-                        let s = services.clone();
-                        let uri = block_uri.clone();
-                        move |_, _, _| {
-                            s.set_focus(Some(uri.clone()));
-                        }
-                    })
-                    .into_any_element(),
-            );
-        }
-    }
-
-    el.into_any_element()
+/// Build a `navigation.focus` intent for the main region targeting `block_id`.
+fn nav_focus(block_id: String) -> OperationIntent {
+    OperationIntent::new(
+        "navigation".into(),
+        "focus".into(),
+        [
+            ("region".into(), Value::String("main".into())),
+            ("block_id".into(), Value::String(block_id)),
+        ]
+        .into_iter()
+        .collect(),
+    )
 }
 
 /// One segment of content: either plain text or a link.
@@ -525,5 +484,165 @@ mod tests {
         assert_eq!(segments[1].byte_range, 2..4);
         assert!(!segments[2].is_link);
         assert_eq!(segments[2].text, "c");
+    }
+
+    // --- dogfood 2026-07-22 bug 1 (marks-on-blur) + F3 (inline-link stacking) ---
+
+    fn mark(start: usize, end: usize, m: InlineMark) -> MarkSpan {
+        MarkSpan::new(start, end, m)
+    }
+
+    /// Bug 1: a block whose ONLY marks are non-link (bold/underline) MUST
+    /// render styled. The old gate keyed on a Link mark, so this returned
+    /// false and the block fell to plain `static_inner` — the exact escape.
+    #[test]
+    fn bold_only_marks_want_styled_render() {
+        let marks = vec![mark(0, 4, InlineMark::Bold)];
+        assert!(
+            wants_styled_render(true, Some(&marks)),
+            "non-link marks must route through the styled renderer"
+        );
+    }
+
+    #[test]
+    fn underline_only_marks_want_styled_render() {
+        let marks = vec![mark(0, 4, InlineMark::Underline)];
+        assert!(wants_styled_render(true, Some(&marks)));
+    }
+
+    #[test]
+    fn link_marks_still_want_styled_render() {
+        let marks = vec![mark_link(0, 4, internal_uri("block:x"))];
+        assert!(wants_styled_render(true, Some(&marks)));
+    }
+
+    #[test]
+    fn no_marks_stays_plain() {
+        assert!(!wants_styled_render(true, None));
+        assert!(!wants_styled_render(true, Some(&[])));
+    }
+
+    #[test]
+    fn empty_content_never_styled_even_with_marks() {
+        let marks = vec![mark(0, 4, InlineMark::Bold)];
+        assert!(!wants_styled_render(false, Some(&marks)));
+    }
+
+    fn rich_style() -> crate::render::rich_text_runs::RichTextStyle {
+        crate::render::rich_text_runs::RichTextStyle {
+            default_font: gpui::font(".SystemUIFont"),
+            default_color: Hsla {
+                h: 0.0,
+                s: 0.0,
+                l: 0.9,
+                a: 1.0,
+            },
+            muted_bg: Hsla {
+                h: 0.0,
+                s: 0.0,
+                l: 0.2,
+                a: 1.0,
+            },
+            code_color: Hsla {
+                h: 0.4,
+                s: 0.5,
+                l: 0.7,
+                a: 1.0,
+            },
+            link_color: Hsla {
+                h: 0.6,
+                s: 0.7,
+                l: 0.6,
+                a: 1.0,
+            },
+        }
+    }
+
+    /// Bug 1, styled-run oracle on Martin's exact repro. The stored content is
+    /// the stripped text; marks are Bold over "content" (14..21) and Underline
+    /// over "block" (25..30). The read-mode styling pipeline the fix now routes
+    /// through must yield a BOLD run and an underlined run — not one plain run.
+    #[test]
+    fn martins_repro_yields_bold_and_underline_runs() {
+        use crate::render::rich_text_runs::marks_to_text_runs;
+        let content = "Formatting of content in block content";
+        assert_eq!(&content[14..21], "content");
+        assert_eq!(&content[25..30], "block");
+        let marks = vec![
+            mark(14, 21, InlineMark::Bold),
+            mark(25, 30, InlineMark::Underline),
+        ];
+        let runs = marks_to_text_runs(content, &marks, &rich_style());
+
+        // More than one run => the text was partitioned by marks, not left plain.
+        assert!(runs.len() > 1, "styled content must produce multiple runs");
+        assert!(
+            runs.iter().any(|r| r.font.weight == gpui::FontWeight::BOLD),
+            "a bold run must exist over \"content\""
+        );
+        assert!(
+            runs.iter().any(|r| r.underline.is_some()),
+            "an underlined run must exist over \"block\""
+        );
+        // Runs cover every byte (single flowing text, not dropped spans).
+        let total: usize = runs.iter().map(|r| r.len).sum();
+        assert_eq!(total, content.len());
+    }
+
+    /// F3: an inline link mid-sentence must partition into ordered segments
+    /// that tile the whole content contiguously (no gaps, no overlap). This
+    /// is the data a single wrapping `StyledText`/`InteractiveText`
+    /// consumes, replacing the old per-segment `flex_row` children that
+    /// stacked onto separate lines.
+    #[test]
+    fn inline_link_partition_tiles_content_contiguously() {
+        let content = "See the Target Page reference inline in this sentence";
+        let start = content.find("Target Page").unwrap();
+        let end = start + "Target Page".len();
+        let marks = vec![mark_link(start, end, internal_uri("block:target-page-doc"))];
+        let segments = build_content_segments(content, &marks);
+
+        // Contiguous cover 0..len, in order, no gaps/overlap.
+        assert_eq!(segments.first().unwrap().byte_range.start, 0);
+        assert_eq!(segments.last().unwrap().byte_range.end, content.len());
+        for w in segments.windows(2) {
+            assert_eq!(
+                w[0].byte_range.end, w[1].byte_range.start,
+                "segments must tile"
+            );
+        }
+        // Exactly one link segment, carrying its nav target (interactivity kept).
+        let links: Vec<_> = segments.iter().filter(|s| s.is_link).collect();
+        assert_eq!(links.len(), 1);
+        assert!(
+            links[0].link_target.is_some(),
+            "link segment keeps its target"
+        );
+        assert_eq!(links[0].text, "Target Page");
+    }
+
+    /// Link-interactivity data: the clickable ranges handed to
+    /// `InteractiveText` line up 1:1 with the segment partition, and each
+    /// link range maps to its target by index (the `on_click(ix)` lookup).
+    /// A click on a non-link range maps to `None` (focus the block).
+    #[test]
+    fn clickable_ranges_align_with_targets_by_index() {
+        let content = "a [[one]] b [[two]] c";
+        let one_s = content.find("[[one]]").unwrap();
+        let two_s = content.find("[[two]]").unwrap();
+        let marks = vec![
+            mark_link(one_s, one_s + "[[one]]".len(), internal_uri("block:one")),
+            mark_link(two_s, two_s + "[[two]]".len(), internal_uri("block:two")),
+        ];
+        let segments = build_content_segments(content, &marks);
+        let ranges: Vec<_> = segments.iter().map(|s| s.byte_range.clone()).collect();
+        let targets: Vec<_> = segments.iter().map(|s| s.link_target.clone()).collect();
+
+        assert_eq!(ranges.len(), targets.len());
+        // Indices of link segments carry Internal targets; text segments are None.
+        for (seg, tgt) in segments.iter().zip(&targets) {
+            assert_eq!(seg.is_link, tgt.is_some());
+        }
+        assert_eq!(targets.iter().filter(|t| t.is_some()).count(), 2);
     }
 }
