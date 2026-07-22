@@ -11,6 +11,7 @@ use holon_api::types::TaskState;
 use orgize::ParseConfig;
 use orgize::SyntaxKind;
 use orgize::ast::Headline;
+use orgize::ast::Section;
 use orgize::ast::SourceBlock as OrgizeSourceBlock;
 use orgize::rowan::ast::AstNode;
 use sha2::Digest;
@@ -205,6 +206,22 @@ pub fn parse_org_file(
 
     // Process document headlines recursively
     let doc = org.document();
+
+    // Top-level (pre-first-headline) source/image children of the document —
+    // emitted FIRST so they precede headline blocks in document order. A page
+    // whose direct child is a source block (row-28: `convert_block_to_page` on a
+    // block owning a `holon_rule`) renders that child as a top-level
+    // `#+BEGIN_SRC` under the file `#+ID:` header; `process_headlines` only
+    // walks headlines, so without this pass the block is dropped on round-trip.
+    let top_section = extract_section_content(doc.section());
+    emit_section_children(
+        top_section.source_blocks,
+        top_section.image_paths,
+        file_id.id(),
+        &mut sequence_counter,
+        &mut blocks,
+    );
+
     process_headlines(
         doc.headlines(),
         file_id.as_str(), // Top-level headlines have document as parent
@@ -320,6 +337,158 @@ fn parse_keywords_from_config(config: &str) -> (Vec<String>, Vec<String>) {
     (active, done)
 }
 
+/// Emit a section's source-block and image children as `Block`s parented to
+/// `parent_bare` (the bare id of the owning headline OR the document root for
+/// top-level, pre-first-headline content). Shared by `process_headlines` and
+/// the document top-level pass in `parse_org_file` so a source/image block
+/// round-trips identically whether it sits under a `* headline` or directly
+/// under the file `#+ID:` header (row-28: a `convert_block_to_page` page whose
+/// direct child is a `holon_rule` renders that child as a top-level
+/// `#+BEGIN_SRC`; without this pass the parser dropped it silently).
+fn emit_section_children(
+    source_blocks: Vec<SourceBlock>,
+    image_paths: Vec<String>,
+    parent_bare: &str,
+    sequence_counter: &mut i64,
+    output: &mut Vec<Block>,
+) {
+    let now = holon_api::clock::now_millis();
+    // Create child Block entities for each source block
+    for (src_index, mut source_block) in source_blocks.into_iter().enumerate() {
+        // Extract :id from header args if present (preserves ID across round-trips)
+        // Otherwise fall back to stable ID based on parent + index
+        let src_id = source_block
+            .header_args
+            .remove("id")
+            .and_then(|v| v.as_string().map(|s| s.to_string()))
+            .unwrap_or_else(|| format!("{}::src::{}", parent_bare, src_index));
+
+        let src_sequence = *sequence_counter;
+        *sequence_counter += 1;
+
+        let mut src_block = Block {
+            id: EntityUri::block(&src_id),
+            // ALLOW(entity_uri_from_raw): org parser output: parent headline raw org slug
+            parent_id: EntityUri::from_raw(parent_bare),
+            content: source_block.source,
+            content_type: ContentType::Source,
+            source_language: source_block
+                .language
+                .map(|l| l.parse::<SourceLanguage>().unwrap()),
+            source_name: source_block.name,
+            created_at: now,
+            updated_at: now,
+            ..Block::default()
+        };
+        src_block.set_sequence(src_sequence);
+
+        // Separate standard org header args from custom properties.
+        // Standard args (results, session, connection, var, etc.) go into
+        // _source_header_args. Everything else is a custom property stored
+        // directly in block.properties for round-trip fidelity.
+        if !source_block.header_args.is_empty() {
+            const KNOWN_HEADER_ARGS: &[&str] = &[
+                "results",
+                "session",
+                "connection",
+                "var",
+                "tangle",
+                "noweb",
+                "exports",
+                "cache",
+                "dir",
+                "eval",
+                "file",
+                "hlines",
+                "colnames",
+                "rownames",
+                "sep",
+                "mkdirp",
+                "padline",
+                "shebang",
+                "wrap",
+                "post",
+                "prologue",
+                "epilogue",
+            ];
+            let mut standard_args = HashMap::new();
+            for (k, v) in source_block.header_args {
+                if KNOWN_HEADER_ARGS.contains(&k.as_str()) {
+                    standard_args.insert(k, v);
+                } else if k.eq_ignore_ascii_case("REQUIRES") || k.eq_ignore_ascii_case("BLOCKED-BY")
+                {
+                    // `:BLOCKED-BY <bare>` (canonical) / `:REQUIRES <bare>`
+                    // (legacy alias) is an edge-typed header arg emitted by
+                    // `source_block_to_org` via `drawer_properties()`. UNION
+                    // both spellings into the typed `block.requires` edge field
+                    // (the `block_requires` junction) so it round-trips as an
+                    // edge, symmetric with the headline path above.
+                    if let Some(s) = v.as_string() {
+                        for slug in s
+                            .split(|c: char| c == ',' || c.is_whitespace())
+                            .filter(|s| !s.is_empty())
+                        {
+                            // ALLOW(entity_uri_from_raw): org src-block REQUIRES/BLOCKED-BY
+                            // header arg bare slug at parse boundary
+                            let uri = EntityUri::from_raw(slug);
+                            if !src_block.requires.contains(&uri) {
+                                src_block.requires.push(uri);
+                            }
+                        }
+                    }
+                } else if k.eq_ignore_ascii_case("ADVICE_SUPPRESSED") {
+                    if let Some(s) = v.as_string() {
+                        src_block.advice_suppressed = s
+                            .split(|c: char| c == ',' || c.is_whitespace())
+                            .filter(|s| !s.is_empty())
+                            // ALLOW(entity_uri_from_raw): org src-block ADVICE_SUPPRESSED
+                            // header arg: bare slug promoted at parse boundary
+                            .map(EntityUri::from_raw)
+                            .collect();
+                    }
+                } else if k.eq_ignore_ascii_case("TAGS") {
+                    // `:TAGS <space-joined>` is emitted by `source_block_to_org`
+                    // because a Source block has no headline to carry `:tag:`
+                    // notation. Lift it back into the typed `block.tags` set so
+                    // tags survive the org round-trip on rule/source blocks.
+                    if let Some(s) = v.as_string() {
+                        src_block.tags = Tags::from_tag_iter(
+                            s.split(|c: char| c == ',' || c.is_whitespace())
+                                .filter(|s| !s.is_empty())
+                                .map(|s| s.to_string()),
+                        );
+                    }
+                } else if let Some(s) = v.as_string() {
+                    src_block.set_property(&k, holon_api::Value::String(s.to_string()));
+                }
+            }
+            if !standard_args.is_empty() {
+                src_block.set_source_header_args(standard_args);
+            }
+        }
+
+        output.push(src_block);
+    }
+
+    // Create child Block entities for each image link
+    for (img_index, image_path) in image_paths.into_iter().enumerate() {
+        let img_id = format!("{}::img::{}", parent_bare, img_index);
+        let img_sequence = *sequence_counter;
+        *sequence_counter += 1;
+
+        let mut img_block = Block::new_image(
+            EntityUri::block(&img_id),
+            // ALLOW(entity_uri_from_raw): org parser output: parent headline raw org slug
+            EntityUri::from_raw(parent_bare),
+            image_path,
+        );
+        img_block.set_sequence(img_sequence);
+        img_block.created_at = now;
+        img_block.updated_at = now;
+        output.push(img_block);
+    }
+}
+
 /// Recursively process headlines and their children
 #[allow(clippy::only_used_in_recursion)] // file_id threaded for future log/diagnostic plumbing
 fn process_headlines(
@@ -373,7 +542,7 @@ fn process_headlines(
         );
 
         // Extract section content with source blocks
-        let section = extract_section_content(&headline);
+        let section = extract_section_content(headline.section());
         let body = section.body;
         let source_blocks = section.source_blocks;
 
@@ -526,141 +695,15 @@ fn process_headlines(
 
         output.push(block);
 
-        // Create child Block entities for each source block
-        for (src_index, mut source_block) in source_blocks.into_iter().enumerate() {
-            // Extract :id from header args if present (preserves ID across round-trips)
-            // Otherwise fall back to stable ID based on parent + index
-            let src_id = source_block
-                .header_args
-                .remove("id")
-                .and_then(|v| v.as_string().map(|s| s.to_string()))
-                .unwrap_or_else(|| format!("{}::src::{}", id, src_index));
-
-            let src_sequence = *sequence_counter;
-            *sequence_counter += 1;
-
-            let mut src_block = Block {
-                id: EntityUri::block(&src_id),
-                // ALLOW(entity_uri_from_raw): org parser output: parent headline raw org slug
-                parent_id: EntityUri::from_raw(&id),
-                content: source_block.source,
-                content_type: ContentType::Source,
-                source_language: source_block
-                    .language
-                    .map(|l| l.parse::<SourceLanguage>().unwrap()),
-                source_name: source_block.name,
-                created_at: now,
-                updated_at: now,
-                ..Block::default()
-            };
-            src_block.set_sequence(src_sequence);
-
-            // Separate standard org header args from custom properties.
-            // Standard args (results, session, connection, var, etc.) go into
-            // _source_header_args. Everything else is a custom property stored
-            // directly in block.properties for round-trip fidelity.
-            if !source_block.header_args.is_empty() {
-                const KNOWN_HEADER_ARGS: &[&str] = &[
-                    "results",
-                    "session",
-                    "connection",
-                    "var",
-                    "tangle",
-                    "noweb",
-                    "exports",
-                    "cache",
-                    "dir",
-                    "eval",
-                    "file",
-                    "hlines",
-                    "colnames",
-                    "rownames",
-                    "sep",
-                    "mkdirp",
-                    "padline",
-                    "shebang",
-                    "wrap",
-                    "post",
-                    "prologue",
-                    "epilogue",
-                ];
-                let mut standard_args = HashMap::new();
-                for (k, v) in source_block.header_args {
-                    if KNOWN_HEADER_ARGS.contains(&k.as_str()) {
-                        standard_args.insert(k, v);
-                    } else if k.eq_ignore_ascii_case("REQUIRES")
-                        || k.eq_ignore_ascii_case("BLOCKED-BY")
-                    {
-                        // `:BLOCKED-BY <bare>` (canonical) / `:REQUIRES <bare>`
-                        // (legacy alias) is an edge-typed header arg emitted by
-                        // `source_block_to_org` via `drawer_properties()`. UNION
-                        // both spellings into the typed `block.requires` edge field
-                        // (the `block_requires` junction) so it round-trips as an
-                        // edge, symmetric with the headline path above.
-                        if let Some(s) = v.as_string() {
-                            for slug in s
-                                .split(|c: char| c == ',' || c.is_whitespace())
-                                .filter(|s| !s.is_empty())
-                            {
-                                // ALLOW(entity_uri_from_raw): org src-block REQUIRES/BLOCKED-BY
-                                // header arg bare slug at parse boundary
-                                let uri = EntityUri::from_raw(slug);
-                                if !src_block.requires.contains(&uri) {
-                                    src_block.requires.push(uri);
-                                }
-                            }
-                        }
-                    } else if k.eq_ignore_ascii_case("ADVICE_SUPPRESSED") {
-                        if let Some(s) = v.as_string() {
-                            src_block.advice_suppressed = s
-                                .split(|c: char| c == ',' || c.is_whitespace())
-                                .filter(|s| !s.is_empty())
-                                // ALLOW(entity_uri_from_raw): org src-block ADVICE_SUPPRESSED
-                                // header arg: bare slug promoted at parse boundary
-                                .map(EntityUri::from_raw)
-                                .collect();
-                        }
-                    } else if k.eq_ignore_ascii_case("TAGS") {
-                        // `:TAGS <space-joined>` is emitted by `source_block_to_org`
-                        // because a Source block has no headline to carry `:tag:`
-                        // notation. Lift it back into the typed `block.tags` set so
-                        // tags survive the org round-trip on rule/source blocks.
-                        if let Some(s) = v.as_string() {
-                            src_block.tags = Tags::from_tag_iter(
-                                s.split(|c: char| c == ',' || c.is_whitespace())
-                                    .filter(|s| !s.is_empty())
-                                    .map(|s| s.to_string()),
-                            );
-                        }
-                    } else if let Some(s) = v.as_string() {
-                        src_block.set_property(&k, holon_api::Value::String(s.to_string()));
-                    }
-                }
-                if !standard_args.is_empty() {
-                    src_block.set_source_header_args(standard_args);
-                }
-            }
-
-            output.push(src_block);
-        }
-
-        // Create child Block entities for each image link
-        for (img_index, image_path) in section.image_paths.into_iter().enumerate() {
-            let img_id = format!("{}::img::{}", id, img_index);
-            let img_sequence = *sequence_counter;
-            *sequence_counter += 1;
-
-            let mut img_block = Block::new_image(
-                EntityUri::block(&img_id),
-                // ALLOW(entity_uri_from_raw): org parser output: parent headline raw org slug
-                EntityUri::from_raw(&id),
-                image_path,
-            );
-            img_block.set_sequence(img_sequence);
-            img_block.created_at = now;
-            img_block.updated_at = now;
-            output.push(img_block);
-        }
+        // Source-block + image children (shared with the document top-level
+        // pass in `parse_org_file`).
+        emit_section_children(
+            source_blocks,
+            section.image_paths,
+            &id,
+            sequence_counter,
+            output,
+        );
 
         // Recursively process children
         process_headlines(
@@ -752,8 +795,8 @@ struct SectionContent {
     deadline_fallback: Option<String>,
 }
 
-fn extract_section_content(headline: &Headline) -> SectionContent {
-    let section = match headline.section() {
+fn extract_section_content(section_opt: Option<Section>) -> SectionContent {
+    let section = match section_opt {
         Some(s) => s,
         None => {
             return SectionContent {

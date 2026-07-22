@@ -1506,13 +1506,15 @@ impl ReferenceState {
             .map(|b| b.id.clone())
             .collect();
 
-        // 1. Mint page P as the last child of `destination_parent`, carrying the
-        //    origin's original content + marks. A page is its own document.
-        let mut page = Block::new_text(
-            page_id.clone(),
-            destination_parent.clone(),
-            origin_content.clone(),
-        );
+        // 1. Mint page P as the last child of `destination_parent`. The page TITLE
+        //    mirrors the backend sanitize (trailing `/` stripped; land 866977e85e) so
+        //    P's content + id + filename agree — the origin block and its `[[P]]` link
+        //    label below keep the RAW content (the backend leaves the origin text
+        //    unchanged). Marks carry over from the origin.
+        let page_content =
+            crate::pbt::transitions::block_to_page::sanitize_page_leaf(&origin_content)
+                .unwrap_or_else(|| origin_content.clone());
+        let mut page = Block::new_text(page_id.clone(), destination_parent.clone(), page_content);
         page.set_page(true);
         page.marks = origin_marks;
         let max_seq = self
