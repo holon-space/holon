@@ -388,3 +388,112 @@ fn sidebar_column_nested_collection_paints_and_commits_bounds(cx: &mut TestAppCo
         );
     }
 }
+
+// ─── Main-panel collection_view() 0-height regression (dogfood 2026-07-22) ──
+//
+// The seeded main panel renders
+//   `column(collection_view(), divider(), "Linked references",
+// live_query(...))`. `collection_view()` expands to a `view_mode_switcher`
+// whose slot holds the focused page's outline collection. The switcher's
+// default render makes its outer element `size_full` and absolutely-positions
+// the slot content to fill it — which resolves to 0 height inside a
+// content-sized `column`, so the outline painted NO rows (only the divider +
+// backlinks header showed live). Same class as the sidebar bug above, one
+// wrapper deeper (the vms slot). `describe_ui` (shadow tree) has the rows, so
+// the headless keystone cannot see this — it needs a real GPUI window / Taffy
+// layout.
+
+use holon_frontend::reactive_view_model::ReactiveSlot;
+
+/// A `view_mode_switcher` node whose slot holds the outline collection — the
+/// shape `collection_view()` expands to inside the main-panel `column`.
+fn view_mode_switcher_node(view: Arc<ReactiveView>) -> Arc<ReactiveViewModel> {
+    let collection_child = ReactiveViewModel {
+        collection: Some(view),
+        ..ReactiveViewModel::from_widget("list", HashMap::new())
+    };
+
+    let mut props = HashMap::new();
+    props.insert(
+        "entity_uri".into(),
+        Value::String("block:test-main-panel".into()),
+    );
+    props.insert(
+        "modes".into(),
+        Value::String(r#"[{"name":"tree","icon":"notebook"}]"#.into()),
+    );
+
+    let mut vms = ReactiveViewModel::from_widget("view_mode_switcher", props);
+    vms.slot = Some(ReactiveSlot::new(collection_child));
+    Arc::new(vms)
+}
+
+/// The exact seeded main-panel shape: a `column` whose first child is
+/// `collection_view()` (→ `view_mode_switcher` wrapping the outline) followed
+/// by the "Linked references" chrome (stood in for by a fixed footer).
+fn main_panel_shaped_column(view: Arc<ReactiveView>) -> Arc<ReactiveViewModel> {
+    let outline = view_mode_switcher_node(view);
+    let footer = Arc::new(ReactiveViewModel::text("Linked references"));
+
+    let mut column = ReactiveViewModel::from_widget("column", HashMap::new());
+    column.children = vec![outline, footer];
+    Arc::new(column)
+}
+
+/// RED before the fix / GREEN after: the outline collection nested inside a
+/// `view_mode_switcher` inside a stacking `column` must paint its rows with
+/// committed, nonzero-height bounds. Before the fix the switcher's `size_full`
+/// collapsed to 0 in the content-sized column and painted nothing.
+#[gpui::test]
+fn main_panel_collection_view_paints_nonzero_height_in_column(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_component::init(cx);
+    });
+
+    let items: Vec<ReactiveViewModel> = (0..SIDEBAR_PAGE_COUNT).map(text_item).collect();
+    let view = Arc::new(ReactiveView::new_static_with_layout(
+        items,
+        CollectionVariant::list(0.0),
+    ));
+    let root = main_panel_shaped_column(view);
+
+    let bounds = BoundsRegistry::new();
+    let (_entity, vcx) = cx.add_window_view({
+        let bounds = bounds.clone();
+        move |_, _| ReactiveFixtureView::with_bounds(root, viewport(), bounds)
+    });
+    vcx.run_until_parked();
+    bounds.flush();
+
+    let tracked_rows: Vec<String> = bounds
+        .all_elements()
+        .iter()
+        .filter_map(|(_, info)| info.entity_id.as_deref().map(str::to_string))
+        .filter(|id| id.starts_with("test-item-"))
+        .collect();
+
+    for ix in 0..SIDEBAR_PAGE_COUNT {
+        assert!(
+            registry_has_entity(&bounds, &item_id(ix)),
+            "outline row {ix} ({}) missing from BoundsRegistry — collection_view() \
+             collapsed to 0 height inside the stacking column and painted no rows. \
+             Committed test rows: {tracked_rows:?}",
+            item_id(ix)
+        );
+    }
+
+    // Nonzero committed height: the first row's bounds must have real extent.
+    let first = bounds
+        .all_elements()
+        .into_iter()
+        .find(|(_, info)| info.entity_id.as_deref() == Some(&item_id(0)))
+        .map(|(_, info)| info)
+        .expect("first outline row must be committed");
+    assert!(
+        first.height > 0.0,
+        "first outline row committed with 0 height — collection is height-starved: \
+         {}x{}",
+        first.width,
+        first.height
+    );
+}
