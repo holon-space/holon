@@ -791,10 +791,7 @@ impl FileSyncController {
             && segments.len() > 1
         {
             let parent_segments: Vec<&str> = segment_refs[..segments.len() - 1].to_vec();
-            self.doc_manager
-                .get_or_create_by_name_chain(&parent_segments)
-                .await?
-                .id
+            self.resolve_dir_page_chain(&parent_segments).await?.id
         } else {
             doc.parent_id.clone()
         };
@@ -1078,6 +1075,120 @@ impl FileSyncController {
         }
     }
 
+    /// The bare `#+ID` (document identity) declared by the folder-companion
+    /// file for a directory `rel_dir`, if one exists on disk. The companion for
+    /// a directory `Areas/` is the sibling file `Areas.<ext>` next to it. Read
+    /// through the format adapter so this is format-agnostic (org's `#+ID:`,
+    /// etc.). Returns `Ok(None)` when there is no companion, or the companion
+    /// carries no explicit id (a name-chain-only page).
+    async fn companion_doc_id(&self, rel_dir: &str) -> Result<Option<String>> {
+        for ext in self.format.extensions() {
+            let candidate = self.root_dir.join(format!("{rel_dir}.{ext}"));
+            if self.fs.exists(&candidate) {
+                let content = self
+                    .fs
+                    .read_to_string(&candidate)
+                    .await
+                    .with_context(|| format!("read companion {}", candidate.display()))?;
+                if let Some(bare) = self.format.doc_id_from_content(&content) {
+                    return Ok(Some(bare));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Resolve (creating as needed) the page for each segment of a name chain,
+    /// returning the leaf page. Companion-aware replacement for the doc
+    /// manager's `get_or_create_by_name_chain`: when a directory segment has no
+    /// page yet, it ADOPTS the segment's folder-companion `#+ID` as the page
+    /// identity instead of minting a path-derived placeholder.
+    ///
+    /// This makes folder-companion reconciliation ORDER-INDEPENDENT (F5,
+    /// dogfood 2026-07-22). A child ingested before its folder companion used
+    /// to mint a `PageId::for_path(segment)` phantom container; the companion
+    /// then landed under its own authoritative `#+ID` via `create_forcing_id`,
+    /// leaving TWO pages for the same folder — one owning the subtree, one
+    /// childless. Adopting the companion's `#+ID` up front means whoever
+    /// ingests first creates the page under the id the companion resolves to,
+    /// so no phantom is ever produced. When the companion has no `#+ID` (or no
+    /// companion file exists) the deterministic `PageId::for_path` id is used —
+    /// an org page and a `[[link]]`-created page for the same path still
+    /// converge on one merge key.
+    async fn resolve_dir_page_chain(&self, chain: &[&str]) -> Result<Block> {
+        assert!(!chain.is_empty(), "name chain must not be empty");
+
+        let mut current_parent_id = EntityUri::no_parent();
+        let mut current_doc: Option<Block> = None;
+        let mut accumulated = String::new();
+
+        for segment in chain {
+            accumulated = if accumulated.is_empty() {
+                segment.to_string()
+            } else {
+                format!("{accumulated}/{segment}")
+            };
+
+            // Adopt the companion `#+ID` when present; else the deterministic
+            // path-derived id. Computed even when a page already exists so a
+            // divergent claim can be disclosed loudly (never silently picked).
+            let companion_id = self
+                .companion_doc_id(&accumulated)
+                .await?
+                .map(|bare| EntityUri::block(&bare));
+            let path_id = holon_api::link_parser::PageId::for_path(&accumulated)
+                .map_err(anyhow::Error::msg)?
+                .into_entity_uri();
+            let intended_id = companion_id.clone().unwrap_or_else(|| path_id.clone());
+
+            match self
+                .doc_manager
+                .find_by_parent_and_name(&current_parent_id, segment)
+                .await?
+            {
+                Some(existing) => {
+                    // A page already claims this (parent, title). If a companion
+                    // file claims a DIFFERENT authoritative id, two roots
+                    // genuinely contend for this folder — disclose both ids
+                    // loudly (fail-loud philosophy) rather than silently
+                    // adopt-by-guess. Keep the existing page so we don't mint a
+                    // third; a one-time dedup migration reconciles legacy rows.
+                    if let Some(comp) = &companion_id {
+                        if comp != &existing.id {
+                            tracing::warn!(
+                                folder = %accumulated,
+                                existing_page_id = %existing.id,
+                                companion_id = %comp,
+                                "two roots claim the same folder page: an existing page and the \
+                                 folder-companion `#+ID` disagree. Keeping the existing page; the \
+                                 companion's `#+ID` is NOT adopted here (would orphan the existing \
+                                 subtree). Reconcile with a dedup migration."
+                            );
+                        }
+                    }
+                    current_parent_id = existing.id.clone();
+                    current_doc = Some(existing);
+                }
+                None => {
+                    let mut new_doc = Block::new_text(
+                        intended_id,
+                        current_parent_id.clone(),
+                        segment.to_string(),
+                    );
+                    new_doc.set_page(true);
+                    // `create_forcing_id`: the adopted companion `#+ID` (or the
+                    // deterministic path id) IS this page's identity — never
+                    // substitute a same-`(parent,title)` row minted elsewhere.
+                    let created = self.doc_manager.create_forcing_id(new_doc).await?;
+                    current_parent_id = created.id.clone();
+                    current_doc = Some(created);
+                }
+            }
+        }
+
+        Ok(current_doc.unwrap())
+    }
+
     /// Echo suppression: if disk content matches last_projection, skip.
     /// Otherwise, diff against last_projection to compute create/update/delete
     /// ops.
@@ -1300,10 +1411,7 @@ impl FileSyncController {
                         let parent_id = if segments.len() > 1 {
                             let parent_segments: Vec<&str> =
                                 segment_refs[..segments.len() - 1].to_vec();
-                            self.doc_manager
-                                .get_or_create_by_name_chain(&parent_segments)
-                                .await?
-                                .id
+                            self.resolve_dir_page_chain(&parent_segments).await?.id
                         } else {
                             EntityUri::no_parent()
                         };
@@ -1321,11 +1429,7 @@ impl FileSyncController {
                     }
                 }
             }
-            None => {
-                self.doc_manager
-                    .get_or_create_by_name_chain(&segment_refs)
-                    .await?
-            }
+            None => self.resolve_dir_page_chain(&segment_refs).await?,
         };
         let document_uri = document.id.clone();
 
