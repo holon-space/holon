@@ -3,6 +3,11 @@ pub(crate) mod prelude;
 pub mod style;
 
 // Re-export tree_item collapse helper for use by ReactiveShell.
+// Re-export the sidebar drag-resize machinery so the root view (`lib.rs`) can
+// mount the full-window capture overlay while a drag is in progress.
+pub(crate) use drawer::SidebarResizeState;
+pub(crate) use drawer::drag_sidebar_to;
+pub(crate) use drawer::finalize_sidebar_resize;
 pub(crate) use tree_item::collapse_state as tree_item_collapse_state;
 
 holon_macros::builder_registry!("src/render/builders",

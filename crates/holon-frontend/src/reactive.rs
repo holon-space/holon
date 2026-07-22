@@ -206,6 +206,15 @@ pub trait BuilderServices: Send + Sync {
         unimplemented!("BuilderServices::set_widget_open");
     }
 
+    /// Set a widget's stored width. `persist == false` is an in-memory-only
+    /// update for live drag-resize; `persist == true` writes through to disk on
+    /// release. Default impl panics — every real `BuilderServices` overrides;
+    /// the stub providers override it as a no-op.
+    fn set_widget_width(&self, id: &str, width: f32, persist: bool) {
+        let _ = (id, width, persist);
+        unimplemented!("BuilderServices::set_widget_width");
+    }
+
     /// Fire-and-forget operation dispatch.
     ///
     /// Spawns the operation on the runtime and logs errors. This replaces the
@@ -2524,6 +2533,10 @@ impl BuilderServices for ReactiveEngine {
         self.session.set_widget_open(id, open);
     }
 
+    fn set_widget_width(&self, id: &str, width: f32, persist: bool) {
+        self.session.set_widget_width(id, width, persist);
+    }
+
     fn set_preference(&self, key: &str, value: holon_api::Value) -> Result<()> {
         let pref_key = crate::preferences::PrefKey::new(key);
         let toml_value = crate::preferences::value_to_toml(&value);
@@ -3063,6 +3076,10 @@ impl BuilderServices for StubBuilderServices {
     }
 
     fn set_widget_open(&self, _: &str, _: bool) {
+        // Stub services don't persist widget state.
+    }
+
+    fn set_widget_width(&self, _: &str, _: f32, _: bool) {
         // Stub services don't persist widget state.
     }
 

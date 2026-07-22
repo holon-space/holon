@@ -84,6 +84,10 @@ impl BuilderServices for HeadlessBuilderServices {
         // Headless services have no UI to toggle.
     }
 
+    fn set_widget_width(&self, _: &str, _: f32, _: bool) {
+        // Headless services have no UI to resize.
+    }
+
     fn dispatch_intent(&self, intent: holon_frontend::operations::OperationIntent) {
         tracing::warn!(
             "HeadlessBuilderServices.dispatch_intent({}.{}) — no-op in headless mode",
