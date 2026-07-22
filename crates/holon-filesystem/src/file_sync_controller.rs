@@ -244,6 +244,29 @@ pub struct FileSyncController {
     /// quarantine. Interior mutability because `is_quarantined` is a `&self`
     /// read used from immutable contexts.
     quarantine_skip_logged: std::sync::Mutex<HashSet<CanonicalPath>>,
+
+    /// Copy-on-write seed docs (`holon_api::is_seed_layout_doc`, e.g.
+    /// `block:__default__`) stay VIRTUAL through boot: the boot seed/re-seed
+    /// writes them into Loro from the current asset, and those writes must NOT
+    /// auto-materialize a vault `.org` file (that file-pin is the F4
+    /// stale-seed bug). `true` from construction until
+    /// [`finish_boot_seeding`](Self::finish_boot_seeding) is called at the end
+    /// of the boot ingest (after `materialize_missing_page_files`). Once
+    /// `false`, a genuine runtime user edit to a seed doc DOES materialize its
+    /// file — the copy-on-write moment, after which the file wins and
+    /// re-seeding is suppressed.
+    boot_seeding: bool,
+
+    /// Pristine (shipped-asset) render of each VIRTUAL seed doc
+    /// (`holon_api::is_seed_layout_doc`), keyed by its file path. Recorded
+    /// during boot (when the store still equals the freshly (re-)seeded asset)
+    /// and used AFTER boot as the copy-on-write baseline: a seed doc whose
+    /// render still equals its pristine value stays virtual (no file written);
+    /// a diverged render — a real user edit — materializes the file. This
+    /// content baseline (not a boot/after time flag alone) is what makes the
+    /// gate RACE-FREE: a late boot-seed delta arriving after `boot_seeding`
+    /// flips still renders == pristine, so it is not mistaken for a user edit.
+    seed_pristine: HashMap<CanonicalPath, String>,
 }
 
 impl FileSyncController {
@@ -284,6 +307,8 @@ impl FileSyncController {
             scan_feed_ids: None,
             quarantined: HashSet::new(),
             quarantine_skip_logged: std::sync::Mutex::new(HashSet::new()),
+            boot_seeding: true,
+            seed_pristine: HashMap::new(),
         }
     }
 
@@ -294,6 +319,52 @@ impl FileSyncController {
     /// the buffer with one convergence wait. Boot ingest latency, Option 1.
     pub fn begin_initial_scan(&mut self) {
         self.scan_feed_ids = Some(Vec::new());
+    }
+
+    /// End the boot seed/re-seed phase. Called once by the boot ingest after
+    /// `materialize_missing_page_files`, so that from here on a runtime user
+    /// edit to a copy-on-write seed doc (`holon_api::is_seed_layout_doc`)
+    /// materializes its vault file (copy-on-write), while every boot-time
+    /// re-seed write stayed virtual.
+    pub fn finish_boot_seeding(&mut self) {
+        self.boot_seeding = false;
+    }
+
+    /// Copy-on-write gate for a VIRTUAL seed doc (`is_seed_layout_doc`, e.g.
+    /// `block:__default__`). Returns `true` when THIS render must NOT be
+    /// written to disk (the doc stays virtual). Non-seed docs and seed docs
+    /// that already own a file on disk are never gated (`false` — write
+    /// normally; a present file WINS). During boot it records the pristine
+    /// shipped-asset render and always skips. After boot it skips only
+    /// while the render still equals that pristine baseline; a diverged
+    /// render (a real user edit) falls through (`false`) to materialize the
+    /// file — copy-on-write — after which the on-disk file wins.
+    /// Content-based, so a late boot-seed delta (render == pristine) is
+    /// never mistaken for a user edit.
+    fn gate_virtual_seed_write(
+        &mut self,
+        doc_id: &EntityUri,
+        canonical: &CanonicalPath,
+        rendered: &str,
+        disk_nonempty: bool,
+    ) -> bool {
+        if !holon_api::is_seed_layout_doc(doc_id) {
+            return false;
+        }
+        if disk_nonempty || self.last_projection.contains_key(canonical) {
+            return false;
+        }
+        if self.boot_seeding {
+            self.seed_pristine
+                .insert(canonical.clone(), rendered.to_string());
+            return true;
+        }
+        // After boot: virtual only while still byte-identical to the pristine
+        // asset render. No baseline recorded ⇒ default to virtual (never
+        // auto-create a seed file we have no evidence the user changed).
+        self.seed_pristine
+            .get(canonical)
+            .map_or(true, |pristine| pristine == rendered)
     }
 
     /// Whether the controller is currently in initial-scan (feed-barrier
@@ -2376,6 +2447,16 @@ impl FileSyncController {
             return Ok(true);
         }
 
+        // Copy-on-write: keep a VIRTUAL seed layout doc (`block:__default__`)
+        // off disk while its render still matches the pristine shipped asset.
+        // A diverged render (a real user edit routed to the seed doc) falls
+        // through and materializes the file — copy-on-write — after which the
+        // on-disk file wins (`disk_content` non-empty ⇒ not gated). Race-free:
+        // a late boot-seed delta renders == pristine and is never written.
+        if self.gate_virtual_seed_write(doc_id, &canonical, &rendered, !disk_content.is_empty()) {
+            return Ok(true);
+        }
+
         // TOCTOU guard: disk may have changed again since we read it above
         // (concurrent external write). Writing `rendered` here — derived
         // from the CDC cache which may lag behind the new disk content —
@@ -3056,6 +3137,13 @@ impl FileSyncController {
         if rendered.trim().is_empty() {
             return Ok(());
         }
+        // Copy-on-write: keep a virtual seed layout doc off disk (disk is empty
+        // here — checked above). During boot this records the pristine asset
+        // render; a post-boot user edit (render diverges) falls through and
+        // materializes the file.
+        if self.gate_virtual_seed_write(page_id, &canonical, &rendered, false) {
+            return Ok(());
+        }
         if let Some(parent) = path.parent() {
             self.fs.create_dir_all(parent).await?;
         }
@@ -3124,6 +3212,13 @@ impl FileSyncController {
             }
             let rendered = self.render_doc_blocks(&doc_id, &path, &blocks).await?;
             if rendered.trim().is_empty() {
+                continue;
+            }
+            // Copy-on-write: a virtual seed doc (`block:__default__`) is NEVER
+            // materialized by the boot sweep (the F4 stale-seed pin). Record its
+            // pristine asset render as the post-boot copy-on-write baseline and
+            // skip the write. `disk` is empty here (checked above).
+            if self.gate_virtual_seed_write(&doc_id, &canonical, &rendered, false) {
                 continue;
             }
             if let Some(parent) = path.parent() {

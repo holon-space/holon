@@ -392,12 +392,33 @@ impl FrontendInjectorExt for Injector {
                             .is_ok_and(|content| content.contains(":ID: root-layout")),
                         _ => false,
                     };
-                    crate::seed::seed_default_layout(&engine, ordering, user_index_org_exists)
-                        .await
-                        .expect(
-                            "boot [component=session stage=session-resolve]: \
+                    // Copy-on-write: a materialized `__default__.org` on disk is
+                    // the durable "user modified the seed layout" marker. When
+                    // present, that file WINS — the org scan owns `__default__`
+                    // and `seed_default_layout` must NOT re-seed/replace it.
+                    // When absent, the seed layout is virtual and re-seeds from
+                    // the current bundled asset (auto-update).
+                    let default_org_exists = match (
+                        resolver.try_resolve::<holon_orgmode::di::OrgModeConfig>(),
+                        resolver.try_resolve::<dyn holon_filesystem::FileSystem>(),
+                    ) {
+                        (Ok(cfg), Ok(fs)) => fs
+                            .read_to_string(&cfg.root_directory.join("__default__.org"))
+                            .await
+                            .is_ok(),
+                        _ => false,
+                    };
+                    crate::seed::seed_default_layout(
+                        &engine,
+                        ordering,
+                        user_index_org_exists,
+                        default_org_exists,
+                    )
+                    .await
+                    .expect(
+                        "boot [component=session stage=session-resolve]: \
                              seed_default_layout failed",
-                        );
+                    );
                 }
                 .instrument(tracing::info_span!(
                     "di.factory.FrontendSession.seed_default_layout"
