@@ -46,6 +46,14 @@ computed:
   is_legacy_rule: 'source_language == "action"'
   todo_states: 'if is_def_var("document_id") && document_id != () { let d = document(document_id); if d != () { d.todo_keywords } else { () } } else { () }'
   is_page_row: 'tags != () && tags.contains("\"Page\"")'
+  # Bullet glyph by disclosure state (Logseq convention): a COLLAPSED block —
+  # which always has hidden children — keeps the ringed `orgmode` fisheye; every
+  # other block (leaf, or an expanded parent) shows a plain filled `circle`. A
+  # childless block is never collapsed, so the `collapsed` column alone is a
+  # faithful proxy for "collapsed AND has children". When `collapsed` is absent
+  # the field is unbound (Null) and the `icon` name falls back to its "circle"
+  # default — so a missing column degrades safely to the plain dot.
+  bullet_shape: 'if collapsed != () && collapsed != 0 { "orgmode" } else { "circle" }'
 
 variants:
   - name: page_title
@@ -130,14 +138,14 @@ variants:
   - name: editing
     priority: -1
     condition: 'is_focused'
-    render: 'column(row(selectable(draggable(icon("orgmode", #{size: 12})), #{shift_action: focus_pin(#{region: "right", block_id: col("id")})}), state_toggle(col("task_state"), #{states: col("todo_states")}), spacer(8), editable_text(col("content"))), drop_zone())'
+    render: 'column(row(#{gap: 2, align: "start"}, selectable(draggable(icon(col("bullet_shape"), #{size: 12, color: "primary", mt: 12})), #{shift_action: focus_pin(#{region: "right", block_id: col("id")})}), state_toggle(col("task_state"), #{states: col("todo_states"), mt: 10}), editable_text(col("content"))), drop_zone())'
   - name: source
     priority: -1
     condition: 'is_source && !is_program'
     render: 'query_result(#{language: col("source_language")})'
   - name: default
     priority: -1
-    render: 'column(row(selectable(draggable(icon("orgmode", #{size: 12})), #{shift_action: focus_pin(#{region: "right", block_id: col("id")})}), state_toggle(col("task_state"), #{states: col("todo_states")}), spacer(8), rendered_text(col("content"))), drop_zone())'
+    render: 'column(row(#{gap: 2, align: "start"}, selectable(draggable(icon(col("bullet_shape"), #{size: 12, color: "primary", mt: 12})), #{shift_action: focus_pin(#{region: "right", block_id: col("id")})}), state_toggle(col("task_state"), #{states: col("todo_states"), mt: 10}), rendered_text(col("content"))), drop_zone())'
 
 virtual_child:
   defaults:

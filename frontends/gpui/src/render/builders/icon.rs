@@ -141,17 +141,45 @@ fn icon_char(name: &str) -> &'static str {
     crate::icon(glyph)
 }
 
+/// Map an optional semantic color name to a theme token. Empty/unknown names
+/// fall back to `muted_foreground` (the default icon tint).
+fn icon_color(ctx: &GpuiRenderContext, name: &str) -> Hsla {
+    match name {
+        "primary" => tc(ctx, |t| t.primary),
+        "accent" => tc(ctx, |t| t.accent_foreground),
+        "muted" => tc(ctx, |t| t.muted_foreground),
+        "warning" => tc(ctx, |t| t.warning),
+        "info" => tc(ctx, |t| t.accent),
+        "success" => tc(ctx, |t| t.success),
+        "foreground" => tc(ctx, |t| t.foreground),
+        _ => tc(ctx, |t| t.muted_foreground),
+    }
+}
+
 pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     let name = node
         .prop_str("name")
         .unwrap_or_else(|| "circle".to_string());
     let size = node.prop_f64("size").unwrap_or(16.0) as f32;
-    render_icon(&name, size, ctx)
+    let color = node
+        .prop_str("color")
+        .map(|c| icon_color(ctx, &c))
+        .unwrap_or_else(|| tc(ctx, |t| t.muted_foreground));
+    let mt = node.prop_f64("mt").unwrap_or(0.0) as f32;
+    render_icon_styled(&name, size, color, mt, ctx)
 }
 
 /// Internal helper for rendering an icon by name and size, used by other
-/// builders.
+/// builders. Uses the default `muted_foreground` tint and no top offset.
 pub(crate) fn render_icon(name: &str, size: f32, ctx: &GpuiRenderContext) -> Div {
+    let color = tc(ctx, |t| t.muted_foreground);
+    render_icon_styled(name, size, color, 0.0, ctx)
+}
+
+/// Render an icon glyph with an explicit tint and top offset. `mt` shifts the
+/// glyph box down so it can align to a text line's vertical center when the
+/// containing row is top-aligned (block-outline bullets, task toggles).
+fn render_icon_styled(name: &str, size: f32, color: Hsla, mt: f32, ctx: &GpuiRenderContext) -> Div {
     let s = ctx.style();
     let default_icon_size = s.icon_size;
     let box_padding = s.icon_box_padding;
@@ -166,6 +194,7 @@ pub(crate) fn render_icon(name: &str, size: f32, ctx: &GpuiRenderContext) -> Div
             let source = ImageSource::Resource(Resource::Path(path.into()));
             return div()
                 .flex_shrink_0()
+                .mt(px(mt))
                 .w(px(icon_size + box_padding))
                 .h(px(icon_size))
                 .flex()
@@ -182,9 +211,9 @@ pub(crate) fn render_icon(name: &str, size: f32, ctx: &GpuiRenderContext) -> Div
 
     // Unicode fallback // ALLOW(fallback): describes default-branch path, not error
     // swallowing
-    let color = tc(ctx, |t| t.muted_foreground);
     div()
         .flex_shrink_0()
+        .mt(px(mt))
         .w(px(icon_size + box_padding))
         .h(px(icon_size))
         .flex()
