@@ -92,6 +92,25 @@ fn page_path_of<R: RefBlockTree>(state: &R, page: &EntityUri) -> Option<String> 
     Some(segments.join("/"))
 }
 
+/// The page leaf title for an origin block's content: trimmed, with any
+/// TRAILING `/` stripped (mirrors the backend `block_to_page_plan` sanitize,
+/// land 866977e85e). Returns `None` when the result is empty (a page needs a
+/// title). Interior `/` is preserved (namespace-meaningful; page-hierarchy
+/// ruling PARKED). Shared by `plan_new_page` (page id) and
+/// `ReferenceState::apply_block_to_page` (page content) so both agree with the
+/// backend.
+pub(crate) fn sanitize_page_leaf(content: &str) -> Option<String> {
+    let mut leaf = content.trim();
+    while leaf.ends_with('/') {
+        leaf = leaf[..leaf.len() - 1].trim_end();
+    }
+    if leaf.is_empty() {
+        None
+    } else {
+        Some(leaf.to_string())
+    }
+}
+
 /// Compute `(nearest_page_ancestor, born-equal page id)` for the origin, or
 /// `None` if the origin is not a legal block→page candidate (no page ancestor,
 /// empty content anywhere in the resulting path, or a path `PageId::for_path`
@@ -100,15 +119,16 @@ fn page_path_of<R: RefBlockTree>(state: &R, page: &EntityUri) -> Option<String> 
 fn plan_new_page<R: RefBlockTree>(state: &R, origin: &EntityUri) -> Option<(EntityUri, EntityUri)> {
     let ancestor = nearest_page_ancestor(state, origin)?;
     let ancestor_path = page_path_of(state, &ancestor)?;
-    let origin_content = state.block_content(origin)?.trim().to_string();
-    if origin_content.is_empty() {
-        return None;
-    }
+    let origin_content = state.block_content(origin)?;
     // The origin's content is the page TITLE — a single leaf segment, NOT a
-    // `/`-path. Mirror the backend planner's `PageId::for_page_under` so a `/`
-    // in the content is treated as part of the title on BOTH sides (never split
-    // into path segments), keeping the born-equal page id in agreement.
-    let page_id = PageId::for_page_under(&ancestor_path, &origin_content)
+    // `/`-path. Mirror the backend planner's `PageId::for_page_under` so an
+    // INTERIOR `/` is treated as part of the title on BOTH sides (never split
+    // into path segments), and a TRAILING `/` is stripped (a stray slash-menu
+    // separator) so the title, its deterministic id, and its filename agree on
+    // disk — the same sanitize the backend `block_to_page_plan` performs (land
+    // 866977e85e). Without mirroring it the born-equal page id disagrees.
+    let leaf = sanitize_page_leaf(origin_content)?;
+    let page_id = PageId::for_page_under(&ancestor_path, &leaf)
         .ok()?
         .into_entity_uri();
     Some((ancestor, page_id))

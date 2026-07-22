@@ -251,9 +251,30 @@ fn ref_org_blocks(refs: &CapMap) -> Extraction<Vec<Block>> {
 
 fn extract_org_snapshot<'a>(
     sut: &'a CapMap,
-    _: &'a CapMap,
+    refs: &'a CapMap,
 ) -> Pin<Box<dyn Future<Output = Extraction<Vec<Block>>> + 'a>> {
-    Box::pin(async move { Extraction::Value(sut.org_block_snapshot().await) })
+    // Filter the on-disk-parsed SUT blocks by the SAME `seed_block_ids` the ref's
+    // `org_blocks` projection excludes (scaffold-injected boot layout: the
+    // `block:journals` page + its `src::0`/`render::0` display sources). This is
+    // the symmetric twin of `extract_block_raw` in holon-turso-testing — the
+    // block_raw arm has always filtered seed on the SUT side; the org arm only
+    // "matched" by accident while the parser silently dropped top-level
+    // `#+BEGIN_SRC` blocks (the seed sources render at the page's top level). Once
+    // the parser correctly round-trips top-level sources (row-28 data-loss fix),
+    // those seed sources surface here and MUST be filtered to stay symmetric —
+    // otherwise they read as spurious `only_in_actual` blocks. Non-seed content
+    // (the `journals::auto-create` heading + its `holon_rule` action, and all
+    // user blocks) is NOT in `seed_block_ids`, so it is still compared.
+    Box::pin(async move {
+        let seed_block_ids = RefBackend::seed_block_ids(refs);
+        Extraction::Value(
+            sut.org_block_snapshot()
+                .await
+                .into_iter()
+                .filter(|b| !seed_block_ids.contains(&b.id))
+                .collect(),
+        )
+    })
 }
 
 fn compare_org_blocks(sut: &Vec<Block>, ref_: &Vec<Block>) -> Result<(), String> {

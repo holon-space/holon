@@ -34,21 +34,43 @@
 //! @pbt covers composed-harness — generic ComposedSut StateMachineTest:
 //! per-tick reconcile + catalog check + non-vacuity floor
 //!
-//! ## Baseline-RED masking (READ before validating a new invariant here)
-//! The shipped standard keystone carries ONE accepted baseline RED — the
-//! journals ingest-data-loss (`block:journals::action::0` /
-//! `journals::auto-create` missing from the SUT). proptest reports and shrinks
-//! to the FIRST failing case, and the journals blocks are in the SEED, so a
-//! draw that seeds journals diverges at the tick-0 `check_invariants` catch
-//! (the `hard.is_empty()` assert) BEFORE any full-render case runs and before
-//! ANY sequence reaches `teardown`. Consequence: a newly-un-blinded render
-//! invariant that reds on a REACHED full_headless case, and the per-sequence
-//! engagement floor in `teardown`, are BOTH invisible to the standard gate — it
-//! green/reds purely on journals. To actually exercise them you MUST bypass the
-//! mask, e.g. `PROPTEST_CASES=1 HOLON_PBT_FORCE_FULL=1
-//! HOLON_PBT_INVARIANTS='*match-ref*:skip,*block-content*:skip'` to soften the
-//! journals family so a full-render case is reached. Do not conclude "green =
-//! validated" from a standard run that never got past journals.
+//! ## No sanctioned baseline RED (the keystone is fully green)
+//! HISTORY (resolved 2026-07-22, BugFunnel row 28): the shipped keystone
+//! carried ONE accepted baseline RED for months — the journals
+//! "ingest-data-loss" (`inv-blocks-match-ref/org` missing
+//! `block:journals::action::0`, the `daily_journal` `holon_rule` action). It
+//! was NOT a store bug (`/block_raw`, `/matview`, `/loro` were always green)
+//! but a REAL org ROUND-TRIP data loss:
+//! `convert_block_to_page(journals::auto-create)` moves the `holon_rule` child
+//! into the new page's file as a TOP-LEVEL `#+BEGIN_SRC` (no enclosing `*
+//! headline`), and the parser (`holon_org_format::parser::parse_org_file`) only
+//! walked `doc.headlines()` — silently dropping every pre-first-headline source
+//! block on read-back. Fixed at TWO layers: (1) the parser now extracts the
+//! document's top-level section sources as direct doc children
+//! (`emit_section_children` shared with the headline path); (2)
+//! `extract_org_snapshot` filters the SUT org blocks by `seed_block_ids` — the
+//! symmetric twin of turso-testing's `extract_block_raw` — since the fix newly
+//! surfaces the seed display sources (`journals::src::0` / `render::0`) the ref
+//! already excludes. So there is NO sanctioned red to whitelist; ANY red is a
+//! real regression.
+// KNOWN PRE-EXISTING RED (2026-07-22, verifier-discovered while de-sanctioning
+// row-28): a fresh-seed draw can hit the unremapped synthetic `block:ref-doc-0`
+// peer-doc — inv-viewmodel-entity-ids-subset-of-data 'phantom entity' +
+// inv-blocks-match-ref/org field divergence; shrink involves
+// AddPeer/CreateDoc/PeerEdit/UndoLastMutation. Parser-independent (reproduced
+// with the row-28 fix reverted). Ledgered in BugFunnel 2026-07-22 (ref-doc-0
+// remap row); fix = the reference-doc id remap in reference_state.rs:798 /
+// action_actor_state.rs:52 must survive that op sequence. Until fixed, a red
+// with EXACTLY this signature is that bug; any OTHER red is a regression.
+//!
+//! CAUTION (still true): proptest reports and shrinks to the FIRST failing
+//! case, and the shrunk minimal input can be a locally-rejected transition when
+//! the real fault is at the tick-0 seed comparison — read the panic's
+//! `only_in_ref`/`only_in_actual` block diff, not the shrunk transition, to
+//! localize. A newly-un-blinded render invariant and the per-sequence
+//! engagement floor in `teardown` are only exercised on a REACHED full_headless
+//! case; force one with `PROPTEST_CASES=1 HOLON_PBT_FORCE_FULL=1` when
+//! validating a new invariant.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
