@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use holon_mcp_client::IntegrationFileConfig;
 use holon_mcp_client::mcp_call_surface::McpCallSurface;
 use holon_mcp_client::mcp_vtable::McpForeignDataWrapper;
+use holon_mcp_client::mcp_vtable::UriParamValue;
 use holon_mcp_client::mcp_vtable::VtableConfig;
 use rmcp::model::CallToolRequestParam;
 use rmcp::model::CallToolResult;
@@ -1268,4 +1269,197 @@ filter_mapping:
         })
         .collect();
     assert_eq!(session_col, vec!["s1", "s2", "s3", "s4", "s5", "s6"]);
+}
+
+// ---------------------------------------------------------------------------
+// claude-history multi-project enumeration (Increment A2)
+// ---------------------------------------------------------------------------
+
+/// The shipped `docs/integrations/claude-history.yaml` parses and declares the
+/// multi-project shape: a sync-only `project` root, session/task fanning out
+/// over it via `enumerate_from`, an enabled `message` fan-out, and NO entity
+/// declaring both a `sync` strategy and a write-through vtable (the
+/// finish_integration clash invariant, locked in config).
+#[test]
+fn claude_history_yaml_multi_project_shape() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/integrations/claude-history.yaml"
+    );
+    let body = std::fs::read_to_string(path).expect("read claude-history.yaml");
+    let cfg: IntegrationFileConfig =
+        serde_yaml::from_str(&body).expect("claude-history.yaml parses as IntegrationFileConfig");
+    assert_eq!(cfg.entity_prefix.as_deref(), Some("cc_"));
+
+    // `project` is the sync-only multi-project root (no write-through vtable).
+    let project = cfg.entities.get("project").expect("project entity");
+    assert!(project.sync.is_some(), "project must sync-warm its cache");
+    assert!(
+        project.vtable.is_none(),
+        "project must not declare a vtable (sync owns the cache table)"
+    );
+
+    // session + task fan out over project via enumerate_from on project_id.
+    for ent in ["session", "task"] {
+        let e = cfg.entities.get(ent).unwrap_or_else(|| panic!("{ent}"));
+        assert!(
+            e.sync.is_none(),
+            "{ent} must NOT sync — enumeration lives in the write-through vtable"
+        );
+        let vt = e.vtable.as_ref().unwrap_or_else(|| panic!("{ent} vtable"));
+        assert!(vt.write_through, "{ent} vtable must write through");
+        assert_eq!(vt.max_fan_out, Some(50), "{ent} fan-out must be bounded");
+        let ef = match vt.uri_params.get("project_id") {
+            Some(UriParamValue::Dynamic(d)) => &d.enumerate_from,
+            other => panic!("{ent} project_id must enumerate_from, got {other:?}"),
+        };
+        assert_eq!(ef.entity, "project");
+        assert_eq!(ef.field.as_deref(), Some("id"));
+        assert_eq!(ef.order_by.as_deref(), Some("last_activity DESC"));
+        assert_eq!(ef.limit, Some(50));
+    }
+
+    // The session watermark strips the 'cc-project:' scheme (11 chars → 12).
+    let session_ef = match cfg.entities["session"]
+        .vtable
+        .as_ref()
+        .unwrap()
+        .uri_params
+        .get("project_id")
+    {
+        Some(UriParamValue::Dynamic(d)) => &d.enumerate_from,
+        _ => unreachable!(),
+    };
+    let where_sql = session_ef.where_sql.as_deref().expect("session watermark");
+    assert!(
+        where_sql.contains("substr(cc_project.id, 12)"),
+        "session watermark must strip the cc-project: scheme: {where_sql}"
+    );
+
+    // message fan-out is ENABLED: enumerate_from session, bounded, watermarked.
+    let msg = cfg.entities.get("message").expect("message entity");
+    let mvt = msg.vtable.as_ref().expect("message vtable enabled");
+    assert!(mvt.write_through);
+    assert_eq!(mvt.max_fan_out, Some(50));
+    let mef = match mvt.uri_params.get("session_id") {
+        Some(UriParamValue::Dynamic(d)) => &d.enumerate_from,
+        other => panic!("message session_id must enumerate_from, got {other:?}"),
+    };
+    assert_eq!(mef.entity, "session");
+    assert_eq!(mef.limit, Some(20));
+    assert!(
+        mef.where_sql
+            .as_deref()
+            .unwrap()
+            .contains("substr(cc_session.id, 12)"),
+        "message watermark must strip the cc-session: scheme"
+    );
+
+    // The clash invariant: sync XOR write-through vtable, per entity.
+    for (name, e) in &cfg.entities {
+        let has_sync = e.sync.is_some();
+        let has_wt = e.vtable.as_ref().is_some_and(|v| v.write_through);
+        assert!(
+            !(has_sync && has_wt),
+            "entity '{name}' declares both sync and write-through vtable (clash)"
+        );
+    }
+}
+
+/// End-to-end resource-template fan-out over the `cc_project` cache table:
+/// an unpinned session query enumerates projects, applies the `last_activity`
+/// watermark (skipping projects with no newer activity), strips the
+/// 'cc-project:' scheme to build the raw resource URI, and writes the fetched
+/// sessions through into `cc_session`. This is the exact mechanism the shipped
+/// yaml uses for multi-project session enumeration.
+#[tokio::test(flavor = "multi_thread")]
+async fn project_enumeration_fans_out_sessions_with_watermark() {
+    let conn = open_memory_conn();
+    execute_sql(
+        &conn,
+        "CREATE TABLE cc_project (id TEXT PRIMARY KEY, last_activity TEXT)",
+    );
+    execute_sql(
+        &conn,
+        "INSERT INTO cc_project(id, last_activity) VALUES \
+         ('cc-project:p1', '2026-01-10'), ('cc-project:p2', '2026-01-05'), \
+         ('cc-project:p3', '2026-01-01')",
+    );
+    execute_sql(
+        &conn,
+        "CREATE TABLE cc_session (id TEXT PRIMARY KEY, project_id TEXT, modified TEXT)",
+    );
+    // p1 has a cached session OLDER than its last_activity  -> re-fetched.
+    // p2 has a cached session NEWER than its last_activity  -> skipped by
+    // watermark. p3 has no cached session                              ->
+    // re-fetched.
+    execute_sql(
+        &conn,
+        "INSERT INTO cc_session(id, project_id, modified) VALUES \
+         ('cc-session:old1', 'p1', '2026-01-08'), \
+         ('cc-session:keep2', 'p2', '2026-01-06')",
+    );
+
+    let peer = Arc::new(MockPeer::new());
+    peer.set_resource_response(
+        "claude-history://projects/p1/sessions",
+        serde_json::json!([{"id": "s1", "project_id": "p1", "modified": "2026-01-10"}]),
+    );
+    peer.set_resource_response(
+        "claude-history://projects/p3/sessions",
+        serde_json::json!([{"id": "s3", "project_id": "p3", "modified": "2026-01-01"}]),
+    );
+
+    let yaml = r#"
+list_resource: "claude-history://projects/{project_id}/sessions"
+uri_params:
+  project_id:
+    enumerate_from:
+      entity: project
+      field: id
+      where: >-
+        last_activity > COALESCE((SELECT MAX(s.modified) FROM cc_session s
+                                  WHERE s.project_id = substr(cc_project.id, 12)), '')
+      order_by: last_activity DESC
+      limit: 50
+write_through: true
+max_fan_out: 50
+"#;
+    let fdw = build_fdw_writeback(
+        "cc_session",
+        &[("id", "TEXT"), ("project_id", "TEXT"), ("modified", "TEXT")],
+        yaml,
+        peer.clone(),
+        Some("cc_"),
+        Some(("id".to_string(), "cc-session".to_string())),
+        Some("cc_session".to_string()),
+    );
+
+    let rows = collect_rows(&fdw, conn.clone(), &[], 3);
+    assert_eq!(rows.len(), 2, "only p1 and p3 fetched (p2 below watermark)");
+
+    // Only p1 and p3 resources were read — p2 was pruned by the watermark,
+    // and the raw ids (scheme stripped) built the URIs.
+    let mut reads = peer.resource_reads();
+    reads.sort();
+    assert_eq!(
+        reads,
+        vec![
+            "claude-history://projects/p1/sessions".to_string(),
+            "claude-history://projects/p3/sessions".to_string(),
+        ]
+    );
+
+    // Cache warmed: p1 refreshed (old1 replaced by s1), p2 untouched, p3 added.
+    let mut cached = query_texts(&conn, "SELECT id, project_id FROM cc_session ORDER BY id");
+    cached.sort();
+    assert_eq!(
+        cached,
+        vec![
+            vec!["cc-session:keep2".to_string(), "p2".to_string()],
+            vec!["cc-session:s1".to_string(), "p1".to_string()],
+            vec!["cc-session:s3".to_string(), "p3".to_string()],
+        ],
+        "write-through warmed cc_session with scheme-prefixed ids; p2 survived"
+    );
 }
