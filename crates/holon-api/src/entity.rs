@@ -331,7 +331,7 @@ impl TypeDefinition {
             .fields
             .iter()
             .map(|f| {
-                let mut col = format!("{} {}", f.name, f.sql_type);
+                let mut col = format!("\"{}\" {}", f.name, f.sql_type);
                 if f.primary_key && inline_pk {
                     col.push_str(" PRIMARY KEY");
                     if let Some(ref target) = self.id_references {
@@ -357,7 +357,8 @@ impl TypeDefinition {
                 .filter(|f| f.primary_key)
                 .map(|f| f.name.as_str())
                 .collect();
-            body.push_str(&format!(",\n  PRIMARY KEY ({})", pk_cols.join(", ")));
+            let quoted_pk: Vec<String> = pk_cols.iter().map(|c| format!("\"{c}\"")).collect();
+            body.push_str(&format!(",\n  PRIMARY KEY ({})", quoted_pk.join(", ")));
         }
 
         format!(
@@ -373,7 +374,7 @@ impl TypeDefinition {
             .filter(|f| f.indexed && !f.primary_key)
             .map(|f| {
                 format!(
-                    "CREATE INDEX IF NOT EXISTS idx_{}_{} ON \"{}\" ({})",
+                    "CREATE INDEX IF NOT EXISTS idx_{}_{} ON \"{}\" (\"{}\")",
                     self.name, f.name, self.name, f.name
                 )
             })
@@ -648,12 +649,12 @@ mod create_table_sql_tests {
         // with "table has more than one primary key" — the table-level clause
         // is the only legal form.
         assert!(
-            !sql.contains("owner TEXT PRIMARY KEY"),
+            !sql.contains("\"owner\" TEXT PRIMARY KEY"),
             "inline PK leaked: {sql}"
         );
         assert!(
-            sql.contains("PRIMARY KEY (owner, repo, number)"),
-            "expected composite PK clause; got: {sql}"
+            sql.contains("PRIMARY KEY (\"owner\", \"repo\", \"number\")"),
+            "expected composite PK clause with quoted identifiers; got: {sql}"
         );
     }
 
@@ -673,8 +674,8 @@ mod create_table_sql_tests {
             source: TypeSource::default(),
         };
         let sql = td.to_create_table_sql();
-        assert!(sql.contains("id TEXT PRIMARY KEY"), "got: {sql}");
-        assert!(!sql.contains("PRIMARY KEY (id)"), "got: {sql}");
+        assert!(sql.contains("\"id\" TEXT PRIMARY KEY"), "got: {sql}");
+        assert!(!sql.contains("PRIMARY KEY (\"id\")"), "got: {sql}");
     }
 }
 
@@ -742,8 +743,8 @@ mod mutation_gap_tests {
         assert_eq!(
             idx,
             vec![
-                "CREATE INDEX IF NOT EXISTS idx_thing_title ON \"thing\" (title)".to_string(),
-                "CREATE INDEX IF NOT EXISTS idx_thing_cache ON \"thing\" (cache)".to_string(),
+                "CREATE INDEX IF NOT EXISTS idx_thing_title ON \"thing\" (\"title\")".to_string(),
+                "CREATE INDEX IF NOT EXISTS idx_thing_cache ON \"thing\" (\"cache\")".to_string(),
             ]
         );
 
