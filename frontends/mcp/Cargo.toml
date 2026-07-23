@@ -26,6 +26,7 @@ holon-profiles = { workspace = true }
 holon-frontend = { workspace = true }
 holon-app.workspace = true
 holon-orgmode = { workspace = true, features = ["di"] }
+holon-org-format = { workspace = true }
 holon-filesystem = { workspace = true }
 holon-loro = { workspace = true }
 holon-toon = { path = "../../crates/holon-toon", features = ["serde-json"] }

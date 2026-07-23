@@ -28,6 +28,7 @@
 
 // Format modules — re-exported from holon-org-format for backward compat.
 // Internal code can use `crate::models::`, `crate::parser::`, etc. as before.
+pub use holon_org_format::dense;
 pub use holon_org_format::inline_marks;
 pub use holon_org_format::link_parser;
 pub use holon_org_format::models;

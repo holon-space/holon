@@ -70,9 +70,10 @@ impl OrgRenderer {
         blocks: &[Block],
         file_id: &EntityUri,
         alias_table: &crate::dense::AliasTable,
+        gap_ids: &std::collections::HashSet<String>,
     ) -> String {
         Self::render_walk(blocks, file_id, &|b: &Block| {
-            crate::dense::to_org_dense(b, alias_table)
+            crate::dense::to_org_dense(b, alias_table, gap_ids)
         })
     }
 

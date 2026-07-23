@@ -2336,6 +2336,108 @@ impl HolonMcpServer {
     }
 
     #[tool(
+        description = "Run a GQL/PRQL/SQL query and return its block result as DENSE org text in \
+                       one call — the token-efficient way to load a filtered task list for \
+                       planning/editing. The query is the FILTER: you write it exactly like \
+                       `execute_query` (same `language`, `params`, `context_id`). It MUST return \
+                       block rows. Canonical example — active (non-DONE) tasks of a page, in \
+                       holon_sql: `SELECT * FROM block WHERE parent_id = :pid AND \
+                       task_state_category != 'done'` with params {\"pid\": \"<page-uuid>\"}; scope \
+                       a subtree with a `from descendants` context query. \n\n\
+                       Output `dense_org`: each headline's :PROPERTIES:/:ID:/:END: drawer is \
+                       compressed to a trailing `{#alias}` token (a short per-query handle) — far \
+                       fewer tokens than read_org_file. A `{#alias^}` token (trailing caret) means \
+                       one or more UNSELECTED ancestors were elided above this block, so its shown \
+                       parent is not its real parent — display-only, safe to ignore. \n\n\
+                       Returns a `projection_handle`. EDIT `dense_org` (retitle, change TODO/DONE \
+                       state, add/move/nest rows; keep each row's `{#alias}` to preserve identity; \
+                       a row with NO token becomes a NEW block; the `^` marker is noise you may \
+                       drop) and pass it plus the handle to `dense_patch` to apply as one batch. \
+                       Omitting a block does NOT delete it (use dense_patch's `delete`)."
+    )]
+    async fn dense_query(
+        &self,
+        Parameters(params): Parameters<DenseQueryParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        use holon_api::block::Block;
+
+        use crate::dense_projection::Projection;
+        use crate::dense_projection::build_projection;
+
+        let context = self
+            .service()
+            .build_context(
+                params.context_id.as_deref(),
+                params.context_parent_id.as_deref(),
+            )
+            .await;
+
+        let mut holon_params = HashMap::new();
+        for (k, v) in &params.params {
+            holon_params.insert(k.clone(), json_to_holon_value(v.clone()));
+        }
+
+        let language = params
+            .language
+            .parse::<QueryLanguage>()
+            .map_err(|e| rmcp::ErrorData::invalid_params(format!("Invalid language: {e}"), None))?;
+
+        let query_result = self
+            .service()
+            .execute_query(&params.query, language, holon_params, context)
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("Query failed: {e}"),
+                    Some(serde_json::json!({"query": params.query, "language": params.language})),
+                )
+            })?;
+
+        // Parse each result row into a Block via the canonical row parser. A row
+        // that is not a block row is a caller error (the query must select block
+        // columns) — fail loud rather than silently drop it.
+        let mut blocks = Vec::with_capacity(query_result.rows.len());
+        for row in &query_result.rows {
+            let block = Block::try_from(row.clone()).map_err(|e| {
+                rmcp::ErrorData::invalid_params(
+                    format!(
+                        "dense_query result row is not a block (the query must return block rows, \
+                         e.g. `SELECT * FROM block ...`): {e}"
+                    ),
+                    None,
+                )
+            })?;
+            blocks.push(block);
+        }
+
+        let built = build_projection(blocks).map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("building dense projection failed: {e}"), None)
+        })?;
+
+        let handle = self.dense_projections.insert(Projection::new(
+            params.query.clone(),
+            built.file_id.clone(),
+            built.alias_table.clone(),
+            built.records.clone(),
+        ));
+
+        let result = serde_json::json!({
+            "projection_handle": handle,
+            "block_count": built.ordered_blocks.len(),
+            "dense_org": built.dense_text,
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    "serialization_failed",
+                    Some(serde_json::json!({"error": e.to_string()})),
+                )
+            })?,
+        )]))
+    }
+
+    #[tool(
         description = "Render a block's UI as a structural tree. Returns what an LLM agent would \
                        'see': widget hierarchy, entity IDs, labels, and nesting. Use format \
                        'text' for readable output or 'json' for structured data."
