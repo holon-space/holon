@@ -433,6 +433,12 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
 
                 let idle_signal_weak = std::sync::Arc::downgrade(&idle_signal);
 
+                // Keep an authoritative-read handle for the feed resolver BEFORE
+                // the reader is moved into the controller: block routing must
+                // read the `Page` tag from the write authority (`block_raw`), not
+                // the lagging matview-backed feed (see `resolve_doc_for_block`).
+                let feed_block_reader = block_reader.clone();
+
                 let mut controller = FileSyncController::with_format(
                     block_reader,
                     doc_manager,
@@ -462,6 +468,7 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                 if let Some(feed) = block_feed.clone() {
                     let resolver_feed = feed.clone();
                     let tx = rerender_tx.clone();
+                    let feed_reader = feed_block_reader.clone();
                     let disclosure = share_disclosure.clone();
                     let disclosed: Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
                         Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
@@ -473,6 +480,7 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                             .for_each(move |diff| {
                                 let tx = tx.clone();
                                 let feed = feed.clone();
+                                let feed_reader = feed_reader.clone();
                                 let disclosure = disclosure.clone();
                                 let disclosed = disclosed.clone();
                                 async move {
@@ -491,14 +499,32 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                                                 disclosure.as_deref(),
                                                 &disclosed,
                                             );
-                                            match resolve_doc_for_block(&feed, &value) {
-                                                Some(doc) => OrgRerender::Block {
+                                            match resolve_doc_for_block(
+                                                feed_reader.as_ref(),
+                                                &value,
+                                            )
+                                            .await
+                                            {
+                                                Ok(Some(doc)) => OrgRerender::Block {
                                                     doc,
                                                     delta: BlockDelta::Upsert((*value).clone()),
                                                 },
-                                                // ALLOW(fallback): doc unresolved (matview lag /
-                                                // nested) → full re-render
-                                                None => OrgRerender::All,
+                                                // ALLOW(fallback): doc unresolved (block/parent
+                                                // absent from the write authority) → full
+                                                // re-render, which re-reads via the authoritative
+                                                // `get_blocks` CTE.
+                                                Ok(None) => OrgRerender::All,
+                                                // A point read failing is a real store fault, not
+                                                // a routing miss — surface it loudly, then take the
+                                                // (disclosed) bulk recovery path rather than
+                                                // silently mis-routing this block's writeback.
+                                                Err(e) => {
+                                                    tracing::error!(
+                                                        "[OrgMode] authoritative doc resolution                                                          failed for block {}: {e:#} — falling back                                                          to full re-render",
+                                                        value.id
+                                                    );
+                                                    OrgRerender::All
+                                                }
                                             }
                                         }
                                         // ADR 0025 ROOT ITEM: a removed block is gone from the
@@ -587,28 +613,43 @@ pub enum OrgRerender {
     All,
 }
 
-/// Resolve the owning document URI for a feed `Block` by walking `parent_id`
-/// up the in-memory block feed to the nearest `Page`-tagged ancestor (the block
-/// itself included). Mirrors `SqlOperationProvider::find_document_uri`'s
-/// recursive CTE (depth-bounded at 50). Returns `None` when the chain ends
-/// without a `Page` — e.g. an ancestor not yet present in the matview-backed
-/// feed — and the caller falls back to a full re-render.
-fn resolve_doc_for_block(
-    feed: &holon_api::live_data::LiveData<Block>,
+/// Resolve the owning document URI for a changed `Block` by walking `parent_id`
+/// up to the nearest `Page`-tagged ancestor (the block itself included).
+///
+/// The walk reads the **write authority** (`block_raw` under Turso / the Loro
+/// tree) via [`BlockReader::get_block_authoritative`], NOT the matview-backed
+/// feed. The feed lags: a day-page created `Page`-tagged by the auto-create
+/// rule can appear in the feed with its `Page` tag not yet applied, so a feed
+/// walk sees the day-page as a plain heading, steps THROUGH it, and mis-routes
+/// the child's write-back to the folder-companion (`block:journals`) — the
+/// child then inlines into `Journals.org` instead of materializing under its
+/// own day-page file (`inv-blocks-match-ref/org` divergence, ForkB §1.3). The
+/// authoritative point read carries the truthful `Page` tag the instant the
+/// block exists (the feed is strictly downstream of `block_raw`), so the SAME
+/// predicate — `is_page()` — decides the boundary, just read from the source
+/// that cannot lag. This is not a second predicate (OQ1): the tag stays the
+/// sole authority; only its read site moves to the write store.
+///
+/// Depth-bounded at 50. Returns `Ok(None)` when the chain ends without a
+/// `Page` — the block or an ancestor is absent from the authority (deleted /
+/// mid-bulk) — and the caller falls back to a full re-render (which re-reads
+/// via the authoritative `get_blocks` CTE). `Err` is a genuine store fault and
+/// is propagated, never swallowed.
+async fn resolve_doc_for_block(
+    reader: &dyn BlockReader,
     block: &Block,
-) -> Option<EntityUri> {
-    let map = feed.read();
-    let mut current = block.clone();
+) -> anyhow::Result<Option<EntityUri>> {
+    let mut id = block.id.clone();
     for _ in 0..50 {
+        let Some(current) = reader.get_block_authoritative(&id).await? else {
+            return Ok(None);
+        };
         if current.is_page() {
-            return Some(current.id.clone());
+            return Ok(Some(current.id));
         }
-        match map.get(current.parent_id.as_str()) {
-            Some(parent) => current = (**parent).clone(),
-            None => return None,
-        }
+        id = current.parent_id;
     }
-    None
+    Ok(None)
 }
 
 /// Inc 1 — loud disclosure of a shared-subtree write-back gap.
