@@ -1681,6 +1681,13 @@ impl FileSyncController {
         // ID-less siblings with identical content stay two blocks; a content match
         // at a DIFFERENT position is disclosed (WARN) and left to mint rather than
         // guessed into a merge.
+        // Inc 3: set when the id-less reconcile binds id-less blocks onto EXISTING
+        // store ids (remaps). Such a bind is a pure UPDATE (no create/delete), so
+        // `has_structural_changes` stays false and the UPDATE-only fast path below
+        // would return WITHOUT re-rendering -- leaving the minted `:ID:` drawers off
+        // disk forever (the Inc 0 guard-(c) echo loop). Forcing the round-trip here
+        // stamps them, mirroring `needs_id_writeback` for the doc `#+ID`.
+        let mut needs_block_id_writeback = false;
         if !new_parse.blocks_needing_ids.is_empty() {
             let existing_children = self
                 .block_reader
@@ -1756,6 +1763,7 @@ impl FileSyncController {
                     _ => None,
                 })
                 .collect();
+            needs_block_id_writeback = !remaps.is_empty();
 
             if !remaps.is_empty() {
                 // Apply id + parent remaps IN PLACE. A child of a remapped ID-less
@@ -2751,6 +2759,7 @@ impl FileSyncController {
         // and writes it back to disk.
         if !has_structural_changes
             && !needs_id_writeback
+            && !needs_block_id_writeback
             && !did_text_merge
             && stale_cross_doc_ids.is_empty()
         {
@@ -2808,23 +2817,50 @@ impl FileSyncController {
         // ADR 0025: this ingest re-project is one of the two irreducibly
         // intent-less boundaries — it holds no op, so it grounds ONLY via the
         // file's own projection (no sibling union, no sanctioned removals).
-        self.format
-            .check_writeback_lossless(
-                path,
-                &disk_content,
-                &rendered,
-                &[],
-                &stale_removals,
-                &self.root_dir,
-            )
-            .with_context(|| {
+        if let Err(lossy) = self.format.check_writeback_lossless(
+            path,
+            &disk_content,
+            &rendered,
+            &[],
+            &stale_removals,
+            &self.root_dir,
+        ) {
+            // Inc 3 carry-forward (risk-register #2). If the SOLE reason we left the
+            // UPDATE-only fast path is `needs_block_id_writeback` (a pure id-less
+            // reconcile that bound blocks onto existing store ids), the re-render
+            // exists only to stamp `:ID:` drawers. For most files it is lossless and
+            // converges inv-org-render-fixed-point. But a companion / round-trip-lossy
+            // page (a heading the renderer models elsewhere) DROPS a block on re-render
+            // -- the exact loss the fast path was avoiding. Rather than quarantine,
+            // carry the re-stamp obligation forward: preserve disk EXACTLY as the
+            // pre-Inc-3 fast path did. The lossless guard stays fully fatal for any
+            // ingest with real structural changes -- only this pure re-stamp degrades.
+            let restamp_only = needs_block_id_writeback
+                && !has_structural_changes
+                && !needs_id_writeback
+                && !did_text_merge;
+            if restamp_only {
+                debug!(
+                    "[FileSyncController] re-stamp round-trip for {} would drop a block on \
+                     re-render (companion / round-trip-lossy page) — preserving disk and \
+                     carrying the id re-stamp forward rather than quarantining.",
+                    path.display(),
+                );
+                self.last_projection
+                    .insert(canonical.clone(), disk_content.to_string());
+                self.persist_disk_hash_for(&canonical, rel_path, &disk_hash)
+                    .await;
+                return Ok(());
+            }
+            return Err(lossy).with_context(|| {
                 format!(
                     "[FileSyncController] REFUSING write-back of {} — ingest was lossy (see the \
                      INGEST DATA LOSS error). The on-disk file is left intact; the file is \
                      quarantined until a clean re-ingest.",
                     path.display()
                 )
-            })?;
+            });
+        }
 
         if rendered != disk_content {
             // TOCTOU guard: re-read the disk NOW. If it changed since we parsed
