@@ -161,9 +161,6 @@ fn hand_authored_keystone_regressions() {
 /// right reason (identical signature to the keystone sweep panic
 /// `harness.rs:686` on `inv-embedded-page-collapsed-lazy`).
 #[test]
-#[ignore = "PARKED echo-loop BlockToPage embedded-page child render-leak \
-            (inv-embedded-page-collapsed-lazy; BugFunnel 142/81). Awaiting a \
-            SUT-vs-oracle ruling; remove #[ignore] to enforce."]
 fn echo_loop_block_to_page_child_render_leak_parked() {
     // Replayed through the EXACT keystone harness the JSONL cases use — the
     // serde shape is the canonical `Fixture<E2ETransition>`, so this stays a
