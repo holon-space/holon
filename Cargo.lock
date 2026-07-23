@@ -5296,6 +5296,7 @@ dependencies = [
  "subsecond",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "toml 0.8.23",
  "tracing",

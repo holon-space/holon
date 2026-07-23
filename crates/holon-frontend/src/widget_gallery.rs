@@ -77,6 +77,7 @@ pub fn widget_gallery_render_expr() -> RenderExpr {
         text_and_labels_section(),
         inputs_section(),
         layout_section(),
+        accordion_section(),
         data_display_section(),
         collections_section(),
         feedback_section(),
@@ -217,6 +218,52 @@ fn layout_section() -> RenderExpr {
                         ],
                     ),
                 )],
+            ),
+        ],
+    )
+}
+
+fn note(s: &str) -> RenderExpr {
+    call(
+        "text",
+        vec![pos(lit_str(s)), named("color", lit_str("muted"))],
+    )
+}
+
+/// Accordion — documentation entry (plan §3 prop table). Rendered as text, not
+/// a live `accordion(...)`: the widget is fail-loud about placement (it must be
+/// a DIRECT child of a main-panel flow column) and the gallery is not one, so a
+/// live instance would correctly render the placement error widget instead.
+fn accordion_section() -> RenderExpr {
+    section(
+        "Accordion (bounded auxiliary region)",
+        vec![
+            call(
+                "text",
+                vec![pos(lit_str(
+                    "accordion(#{...}, child…) — a bounded, collapsible region \
+                     pinned at the bottom of a main-panel column.",
+                ))],
+            ),
+            note("Props:"),
+            note("• title: String — header text (default: empty)."),
+            note("• icon: String — header icon name (optional)."),
+            note(
+                "• max_height_fraction: Float — cap as a fraction of the PANEL \
+                 height; default 0.4; must be finite and in (0.0, 1.0].",
+            ),
+            note("• collapsible: Bool — default true."),
+            note("• collapsed: Bool — initial state only; default false."),
+            note(
+                "Placement: MUST be a direct child of a main-panel (flow) \
+                 column. Anywhere else renders the standard error widget \
+                 (never a silently-unbounded region).",
+            ),
+            note(
+                "Semantics: the cap is a fraction of the panel height (window \
+                 minus chrome). Content shorter than the cap shrinks to fit; \
+                 taller content scrolls WITHIN the capped region while the \
+                 outline above scrolls independently.",
             ),
         ],
     )
