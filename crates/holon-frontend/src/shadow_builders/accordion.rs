@@ -5,8 +5,58 @@ pub const DEFAULT_MAX_HEIGHT_FRACTION: f64 = 0.4;
 
 /// Flag key the `column` builder stamps onto its direct children's context so
 /// an `accordion` can prove — at build time — that it is a direct flow-panel
-/// column child. Absent ⇒ the accordion is misplaced (§3 placement guard).
+/// column child. Absent ⇒ a `pinned` accordion is misplaced (§3 placement
+/// guard).
 pub(crate) const ACCORDION_PARENT_FLAG: &str = "accordion_parent";
+
+/// Flag key the `section_stack` builder stamps onto its direct children's
+/// context so an in-flow (`pinned:false`) or `sticky` accordion can prove — at
+/// build time — that it lives inside a section stack. Absent ⇒ those variants
+/// are misplaced (Inc C placement guard).
+pub(crate) const SECTION_STACK_FLAG: &str = "section_stack_parent";
+
+/// Where an accordion is placed — parsed once from the `pinned` / `sticky`
+/// props (parse-don't-validate). Each variant has EXACTLY one legal context,
+/// checked fail-loud at build time:
+///
+/// | Placement | props                    | legal context           |
+/// |-----------|--------------------------|-------------------------|
+/// | `Pinned`  | default (`pinned:true`)  | direct flow-column child|
+/// | `InFlow`  | `pinned:false`           | inside a section stack  |
+/// | `Sticky`  | `sticky:true`            | inside a section stack  |
+///
+/// `sticky:true` wins over `pinned` (a sticky overlay is never a pinned
+/// footer). Anything placed outside its legal context renders the standard
+/// error widget — never a silently-misrendered region.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccordionPlacement {
+    Pinned,
+    InFlow,
+    Sticky,
+}
+
+impl AccordionPlacement {
+    /// Parse from the two booleans (both already defaulted): `sticky` first
+    /// (it wins), then `pinned`.
+    pub fn parse(pinned: bool, sticky: bool) -> Self {
+        if sticky {
+            AccordionPlacement::Sticky
+        } else if !pinned {
+            AccordionPlacement::InFlow
+        } else {
+            AccordionPlacement::Pinned
+        }
+    }
+
+    /// The prop-string the renderer routes on.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AccordionPlacement::Pinned => "pinned",
+            AccordionPlacement::InFlow => "in_flow",
+            AccordionPlacement::Sticky => "sticky",
+        }
+    }
+}
 
 /// Parse-don't-validate boundary for `max_height_fraction` (§3): must be finite
 /// and in `(0.0, 1.0]`. A bad value becomes a visible error widget, never a
@@ -23,22 +73,40 @@ pub(crate) fn validate_fraction(f: f64) -> Result<f64, String> {
 
 holon_macros::widget_builder! {
     raw fn accordion(ba: BA<'_>) -> ViewModel {
-        // Fail-loud placement guard (§3, senior-review amendment): the
-        // bounded-footer split only works when the accordion is a DIRECT child
-        // of a flow-panel `column`. Anywhere else (root, inside a `row`, inside
-        // another accordion, the drawer branch) is a visible error, never a
-        // silently-unbounded region — silent degradation here would recreate
-        // the exact bug class this feature kills.
+        let pinned = ba.args.get_bool("pinned").unwrap_or(true);
+        let sticky = ba.args.get_bool("sticky").unwrap_or(false);
+        let placement = AccordionPlacement::parse(pinned, sticky);
+
+        // Fail-loud placement guard (§3 + Inc C): each placement has exactly
+        // one legal context, proven by a flag its container stamps. A misplaced
+        // accordion is a visible error, never a silently-unbounded/mispositioned
+        // region — silent degradation here recreates the exact bug class this
+        // feature kills.
         let is_column_child = ba
             .ctx
             .flags
             .get(ACCORDION_PARENT_FLAG)
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        if !is_column_child {
+        let is_section_stack_child = ba
+            .ctx
+            .flags
+            .get(SECTION_STACK_FLAG)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let placement_ok = match placement {
+            AccordionPlacement::Pinned => is_column_child,
+            AccordionPlacement::InFlow | AccordionPlacement::Sticky => is_section_stack_child,
+        };
+        if !placement_ok {
+            let need = match placement {
+                AccordionPlacement::Pinned => "a direct child of a main-panel column",
+                AccordionPlacement::InFlow => "inside a section stack (pinned:false)",
+                AccordionPlacement::Sticky => "inside a section stack (sticky:true)",
+            };
             return ViewModel::error(
                 "accordion",
-                "accordion must be a direct child of a main-panel column",
+                format!("accordion with placement '{}' must be {need}", placement.as_str()),
             );
         }
 
@@ -59,8 +127,9 @@ holon_macros::widget_builder! {
         let collapsible = ba.args.get_bool("collapsible").unwrap_or(true);
         let collapsed = ba.args.get_bool("collapsed").unwrap_or(false);
 
-        // Interpret children with the parent flag CLEARED so a nested
-        // `accordion(accordion(...))` errors (an accordion is not a column).
+        // Interpret children with BOTH parent flags CLEARED so a nested
+        // accordion (an accordion is neither a column nor a section stack)
+        // errors.
         let child_ctx = ba.ctx.without_flags();
         let children: Vec<ViewModel> = ba
             .args
@@ -77,6 +146,12 @@ holon_macros::widget_builder! {
         __props.insert("max_height_fraction".to_string(), Value::Float(fraction));
         __props.insert("collapsible".to_string(), Value::Boolean(collapsible));
         __props.insert("collapsed".to_string(), Value::Boolean(collapsed));
+        // The renderer routes on this: pinned → split footer, in_flow → inline,
+        // sticky → occlude overlay.
+        __props.insert(
+            "placement".to_string(),
+            Value::String(placement.as_str().to_string()),
+        );
 
         ViewModel {
             children: children.into_iter().map(Arc::new).collect(),
@@ -92,6 +167,7 @@ holon_macros::widget_builder! {
 
 #[cfg(test)]
 mod tests {
+    use super::AccordionPlacement;
     use super::validate_fraction;
 
     #[test]
@@ -114,5 +190,26 @@ mod tests {
         assert!(validate_fraction(f64::NAN).is_err());
         assert!(validate_fraction(f64::INFINITY).is_err());
         assert!(validate_fraction(f64::NEG_INFINITY).is_err());
+    }
+
+    #[test]
+    fn placement_parse_precedence() {
+        // sticky wins over pinned; pinned:false ⇒ in-flow; default ⇒ pinned.
+        assert_eq!(
+            AccordionPlacement::parse(true, false),
+            AccordionPlacement::Pinned
+        );
+        assert_eq!(
+            AccordionPlacement::parse(false, false),
+            AccordionPlacement::InFlow
+        );
+        assert_eq!(
+            AccordionPlacement::parse(true, true),
+            AccordionPlacement::Sticky
+        );
+        assert_eq!(
+            AccordionPlacement::parse(false, true),
+            AccordionPlacement::Sticky
+        );
     }
 }

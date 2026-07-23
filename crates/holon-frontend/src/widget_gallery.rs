@@ -255,9 +255,24 @@ fn accordion_section() -> RenderExpr {
             note("• collapsible: Bool — default true."),
             note("• collapsed: Bool — initial state only; default false."),
             note(
-                "Placement: MUST be a direct child of a main-panel (flow) \
-                 column. Anywhere else renders the standard error widget \
-                 (never a silently-unbounded region).",
+                "• pinned: Bool — default true. true = pinned footer at the \
+                 column bottom (needs a flow-column parent). false = in-flow: \
+                 capped+collapsible at its natural position inside a section \
+                 stack (no split, scrolls with siblings).",
+            ),
+            note(
+                "• sticky: Bool — default false; wins over pinned. An absolute \
+                 .occlude() overlay footer inside a section stack, pinned by \
+                 min(viewport_bottom − footer_h, next_section_top); the cap is \
+                 px-computed (fraction × the section stack's DEFINITE height, \
+                 asserted fail-loud). A wheel over the footer is hard-contained \
+                 (v1 — no fall-through).",
+            ),
+            note(
+                "Placement (fail-loud; anywhere else renders the standard error \
+                 widget, never a silently-mispositioned region): pinned:true \
+                 MUST be a direct child of a main-panel (flow) column; \
+                 pinned:false and sticky:true MUST be inside a section stack.",
             ),
             note(
                 "Semantics: the cap is a fraction of the panel height (window \
