@@ -50,4 +50,6 @@ pub mod viewmodel_snapshot;
 pub mod viewmodel_state_toggle_correct;
 pub mod viewmodel_tree_virtual_slots;
 pub mod watch_rows_match_ref;
+pub mod wheel_occlusion_routing;
+pub mod wheel_two_mode_motion_law;
 pub mod window_focus_matches_engine_focus;

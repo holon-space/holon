@@ -847,6 +847,12 @@ pub trait SutBlockInteract {
     /// (`ToggleCollapse`/`ToggleDrawer`/ `SwitchViewMode`) via
     /// `SutClickAdapter`.
     async fn click_at_element(&self, element_id: &str);
+    /// Scroll a wheel of `delta_y` pixels over the rendered element tracked
+    /// under `element_id` (positive `delta_y` = scroll down). Windowed-only
+    /// gesture (the `WheelScroll` transition). Native drivers synthesize a real
+    /// scroll-wheel event at the element's centre; there is no headless path —
+    /// `WheelScroll` is cap-gated out of every headless composition.
+    async fn scroll_over(&self, element_id: &str, delta_y: f32);
 }
 
 /// Uniform quiescence abstraction. Pure slice: no-op. Wide PBT: drains

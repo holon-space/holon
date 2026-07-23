@@ -232,3 +232,127 @@ pub fn check_all_single(obs: &[ObservedRect], fraction: f32) -> Vec<String> {
     }
     fails
 }
+
+// ── Inc D: WheelScroll postcondition spec ───────────────────────────────────
+
+/// A single wheel event's before/after geometry — the metamorphic input the
+/// two WheelScroll postcondition invariants evaluate. Captured by the windowed
+/// harness (Inc E) around a `WheelScroll` apply: the outer scroll offset, the
+/// footer-internal scroll offset, and the active footer's top, each read just
+/// before and just after the wheel, plus which region the wheel was over and
+/// its signed δ.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WheelObservation {
+    /// True when the wheel was over the sticky footer (occluded), false over
+    /// the outer list.
+    pub over_footer: bool,
+    /// Signed wheel δ in pixels (positive = scroll down).
+    pub delta_y: f32,
+    pub footer_top_before: f32,
+    pub footer_top_after: f32,
+    pub outer_offset_before: f32,
+    pub outer_offset_after: f32,
+    pub footer_offset_before: f32,
+    pub footer_offset_after: f32,
+}
+
+/// Two-mode motion law: a wheel of δ moves the ACTIVE footer's top by either
+/// `0` (the wheel was over the footer — occluded, the outer list didn't move)
+/// or `−δ` (the wheel scrolled the outer list, so the incoming section rode the
+/// footer up by δ). No third outcome.
+pub fn check_two_mode_motion_law(o: &WheelObservation) -> Result<(), String> {
+    let delta_top = o.footer_top_after - o.footer_top_before;
+    let mode_zero = delta_top.abs() <= TOL;
+    let mode_minus_delta = (delta_top - (-o.delta_y)).abs() <= TOL;
+    if mode_zero || mode_minus_delta {
+        Ok(())
+    } else {
+        Err(format!(
+            "[two-mode-motion-law] Δfooter.top={delta_top} is neither 0 nor −δ (−{})",
+            o.delta_y
+        ))
+    }
+}
+
+/// Occlusion routing: a wheel over the footer leaves the OUTER offset
+/// unchanged; a wheel over the list leaves the FOOTER-INTERNAL offset
+/// unchanged. The `.occlude()` overlay routes the wheel to exactly one scroll
+/// region.
+pub fn check_occlusion_routing(o: &WheelObservation) -> Result<(), String> {
+    if o.over_footer {
+        let outer_moved = (o.outer_offset_after - o.outer_offset_before).abs();
+        if outer_moved <= TOL {
+            Ok(())
+        } else {
+            Err(format!(
+                "[occlusion-routing] wheel over footer moved the OUTER offset by {outer_moved}"
+            ))
+        }
+    } else {
+        let footer_moved = (o.footer_offset_after - o.footer_offset_before).abs();
+        if footer_moved <= TOL {
+            Ok(())
+        } else {
+            Err(format!(
+                "[occlusion-routing] wheel over list moved the FOOTER-INTERNAL offset by {footer_moved}"
+            ))
+        }
+    }
+}
+
+#[cfg(test)]
+mod wheel_tests {
+    use super::*;
+
+    fn base() -> WheelObservation {
+        WheelObservation {
+            over_footer: false,
+            delta_y: 40.0,
+            footer_top_before: 300.0,
+            footer_top_after: 300.0,
+            outer_offset_before: 0.0,
+            outer_offset_after: 0.0,
+            footer_offset_before: 0.0,
+            footer_offset_after: 0.0,
+        }
+    }
+
+    #[test]
+    fn motion_law_accepts_zero_and_minus_delta() {
+        // Mode 0: footer.top unchanged (wheel over footer).
+        assert!(check_two_mode_motion_law(&base()).is_ok());
+        // Mode −δ: footer rode up by δ (wheel over list).
+        let mut o = base();
+        o.footer_top_after = o.footer_top_before - o.delta_y;
+        assert!(check_two_mode_motion_law(&o).is_ok());
+    }
+
+    #[test]
+    fn motion_law_rejects_a_third_outcome() {
+        let mut o = base();
+        o.footer_top_after = o.footer_top_before - o.delta_y / 2.0; // half δ
+        assert!(check_two_mode_motion_law(&o).is_err());
+    }
+
+    #[test]
+    fn occlusion_routing_over_footer_forbids_outer_motion() {
+        let mut o = base();
+        o.over_footer = true;
+        o.outer_offset_after = 40.0; // outer moved — illegal
+        assert!(check_occlusion_routing(&o).is_err());
+        o.outer_offset_after = 0.0;
+        o.footer_offset_after = 40.0; // footer-internal moved — legal over footer
+        assert!(check_occlusion_routing(&o).is_ok());
+    }
+
+    #[test]
+    fn occlusion_routing_over_list_forbids_footer_internal_motion() {
+        let mut o = base();
+        o.over_footer = false;
+        o.footer_offset_after = 40.0; // footer-internal moved — illegal over list
+        assert!(check_occlusion_routing(&o).is_err());
+        o.footer_offset_after = 0.0;
+        o.outer_offset_after = 40.0; // outer moved — legal over list
+        assert!(check_occlusion_routing(&o).is_ok());
+    }
+}

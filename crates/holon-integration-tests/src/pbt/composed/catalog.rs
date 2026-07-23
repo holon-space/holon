@@ -85,6 +85,8 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         invariants::frontend_bounds_rendered::wire(),
         invariants::live_block_shell_present::wire(),
         invariants::sticky_accordion_spec::wire(),
+        invariants::wheel_two_mode_motion_law::wire(),
+        invariants::wheel_occlusion_routing::wire(),
         invariants::displayed_text::wire_widget(),
         invariants::displayed_text::wire_viewmodel(),
         // Windowed focus coherence (E4 inc4): needs `SutDriver` (now CapMap-hosted)
@@ -288,6 +290,8 @@ const CENTRAL_INVARIANT_IDS_HEAD: &[&str] = &[
     "inv-frontend-bounds-rendered",
     "inv-live-block-shell-present",
     "inv-sticky-accordion-spec",
+    "inv-wheel-two-mode-motion-law",
+    "inv-wheel-occlusion-routing",
     "inv-displayed-text/widget",
     "inv-displayed-text/viewmodel",
     "inv-window-focus-matches-engine-focus",

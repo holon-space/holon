@@ -1128,6 +1128,7 @@ mod tests {
             rc::<t::StartApp>(),      // SutAppLifecycle
             rc::<t::ApplyMutation>(), // SutLoro (absent in turso_only → still gated out)
             rc::<t::ArrowNavigate>(), // SutArrowNavigate
+            rc::<t::WheelScroll>(),   // SutBlockInteract (windowed wheel — Inc D)
         ] {
             assert!(
                 !state.caps_available(&absent),

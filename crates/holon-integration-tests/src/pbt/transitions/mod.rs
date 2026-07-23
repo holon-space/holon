@@ -129,6 +129,7 @@ pub mod trigger_slash_command;
 pub mod type_chars;
 mod undo_last_mutation;
 mod unpin_block;
+mod wheel_scroll;
 pub(crate) mod write_org_file;
 
 // Shared layout-PBT variants (delegate to holon-pbt-core +
@@ -199,6 +200,7 @@ pub use trigger_slash_command::TriggerSlashCommand;
 pub use type_chars::TypeChars;
 pub use undo_last_mutation::UndoLastMutation;
 pub use unpin_block::UnpinBlock;
+pub use wheel_scroll::WheelScroll;
 pub use write_org_file::WriteOrgFile;
 
 crate::declare_e2e_transitions! {
@@ -257,6 +259,7 @@ crate::declare_e2e_transitions! {
         TypeChars(TypeChars),
         UndoLastMutation(UndoLastMutation),
         UnpinBlock(UnpinBlock),
+        WheelScroll(WheelScroll),
         AddPeer(AddPeer),
         PeerEdit(PeerEdit),
         SyncWithPeer(SyncWithPeer),
