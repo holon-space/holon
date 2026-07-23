@@ -144,7 +144,7 @@ impl<
             .collect();
 
         check(!pairs.is_empty(), Reason::NoTogglableStates).map(|_| {
-            let strat = prop::sample::select(pairs)
+            let strat = super::select_bias::select_with_edge_bias(pairs)
                 .prop_map(|(block_id, new_state)| ToggleState {
                     block_id,
                     new_state,

@@ -91,7 +91,7 @@ pub fn outdent_weighted_generator<R: RefBlockTree + RefLifecycle>(
         .filter(|id| outdent_preconditions(id, state).is_good())
         .collect();
     check(!candidates.is_empty(), Reason::PreconditionFailed).map(|_| {
-        let strat = prop::sample::select(candidates)
+        let strat = super::select_bias::select_with_edge_bias(candidates)
             .prop_map(|block_id| Outdent { block_id })
             .boxed();
         // F16: raise structural chord weight 1 → 20 (was ~1/180 vs split=100).

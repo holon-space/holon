@@ -115,6 +115,7 @@ mod pin_block;
 mod press_key;
 mod redo;
 mod remove_watch;
+mod select_bias;
 pub mod set_edge_field;
 mod setup_watch;
 mod simulate_restart;

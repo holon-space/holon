@@ -233,7 +233,7 @@ pub fn split_block_weighted_generator<R: RefBlockTree + RefLifecycle>(
         }
     }
     check(!candidates.is_empty(), Reason::PreconditionFailed).map(|_| {
-        let strat = prop::sample::select(candidates)
+        let strat = super::select_bias::select_with_edge_bias(candidates)
             .prop_map(|(block_id, position)| SplitBlock { block_id, position })
             .boxed();
         // High weight: editing transitions are starved unless Main is
