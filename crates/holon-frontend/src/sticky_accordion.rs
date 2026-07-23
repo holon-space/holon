@@ -235,6 +235,26 @@ pub fn check_all_single(obs: &[ObservedRect], fraction: f32) -> Vec<String> {
 
 // ── Inc D: WheelScroll postcondition spec ───────────────────────────────────
 
+use std::sync::Mutex;
+
+/// The last `WheelObservation` captured by whoever drove a `WheelScroll` (the
+/// Inc E windowed harness / dedicated test). The two wheel invariant bodies
+/// read it via [`take_wheel_observation`]; absence ⇒ they Skip (the composed
+/// catalog never sets it, so they stay engage+Skip there). A process-global
+/// cell rather than a new SUT cap so the bodies keep their `SutLayout`-only
+/// bounds and are never deselected from the composed catalog.
+static LAST_WHEEL_OBSERVATION: Mutex<Option<WheelObservation>> = Mutex::new(None);
+
+/// Record the observation captured around a `WheelScroll` (consumed once).
+pub fn set_wheel_observation(o: Option<WheelObservation>) {
+    *LAST_WHEEL_OBSERVATION.lock().unwrap() = o;
+}
+
+/// Take (and clear) the last recorded wheel observation.
+pub fn take_wheel_observation() -> Option<WheelObservation> {
+    LAST_WHEEL_OBSERVATION.lock().unwrap().take()
+}
+
 /// A single wheel event's before/after geometry — the metamorphic input the
 /// two WheelScroll postcondition invariants evaluate. Captured by the windowed
 /// harness (Inc E) around a `WheelScroll` apply: the outer scroll offset, the

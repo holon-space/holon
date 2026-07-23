@@ -63,13 +63,33 @@ where
         // is always available post-boot; the footer source (Inc E) requires the
         // reference to model a sticky footer.
         check(state.app_started(), Reason::AppNotStarted).map(|_| {
-            let strat = prop::sample::select(vec![-120i32, -60, -30, 30, 60, 120])
-                .prop_map(|delta_y| WheelScroll {
-                    over_footer: false,
-                    element_id: OUTER_LIST_ELEMENT.to_string(),
-                    delta_y,
-                })
-                .boxed();
+            // Outer-list source (always available post-boot).
+            let mut arms: Vec<(u32, BoxedStrategy<WheelScroll>)> = vec![(
+                3,
+                prop::sample::select(vec![-120i32, -60, -30, 30, 60, 120])
+                    .prop_map(|delta_y| WheelScroll {
+                        over_footer: false,
+                        element_id: OUTER_LIST_ELEMENT.to_string(),
+                        delta_y,
+                    })
+                    .boxed(),
+            )];
+            // Sticky-footer source — ACTIVE only when the reference models an
+            // on-screen sticky footer (Journals-shaped stack). Source-routed:
+            // the `over_footer` axis shrinks toward the outer-list arm (arm 0).
+            if let Some(footer_id) = state.sticky_footer_element_id() {
+                arms.push((
+                    2,
+                    prop::sample::select(vec![-120i32, -60, -30, 30, 60, 120])
+                        .prop_map(move |delta_y| WheelScroll {
+                            over_footer: true,
+                            element_id: footer_id.clone(),
+                            delta_y,
+                        })
+                        .boxed(),
+                ));
+            }
+            let strat = proptest::strategy::Union::new_weighted(arms).boxed();
             // Low weight — a wheel is a frequent gesture but must not crowd out
             // block-modifying transitions.
             (2, strat)
@@ -102,5 +122,77 @@ crate::cap_transition! {
     sql_budget: |_me, _state| {
         // A wheel issues no SQL (pure viewport).
         ExpectedSql { reads: 0, writes: 0, ddl: 0, tolerance: 0 }
+    }
+}
+
+#[cfg(test)]
+mod shrink_tests {
+    use proptest::prelude::*;
+    use proptest::strategy::Strategy;
+    use proptest::strategy::Union;
+    use proptest::test_runner::TestError;
+    use proptest::test_runner::TestRunner;
+
+    use super::OUTER_LIST_ELEMENT;
+    use super::WheelScroll;
+
+    /// Reconstruct EXACTLY the source-routed strategy `weighted_generator`
+    /// builds when BOTH sources are active (outer-list arm 0 + sticky-footer
+    /// arm 1), so the shrink behaviour of the new arm is exercised directly.
+    fn both_source_strat() -> proptest::strategy::BoxedStrategy<WheelScroll> {
+        let deltas = || vec![-120i32, -60, -30, 30, 60, 120];
+        Union::new_weighted(vec![
+            (
+                3u32,
+                proptest::sample::select(deltas())
+                    .prop_map(|delta_y| WheelScroll {
+                        over_footer: false,
+                        element_id: OUTER_LIST_ELEMENT.to_string(),
+                        delta_y,
+                    })
+                    .boxed(),
+            ),
+            (
+                2u32,
+                proptest::sample::select(deltas())
+                    .prop_map(|delta_y| WheelScroll {
+                        over_footer: true,
+                        element_id: "sticky-footer:x".to_string(),
+                        delta_y,
+                    })
+                    .boxed(),
+            ),
+        ])
+        .boxed()
+    }
+
+    /// Shrinking stays effective on the new arm: a forced (always-false)
+    /// property drives the shrinker toward the canonical minimum — the
+    /// outer-list source (arm 0) at the smallest delta index (`-120`). The
+    /// `over_footer` occlusion axis shrinks toward `false` (arm 0).
+    #[test]
+    fn wheel_scroll_arm_shrinks_to_canonical_minimum() {
+        let mut exercised = 0u32;
+        for _ in 0..200 {
+            let mut runner = TestRunner::default();
+            match runner.run(&both_source_strat(), |_w| {
+                // Forced failure: every drawn WheelScroll fails, so the runner
+                // must MINIMISE it.
+                prop_assert!(false, "forced");
+                Ok(())
+            }) {
+                Err(TestError::Fail(_, minimal)) => {
+                    exercised += 1;
+                    assert!(
+                        !minimal.over_footer && minimal.delta_y == -120,
+                        "shrink did not reach the canonical minimum \
+                         (over_footer=false, delta=-120): got {minimal:?}",
+                    );
+                }
+                Ok(()) => panic!("forced-false property must fail"),
+                Err(e) => panic!("unexpected: {e:?}"),
+            }
+        }
+        assert!(exercised > 0, "no failing case generated — vacuous");
     }
 }

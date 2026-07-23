@@ -598,6 +598,15 @@ pub trait RefLifecycle {
         false
     }
 
+    /// The bounds-registry id of the ACTIVE sticky-accordion footer currently
+    /// on screen, if any — the target the `WheelScroll` sticky-footer source
+    /// scrolls over. `None` by default: a reference that models no sticky
+    /// footer never generates the footer wheel source (the source activates
+    /// when a Journals-shaped section stack is modelled — Inc E boundary).
+    fn sticky_footer_element_id(&self) -> Option<String> {
+        None
+    }
+
     /// Whether a block-interaction transition (indent / drag / chord / …) can
     /// dispatch against `block_id` under the active main-panel layout: the
     /// block must be in the layout query's rendered set AND rendered with
