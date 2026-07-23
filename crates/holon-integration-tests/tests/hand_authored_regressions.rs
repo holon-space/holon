@@ -128,3 +128,53 @@ fn hand_authored_keystone_regressions() {
         eprintln!("[hand-authored regression] PASSED case {:?}", case.name);
     }
 }
+
+/// PARKED pin — echo-loop `BlockToPage` embedded-page child render-leak
+/// (BugFunnel rows 142 file-authority-echo / 81 echo-loop-blocked).
+///
+/// Deterministic repro (no RNG): create `origin` + `child` under the boot
+/// focus page, `Indent` child under origin, toggle it DOING, then
+/// `BlockToPage(origin)`. The origin becomes a `[[P]]` link, a new page P is
+/// minted, and `child` re-homes under P — in `block_raw`, the matview, Loro,
+/// the org file AND the watch rowset (all block-comparison invariants stay
+/// green). The DIVERGENCE is render-only: P renders as a COLLAPSED embedded
+/// page in the main panel, yet `child` leaks into the main-panel widget tree,
+/// tripping `inv-embedded-page-collapsed-lazy`
+/// (`bodies/embedded_page_collapsed_lazy.rs:176`, reading
+/// `SutRenderer::widget_tree_snapshot`).
+///
+/// Why parked, not fixed:
+///  * The 2026-07-23 triage's PRIME SUSPECT — the ancestor writeback leaving
+///    the moved subtree in its file so a re-ingest DOUBLE-HOMES `child` and
+///    reverts its `block_raw` parent — is REFUTED by this keystone: appending
+///    `SimulateRestart` (a real FileSyncController re-ingest tick) leaves every
+///    block/org/watch invariant green; the ONLY residual failure is still the
+///    render leak. Writeback prunes correctly; persistence never reverts.
+///  * `inv-embedded-page-collapsed-lazy` is a KNOWN PARKED keystone invariant.
+///    Whether the fix belongs in the SUT (the embedded-page main-panel assembly
+///    must prune a freshly-converted collapsed page's re-homed children) or in
+///    the oracle (a just-converted page may legitimately render its children
+///    until the next lazy tick) is a RULING for Martin — it touches the
+///    embedded-page render machinery broadly, so it is not a bounded fix.
+///
+/// One flag-flip from enforcement: delete `#[ignore]` and this goes RED for the
+/// right reason (identical signature to the keystone sweep panic
+/// `harness.rs:686` on `inv-embedded-page-collapsed-lazy`).
+#[test]
+#[ignore = "PARKED echo-loop BlockToPage embedded-page child render-leak \
+            (inv-embedded-page-collapsed-lazy; BugFunnel 142/81). Awaiting a \
+            SUT-vs-oracle ruling; remove #[ignore] to enforce."]
+fn echo_loop_block_to_page_child_render_leak_parked() {
+    // Replayed through the EXACT keystone harness the JSONL cases use — the
+    // serde shape is the canonical `Fixture<E2ETransition>`, so this stays a
+    // one-line-flip from a live JSONL regression once the ruling lands.
+    let line = r#"{"name": "block-to-page-child-render-leak", "description": "echo-loop (BugFunnel 142/81): re-homed child leaks into the collapsed embedded page's main panel", "transitions": [{"CreateBlockUnderFocus": {"content": "origin", "id": "block:echoorigin"}}, {"CreateBlockUnderFocus": {"content": "child", "id": "block:echochild"}}, {"Indent": {"block_id": "block:echochild"}}, {"ToggleState": {"block_id": "block:echochild", "new_state": "DOING"}}, {"BlockToPage": {"origin_id": "block:echoorigin"}}]}"#;
+    let case: HandAuthoredCase =
+        serde_json::from_str(line).expect("parked echo-loop case must parse");
+    let config = Config {
+        verbose: 1,
+        ..Config::default()
+    };
+    let initial_state = wide_e2e_ref();
+    ComposedSut::<WideE2E>::test_sequential(config, initial_state, case.transitions, None);
+}
