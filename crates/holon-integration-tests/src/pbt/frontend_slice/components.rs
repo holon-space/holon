@@ -2588,6 +2588,100 @@ impl SutSeamMutate for HeadlessFrontendComponent {
             .unwrap_or_else(|e| panic!("[bulk_external_add] write {file_path:?} failed: {e:#}"));
         self.settle_block_ids_stable(Duration::from_secs(5)).await;
     }
+
+    async fn stale_external_rewrite(&self, doc_uri: &EntityUri) {
+        use holon_filesystem::FileSystem;
+        let resolved_doc = self.resolve_id(doc_uri);
+        let file_path = self
+            .resolve_doc_file_path(&resolved_doc)
+            .await
+            .unwrap_or_else(|| {
+                panic!(
+                    "[stale_external_rewrite] no file for doc {doc_uri} (resolved {resolved_doc})"
+                )
+            });
+        // Render the doc's CURRENT content (matview snapshot, so the Page tag
+        // survives), then STRIP every `:ID:` drawer -- the bytes a stale
+        // external editor holds, from before Holon's writeback minted ids.
+        let mut current = self.live_block_snapshot().await;
+        self.stamp_sequence_from_sort_key(&mut current).await;
+        let grouped = holon_api::blocks_by_document(&current);
+        let doc_blocks: Vec<&Block> = grouped
+            .iter()
+            .find(|(u, _)| *u == resolved_doc)
+            .map(|(_, b)| b.iter().collect())
+            .unwrap_or_default();
+        let doc_block = current.iter().find(|b| b.id == resolved_doc && b.is_page());
+        let org = crate::serialize_blocks_to_org_with_doc(&doc_blocks, &resolved_doc, doc_block);
+        let stale = strip_org_block_ids(&org);
+        FileSystem::write(self.org_fs.as_ref(), &file_path, stale.as_bytes())
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[stale_external_rewrite] write {file_path:?} failed: {e:#}")
+            });
+        self.settle_block_ids_stable(Duration::from_secs(5)).await;
+    }
+}
+
+/// Strip every block `:ID:` drawer entry (and `:id X` src-header arg) from
+/// rendered org text, modeling a stale external editor that never saw the ids
+/// Holon minted on writeback. A `:PROPERTIES:`/`:END:` drawer holding nothing
+/// but the removed `:ID:` line is dropped whole, so the parser sees a clean
+/// id-less headline (the exact shape that duplicated pre-PR-#81).
+fn strip_org_block_ids(org: &str) -> String {
+    let lines: Vec<&str> = org.lines().collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim();
+        if trimmed == ":PROPERTIES:" {
+            let mut j = i + 1;
+            let mut body: Vec<&str> = Vec::new();
+            while j < lines.len() && lines[j].trim() != ":END:" {
+                body.push(lines[j]);
+                j += 1;
+            }
+            let kept: Vec<&str> = body
+                .iter()
+                .copied()
+                .filter(|l| !l.trim().starts_with(":ID:"))
+                .collect();
+            if !kept.is_empty() {
+                out.push(line.to_string());
+                for l in kept {
+                    out.push(l.to_string());
+                }
+                if j < lines.len() {
+                    out.push(lines[j].to_string());
+                }
+            }
+            i = if j < lines.len() { j + 1 } else { j };
+            continue;
+        }
+        if trimmed.starts_with("#+BEGIN_SRC") {
+            let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+            let mut kept_toks: Vec<&str> = Vec::new();
+            let mut toks = line.split_whitespace();
+            while let Some(t) = toks.next() {
+                if t == ":id" {
+                    toks.next();
+                    continue;
+                }
+                kept_toks.push(t);
+            }
+            out.push(format!("{indent}{}", kept_toks.join(" ")));
+            i += 1;
+            continue;
+        }
+        out.push(line.to_string());
+        i += 1;
+    }
+    let mut result = out.join("\n");
+    if org.ends_with('\n') {
+        result.push('\n');
+    }
+    result
 }
 
 /// `SutBlockCreate` over the headless component — the composed home for the

@@ -95,6 +95,7 @@ mod drag_drop_block;
 mod emit_mcp_data;
 mod epoch_flip_rejected;
 mod expand_toggle;
+pub mod external_write_while_focused;
 pub mod focus_editable_text;
 mod git_init;
 pub mod indent;
@@ -118,6 +119,7 @@ pub mod set_edge_field;
 mod setup_watch;
 mod simulate_restart;
 pub mod split_block;
+pub mod stale_external_rewrite;
 pub(crate) mod start_app;
 mod switch_view;
 mod toggle_collapse;
@@ -151,6 +153,7 @@ pub use drag_drop_block::DragDropBlock;
 pub use emit_mcp_data::EmitMcpData;
 pub use epoch_flip_rejected::EpochFlipRejected;
 pub use expand_toggle::ExpandToggle;
+pub use external_write_while_focused::ExternalWriteWhileFocused;
 pub use focus_editable_text::FocusEditableText;
 pub use git_init::GitInit;
 // The peer-sync transitions (`AddPeer`, `PeerEdit`, `PeerCharEdit`,
@@ -184,6 +187,7 @@ pub use set_edge_field::SetEdgeField;
 pub use setup_watch::SetupWatch;
 pub use simulate_restart::SimulateRestart;
 pub use split_block::SplitBlock;
+pub use stale_external_rewrite::StaleExternalRewrite;
 pub use start_app::StartApp;
 pub use switch_view::SwitchView;
 pub use switch_view_mode::SwitchViewMode;
@@ -208,6 +212,8 @@ crate::declare_e2e_transitions! {
         BlockToPage(BlockToPage),
         NavigateBack(NavigateBack),
         BulkExternalAdd(BulkExternalAdd),
+        StaleExternalRewrite(StaleExternalRewrite),
+        ExternalWriteWhileFocused(ExternalWriteWhileFocused),
         ClickBlock(ClickBlock),
         CreateBlockUnderFocus(CreateBlockUnderFocus),
         CreateDocument(CreateDocument),
