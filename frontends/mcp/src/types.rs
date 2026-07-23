@@ -35,6 +35,47 @@ pub struct InsertDataParams {
     pub rows: Vec<HashMap<String, serde_json::Value>>,
 }
 
+/// Parameters for `dense_query` — a token-compressed org projection of a
+/// query's block result, returned in one call with an opaque handle for a later
+/// `dense_patch`. Mirrors `execute_query`: the CALLER writes the filter as an
+/// ordinary GQL/PRQL/SQL query (exclude DONE, scope to a subtree, limit depth —
+/// all in the query language), and the tool renders the resulting blocks
+/// densely. There are no Rust-side filter parameters.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DenseQueryParams {
+    /// The query. It MUST return block rows (`SELECT * FROM block ...` in
+    /// holon_sql, or a GQL/PRQL query over blocks) — every column is parsed
+    /// into a Block for rendering.
+    pub query: String,
+    /// Query language: "holon_prql", "holon_gql", or "holon_sql".
+    pub language: String,
+    #[serde(default)]
+    pub params: HashMap<String, serde_json::Value>,
+    /// Block ID for `from children` / `from descendants` context resolution.
+    pub context_id: Option<String>,
+    /// Parent block ID for `from siblings` context resolution.
+    pub context_parent_id: Option<String>,
+}
+
+/// Parameters for `dense_patch` — apply an edited dense projection back as a
+/// batch of block operations, matched by `{#alias}` handle.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DensePatchParams {
+    /// The `projection_handle` returned by `dense_query`.
+    pub handle: String,
+    /// The edited dense org text. Rows keep their `{#alias}` token to match an
+    /// existing block; a row with NO token is created as a NEW block at its
+    /// tree position. Blocks omitted from the text are NOT deleted.
+    pub text: String,
+    /// Aliases to delete explicitly (deletion is never inferred from omission).
+    #[serde(default)]
+    pub delete: Vec<String>,
+    /// When true, only report the planned operations and any conflicts without
+    /// applying them.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ExecuteQueryParams {
     /// The query string to execute

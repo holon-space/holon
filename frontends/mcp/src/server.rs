@@ -341,6 +341,9 @@ pub struct HolonMcpServer {
     pub debug: Arc<DebugServices>,
     pub watches: Arc<Mutex<HashMap<String, WatchState>>>,
     pub(crate) tool_router: ToolRouter<HolonMcpServer>,
+    /// Handle → dense projection store for the `dense_query`/`dense_patch` pair
+    /// (in-memory, TTL-evicted). Shared across sessions like `watches`.
+    pub(crate) dense_projections: crate::dense_projection::ProjectionRegistry,
     /// Stable identity of this MCP server instance — the agent-session id
     /// stamped as provenance on every op the agent drives (C2a supervision).
     session_id: String,
@@ -398,6 +401,9 @@ impl HolonMcpServer {
             debug,
             watches: Arc::new(Mutex::new(HashMap::new())),
             tool_router,
+            dense_projections: crate::dense_projection::ProjectionRegistry::new(
+                std::time::Duration::from_secs(60 * 30),
+            ),
             session_id: format!("mcp-session:{}", uuid::Uuid::new_v4()),
         }
     }

@@ -850,7 +850,10 @@ pub(crate) enum HeadlineIdentity<'a> {
     /// Canonical: `:ID:` inside the properties drawer.
     Drawer,
     /// Dense projection: trailing `{#alias}` token, `:ID:` line suppressed.
-    DenseToken(&'a str),
+    /// `gap` renders a `^` inside the token (`{#alias^}`) meaning one or more
+    /// unselected ancestors were elided above this block — its rendered parent
+    /// is NOT its true parent. Display-only (see `crate::dense`).
+    DenseToken { alias: &'a str, gap: bool },
 }
 
 impl ToOrg for Block {
@@ -931,9 +934,11 @@ pub(crate) fn render_headline_block(block: &Block, identity: HeadlineIdentity) -
     }
 
     // Dense identity: the `:ID:` drawer scaffolding is compressed to a
-    // trailing `{#alias}` token on the headline line itself.
-    if let HeadlineIdentity::DenseToken(alias) = identity {
-        result.push_str(&format!(" {{#{}}}", alias));
+    // trailing `{#alias}` token on the headline line itself; `^` flags an
+    // elided-ancestor gap.
+    if let HeadlineIdentity::DenseToken { alias, gap } = identity {
+        let flag = if gap { "^" } else { "" };
+        result.push_str(&format!(" {{#{}{}}}", alias, flag));
     }
 
     result.push('\n');
@@ -954,7 +959,7 @@ pub(crate) fn render_headline_block(block: &Block, identity: HeadlineIdentity) -
     if let Some(props_json) = block.org_properties() {
         let props_drawer = match identity {
             HeadlineIdentity::Drawer => format_properties_drawer(&props_json),
-            HeadlineIdentity::DenseToken(_) => format_properties_drawer_without_id(&props_json),
+            HeadlineIdentity::DenseToken { .. } => format_properties_drawer_without_id(&props_json),
         };
         if !props_drawer.is_empty() {
             result.push_str(&props_drawer);

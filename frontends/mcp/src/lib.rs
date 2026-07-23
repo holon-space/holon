@@ -5,6 +5,7 @@
 //! MCP server frontend (stdio + HTTP).
 
 pub mod browser_relay;
+pub mod dense_projection;
 pub mod di;
 pub mod resources;
 pub mod server;

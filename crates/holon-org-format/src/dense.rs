@@ -19,6 +19,7 @@
 //! does not re-parse org.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use anyhow::Result;
 use anyhow::bail;
@@ -149,7 +150,11 @@ impl AliasTable {
 /// their canonical form (the token compression targets headline `:ID:`
 /// drawers). Fails loud if the block is missing from `alias_table` — a
 /// projected block MUST have an alias.
-pub(crate) fn to_org_dense(block: &Block, alias_table: &AliasTable) -> String {
+pub(crate) fn to_org_dense(
+    block: &Block,
+    alias_table: &AliasTable,
+    gap_ids: &HashSet<String>,
+) -> String {
     use holon_api::types::ContentType;
     if matches!(block.content_type, ContentType::Source | ContentType::Image) {
         return crate::models::ToOrg::to_org(block);
@@ -161,7 +166,14 @@ pub(crate) fn to_org_dense(block: &Block, alias_table: &AliasTable) -> String {
             block.id.as_str()
         )
     });
-    render_headline_block(block, HeadlineIdentity::DenseToken(alias.as_str()))
+    let gap = gap_ids.contains(block.id.as_str());
+    render_headline_block(
+        block,
+        HeadlineIdentity::DenseToken {
+            alias: alias.as_str(),
+            gap,
+        },
+    )
 }
 
 /// Render a projected block forest as a dense org document: header
@@ -170,12 +182,15 @@ pub(crate) fn to_org_dense(block: &Block, alias_table: &AliasTable) -> String {
 ///
 /// `blocks` arrive in authoritative tree order (parent before children),
 /// exactly as [`OrgRenderer::render_entitys`] expects. `alias_table` must cover
-/// every headline block in `blocks`.
+/// every headline block in `blocks`. `gap_ids` are block ids to flag with the
+/// elided-ancestor marker (`{#alias^}`) — blocks rendered under a parent that
+/// is not their true parent.
 pub fn render_dense(
     doc_block: &Block,
     blocks: &[Block],
     file_id: &EntityUri,
     alias_table: &AliasTable,
+    gap_ids: &HashSet<String>,
 ) -> String {
     let mut result = render_document_header(doc_block);
     if !result.is_empty() && !result.ends_with('\n') {
@@ -185,6 +200,7 @@ pub fn render_dense(
         blocks,
         file_id,
         alias_table,
+        gap_ids,
     ));
     while matches!(
         result.chars().last(),
@@ -205,6 +221,10 @@ pub struct DenseBlock {
     pub block: Block,
     /// The `{#alias}` handle, or `None` for a NEW block (no token present).
     pub alias: Option<Alias>,
+    /// Whether the token carried the elided-ancestor gap marker (`{#alias^}`).
+    /// Display-only: a patch treats it as noise — its presence/absence carries
+    /// no semantic weight (moves are detected by relative position, not this).
+    pub gap: bool,
     /// Parser-minted placeholder id for THIS row — used to reconstruct the
     /// parent→child tree among parsed rows (including NEW blocks).
     pub parse_id: EntityUri,
@@ -220,11 +240,12 @@ pub struct DenseParse {
     pub blocks: Vec<DenseBlock>,
 }
 
-/// Split a trailing `{#<alias>}` token off a headline title's first line.
-/// Returns `(clean_title_first_line, Some(alias))` when present, else
-/// `(unchanged, None)`. Only a token that is the very last non-space run and
-/// matches the base62 grammar is treated as an alias.
-fn split_trailing_token(first_line: &str) -> Result<(String, Option<Alias>)> {
+/// Split a trailing `{#<alias>}` or `{#<alias>^}` token off a headline title's
+/// first line. Returns `(clean_title_first_line, Some((alias, gap)))` when
+/// present, else `(unchanged, None)`. `gap` is the trailing `^` elided-ancestor
+/// marker. Only a token that is the very last non-space run and matches the
+/// grammar is treated as a token.
+fn split_trailing_token(first_line: &str) -> Result<(String, Option<(Alias, bool)>)> {
     let trimmed = first_line.trim_end();
     let Some(open) = trimmed.rfind("{#") else {
         return Ok((first_line.to_string(), None));
@@ -232,15 +253,19 @@ fn split_trailing_token(first_line: &str) -> Result<(String, Option<Alias>)> {
     if !trimmed.ends_with('}') {
         return Ok((first_line.to_string(), None));
     }
-    let inner = &trimmed[open + 2..trimmed.len() - 1];
-    // Guard against a false positive where `{#` and `}` are not a clean token
-    // (e.g. contains a brace or non-base62 char) — leave the title untouched.
+    let mut inner = &trimmed[open + 2..trimmed.len() - 1];
+    let gap = inner.ends_with('^');
+    if gap {
+        inner = &inner[..inner.len() - 1];
+    }
+    // Guard against a false positive where `{#…}` is not a clean token (empty or
+    // a non-base62 char) — leave the title untouched.
     if inner.is_empty() || !inner.bytes().all(|b| BASE62.contains(&b)) {
         return Ok((first_line.to_string(), None));
     }
     let alias = Alias::parse(inner)?;
     let clean = trimmed[..open].trim_end().to_string();
-    Ok((clean, Some(alias)))
+    Ok((clean, Some((alias, gap))))
 }
 
 /// Parse a dense projection back into typed blocks, reusing the canonical org
@@ -265,12 +290,12 @@ pub fn parse_dense(text: &str) -> Result<DenseParse> {
 
         // Strip the trailing token from the title's first line, preserving any
         // body lines. Source/Image blocks never carry a token.
-        let alias = {
+        let (alias, gap) = {
             let content = block.content.clone();
             let mut lines = content.lines();
             let first = lines.next().unwrap_or("");
-            let (clean_first, alias) = split_trailing_token(first)?;
-            if alias.is_some() {
+            let (clean_first, token) = split_trailing_token(first)?;
+            if token.is_some() {
                 let rest: Vec<&str> = lines.collect();
                 block.content = if rest.is_empty() {
                     clean_first
@@ -278,12 +303,16 @@ pub fn parse_dense(text: &str) -> Result<DenseParse> {
                     format!("{}\n{}", clean_first, rest.join("\n"))
                 };
             }
-            alias
+            match token {
+                Some((alias, gap)) => (Some(alias), gap),
+                None => (None, false),
+            }
         };
 
         blocks.push(DenseBlock {
             block,
             alias,
+            gap,
             parse_id,
             parent_parse_id,
         });

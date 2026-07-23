@@ -116,7 +116,9 @@ proptest! {
         let table = AliasTable::assign(blocks.iter().map(|b| b.id.clone()));
         let doc = doc_block();
 
-        let dense = render_dense(&doc, &blocks, &fid, &table);
+        // No holes in this generator (every parent is present), so no gap markers.
+        let gap_ids = std::collections::HashSet::new();
+        let dense = render_dense(&doc, &blocks, &fid, &table, &gap_ids);
 
         // Density property: no :ID: drawer line survived, and at least one
         // trailing token was emitted (the whole point of the projection).
