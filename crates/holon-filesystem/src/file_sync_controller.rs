@@ -324,7 +324,7 @@ impl FileSyncController {
             fs,
             doc_blocks: HashMap::new(),
             text_merge: None,
-            block_matcher: Arc::new(PositionalExactMatcher),
+            block_matcher: Arc::new(TieredMatcher),
             mount_registry: None,
             history: None,
             clock: Arc::new(holon_api::SystemClock),
@@ -1748,6 +1748,14 @@ impl FileSyncController {
                     _ => None,
                 })
                 .collect();
+            // Provenance: the basis each remap was decided on (WARN/debug trail).
+            let basis_by_minted: HashMap<EntityUri, MatchBasis> = verdicts
+                .iter()
+                .filter_map(|v| match v {
+                    MatchVerdict::Remap { minted, basis, .. } => Some((minted.clone(), *basis)),
+                    _ => None,
+                })
+                .collect();
 
             if !remaps.is_empty() {
                 // Apply id + parent remaps IN PLACE. A child of a remapped ID-less
@@ -1760,8 +1768,9 @@ impl FileSyncController {
                     if let Some(existing_id) = remaps.get(&block.id) {
                         debug!(
                             "[FileSyncController] reconciled ID-less headline onto its \
-                             already-minted store twin by content+position (file {}, headline \
-                             {:?}): {} -> {}",
+                             already-minted store twin (basis {:?}) (file {}, headline {:?}): {} \
+                             -> {}",
+                            basis_by_minted.get(&block.id),
                             path.display(),
                             block.content,
                             block.id,
@@ -1778,7 +1787,8 @@ impl FileSyncController {
             }
             for verdict in &verdicts {
                 let MatchVerdict::MintAmbiguous {
-                    minted: minted_id, ..
+                    minted: minted_id,
+                    candidates,
                 } = verdict
                 else {
                     continue;
@@ -1788,16 +1798,19 @@ impl FileSyncController {
                     .find(|b| &b.id == minted_id)
                     .map(|b| b.content.as_str())
                     .unwrap_or("");
-                // Content matched an existing store sibling but at a DIFFERENT
-                // position — ambiguous, not deterministically resolvable. Prefer
-                // minting (current behavior) over guessing a merge, disclosed.
+                // Content matched existing store blocks but not uniquely in the
+                // document (multiple twins, or the incoming side is duplicated) —
+                // not deterministically resolvable. Mint rather than guess a
+                // merge, disclosed with the candidate ids for auditing.
                 warn!(
-                    "[FileSyncController] ID-less headline content matches an existing store \
-                     sibling at a DIFFERENT position — minting a fresh id rather than guessing a \
-                     merge (external-edit dup guard). file={}, headline={:?}, minted_id={}",
+                    "[FileSyncController] ID-less headline content matches existing store \
+                     block(s) but not uniquely in the document — minting a fresh id rather than \
+                     guessing a merge (external-edit dup guard). file={}, headline={:?}, \
+                     minted_id={}, candidates={:?}",
                     path.display(),
                     headline,
                     minted_id,
+                    candidates,
                 );
             }
         }
@@ -4504,6 +4517,131 @@ impl BlockMatchStrategy for PositionalExactMatcher {
     }
 }
 
+/// v1 strategy: T0 id-identity (authored skipped) -> T1 exact content at the
+/// SAME sibling position (PR #81, retained as a tie-breaker within uniqueness)
+/// -> T3 exact content UNIQUE in the WHOLE DOCUMENT on BOTH sides (unclaimed
+/// existing AND incoming id-less) -> else MintAmbiguous / MintFresh.
+///
+/// Document-scope uniqueness is Martin's ruling (not the sibling-scope T2 of
+/// the brief): it handles cross-parent moves (external agents restructure
+/// trees), and the both-sides-uniqueness gate carries the FP protection --
+/// repeated identical content (e.g. `TODO buy milk` under several parents)
+/// stays ambiguous and mints rather than being guessed into a wrong merge.
+pub struct TieredMatcher;
+
+#[async_trait::async_trait]
+impl BlockMatchStrategy for TieredMatcher {
+    fn id(&self) -> &'static str {
+        "tiered-v1"
+    }
+
+    async fn match_blocks(&self, ctx: MatchContext<'_>) -> Result<Vec<MatchVerdict>> {
+        Ok(tiered_match(ctx.existing, ctx.incoming))
+    }
+}
+
+/// Pure v1 matcher. Processes `incoming` in document order (parents-first) so a
+/// remapped parent regroups its subtree for the T1 positional tie-breaker.
+/// Greedy 1:1 claiming keeps each store id claimed at most once.
+fn tiered_match(existing: &[ExistingChild], incoming: &[IncomingIdentity]) -> Vec<MatchVerdict> {
+    // Positional index by parent (T1), sorted by DFS sequence.
+    let mut by_parent: HashMap<EntityUri, Vec<&ExistingChild>> = HashMap::new();
+    for e in existing {
+        by_parent.entry(e.parent.clone()).or_default().push(e);
+    }
+    for sibs in by_parent.values_mut() {
+        sibs.sort_by_key(|e| e.seq);
+    }
+
+    // Existing ids matched verbatim by an incoming id are claimed up front -- an
+    // id-less block can never absorb an authored twin.
+    let incoming_ids: HashSet<&EntityUri> = incoming.iter().map(|i| &i.id).collect();
+    let mut claimed: HashSet<EntityUri> = existing
+        .iter()
+        .filter(|e| incoming_ids.contains(&e.id))
+        .map(|e| e.id.clone())
+        .collect();
+
+    // Incoming-side document-wide content multiplicity (minted only). The
+    // both-sides-uniqueness gate needs the incoming count to be exactly 1.
+    let mut incoming_dupes: HashMap<&str, usize> = HashMap::new();
+    for inc in incoming.iter().filter(|i| i.minted) {
+        *incoming_dupes.entry(inc.content.as_str()).or_insert(0) += 1;
+    }
+
+    let mut remaps: HashMap<EntityUri, EntityUri> = HashMap::new();
+    let mut pos_in_parent: HashMap<EntityUri, usize> = HashMap::new();
+    let mut verdicts = Vec::new();
+
+    for inc in incoming {
+        // A parent that is itself a remapped id-less headline regroups onto its
+        // existing twin before its children are positioned/matched.
+        let parent = remaps
+            .get(&inc.parent)
+            .cloned()
+            .unwrap_or_else(|| inc.parent.clone());
+        let pos = {
+            let counter = pos_in_parent.entry(parent.clone()).or_insert(0);
+            let p = *counter;
+            *counter += 1;
+            p
+        };
+        if !inc.minted {
+            continue; // authored `:ID:` -- the by-id diff owns it
+        }
+
+        // T1: exact content at the SAME sibling position under the (resolved)
+        // parent -- the PR #81 rule, retained as a tie-breaker within uniqueness.
+        let t1 = by_parent
+            .get(&parent)
+            .and_then(|s| s.get(pos))
+            .filter(|e| e.content == inc.content && !claimed.contains(&e.id));
+        if let Some(e) = t1 {
+            claimed.insert(e.id.clone());
+            remaps.insert(inc.id.clone(), e.id.clone());
+            verdicts.push(MatchVerdict::Remap {
+                minted: inc.id.clone(),
+                onto: e.id.clone(),
+                basis: MatchBasis::ContentAtPosition,
+            });
+            continue;
+        }
+
+        // T3: exact content UNIQUE in the whole document on BOTH sides.
+        let candidates: Vec<&ExistingChild> = existing
+            .iter()
+            .filter(|e| e.content == inc.content && !claimed.contains(&e.id))
+            .collect();
+        let incoming_unique = incoming_dupes
+            .get(inc.content.as_str())
+            .copied()
+            .unwrap_or(0)
+            == 1;
+        if candidates.len() == 1 && incoming_unique {
+            let e = candidates[0];
+            claimed.insert(e.id.clone());
+            remaps.insert(inc.id.clone(), e.id.clone());
+            verdicts.push(MatchVerdict::Remap {
+                minted: inc.id.clone(),
+                onto: e.id.clone(),
+                basis: MatchBasis::ContentUniqueInDocument,
+            });
+        } else if candidates.is_empty() {
+            verdicts.push(MatchVerdict::MintFresh {
+                minted: inc.id.clone(),
+            });
+        } else {
+            // Content matched but not deterministically (multiple existing twins,
+            // or the incoming side is itself duplicated) -- disclose and mint.
+            verdicts.push(MatchVerdict::MintAmbiguous {
+                minted: inc.id.clone(),
+                candidates: candidates.iter().map(|e| e.id.clone()).collect(),
+            });
+        }
+    }
+    verdicts
+}
+
 #[cfg(test)]
 mod idless_reconcile_tests {
     use std::collections::HashSet;
@@ -4779,6 +4917,274 @@ mod idless_reconcile_tests {
     #[test]
     fn positional_matcher_has_provenance_id() {
         assert_eq!(PositionalExactMatcher.id(), "positional-exact");
+    }
+}
+
+#[cfg(test)]
+mod tiered_matcher_tests {
+    use std::collections::HashSet;
+
+    use holon_api::EntityUri;
+
+    use super::BlockMatchStrategy;
+    use super::ExistingChild;
+    use super::IncomingIdentity;
+    use super::MatchBasis;
+    use super::MatchContext;
+    use super::MatchSituation;
+    use super::MatchVerdict;
+    use super::TieredMatcher;
+
+    fn doc() -> EntityUri {
+        EntityUri::block("doc")
+    }
+
+    fn existing(id: &str, parent: &EntityUri, seq: i64, content: &str) -> ExistingChild {
+        ExistingChild {
+            id: EntityUri::block(id),
+            parent: parent.clone(),
+            seq,
+            content: content.to_string(),
+        }
+    }
+
+    fn incoming(id: &str, parent: &EntityUri, content: &str, minted: bool) -> IncomingIdentity {
+        IncomingIdentity {
+            id: EntityUri::block(id),
+            parent: parent.clone(),
+            content: content.to_string(),
+            minted,
+        }
+    }
+
+    async fn verdicts(
+        existing: &[ExistingChild],
+        incoming: &[IncomingIdentity],
+    ) -> Vec<MatchVerdict> {
+        TieredMatcher
+            .match_blocks(MatchContext {
+                document_uri: &doc(),
+                existing,
+                incoming,
+                situation: MatchSituation::StaleRewrite {
+                    idless_fraction: 1.0,
+                },
+            })
+            .await
+            .expect("TieredMatcher never errs")
+    }
+
+    fn remap(vs: &[MatchVerdict], minted: &str) -> Option<(EntityUri, MatchBasis)> {
+        vs.iter().find_map(|v| match v {
+            MatchVerdict::Remap {
+                minted: m,
+                onto,
+                basis,
+            } if m.id() == minted => Some((onto.clone(), *basis)),
+            _ => None,
+        })
+    }
+
+    fn remap_onto(vs: &[MatchVerdict], minted: &str) -> Option<EntityUri> {
+        remap(vs, minted).map(|(onto, _)| onto)
+    }
+
+    fn is_ambiguous(vs: &[MatchVerdict], minted: &str) -> bool {
+        vs.iter()
+            .any(|v| matches!(v, MatchVerdict::MintAmbiguous { minted: m, .. } if m.id() == minted))
+    }
+
+    fn is_mint_fresh(vs: &[MatchVerdict], minted: &str) -> bool {
+        vs.iter()
+            .any(|v| matches!(v, MatchVerdict::MintFresh { minted: m } if m.id() == minted))
+    }
+
+    /// The captured red class: a drawer/insert shifts sibling offsets so the
+    /// id-less headline's content matches its store twin at a DIFFERENT
+    /// position. Document-unique content -> remap (basis
+    /// ContentUniqueInDocument) where v0 minted-ambiguous.
+    #[tokio::test]
+    async fn shifted_position_unique_content_remaps() {
+        let d = doc();
+        let existing = vec![existing("A", &d, 0, "Alpha")];
+        // A new id-less note is inserted before the twin, pushing "Alpha" to pos 1.
+        let incoming = vec![
+            incoming("note", &d, "Note", true),
+            incoming("i", &d, "Alpha", true),
+        ];
+        let vs = verdicts(&existing, &incoming).await;
+        assert_eq!(
+            remap(&vs, "i"),
+            Some((EntityUri::block("A"), MatchBasis::ContentUniqueInDocument)),
+            "shifted unique content must remap onto its twin"
+        );
+        assert!(
+            is_mint_fresh(&vs, "note"),
+            "the genuinely-new note mints fresh"
+        );
+    }
+
+    /// Cross-parent move (new, per the ruling): a block moves under a different
+    /// parent, content unique in the document -> remap onto the moved twin.
+    #[tokio::test]
+    async fn cross_parent_move_remaps() {
+        let existing = vec![existing("C", &EntityUri::block("P1"), 0, "Moved")];
+        // Same content, now parented under P2 (an external restructure).
+        let incoming = vec![incoming("c", &EntityUri::block("P2"), "Moved", true)];
+        let vs = verdicts(&existing, &incoming).await;
+        assert_eq!(
+            remap(&vs, "c"),
+            Some((EntityUri::block("C"), MatchBasis::ContentUniqueInDocument)),
+            "document-unique content must remap across a parent change"
+        );
+    }
+
+    /// Non-unique content that positional matching cannot tie-break (the twins
+    /// moved together / positions all shifted) stays ambiguous on BOTH -- no
+    /// guess. FP protection.
+    #[tokio::test]
+    async fn reordered_identical_twins_both_mint_ambiguous() {
+        let d = doc();
+        let existing = vec![existing("A", &d, 0, "Dup"), existing("X", &d, 1, "Dup")];
+        // Both incoming twins land under a different parent -> no positional twin.
+        let other = EntityUri::block("other");
+        let incoming = vec![
+            incoming("i1", &other, "Dup", true),
+            incoming("i2", &other, "Dup", true),
+        ];
+        let vs = verdicts(&existing, &incoming).await;
+        assert!(
+            is_ambiguous(&vs, "i1"),
+            "non-unique twin -> ambiguous, not remap"
+        );
+        assert!(
+            is_ambiguous(&vs, "i2"),
+            "non-unique twin -> ambiguous, not remap"
+        );
+        assert!(remap_onto(&vs, "i1").is_none());
+        assert!(remap_onto(&vs, "i2").is_none());
+    }
+
+    /// Incoming-side duplicates: two id-less blocks share content, only one
+    /// store twin exists -> we cannot know which incoming IS the twin, so
+    /// neither remaps (both-sides-uniqueness gate). They mint (disclosed).
+    #[tokio::test]
+    async fn incoming_side_duplicates_mint() {
+        let d = doc();
+        let existing = vec![existing("A", &d, 0, "Solo")];
+        let other = EntityUri::block("other");
+        let incoming = vec![
+            incoming("i1", &other, "Solo", true),
+            incoming("i2", &other, "Solo", true),
+        ];
+        let vs = verdicts(&existing, &incoming).await;
+        assert!(
+            remap_onto(&vs, "i1").is_none(),
+            "incoming dupe must not remap"
+        );
+        assert!(
+            remap_onto(&vs, "i2").is_none(),
+            "incoming dupe must not remap"
+        );
+        assert!(is_ambiguous(&vs, "i1"));
+        assert!(is_ambiguous(&vs, "i2"));
+    }
+
+    /// Claimed-id exclusion: an existing id matched verbatim by an authored
+    /// (non-minted) incoming block is claimed; an id-less block with the same
+    /// content cannot steal it -> mints fresh.
+    #[tokio::test]
+    async fn claimed_id_excluded_from_remap() {
+        let d = doc();
+        let existing = vec![existing("A", &d, 0, "Foo")];
+        let incoming = vec![
+            // Authored block carrying id A claims the twin.
+            incoming("A", &d, "Foo", false),
+            incoming("i", &d, "Foo", true),
+        ];
+        let vs = verdicts(&existing, &incoming).await;
+        assert!(
+            remap_onto(&vs, "i").is_none(),
+            "claimed twin cannot be remapped onto"
+        );
+        assert!(is_mint_fresh(&vs, "i"), "no unclaimed twin -> mint fresh");
+        assert!(
+            vs.iter().all(|v| v.minted().id() != "A"),
+            "authored id never a verdict's minted id"
+        );
+    }
+
+    /// Document-wide duplicate content: the same content appears under multiple
+    /// parents in the store -> a single id-less incoming with that content is
+    /// ambiguous (existing side not unique). FP protection (repeated `TODO`s).
+    #[tokio::test]
+    async fn document_wide_duplicate_content_is_ambiguous() {
+        let existing = vec![
+            existing("A", &EntityUri::block("P1"), 0, "Foo"),
+            existing("B", &EntityUri::block("P2"), 0, "Foo"),
+        ];
+        let incoming = vec![incoming("i", &doc(), "Foo", true)];
+        let vs = verdicts(&existing, &incoming).await;
+        assert!(
+            remap_onto(&vs, "i").is_none(),
+            "non-unique existing -> no remap"
+        );
+        assert!(is_ambiguous(&vs, "i"));
+    }
+
+    // ── Trait-contract tests (same contract as v0) ──
+
+    #[tokio::test]
+    async fn contract_one_to_one_partial_matching() {
+        let d = doc();
+        let existing = vec![existing("A1", &d, 0, "Foo"), existing("A2", &d, 1, "Foo")];
+        let incoming = vec![
+            incoming("B1", &d, "Foo", true),
+            incoming("B2", &d, "Foo", true),
+        ];
+        let vs = verdicts(&existing, &incoming).await;
+        let ontos: Vec<EntityUri> = vs
+            .iter()
+            .filter_map(|v| match v {
+                MatchVerdict::Remap { onto, .. } => Some(onto.clone()),
+                _ => None,
+            })
+            .collect();
+        let uniq: HashSet<&EntityUri> = ontos.iter().collect();
+        assert_eq!(ontos.len(), uniq.len(), "no store id claimed by two remaps");
+    }
+
+    #[tokio::test]
+    async fn contract_authored_ids_never_minted() {
+        let d = doc();
+        let existing = vec![existing("A", &d, 0, "Foo")];
+        let incoming = vec![
+            incoming("B", &d, "Foo", true),
+            incoming("authored", &d, "Bar", false),
+        ];
+        let vs = verdicts(&existing, &incoming).await;
+        assert!(vs.iter().all(|v| v.minted().id() != "authored"));
+    }
+
+    #[tokio::test]
+    async fn contract_exhaustiveness() {
+        let d = doc();
+        let existing = vec![existing("A", &d, 0, "Foo")];
+        let incoming = vec![
+            incoming("m1", &d, "Foo", true),
+            incoming("auth", &d, "Foo", false),
+            incoming("m2", &d, "Bar", true),
+        ];
+        let vs = verdicts(&existing, &incoming).await;
+        let got: HashSet<String> = vs.iter().map(|v| v.minted().id().to_string()).collect();
+        let want: HashSet<String> = ["m1", "m2"].iter().map(|s| (*s).to_string()).collect();
+        assert_eq!(got, want, "exactly the minted incoming ids get verdicts");
+        assert_eq!(vs.len(), 2);
+    }
+
+    #[test]
+    fn tiered_matcher_has_provenance_id() {
+        assert_eq!(TieredMatcher.id(), "tiered-v1");
     }
 }
 
