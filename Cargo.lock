@@ -5545,6 +5545,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry-stdout",
  "opentelemetry_sdk",
+ "proptest 1.11.0",
  "rmcp",
  "schemars",
  "serde",

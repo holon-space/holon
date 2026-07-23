@@ -54,3 +54,5 @@ workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+proptest.workspace = true
+holon-org-format = { workspace = true }
