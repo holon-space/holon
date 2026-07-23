@@ -76,6 +76,18 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
                 .and_then(|v| v.as_string())
                 .unwrap_or("panel");
             let id = hashed_id(scroll_id);
+            // Accordion flow-panel split (plan §4): a Flex flow column carrying
+            // an accordion child becomes a scrollable main region + pinned
+            // bounded footer. Every other item takes the byte-identical
+            // original path below (sidebar firewall).
+            if matches!(item.layout_hint, LayoutHint::Flex { .. })
+                && super::column::has_accordion_child(item)
+            {
+                container = container.child(panel_wrap(move |inner| {
+                    super::column::render_accordion_split(inner, item, id, None, ctx)
+                }));
+                continue;
+            }
             let rendered = super::render(item, ctx);
             match item.layout_hint {
                 LayoutHint::Fixed { px: fixed_px } => {
@@ -231,10 +243,26 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
                 .get("id")
                 .and_then(|v| v.as_string())
                 .unwrap_or("panel");
-            let rendered = super::render(item, ctx);
             let id = hashed_id(scroll_id);
             let pad_x = ctx.style().content_padding_x;
             let pad_y = ctx.style().content_padding_y;
+            // Accordion flow-panel split, drawer branch (plan §4): same as the
+            // plain flow branch but the padded main-panel viewport.
+            if matches!(item.layout_hint, LayoutHint::Flex { .. })
+                && super::column::has_accordion_child(item)
+            {
+                container = container.child(panel_wrap(move |inner| {
+                    super::column::render_accordion_split(
+                        inner,
+                        item,
+                        id,
+                        Some((pad_x, pad_y)),
+                        ctx,
+                    )
+                }));
+                continue;
+            }
+            let rendered = super::render(item, ctx);
             match item.layout_hint {
                 LayoutHint::Fixed { px: fixed_px } => {
                     container = container.child(

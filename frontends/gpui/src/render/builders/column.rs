@@ -23,6 +23,19 @@ fn vms_slot_collection(c: &ReactiveViewModel) -> Option<std::sync::Arc<ReactiveV
     content.collection.clone()
 }
 
+fn is_accordion(c: &ReactiveViewModel) -> bool {
+    c.widget_name().as_deref() == Some("accordion")
+}
+
+/// True if `node` is a `column` with ≥1 direct `accordion` child — the trigger
+/// for the flow-panel split (plan §4). Detected by widget name at render time
+/// (the same mechanism as `holds_collection` / `is_drawer`); a column WITHOUT
+/// an accordion child takes the byte-identical original path (sidebar
+/// firewall).
+pub(crate) fn has_accordion_child(node: &ReactiveViewModel) -> bool {
+    node.widget_name().as_deref() == Some("column") && node.children.iter().any(|c| is_accordion(c))
+}
+
 /// Render a scrollable collection at CONTENT height (eager, non-virtualized).
 ///
 /// A `tree`/`list`/`live_query` stacked inside a `column` among fixed siblings
@@ -70,6 +83,27 @@ pub(crate) fn eager_collection_div(view: &ReactiveView, ctx: &GpuiRenderContext)
     list_div
 }
 
+/// Append one column child to `container`, routing it to the correct
+/// content-height path: a collection renders eagerly, a `view_mode_switcher`
+/// slot renders content-height, everything else renders normally. Shared by
+/// `render`, the accordion split's main body, and the accordion body so the
+/// routing lives in exactly one place.
+fn push_content_child(container: Div, child: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
+    if let Some(view) = child.collection.as_ref() {
+        container.child(eager_collection_div(view, ctx))
+    } else if vms_slot_collection(child).is_some() {
+        // `collection_view()` composed inside `column(...)` expands to a
+        // `view_mode_switcher` whose slot holds the outline collection. Its
+        // default (`size_full`, absolutely-positioned slot content) render path
+        // collapses to 0 height in a content-sized column — the exact
+        // 2026-07-22 main-panel bug. Render it content-height instead, keeping
+        // the mode-switcher chrome as an overlay.
+        container.child(super::view_mode_switcher::render_content_height(child, ctx))
+    } else {
+        container.child(super::render(child, ctx))
+    }
+}
+
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     let gap = node.prop_f64("gap").unwrap_or(0.0) as f32;
     let children = &node.children;
@@ -90,20 +124,93 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
         container = container.gap(px(gap));
     }
     for child in children {
-        if let Some(view) = child.collection.as_ref() {
-            container = container.child(eager_collection_div(view, ctx));
-        } else if vms_slot_collection(child).is_some() {
-            // `collection_view()` composed inside `column(...)` expands to a
-            // `view_mode_switcher` whose slot holds the outline collection. Its
-            // default (`size_full`, absolutely-positioned slot content) render
-            // path collapses to 0 height in a content-sized column — the exact
-            // 2026-07-22 main-panel bug. Render it content-height instead,
-            // keeping the mode-switcher chrome as an overlay.
-            container =
-                container.child(super::view_mode_switcher::render_content_height(child, ctx));
-        } else {
-            container = container.child(super::render(child, ctx));
-        }
+        container = push_content_child(container, child, ctx);
     }
     container
+}
+
+/// Render the column's NON-accordion children as the content-height eager body
+/// that fills the scrollable main region of the accordion split (plan §4).
+/// Mirrors `render`'s `w_full`/`gap` handling, minus the accordion(s), which
+/// become the pinned footer.
+fn render_main_body(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
+    let gap = node.prop_f64("gap").unwrap_or(0.0) as f32;
+    let has_collection_child = node
+        .children
+        .iter()
+        .any(|c| !is_accordion(c) && holds_collection(c));
+
+    let mut container = div().flex().flex_col();
+    if has_collection_child {
+        container = container.w_full();
+    }
+    if gap > 0.0 {
+        container = container.gap(px(gap));
+    }
+    for child in &node.children {
+        if is_accordion(child) {
+            continue;
+        }
+        container = push_content_child(container, child, ctx);
+    }
+    container
+}
+
+/// Render a slice of children as a content-height `flex_col` (used for the
+/// accordion body's eager content).
+pub(crate) fn render_children_content_height(
+    children: &[std::sync::Arc<ReactiveViewModel>],
+    ctx: &GpuiRenderContext,
+) -> Div {
+    let mut container = div().flex().flex_col().w_full();
+    for child in children {
+        container = push_content_child(container, child, ctx);
+    }
+    container
+}
+
+/// The flow-panel accordion split (plan §4, Martin's R8 = PINNED FOOTER).
+///
+/// `inner` is the definite-height `absolute size_full` div from
+/// `columns::panel_wrap`. We turn it into a `flex_col` whose:
+///   - MAIN region (`flex_1 min_h_0 overflow_y_scroll`) holds the column's
+///     non-accordion children (outline + divider) and scrolls INDEPENDENTLY;
+///   - FOOTER(s) are the bounded accordion(s), `flex_shrink_0`, PINNED at the
+///     panel bottom — they never scroll with the outline.
+/// `pad` is `(horizontal, vertical)` padding for the drawer-branch main panel
+/// (`None` for the plain flow branch, which had no padding).
+pub(crate) fn render_accordion_split(
+    inner: Div,
+    node: &ReactiveViewModel,
+    scroll_id: ElementId,
+    pad: Option<(f32, f32)>,
+    ctx: &GpuiRenderContext,
+) -> AnyElement {
+    let mut main = div()
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .id(scroll_id)
+        .overflow_y_scroll();
+    if let Some((_, pad_y)) = pad {
+        main = main.py(px(pad_y));
+    }
+    main = main.child(render_main_body(node, ctx));
+
+    let mut wrapper = inner.flex().flex_col();
+    if let Some((pad_x, _)) = pad {
+        wrapper = wrapper.px(px(pad_x));
+    }
+    wrapper = wrapper.child(main);
+
+    for child in &node.children {
+        if is_accordion(child) {
+            wrapper = wrapper.child(super::tag(
+                ctx,
+                "accordion",
+                super::accordion::render_bounded(child, ctx),
+            ));
+        }
+    }
+    wrapper.into_any_element()
 }
