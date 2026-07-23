@@ -402,6 +402,128 @@ pub trait MountRegistry: Send + Sync {
     async fn is_registered_mount(&self, block_id: &EntityUri) -> Result<bool>;
 }
 
+// ── Block-matching strategy seam (ID-less external-rewrite reconcile) ──
+//
+// When an external editor re-writes a doc's file with block `:ID:` drawers
+// stripped, every id-less headline is minted a FRESH uuid on parse. Before the
+// id-keyed diff runs, the controller must decide -- per minted headline --
+// whether it reconciles onto an already-minted STORE twin (remap) or is a
+// genuinely new block (mint). That decision is the matching SPECTRUM (exact
+// position -> content-unique-in-siblings -> content-unique-in-document ->
+// fuzzy/embedding/LLM tie-breakers); this port lets the strategy evolve behind
+// a stable call site. The house pattern mirrors [`ThreeWayTextMerge`] /
+// [`MountRegistry`]: `Arc<dyn ...>`, builder injection, storage-agnostic.
+
+/// One existing store child, as the ID-less reconcile sees it.
+#[derive(Debug, Clone)]
+pub struct ExistingChild {
+    pub id: EntityUri,
+    pub parent: EntityUri,
+    /// The org parser's DFS `sequence` property -- orders siblings within a
+    /// parent (children are otherwise unordered in the store snapshot).
+    pub seq: i64,
+    pub content: String,
+}
+
+/// One incoming parsed block's identity, as the ID-less reconcile sees it.
+#[derive(Debug, Clone)]
+pub struct IncomingIdentity {
+    pub id: EntityUri,
+    /// Top-level headlines are normalised by the caller to the document uri so
+    /// they group with the store's top-level children.
+    pub parent: EntityUri,
+    pub content: String,
+    /// The id was freshly minted this parse (an ID-less headline).
+    pub minted: bool,
+}
+
+/// Situation the reconcile finds itself in -- detected by the controller from
+/// data already in hand, consumed by strategies (composites may branch on it).
+/// Ships in the context from day one so a future situational strategy needs no
+/// call-site change; the v0 strategy ignores it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MatchSituation {
+    /// No existing store children for this document (first ingest).
+    PristineIngest,
+    /// Incoming parse is wholly/mostly id-less while the store is id-full
+    /// (the StaleExternalRewrite shape).
+    StaleRewrite { idless_fraction: f64 },
+    /// Mixed ids, normal external edit.
+    SyncMerge,
+}
+
+/// The basis on which a minted headline was reconciled onto a store id --
+/// provenance for the WARN/history trail and for auditing spectrum moves.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MatchBasis {
+    IdIdentity,
+    ContentAtPosition,
+    ContentUniqueInSiblings,
+    ContentUniqueInDocument,
+}
+
+/// Parse-don't-validate: every minted incoming id gets an explicit verdict;
+/// ambiguity is a typed variant, not a side-channel WARN.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MatchVerdict {
+    /// Reconcile the minted id onto an existing store id.
+    Remap {
+        minted: EntityUri,
+        onto: EntityUri,
+        basis: MatchBasis,
+    },
+    /// Content matched an existing sibling but not deterministically (e.g. at a
+    /// different position, or a document-wide collision) -- mint, caller WARNs
+    /// loudly with the candidate ids.
+    MintAmbiguous {
+        minted: EntityUri,
+        candidates: Vec<EntityUri>,
+    },
+    /// Genuinely new block -- mint a fresh id.
+    MintFresh { minted: EntityUri },
+}
+
+impl MatchVerdict {
+    /// The minted incoming id this verdict concerns.
+    pub fn minted(&self) -> &EntityUri {
+        match self {
+            MatchVerdict::Remap { minted, .. }
+            | MatchVerdict::MintAmbiguous { minted, .. }
+            | MatchVerdict::MintFresh { minted } => minted,
+        }
+    }
+}
+
+/// Inputs to a matching decision. `existing` is the store's CURRENT children
+/// (PR #81 invariant -- NOT the diff base, which desyncs in the duplicating
+/// case); `incoming` is document-order, parents-first.
+pub struct MatchContext<'a> {
+    pub document_uri: &'a EntityUri,
+    pub existing: &'a [ExistingChild],
+    pub incoming: &'a [IncomingIdentity],
+    pub situation: MatchSituation,
+}
+
+/// Decide, per minted (id-less) incoming headline, whether it reconciles onto a
+/// store twin or mints. Implementations MUST honour the contract:
+/// - **1:1 partial matching**: no `onto` id claimed by two verdicts, and ids
+///   the incoming set already matches verbatim are never re-remapped.
+/// - **authored ids are never minted**: only `incoming` blocks with `minted ==
+///   true` appear as a verdict's `minted` id.
+/// - **exhaustiveness**: every minted incoming block receives exactly one
+///   verdict (parse, don't validate -- ambiguity is a variant, not an
+///   omission).
+///
+/// Async + `Result` keep the door open for future strategies that do embedding
+/// lookups / LLM adjudication, and keep fail-loud (a strategy that cannot
+/// decide errs, it never guesses silently).
+#[async_trait]
+pub trait BlockMatchStrategy: Send + Sync {
+    /// Provenance tag recorded alongside the decision.
+    fn id(&self) -> &'static str;
+    async fn match_blocks(&self, ctx: MatchContext<'_>) -> Result<Vec<MatchVerdict>>;
+}
+
 #[cfg(test)]
 mod name_chain_tests {
     //! Red-first coverage for the no-pages-under-non-pages ruling

@@ -46,9 +46,16 @@ use crate::BaseStore;
 use crate::FileSystem;
 use crate::SyncBaseStore;
 use crate::sync_ports::AliasRegistrar;
+use crate::sync_ports::BlockMatchStrategy;
 use crate::sync_ports::BlockReader;
 use crate::sync_ports::DocumentManager;
+use crate::sync_ports::ExistingChild;
 use crate::sync_ports::ImageDataProvider;
+use crate::sync_ports::IncomingIdentity;
+use crate::sync_ports::MatchBasis;
+use crate::sync_ports::MatchContext;
+use crate::sync_ports::MatchSituation;
+use crate::sync_ports::MatchVerdict;
 use crate::sync_ports::MountRegistry;
 use crate::sync_ports::ThreeWayTextMerge;
 
@@ -215,6 +222,12 @@ pub struct FileSyncController {
     /// OS `SystemClock` in production).
     clock: Arc<dyn holon_api::Clock>,
 
+    /// Strategy deciding, per minted id-less headline, remap-onto-twin
+    /// vs mint (the matching spectrum). Defaults to
+    /// [`PositionalExactMatcher`] (PR #81 exact position);
+    /// `with_block_matcher` swaps in a looser tier.
+    block_matcher: Arc<dyn BlockMatchStrategy>,
+
     /// Initial-scan feed-barrier batching (boot ingest latency, Options 0+1).
     /// `None` in steady state — each runtime `on_file_changed` pays its own
     /// per-file `wait_for_blocks_in_feed` barrier (unchanged). `Some(buf)` only
@@ -311,6 +324,7 @@ impl FileSyncController {
             fs,
             doc_blocks: HashMap::new(),
             text_merge: None,
+            block_matcher: Arc::new(PositionalExactMatcher),
             mount_registry: None,
             history: None,
             clock: Arc::new(holon_api::SystemClock),
@@ -517,6 +531,15 @@ impl FileSyncController {
     /// ladder). No-op in `Upstream` (Loro) mode — the live CRDT merges there.
     pub fn with_text_merge(mut self, merger: Arc<dyn ThreeWayTextMerge>) -> Self {
         self.text_merge = Some(merger);
+        self
+    }
+
+    /// Inject a block-matching strategy for the ID-less external-rewrite
+    /// reconcile. Without it the controller uses [`PositionalExactMatcher`]
+    /// (PR #81 exact-content-at-position). Mirrors `with_text_merge` /
+    /// `with_mount_registry`.
+    pub fn with_block_matcher(mut self, matcher: Arc<dyn BlockMatchStrategy>) -> Self {
+        self.block_matcher = matcher;
         self
     }
 
@@ -1703,7 +1726,28 @@ impl FileSyncController {
                 })
                 .collect();
 
-            let IdlessRemap { remaps, ambiguous } = compute_idless_remaps(&existing, &incoming);
+            let situation = detect_match_situation(&existing, &incoming);
+            let verdicts = self
+                .block_matcher
+                .match_blocks(MatchContext {
+                    document_uri: &document_uri,
+                    existing: &existing,
+                    incoming: &incoming,
+                    situation,
+                })
+                .await
+                .with_context(|| {
+                    format!("block-match strategy for ID-less reconcile (doc {document_uri})")
+                })?;
+            let remaps: HashMap<EntityUri, EntityUri> = verdicts
+                .iter()
+                .filter_map(|v| match v {
+                    MatchVerdict::Remap { minted, onto, .. } => {
+                        Some((minted.clone(), onto.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
 
             if !remaps.is_empty() {
                 // Apply id + parent remaps IN PLACE. A child of a remapped ID-less
@@ -1732,7 +1776,13 @@ impl FileSyncController {
                     }
                 }
             }
-            for minted_id in &ambiguous {
+            for verdict in &verdicts {
+                let MatchVerdict::MintAmbiguous {
+                    minted: minted_id, ..
+                } = verdict
+                else {
+                    continue;
+                };
                 let headline = new_blocks_vec
                     .iter()
                     .find(|b| &b.id == minted_id)
@@ -4303,29 +4353,6 @@ fn three_way_text_content(
     Ok((merged, true))
 }
 
-/// One existing store child, as the ID-less reconcile sees it.
-#[derive(Debug, Clone)]
-struct ExistingChild {
-    id: EntityUri,
-    parent: EntityUri,
-    /// The org parser's DFS `sequence` property — orders siblings within a
-    /// parent (children are otherwise unordered in the store snapshot).
-    seq: i64,
-    content: String,
-}
-
-/// One incoming parsed block's identity, as the ID-less reconcile sees it.
-#[derive(Debug, Clone)]
-struct IncomingIdentity {
-    id: EntityUri,
-    /// Top-level headlines are normalised by the caller to the document uri so
-    /// they group with the store's top-level children.
-    parent: EntityUri,
-    content: String,
-    /// The id was freshly minted this parse (an ID-less headline).
-    minted: bool,
-}
-
 /// Outcome of the ID-less content+position reconcile.
 #[derive(Debug, Default)]
 struct IdlessRemap {
@@ -4334,6 +4361,29 @@ struct IdlessRemap {
     /// minted incoming ids whose content matched an existing sibling only at a
     /// DIFFERENT position — left to mint, caller discloses via WARN.
     ambiguous: Vec<EntityUri>,
+}
+
+/// Classify the reconcile situation from data already in hand (store child
+/// count, minted fraction). Informational: ships in `MatchContext` so a future
+/// situational strategy can branch, but the v0 `PositionalExactMatcher` ignores
+/// it -- so this is behavior-neutral.
+fn detect_match_situation(
+    existing: &[ExistingChild],
+    incoming: &[IncomingIdentity],
+) -> MatchSituation {
+    if existing.is_empty() {
+        return MatchSituation::PristineIngest;
+    }
+    let minted = incoming.iter().filter(|i| i.minted).count();
+    if minted == 0 {
+        return MatchSituation::SyncMerge;
+    }
+    let idless_fraction = minted as f64 / incoming.len() as f64;
+    if idless_fraction >= 0.5 {
+        MatchSituation::StaleRewrite { idless_fraction }
+    } else {
+        MatchSituation::SyncMerge
+    }
 }
 
 /// Match ID-less (freshly-minted) incoming headlines onto their already-minted
@@ -4404,13 +4454,70 @@ fn compute_idless_remaps(existing: &[ExistingChild], incoming: &[IncomingIdentit
     out
 }
 
+/// v0 strategy: exact content at the same sibling position (PR #81's rule),
+/// wrapping the pure `compute_idless_remaps`. This is the DEFAULT injected
+/// matcher and is behavior-frozen relative to the pre-seam controller: it
+/// ignores `ctx.situation` and `ctx.document_uri`.
+pub struct PositionalExactMatcher;
+
+#[async_trait::async_trait]
+impl BlockMatchStrategy for PositionalExactMatcher {
+    fn id(&self) -> &'static str {
+        "positional-exact"
+    }
+
+    async fn match_blocks(&self, ctx: MatchContext<'_>) -> Result<Vec<MatchVerdict>> {
+        let IdlessRemap { remaps, ambiguous } = compute_idless_remaps(ctx.existing, ctx.incoming);
+        let ambiguous: HashSet<EntityUri> = ambiguous.into_iter().collect();
+        let mut verdicts = Vec::with_capacity(ctx.incoming.len());
+        for inc in ctx.incoming {
+            if !inc.minted {
+                continue; // authored `:ID:` -- never minted; the by-id diff owns it
+            }
+            let verdict = if let Some(onto) = remaps.get(&inc.id) {
+                MatchVerdict::Remap {
+                    minted: inc.id.clone(),
+                    onto: onto.clone(),
+                    basis: MatchBasis::ContentAtPosition,
+                }
+            } else if ambiguous.contains(&inc.id) {
+                // Candidates = existing children with equal content -- the ids the
+                // caller's WARN discloses. Informational; does not gate behavior.
+                let candidates = ctx
+                    .existing
+                    .iter()
+                    .filter(|e| e.content == inc.content)
+                    .map(|e| e.id.clone())
+                    .collect();
+                MatchVerdict::MintAmbiguous {
+                    minted: inc.id.clone(),
+                    candidates,
+                }
+            } else {
+                MatchVerdict::MintFresh {
+                    minted: inc.id.clone(),
+                }
+            };
+            verdicts.push(verdict);
+        }
+        Ok(verdicts)
+    }
+}
+
 #[cfg(test)]
 mod idless_reconcile_tests {
+    use std::collections::HashSet;
+
     use holon_api::EntityUri;
 
+    use super::BlockMatchStrategy;
     use super::ExistingChild;
     use super::IncomingIdentity;
-    use super::compute_idless_remaps;
+    use super::MatchBasis;
+    use super::MatchContext;
+    use super::MatchSituation;
+    use super::MatchVerdict;
+    use super::PositionalExactMatcher;
 
     fn doc() -> EntityUri {
         EntityUri::block("doc")
@@ -4434,87 +4541,121 @@ mod idless_reconcile_tests {
         }
     }
 
+    /// Drive the DEFAULT v0 strategy (`PositionalExactMatcher`) through the
+    /// `BlockMatchStrategy` port -- the same path the controller uses.
+    async fn verdicts(
+        existing: &[ExistingChild],
+        incoming: &[IncomingIdentity],
+    ) -> Vec<MatchVerdict> {
+        PositionalExactMatcher
+            .match_blocks(MatchContext {
+                document_uri: &doc(),
+                existing,
+                incoming,
+                situation: MatchSituation::SyncMerge,
+            })
+            .await
+            .expect("PositionalExactMatcher never errs")
+    }
+
+    fn remap(vs: &[MatchVerdict], minted: &str) -> Option<(EntityUri, MatchBasis)> {
+        vs.iter().find_map(|v| match v {
+            MatchVerdict::Remap {
+                minted: m,
+                onto,
+                basis,
+            } if m.id() == minted => Some((onto.clone(), *basis)),
+            _ => None,
+        })
+    }
+
+    fn remap_onto(vs: &[MatchVerdict], minted: &str) -> Option<EntityUri> {
+        remap(vs, minted).map(|(onto, _)| onto)
+    }
+
+    fn is_ambiguous(vs: &[MatchVerdict], minted: &str) -> bool {
+        vs.iter()
+            .any(|v| matches!(v, MatchVerdict::MintAmbiguous { minted: m, .. } if m.id() == minted))
+    }
+
+    fn is_mint_fresh(vs: &[MatchVerdict], minted: &str) -> bool {
+        vs.iter()
+            .any(|v| matches!(v, MatchVerdict::MintFresh { minted: m } if m.id() == minted))
+    }
+
     /// The core dup guard: a freshly-minted ID-less headline whose content +
-    /// position matches an existing store twin remaps onto that twin — so the
-    /// stale re-write updates in place instead of re-minting (which churns
-    /// identity or, on base desync, duplicates).
-    #[test]
-    fn minted_headline_remaps_onto_positional_twin() {
+    /// position matches an existing store twin remaps onto that twin (basis
+    /// `ContentAtPosition`) -- so the stale re-write updates in place instead
+    /// of re-minting (which churns identity or, on base desync,
+    /// duplicates).
+    #[tokio::test]
+    async fn minted_headline_remaps_onto_positional_twin() {
         let d = doc();
         let existing = vec![existing("A", &d, 0, "Prepare personal usage")];
         let incoming = vec![incoming("B", &d, "Prepare personal usage", true)];
-        let out = compute_idless_remaps(&existing, &incoming);
+        let vs = verdicts(&existing, &incoming).await;
         assert_eq!(
-            out.remaps.get(&EntityUri::block("B")),
-            Some(&EntityUri::block("A")),
+            remap(&vs, "B"),
+            Some((EntityUri::block("A"), MatchBasis::ContentAtPosition)),
             "minted headline must reconcile onto its store twin"
         );
-        assert!(out.ambiguous.is_empty());
+        assert!(!is_ambiguous(&vs, "B"));
     }
 
     /// The flagged caveat: two genuinely-distinct ID-less siblings with
-    /// IDENTICAL content match their two twins 1:1 IN ORDER — never both
-    /// onto the first twin (which would drop one) and never merged.
-    #[test]
-    fn two_identical_idless_siblings_match_1to1() {
+    /// IDENTICAL content match their two twins 1:1 IN ORDER -- never both onto
+    /// the first twin (which would drop one) and never merged.
+    #[tokio::test]
+    async fn two_identical_idless_siblings_match_1to1() {
         let d = doc();
         let existing = vec![existing("A1", &d, 0, "Foo"), existing("A2", &d, 1, "Foo")];
         let incoming = vec![
             incoming("B1", &d, "Foo", true),
             incoming("B2", &d, "Foo", true),
         ];
-        let out = compute_idless_remaps(&existing, &incoming);
-        assert_eq!(
-            out.remaps.get(&EntityUri::block("B1")),
-            Some(&EntityUri::block("A1"))
-        );
-        assert_eq!(
-            out.remaps.get(&EntityUri::block("B2")),
-            Some(&EntityUri::block("A2"))
-        );
-        assert_eq!(out.remaps.len(), 2, "each sibling maps to its own twin");
+        let vs = verdicts(&existing, &incoming).await;
+        assert_eq!(remap_onto(&vs, "B1"), Some(EntityUri::block("A1")));
+        assert_eq!(remap_onto(&vs, "B2"), Some(EntityUri::block("A2")));
     }
 
     /// Fresh ingest (no existing twins): two identical ID-less siblings both
-    /// mint (no remap, no false merge) — they stay two distinct blocks.
-    #[test]
-    fn identical_siblings_without_twins_both_mint() {
+    /// mint (no remap, no false merge) -- they stay two distinct blocks.
+    #[tokio::test]
+    async fn identical_siblings_without_twins_both_mint() {
         let d = doc();
         let existing: Vec<ExistingChild> = vec![];
         let incoming = vec![
             incoming("B1", &d, "Foo", true),
             incoming("B2", &d, "Foo", true),
         ];
-        let out = compute_idless_remaps(&existing, &incoming);
-        assert!(out.remaps.is_empty(), "no twins → nothing to remap");
-        assert!(out.ambiguous.is_empty());
+        let vs = verdicts(&existing, &incoming).await;
+        assert!(is_mint_fresh(&vs, "B1"), "no twins -> B1 mints");
+        assert!(is_mint_fresh(&vs, "B2"), "no twins -> B2 mints");
+        assert!(remap_onto(&vs, "B1").is_none());
+        assert!(!is_ambiguous(&vs, "B1"));
     }
 
-    /// Surplus: one existing twin, two incoming identical ID-less siblings —
-    /// the first matches positionally, the second is genuine surplus and
-    /// mints.
-    #[test]
-    fn surplus_idless_sibling_mints() {
+    /// Surplus: one existing twin, two incoming identical ID-less siblings --
+    /// the first matches positionally, the second is genuine surplus and mints.
+    #[tokio::test]
+    async fn surplus_idless_sibling_mints() {
         let d = doc();
         let existing = vec![existing("A1", &d, 0, "Foo")];
         let incoming = vec![
             incoming("B1", &d, "Foo", true),
             incoming("B2", &d, "Foo", true),
         ];
-        let out = compute_idless_remaps(&existing, &incoming);
-        assert_eq!(
-            out.remaps.get(&EntityUri::block("B1")),
-            Some(&EntityUri::block("A1"))
-        );
-        assert!(!out.remaps.contains_key(&EntityUri::block("B2")));
-        // B2's content matches A1 but A1 is claimed → not ambiguous, just mints.
-        assert!(out.ambiguous.is_empty());
+        let vs = verdicts(&existing, &incoming).await;
+        assert_eq!(remap_onto(&vs, "B1"), Some(EntityUri::block("A1")));
+        // B2's content matches A1 but A1 is claimed -> not ambiguous, just mints.
+        assert!(is_mint_fresh(&vs, "B2"));
+        assert!(!is_ambiguous(&vs, "B2"));
     }
 
     /// A content match at a DIFFERENT position is ambiguous: we do NOT guess a
-    /// merge — the id is reported so the caller keeps the mint and WARNs.
-    #[test]
-    fn content_match_at_other_position_is_ambiguous() {
+    /// merge -- the id mints and is disclosed (MintAmbiguous).
+    #[tokio::test]
+    async fn content_match_at_other_position_is_ambiguous() {
         let d = doc();
         let existing = vec![existing("A", &d, 0, "Foo"), existing("X", &d, 1, "Bar")];
         // Incoming order swapped: Bar at pos0, Foo at pos1.
@@ -4522,21 +4663,23 @@ mod idless_reconcile_tests {
             incoming("Y", &d, "Bar", true),
             incoming("B", &d, "Foo", true),
         ];
-        let out = compute_idless_remaps(&existing, &incoming);
+        let vs = verdicts(&existing, &incoming).await;
         assert!(
-            out.remaps.is_empty(),
-            "no positional twins → no remap, got {:?}",
-            out.remaps
+            remap_onto(&vs, "Y").is_none(),
+            "no positional twin -> no remap"
         );
-        let mut amb: Vec<String> = out.ambiguous.iter().map(|u| u.id().to_string()).collect();
-        amb.sort();
-        assert_eq!(amb, vec!["B".to_string(), "Y".to_string()]);
+        assert!(
+            remap_onto(&vs, "B").is_none(),
+            "no positional twin -> no remap"
+        );
+        assert!(is_ambiguous(&vs, "Y"));
+        assert!(is_ambiguous(&vs, "B"));
     }
 
     /// Nested: a remapped ID-less parent regroups its subtree onto the existing
     /// parent, so an ID-less child then matches the existing child.
-    #[test]
-    fn nested_child_regroups_after_parent_remap() {
+    #[tokio::test]
+    async fn nested_child_regroups_after_parent_remap() {
         let d = doc();
         let p_old = EntityUri::block("Bp"); // minted parent id this parse
         let existing = vec![
@@ -4547,29 +4690,95 @@ mod idless_reconcile_tests {
             incoming("Bp", &d, "Parent", true),
             incoming("Bc", &p_old, "Child", true),
         ];
-        let out = compute_idless_remaps(&existing, &incoming);
+        let vs = verdicts(&existing, &incoming).await;
+        assert_eq!(remap_onto(&vs, "Bp"), Some(EntityUri::block("P")));
         assert_eq!(
-            out.remaps.get(&EntityUri::block("Bp")),
-            Some(&EntityUri::block("P"))
-        );
-        assert_eq!(
-            out.remaps.get(&EntityUri::block("Bc")),
-            Some(&EntityUri::block("C")),
+            remap_onto(&vs, "Bc"),
+            Some(EntityUri::block("C")),
             "child must regroup under the remapped parent and match the store child"
         );
     }
 
     /// An authored (`:ID:`-carrying, non-minted) incoming headline is never
-    /// remapped, even if its content collides with a store sibling — the by-id
-    /// diff owns it.
-    #[test]
-    fn authored_headline_is_never_remapped() {
+    /// remapped and never appears as a verdict, even if its content collides
+    /// with a store sibling -- the by-id diff owns it.
+    #[tokio::test]
+    async fn authored_headline_is_never_remapped() {
         let d = doc();
         let existing = vec![existing("A", &d, 0, "Foo")];
         let incoming = vec![incoming("authored", &d, "Foo", false)];
-        let out = compute_idless_remaps(&existing, &incoming);
-        assert!(out.remaps.is_empty());
-        assert!(out.ambiguous.is_empty());
+        let vs = verdicts(&existing, &incoming).await;
+        assert!(vs.is_empty(), "authored (non-minted) yields no verdict");
+    }
+
+    // ── Trait-contract tests (apply to every BlockMatchStrategy impl) ──
+
+    /// 1:1 partial matching: no store id is claimed as `onto` by two verdicts.
+    #[tokio::test]
+    async fn contract_one_to_one_partial_matching() {
+        let d = doc();
+        let existing = vec![existing("A1", &d, 0, "Foo"), existing("A2", &d, 1, "Foo")];
+        // Three identical incoming, only two twins -> at most two remaps, all distinct.
+        let incoming = vec![
+            incoming("B1", &d, "Foo", true),
+            incoming("B2", &d, "Foo", true),
+            incoming("B3", &d, "Foo", true),
+        ];
+        let vs = verdicts(&existing, &incoming).await;
+        let ontos: Vec<EntityUri> = vs
+            .iter()
+            .filter_map(|v| match v {
+                MatchVerdict::Remap { onto, .. } => Some(onto.clone()),
+                _ => None,
+            })
+            .collect();
+        let uniq: HashSet<&EntityUri> = ontos.iter().collect();
+        assert_eq!(ontos.len(), uniq.len(), "no store id claimed by two remaps");
+        assert_eq!(ontos.len(), 2, "two twins -> exactly two distinct remaps");
+    }
+
+    /// Authored ids are never minted: only `minted == true` incoming blocks
+    /// appear as a verdict's `minted` id.
+    #[tokio::test]
+    async fn contract_authored_ids_never_minted() {
+        let d = doc();
+        let existing = vec![existing("A", &d, 0, "Foo")];
+        // B (minted) sits at pos 0 and matches A; the authored block follows at
+        // pos 1 with distinct content so it never shifts B's position.
+        let incoming = vec![
+            incoming("B", &d, "Foo", true),
+            incoming("authored", &d, "Bar", false),
+        ];
+        let vs = verdicts(&existing, &incoming).await;
+        assert!(
+            vs.iter().all(|v| v.minted().id() != "authored"),
+            "authored id must never be a verdict's minted id"
+        );
+        assert_eq!(remap_onto(&vs, "B"), Some(EntityUri::block("A")));
+    }
+
+    /// Exhaustiveness: every minted incoming block receives EXACTLY one
+    /// verdict; non-minted blocks receive none.
+    #[tokio::test]
+    async fn contract_exhaustiveness() {
+        let d = doc();
+        let existing = vec![existing("A", &d, 0, "Foo")];
+        let incoming = vec![
+            incoming("m1", &d, "Foo", true),
+            incoming("auth", &d, "Foo", false),
+            incoming("m2", &d, "Bar", true),
+        ];
+        let vs = verdicts(&existing, &incoming).await;
+        let got: HashSet<String> = vs.iter().map(|v| v.minted().id().to_string()).collect();
+        let want: HashSet<String> = ["m1", "m2"].iter().map(|s| (*s).to_string()).collect();
+        assert_eq!(got, want, "exactly the minted incoming ids get verdicts");
+        assert_eq!(vs.len(), 2, "exactly one verdict per minted incoming");
+    }
+
+    /// The strategy exposes its provenance tag.
+    #[test]
+    fn positional_matcher_has_provenance_id() {
+        assert_eq!(PositionalExactMatcher.id(), "positional-exact");
     }
 }
 
