@@ -19,6 +19,7 @@
 //! ALLOW(compatibility): see holon-orgmode crate header everything from this
 //! crate so older import paths keep resolving.
 
+pub mod dense;
 pub mod inline_marks;
 pub mod link_parser;
 pub mod models;
@@ -27,6 +28,12 @@ pub mod parser;
 
 // Flat re-exports — mirrors what holon-orgmode used to export directly
 
+pub use dense::Alias;
+pub use dense::AliasTable;
+pub use dense::DenseBlock;
+pub use dense::DenseParse;
+pub use dense::parse_dense;
+pub use dense::render_dense;
 pub use inline_marks::extract_inline_marks;
 pub use inline_marks::render_inline_marks;
 pub use models::BlockResolver;

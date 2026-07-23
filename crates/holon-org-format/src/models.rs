@@ -185,6 +185,36 @@ fn format_properties_drawer(properties_json: &str) -> String {
     result
 }
 
+/// Format a properties drawer with the `:ID:` line omitted (dense projection).
+/// Returns an empty string when no non-ID properties remain, so a block whose
+/// only drawer content was its `:ID:` renders with no drawer at all.
+fn format_properties_drawer_without_id(properties_json: &str) -> String {
+    let props: serde_json::Map<String, serde_json::Value> = serde_json::from_str(properties_json)
+        .unwrap_or_else(|e| {
+            panic!(
+                "malformed org_properties JSON {properties_json:?}: {e} — dense render must not \
+                 silently drop drawer properties"
+            )
+        });
+
+    let mut sorted_props: Vec<_> = props.iter().filter(|(k, _)| k.as_str() != "ID").collect();
+    if sorted_props.is_empty() {
+        return String::new();
+    }
+    sorted_props.sort_by_key(|(a, _)| *a);
+
+    let mut result = String::from(":PROPERTIES:\n");
+    for (key, value) in sorted_props {
+        let value_str = match value {
+            serde_json::Value::String(s) => s.clone(),
+            _ => value.to_string(),
+        };
+        result.push_str(&format!(":{}: {}\n", key, value_str));
+    }
+    result.push_str(":END:");
+    result
+}
+
 /// Format the planning line (SCHEDULED/DEADLINE).
 ///
 /// Both keywords MUST share one line: orgize's `planning_node` parser reads
@@ -808,6 +838,21 @@ impl OrgBlockExt for Block {
     }
 }
 
+/// How a headline block's stable identity is emitted.
+///
+/// The canonical org file carries identity in the `:PROPERTIES:/:ID:/:END:`
+/// drawer. A DENSE projection (agent-facing, projection-only — see
+/// `crate::dense`) instead compresses that three-line scaffolding to a single
+/// trailing headline token `{#<alias>}`, where `<alias>` is a short per-query
+/// handle. This enum is the ONE branch point between the two forms so the
+/// headline-building logic stays a single implementation.
+pub(crate) enum HeadlineIdentity<'a> {
+    /// Canonical: `:ID:` inside the properties drawer.
+    Drawer,
+    /// Dense projection: trailing `{#alias}` token, `:ID:` line suppressed.
+    DenseToken(&'a str),
+}
+
 impl ToOrg for Block {
     fn to_org(&self) -> String {
         // Source blocks render as #+BEGIN_SRC ... #+END_SRC
@@ -820,104 +865,122 @@ impl ToOrg for Block {
             return format!("[[file:{}]]\n", self.content);
         }
 
-        // Rich text: re-emit org delimiters from the mark set before
-        // splitting into title + body lines. When marks=None, content is
-        // already raw org text (no marks to project) — emit as-is. The
-        // local override `with_marks_rendered` shadows accessors that read
-        // self.content for the duration of this method.
-        let with_marks_rendered: Option<String> = self
-            .marks
-            .as_ref()
-            .filter(|m| !m.is_empty())
-            .map(|m| crate::inline_marks::render_inline_marks(&self.content, m));
-        let title_str = match with_marks_rendered.as_ref() {
-            Some(rendered) => rendered.lines().next().unwrap_or("").trim_end().to_string(),
-            None => self.org_title(),
-        };
-        let body_str: Option<String> = match with_marks_rendered.as_ref() {
-            Some(rendered) => {
-                let lines: Vec<&str> = rendered.lines().collect();
-                if lines.len() > 1 {
-                    Some(lines[1..].join("\n"))
-                } else {
-                    None
-                }
+        render_headline_block(self, HeadlineIdentity::Drawer)
+    }
+}
+
+/// Render a text/headline `Block` to org. `identity` selects the canonical
+/// drawer form or the dense trailing-token form (`crate::dense`). Callers MUST
+/// have already dispatched Source/Image content types (this only handles the
+/// headline case). Free function (not an inherent method) because `Block` is
+/// defined in `holon-api`.
+pub(crate) fn render_headline_block(block: &Block, identity: HeadlineIdentity) -> String {
+    // Rich text: re-emit org delimiters from the mark set before
+    // splitting into title + body lines. When marks=None, content is
+    // already raw org text (no marks to project) — emit as-is.
+    let with_marks_rendered: Option<String> = block
+        .marks
+        .as_ref()
+        .filter(|m| !m.is_empty())
+        .map(|m| crate::inline_marks::render_inline_marks(&block.content, m));
+    let title_str = match with_marks_rendered.as_ref() {
+        Some(rendered) => rendered.lines().next().unwrap_or("").trim_end().to_string(),
+        None => block.org_title(),
+    };
+    let body_str: Option<String> = match with_marks_rendered.as_ref() {
+        Some(rendered) => {
+            let lines: Vec<&str> = rendered.lines().collect();
+            if lines.len() > 1 {
+                Some(lines[1..].join("\n"))
+            } else {
+                None
             }
-            None => self.body(),
-        };
+        }
+        None => block.body(),
+    };
 
-        // Text blocks (headlines) render with stars, TODO, etc.
-        let mut result = String::new();
+    // Text blocks (headlines) render with stars, TODO, etc.
+    let mut result = String::new();
 
-        // Headline level (stars)
-        result.push_str(&"*".repeat(self.level() as usize));
+    // Headline level (stars)
+    result.push_str(&"*".repeat(block.level() as usize));
+    result.push(' ');
+
+    // TODO keyword
+    if let Some(ref todo) = block.task_state() {
+        result.push_str(&todo.to_string());
         result.push(' ');
+    }
 
-        // TODO keyword
-        if let Some(ref todo) = self.task_state() {
-            result.push_str(&todo.to_string());
+    // Priority
+    if let Some(priority) = block.priority() {
+        result.push_str(&format!("[#{}] ", priority.to_letter()));
+    }
+
+    // Title
+    result.push_str(&title_str);
+
+    // Tags
+    let tags = block.tags();
+    if !tags.is_empty() {
+        let formatted_tags = tags.to_org();
+        if !formatted_tags.is_empty() {
             result.push(' ');
+            result.push_str(&formatted_tags);
         }
+    }
 
-        // Priority
-        if let Some(priority) = self.priority() {
-            result.push_str(&format!("[#{}] ", priority.to_letter()));
-        }
+    // Dense identity: the `:ID:` drawer scaffolding is compressed to a
+    // trailing `{#alias}` token on the headline line itself.
+    if let HeadlineIdentity::DenseToken(alias) = identity {
+        result.push_str(&format!(" {{#{}}}", alias));
+    }
 
-        // Title
-        result.push_str(&title_str);
+    result.push('\n');
 
-        // Tags
-        let tags = self.tags();
-        if !tags.is_empty() {
-            let formatted_tags = tags.to_org();
-            if !formatted_tags.is_empty() {
-                result.push(' ');
-                result.push_str(&formatted_tags);
-            }
-        }
+    // Planning (SCHEDULED/DEADLINE) — org syntax requires this line
+    // directly after the headline, before any drawer (Emacs/LogSeq won't
+    // parse it in a :PROPERTIES: drawer's wake).
+    let sched_str = block.scheduled().map(|t| t.to_string());
+    let dead_str = block.deadline().map(|t| t.to_string());
+    let planning = format_planning(sched_str.as_deref(), dead_str.as_deref());
+    if !planning.is_empty() {
+        result.push_str(&planning);
+    }
 
-        result.push('\n');
-
-        // Planning (SCHEDULED/DEADLINE) — org syntax requires this line
-        // directly after the headline, before any drawer (Emacs/LogSeq won't
-        // parse it in a :PROPERTIES: drawer's wake).
-        let sched_str = self.scheduled().map(|t| t.to_string());
-        let dead_str = self.deadline().map(|t| t.to_string());
-        let planning = format_planning(sched_str.as_deref(), dead_str.as_deref());
-        if !planning.is_empty() {
-            result.push_str(&planning);
-        }
-
-        // Properties drawer
-        if let Some(props_json) = self.org_properties() {
-            let props_drawer = format_properties_drawer(&props_json);
-            if !props_drawer.is_empty() {
-                result.push_str(&props_drawer);
-                result.push('\n');
-            }
-        }
-
-        // Body text (source blocks are child Block entities, rendered via tree
-        // traversal)
-        if let Some(body) = body_str {
-            let trimmed_body = body.trim();
-            if !trimmed_body.is_empty() {
-                result.push_str(trimmed_body);
-                if !trimmed_body.ends_with('\n') {
-                    result.push('\n');
-                }
-                result.push('\n');
-            }
-        }
-
-        // Ensure result ends with newline if non-empty
-        if !result.is_empty() && !result.ends_with('\n') {
+    // Properties drawer. In dense mode the `:ID:` line is dropped (identity
+    // moved to the trailing token); any OTHER drawer properties are still
+    // emitted, and a drawer that held only `:ID:` collapses to nothing.
+    if let Some(props_json) = block.org_properties() {
+        let props_drawer = match identity {
+            HeadlineIdentity::Drawer => format_properties_drawer(&props_json),
+            HeadlineIdentity::DenseToken(_) => format_properties_drawer_without_id(&props_json),
+        };
+        if !props_drawer.is_empty() {
+            result.push_str(&props_drawer);
             result.push('\n');
         }
-
-        result
     }
+
+    // Body text (source blocks are child Block entities, rendered via tree
+    // traversal)
+    if let Some(body) = body_str {
+        let trimmed_body = body.trim();
+        if !trimmed_body.is_empty() {
+            result.push_str(trimmed_body);
+            if !trimmed_body.ends_with('\n') {
+                result.push('\n');
+            }
+            result.push('\n');
+        }
+    }
+
+    // Ensure result ends with newline if non-empty
+    if !result.is_empty() && !result.ends_with('\n') {
+        result.push('\n');
+    }
+
+    result
 }
 
 /// Render a source-type Block as Org Mode #+BEGIN_SRC ... #+END_SRC
