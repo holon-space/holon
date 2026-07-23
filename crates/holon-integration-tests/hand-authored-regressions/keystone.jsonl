@@ -102,3 +102,12 @@
 # undo like next_doc_id already does (reference_state.rs:1863) -> re-materialise dropped doc roots
 # after pop_undo_to_redo. GREEN once the oracle undo stops over-reverting file docs.
 {"name": "ref-doc-0-undo-over-reverts-file-ingested-doc", "description": "BugFunnel 2026-07-22 ref-doc-0 FACET 2 (the original subset-of-data phantom): a USER-origin CreateBlockUnderFocus snapshots pre-doc state; a CreateDocument file-ingest (INGEST-origin, not undoable in prod) adds the doc; UndoLastMutation restores the pre-doc oracle snapshot, dropping the doc oracle-side while prod KEEPS it -> the SUT-rendered doc is a phantom against the resolved oracle. Oracle-side undo over-reverts file-ingested docs.", "transitions": [{"CreateBlockUnderFocus": {"content": "g", "id": "block:gen-0"}}, {"CreateDocument": {"file_name": "doc_0.org"}}, {"UndoLastMutation": null}]}
+#
+# --- R3 slot-create history: creation-slot commit must record a block_history op_group (BugFunnel 236/240) ---
+# A single id:None CreateBlockUnderFocus drives the PRODUCTION creation-slot gesture
+# (commit_creation_slot -> handle_text_sync -> block.create, mint-when-absent). The slot mints a real
+# uuid != the oracle synthetic block::create-0, so harness.rs:300 counts it as one UI create that MUST
+# record >=1 block_history op_group. RED (pre-fix): inv-history-records-all-creates fires
+# "block_history has 0 distinct op_group(s) but the oracle drove 1 UI create(s)". No CreateDocument, so
+# the doc-ingest under-recording confound (2nd-doc issue) is excluded.
+{"name": "slot-create-records-history-op-group", "description": "R3 (Martin ruling Option A): the creation-slot commit path must emit the same block_history provenance as every other create. A single id:None CreateBlockUnderFocus (production slot gesture) records >=1 op_group (inv-history-records-all-creates enforces); UndoLastMutation then pops that create, locking undo parity with every other create path.", "transitions": [{"CreateBlockUnderFocus": {"content": "a", "id": null}}, {"UndoLastMutation": null}]}
