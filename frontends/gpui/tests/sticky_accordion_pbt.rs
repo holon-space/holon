@@ -188,3 +188,266 @@ fn in_flow_accordion_renders_inline_not_error(cx: &mut TestAppContext) {
         obs.iter().map(|o| &o.widget_type).collect::<Vec<_>>()
     );
 }
+
+// ── Inc E: Journals-shaped multi-section stack + the three real catalog bodies
+// ──
+
+use std::time::Duration;
+
+use holon_api::EntityUri;
+use holon_integration_tests::pbt::invariants::bodies::sticky_accordion_spec::InvStickyAccordionSpec;
+use holon_integration_tests::pbt::invariants::bodies::wheel_occlusion_routing::InvWheelOcclusionRouting;
+use holon_integration_tests::pbt::invariants::bodies::wheel_two_mode_motion_law::InvWheelTwoModeMotionLaw;
+use holon_pbt_core::capabilities::RenderedElement;
+use holon_pbt_core::capabilities::SutLayout;
+use holon_pbt_core::invariant::Invariant;
+use holon_pbt_core::invariant::InvariantResult;
+
+/// Minimal `SutLayout` over a captured geometry snapshot — lets the dedicated
+/// windowed test drive the REAL composed catalog invariant bodies
+/// (`InvStickyAccordionSpec` / `InvWheel*`) without booting a full
+/// `ComposedSut`, so promotion to the keystone (when Journals gets a
+/// section_stack profile) is a move, not a rewrite. Only `rendered_elements` is
+/// exercised by the three bodies; the rest are inert.
+struct StickyLayoutSut {
+    elements: Vec<RenderedElement>,
+}
+
+#[async_trait::async_trait(?Send)]
+impl SutLayout for StickyLayoutSut {
+    async fn rendered_elements(&self) -> Vec<RenderedElement> {
+        self.elements.clone()
+    }
+    async fn visual_content_fraction(&self) -> Option<f32> {
+        None
+    }
+    async fn has_registered_bounds(&self, _: &EntityUri) -> bool {
+        false
+    }
+    async fn has_draggable_handle(&self, _: &EntityUri) -> bool {
+        false
+    }
+    async fn any_error_widget(&self) -> bool {
+        false
+    }
+    async fn wait_for_bounds(&self, _: &EntityUri, _: Duration) -> Result<(), String> {
+        Ok(())
+    }
+    async fn wait_for_widget_kind(
+        &self,
+        _: &EntityUri,
+        _: &[&str],
+        _: Duration,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    async fn wait_for_window_focused_editor(
+        &self,
+        _: &EntityUri,
+        _: Duration,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+fn to_rendered(bounds: &BoundsRegistry) -> Vec<RenderedElement> {
+    bounds
+        .all_elements()
+        .into_iter()
+        .map(|(el_id, i)| RenderedElement {
+            el_id,
+            widget_type: i.widget_type.to_string(),
+            entity_id: i
+                .entity_id
+                .as_deref()
+                .map(|s| EntityUri::parse(s).unwrap_or_else(|_| EntityUri::block(s))),
+            displayed_text: None,
+            x: i.x,
+            y: i.y,
+            width: i.width,
+            height: i.height,
+            has_content: true,
+            parent_id: None,
+            expected_size_violation: None,
+            is_error_widget: false,
+            focused: None,
+        })
+        .collect()
+}
+
+/// `section_stack( column(rows)×N , accordion(sticky, footer_rows) )` — N
+/// variable-height content sections + one active sticky footer.
+fn journals_root(
+    section_rows: &[usize],
+    footer_rows: usize,
+    fraction: f64,
+) -> Arc<ReactiveViewModel> {
+    let mut children: Vec<Arc<ReactiveViewModel>> = Vec::new();
+    for (s, &n) in section_rows.iter().enumerate() {
+        let rows: Vec<Arc<ReactiveViewModel>> = (0..n)
+            .map(|r| {
+                Arc::new(text_item(
+                    format!("s{s}r{r}"),
+                    format!("section {s} row {r}"),
+                ))
+            })
+            .collect();
+        let mut col = ReactiveViewModel::from_widget("column", HashMap::new());
+        col.children = rows;
+        children.push(Arc::new(col));
+    }
+    let footer_children: Vec<Arc<ReactiveViewModel>> = (0..footer_rows)
+        .map(|i| Arc::new(text_item(format!("frow-{i}"), format!("footer row {i}"))))
+        .collect();
+    let mut acc_props = HashMap::new();
+    acc_props.insert("title".to_string(), Value::String("Journals".into()));
+    acc_props.insert("max_height_fraction".to_string(), Value::Float(fraction));
+    acc_props.insert("collapsible".to_string(), Value::Boolean(true));
+    acc_props.insert("collapsed".to_string(), Value::Boolean(false));
+    acc_props.insert("placement".to_string(), Value::String("sticky".into()));
+    children.push(Arc::new(ReactiveViewModel {
+        children: footer_children,
+        expanded: Some(Mutable::new(true)),
+        ..ReactiveViewModel::from_widget("accordion", acc_props)
+    }));
+
+    let mut props = HashMap::new();
+    props.insert("section_stack".to_string(), Value::Boolean(true));
+    let mut ss = ReactiveViewModel::from_widget("section_stack", props);
+    ss.children = children;
+    Arc::new(ss)
+}
+
+fn y_of(obs: &[sa::ObservedRect], entity_id: &str) -> f32 {
+    obs.iter()
+        .find(|o| o.entity_id.as_deref() == Some(entity_id))
+        .map(|o| o.y)
+        .unwrap_or(f32::NAN)
+}
+
+fn footer_top(obs: &[sa::ObservedRect]) -> f32 {
+    obs.iter()
+        .find(|o| o.widget_type == sa::STICKY_FOOTER_WIDGET)
+        .map(|o| o.y)
+        .unwrap_or(f32::NAN)
+}
+
+fn engaged(r: &InvariantResult) -> bool {
+    matches!(r, InvariantResult::Ok | InvariantResult::Fail(_))
+}
+
+#[gpui::test]
+fn journals_multi_section_engages_all_three_invariants(cx: &mut TestAppContext) {
+    let fraction = 0.4_f64;
+    let viewport = size(px(440.0), px(340.0));
+    let (entity, vcx, bounds) =
+        open_stack(cx, journals_root(&[6, 9, 7, 8], 16, fraction), viewport);
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("rt");
+
+    // Section stack + one active sticky footer rendered.
+    let pre_obs = observe(&bounds);
+    let pre_top = footer_top(&pre_obs);
+    let outer_id = "section:section-stack:0";
+    let outer_pre = y_of(&pre_obs, outer_id);
+    let footer_row_pre = y_of(&pre_obs, "frow-0");
+
+    // (1) inv-sticky-accordion-spec over the multi-section render.
+    let sut = StickyLayoutSut {
+        elements: to_rendered(&bounds),
+    };
+    let r_sticky = rt.block_on(InvStickyAccordionSpec.check(&(), &sut));
+    let sticky_engaged = engaged(&r_sticky) as u32;
+
+    // Drive a real wheel over the OUTER list (mid-height, left of the footer).
+    let list_pos = gpui::point(px(120.0), px(80.0));
+    support::simulate_wheel_at(vcx, list_pos, px(60.0));
+    settle(&entity, vcx, &bounds);
+    let post_list = observe(&bounds);
+    let obs_list = sa::WheelObservation {
+        over_footer: false,
+        delta_y: 60.0,
+        footer_top_before: pre_top,
+        footer_top_after: footer_top(&post_list),
+        outer_offset_before: outer_pre,
+        outer_offset_after: y_of(&post_list, outer_id),
+        footer_offset_before: footer_row_pre,
+        footer_offset_after: y_of(&post_list, "frow-0"),
+    };
+
+    // (2)+(3) wheel invariants over the OUTER-LIST wheel.
+    sa::set_wheel_observation(Some(obs_list));
+    let sut2 = StickyLayoutSut {
+        elements: to_rendered(&bounds),
+    };
+    let r_motion_list = rt.block_on(InvWheelTwoModeMotionLaw.check(&(), &sut2));
+    sa::set_wheel_observation(Some(obs_list));
+    let r_occl_list = rt.block_on(InvWheelOcclusionRouting.check(&(), &sut2));
+
+    // Drive a real wheel over the FOOTER (occluded) — internal scroll only.
+    let ftop_now = footer_top(&post_list);
+    let footer_pos = gpui::point(px(220.0), px(ftop_now + 30.0));
+    let outer_before_footer = y_of(&post_list, outer_id);
+    let footer_row_before = y_of(&post_list, "frow-0");
+    support::simulate_wheel_at(vcx, footer_pos, px(60.0));
+    settle(&entity, vcx, &bounds);
+    let post_footer = observe(&bounds);
+    let obs_footer = sa::WheelObservation {
+        over_footer: true,
+        delta_y: 60.0,
+        footer_top_before: ftop_now,
+        footer_top_after: footer_top(&post_footer),
+        outer_offset_before: outer_before_footer,
+        outer_offset_after: y_of(&post_footer, outer_id),
+        footer_offset_before: footer_row_before,
+        footer_offset_after: y_of(&post_footer, "frow-0"),
+    };
+    sa::set_wheel_observation(Some(obs_footer));
+    let sut3 = StickyLayoutSut {
+        elements: to_rendered(&bounds),
+    };
+    let r_motion_footer = rt.block_on(InvWheelTwoModeMotionLaw.check(&(), &sut3));
+    sa::set_wheel_observation(Some(obs_footer));
+    let r_occl_footer = rt.block_on(InvWheelOcclusionRouting.check(&(), &sut3));
+
+    let motion_engaged = engaged(&r_motion_list) as u32 + engaged(&r_motion_footer) as u32;
+    let occl_engaged = engaged(&r_occl_list) as u32 + engaged(&r_occl_footer) as u32;
+
+    eprintln!(
+        "[journals-engagement] inv-sticky-accordion-spec={sticky_engaged} \
+         inv-wheel-two-mode-motion-law={motion_engaged} inv-wheel-occlusion-routing={occl_engaged}"
+    );
+    eprintln!(
+        "  sticky={r_sticky:?}\n  motion(list)={r_motion_list:?}\n  motion(footer)={r_motion_footer:?}\n  \
+         occl(list)={r_occl_list:?}\n  occl(footer)={r_occl_footer:?}"
+    );
+
+    // DONE-CRITERIA: non-zero engagement (Ok/Fail, never all-Skip) for each body.
+    assert!(
+        sticky_engaged >= 1,
+        "inv-sticky-accordion-spec never engaged (vacuous)"
+    );
+    assert!(
+        motion_engaged >= 1,
+        "inv-wheel-two-mode-motion-law never engaged (vacuous)"
+    );
+    assert!(
+        occl_engaged >= 1,
+        "inv-wheel-occlusion-routing never engaged (vacuous)"
+    );
+    // And the engaged runs must PASS (Ok, not Fail).
+    for (name, r) in [
+        ("sticky", &r_sticky),
+        ("motion(list)", &r_motion_list),
+        ("motion(footer)", &r_motion_footer),
+        ("occl(list)", &r_occl_list),
+        ("occl(footer)", &r_occl_footer),
+    ] {
+        assert!(
+            !matches!(r, InvariantResult::Fail(_)),
+            "invariant {name} FAILED: {r:?}"
+        );
+    }
+}

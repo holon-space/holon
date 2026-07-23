@@ -56,11 +56,18 @@ where
                 Self::LABEL
             ));
         }
-        // Inc E: read the WheelObservation the windowed harness captured
-        // before/after the last WheelScroll and evaluate sa::check_occlusion_routing.
-        InvariantResult::Skipped(format!(
-            "[{}] awaiting the Inc E windowed-harness WheelObservation",
-            Self::LABEL
-        ))
+        // Read the WheelObservation the harness/driver captured before/after
+        // the last WheelScroll. None ⇒ no wheel fired this tick (the composed
+        // catalog never sets it) ⇒ Skip.
+        let Some(obs) = sa::take_wheel_observation() else {
+            return InvariantResult::Skipped(format!(
+                "[{}] no WheelScroll observation this tick",
+                Self::LABEL
+            ));
+        };
+        match sa::check_occlusion_routing(&obs) {
+            Ok(()) => InvariantResult::Ok,
+            Err(e) => InvariantResult::Fail(format!("[{}] {e}", Self::LABEL)),
+        }
     }
 }
