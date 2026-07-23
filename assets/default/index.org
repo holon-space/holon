@@ -29,8 +29,10 @@ WITH RECURSIVE focus_descendants AS (
   SELECT child.id, focus_descendants.source_id, focus_descendants.depth + 1, focus_descendants.visited || ',' || CAST(child.id AS TEXT)
   FROM focus_descendants
   JOIN block child ON child.parent_id = focus_descendants.node_id
+  LEFT JOIN block_tags pt ON pt.block_id = focus_descendants.node_id AND pt.tag = 'Page'
   WHERE focus_descendants.depth < 20
     AND ',' || focus_descendants.visited || ',' NOT LIKE '%,' || CAST(child.id AS TEXT) || ',%'
+    AND (focus_descendants.depth = 0 OR pt.block_id IS NULL)
 )
 SELECT d.*
 FROM focus_roots fr
