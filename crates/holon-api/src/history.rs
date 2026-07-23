@@ -141,6 +141,39 @@ pub struct HistoryEvent {
     pub op_group: Option<i64>,
 }
 
+impl HistoryEvent {
+    /// Build the single create-event for a genuinely-new block, in the SAME
+    /// shape the engine's `history_events_for` emits for a `create` field-delta
+    /// (`field="id"`, `old_value="null"`, `new_value=block_id`). Used by the
+    /// doc-ingest path, which mints doc/day PAGE blocks through the ordering
+    /// authority (never the engine), so its creates would otherwise leave no
+    /// history trace.
+    pub fn create_event(
+        entity_name: impl Into<String>,
+        block_id: impl Into<String>,
+        origin: &crate::OpOrigin,
+        at_millis: i64,
+    ) -> Self {
+        let stamp = crate::ProvenanceStamp::from_origin(origin, at_millis);
+        let block_id = block_id.into();
+        Self {
+            entity_name: entity_name.into(),
+            block_id: block_id.clone(),
+            op_name: "create".to_string(),
+            origin: stamp.origin,
+            transition_id: stamp.transition_id,
+            session_id: stamp.session_id,
+            tool_call_id: stamp.tool_call_id,
+            effect_id: None,
+            field: Some("id".to_string()),
+            old_value: Some("null".to_string()),
+            new_value: Some(block_id),
+            at_millis: stamp.at_millis,
+            op_group: None,
+        }
+    }
+}
+
 /// The UTC calendar day (`YYYY-MM-DD`) of an `at_millis` timestamp — the
 /// denormalized `day` column the store derives at insert, so day-grouped
 /// queries (the Automations journal) never depend on the IVM maintaining an

@@ -111,3 +111,13 @@
 # "block_history has 0 distinct op_group(s) but the oracle drove 1 UI create(s)". No CreateDocument, so
 # the doc-ingest under-recording confound (2nd-doc issue) is excluded.
 {"name": "slot-create-records-history-op-group", "description": "R3 (Martin ruling Option A): the creation-slot commit path must emit the same block_history provenance as every other create. A single id:None CreateBlockUnderFocus (production slot gesture) records >=1 op_group (inv-history-records-all-creates enforces); UndoLastMutation then pops that create, locking undo parity with every other create path.", "transitions": [{"CreateBlockUnderFocus": {"content": "a", "id": null}}, {"UndoLastMutation": null}]}
+#
+# --- R3b watcher-ingest history: doc-ingest creates must record a block_history op_group ---
+# TWO user CreateDocument gestures each write a NEW empty org file; the FileSyncController watcher
+# ingests each and mints a doc-page block via the ordering authority (create_in_tree), NOT through
+# DispatchingOperationEngine. Pre-fix that recorded 0 op_groups for the doc creates, so the C2 floor
+# (harness.rs:300 counts each ref-doc-N->uuid remap as a UI create demanding >=1) went short: RED
+# "block_history has 1 distinct op_group(s) but the oracle drove 2 UI create(s)". FIXED (R3b): the
+# ingest doc-page create records one OpOrigin::Ingest op_group when genuinely-new + runtime
+# (!in_initial_scan). Recording-only (ingest creates are not on the undo stack — separate item).
+{"name": "doc-ingest-records-history-op-group", "description": "R3b: watcher-ingested doc-page creates record block_history provenance like engine-routed creates. Two user CreateDocument gestures record >=2 op_groups; inv-history-records-all-creates enforces (lower bound).", "transitions": [{"CreateDocument": {"file_name": "doc_0.org"}}, {"CreateDocument": {"file_name": "doc_1.org"}}]}
