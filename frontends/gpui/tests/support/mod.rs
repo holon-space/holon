@@ -841,6 +841,54 @@ pub fn render_reactive_fixture_quiescent_sized(
     holon_layout_testing::snapshot::snapshot_from_provider(&bounds)
 }
 
+/// Like `render_reactive_fixture_quiescent_sized` but with CALLER-supplied
+/// services — used to route through a real `live_block(block:default-*)` shell
+/// by handing in a `TestServices` whose `BlockTreeRegistry` has the block
+/// registered (production-faithful composition).
+pub fn render_reactive_fixture_quiescent_sized_with_services(
+    cx: &mut TestAppContext,
+    vm: Arc<ReactiveViewModel>,
+    window_size: Size<Pixels>,
+    services: Arc<dyn BuilderServices>,
+) -> BoundsSnapshot {
+    cx.update(|cx| {
+        gpui_component::init(cx);
+    });
+
+    let bounds = BoundsRegistry::new();
+    let bounds_for_view = bounds.clone();
+
+    let _window: WindowHandle<ReactiveFixtureView> = cx.update(|cx| {
+        cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds {
+                    origin: Point::default(),
+                    size: window_size,
+                })),
+                ..Default::default()
+            },
+            |_window, cx| {
+                cx.new(|_cx| {
+                    ReactiveFixtureView::with_services_and_bounds(
+                        vm,
+                        services,
+                        window_size,
+                        bounds_for_view,
+                    )
+                })
+            },
+        )
+        .expect("open_window failed")
+    });
+
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(500));
+    cx.run_until_parked();
+
+    holon_layout_testing::snapshot::snapshot_from_provider(&bounds)
+}
+
 // ── Scroll fixture ────────────────────────────────────────────────────
 //
 // A `gpui::Render` view that hosts a `uniform_list` inside the **same**

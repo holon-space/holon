@@ -754,6 +754,35 @@ impl Render for ReactiveShell {
             // accordion cap) and virtualized `gpui::list` sidebars require, so
             // this is the eager arm's proven shape — not a new percentage trap.
             let scroll_id = self.block_id.as_deref().unwrap_or("block-content-scroll");
+            // Accordion-bearing column: fire the flow-panel split HERE — the real
+            // production seam. Production wraps the main panel in a `live_block`,
+            // so `columns::render`'s flow child is a live_block and its split
+            // never fires; the split must fire wherever the column-with-accordion
+            // is actually rendered — this block-mode shell arm. The `size_full`
+            // div is the definite-height wrapper the accordion cap resolves
+            // against (same role as `columns::panel_wrap`'s absolute size_full).
+            // Shell-less compositions still split at `columns::render` — ONE
+            // implementation (`render_accordion_split`), two call sites.
+            if builders::has_accordion_child(tree) {
+                let sid = gpui::ElementId::from(SharedString::from(format!("{scroll_id}-main")));
+                return builders::render_accordion_split(
+                    div().size_full(),
+                    tree,
+                    sid,
+                    None,
+                    &gpui_ctx,
+                );
+            }
+            // Plain (non-accordion) block tree: MIRROR the eager arm above (id +
+            // overflow_y_scroll on the size_full div). Without the scroll viewport
+            // a content-height column (an outline that overflows) is clipped to
+            // the panel with no way to reach below-fold rows — the plain-path main
+            // panel stopped scrolling (Martin dogfood): the outer columns.rs
+            // wrapper cannot scroll because this size_full shell exactly fills it.
+            // Keeping size_full (NOT content-height) preserves the DEFINITE-height
+            // context that relative-height descendants (live_query `relative(1.0)`,
+            // virtualized `gpui::list` sidebars) require — the eager arm's proven
+            // shape, not a new percentage trap.
             return div()
                 .id(SharedString::from(scroll_id.to_string()))
                 .flex()

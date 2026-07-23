@@ -5,6 +5,12 @@ pub mod style;
 // Re-export tree_item collapse helper for use by ReactiveShell.
 // Re-export the sidebar drag-resize machinery so the root view (`lib.rs`) can
 // mount the full-window capture overlay while a drag is in progress.
+// Accordion flow-panel split — ONE implementation, TWO call sites: columns.rs
+// (shell-less compositions) and the per-block ReactiveShell arm (production,
+// where the main panel is wrapped in a live_block so columns.rs sees no
+// column).
+pub(crate) use column::has_accordion_child;
+pub(crate) use column::render_accordion_split;
 pub(crate) use drawer::SidebarResizeState;
 pub(crate) use drawer::drag_sidebar_to;
 pub(crate) use drawer::finalize_sidebar_resize;

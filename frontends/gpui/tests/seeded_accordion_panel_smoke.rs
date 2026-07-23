@@ -209,8 +209,9 @@ fn seeded_main_panel_renders_capped_accordion_split(cx: &mut TestAppContext) {
     // 2. Interpret through a QUIESCENT `TestServices` threaded as the builder
     //    services (so `live_query`'s `watch_query` returns Ok and `text(col)`
     //    subscriptions queue on the never-driven current-thread runtime).
-    let services =
-        support::TestServices::with_registry_quiescent(Arc::new(support::BlockTreeRegistry::new()));
+    let registry = Arc::new(support::BlockTreeRegistry::new());
+    let services = support::TestServices::with_registry_quiescent(registry.clone());
+    let services: Arc<dyn holon_frontend::reactive::BuilderServices> = services;
     let interp = holon_frontend::shadow_builders::build_shadow_interpreter();
     let ctx = RenderContext::default();
     let mut column_vm = interp.interpret(&column_expr, &ctx, &*services);
@@ -223,11 +224,33 @@ fn seeded_main_panel_renders_capped_accordion_split(cx: &mut TestAppContext) {
         .expect("substituted `collection_view` -> `list` sentinel must be a direct column child");
     column_vm.children[sentinel] = Arc::new(outline_collection());
 
-    // 4. Wrap in `columns(...)` — the panel-wrap that triggers `columns::render` ->
-    //    `render_accordion_split` (the split fires only under a columns panel,
-    //    exactly as the seeded main panel is hosted).
+    // 4. PRODUCTION-FAITHFUL composition: register the accordion column as
+    //    `block:default-main-panel` and wrap it in a `live_block`, so the tree
+    //    routes through the REAL per-block `ReactiveShell` (the layer that wraps
+    //    every `block:default-*` panel). `columns::render`'s flow child is then a
+    //    `live_block`, not a column — exactly as in prod — so the accordion split
+    //    must (and now does) fire at the block-shell arm, NOT at `columns::render`.
+    //    (An earlier version mounted `columns(column(accordion))` directly, which
+    //    fired the split at `columns::render` and MASKED the prod break where the
+    //    accordion rendered the placement-error div — the environment-parity
+    //    lesson.) The block tree is handed out once via `watch_live`.
+    let column_slot = std::sync::Mutex::new(Some(column_vm));
+    let thunk: support::BlockTreeThunk = Arc::new(move || {
+        column_slot
+            .lock()
+            .unwrap()
+            .take()
+            .expect("watch_live called more than once for the seeded main panel")
+    });
+    registry.register(
+        "block:default-main-panel",
+        vec![("default".to_string(), thunk)],
+        0,
+    );
+    let live_block =
+        ReactiveViewModel::live_block(holon_api::EntityUri::block("default-main-panel"));
     let columns_view = Arc::new(ReactiveView::new_static_with_layout(
-        vec![column_vm],
+        vec![live_block],
         CollectionVariant::columns(4.0),
     ));
     let root = Arc::new(ReactiveViewModel {
@@ -235,11 +258,13 @@ fn seeded_main_panel_renders_capped_accordion_split(cx: &mut TestAppContext) {
         ..ReactiveViewModel::from_widget("columns", HashMap::new())
     });
 
-    // 5. Render at a definite window (the panel height the cap resolves against).
-    let snap = support::render_reactive_fixture_quiescent_sized(
+    // 5. Render at a definite window (the panel height the cap resolves against),
+    //    threading the SAME registry-backed services so the live_block resolves.
+    let snap = support::render_reactive_fixture_quiescent_sized_with_services(
         cx,
         root,
         size(px(WINDOW_W), px(WINDOW_H)),
+        services,
     );
 
     let cap = FRACTION * WINDOW_H;
