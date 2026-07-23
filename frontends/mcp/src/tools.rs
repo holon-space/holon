@@ -2984,21 +2984,29 @@ struct WindowCandidate {
 /// with `.find()`, which returned whichever such window enumerated FIRST —
 /// often a phantom — then `capture_image` failed with `minimized=true`.
 ///
-/// Robust rule (both branches): keep only ONSCREEN candidates (not minimized,
-/// non-zero area) and pick the LARGEST by pixel area. Stable whether a phantom
-/// reports an empty title or duplicates "Holon". Fail loud listing every
-/// candidate when none qualifies — never silently grab a phantom.
+/// Robust rule (both branches): keep every CAPTURABLE candidate (non-zero
+/// area) and pick the LARGEST by pixel area. `minimized` is NOT a filter: the
+/// xcap fork enumerates windows on other Spaces / behind other windows and
+/// reports many of them as `minimized` on macOS, yet they capture fine (the
+/// whole point of the offscreen-window fork). Filtering them out made
+/// `screenshot` fail with "No window matched" whenever Holon was occluded or on
+/// another desktop. Stable whether a phantom reports an empty title or
+/// duplicates "Holon". Fail loud listing every candidate when none qualifies —
+/// never silently grab a zero-area phantom.
 ///
 /// - `explicit_title`: match any candidate whose title OR app-name contains the
-///   needle (case-insensitive), then largest-onscreen among them.
-/// - no title: our own process's largest onscreen, non-empty-titled window.
+///   needle (case-insensitive), then largest among them.
+/// - no title: our own process's largest non-empty-titled window.
 #[cfg(target_os = "macos")]
 fn select_window_index(
     windows: &[WindowCandidate],
     our_pid: u32,
     explicit_title: Option<&str>,
 ) -> Result<usize, String> {
-    let onscreen = |w: &WindowCandidate| !w.minimized && w.width > 0 && w.height > 0;
+    // Capturable = has on-screen extent. Occluded / other-Space windows that
+    // xcap flags `minimized` are still captured by the offscreen fork, so they
+    // must stay in the running.
+    let capturable = |w: &WindowCandidate| w.width > 0 && w.height > 0;
     let area = |w: &WindowCandidate| u64::from(w.width) * u64::from(w.height);
 
     let (predicate_desc, matches): (String, Vec<usize>) = match explicit_title {
@@ -3008,23 +3016,23 @@ fn select_window_index(
                 .iter()
                 .enumerate()
                 .filter(|(_, w)| {
-                    onscreen(w)
+                    capturable(w)
                         && (w.title.to_lowercase().contains(&needle)
                             || w.app_name.to_lowercase().contains(&needle))
                 })
                 .map(|(i, _)| i)
                 .collect();
-            (format!("onscreen, title/app contains {title:?}"), idxs)
+            (format!("capturable, title/app contains {title:?}"), idxs)
         }
         None => {
             let idxs = windows
                 .iter()
                 .enumerate()
-                .filter(|(_, w)| onscreen(w) && w.pid == our_pid && !w.title.is_empty())
+                .filter(|(_, w)| capturable(w) && w.pid == our_pid && !w.title.is_empty())
                 .map(|(i, _)| i)
                 .collect();
             (
-                format!("onscreen, own pid {our_pid}, non-empty title"),
+                format!("capturable, own pid {our_pid}, non-empty title"),
                 idxs,
             )
         }
@@ -3347,14 +3355,29 @@ mod window_select_tests {
         assert_eq!(select_window_index(&wins, ours, None), Ok(2));
     }
 
-    /// A minimized main window is not silently captured — fail loud instead of
-    /// returning the phantom or a window `capture_image` would reject.
+    /// An occluded / other-Space main window is reported `minimized` by the
+    /// xcap fork yet still captures fine — so it must be SELECTED (largest,
+    /// non-empty title), not filtered out. Filtering it made `screenshot` fail
+    /// with "No window matched" whenever Holon was not frontmost.
     #[test]
-    fn own_process_minimized_main_fails_loud_not_phantom() {
+    fn own_process_occluded_main_is_captured_over_phantom() {
         let ours = 7;
         let wins = vec![
-            win("", "holon-gpui", ours, 500, 500, false), // phantom onscreen
-            win("Holon", "holon-gpui", ours, 3440, 1440, true), // real but minimized
+            win("", "holon-gpui", ours, 500, 500, false), // untitled phantom
+            win("Holon", "holon-gpui", ours, 3440, 1440, true), // real, xcap-minimized
+        ];
+        // idx 0 is dropped (empty title); the occluded main window wins.
+        assert_eq!(select_window_index(&wins, ours, None), Ok(1));
+    }
+
+    /// Zero-area phantoms are still rejected: a window with no on-screen extent
+    /// is not capturable, so an all-phantom list fails loud.
+    #[test]
+    fn zero_area_windows_are_not_capturable() {
+        let ours = 7;
+        let wins = vec![
+            win("", "holon-gpui", ours, 0, 0, false),
+            win("Holon", "holon-gpui", ours, 0, 0, false),
         ];
         let err = select_window_index(&wins, ours, None).unwrap_err();
         assert!(err.contains("No window matched"), "got: {err}");

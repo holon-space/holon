@@ -492,6 +492,19 @@ impl UserDriver for SimUserDriver {
         self.update_and_settle(|cx| {
             self.window
                 .update(cx, |_, window, cx| {
+                    // Move the pointer to the target first, mirroring
+                    // `GpuiUserDriver::scroll_at`: gpui recomputes the scroll
+                    // hit-test from the window's tracked mouse position, so the
+                    // move keeps the wheel landing on the intended viewport.
+                    window.dispatch_event(
+                        gpui::MouseMoveEvent {
+                            position: point,
+                            pressed_button: None,
+                            modifiers: Default::default(),
+                        }
+                        .to_platform_input(),
+                        cx,
+                    );
                     window.dispatch_event(
                         gpui::ScrollWheelEvent {
                             position: point,
