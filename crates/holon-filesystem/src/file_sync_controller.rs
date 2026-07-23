@@ -3638,6 +3638,10 @@ impl FileSyncController {
         let mut current = page_id.clone();
         let mut is_self = true;
         let mut guard = 0usize;
+        // The nearest page-ancestor already folded into `chain` (self included):
+        // the top of the page-chain walked so far. Used to resolve a
+        // file-owning subtree root when the walk reaches a non-page ancestor.
+        let mut subtree_root_page: Option<EntityUri> = None;
         loop {
             if current == EntityUri::no_parent() || current.is_sentinel() {
                 break;
@@ -3659,12 +3663,41 @@ impl FileSyncController {
             };
             if block.is_page() {
                 chain.push(block.title());
+                subtree_root_page = Some(current.clone());
             } else if !is_self {
-                anyhow::bail!(
-                    "authoritative_name_chain({page_id}): non-page ancestor '{current}' while \
-                     walking to root — pages under non-pages are prohibited (interim ruling \
-                     2026-07-13)"
-                );
+                // Non-page ancestor. A page directly under a non-page is normally
+                // prohibited (interim ruling 2026-07-13) — EXCEPT when the page
+                // subtree already walked is rooted at a page that OWNS its own
+                // on-disk file whose doc-root was ingested under a synthetic
+                // (empty) document-root sentinel rather than a page-chain (e.g. a
+                // subdir journal date file `Journals/<date>.org`). That root page
+                // is file-resolvable via the alias registry, so a runtime page
+                // minted beneath it — e.g. `convert_block_to_page`'s new page —
+                // must nest under that file, not error out and vanish from disk
+                // (job 72446a9c). Resolve the subtree-root page's own path and
+                // prepend its ancestor segments; only bail when the root page
+                // owns no resolvable file either.
+                let root_page = subtree_root_page
+                    .as_ref()
+                    .expect("a non-self walk has folded in >=1 page");
+                match self.doc_id_to_path(root_page).await? {
+                    Some(path) => {
+                        let rel = path.strip_prefix(&self.root_dir).unwrap_or(&path);
+                        let mut segs = path_to_name_chain(rel);
+                        // The root page's own title is already in `chain`; keep
+                        // only its ancestor segments as the prefix.
+                        segs.pop();
+                        for seg in segs.into_iter().rev() {
+                            chain.push(seg);
+                        }
+                        break;
+                    }
+                    None => anyhow::bail!(
+                        "authoritative_name_chain({page_id}): non-page ancestor '{current}' while \
+                         walking to root and subtree-root page '{root_page}' owns no resolvable \
+                         file — pages under non-pages are prohibited (interim ruling 2026-07-13)"
+                    ),
+                }
             } else {
                 // Starting block is not a page — it owns no file.
                 return Ok(Vec::new());
