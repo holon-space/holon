@@ -10,27 +10,19 @@
 //! independently measured over the same vault. Unset ⇒ returns immediately, so
 //! CI stays green.
 //!
-//! Run against a real vault locally:
-//!   HOLON_PBT_LOCAL_VAULT=/path/to/vault cargo test \
-//!     -p holon-integration-tests --features pbt \
-//!     --test local_vault_fidelity -- --nocapture
-//!
 //! The extractor oracle is the checked-in profile; its `depth` histogram counts
 //! every parsed block exactly once, so its total is the extractor's block
 //! count.
 //!
-//! KNOWN RED (2026-07-23) — this oracle currently FAILS when pointed at the
-//! real vault, and that failure is the deliverable, not a defect in the test.
-//! Point-at-vault mode caught a silent ingest gap: the extractor parses 17,315
-//! blocks, but the SUT boot projects only ~1,526 (8.8%). Localization
-//! (throwaway diagnostic, since deleted): the shortfall is at INGEST/storage
-//! (`block_raw` ~= the `block` matview, so NOT a matview bug); ALL ingested
-//! rows are `depth=0` while the extractor sees 14,435/17,315 blocks at depth >=
-//! 2 — i.e. the whole nested hierarchy is dropped — and only 86 of 985 files
-//! yield a `Page` block, with `startup_error_count=0` (a SILENT drop, violating
-//! fail-loud). All 985 files ARE registered in the `file` table, so discovery
-//! works; block extraction/persistence for nested content is what fails at real
-//! scale. Handed back for root-cause; do NOT soften this assertion to hide it.
+//! IMPORTANT — the walk MUST mirror the app's ingest walk. This test (and the
+//! extractor) use `holon_filesystem::fs_port::walk_directory`, the SAME
+//! hidden-entry- and `.gitignore`-aware walk the production
+//! `FileSyncController` scans with. An earlier naive `walkdir` here seeded the
+//! SUT with the vault's `.claude/worktrees/` agent-copy files (900 of 985) —
+//! duplicate-`#+ID` copies the app never ingests — which produced a spurious
+//! "8.8% ingest gap" (the SUT correctly deduplicates by block id; the copies
+//! were quarantined at ERROR). Mirroring the real walk removes the artifact:
+//! both sides see only the ~85 canonical files, and the oracle passes.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -41,7 +33,6 @@ use std::time::Instant;
 use holon_api::QueryLanguage;
 use holon_api::vault_shape::VaultShapeProfile;
 use holon_integration_tests::TestEnvironmentBuilder;
-use walkdir::WalkDir;
 
 /// The profile the extractor produced for this vault (checked into the repo).
 /// Its `depth.total()` is the extractor's independent block count — the oracle.
@@ -73,6 +64,7 @@ fn local_vault_fidelity_oracle() {
         "HOLON_PBT_LOCAL_VAULT is not a directory: {}",
         vault.display()
     );
+    let vault = vault.canonicalize().expect("canonicalize vault");
 
     let profile: VaultShapeProfile =
         serde_json::from_str(EXTRACTOR_PROFILE_JSON).expect("checked-in profile parses");
@@ -88,17 +80,20 @@ fn local_vault_fidelity_oracle() {
     rt.block_on(async move {
         // Seed the SUT from a COPY of the vault: read each file's content and
         // hand it to the builder, which re-creates it in a fresh temp/in-memory
-        // FS. The original vault is never opened for writing.
+        // FS. The original vault is never opened for writing. The walk is the
+        // app's own hidden/`.gitignore`-aware walk, so `.claude/`, `.git/`, and
+        // gitignored copies are excluded — exactly what the app ingests.
         let mut builder = TestEnvironmentBuilder::new();
         let mut file_count = 0usize;
-        for entry in WalkDir::new(vault).sort_by_file_name() {
-            let entry = entry.expect("walk vault");
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("org") {
-                continue;
-            }
+        let mut org_files: Vec<_> = holon_filesystem::fs_port::walk_directory(&vault)
+            .files
+            .into_iter()
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("org"))
+            .collect();
+        org_files.sort();
+        for path in &org_files {
             let rel = path
-                .strip_prefix(vault)
+                .strip_prefix(&vault)
                 .expect("path under vault")
                 .to_string_lossy()
                 .to_string();
@@ -123,8 +118,8 @@ fn local_vault_fidelity_oracle() {
             .unwrap_or_else(|e| panic!("SUT boot on real vault failed: {e:#}"));
 
         // ─── Wait for ingest quiescence (bounded poll-until-stable) ──────
-        // The org-scan idle signal caps its own budget at ~2s, which is far too
-        // short for a 985-file cold vault, so it is NOT the mechanism here.
+        // The org-scan idle signal caps its own budget at ~2s, which is too
+        // short for a many-file cold vault, so it is NOT the mechanism here.
         // Instead poll the projected block count until it stops growing for
         // STABLE_POLLS_REQUIRED consecutive reads (or the generous timeout).
         let start = Instant::now();
@@ -206,8 +201,9 @@ fn local_vault_fidelity_oracle() {
         assert!(
             ratio >= MIN_FIDELITY_RATIO,
             "real-vault projection converged at {converged} blocks — only {:.1}% of the \
-             {extractor_blocks} blocks the extractor independently parsed. A wildly short \
-             post-quiescence projection is a real ingest gap caught by point-at-vault mode.",
+             {extractor_blocks} blocks the extractor independently parsed (walking the SAME \
+             hidden/gitignore-aware file set). A wildly short post-quiescence projection is a \
+             real ingest gap caught by point-at-vault mode.",
             ratio * 100.0
         );
 

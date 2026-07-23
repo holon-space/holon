@@ -148,7 +148,6 @@ workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
 # Testing infrastructure (enable pbt feature for test targets)
-walkdir.workspace = true
 proptest.workspace = true
 proptest-state-machine.workspace = true
 futures.workspace = true
