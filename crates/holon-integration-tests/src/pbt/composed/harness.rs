@@ -683,6 +683,14 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
                 _ => true,
             })
             .collect();
+        // Env-gated failure-tick DB dump (`HOLON_PBT_DUMP_DB=1`): on a hard
+        // divergence, dump the `block` matview vs `block_raw` base per-id
+        // row-counts so the Turso IVM over-count signature (a matview id with
+        // more rows than the PK-unique base) is captured BEFORE teardown drops
+        // the DB. Off by default — the run stays byte-identical.
+        if !hard.is_empty() && std::env::var_os("HOLON_PBT_DUMP_DB").is_some() {
+            dump_matview_vs_base(sut);
+        }
         assert!(
             hard.is_empty(),
             "reconciled composed sequence diverged from the oracle: {hard:?}"
@@ -803,6 +811,95 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
              exercised with teeth: {unengaged:?} (engaged: {:?})",
             engaged.iter().collect::<Vec<_>>(),
         );
+    }
+}
+
+/// Env-gated (`HOLON_PBT_DUMP_DB`) failure-tick diagnostic. On a hard invariant
+/// divergence, dump the live `block` matview snapshot vs the `block_raw` base
+/// snapshot and report every id whose matview row-count differs from its base
+/// row-count — the signature of the Turso IVM over-count (the matview carries a
+/// duplicate/extra row the PK-unique `block_raw` cannot). Turso keeps its IVM
+/// operator state in internal btrees (not SQL-exposed), so matview-vs-base row
+/// divergence is the observable evidence. In-tree debugging affordance; the
+/// call site is env-gated so default runs are byte-identical.
+fn dump_matview_vs_base<S: ComposedSlice>(sut: &ComposedSut<S>) {
+    let (matview, base) = sut.rt.block_on(async {
+        (
+            sut.caps.live_block_snapshot().await,
+            sut.caps.block_raw_snapshot().await,
+        )
+    });
+    let mut mv_counts: BTreeMap<EntityUri, usize> = BTreeMap::new();
+    for b in &matview {
+        *mv_counts.entry(b.id.clone()).or_default() += 1;
+    }
+    let mut base_counts: BTreeMap<EntityUri, usize> = BTreeMap::new();
+    for b in &base {
+        *base_counts.entry(b.id.clone()).or_default() += 1;
+    }
+    eprintln!(
+        "[HOLON_PBT_DUMP_DB] block matview rows={} block_raw rows={}",
+        matview.len(),
+        base.len()
+    );
+    let mut ids: BTreeSet<&EntityUri> = BTreeSet::new();
+    ids.extend(mv_counts.keys());
+    ids.extend(base_counts.keys());
+    let mut any = false;
+    for id in ids {
+        let mv = mv_counts.get(id).copied().unwrap_or(0);
+        let bc = base_counts.get(id).copied().unwrap_or(0);
+        if mv != bc {
+            any = true;
+            let base_parent = base
+                .iter()
+                .find(|b| &b.id == id)
+                .map(|b| b.parent_id.to_string())
+                .unwrap_or_else(|| "<absent-in-base>".into());
+            eprintln!(
+                "[HOLON_PBT_DUMP_DB] DIVERGENT id={id} matview_rows={mv} base_rows={bc} \
+                 base_parent_id={base_parent}"
+            );
+            for (i, b) in matview.iter().filter(|b| &b.id == id).enumerate() {
+                eprintln!(
+                    "[HOLON_PBT_DUMP_DB]   matview[{i}] parent_id={} content={:?}",
+                    b.parent_id, b.content
+                );
+            }
+        }
+    }
+    if !any {
+        eprintln!(
+            "[HOLON_PBT_DUMP_DB] no per-id matview/base row-count divergence in this \
+             snapshot pair (over-count may be field-level or org-store only)"
+        );
+    }
+    // Field-level (parent_id) divergence: a matview row whose parent_id differs
+    // from the PK-unique base row for the same id localizes a PROJECTION bug
+    // (matview mis-maintained a re-parent delta); agreement instead points the
+    // wrong-parent UPSTREAM (write authority / org-writeback), NOT the matview.
+    // Also list every id parented under `block:journals` — the phantom target.
+    let base_parent: BTreeMap<&EntityUri, &EntityUri> =
+        base.iter().map(|b| (&b.id, &b.parent_id)).collect();
+    for b in &matview {
+        if let Some(bp) = base_parent.get(&b.id) {
+            if *bp != &b.parent_id {
+                eprintln!(
+                    "[HOLON_PBT_DUMP_DB] PARENT-DIVERGE id={} matview_parent={} base_parent={} \
+                     (projection mis-maintained the re-parent)",
+                    b.id, b.parent_id, bp
+                );
+            }
+        }
+    }
+    for b in &base {
+        if b.parent_id.as_str() == "block:journals" {
+            eprintln!(
+                "[HOLON_PBT_DUMP_DB] JOURNALS-PARENTED (base) id={} content={:?} — write \
+                 authority itself has this under journals",
+                b.id, b.content
+            );
+        }
     }
 }
 
