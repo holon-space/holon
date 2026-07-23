@@ -1868,6 +1868,7 @@ impl ReferenceState {
         let mut restored = self.action.undo_stack.pop().expect("undo stack is empty");
         restored.next_id = restored.next_id.max(id_hwm);
         self.domain.block_state = restored;
+        self.rematerialize_file_ingested_docs();
         self.recompute_derived();
     }
 
@@ -1880,7 +1881,51 @@ impl ReferenceState {
         let mut restored = self.action.redo_stack.pop().expect("redo stack is empty");
         restored.next_id = restored.next_id.max(id_hwm);
         self.domain.block_state = restored;
+        self.rematerialize_file_ingested_docs();
         self.recompute_derived();
+    }
+
+    /// Prod's `engine.undo()` reverts only USER-origin ops
+    /// (`operation_engine.rs:1220` — "only User-origin operations push undo
+    /// entries"); an INGEST-origin file-ingested doc page (minted by the
+    /// `FileSyncController` watcher for a `CreateDocument`) is NOT on the undo
+    /// stack, so a doc created before an undo PERSISTS in prod. The oracle,
+    /// however, snapshots the WHOLE `block_state`, so restoring a pre-doc
+    /// snapshot would drop the doc page the SUT still holds — surfacing it as a
+    /// phantom (`inv-viewmodel-entity-ids-subset-of-data` /
+    /// `inv-blocks-match-ref` spurious). `files.documents` lives OUTSIDE the
+    /// snapshot (like `next_doc_id`, see `pop_undo_to_redo`), so it is the
+    /// authority for which docs exist; re-materialise every doc page the
+    /// restore dropped, mirroring prod. Only the file-ingested ROOT page is
+    /// re-added (title = file stem, `no_parent`, `Page`) — exactly
+    /// `insert_document`'s block; any USER-origin children remain undone.
+    fn rematerialize_file_ingested_docs(&mut self) {
+        let docs: Vec<(EntityUri, String)> = self
+            .files
+            .documents
+            .iter()
+            .map(|(uri, name)| (uri.clone(), name.clone()))
+            .collect();
+        for (doc_uri, file_name) in docs {
+            if self.domain.block_state.blocks.contains_key(&doc_uri) {
+                continue;
+            }
+            let doc_name = std::path::Path::new(&file_name)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&file_name)
+                .to_string();
+            let mut doc_block = Block::new_text(doc_uri.clone(), EntityUri::no_parent(), doc_name);
+            doc_block.set_page(true);
+            self.domain
+                .block_state
+                .blocks
+                .insert(doc_uri.clone(), doc_block);
+            self.domain
+                .block_state
+                .block_documents
+                .insert(doc_uri.clone(), doc_uri);
+        }
     }
 
     /// Recompute derived fields (profiles, render expressions) after undo/redo
