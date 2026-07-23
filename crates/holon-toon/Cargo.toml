@@ -1,0 +1,31 @@
+[package]
+name = "holon-toon"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Experiment: a TOON-based dense, round-trippable text projection of the Holon block forest, compared against Org syntax for agent read/patch workflows."
+
+[dependencies]
+thiserror = { workspace = true }
+
+# Optional: `ToonValue::from_json` (the MCP query-result adapter). Kept behind a
+# feature so the core codec has zero runtime deps.
+serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+serde_json = { workspace = true }
+
+# Only pulled in for the token-measurement example; the library and its
+# round-trip PBT never touch the tokenizer.
+[dependencies.tiktoken-rs]
+version = "0.6"
+optional = true
+
+[features]
+serde-json = ["dep:serde_json"]
+measure = ["dep:tiktoken-rs", "serde-json"]
+
+[[example]]
+name = "measure"
+required-features = ["measure"]

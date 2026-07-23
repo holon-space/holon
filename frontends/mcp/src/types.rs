@@ -56,6 +56,12 @@ pub struct ExecuteQueryParams {
     /// info (profile name, render expression, available operations).
     #[serde(default)]
     pub include_profile: Option<bool>,
+    /// Output encoding: `"toon"` (default) or `"json"`. TOON is a dense tabular
+    /// text (`name[N]{cols}: rows…`) that drops the repeated per-row key names
+    /// — biggest savings on wide, uniform result sets. Pass `"json"` if you
+    /// need plain JSON rows (e.g. rows dominated by nested JSON blobs).
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -79,6 +85,10 @@ pub struct ExecuteSourceBlockParams {
     /// info.
     #[serde(default)]
     pub include_profile: Option<bool>,
+    /// Output encoding: `"toon"` (default, dense tabular) or `"json"` (mirrors
+    /// `execute_query`).
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -189,6 +199,10 @@ pub struct ExecuteRawSqlParams {
     pub sql: String,
     #[serde(default)]
     pub params: HashMap<String, serde_json::Value>,
+    /// Output encoding: `"toon"` (default, dense tabular) or `"json"` (mirrors
+    /// `execute_query`).
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
 /// Filter for the `query_history` tool (C2b op/effect history, ADR 0024 P8).

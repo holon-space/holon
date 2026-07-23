@@ -28,6 +28,7 @@ holon-app.workspace = true
 holon-orgmode = { workspace = true, features = ["di"] }
 holon-filesystem = { workspace = true }
 holon-loro = { workspace = true }
+holon-toon = { path = "../../crates/holon-toon", features = ["serde-json"] }
 fluxdi.workspace = true
 uuid = { workspace = true }
 tracing = { workspace = true }
