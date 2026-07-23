@@ -87,3 +87,18 @@
 # none) -> inv-history-records-all-creates fires BEFORE CreateBlockUnderFocus even runs, masking
 # the parent-resolution bug. One doc keeps the born-equal create reachable. (2nd-doc issue parked.)
 {"name": "ref-doc-0-remap-born-equal-create-under-focus", "description": "BugFunnel 2026-07-22 ref-doc-0 remap gap: born-equal (id:Some) CreateBlockUnderFocus under a CreateDocument-minted synthetic doc dispatches block.create with the UNREMAPPED oracle focus-root parent -> SUT parent-not-found. Green once the focus-root parent is resolved through the id resolver.", "transitions": [{"CreateDocument": {"file_name": "doc_0.org"}}, {"NavigateFocus": {"region": "main", "block_id": "block:ref-doc-0"}}, {"CreateBlockUnderFocus": {"content": "a", "id": "block:gen-13"}}]}
+#
+# --- ref-doc-0 remap gap FACET 2: undo over-reverts a file-ingested doc (BugFunnel 2026-07-22) ---
+# The ORIGINAL BugFunnel phantom (inv-viewmodel-entity-ids-subset-of-data), an ORACLE-side undo bug.
+# CreateBlockUnderFocus(g0) is a USER-origin block.create -> pushes an oracle undo snapshot S0 taken
+# BEFORE g0 (so S0 has NO docs) and is undoable in prod. CreateDocument writes doc_0.org whose
+# watcher-ingest mints the doc page: in the ORACLE `insert_document` adds it to the SNAPSHOTTED
+# block_state.blocks (+ files.documents, which is NOT snapshotted); in the SUT it is an INGEST-origin
+# create that (operation_engine.rs:1220 "only User-origin ops push undo entries") is NOT on the undo
+# stack. UndoLastMutation pops S0 -> the ORACLE block_state loses the doc block, but PROD's
+# engine.undo() only reverts g0 and KEEPS the file-ingested doc. So the SUT still renders the doc
+# (sidebar page list) while the resolved oracle no longer knows it -> phantom entity id. Fix is
+# ORACLE-side & prod-faithful: file-ingested doc pages (tracked in files.documents) must survive
+# undo like next_doc_id already does (reference_state.rs:1863) -> re-materialise dropped doc roots
+# after pop_undo_to_redo. GREEN once the oracle undo stops over-reverting file docs.
+{"name": "ref-doc-0-undo-over-reverts-file-ingested-doc", "description": "BugFunnel 2026-07-22 ref-doc-0 FACET 2 (the original subset-of-data phantom): a USER-origin CreateBlockUnderFocus snapshots pre-doc state; a CreateDocument file-ingest (INGEST-origin, not undoable in prod) adds the doc; UndoLastMutation restores the pre-doc oracle snapshot, dropping the doc oracle-side while prod KEEPS it -> the SUT-rendered doc is a phantom against the resolved oracle. Oracle-side undo over-reverts file-ingested docs.", "transitions": [{"CreateBlockUnderFocus": {"content": "g", "id": "block:gen-0"}}, {"CreateDocument": {"file_name": "doc_0.org"}}, {"UndoLastMutation": null}]}
