@@ -643,6 +643,17 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             "per-tick reconcile: one synthetic per minted real id (syn={synthetic:?}, \
              real={real_new:?})"
         );
+        // Pairing safety for the R2 StaleExternalRewrite CHURN (multiple mints in
+        // one tick, unlike the usual one-mint transitions this zip was written for):
+        // the churn re-mints only NON-UNIQUE / empty content (unique content remaps
+        // via `tiered_match`, keeping its id — never appears here), so every element
+        // of `synthetic`/`real_new` this tick shares the same (parent, content). The
+        // zip is therefore order-insensitive: (1) `inv-blocks-match-ref` normalizes on
+        // {id, parent, content, tags, …} with NO sort_key / position field, so
+        // identical-(parent, content) blocks are interchangeable, and (2) no
+        // cross-content mispair is possible because all churn mints carry the same
+        // content. The oracle predicts the identical churn in `StaleExternalRewrite::
+        // apply_to_ref` (shared `tiered_match`), so the two lengths match here.
         for (syn, real) in synthetic.into_iter().zip(real_new) {
             map.insert(syn, real);
         }

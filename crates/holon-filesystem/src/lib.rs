@@ -47,6 +47,7 @@ pub use file_sync_controller::BlockDelta;
 pub use file_sync_controller::FileSyncController;
 #[cfg(not(target_arch = "wasm32"))]
 pub use file_sync_controller::RENDERER_VERSION;
+pub use file_sync_controller::tiered_match;
 #[cfg(not(target_arch = "wasm32"))]
 pub use fs_port::FileMeta;
 #[cfg(not(target_arch = "wasm32"))]
@@ -66,7 +67,11 @@ pub use sync_conflict::is_sync_conflict_artifact;
 pub use sync_ports::AliasRegistrar;
 pub use sync_ports::BlockReader;
 pub use sync_ports::DocumentManager;
+pub use sync_ports::ExistingChild;
 pub use sync_ports::ImageDataProvider;
+pub use sync_ports::IncomingIdentity;
+pub use sync_ports::MatchBasis;
+pub use sync_ports::MatchVerdict;
 pub use sync_ports::MountRegistry;
 pub use sync_ports::ShareWritebackDisclosure;
 pub use sync_ports::ThreeWayTextMerge;

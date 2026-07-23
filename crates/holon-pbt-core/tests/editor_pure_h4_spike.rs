@@ -241,6 +241,13 @@ impl RefBlockTreeMut for EditorPureRef {
         );
         new_id
     }
+
+    fn remint_block(&mut self, _old_id: &EntityUri) -> EntityUri {
+        unimplemented!(
+            "remint_block: only reachable via StaleExternalRewrite, which requires the composed \
+             environment"
+        )
+    }
     fn join_block(&mut self, id: &EntityUri) -> usize {
         let into = self.previous_sibling(id).unwrap_or_else(|| {
             self.blocks

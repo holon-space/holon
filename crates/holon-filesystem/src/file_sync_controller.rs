@@ -4579,7 +4579,10 @@ impl BlockMatchStrategy for TieredMatcher {
 /// Pure v1 matcher. Processes `incoming` in document order (parents-first) so a
 /// remapped parent regroups its subtree for the T1 positional tie-breaker.
 /// Greedy 1:1 claiming keeps each store id claimed at most once.
-fn tiered_match(existing: &[ExistingChild], incoming: &[IncomingIdentity]) -> Vec<MatchVerdict> {
+pub fn tiered_match(
+    existing: &[ExistingChild],
+    incoming: &[IncomingIdentity],
+) -> Vec<MatchVerdict> {
     // Positional index by parent (T1), sorted by DFS sequence.
     let mut by_parent: HashMap<EntityUri, Vec<&ExistingChild>> = HashMap::new();
     for e in existing {

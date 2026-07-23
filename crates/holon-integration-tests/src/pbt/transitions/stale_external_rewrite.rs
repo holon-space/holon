@@ -17,9 +17,18 @@
 //! goes RED -- which is precisely what this transition should have caught
 //! before PR #81 fixed it.
 
+use std::collections::HashMap;
+use std::collections::HashSet;
+
 use holon_api::EntityUri;
+use holon_filesystem::ExistingChild;
+use holon_filesystem::IncomingIdentity;
+use holon_filesystem::MatchVerdict;
+use holon_filesystem::tiered_match;
 use holon_pbt_core::TransitionFactory;
 use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::RefBlockTree;
+use holon_pbt_core::capabilities::RefBlockTreeMut;
 use holon_pbt_core::capabilities::RefDocuments;
 use holon_pbt_core::capabilities::RefLayoutInteract;
 use holon_pbt_core::capabilities::RefLayoutMutate;
@@ -44,8 +53,14 @@ pub struct StaleExternalRewrite {
     pub doc_uri: EntityUri,
 }
 
-impl<R: RefLifecycle + RefDocuments + RefLayoutInteract + RefLayoutMutate> TransitionFactory<R>
-    for StaleExternalRewrite
+impl<
+    R: RefLifecycle
+        + RefDocuments
+        + RefLayoutInteract
+        + RefLayoutMutate
+        + RefBlockTree
+        + RefBlockTreeMut,
+> TransitionFactory<R> for StaleExternalRewrite
 {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
         Self::declared_caps()
@@ -73,8 +88,14 @@ impl<R: RefLifecycle + RefDocuments + RefLayoutInteract + RefLayoutMutate> Trans
     }
 }
 
-impl<R: RefLifecycle + RefDocuments + RefLayoutInteract + RefLayoutMutate> TransitionRef<R>
-    for StaleExternalRewrite
+impl<
+    R: RefLifecycle
+        + RefDocuments
+        + RefLayoutInteract
+        + RefLayoutMutate
+        + RefBlockTree
+        + RefBlockTreeMut,
+> TransitionRef<R> for StaleExternalRewrite
 {
     type Reason = Reason;
 
@@ -96,17 +117,103 @@ impl<R: RefLifecycle + RefDocuments + RefLayoutInteract + RefLayoutMutate> Trans
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, _state: &mut R) {
-        // NO-OP: replaying the SAME content (only id-less) must reconcile
-        // against current children -- ids, content, parents, order all stay.
-        // Any SUT-side divergence (duplicate rows, id churn) is therefore a
-        // real bug surfaced by `inv-live-children-match-ref`.
+    fn apply_to_ref(&self, state: &mut R) {
+        // Predict the SUT's id-less reconcile by running the SAME `tiered_match`
+        // the controller uses, on the reference's view of the doc. Under the R2
+        // ruling: content UNIQUE in the document remaps (a true no-op); non-unique
+        // / empty content cannot be uniquely matched, so the SUT re-mints it
+        // (churn). The oracle must predict the SAME churn or the per-tick
+        // synthetic->real reconcile panics (`harness.rs`: `syn=[]` vs many reals).
+        // We re-mint every reference block `tiered_match` does NOT remap; Inc 3's
+        // write-back then re-stamps the fresh ids to disk, so a REPEAT replay of
+        // the same doc is quiescent (ids are back, content+positions stable ->
+        // all remap). Tautology disclosure: sharing `tiered_match` means the
+        // matching DECISION is not independently oracled here — acceptable because
+        // (1) its semantics are pinned by 10 independent red-first unit tests, and
+        // (2) the invariants of record (fixed-point, blocks-match-ref family)
+        // still check OUTCOMES independently; this shared call only fixes the
+        // id-bookkeeping prediction (and honors the one-keystone shared-logic rule).
+        let doc = self.doc_uri.clone();
+
+        // Doc blocks in document order (parents before children), each with its
+        // real id, normalized parent (top-level -> doc uri), and content.
+        fn walk<R: RefBlockTree>(
+            state: &R,
+            parent: &EntityUri,
+            out: &mut Vec<(EntityUri, EntityUri, String)>,
+        ) {
+            for child in state.sorted_children(parent) {
+                let content = state.block_content(&child).unwrap_or_default().to_string();
+                out.push((child.clone(), parent.clone(), content));
+                walk(state, &child, out);
+            }
+        }
+        let mut ordered: Vec<(EntityUri, EntityUri, String)> = Vec::new();
+        walk(state, &doc, &mut ordered);
+        if ordered.is_empty() {
+            return;
+        }
+
+        // existing: real ids; seq = document-order index within the parent.
+        let mut per_parent: HashMap<EntityUri, i64> = HashMap::new();
+        let existing: Vec<ExistingChild> = ordered
+            .iter()
+            .map(|(id, parent, content)| {
+                let counter = per_parent.entry(parent.clone()).or_insert(0);
+                let seq = *counter;
+                *counter += 1;
+                ExistingChild {
+                    id: id.clone(),
+                    parent: parent.clone(),
+                    seq,
+                    content: content.clone(),
+                }
+            })
+            .collect();
+
+        // incoming: placeholder ids in the same document order; a child's parent
+        // is its parent's PLACEHOLDER (or the doc uri for top-level), mirroring how
+        // the parser re-mints an id-less tree before the controller reconciles it.
+        let placeholder_of: HashMap<EntityUri, EntityUri> = ordered
+            .iter()
+            .enumerate()
+            .map(|(i, (id, _, _))| (id.clone(), EntityUri::block(&format!(":stale-in-{i}"))))
+            .collect();
+        let incoming: Vec<IncomingIdentity> = ordered
+            .iter()
+            .map(|(id, parent, content)| IncomingIdentity {
+                id: placeholder_of[id].clone(),
+                parent: if *parent == doc {
+                    doc.clone()
+                } else {
+                    placeholder_of[parent].clone()
+                },
+                content: content.clone(),
+                minted: true,
+            })
+            .collect();
+
+        let verdicts = tiered_match(&existing, &incoming);
+        let remapped: HashSet<EntityUri> = verdicts
+            .iter()
+            .filter_map(|v| match v {
+                MatchVerdict::Remap { onto, .. } => Some(onto.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // Churn: every existing block `tiered_match` did NOT remap onto re-mints.
+        for (id, _, _) in &ordered {
+            if !remapped.contains(id) {
+                state.remint_block(id);
+            }
+        }
     }
 }
 
 crate::cap_transition! {
     StaleExternalRewrite: SutSeamMutate,
-    where R: [ RefLifecycle + RefDocuments + RefLayoutInteract + RefLayoutMutate ],
+    where R: [ RefLifecycle + RefDocuments + RefLayoutInteract + RefLayoutMutate + RefBlockTree + RefBlockTreeMut ],
     |me, _state, sut| {
         sut.stale_external_rewrite(&me.doc_uri).await;
     }
