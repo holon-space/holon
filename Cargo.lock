@@ -5367,6 +5367,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "validated",
+ "walkdir",
  "workspace-hack 0.1.0",
  "xcap",
 ]
@@ -5725,12 +5726,16 @@ dependencies = [
  "chrono",
  "clap",
  "holon",
+ "holon-api",
+ "holon-org-format",
  "regex",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing-subscriber",
  "turso",
  "turso_core",
+ "walkdir",
 ]
 
 [[package]]

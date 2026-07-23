@@ -8,6 +8,10 @@ publish = false
 name = "turso-sql-replay"
 path = "src/turso_sql_replay.rs"
 
+[[bin]]
+name = "vault-shape-profile"
+path = "src/vault_shape_profile.rs"
+
 [dependencies]
 clap = { workspace = true }
 regex = { workspace = true }
@@ -17,5 +21,9 @@ turso = { workspace = true }
 turso_core = { workspace = true }
 chrono = { workspace = true }
 tempfile = { workspace = true }
+walkdir = { workspace = true }
+serde_json = { workspace = true }
 holon = { path = "../crates/holon" }
+holon-api = { path = "../crates/holon-api" }
+holon-org-format = { path = "../crates/holon-org-format" }
 tracing-subscriber = { workspace = true }

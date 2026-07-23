@@ -60,6 +60,7 @@ pub mod streaming;
 pub mod template;
 pub mod types;
 pub mod ui_watcher;
+pub mod vault_shape;
 pub mod widget_meta;
 pub mod widget_spec;
 pub mod write_seq;
