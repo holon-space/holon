@@ -57,9 +57,30 @@ impl OrgRenderer {
     ///
     /// # Returns
     /// Org-mode formatted string
-    // ALLOW(unused_param): file_path is documented public API; kept for OrgBlock
-    // metadata wiring
-    pub fn render_entitys(blocks: &[Block], _file_path: &Path, file_id: &EntityUri) -> String {
+    pub fn render_entitys(blocks: &[Block], _: &Path, file_id: &EntityUri) -> String {
+        Self::render_walk(blocks, file_id, &|b: &Block| b.to_org())
+    }
+
+    /// Dense projection variant of [`Self::render_entitys`]: identical tree
+    /// walk and projection invariants, but each headline's `:ID:` drawer
+    /// scaffolding is compressed to a trailing `{#alias}` token via
+    /// `alias_table` (projection-only — see [`crate::dense`]). Source/Image
+    /// blocks keep their canonical form.
+    pub fn render_entitys_dense(
+        blocks: &[Block],
+        file_id: &EntityUri,
+        alias_table: &crate::dense::AliasTable,
+    ) -> String {
+        Self::render_walk(blocks, file_id, &|b: &Block| {
+            crate::dense::to_org_dense(b, alias_table)
+        })
+    }
+
+    fn render_walk<F: Fn(&Block) -> String>(
+        blocks: &[Block],
+        file_id: &EntityUri,
+        render_block: &F,
+    ) -> String {
         let mut result = String::new();
 
         // Sibling order is the caller's responsibility — `blocks` arrives in
@@ -124,6 +145,7 @@ impl OrgRenderer {
                     &mut result,
                     0,
                     &mut visited,
+                    render_block,
                 );
             }
         }
@@ -160,12 +182,13 @@ impl OrgRenderer {
     }
 
     /// Render a block and its children recursively.
-    fn render_entity_tree<'b>(
+    fn render_entity_tree<'b, F: Fn(&Block) -> String>(
         block: &'b Block,
         children_by_parent: &HashMap<&'b str, Vec<&'b Block>>,
         result: &mut String,
         depth: usize,
         visited: &mut std::collections::HashSet<&'b str>,
+        render_block: &F,
     ) {
         // Record reachability for the WP-F cycle/disconnected-component assertion
         // in `render_entitys` — free, we are already walking every reachable node.
@@ -176,8 +199,10 @@ impl OrgRenderer {
         let mut prepared_block = block.clone();
         Self::prepare_block_for_org(&mut prepared_block, depth);
 
-        // Render using Block::to_org() which guarantees trailing newline
-        result.push_str(&prepared_block.to_org());
+        // Render via the caller-supplied per-block renderer (canonical
+        // `Block::to_org` or the dense token form). Both guarantee a trailing
+        // newline.
+        result.push_str(&render_block(&prepared_block));
 
         if let Some(kids) = children_by_parent.get(block.id.as_str()) {
             for child_block in kids {
@@ -187,6 +212,7 @@ impl OrgRenderer {
                     result,
                     depth + 1,
                     visited,
+                    render_block,
                 );
             }
         }
