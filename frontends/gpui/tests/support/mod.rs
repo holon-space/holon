@@ -64,6 +64,36 @@ pub use holon_layout_testing::{
     assert_no_sibling_overlap, assert_nonempty,
 };
 
+/// Row count each canned `live_query` watcher yields. Chosen so the stacked
+/// content is several viewports tall — comfortably taller than any
+/// `max_height_fraction` cap a seed would set, so the bounded accordion footer
+/// is proven to CLAMP (not merely fit) the greedy live-query shell.
+pub const CANNED_LIVE_QUERY_ROWS: usize = 40;
+
+/// A production-faithful `text` row (see `builders/text.rs`): `data.id` plus
+/// `props.field == "content"` makes its bounds appear in `BoundsRegistry`
+/// keyed by `entity_id` (`{prefix}-{ix}`), so a windowed test can locate the
+/// rows a canned `watch_query_live` produced.
+fn canned_live_query_row(prefix: &str, ix: usize) -> ReactiveViewModel {
+    let id = format!("{prefix}-{ix}");
+    let label = format!("{prefix} reference {ix}");
+    let mut data = std::collections::HashMap::new();
+    data.insert("id".to_string(), holon_api::Value::String(id));
+    data.insert(
+        "content".to_string(),
+        holon_api::Value::String(label.clone()),
+    );
+    let mut props = std::collections::HashMap::new();
+    props.insert("content".to_string(), holon_api::Value::String(label));
+    props.insert(
+        "field".to_string(),
+        holon_api::Value::String("content".to_string()),
+    );
+    let mut vm = ReactiveViewModel::from_widget("text", props);
+    vm.data = futures_signals::signal::Mutable::new(std::sync::Arc::new(data)).read_only();
+    vm
+}
+
 // ── Stub BuilderServices ───────────────────────────────────────────────
 
 /// Every method panics. Fast-UI fixtures must stay in the pure-layout subset
@@ -243,11 +273,18 @@ impl BuilderServices for TestServices {
     }
     fn watch_query(
         &self,
-        query: &str,
-        lang: QueryLanguage,
-        ctx: Option<QueryContext>,
+        _query: &str,
+        _lang: QueryLanguage,
+        _ctx: Option<QueryContext>,
     ) -> Result<holon_api::EnrichedChangeStream> {
-        self.inner.watch_query(query, lang, ctx)
+        // Canned empty stream. `shared_live_query_build` (interpret) only
+        // checks Ok-vs-Err then drops the stream, so an immediately-closed
+        // channel is enough to let a seeded `live_query(...)` build a real
+        // node (query / render_expr props + slot) instead of an error node —
+        // the windowed render then reaches `watch_query_live`. The inner
+        // `StubBuilderServices::watch_query` bails, which is why we override.
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        Ok(tokio_stream::wrappers::ReceiverStream::new(rx))
     }
     fn widget_state(&self, id: &str) -> WidgetState {
         let states = self.drawer_states.lock().unwrap();
@@ -318,6 +355,57 @@ impl BuilderServices for TestServices {
         _: Arc<dyn BuilderServices>,
     ) -> holon_frontend::LiveBlock {
         self.registry.watch_live(&block_id.to_string())
+    }
+
+    /// Feed a seeded `live_query(...)` with canned rows so it renders a REAL
+    /// greedy `ReactiveShell` (plan R4: `flex_grow:1` + height `relative(1.0)`)
+    /// instead of panicking through the default trait impl. The row set is
+    /// deliberately taller than any sane accordion cap, so a windowed smoke can
+    /// prove the bounded footer CLAMPS the greedy shell rather than the shell
+    /// happening to be short. Rows are a plain `column` of data-bound `text`
+    /// VMs (NO `ReactiveView` collection), so `start_reactive_views` spawns no
+    /// driver — nothing runs on a tokio worker for gpui's `TestScheduler` to
+    /// flag. Backlinks vs outline are told apart by the query text, so this one
+    /// impl feeds both of the seeded main panel's `live_query`s.
+    fn watch_query_live(
+        &self,
+        query: String,
+        _lang: QueryLanguage,
+        _render_expr: RenderExpr,
+        _query_context: Option<QueryContext>,
+        _services: Arc<dyn BuilderServices>,
+    ) -> (EntityUri, holon_frontend::LiveBlock) {
+        let (prefix, key) = if query.contains("backlinks") {
+            ("backlink", "query:canned-backlinks")
+        } else {
+            ("outline", "query:canned-outline")
+        };
+        // A static `list` COLLECTION — the shape production's streaming
+        // `watch_query_live` hands back (query rows woven through the
+        // item_template). Rendering it through the real gpui list path gives the
+        // greedy `live_query` `ReactiveShell` a content-height inner, so it
+        // reports real height (and the bounded accordion body caps it). A plain
+        // `column` would collapse the `relative(1.0)` shell to 0.
+        let rows: Vec<ReactiveViewModel> = (0..CANNED_LIVE_QUERY_ROWS)
+            .map(|i| canned_live_query_row(prefix, i))
+            .collect();
+        let view = std::sync::Arc::new(
+            holon_frontend::reactive_view::ReactiveView::new_static_with_layout(
+                rows,
+                holon_frontend::reactive_view_model::CollectionVariant::list(0.0),
+            ),
+        );
+        let tree = ReactiveViewModel {
+            collection: Some(view),
+            ..ReactiveViewModel::from_widget("list", std::collections::HashMap::new())
+        };
+        let live_block = holon_frontend::LiveBlock {
+            tree,
+            structural_changes: Box::pin(futures::stream::pending()),
+            watch_guard: None,
+        };
+        // ALLOW(entity_uri_from_raw): synthetic canned-watcher key, no upstream URI
+        (EntityUri::from_raw(key), live_block)
     }
 
     fn ui_state(
@@ -694,6 +782,58 @@ pub fn render_reactive_fixture_sized(
     // animation so layout invariants see the settled end state, not the first
     // animation frame. 500ms is well over the current `SLIDE_DURATION`
     // (150ms) and cheap in a fake-time executor.
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(500));
+    cx.run_until_parked();
+
+    holon_layout_testing::snapshot::snapshot_from_provider(&bounds)
+}
+
+/// Like `render_reactive_fixture_sized`, but drives the tree through a
+/// QUIESCENT-runtime `TestServices` (current-thread handle: driver / signal
+/// spawns queue but never execute). Required whenever the tree interprets or
+/// renders `text(col(...))` or a `live_query(...)` shell — both spawn tokio
+/// subscriptions that, on the default multi-thread stub runtime, trip gpui's
+/// `TestScheduler` off-thread detector. Also the entry point that reaches this
+/// module's canned `watch_query` / `watch_query_live`.
+pub fn render_reactive_fixture_quiescent_sized(
+    cx: &mut TestAppContext,
+    vm: Arc<ReactiveViewModel>,
+    window_size: Size<Pixels>,
+) -> BoundsSnapshot {
+    cx.update(|cx| {
+        gpui_component::init(cx);
+    });
+
+    let bounds = BoundsRegistry::new();
+    let bounds_for_view = bounds.clone();
+    let services: Arc<dyn BuilderServices> =
+        TestServices::with_registry_quiescent(Arc::new(BlockTreeRegistry::new()));
+
+    let _window: WindowHandle<ReactiveFixtureView> = cx.update(|cx| {
+        cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds {
+                    origin: Point::default(),
+                    size: window_size,
+                })),
+                ..Default::default()
+            },
+            |_window, cx| {
+                cx.new(|_cx| {
+                    ReactiveFixtureView::with_services_and_bounds(
+                        vm,
+                        services,
+                        window_size,
+                        bounds_for_view,
+                    )
+                })
+            },
+        )
+        .expect("open_window failed")
+    });
+
+    cx.run_until_parked();
     cx.executor()
         .advance_clock(std::time::Duration::from_millis(500));
     cx.run_until_parked();

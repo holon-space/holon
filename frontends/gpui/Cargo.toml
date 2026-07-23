@@ -156,6 +156,10 @@ tracing-oslog = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
+# Construct an empty `EnrichedChangeStream` (a `ReceiverStream`) in
+# `tests/support/mod.rs`'s canned `watch_query`, so the seeded main panel's
+# `live_query(...)` builds a real node during interpret instead of an error.
+tokio-stream.workspace = true
 # Parses the embedded DejaVu Sans font in `icon_font_tests` to assert glyph
 # coverage host-side (already in the tree via cosmic-text/fontdb).
 ttf-parser = "0.25"
