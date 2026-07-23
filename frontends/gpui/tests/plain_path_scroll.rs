@@ -418,7 +418,7 @@ fn shell_wrapped_sidebar_scrolls(cx: &mut TestAppContext) {
     );
 }
 
-/// KNOWN BUG (red-first scaffold for the follow-up): route an ACCORDION-bearing
+/// Production-faithful accordion rung: route an ACCORDION-bearing
 /// column through the real per-block shell — the PRODUCTION wrapping. The
 /// accordion split lives in `columns::render`, gated on the flow child being a
 /// `column`; production's flow child is a
@@ -429,7 +429,6 @@ fn shell_wrapped_sidebar_scrolls(cx: &mut TestAppContext) {
 /// un-ignore + fix (relocate the split to fire wherever a column-with-accordion
 /// is rendered, i.e. the block-shell arm) in the follow-up.
 #[gpui::test]
-#[ignore = "KNOWN: accordion split does not fire through the per-block live_block             shell (renders placement-error, ~38px, not a bounded footer). Follow-up."]
 fn accordion_through_shell_renders_bounded_not_error(cx: &mut TestAppContext) {
     cx.update(|cx| gpui_component::init(cx));
     let registry = Arc::new(BlockTreeRegistry::new());
@@ -517,7 +516,7 @@ fn accordion_through_shell_renders_bounded_not_error(cx: &mut TestAppContext) {
     );
     // DESIRED: the accordion renders as a bounded footer (header + backlinks,
     // well over the ~38px placement-error div). Currently RED (the split does
-    // not fire through the shell) — hence #[ignore] above.
+    // fires the split (relocated to the block-shell arm), so this is GREEN.
     assert!(
         acc_h > 100.0,
         "accordion routed through the per-block shell should be a BOUNDED footer          (>100px), but was {acc_h}px — the placement-error div. The accordion          split in columns::render does not fire because the flow child is a          live_block, not a column."
