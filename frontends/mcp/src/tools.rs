@@ -225,6 +225,60 @@ async fn set_field(
     Ok(())
 }
 
+/// Move a block: optionally reparent (`parent_id`) and/or reposition after a
+/// sibling (`position_after_block_id`; `None` = first child). Used by the
+/// dense_patch applier.
+async fn move_block_after(
+    service: &HolonService,
+    id: &str,
+    parent_id: Option<&str>,
+    after_id: Option<&str>,
+) -> Result<(), rmcp::ErrorData> {
+    let mut storage: StorageEntity = HashMap::new();
+    storage.insert("id".into(), Value::String(id.to_string()));
+    if let Some(p) = parent_id {
+        storage.insert("parent_id".into(), Value::String(p.to_string()));
+    }
+    if let Some(a) = after_id {
+        storage.insert(
+            "position_after_block_id".into(),
+            Value::String(a.to_string()),
+        );
+    }
+    service
+        .execute_operation(&EntityName::new("block"), "move_block", storage)
+        .await
+        .map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("move_block on {id} failed: {e}"), None)
+        })?;
+    Ok(())
+}
+
+/// One-line JSON description of a planned patch op (for dense_patch dry_run).
+fn describe_patch_op(op: &crate::dense_patch::PatchOp) -> serde_json::Value {
+    use crate::dense_patch::PatchOp;
+    match op {
+        PatchOp::Create { title, .. } => serde_json::json!({"op": "create", "title": title}),
+        PatchOp::UpdateTitle { block_id, title } => {
+            serde_json::json!({"op": "update_title", "block": block_id.as_str(), "title": title})
+        }
+        PatchOp::SetState {
+            block_id,
+            task_state,
+        } => serde_json::json!({
+            "op": "set_state",
+            "block": block_id.as_str(),
+            "state": task_state.as_ref().map(|s| s.keyword.clone()),
+        }),
+        PatchOp::Move { block_id, .. } => {
+            serde_json::json!({"op": "move", "block": block_id.as_str()})
+        }
+        PatchOp::Delete { block_id } => {
+            serde_json::json!({"op": "delete", "block": block_id.as_str()})
+        }
+    }
+}
+
 /// Read the canonical `assigned-to` value for a block straight from
 /// `block_raw`.
 async fn read_assigned_to(
@@ -2434,6 +2488,231 @@ impl HolonMcpServer {
                     Some(serde_json::json!({"error": e.to_string()})),
                 )
             })?,
+        )]))
+    }
+
+    #[tool(
+        description = "Apply an edited dense projection (from dense_query) back to the store as one \
+                       batch. Pass the `projection_handle` and the edited `dense_org` text. \
+                       Matching is by `{#alias}` token: a row keeping its token updates that block \
+                       (retitle, change TODO/DONE state, move/nest); a row with NO token is CREATED \
+                       as a new block at its tree position; the `{#alias^}` gap marker is ignored. \
+                       Blocks you omit are NOT deleted — list their aliases in `delete` to remove \
+                       them (with their subtrees). Optimistic concurrency: if any block you touch \
+                       changed since dense_query, the whole patch is REJECTED with a conflict list \
+                       (re-run dense_query and retry). Set `dry_run: true` to preview the planned \
+                       operations without applying. A stale/unknown handle is a loud error."
+    )]
+    async fn dense_patch(
+        &self,
+        Parameters(params): Parameters<DensePatchParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        use holon_org_format::Alias;
+        use holon_org_format::parse_dense;
+
+        use crate::dense_patch::PatchOp;
+        use crate::dense_patch::Ref as PRef;
+        use crate::dense_patch::plan_patch;
+
+        let projection = self
+            .dense_projections
+            .get(&params.handle)
+            .map_err(|e| rmcp::ErrorData::invalid_params(format!("{e}"), None))?;
+
+        let parsed = parse_dense(&params.text).map_err(|e| {
+            rmcp::ErrorData::invalid_params(format!("edited dense text did not parse: {e}"), None)
+        })?;
+
+        let mut delete_aliases = Vec::with_capacity(params.delete.len());
+        for a in &params.delete {
+            delete_aliases.push(Alias::parse(a).map_err(|e| {
+                rmcp::ErrorData::invalid_params(format!("invalid delete alias {a:?}: {e}"), None)
+            })?);
+        }
+
+        let plan = plan_patch(&projection, &parsed, &delete_aliases).map_err(|e| {
+            rmcp::ErrorData::invalid_params(format!("could not plan patch: {e}"), None)
+        })?;
+
+        // Optimistic concurrency: re-read updated_at for every touched block from
+        // the same `block` matview the projection was taken from; reject the
+        // whole batch if any changed.
+        let mut conflicts: Vec<String> = Vec::new();
+        if !plan.verify.is_empty() {
+            let id_list = plan
+                .verify
+                .iter()
+                .map(|(id, _)| format!("'{}'", id.as_str().replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!("SELECT id, updated_at FROM block WHERE id IN ({id_list})");
+            let current = self
+                .service()
+                .execute_raw_sql(&sql, HashMap::new())
+                .await
+                .map_err(|e| {
+                    rmcp::ErrorData::internal_error(
+                        format!("concurrency re-read failed: {e}"),
+                        None,
+                    )
+                })?;
+            let mut now: HashMap<String, i64> = HashMap::new();
+            for row in &current.rows {
+                if let (Some(id), Some(ts)) = (
+                    row.get("id").and_then(|v| v.as_string()),
+                    row.get("updated_at").and_then(|v| v.as_i64()),
+                ) {
+                    now.insert(id.to_string(), ts);
+                }
+            }
+            for (id, expected) in &plan.verify {
+                match now.get(id.as_str()) {
+                    Some(cur) if *cur == expected.updated_at => {}
+                    _ => conflicts.push(id.as_str().to_string()),
+                }
+            }
+        }
+        if !conflicts.is_empty() {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!(
+                    "conflict: {} block(s) changed since dense_query — patch rejected. Re-run \
+                     dense_query and retry.",
+                    conflicts.len()
+                ),
+                Some(serde_json::json!({ "conflicting_blocks": conflicts })),
+            ));
+        }
+
+        if params.dry_run {
+            let result = serde_json::json!({
+                "dry_run": true,
+                "op_count": plan.ops.len(),
+                "move_count": plan.move_count(),
+                "ops": plan.ops.iter().map(describe_patch_op).collect::<Vec<_>>(),
+            });
+            return Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&result).unwrap_or_default(),
+            )]));
+        }
+
+        // Apply. New-block temp ids resolve to freshly minted uuids as they are
+        // created; pre-order guarantees a parent/predecessor is created first.
+        let svc = self.service();
+        let mut new_ids: HashMap<usize, String> = HashMap::new();
+        let resolve = |r: &PRef, new_ids: &HashMap<usize, String>| -> String {
+            match r {
+                PRef::Root => projection.file_id.as_str().to_string(),
+                PRef::Existing(id) => id.as_str().to_string(),
+                PRef::New(t) => new_ids.get(t).cloned().unwrap_or_default(),
+            }
+        };
+        let mut created = 0usize;
+        let mut updated = 0usize;
+        let mut moved = 0usize;
+        let mut deleted = 0usize;
+        for op in &plan.ops {
+            match op {
+                PatchOp::Create {
+                    temp,
+                    parent,
+                    after,
+                    title,
+                    task_state,
+                } => {
+                    let new_bare = Uuid::new_v4().to_string();
+                    let new_id = ensure_block_prefix(&new_bare);
+                    let parent_id = resolve(parent, &new_ids);
+                    let mut storage: StorageEntity = HashMap::new();
+                    storage.insert("id".into(), Value::String(new_id.clone()));
+                    storage.insert("parent_id".into(), Value::String(parent_id));
+                    storage.insert("content".into(), Value::String(title.clone()));
+                    storage.insert("content_type".into(), Value::String("text".to_string()));
+                    storage.insert("ID".into(), Value::String(new_bare.clone()));
+                    if let Some(st) = task_state {
+                        storage.insert("task_state".into(), Value::String(st.keyword.clone()));
+                        storage.insert(
+                            "task_state_category".into(),
+                            Value::String(st.category.as_str().to_string()),
+                        );
+                    }
+                    svc.execute_operation(&EntityName::new("block"), "create", storage)
+                        .await
+                        .map_err(|e| {
+                            rmcp::ErrorData::internal_error(format!("create failed: {e}"), None)
+                        })?;
+                    if let Some(a) = after {
+                        let after_id = resolve(a, &new_ids);
+                        move_block_after(&svc, &new_id, None, Some(&after_id)).await?;
+                    }
+                    new_ids.insert(*temp, new_id);
+                    created += 1;
+                }
+                PatchOp::UpdateTitle { block_id, title } => {
+                    set_field(
+                        &svc,
+                        block_id.as_str(),
+                        "content",
+                        Value::String(title.clone()),
+                    )
+                    .await?;
+                    updated += 1;
+                }
+                PatchOp::SetState {
+                    block_id,
+                    task_state,
+                } => {
+                    let (kw, cat) = match task_state {
+                        Some(st) => (st.keyword.clone(), st.category.as_str().to_string()),
+                        None => (String::new(), String::new()),
+                    };
+                    set_field(&svc, block_id.as_str(), "task_state", Value::String(kw)).await?;
+                    set_field(
+                        &svc,
+                        block_id.as_str(),
+                        "task_state_category",
+                        Value::String(cat),
+                    )
+                    .await?;
+                    updated += 1;
+                }
+                PatchOp::Move {
+                    block_id,
+                    parent,
+                    after,
+                } => {
+                    let parent_id = resolve(parent, &new_ids);
+                    let after_id = after.as_ref().map(|a| resolve(a, &new_ids));
+                    move_block_after(
+                        &svc,
+                        block_id.as_str(),
+                        Some(&parent_id),
+                        after_id.as_deref(),
+                    )
+                    .await?;
+                    moved += 1;
+                }
+                PatchOp::Delete { block_id } => {
+                    let mut storage: StorageEntity = HashMap::new();
+                    storage.insert("id".into(), Value::String(block_id.as_str().to_string()));
+                    svc.execute_operation(&EntityName::new("block"), "delete", storage)
+                        .await
+                        .map_err(|e| {
+                            rmcp::ErrorData::internal_error(format!("delete failed: {e}"), None)
+                        })?;
+                    deleted += 1;
+                }
+            }
+        }
+
+        let result = serde_json::json!({
+            "applied": true,
+            "created": created,
+            "updated": updated,
+            "moved": moved,
+            "deleted": deleted,
+        });
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
         )]))
     }
 

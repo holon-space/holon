@@ -79,6 +79,11 @@ pub struct ProjectedBlock {
     /// Whether this block is rendered with the elided-ancestor gap marker: its
     /// true parent was NOT selected and is not the render root.
     pub gap: bool,
+    /// The block's title (first content line) at projection time — the baseline
+    /// the patch diffs against to detect a retitle.
+    pub title: String,
+    /// The block's task state at projection time — baseline for a state change.
+    pub task_state: Option<holon_api::types::TaskState>,
     pub version: BlockVersion,
 }
 
@@ -257,6 +262,8 @@ pub fn build_projection(blocks: Vec<Block>) -> Result<BuiltProjection> {
                 proj_parent,
                 proj_index,
                 gap,
+                title: rb.org_title(),
+                task_state: rb.task_state(),
                 version: BlockVersion::of(rb),
             },
         );

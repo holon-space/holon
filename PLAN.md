@@ -64,6 +64,21 @@ and rejects with a structured conflict listing changed blocks BEFORE applying an
 Honors the EBO dirty-editor policy: a block edited between project and patch fails loud,
 never clobbered. Deletion only via explicit `delete: [aliases]` param (never by omission).
 
+## Rulings incorporated (Martin, 2026-07-23, mid-implementation)
+- **Query-driven, not Rust-filtered**: `dense_query` takes an ordinary
+  GQL/PRQL/SQL query (same `language`/`params`/`context_id` as `execute_query`).
+  The query IS the filter — "exclude DONE" is `... WHERE task_state_category !=
+  'done'`, documented as the canonical example. No `exclude_state_categories` /
+  `subtree` / `max_depth` Rust params. Result rows → `Block::try_from` → render.
+- **Trees with holes → nearest-surviving-ancestor + explicit gap marker**: a
+  block whose true parent was not selected renders at the projection top level
+  with a display-only `{#alias^}` gap marker; its true parent is recorded in the
+  handle. The marker carries no semantic weight (parse ignores `^`).
+- **Relative-diff patch**: `dense_patch` emits a move ONLY when a block's
+  enclosing rendered block or its order relative to surviving siblings actually
+  changed vs the projection (LIS-minimal reorder detection). Untouched
+  re-rooted / gap-marked blocks emit no move.
+
 ## Increments (one commit each, bookmark `dense-org-mcp`)
 1. `dense.rs` render + `{#token}` parse + round-trip PBT (red first).
 2. `dense_query` tool end-to-end (projection + handle + aliases) + `ProjectionRegistry`.
