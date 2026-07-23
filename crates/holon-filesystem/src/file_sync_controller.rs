@@ -1213,6 +1213,26 @@ impl FileSyncController {
         Ok(current_doc.unwrap())
     }
 
+    /// Resolve the AUTHORITATIVE owning document of a block by walking its
+    /// `parent_id` chain in the write authority (`block_raw` / the Loro tree,
+    /// via `get_block_authoritative`) up to the nearest `Page` — the bf071003
+    /// pattern, never the lagging matview. `Ok(None)` when the id (or an
+    /// ancestor) is absent from the authority: a brand-new / id-less / unknown
+    /// block, which is normal ingest and must be left untouched. Depth-bounded.
+    async fn resolve_authoritative_doc(&self, id: &EntityUri) -> Result<Option<EntityUri>> {
+        let mut cursor = id.clone();
+        for _ in 0..50 {
+            let Some(block) = self.block_reader.get_block_authoritative(&cursor).await? else {
+                return Ok(None);
+            };
+            if block.is_page() {
+                return Ok(Some(block.id));
+            }
+            cursor = block.parent_id;
+        }
+        Ok(None)
+    }
+
     /// Echo suppression: if disk content matches last_projection, skip.
     /// Otherwise, diff against last_projection to compute create/update/delete
     /// ops.
@@ -1836,6 +1856,59 @@ impl FileSyncController {
         // tag (plus its parsed descendants) are structurally invisible to the
         // doc walk even when their rows land. Counting them made the gate
         // unsatisfiable and quarantined the file forever.
+        // Cross-doc-membership guard — arm (b) of the journals phantom
+        // (on-disk STALE cross-doc copy). A block parsed into THIS file whose
+        // AUTHORITATIVE routing (`block_raw` Page-walk, never a matview) lands
+        // under a DIFFERENT document is a stale copy left on disk by a past
+        // mis-route / crash / external edit. The matview-based
+        // `find_foreign_blocks` re-parent above would ADOPT it (author a Move
+        // into this file's doc); the day-page then re-adopts on its next
+        // writeback and the org fixed-point oscillates forever. Instead: never
+        // adopt it (fold into the skip set so no create/update/place/gate pass
+        // touches it), disclose loudly (block + both docs), and let THIS file's
+        // own honest re-render — which reads `block_raw` and routes the block
+        // back to its real owner — PRUNE it from disk (sanctioned below so the
+        // writeback-lossless guard does not read the prune as data loss).
+        //
+        // Fail-loud, never fake, never touches USER content: only fires when the
+        // id ALREADY exists in the store (`get_block_authoritative` = `Some`)
+        // under a resolvable page that is NOT this file's doc. An id-less /
+        // brand-new / unknown block resolves to `None` → normal ingest. Foreign
+        // PAGE inlines (`foreign_subtree_ids`) are the de-inline workstream's
+        // concern (deferred, not pruned) and are excluded here.
+        let mut stale_cross_doc_ids: HashSet<EntityUri> = HashSet::new();
+        for block in &new_blocks_vec {
+            if block.id == document_uri
+                || block.id == new_parse.document.id
+                || foreign_subtree_ids.contains(&block.id)
+            {
+                continue;
+            }
+            if let Some(auth_doc) = self.resolve_authoritative_doc(&block.id).await? {
+                if auth_doc != document_uri && auth_doc != new_parse.document.id {
+                    tracing::warn!(
+                        block_id = %block.id,
+                        ingesting_doc = %document_uri,
+                        authoritative_doc = %auth_doc,
+                        path = %path.display(),
+                        "[FileSyncController] cross-doc membership: a block parsed into this \
+                         file is authoritatively owned by a DIFFERENT document (block_raw \
+                         routing) — NOT adopting the stale on-disk copy; pruning it from this \
+                         file's writeback so it converges to its real owner."
+                    );
+                    stale_cross_doc_ids.insert(block.id.clone());
+                }
+            }
+        }
+        // Fold into the skip set so every create/update/place/gate pass leaves
+        // these blocks untouched (identical handling to a foreign page subtree).
+        foreign_subtree_ids.extend(stale_cross_doc_ids.iter().cloned());
+        // String ids for the writeback-lossless sanctioned-removals seam
+        // (`as_str()` form, matching the guard's `block.id.as_str()` compare).
+        let stale_removals: HashSet<String> = stale_cross_doc_ids
+            .iter()
+            .map(|u| u.as_str().to_string())
+            .collect();
         let mut gate_excluded_ids = foreign_subtree_ids.clone();
         for block in &new_blocks_vec {
             if block.id == document_uri || block.id == new_parse.document.id {
@@ -2613,7 +2686,11 @@ impl FileSyncController {
         // projection and returning would strand the merged text (disk would
         // never converge). The re-render below reads the merged store content
         // and writes it back to disk.
-        if !has_structural_changes && !needs_id_writeback && !did_text_merge {
+        if !has_structural_changes
+            && !needs_id_writeback
+            && !did_text_merge
+            && stale_cross_doc_ids.is_empty()
+        {
             self.last_projection
                 .insert(canonical.clone(), disk_content.to_string());
             self.persist_disk_hash_for(&canonical, rel_path, &disk_hash)
@@ -2628,7 +2705,7 @@ impl FileSyncController {
         // not this ingest's. Defer the write-back: disk already reflects every
         // block this ingest processed (the ops came FROM this parse), so
         // recording it as the projection is sound. ALLOW(fallback): disclosed.
-        if !foreign_subtree_ids.is_empty() && !did_text_merge {
+        if !foreign_subtree_ids.is_empty() && stale_cross_doc_ids.is_empty() && !did_text_merge {
             info!(
                 "[FileSyncController] Deferring write-back of {} — it inlines {} block(s) owned \
                  by other page-files; rewriting now would de-inline them. Disk left as-is; DB \
@@ -2674,7 +2751,7 @@ impl FileSyncController {
                 &disk_content,
                 &rendered,
                 &[],
-                &HashSet::new(),
+                &stale_removals,
                 &self.root_dir,
             )
             .with_context(|| {
