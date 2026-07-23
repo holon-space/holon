@@ -22,6 +22,8 @@
 //! are unsupported by this driver.
 
 use std::collections::HashMap;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -51,6 +53,15 @@ use holon_mcp::server::InteractionResponse;
 /// cover idle/occluded windows that only paint when driven; a real
 /// never-rendered element still fails at the deadline.
 const CLICK_BOUNDS_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a wheel-driven scroll polls the `BoundsRegistry` for a committed
+/// change before concluding nothing moved. A real wheel scroll re-lays-out and
+/// commits new bounds on the next paint (the interaction pump `refresh()`es the
+/// window after each event); an occluded/idle window only paints when driven,
+/// so this must cover a couple of forced frames. When the deadline passes with
+/// no movement, the scroll is treated as a no-op and fails loud (never a fake
+/// success — dogfood #3).
+const SCROLL_SETTLE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Channel-based `UserDriver` for GPUI. Sends `InteractionCommand`s on
 /// the shared `interaction_tx` channel; the GPUI interaction pump drains
@@ -293,6 +304,65 @@ impl GpuiUserDriver {
             );
         }
         Ok(())
+    }
+
+    /// Order-independent fingerprint of every committed element's vertical
+    /// placement (rounded `y` + visible `height`). A scroll shifts rows and
+    /// changes which are clipped, so the fingerprint changes iff something
+    /// actually moved on screen — the observable the wheel path verifies
+    /// against instead of trusting the dispatch to have "worked".
+    fn geometry_fingerprint(&self) -> u64 {
+        let mut rows: Vec<(String, i32, i32)> = self
+            .geometry
+            .all_elements()
+            .into_iter()
+            .map(|(id, info)| {
+                (
+                    id,
+                    (info.y * 10.0).round() as i32,
+                    (info.height * 10.0).round() as i32,
+                )
+            })
+            .collect();
+        rows.sort();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        rows.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Dispatch a real wheel scroll at `(x, y)`: a `MouseMove` to the point
+    /// (so the window's tracked mouse position — which gpui recomputes the
+    /// scroll hit-test from — sits over the target), then a `ScrollWheel`.
+    /// Unlike the ListState-only `ScrollList` path, this drives ANY scroll
+    /// viewport (eager `overflow_y_scroll` panels included), because it is the
+    /// exact input a trackpad/wheel produces. Returns `Ok(true)` when the
+    /// committed geometry moved, `Ok(false)` when the dispatch left the screen
+    /// unchanged (caller decides whether that is a fallback case or fails
+    /// loud). `dx`/`dy` are line-based deltas (positive `dy` = down).
+    async fn dispatch_wheel_and_settle(&self, x: f32, y: f32, dx: f32, dy: f32) -> Result<bool> {
+        let before = self.geometry_fingerprint();
+        self.dispatch_event(InteractionEvent::MouseMove {
+            position: (x, y),
+            pressed_button: None,
+            modifiers: Vec::new(),
+        })
+        .await?;
+        self.dispatch_event(InteractionEvent::ScrollWheel {
+            position: (x, y),
+            delta: (dx, dy),
+            modifiers: Vec::new(),
+        })
+        .await?;
+        let deadline = tokio::time::Instant::now() + SCROLL_SETTLE_TIMEOUT;
+        loop {
+            if self.geometry_fingerprint() != before {
+                return Ok(true);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(false);
+            }
+            let _ = tokio::time::timeout(Duration::from_millis(100), self.geometry.changed()).await;
+        }
     }
 
     fn require_element_center(&self, entity_id: &str, verb: &str) -> Result<(f32, f32)> {
@@ -738,16 +808,23 @@ impl UserDriver for GpuiUserDriver {
         Ok(true)
     }
 
-    /// Scroll the virtualized list at a window coordinate. `dy` is a pixel
-    /// delta (positive = down / toward the end); `dx` is reserved.
+    /// Scroll at a window coordinate with a real wheel event. `dx`/`dy` are
+    /// line-based deltas (positive `dy` = down / toward the end).
     ///
-    /// Resolves which `block:default-*` panel's recorded bounds contain
-    /// `(x, y)` and drives that panel's `ListState::scroll_by` directly
-    /// (see [`scroll_entity`]). Fails loud when the point is over no panel,
-    /// or when the resolved panel has no scrollable list — a synthetic
-    /// `ScrollWheel` used to be dispatched here and silently no-opped
-    /// (dogfood #3).
+    /// Primary path: dispatch `MouseMove(x, y)` + `ScrollWheel(x, y)` — the
+    /// input a trackpad/wheel produces, which scrolls EVERY viewport including
+    /// eager `overflow_y_scroll` panels that have no `ListState` (the seeded
+    /// main panel). Verified by observation: the committed geometry must move,
+    /// else it is not reported as success.
+    ///
+    /// Fallback (virtualized lists): if the wheel produced no visible movement
+    /// AND `(x, y)` is over a `block:default-*` panel, drive that panel's
+    /// `ListState::scroll_by` directly. Fails loud when neither path moved
+    /// anything — never a fake success (dogfood #3).
     async fn scroll_at(&self, x: f32, y: f32, dx: f32, dy: f32) -> Result<()> {
+        if self.dispatch_wheel_and_settle(x, y, dx, dy).await? {
+            return Ok(());
+        }
         let mut panel: Option<&str> = None;
         for p in DEFAULT_PANEL_IDS {
             if let Some(info) = self.geometry.find_by_entity_id(p) {
@@ -763,23 +840,31 @@ impl UserDriver for GpuiUserDriver {
         }
         let panel = panel.ok_or_else(|| {
             anyhow::anyhow!(
-                "scroll_at({x}, {y}): no default panel's bounds contain the point — pass \
-                 `entity_id` to target a specific panel/block, or verify the coordinates are \
-                 inside the window"
+                "scroll_at({x}, {y}): wheel produced no visible movement and no default panel's \
+                 bounds contain the point — the target may be at its scroll limit, or the \
+                 coordinates are outside the window"
             )
         })?;
         self.scroll_list(panel, dx, dy).await
     }
 
-    /// Scroll the virtualized list associated with `entity_id` by a pixel
-    /// `dy` (positive = down). `entity_id` is a `block:default-*` panel (its
-    /// primary list scrolls) or a block inside one (its containing list
-    /// scrolls). Drives `ListState::scroll_by` DIRECTLY via `ScrollList` —
-    /// NOT a synthetic `ScrollWheel`, which no-ops for an off-cursor event
-    /// (gpui's `should_handle_scroll` hover gate) and used to report success
-    /// while nothing moved (dogfood #3). Fails loud when no scrollable list
-    /// is reachable.
+    /// Scroll the viewport associated with `entity_id` by line-based `dx`/`dy`
+    /// (positive `dy` = down). `entity_id` is a `block:default-*` panel or any
+    /// block inside one. Resolves the target's on-screen centre and dispatches
+    /// a real `MouseMove` + `ScrollWheel` there (the wheel path in
+    /// [`scroll_at`]), so eager `overflow_y_scroll` panels scroll too — not
+    /// only virtualized `gpui::list`s. Falls back to the direct
+    /// `ListState::scroll_by` path when the wheel does not move the target, and
+    /// fails loud when neither moves anything (dogfood #3).
     async fn scroll_entity(&self, entity_id: &EntityUri, dx: f32, dy: f32) -> Result<()> {
+        if let Some((cx, cy)) = self.element_center(entity_id.as_str()) {
+            if self.dispatch_wheel_and_settle(cx, cy, dx, dy).await? {
+                return Ok(());
+            }
+        }
+        // Wheel did not move it (or the entity has no committed bounds — an
+        // off-viewport row of a virtualized list): drive the ListState path,
+        // which resolves the row by index and fails loud if unreachable.
         self.scroll_list(entity_id.as_str(), dx, dy).await
     }
 
