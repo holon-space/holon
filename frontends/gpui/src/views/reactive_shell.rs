@@ -742,10 +742,24 @@ impl Render for ReactiveShell {
                     .child(container)
                     .into_any_element();
             }
+            // Block-mode non-eager arm: MIRROR the eager arm above (id +
+            // overflow_y_scroll on the size_full div). Without the scroll
+            // viewport a content-height column (an outline that overflows) is
+            // clipped to the panel with no way to reach below-fold rows — the
+            // plain-path (non-accordion) main panel stopped scrolling (Martin
+            // dogfood): the outer columns.rs wrapper cannot scroll because this
+            // size_full shell exactly fills it. Keeping size_full (NOT switching
+            // to content-height) preserves the DEFINITE-height context that
+            // relative-height descendants (live_query `relative(1.0)`, the
+            // accordion cap) and virtualized `gpui::list` sidebars require, so
+            // this is the eager arm's proven shape — not a new percentage trap.
+            let scroll_id = self.block_id.as_deref().unwrap_or("block-content-scroll");
             return div()
+                .id(SharedString::from(scroll_id.to_string()))
                 .flex()
                 .flex_col()
                 .size_full()
+                .overflow_y_scroll()
                 .child(builders::render(tree, &gpui_ctx))
                 .into_any_element();
         }
