@@ -58,3 +58,12 @@
 # fault-injection transition that writes a mark span decoupled from a shorter content (or a
 # store-divergence create) — tracked as a coverage follow-up.
 
+
+# --- external-write-while-focused: dirty-buffer preservation lock (EBO seam, vault row-292) ---
+# Focus -> Type (dirty) -> ExternalWriteWhileFocused. The random generator almost never lands the
+# dirty-editor window at a step where this transition is sampled, so a deterministic hand-authored
+# case is the only way to exercise it. NOTE: hand-authored replay drives transitions directly and
+# BYPASSES the HOLON_PBT_EXTERNAL_RACES generator gate (the gate is generator-only); preconditions
+# (app_started + active_editor_dirty + has_document_uri) are the only admission checks, and the
+# create/focus/type prefix establishes the dirty editor, so the case runs with the flag UNSET.
+{"name": "external-write-while-focused-preserves-dirty-buffer", "description": "EBO seam / vault row-292: an external sibling-add re-ingest landing while a focused block has a DIRTY editor buffer must NOT clobber that buffer (inv-editor-text/mirror = no silent data loss) nor duplicate blocks (inv-live-children-match-ref). Prefix mirrors the green echo case: create wwf0 under the structural-page focus root, focus it, type DIRTY. Then an external write adds a sibling to the SAME doc mid-focus.", "transitions": [{"CreateBlockUnderFocus": {"content": "wwf-focus", "id": "block:wwf0"}}, {"FocusEditableText": {"block_id": "block:wwf0"}}, {"TypeChars": {"text": "DIRTY"}}, {"ExternalWriteWhileFocused": {"doc_uri": "block:structural-page", "blocks": [{"id": "block:wwf-ext0", "parent_id": "block:structural-page", "content": "external sibling", "content_type": "text", "source_language": null, "source_name": null, "created_at": 0, "updated_at": 0}]}}]}
