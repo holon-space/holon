@@ -9,7 +9,13 @@
 //!   cargo run -p holon-tools --bin vault-shape-profile -- \
 //!     --vault /path/to/vault --out profile.json
 //!
-//! The vault is READ-ONLY input; nothing is written back to it.
+//! The vault is READ-ONLY input; nothing is written back to it. The walk
+//! mirrors the PRODUCTION ingest walk EXACTLY —
+//! `holon_filesystem::fs_port::walk_directory`, which is hidden-entry- and
+//! `.gitignore`-aware — so the profile counts only the files the app itself
+//! would ingest (never `.claude/`, `.git/`, `.jj/`, or gitignored copies).
+//! Using a naive walk here inflates the profile with agent-worktree
+//! duplicate-ID copies the app never sees.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -26,7 +32,6 @@ use holon_api::vault_shape::VAULT_SHAPE_SCHEMA_VERSION;
 use holon_api::vault_shape::VaultShapeProfile;
 use holon_org_format::parser::parse_doc_id;
 use holon_org_format::parser::parse_org_file;
-use walkdir::WalkDir;
 
 #[derive(Parser)]
 #[command(about = "Emit an anonymized structural profile of a vault (counts only)")]
@@ -107,29 +112,36 @@ impl Acc {
     }
 }
 
-/// Walk `root` and build the structural profile. Deterministic (files walked in
-/// sorted order; every distribution is a sorted `BTreeMap`).
+/// Walk `root` and build the structural profile. Deterministic (files sorted;
+/// every distribution is a sorted `BTreeMap`). The walk is the SAME
+/// hidden/`.gitignore`-aware walk the app's ingest uses, so the profile
+/// reflects exactly the files the app would ingest.
 pub fn extract_profile(root: &Path) -> Result<VaultShapeProfile> {
     let root = root
         .canonicalize()
         .with_context(|| format!("canonicalizing vault root {}", root.display()))?;
-    let mut acc = Acc::default();
 
-    for entry in WalkDir::new(&root).sort_by_file_name() {
-        let entry = entry?;
-        let path = entry.path();
-        // Companion pairs: a directory that has a same-name `.org` beside it.
-        if entry.file_type().is_dir() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                let companion = path.with_file_name(format!("{name}.org"));
-                if companion.is_file() {
-                    acc.companion_pair_count += 1;
-                }
+    let mut org_files: Vec<PathBuf> = holon_filesystem::fs_port::walk_directory(&root)
+        .files
+        .into_iter()
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("org"))
+        .collect();
+    org_files.sort();
+
+    // Every ancestor directory of a walked file — used to detect companion
+    // pairs (a dir `X/` that contains walked files, beside a file `X.org`).
+    let dir_set: BTreeSet<PathBuf> = org_files
+        .iter()
+        .flat_map(|p| p.ancestors().skip(1).map(Path::to_path_buf))
+        .collect();
+
+    let mut acc = Acc::default();
+    for path in &org_files {
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            let companion_dir = path.with_file_name(stem);
+            if dir_set.contains(&companion_dir) {
+                acc.companion_pair_count += 1;
             }
-            continue;
-        }
-        if path.extension().and_then(|e| e.to_str()) != Some("org") {
-            continue;
         }
         let content =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -277,11 +289,18 @@ mod tests {
             "Area/note.org",
             "#+ID: doc-note\n* Note heading\n:PROPERTIES:\n:ID: n1\n:END:\n",
         );
+        // Hidden dir the app's walk SKIPS — must NOT be counted (this is the
+        // real-vault `.claude/worktrees/` duplicate-copy class).
+        write(
+            root,
+            ".claude/copy.org",
+            "#+ID: doc-a\n* Duplicate copy\n:PROPERTIES:\n:ID: a1\n:END:\n",
+        );
 
         let p = extract_profile(root).unwrap();
 
         assert_eq!(p.schema_version, VAULT_SHAPE_SCHEMA_VERSION);
-        assert_eq!(p.file_count, 4, "a, b, Area, Area/note");
+        assert_eq!(p.file_count, 4, "a, b, Area, Area/note — .claude/ excluded");
         assert_eq!(p.companion_pair_count, 1, "Area/ has Area.org companion");
 
         // b.org has no #+ID → 1 of 4 files idless.
@@ -302,7 +321,7 @@ mod tests {
         assert!(p.property_usage >= 1);
         assert!(p.distinct_tag_count >= 1);
 
-        // Blocks-per-file distribution has been populated for all 4 files.
+        // Blocks-per-file distribution populated for all 4 walked files.
         assert_eq!(p.blocks_per_file.total(), 4);
 
         // JSON is deterministic + carries no obvious vault strings.
