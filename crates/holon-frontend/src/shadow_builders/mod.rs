@@ -10,7 +10,6 @@ holon_macros::builder_registry!("src/shadow_builders",
 );
 
 use crate::render_interpreter::RenderInterpreter;
-use crate::render_interpreter::shared_col_build;
 
 /// Build the shadow `RenderInterpreter<ReactiveViewModel>` from the
 /// macro-generated builder registry plus the manual `col` builder.
@@ -57,7 +56,35 @@ pub fn build_shadow_interpreter() -> RenderInterpreter<ReactiveViewModel> {
     register_all(&mut interp);
     interp.register("column", |ba: prelude::BA<'_>| {
         let gap = ba.args.get_f64("gap").unwrap_or(0.0) as f32;
-        let children: Vec<ReactiveViewModel> = shared_col_build(&ba);
+        // Placement guard (accordion.rs, §3): bless ONLY direct `accordion(...)`
+        // child EXPRESSIONS with the accordion-parent flag; strip it from every
+        // other child's context. Inspecting the child expr's function name
+        // (rather than an inherited flag) makes "direct child of a column" the
+        // exact, leak-free condition — an accordion nested inside a `row`,
+        // drawer, or another container never sees the flag and so errors loudly.
+        let children: Vec<ReactiveViewModel> = ba
+            .args
+            .positional_exprs
+            .iter()
+            .map(|expr| {
+                let is_accordion = matches!(
+                    expr,
+                    holon_api::render_types::RenderExpr::FunctionCall { name, .. }
+                        if name == "accordion"
+                );
+                let mut child_flags = ba.ctx.flags.clone();
+                if is_accordion {
+                    child_flags.insert(
+                        accordion::ACCORDION_PARENT_FLAG.to_string(),
+                        holon_api::Value::Boolean(true),
+                    );
+                } else {
+                    child_flags.remove(accordion::ACCORDION_PARENT_FLAG);
+                }
+                let child_ctx = ba.ctx.with_flags(child_flags);
+                (ba.interpret)(expr, &child_ctx)
+            })
+            .collect();
         let mut props = std::collections::HashMap::new();
         props.insert("gap".to_string(), holon_api::Value::Float(gap as f64));
         ReactiveViewModel {
