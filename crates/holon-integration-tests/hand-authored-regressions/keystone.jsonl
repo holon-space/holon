@@ -67,3 +67,23 @@
 # (app_started + active_editor_dirty + has_document_uri) are the only admission checks, and the
 # create/focus/type prefix establishes the dirty editor, so the case runs with the flag UNSET.
 {"name": "external-write-while-focused-preserves-dirty-buffer", "description": "EBO seam / vault row-292: an external sibling-add re-ingest landing while a focused block has a DIRTY editor buffer must NOT clobber that buffer (inv-editor-text/mirror = no silent data loss) nor duplicate blocks (inv-live-children-match-ref). Prefix mirrors the green echo case: create wwf0 under the structural-page focus root, focus it, type DIRTY. Then an external write adds a sibling to the SAME doc mid-focus.", "transitions": [{"CreateBlockUnderFocus": {"content": "wwf-focus", "id": "block:wwf0"}}, {"FocusEditableText": {"block_id": "block:wwf0"}}, {"TypeChars": {"text": "DIRTY"}}, {"ExternalWriteWhileFocused": {"doc_uri": "block:structural-page", "blocks": [{"id": "block:wwf-ext0", "parent_id": "block:structural-page", "content": "external sibling", "content_type": "text", "source_language": null, "source_name": null, "created_at": 0, "updated_at": 0}]}}]}
+#
+# --- ref-doc-0 remap gap: born-equal create-under-focus (BugFunnel 2026-07-22, keystone tolerated red) ---
+# Deterministic repro of the ref-doc-0 remap gap. CreateDocument mints the ORACLE's synthetic
+# `block:ref-doc-0`; the SUT writes an empty doc_0.org whose watcher mints a REAL uuid, so the two
+# id-spaces differ (per-tick reconcile maps ref-doc-0 -> uuid). NavigateFocus focuses the ORACLE's
+# `block:ref-doc-0`. CreateBlockUnderFocus with an EXPLICIT id (`id: Some(...)`, born-equal path)
+# dispatches `block.create{parent_id: <focus-root>}` DIRECTLY (components.rs create_block_with_id),
+# and create_block_under_focus.rs passes the UNREMAPPED oracle focus-root `block:ref-doc-0` as the
+# parent -> SUT Loro has no such block -> "parent block not found: block:ref-doc-0" hard failure.
+# The `id: None` slot path dodges this (commit_creation_slot re-resolves the parent from the SUT's
+# own live rows), which is why the earlier hand-authored case was green. GREEN once the SUT
+# create-under-focus resolves the focus-root parent through the id resolver (remap TOTAL, fail-loud
+# on an unmapped synthetic). NB: the BugFunnel row's phantom signature was WRONG — the live
+# manifestation is this hard create failure, not an inv-viewmodel-entity-ids-subset-of-data phantom.
+# NB: uses a SINGLE CreateDocument. A 2nd CreateDocument confounds this lock with a SEPARATE
+# doc-ingest history under-recording (harness.rs:300 counts each ref-doc-N->uuid remap as a UI
+# create that must record >=1 block_history op_group, but the 2nd doc's watcher-ingest records
+# none) -> inv-history-records-all-creates fires BEFORE CreateBlockUnderFocus even runs, masking
+# the parent-resolution bug. One doc keeps the born-equal create reachable. (2nd-doc issue parked.)
+{"name": "ref-doc-0-remap-born-equal-create-under-focus", "description": "BugFunnel 2026-07-22 ref-doc-0 remap gap: born-equal (id:Some) CreateBlockUnderFocus under a CreateDocument-minted synthetic doc dispatches block.create with the UNREMAPPED oracle focus-root parent -> SUT parent-not-found. Green once the focus-root parent is resolved through the id resolver.", "transitions": [{"CreateDocument": {"file_name": "doc_0.org"}}, {"NavigateFocus": {"region": "main", "block_id": "block:ref-doc-0"}}, {"CreateBlockUnderFocus": {"content": "a", "id": "block:gen-13"}}]}

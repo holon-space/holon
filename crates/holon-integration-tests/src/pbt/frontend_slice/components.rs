@@ -2704,14 +2704,38 @@ impl SutBlockCreate for HeadlessFrontendComponent {
         id: Option<&EntityUri>,
     ) {
         match id {
-            // Explicit id: no slot gesture exists for a born-equal id, so dispatch
-            // the production `block.create{id, parent_id, content}` intent directly
-            // under the ref-resolved focus root.
-            Some(uri) => self
-                .driver
-                .create_block_with_id(parent, content, uri)
-                .await
-                .unwrap_or_else(|e| panic!("[SutBlockCreate::apply_create_under_focus] {e:#}")),
+            // Explicit id (born-equal): no slot gesture exists, so the op-floor
+            // dispatches `block.create{id, parent_id, content}` DIRECTLY under
+            // `parent`. `parent` is the ORACLE focus root, so it must first be
+            // resolved into SUT id space — a CreateDocument-minted `block:ref-doc-N`
+            // doc page lives under a freshly-minted uuid (the empty doc file's
+            // watcher mint), never under the synthetic id. This mirrors
+            // `apply_navigate_focus_via`'s `self.resolve_id(id)`; without it the
+            // create dispatches under a non-existent `block:ref-doc-N` parent and
+            // the SUT rejects it ("parent block not found"). The `None` slot path
+            // below re-resolves the parent from its own live SUT rows, so it never
+            // hit this gap.
+            Some(uri) => {
+                let parent = self.resolve_id(parent);
+                // Remap totality (fail-loud, not best-effort): a SUT-minted doc
+                // synthetic that survives resolution unmapped would be dispatched
+                // as a non-existent parent. Refuse it, naming the id — never pass
+                // an unmapped synthetic through, never silently skip the create.
+                // (Born-equal `block:gen-`/`block:peer-` parents ARE valid SUT ids
+                // — the reconcile self-maps them — so identity resolution is
+                // correct for those and they are not covered here.)
+                assert!(
+                    !parent.as_str().starts_with("block:ref-doc-"),
+                    "[SutBlockCreate::apply_create_under_focus] remap-totality violation: \
+                     focus-root parent {parent} is an unmapped CreateDocument-minted synthetic \
+                     doc id — its real SUT id was never reconciled; refusing to dispatch \
+                     block.create under a non-existent parent"
+                );
+                self.driver
+                    .create_block_with_id(&parent, content, uri)
+                    .await
+                    .unwrap_or_else(|e| panic!("[SutBlockCreate::apply_create_under_focus] {e:#}"))
+            }
             // No id: drive the PRODUCTION creation-slot gesture EXACTLY as today —
             // it re-resolves the parent from its own live rendered rowset (WP-E
             // focus-root cross-check preserved) and mints via `block.create`.
