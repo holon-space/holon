@@ -126,7 +126,7 @@ impl<R: RefLifecycle + RefBlockTree + RefFocus + RefNavHistory + RefLayoutMutate
         if !main_candidates.is_empty() {
             arms.push((
                 3,
-                proptest::sample::select(main_candidates)
+                super::select_bias::select_with_edge_bias(main_candidates)
                     .prop_map(|block_id| ClickBlock {
                         region: Region::Main,
                         block_id,
