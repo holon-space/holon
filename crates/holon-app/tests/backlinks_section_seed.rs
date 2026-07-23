@@ -252,23 +252,66 @@ fn fresh_seed_places_backlinks_section_below_outline() {
         let divider_at = content
             .find("divider(")
             .expect("render must contain a divider() separating outline from backlinks");
+        // The backlinks region is now an `accordion` (bounded, collapsible)
+        // wrapping the live_query — its `title` is the "Linked references"
+        // header, and it is a DIRECT child of the main-panel column (the
+        // placement the fail-loud guard requires).
+        let accordion_at = content
+            .find("accordion(")
+            .expect("backlinks section must be wrapped in an accordion() container");
         let header_at = content
             .find("Linked references")
-            .expect("render must contain the Linked references header");
+            .expect("accordion must carry the Linked references title");
         let query_at = content
             .find("live_query")
             .expect("backlinks section must be a live_query (reactive)");
 
         assert!(
-            outline_at < divider_at && divider_at < header_at && header_at < query_at,
-            "order must be: outline, divider, header, backlinks query — got \
-             outline@{outline_at} divider@{divider_at} header@{header_at} \
-             query@{query_at} in: {content}"
+            outline_at < divider_at
+                && divider_at < accordion_at
+                && accordion_at < header_at
+                && header_at < query_at,
+            "order must be: outline, divider, accordion(title, live_query) — got \
+             outline@{outline_at} divider@{divider_at} accordion@{accordion_at} \
+             header@{header_at} query@{query_at} in: {content}"
+        );
+        assert!(
+            content.contains("max_height_fraction"),
+            "accordion must carry a max_height_fraction cap prop: {content}"
         );
         assert!(
             content.contains("backlinks") && content.contains("focus_roots"),
             "section must query the backlinks matview scoped to the current page \
              via focus_roots: {content}"
+        );
+    });
+}
+
+/// Copy-on-write stickiness for the accordion-bearing layout: once the user
+/// owns the default layout (`__default__.org` on disk), a reseed must NOT
+/// clobber it with the shipped default — so a user who edited the backlinks
+/// render (e.g. changed the accordion cap or collapsed it) keeps their version.
+/// Complements `seed_copy_on_write.rs` (generic suppression) by binding the
+/// guarantee to the concrete main-panel render this file governs.
+#[test]
+fn user_owned_layout_suppresses_accordion_reseed() {
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (engine, ordering) = fresh_engine(dir.path().join("cow.db")).await;
+
+        // default_org_exists = true → the user has materialized/edited the
+        // default layout; their file WINS and the shipped accordion default is
+        // NOT re-seeded over it.
+        holon_app::seed_default_layout(&engine, ordering, false, true)
+            .await
+            .expect("seed_default_layout must complete");
+
+        let db = engine.db_handle();
+        assert!(
+            main_panel_render_content(&db).await.is_none(),
+            "a user-owned __default__.org must suppress re-seeding the default \
+             main-panel layout — the edited accordion render survives reseed"
         );
     });
 }
