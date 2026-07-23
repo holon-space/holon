@@ -275,6 +275,20 @@ fn full_render_oracle(h: &Harness) -> String {
     OrgRenderer::render_document(&h.doc, &blocks, &h.path, &h.doc.id)
 }
 
+/// A benign, non-`Page` tag used PURELY to force a full reseed: the render
+/// cache reseeds whenever a block's `tags` differ from the cached copy (see
+/// `render_with_cache`), regardless of WHICH tag changed. It must NOT be
+/// `Page`: since the 2026-07-19 daily-note ruling, `on_block_changed` runs
+/// `materialize_page_identity_file` on any authoritative page upsert, which
+/// `authoritative_name_chain`-bails on these single-doc mocks (whose doc-root
+/// block is absent from `get_block_authoritative`) — an interaction unrelated
+/// to the drop-tripwire behaviour these tests pin.
+fn reseed_lever_tags() -> Tags {
+    let mut tags = Tags::default();
+    tags.insert("Todo");
+    tags
+}
+
 #[tokio::test]
 async fn content_only_edit_serves_from_cache_and_fires_zero_get_blocks() {
     let mut h = build_harness();
@@ -311,8 +325,10 @@ async fn content_only_edit_serves_from_cache_and_fires_zero_get_blocks() {
     );
     assert_eq!(
         h.reader.point_read_calls(),
-        point_reads_before + 1,
-        "content-only edit must refresh exactly one block via the authoritative point read"
+        point_reads_before + 2,
+        "content-only edit does two O(1) point reads: the page-identity \
+         is_page pre-check (2026-07-19 daily-note ruling, on_block_changed) \
+         + the cache-refresh read — still ZERO recursive-CTE get_blocks"
     );
 
     // Byte-identical to the full-read oracle.
@@ -341,9 +357,7 @@ async fn tags_change_takes_full_reseed() {
     // Toggle a tag on a cached block — H4: a Page/tag change can re-partition
     // the doc's subtree, so it must reseed rather than upsert in place.
     let mut b1_tagged = b1.clone();
-    let mut tags = Tags::default();
-    tags.insert("Page");
-    b1_tagged.tags = tags;
+    b1_tagged.tags = reseed_lever_tags();
     h.reader.set_block(b1_tagged.clone());
 
     h.controller
@@ -490,9 +504,7 @@ async fn block_driven_writeback_small_drop_passes_silently() {
     // ungrounded).
     h.reader.set_blocks(vec![b1.clone(), b3.clone()]);
     let mut b1_tagged = b1.clone();
-    let mut tags = Tags::default();
-    tags.insert("Page");
-    b1_tagged.tags = tags;
+    b1_tagged.tags = reseed_lever_tags();
     h.reader.set_block(b1_tagged.clone());
 
     h.controller
@@ -553,9 +565,7 @@ async fn block_driven_writeback_vetoes_mass_truncation() {
     let keep: Vec<Block> = all[..5].to_vec();
     h.reader.set_blocks(keep);
     let mut b0_tagged = b0.clone();
-    let mut tags = Tags::default();
-    tags.insert("Page");
-    b0_tagged.tags = tags;
+    b0_tagged.tags = reseed_lever_tags();
     h.reader.set_block(b0_tagged.clone());
 
     let veto = h
@@ -846,9 +856,7 @@ async fn name_chain_failed_ungrounded_drop_hard_vetoes() {
     let keep: Vec<Block> = all[..6].to_vec();
     h.reader.set_blocks(keep);
     let mut b0_tagged = b0.clone();
-    let mut tags = Tags::default();
-    tags.insert("Page");
-    b0_tagged.tags = tags;
+    b0_tagged.tags = reseed_lever_tags();
     h.reader.set_block(b0_tagged.clone());
 
     let veto = h
