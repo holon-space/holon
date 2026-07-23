@@ -293,6 +293,10 @@ pub struct TestEnvironmentBuilder {
     enable_fake_mcp: bool,
     /// Enable Loro CRDT layer (default: true)
     enable_loro: bool,
+    /// Pin the boot clock so "today" (and any date-derived boot behavior, e.g.
+    /// the daily-journal auto-create rule) is deterministic regardless of the
+    /// real wall-clock date. `None` uses the real `SystemClock`.
+    clock: Option<Arc<dyn holon_api::Clock>>,
 }
 
 impl TestEnvironmentBuilder {
@@ -304,7 +308,17 @@ impl TestEnvironmentBuilder {
             settle_delay_ms: 100,
             enable_fake_mcp: false,
             enable_loro: true,
+            clock: None,
         }
+    }
+
+    /// Pin the boot clock to a fixed instant so date-derived boot behavior (the
+    /// daily-journal auto-create rule's `{today}`) is deterministic under ANY
+    /// real wall-clock date. Registered as the DI `InjectedClock`, mirroring
+    /// the composed keystone's `keystone_boot_clock`.
+    pub fn with_clock(mut self, clock: Arc<dyn holon_api::Clock>) -> Self {
+        self.clock = Some(clock);
+        self
     }
 
     /// Add an org file to be created BEFORE engine initialization
@@ -406,6 +420,7 @@ impl TestEnvironmentBuilder {
         }
         let enable_fake_mcp = self.enable_fake_mcp;
         let org_fs_for_di = org_fs.clone();
+        let clock_for_di = self.clock.clone();
 
         let (
             session,
@@ -421,6 +436,12 @@ impl TestEnvironmentBuilder {
                 holon_mcp::di::register_debug_services(injector);
                 if enable_fake_mcp {
                     crate::fake_mcp_module::register_fake_mcp(injector);
+                }
+                if let Some(clock) = clock_for_di.clone() {
+                    let injected = holon_api::InjectedClock(clock);
+                    injector.provide::<holon_api::InjectedClock>(fluxdi::Provider::root(
+                        move |_| injected.clone().into(),
+                    ));
                 }
                 Ok(())
             },
