@@ -181,8 +181,12 @@ impl RowOrigin {
 ///   sentinel, resolved whenever the forest carries at least one
 ///   sentinel-rooted anchor (mixed nested-page forests included). A
 ///   creation-enabled forest whose EVERY root dangles to a real-but-absent
-///   parent has no top-level anchor → `panic!` (genuinely malformed
-///   query/render spec; fail-loud remains right for truly impossible states).
+///   parent has no top-level anchor → `None` (no slot), the SAME disposition as
+///   the read-only multi-root case. `creation_slot: true` is applied by the
+///   default `collection_profile` to EVERY tree, so it does NOT imply a
+///   top-level-pages list — any non-top-level focus subtree, or a transient
+///   boot-race streaming intermediate, legitimately reaches this shape and must
+///   not crash (this fn runs on every signal tick).
 ///
 /// The single-root (main panel focus root) and flat-container shapes are
 /// unaffected — they never needed the opt-in.
@@ -270,10 +274,8 @@ pub fn resolve_creation_parent(
             // Creation-enabled list (`creation_slot: true`): a new item is a NEW
             // TOP-LEVEL PAGE, parented to the `no_parent` sentinel. This is only
             // meaningful when the forest actually carries a top-level anchor (at
-            // least one sentinel-rooted row); mixed forests with nested pages
-            // still resolve here. A creation-enabled forest whose EVERY root
-            // dangles to a real-but-absent parent has no top-level to create
-            // under → genuinely malformed query/render spec → loud panic.
+            // least one sentinel-rooted row); mixed nested-page forests still
+            // resolve here as long as ONE root sits at the sentinel.
             let no_parent = EntityUri::no_parent();
             if many.iter().any(|r| {
                 data_row_parent_id(r)
@@ -282,12 +284,25 @@ pub fn resolve_creation_parent(
             }) {
                 return Some(no_parent);
             }
-            panic!(
-                "creation slot: rowset has {} disjoint root rows (container={container}); \
-                 creation enabled but no top-level (no_parent) anchor — malformed query or render \
-                 spec",
-                many.len()
-            )
+            // No `no_parent` anchor in a multi-root forest → offer NO creation
+            // slot (`None`), the SAME disposition as the read-only multi-root
+            // case above. This is NOT a malformed spec: the default
+            // `collection_profile` (assets/default/types/collection_profile.yaml)
+            // renders EVERY tree with `creation_slot: true`, so
+            // `allow_root_creation` does NOT imply a top-level-pages list. Any
+            // non-top-level focus subtree (e.g. `journals::action::0`'s children)
+            // legitimately reaches here with all roots dangling to
+            // scope-filtered / absent parents — and `resolve_creation_parent`
+            // runs on EVERY streaming signal tick (reactive_view.rs), so a
+            // transient boot-race intermediate (the ActionEngine action-watcher
+            // mints the journal day-block live, concurrent with the journals
+            // seed) also transits this shape. There is simply no top-level to
+            // anchor a new root under, so no slot is offered until the rowset is
+            // coherent; a genuine top-level-pages list still resolves via the
+            // sentinel anchor above. A phantom mis-parented slot is never
+            // created, and a PERSISTENT wrong-row wiring is still caught by the
+            // post-convergence view-model invariants (never silently degraded).
+            None
         }
     }
 }
@@ -603,16 +618,50 @@ mod tests {
     }
 
     /// A creation-enabled forest whose EVERY root dangles to a real-but-absent
-    /// parent (NO sentinel anchor at all) has nothing top-level to create under
-    /// — a genuinely malformed query/render spec → loud panic (fail-loud
-    /// for truly impossible states).
+    /// parent (NO sentinel anchor at all) offers NO creation slot (`None`) —
+    /// there is no top-level to anchor a new root under. `creation_slot: true`
+    /// is applied by the default `collection_profile` to EVERY tree, so it does
+    /// NOT imply a top-level-pages list; this shape is reached by ordinary
+    /// non-top-level focus subtrees (and transient boot-race intermediates that
+    /// stream through this fn on every signal tick), never only by a malformed
+    /// spec. Same disposition as the read-only multi-root case.
     #[test]
-    #[should_panic(expected = "no top-level")]
-    fn creation_enabled_all_dangling_roots_panic() {
+    fn creation_enabled_all_dangling_roots_get_no_slot() {
         let rows = vec![
             row("block:p1", Some("block:outsideA")),
             row("block:p2", Some("block:outsideB")),
         ];
-        let _ = resolve_creation_parent(&rows, &uri("block:default-main-panel"), true);
+        assert!(resolve_creation_parent(&rows, &uri("block:default-main-panel"), true).is_none());
+    }
+
+    /// Boot-race regression (row_origin.rs panic under ActionEngine wiring).
+    /// The default `collection_profile`
+    /// (assets/default/types/collection_profile.yaml) renders EVERY tree
+    /// with `creation_slot: true`, so a NON-top-level focus subtree — here
+    /// `journals::action::0`'s streaming collection while the live
+    /// action-watcher mints the boot journal day-block — passes through
+    /// `resolve_creation_parent` on every signal tick (reactive_view.rs). A
+    /// transient / scope-filtered emission carries multiple roots all dangling
+    /// to real-but-absent parents (the day page under `block:journals`,
+    /// whose parent is not in this rowset) with NO `no_parent` anchor.
+    /// `creation_slot: true` does NOT imply a top-level-pages list here, so
+    /// this is not a malformed spec: there is simply no top-level to anchor
+    /// a new root under, so NO creation slot is offered (`None`) — the same
+    /// disposition as the read-only multi-root case. Before the contract
+    /// fix this PANICKED at boot, crashing every Todoist/ActionEngine
+    /// user's app.
+    #[test]
+    fn creation_enabled_non_top_level_disjoint_roots_get_no_slot() {
+        let rows = vec![
+            row(
+                "block:61133fe7-d4d5-ab1c-24e4-110da5f42293",
+                Some("block:journals"),
+            ),
+            row("block:journals-day-other", Some("block:journals")),
+        ];
+        assert!(
+            resolve_creation_parent(&rows, &uri("block:journals::action::0"), true).is_none(),
+            "a non-top-level creation-enabled multi-root forest offers no slot"
+        );
     }
 }
