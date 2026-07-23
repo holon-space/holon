@@ -463,6 +463,23 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                     controller = controller.with_mount_registry(registry);
                 }
 
+                // R3b: wire the C2b history store so the org-ingest doc-page
+                // create records provenance (absent in org-standalone/no-Turso
+                // wirings). Plus the injected clock, when a test provides one, so
+                // the ingest history `at_millis` is deterministic under replay.
+                if let Some(history) = resolver
+                    .optional_resolve_async::<dyn holon_api::HistoryStore>()
+                    .await
+                {
+                    controller = controller.with_history_store(history);
+                }
+                if let Some(injected) = resolver
+                    .optional_resolve_async::<holon_api::InjectedClock>()
+                    .await
+                {
+                    controller = controller.with_clock(injected.0.clone());
+                }
+
                 let (rerender_tx, rerender_rx) =
                     tokio::sync::mpsc::unbounded_channel::<OrgRerender>();
                 if let Some(feed) = block_feed.clone() {

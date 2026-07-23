@@ -206,6 +206,14 @@ pub struct FileSyncController {
     /// like a mount, so a hand-authored `:share-role: mount:` file is not
     /// silently skipped (data loss). `None` (SqlOnly / tests) ⇒ never skip.
     mount_registry: Option<Arc<dyn MountRegistry>>,
+    /// C2b history port (R3b): records ONE `block_history` op_group for a
+    /// genuinely-new doc/day PAGE created by RUNTIME org-ingest. `None` when no
+    /// Turso history store is wired. Never records during the initial cold-boot
+    /// scan (see `in_initial_scan`), so a vault load does not flood history.
+    history: Option<Arc<dyn holon_api::HistoryStore>>,
+    /// Clock for the ingest history event's `at_millis` (injected in tests; the
+    /// OS `SystemClock` in production).
+    clock: Arc<dyn holon_api::Clock>,
 
     /// Initial-scan feed-barrier batching (boot ingest latency, Options 0+1).
     /// `None` in steady state — each runtime `on_file_changed` pays its own
@@ -304,6 +312,8 @@ impl FileSyncController {
             doc_blocks: HashMap::new(),
             text_merge: None,
             mount_registry: None,
+            history: None,
+            clock: Arc::new(holon_api::SystemClock),
             scan_feed_ids: None,
             quarantined: HashSet::new(),
             quarantine_skip_logged: std::sync::Mutex::new(HashSet::new()),
@@ -525,6 +535,20 @@ impl FileSyncController {
     /// command bus.
     pub fn with_downstream_projection(mut self, projection: Arc<dyn DownstreamProjection>) -> Self {
         self.downstream = Some(projection);
+        self
+    }
+
+    /// Wire the C2b history store (R3b): the org-ingest doc-page create then
+    /// records one op_group through it. Absent in org-standalone wirings.
+    pub fn with_history_store(mut self, history: Arc<dyn holon_api::HistoryStore>) -> Self {
+        self.history = Some(history);
+        self
+    }
+
+    /// Override the clock used for ingest history timestamps (test
+    /// determinism).
+    pub fn with_clock(mut self, clock: Arc<dyn holon_api::Clock>) -> Self {
+        self.clock = clock;
         self
     }
 
@@ -1402,11 +1426,15 @@ impl FileSyncController {
         // store-health seam's job (`heal_title_less_doc_roots` boot sweep +
         // the file-watch heal in `on_file_changed`), which runs before/around this
         // ingest, so the doc resolved here is already healed in the store.
-        let document = match bare_id_in_file.as_deref() {
+        // `doc_was_created` (R3b): whether THIS ingest minted the doc-page (vs
+        // resolved an existing one). Computed from the resolution itself —
+        // BEFORE `create_forcing_id`/`resolve_dir_page_chain` materialise the row
+        // — so a re-ingest/edit of an existing doc never counts as a create.
+        let (document, doc_was_created) = match bare_id_in_file.as_deref() {
             Some(bare) => {
                 let id = EntityUri::block(bare);
                 match self.doc_manager.get_by_id(&id).await? {
-                    Some(doc) => doc,
+                    Some(doc) => (doc, false),
                     None => {
                         let parent_id = if segments.len() > 1 {
                             let parent_segments: Vec<&str> =
@@ -1425,13 +1453,33 @@ impl FileSyncController {
                         // `(parent, title)` and hand that placeholder's id back,
                         // so writeback would re-mint this file's `#+ID` (data
                         // loss). `create_forcing_id` keeps the authoritative id.
-                        self.doc_manager.create_forcing_id(new_doc).await?
+                        (self.doc_manager.create_forcing_id(new_doc).await?, true)
                     }
                 }
             }
-            None => self.resolve_dir_page_chain(&segment_refs).await?,
+            // No `#+ID`: name-chain-derived identity. A genuine NEW doc-page iff
+            // the store has no page for this name chain BEFORE
+            // `resolve_dir_page_chain` create-if-absents it.
+            None => {
+                let existed = self
+                    .doc_manager
+                    .find_by_name_chain(&segment_refs)
+                    .await?
+                    .is_some();
+                (self.resolve_dir_page_chain(&segment_refs).await?, !existed)
+            }
         };
         let document_uri = document.id.clone();
+
+        // R3b (doc-ingest history): record ONE `block_history` op_group for a
+        // genuinely-new doc/day PAGE created by RUNTIME org-ingest (a user
+        // CreateDocument / external new file), so the C2 provenance floor
+        // (`inv-history-records-all-creates`) covers ingest creates, not only
+        // engine-routed ones. Cold-boot scan is excluded (`in_initial_scan`) so a
+        // vault load never floods history. Ingest-origin: recorded, never on the
+        // undo stack (undo-reach of ingest ops is a separate item).
+        let doc_page_is_new_runtime =
+            doc_was_created && !self.in_initial_scan() && self.history.is_some();
 
         // The document is a block too. Send it to the consolidator as a create
         // intent so it becomes a real node carrying its content + `Page` tag —
@@ -1454,6 +1502,22 @@ impl FileSyncController {
             )
             .await
             .map_err(|e| anyhow::anyhow!("create_in_tree(document {document_uri}): {e:#}"))?;
+
+        if doc_page_is_new_runtime {
+            let history = self
+                .history
+                .as_ref()
+                .expect("doc_page_is_new_runtime implies a wired history store");
+            history
+                .record(holon_api::HistoryEvent::create_event(
+                    "block",
+                    document_uri.as_str(),
+                    &holon_api::OpOrigin::Ingest,
+                    self.clock.now_millis(),
+                ))
+                .await
+                .with_context(|| format!("record ingest doc-create history for {document_uri}"))?;
+        }
 
         // Register UUID → file path alias (if Loro is available)
         if let Some(ref registrar) = self.alias_registrar {

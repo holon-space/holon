@@ -284,6 +284,21 @@ pub fn register_schema_providers(injector: &Injector) {
         Shared::new(DbReady::<HistoryTables>::new())
     }));
 
+    // -- HistoryStore (C2b): the typed `dyn HistoryStore` port over the boot-
+    // owned `block_history` table, so non-engine writers (the org-ingest
+    // doc-page create in `FileSyncController`) can record provenance through the
+    // same store the engine uses. Depends on HistoryTables so the relation
+    // exists before any record. --
+    injector.provide::<dyn holon_api::HistoryStore>(
+        Provider::root_async(|inj| async move {
+            let _hist = inj.resolve_async::<DbReady<HistoryTables>>().await;
+            let db = inj.resolve::<dyn DbHandleProvider>();
+            std::sync::Arc::new(crate::api::TursoHistoryStore::new(db.handle()))
+                as std::sync::Arc<dyn holon_api::HistoryStore>
+        })
+        .with_dependency::<DbReady<HistoryTables>>(),
+    );
+
     // -- AutomationsJournalView (matview grouped over block_history — depends on
     // HistoryTables only) --
     injector.provide::<DbReady<AutomationsJournalView>>(
