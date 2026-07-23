@@ -2579,6 +2579,12 @@ pub trait SutSeamMutate {
         doc_uri: &holon_api::EntityUri,
         blocks: &[holon_api::block::Block],
     );
+    /// Replay a STALE external snapshot over the doc's file: re-render the
+    /// doc's CURRENT content but with every block `:ID:` drawer stripped, as
+    /// an editor/agent writing from a pre-writeback copy (before Holon minted
+    /// the ids) would. Re-ingest must reconcile the id-less blocks against the
+    /// store's current children -- NOT duplicate them (the PR #81 bug class).
+    async fn stale_external_rewrite(&self, doc_uri: &holon_api::EntityUri);
 }
 
 /// SUT capability: create a block through the focused panel's creation slot
