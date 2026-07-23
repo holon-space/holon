@@ -99,6 +99,56 @@ fn holon_to_json_value(v: &Value) -> serde_json::Value {
     }
 }
 
+/// Output encoding for query-result tools. TOON — a dense tabular encoding
+/// (see `holon_toon::table`) that drops the repeated per-row key names — is
+/// the default; JSON is the explicit opt-out for callers that need it (e.g.
+/// nested-blob-heavy rows, where TOON's advantage disappears).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OutputFormat {
+    Json,
+    Toon,
+}
+
+/// Parse the optional `format` tool param. TOON is the default; `"json"` is
+/// the explicit opt-out. Fails loud on an unknown value rather than silently
+/// defaulting (parse-don't-validate at the boundary).
+fn parse_output_format(param: Option<&str>) -> Result<OutputFormat, rmcp::ErrorData> {
+    match param {
+        None | Some("toon") => Ok(OutputFormat::Toon),
+        Some("json") => Ok(OutputFormat::Json),
+        Some(other) => Err(rmcp::ErrorData::invalid_params(
+            format!("unknown format {other:?}: expected \"json\" or \"toon\""),
+            None,
+        )),
+    }
+}
+
+/// Encode already-JSON-ified rows as a TOON tabular document. Column set is the
+/// sorted union of keys across rows; a missing key is an absent cell (distinct
+/// from JSON `null`). Nested JSON objects/arrays become JSON-string cells.
+fn rows_to_toon(rows: &[HashMap<String, serde_json::Value>]) -> Result<String, rmcp::ErrorData> {
+    let mut toon_rows: Vec<holon_toon::Row> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut r = holon_toon::Row::new();
+        for (k, v) in row {
+            let tv = holon_toon::ToonValue::from_json(v).map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("TOON encode failed for key {k:?}: {e}"),
+                    None,
+                )
+            })?;
+            r.insert(k.clone(), tv);
+        }
+        toon_rows.push(r);
+    }
+    let table = holon_toon::Table::from_rows("rows", toon_rows).map_err(|e| {
+        rmcp::ErrorData::internal_error(format!("TOON table build failed: {e}"), None)
+    })?;
+    table
+        .render()
+        .map_err(|e| rmcp::ErrorData::internal_error(format!("TOON render failed: {e}"), None))
+}
+
 // Helper function to convert HashMap<String, serde_json::Value> to
 // StorageEntity
 /// Resolve the calling agent's id from a tool param or `HOLON_AGENT_ID`.
@@ -371,7 +421,11 @@ impl HolonMcpServer {
         description = "Execute a query in PRQL, GQL, or SQL and return results. Set language to \
                        'prql', 'gql', or 'sql'. This uses a very similar mechanism as the UI does \
                        and adds information about widget specs, operations and profiles. Use this \
-                       if you need to debug backend -> UI interaction."
+                       if you need to debug backend -> UI interaction. Results default to TOON, a \
+                       dense tabular encoding that emits each column name once in a header \
+                       (`rows[N]{cols}:` then one comma-separated line per row) instead of \
+                       repeating it per row. Set format='json' for plain JSON rows, e.g. for \
+                       highly heterogeneous shapes or rows dominated by nested JSON blobs."
     )]
     async fn execute_query(
         &self,
@@ -408,7 +462,13 @@ impl HolonMcpServer {
 
         let duration_ms = query_result.duration.as_secs_f64() * 1000.0;
         let include_profile = params.include_profile.unwrap_or(false);
-        self.finalize_query_response(&query_result.rows, Some(duration_ms), include_profile)
+        let format = parse_output_format(params.format.as_deref())?;
+        self.finalize_query_response(
+            &query_result.rows,
+            Some(duration_ms),
+            include_profile,
+            format,
+        )
     }
 
     #[tool(
@@ -499,7 +559,13 @@ impl HolonMcpServer {
 
         let duration_ms = query_result.duration.as_secs_f64() * 1000.0;
         let include_profile = params.include_profile.unwrap_or(false);
-        self.finalize_query_response(&query_result.rows, Some(duration_ms), include_profile)
+        let format = parse_output_format(params.format.as_deref())?;
+        self.finalize_query_response(
+            &query_result.rows,
+            Some(duration_ms),
+            include_profile,
+            format,
+        )
     }
 
     #[tool(
@@ -918,7 +984,9 @@ impl HolonMcpServer {
     #[tool(
         description = "Execute raw SQL directly against Turso, bypassing all query compilation \
                        (PRQL/GQL) and SQL transforms. Use this for Turso-specific queries, \
-                       pragmas, or when you need to avoid the holon query pipeline."
+                       pragmas, or when you need to avoid the holon query pipeline. Results \
+                       default to TOON, a dense tabular encoding (column names emitted once in a \
+                       header, not per row); set format='json' for plain JSON rows."
     )]
     async fn execute_raw_sql(
         &self,
@@ -941,7 +1009,8 @@ impl HolonMcpServer {
             })?;
 
         let duration_ms = query_result.duration.as_secs_f64() * 1000.0;
-        self.finalize_query_response(&query_result.rows, Some(duration_ms), false)
+        let format = parse_output_format(params.format.as_deref())?;
+        self.finalize_query_response(&query_result.rows, Some(duration_ms), false, format)
     }
 
     #[tool(
@@ -1238,7 +1307,7 @@ impl HolonMcpServer {
                 )
             })?;
 
-        self.finalize_query_response(&rows, None, false)
+        self.finalize_query_response(&rows, None, false, OutputFormat::Json)
     }
 
     #[tool(
@@ -3109,6 +3178,7 @@ impl HolonMcpServer {
         rows: &[holon_api::StorageEntity],
         duration_ms: Option<f64>,
         include_profile: bool,
+        format: OutputFormat,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let json_rows: Vec<HashMap<String, serde_json::Value>> = rows
             .iter()
@@ -3139,6 +3209,14 @@ impl HolonMcpServer {
                 json_row
             })
             .collect();
+
+        if format == OutputFormat::Toon {
+            // TOON carries the rows only (no row_count/duration envelope — the
+            // header's `[N]` already states the count). Callers that need the
+            // envelope stay on JSON.
+            let toon = rows_to_toon(&json_rows)?;
+            return Ok(CallToolResult::success(vec![Content::text(toon)]));
+        }
 
         let result = QueryResult {
             rows: json_rows.clone(),
@@ -3414,6 +3492,14 @@ mod tests {
     fn json_to_holon_string() {
         let v = json_to_holon_value(serde_json::json!("hello"));
         assert_eq!(v, Value::String("hello".into()));
+    }
+
+    #[test]
+    fn output_format_defaults_to_toon() {
+        assert!(parse_output_format(None).unwrap() == OutputFormat::Toon);
+        assert!(parse_output_format(Some("toon")).unwrap() == OutputFormat::Toon);
+        assert!(parse_output_format(Some("json")).unwrap() == OutputFormat::Json);
+        assert!(parse_output_format(Some("yaml")).is_err());
     }
 
     // ── type_text fail-loud contract (dogfood #5 row 147) ────────────────────

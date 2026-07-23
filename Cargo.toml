@@ -8,6 +8,7 @@ members = [
     "crates/holon-engine",
     "crates/holon-expr",
     "crates/holon-org-format",
+    "crates/holon-toon",
     "crates/holon-orgmode",
     "crates/holon-markdown",
     "crates/holon-filesystem",
