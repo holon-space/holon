@@ -1,0 +1,25 @@
+[package]
+name = "holon-toon"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Experiment: a TOON-based dense, round-trippable text projection of the Holon block forest, compared against Org syntax for agent read/patch workflows."
+
+[dependencies]
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+# Only pulled in for the token-measurement example; the library and its
+# round-trip PBT never touch the tokenizer.
+[dependencies.tiktoken-rs]
+version = "0.6"
+optional = true
+
+[features]
+measure = ["dep:tiktoken-rs"]
+
+[[example]]
+name = "measure"
+required-features = ["measure"]
