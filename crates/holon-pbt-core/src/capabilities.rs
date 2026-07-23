@@ -118,6 +118,23 @@ pub trait SutAdviceMatview {
     async fn advice_matviews(&self) -> Vec<(String, Vec<(String, String, u32)>)>;
 }
 
+/// SUT-side differential observation for
+/// `inv-matview-consistent-with-recompute`. For every `CREATE MATERIALIZED
+/// VIEW` in the SUT's `sqlite_master`, reads the IVM-maintained matview
+/// contents AND re-executes the view's own defining SELECT now, returning both
+/// as canonically-sorted multisets so the body is a pure comparison. A
+/// persistent per-view divergence is an IVM-vs-recompute bug (the "22-vs-20
+/// matview DUP" class); transient CDC lag self-heals inside the
+/// body's bounded-wait window. Placeholder / context-param views are skipped
+/// inside the impl (disclosed, not faked).
+#[holon_macros::capmap_adapter]
+pub trait SutMatviews {
+    /// Per MATERIALIZED view: (name, matview_rows, recompute_rows).
+    /// Both row sets canonically sorted; multiset semantics (dups kept).
+    async fn matview_recompute_snapshot(&self)
+    -> Vec<(String, Vec<Vec<String>>, Vec<Vec<String>>)>;
+}
+
 // ─── Reference-side: BlockTree ────────────────────────────────────────
 
 /// Read-side block-tree queries used by Phase 5 T0 transitions and their
