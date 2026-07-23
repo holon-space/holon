@@ -1376,6 +1376,37 @@ impl ReferenceState {
         new_id
     }
 
+    /// Re-mint `old_id` with a FRESH synthetic `block::split-N` id: move the
+    /// block under the new key (content, parent, sequence all preserved) and
+    /// re-parent every child (`parent_id == old_id` -> new id). Models the
+    /// reference side of the R2 id-less-reconcile CHURN (see the
+    /// `RefBlockTreeMut::remint_block` trait doc). No `recanon_and_rebuild`:
+    /// positions are unchanged, and it would double-bump `next_id`.
+    pub fn remint_block(&mut self, old_id: &EntityUri) -> EntityUri {
+        let new_id = EntityUri::block(&format!(":split-{}", self.domain.block_state.next_id));
+        self.domain.block_state.next_id += 1;
+        let mut block = self
+            .domain
+            .block_state
+            .blocks
+            .remove(old_id)
+            .unwrap_or_else(|| panic!("remint_block: block {old_id} absent from ref block_state"));
+        block.id = new_id.clone();
+        self.domain.block_state.blocks.insert(new_id.clone(), block);
+        if let Some(doc) = self.domain.block_state.block_documents.remove(old_id) {
+            self.domain
+                .block_state
+                .block_documents
+                .insert(new_id.clone(), doc);
+        }
+        for child in self.domain.block_state.blocks.values_mut() {
+            if child.parent_id == *old_id {
+                child.parent_id = new_id.clone();
+            }
+        }
+        new_id
+    }
+
     /// Create a new text block under `parent` as its LAST child — the oracle
     /// prediction for the creation-slot "type here to create" gesture
     /// (`CreateBlockUnderFocus`). Prod's `block.create` from the

@@ -247,6 +247,17 @@ pub trait RefBlockTreeMut: RefBlockTree {
     /// cursor to start — the whole `Redo` reference effect. Defaults to a
     /// no-op for slices that don't model a redo stack.
     fn redo_last_and_reset_cursors(&mut self) {}
+
+    /// Re-mint a block: swap its identity for a FRESH synthetic id (keeping
+    /// content, parent, and position) and re-parent its children onto the new
+    /// id. Returns the new synthetic id. Models the reference side of the R2
+    /// id-less-reconcile CHURN: when `StaleExternalRewrite` replays a doc with
+    /// non-unique / empty content, `tiered_match` cannot uniquely remap those
+    /// blocks, so the SUT re-mints them; the oracle must predict the same so
+    /// the per-tick synthetic→real reconcile pairs 1:1 instead of
+    /// panicking. Only `StaleExternalRewrite` (composed environment)
+    /// reaches this.
+    fn remint_block(&mut self, old_id: &EntityUri) -> EntityUri;
 }
 
 // ─── Reference-side: EditorMirror ────────────────────────────────────

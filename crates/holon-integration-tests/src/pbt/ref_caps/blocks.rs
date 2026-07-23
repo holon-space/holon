@@ -209,6 +209,12 @@ impl RefBlockTreeMut for ReferenceState {
         cap_id(&new_uri)
     }
 
+    fn remint_block(&mut self, old_id: &EntityUri) -> EntityUri {
+        let uri = parse_id_must(old_id);
+        let new_uri = ReferenceState::remint_block(self, &uri);
+        cap_id(&new_uri)
+    }
+
     fn join_block(&mut self, id: &EntityUri) -> usize {
         let uri = parse_id_must(id);
         ReferenceState::join_block(self, &uri)
