@@ -30,6 +30,8 @@ use holon_api::TaskState;
 use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::predicate::Predicate;
+use holon_api::vault_shape::VAULT_SHAPE_SCHEMA_VERSION;
+use holon_api::vault_shape::VaultShapeProfile;
 use holon_orgmode::models::OrgBlockExt;
 use holon_pbt_core::content_generators::extended_char;
 use holon_pbt_core::content_generators::extended_content_arm;
@@ -123,12 +125,90 @@ pub fn extended_gen_enabled() -> bool {
     })
 }
 
+/// Profile-driven shape widening (`HOLON_PBT_SHAPE_PROFILE=<path-to-json>`).
+///
+/// When set, the generated vault's per-file block count, headline content
+/// length and (via block count feeding the parent-selector) tree depth widen
+/// toward the shape of a REAL vault — the environment-parity lever
+/// (ENV dominates the escape funnel). Unset ⇒ the historical hardcoded bounds,
+/// so the blessed default gates stay byte-identical. The profile is read at
+/// strategy BUILD time and cached; the bounds only ever RAISE range upper
+/// bounds, so proptest still shrinks every range toward its small end and
+/// shrink quality is preserved regardless of the active profile.
+pub fn active_shape_profile() -> Option<&'static VaultShapeProfile> {
+    static PROFILE: std::sync::OnceLock<Option<VaultShapeProfile>> = std::sync::OnceLock::new();
+    PROFILE
+        .get_or_init(|| {
+            let path = std::env::var("HOLON_PBT_SHAPE_PROFILE").ok()?;
+            let json = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("HOLON_PBT_SHAPE_PROFILE={path}: {e}"));
+            let profile: VaultShapeProfile = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("HOLON_PBT_SHAPE_PROFILE={path} parse error: {e}"));
+            assert_eq!(
+                profile.schema_version, VAULT_SHAPE_SCHEMA_VERSION,
+                "shape profile schema mismatch (regenerate with the current extractor)"
+            );
+            eprintln!(
+                "[HOLON_PBT_SHAPE_PROFILE] ACTIVE ({path}): blocks/file<={} content<={} \
+                 depth-reach<={}",
+                blocks_per_file_gen_bound_for(&profile),
+                content_len_gen_bound_for(&profile),
+                profile.depth_bound(),
+            );
+            Some(profile)
+        })
+        .as_ref()
+}
+
+/// Runtime ceiling on the per-file block count, so one profile-driven case
+/// stays tractable inside the 600s smoke gate even when the real vault's p95 is
+/// far larger. Disclosed cap, not a silent clamp.
+const MAX_BLOCKS_PER_FILE_GEN: u32 = 24;
+/// Runtime ceiling on generated headline content length (chars).
+const MAX_CONTENT_LEN_GEN: u32 = 128;
+
+fn blocks_per_file_gen_bound_for(p: &VaultShapeProfile) -> u32 {
+    p.blocks_per_file_bound().clamp(1, MAX_BLOCKS_PER_FILE_GEN)
+}
+
+fn content_len_gen_bound_for(p: &VaultShapeProfile) -> u32 {
+    p.content_length_bound().clamp(1, MAX_CONTENT_LEN_GEN)
+}
+
+/// Per-file block-count range upper bound: historical `5`, or the (capped)
+/// profile p95 when a shape profile is active.
+pub fn blocks_per_file_gen_bound() -> usize {
+    match active_shape_profile() {
+        Some(p) => blocks_per_file_gen_bound_for(p) as usize,
+        None => 5,
+    }
+}
+
+/// Max total headline-content chars: historical `21` (`[A-Z]` + `{0,20}`), or
+/// the (capped) profile p95 when a shape profile is active.
+pub fn content_len_gen_bound() -> u32 {
+    match active_shape_profile() {
+        Some(p) => content_len_gen_bound_for(p),
+        None => 21,
+    }
+}
+
+/// The base headline-content strategy, width driven by
+/// [`content_len_gen_bound`]. Same character class as before (single-line, no
+/// newline), just a wider length ceiling under a profile.
+fn content_base_regex() -> BoxedStrategy<String> {
+    let tail = content_len_gen_bound().saturating_sub(1);
+    proptest::string::string_regex(&format!("[A-Z][a-zA-Z0-9 ]{{0,{tail}}}"))
+        .expect("content base regex is valid")
+        .boxed()
+}
+
 /// Generate single-line block content for headlines.
 /// Headlines must be single-line because the org parser treats newlines in
 /// headline text as content boundaries — multi-line headlines cause
 /// `:PROPERTIES:` drawers to be embedded in the content.
 pub fn content_strategy() -> BoxedStrategy<String> {
-    let base = "[A-Z][a-zA-Z0-9 ]{0,20}".prop_map(|s| s).boxed();
+    let base = content_base_regex();
     prop_oneof![6 => base, 4 => extended_content_arm()].boxed()
 }
 
@@ -286,10 +366,12 @@ pub fn generate_org_file_content_with_keywords(
                 // `sel % (i + 1)` — 0 = doc root, k = heading `k-1`. Same
                 // predecessor trick as `make_requires`: only already-built
                 // headings are eligible, so the tree is well-founded by
-                // construction. Default gen ignores this (flat files).
+                // construction. Nesting is always active; widening the
+                // per-file block count (via a shape profile) widens the
+                // reachable tree depth toward real-vault shape.
                 prop::num::u8::ANY,
             ),
-            1..=5,
+            1..=blocks_per_file_gen_bound(),
         ),
     )
         .prop_map(move |(filename, headings)| {
