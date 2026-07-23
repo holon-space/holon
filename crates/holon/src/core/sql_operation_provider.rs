@@ -535,7 +535,7 @@ impl SqlOperationProvider {
 
     /// Whether `id` carries the `Page` tag (mirrors the `tag='Page'` join
     /// precedent used by `resolve_page_name`).
-    async fn block_is_page(&self, id: &str) -> Result<bool> {
+    pub async fn block_is_page(&self, id: &str) -> Result<bool> {
         let sql = format!(
             "SELECT 1 FROM block_tags WHERE block_id = '{}' AND tag = '{}' LIMIT 1",
             id.replace('\'', "''"),

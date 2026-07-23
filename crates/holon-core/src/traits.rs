@@ -734,10 +734,33 @@ where
 }
 
 /// Backward-compatible alias combining both query and maintenance helpers
+#[async_trait]
 pub trait BlockDataSourceHelpers<T>: BlockQueryHelpers<T> + BlockMaintenanceHelpers<T>
 where
     T: BlockEntity + MaybeSendSync + 'static,
 {
+    /// Authoritative `Page`-tag check — reads the WRITE authority for the tag,
+    /// NOT the possibly-lagging read projection that `get_by_id` deserializes
+    /// (`Block::tags` comes from the `block` matview, which trails the
+    /// block_tags edge write via CDC). Page-BOUNDARY guards (`outdent`) MUST
+    /// use this: a page whose `Page` tag is committed to the store but not
+    /// yet reflected in the matview would otherwise be mis-seen as a
+    /// non-page, letting a child escape its page container into the
+    /// enclosing page (the journals-phantom family — block_raw corruption
+    /// every downstream projection then faithfully mirrors). Deliberately
+    /// NOT on the `#[operations_trait]` `BlockOperations` (it is an
+    /// internal guard read, not a dispatchable operation). The default
+    /// falls back to the projected block, correct for stores with no
+    /// separate write authority (Loro / in-memory test substrate); the SQL
+    /// store overrides it to read `block_tags` directly, closing the
+    /// read-snapshot window completely.
+    async fn is_page_authoritative(&self, id: &EntityUri) -> Result<bool> {
+        Ok(self
+            .get_by_id(id.as_str())
+            .await?
+            .map(|b| b.is_page())
+            .unwrap_or(false))
+    }
 }
 
 /// Read a block's content through the cell registry. Returns `None`
@@ -1058,7 +1081,14 @@ where
         // its page container to the page's own level — escaping the page. That
         // crossing is forbidden. Reject loudly (no structural change); the editor
         // surfaces this as a user-visible CommandFailed toast.
-        if parent.is_page() {
+        //
+        // Read the parent's page-ness from the WRITE authority, not `parent`
+        // (deserialized from the lagging `block` matview): a seeded / nested
+        // day-page whose `Page` tag has not yet propagated to the matview would
+        // otherwise read as a non-page, letting this child escape into
+        // `journals` (the journals-phantom family — block_raw corruption that
+        // every downstream projection faithfully mirrors).
+        if self.is_page_authoritative(parent_id).await? {
             return Err(anyhow::anyhow!(
                 "Cannot outdent a direct child of a page: block {id_str} would escape its page \
                  container (ADR 0028 D1). Move it elsewhere instead."

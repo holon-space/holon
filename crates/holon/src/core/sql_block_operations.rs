@@ -213,7 +213,16 @@ impl BlockQueryHelpers<Block> for SqlBlockOperations {
     }
 }
 impl BlockMaintenanceHelpers<Block> for SqlBlockOperations {}
-impl BlockDataSourceHelpers<Block> for SqlBlockOperations {}
+#[async_trait]
+impl BlockDataSourceHelpers<Block> for SqlBlockOperations {
+    /// Read the `Page` tag from the write authority (`block_tags`) instead of
+    /// the `block`-matview-projected `Block::tags`, which trails the edge write
+    /// via CDC. Closes the read-snapshot window that let a day-page's child
+    /// escape into `journals` during tag-propagation lag (journals-phantom).
+    async fn is_page_authoritative(&self, id: &holon_api::EntityUri) -> Result<bool> {
+        self.sql_ops.block_is_page(id.as_str()).await
+    }
+}
 impl BlockOperations<Block> for SqlBlockOperations {
     fn cells(&self) -> Option<&dyn EntityCellRegistry> {
         Some(&*self.cell_registry as &dyn EntityCellRegistry)

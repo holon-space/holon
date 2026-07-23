@@ -320,7 +320,20 @@ impl SutBlockTreeWrite for KeystrokeBlockTreeWriter {
         // Shift+Tab → `outdent` (BackTab) in the `HeadlessEditorMirror`.
         let resolved = self.resolve(id);
         self.focus_editor(&resolved, "Outdent").await;
-        self.key("tab", &["shift"], "Outdent").await;
+        // ADR 0028 D1: outdenting a DIRECT CHILD OF A PAGE is REJECTED by the op
+        // engine — it would escape the page container into the enclosing page
+        // (the journals-phantom corruption). Prod surfaces a CommandFailed toast
+        // and leaves the tree unchanged; `outdent_apply_to_ref` models the SAME
+        // no-op. So a page-boundary rejection here is the CORRECT outcome, not a
+        // driver failure — swallow it as a no-op (matching the reference). Any
+        // OTHER dispatch error stays fail-loud.
+        if let Err(e) = self.driver.send_raw_keystroke("tab", &["shift"]).await {
+            let msg = format!("{e:#}");
+            if msg.contains("escape its page container") {
+                return;
+            }
+            panic!("[Outdent/keystroke] tab [\"shift\"] failed: {msg}");
+        }
     }
 
     // `move_up`/`move_down` are block-reorder ops with NO editor-mirror keystroke
