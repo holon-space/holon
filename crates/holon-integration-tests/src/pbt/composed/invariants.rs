@@ -45,6 +45,8 @@ pub mod mark_bounds_within_content;
 pub mod observed_errors;
 pub mod reseed_leak;
 pub mod sticky_accordion_spec;
+pub mod wheel_occlusion_routing;
+pub mod wheel_two_mode_motion_law;
 // `navigation_focus` is now auto-derived by `capability_pair! { pub trait Focus
 // }` in holon-pbt-core (`inv_pair_focus_current_focus_rows`); its hand-written
 // wiring + body files were deleted.

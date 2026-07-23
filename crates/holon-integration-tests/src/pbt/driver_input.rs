@@ -423,6 +423,19 @@ impl SutBlockInteract for DriverInputComponent {
             });
     }
 
+    async fn scroll_over(&self, element_id: &str, delta_y: f32) {
+        // Windowed wheel: forward to the production `UserDriver`, which
+        // synthesizes a real scroll-wheel event at the element's centre. The
+        // element id may be a block URI (`block:default-main-panel`) or a raw
+        // geometry handle (the sticky-footer id); parse leniently.
+        let uri = holon_api::EntityUri::parse(element_id)
+            .unwrap_or_else(|_| holon_api::EntityUri::block(element_id));
+        self.driver()
+            .scroll_entity(&uri, 0.0, delta_y)
+            .await
+            .unwrap_or_else(|e| panic!("[WheelScroll] scroll_entity({element_id}) failed: {e:#}"));
+    }
+
     async fn collapse_toggle(&self, block_id: &EntityUri) {
         let resolved = self.resolve(block_id);
         let block_id = &resolved;
