@@ -56,6 +56,7 @@ use holon_pbt_core::capabilities::SutFocus;
 use holon_pbt_core::capabilities::SutFocusWrite;
 use holon_pbt_core::capabilities::SutHistory;
 use holon_pbt_core::capabilities::SutHistoryWrite;
+use holon_pbt_core::capabilities::SutMatviews;
 use holon_pbt_core::capabilities::SutMcpEmit;
 use holon_pbt_core::capabilities::SutMutate;
 use holon_pbt_core::capabilities::SutNavHistoryDrive;
@@ -944,6 +945,25 @@ impl HeadlessFrontendComponent {
 
     fn cell(row: &holon_api::StorageEntity, col: &str) -> Option<String> {
         row.get(col).and_then(|v| v.as_string()).map(str::to_string)
+    }
+
+    /// Canonicalize raw SQL rows into a sorted multiset for order-insensitive
+    /// diffing. Each row's cells become `"{key}={value:?}"` over ALL columns,
+    /// sorted; rows are then sorted; duplicate rows are KEPT (the matview-DUP
+    /// bug class hinges on multiset, not set, semantics). Inc-0 recon confirmed
+    /// no `rowid`/`_rowid` column is injected, so no key is dropped.
+    fn canonicalize_rows(rows: Vec<holon_api::StorageEntity>) -> Vec<Vec<String>> {
+        let mut out: Vec<Vec<String>> = rows
+            .into_iter()
+            .map(|row| {
+                let mut cells: Vec<String> =
+                    row.iter().map(|(k, v)| format!("{k}={v:?}")).collect();
+                cells.sort();
+                cells
+            })
+            .collect();
+        out.sort();
+        out
     }
 
     fn sorted_fields(row: holon_api::StorageEntity) -> Vec<String> {
@@ -2088,6 +2108,62 @@ impl SutAdviceMatview for HeadlessFrontendComponent {
                 })
                 .collect();
             out.push((name, rows));
+        }
+        out
+    }
+}
+
+/// `SutMatviews` over the live Turso projection — the differential teeth for
+/// `inv-matview-consistent-with-recompute`. Enumerates every
+/// `CREATE MATERIALIZED VIEW` from `sqlite_master` (same `sql_query` plumbing
+/// every other SUT SQL read uses), reads each matview's contents AND
+/// re-executes its defining SELECT, and returns both as canonically-sorted
+/// multisets. Inc-0 recon pinned the contract: all views are materialized, no
+/// `rowid`/`_rowid` column is injected, every defining SELECT direct-executes
+/// cleanly — so a direct-exec error is UNEXPECTED and fail-louds via
+/// `sql_query`. Views whose stored SELECT still carries a `?`/`$` placeholder
+/// (context-param, Inc 4) are skipped WITH DISCLOSURE, never faked.
+#[async_trait::async_trait(?Send)]
+impl SutMatviews for HeadlessFrontendComponent {
+    async fn matview_recompute_snapshot(
+        &self,
+    ) -> Vec<(String, Vec<Vec<String>>, Vec<Vec<String>>)> {
+        let views = self
+            .sql_query("SELECT name, sql FROM sqlite_master WHERE type='view'")
+            .await;
+        let mut out = Vec::new();
+        for row in &views {
+            let name = Self::cell(row, "name").expect("sqlite_master view row must carry a name");
+            let sql =
+                Self::cell(row, "sql").expect("sqlite_master view row must carry defining sql");
+            // Keep only materialized views; drop plain `CREATE VIEW`.
+            if !sql
+                .trim_start()
+                .to_uppercase()
+                .starts_with("CREATE MATERIALIZED VIEW")
+            {
+                continue;
+            }
+            // Strip the `CREATE MATERIALIZED VIEW <name> AS ` prefix via the first
+            // case-insensitive ` AS ` — fail loud if the DDL shape is unexpected.
+            let as_at = sql
+                .to_lowercase()
+                .find(" as ")
+                .expect("materialized view DDL must contain ' AS '");
+            let select_sql = sql[as_at + 4..].to_string();
+            // Context-param / placeholder views are out of scope for Inc 1: skip
+            // WITH DISCLOSURE rather than mis-recompute (plan §1).
+            if select_sql.contains('?') || select_sql.contains('$') {
+                eprintln!(
+                    "[inv-matview-consistent-with-recompute] SKIP view {name}: \
+                     defining SELECT carries a ?/$ placeholder (context-param, Inc 4)"
+                );
+                continue;
+            }
+            let matview_rows =
+                Self::canonicalize_rows(self.sql_query(&format!("SELECT * FROM {name}")).await);
+            let recompute_rows = Self::canonicalize_rows(self.sql_query(&select_sql).await);
+            out.push((name, matview_rows, recompute_rows));
         }
         out
     }
