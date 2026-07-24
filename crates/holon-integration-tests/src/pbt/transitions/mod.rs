@@ -95,6 +95,7 @@ mod drag_drop_block;
 mod emit_mcp_data;
 mod epoch_flip_rejected;
 mod expand_toggle;
+pub mod external_write_same_block_focused;
 pub mod external_write_while_focused;
 pub mod focus_editable_text;
 mod git_init;
@@ -155,6 +156,7 @@ pub use drag_drop_block::DragDropBlock;
 pub use emit_mcp_data::EmitMcpData;
 pub use epoch_flip_rejected::EpochFlipRejected;
 pub use expand_toggle::ExpandToggle;
+pub use external_write_same_block_focused::ExternalWriteSameBlockFocused;
 pub use external_write_while_focused::ExternalWriteWhileFocused;
 pub use focus_editable_text::FocusEditableText;
 pub use git_init::GitInit;
@@ -217,6 +219,7 @@ crate::declare_e2e_transitions! {
         BulkExternalAdd(BulkExternalAdd),
         StaleExternalRewrite(StaleExternalRewrite),
         ExternalWriteWhileFocused(ExternalWriteWhileFocused),
+        ExternalWriteSameBlockFocused(ExternalWriteSameBlockFocused),
         ClickBlock(ClickBlock),
         CreateBlockUnderFocus(CreateBlockUnderFocus),
         CreateDocument(CreateDocument),
