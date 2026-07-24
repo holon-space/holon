@@ -52,7 +52,7 @@ WHERE fr.region = 'main'
 tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: render_entity(), rules: [#{when: eq("level", 0), override: #{role: "page_title", show_bullet: false, show_chevron: false, sortkey: "-added_ts"}}, #{when: always(), override: #{show_bullet: false}}]})
 #+END_SRC
 #+BEGIN_SRC holon_gql :id default-right-sidebar::src::0
-MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..20]-(d:block) WHERE fr.region = 'right' AND root.id = fr.root_id RETURN d ORDER BY fr.added_ts DESC, d.sort_key
+MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..20]-(d:block) WHERE fr.region = 'right_sidebar' AND root.id = fr.root_id RETURN d, fr.added_ts AS added_ts ORDER BY fr.added_ts DESC, d.sort_key
 #+END_SRC
 ** Advice Rules
 :PROPERTIES:

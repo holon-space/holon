@@ -19,9 +19,11 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::str::FromStr;
 
 use holon_api::EntityUri;
 use holon_api::QueryLanguage;
+use holon_api::Region;
 use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::predicate::Predicate;
@@ -146,15 +148,19 @@ impl QuerySource {
             }
             QueryLanguage::HolonSql => {
                 if q.contains("focus_roots") && q.contains("focus_descendants") {
-                    let region = if q.contains("region = 'right'") {
-                        "right"
-                    } else if q.contains("region = 'main'") {
-                        "main"
+                    // Canonical prod keys (`Region::as_str()`): a focus SQL
+                    // filters `navigation_history.region`, whose values are
+                    // exactly what `focus_pin` writes. Default to `Main` when no
+                    // region predicate is present.
+                    let region = if q.contains("region = 'right_sidebar'") {
+                        Region::RightSidebar
+                    } else if q.contains("region = 'left_sidebar'") {
+                        Region::LeftSidebar
                     } else {
-                        "main"
+                        Region::Main
                     };
                     QuerySource::FocusRootDescendants {
-                        region: region.to_string(),
+                        region: region.as_str().to_string(),
                         max_depth: 20,
                         stop_at_pages: true,
                     }
@@ -170,14 +176,35 @@ impl QuerySource {
     }
 }
 
-/// Parse `'region'` out of a GQL `WHERE fr.region = 'main'` clause; defaults to
-/// `"main"`.
+/// Parse the region literal out of a GQL `WHERE fr.region = '<region>'` clause
+/// into the canonical [`Region`] key prod uses. Parse-don't-validate at the
+/// boundary: the returned string is `Region::as_str()` (the exact value
+/// `focus_pin` writes to `navigation_history.region` and the focus matview
+/// keys by), NOT whatever literal the seed happens to carry. A focus-root
+/// query with no `fr.region` clause defaults to `Region::Main`; an UNKNOWN
+/// region literal (e.g. a stale `'right'` instead of `'right_sidebar'`) is a
+/// loud parse error here — never a silently-empty filter that mirrors a broken
+/// seed and hides the divergence from prod.
 fn gql_focus_region(gql: &str) -> String {
-    gql.split_once("fr.region")
+    let literal = gql
+        .split_once("fr.region")
         .and_then(|(_, rest)| rest.split_once('\''))
         .and_then(|(_, rest)| rest.split_once('\''))
-        .map(|(region, _)| region.to_string())
-        .unwrap_or_else(|| "main".to_string())
+        .map(|(region, _)| region);
+    match literal {
+        None => Region::Main.as_str().to_string(),
+        Some(lit) => Region::from_str(lit)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "focus-root GQL carries an unknown region literal {lit:?} — the reference \
+                     interpreter parses region literals into the prod Region enum so a seed that \
+                     drifts from Region::as_str() fails loud instead of silently rendering an \
+                     empty region: {e}"
+                )
+            })
+            .as_str()
+            .to_string(),
+    }
 }
 
 /// Parse `a..b` out of a GQL `CHILD_OF*a..b` clause.
