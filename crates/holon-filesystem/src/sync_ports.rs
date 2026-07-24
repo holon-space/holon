@@ -460,6 +460,15 @@ pub enum MatchBasis {
     ContentAtPosition,
     ContentUniqueInSiblings,
     ContentUniqueInDocument,
+    /// RULING A2: same-content twins tie-broken by an equal DESCENDANT subtree
+    /// signature (the incoming block's whole subtree matches this store
+    /// twin's), so the twin keeps its own children instead of being
+    /// re-homed.
+    SubtreeSignature,
+    /// RULING A2: same-content twins with no signature match, paired by
+    /// relative sibling position (identical-subtree twins are
+    /// interchangeable).
+    ContentAtRelativePosition,
 }
 
 /// Parse-don't-validate: every minted incoming id gets an explicit verdict;

@@ -24,11 +24,22 @@
 //!
 //! Remedy under test: before minting, an ID-less incoming headline is
 //! reconciled onto its already-minted twin among the STORE's current children
-//! by exact CONTENT + sibling POSITION (`FileSyncController::ingest_file` →
-//! `compute_idless_remaps`), so the stale re-write reconciles onto the existing
-//! block — its id stays STABLE and it is never duplicated. Matching is
-//! positional 1:1, so two genuinely-distinct ID-less siblings with identical
-//! content stay two blocks.
+//! by exact CONTENT + sibling POSITION + a STRUCTURAL SIGNATURE OF DESCENDANTS
+//! (`FileSyncController::ingest_file` → `TieredMatcher`), so the stale re-write
+//! reconciles onto the existing block — its id stays STABLE and it is never
+//! duplicated.
+//!
+//! RULING A2 (2026-07-24) tightened the tie-break for AMBIGUOUS-content blocks
+//! (same content, neither position-exact nor content-unique). Where the matcher
+//! once minted a fresh id ("MintAmbiguous", tolerating a duplicate), it now
+//! PAIRS the incoming id-less twins onto the existing twins deterministically:
+//! by descendant subtree signature first (so children can never be silently
+//! re-homed onto the WRONG identical-content twin), then by relative sibling
+//! position (identical-subtree twins are interchangeable — either pairing is
+//! correct). Fresh-mint remains ONLY for a genuinely new block (no unclaimed
+//! same-content candidate left). So identical-content siblings stop duplicating
+//! even when a reorder shifts their positions, and identical-content PARENTS
+//! keep their own children across an external reorder.
 //!
 //! These tests live here (not in the pure parse↔render PBT) because the bug is
 //! in the ingest reconcile of a *running* `FileSyncController` — the
@@ -77,6 +88,31 @@ async fn ids_with_content(
         .collect();
     ids.sort();
     ids
+}
+
+/// The `parent_id` of the (unique) store block whose `content` equals
+/// `content` exactly. Panics if there is not exactly one such block.
+async fn parent_of_content(
+    env: &holon_integration_tests::TestEnvironment,
+    content: &str,
+) -> String {
+    let rows = env
+        .query(
+            &format!("from block | filter content == \"{content}\" | select {{id, parent_id}}"),
+            QueryLanguage::HolonPrql,
+        )
+        .await
+        .expect("parent query failed");
+    assert_eq!(
+        rows.len(),
+        1,
+        "expected exactly one block with content {content:?}, got {rows:?}"
+    );
+    rows[0]
+        .get("parent_id")
+        .and_then(|v| v.as_string())
+        .map(str::to_string)
+        .unwrap_or_else(|| panic!("block {content:?} has no parent_id: {rows:?}"))
 }
 
 /// Poll the file on disk until `pred(content)` holds or the timeout elapses.
@@ -214,6 +250,202 @@ fn two_identical_idless_siblings_survive_reingest() {
             after, before,
             "the two siblings must reconcile 1:1 onto their twins, preserving both ids (before \
              {before:?}, after {after:?})"
+        );
+    });
+}
+
+/// RULING A2 (a): two identical-content ID-less siblings whose POSITIONS SHIFT
+/// on re-ingest (a genuinely-new headline is inserted ahead of them) must still
+/// reconcile onto their existing twins — identities preserved, no duplicate.
+///
+/// The position shift defeats the T1 exact-position tie-break for the trailing
+/// twin, so pre-A2 it fell to MintAmbiguous: it minted a fresh id and the
+/// orphaned twin was deleted (identity CHURN) — after != before. A2 pairs it by
+/// subtree signature (both leaves ⇒ interchangeable ⇒ relative position), so
+/// both twins keep their ids and the inserted headline mints fresh.
+#[test]
+fn shifted_identical_twins_preserve_identity() {
+    let rt = runtime();
+    rt.block_on(async {
+        const DUP: &str = "Weekly review";
+        let two = format!("* {DUP}\n* {DUP}\n");
+
+        let env = TestEnvironmentBuilder::new()
+            .without_loro()
+            .with_org_file("Shift.org", two.clone())
+            .build(rt.clone())
+            .await
+            .expect("boot");
+
+        let path = env.org_file_path("Shift.org");
+        wait_for_disk(
+            &env,
+            &path,
+            |c| c.contains(":ID:"),
+            "first writeback (mint)",
+        )
+        .await;
+        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+
+        let before = ids_with_content(&env, DUP).await;
+        assert_eq!(
+            before.len(),
+            2,
+            "two twins ingest as two blocks, got {before:?}"
+        );
+
+        // A NEW headline is inserted ahead of the twins (still all ID-less):
+        // positions shift 0,1 → 1,2, defeating positional matching for the last.
+        let shifted = format!("* Sprint kickoff\n* {DUP}\n* {DUP}\n");
+        FileSystem::write(env.org_fs.as_ref(), &path, shifted.as_bytes())
+            .await
+            .expect("stale re-write with insert");
+        wait_for_disk(
+            &env,
+            &path,
+            |c| c.contains("Sprint kickoff"),
+            "second writeback",
+        )
+        .await;
+        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+
+        let after = ids_with_content(&env, DUP).await;
+        assert_eq!(
+            after.len(),
+            2,
+            "shifted identical twins must stay two blocks (no duplicate/orphan), got {after:?}"
+        );
+        assert_eq!(
+            after, before,
+            "shifted identical twins must reconcile onto their existing twins, preserving both \
+             ids (before {before:?}, after {after:?})"
+        );
+        let fresh = ids_with_content(&env, "Sprint kickoff").await;
+        assert_eq!(
+            fresh.len(),
+            1,
+            "the inserted headline mints exactly one fresh block"
+        );
+    });
+}
+
+/// RULING A2 (b): two identical-content PARENTS with DIFFERENT children, then
+/// an external reorder SWAPS the two parents. Their children must follow their
+/// OWN parent identity — never re-homed onto the wrong same-content twin. The
+/// descendant subtree signature discriminates the twins; positional matching
+/// alone would swap the children.
+#[test]
+fn swapped_identical_parents_keep_their_children() {
+    let rt = runtime();
+    rt.block_on(async {
+        // Two `Item` parents, distinct children Alpha / Beta.
+        let tree = "* Item\n** Alpha\n* Item\n** Beta\n".to_string();
+
+        let env = TestEnvironmentBuilder::new()
+            .without_loro()
+            .with_org_file("Swap.org", tree)
+            .build(rt.clone())
+            .await
+            .expect("boot");
+
+        let path = env.org_file_path("Swap.org");
+        wait_for_disk(
+            &env,
+            &path,
+            |c| c.contains(":ID:"),
+            "first writeback (mint)",
+        )
+        .await;
+        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+
+        let alpha_parent_before = parent_of_content(&env, "Alpha").await;
+        let beta_parent_before = parent_of_content(&env, "Beta").await;
+        assert_ne!(
+            alpha_parent_before, beta_parent_before,
+            "the two Item parents must be distinct blocks"
+        );
+
+        // External reorder: SWAP the two parents (still all ID-less). Positional
+        // matching would map incoming-parent-0 (now carrying Beta) onto the
+        // store parent that had Alpha — re-homing the children.
+        let swapped = "* Item\n** Beta\n* Item\n** Alpha\n".to_string();
+        FileSystem::write(env.org_fs.as_ref(), &path, swapped.as_bytes())
+            .await
+            .expect("stale re-write (swap)");
+        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+        wait_for_disk(&env, &path, |c| c.contains(":ID:"), "second writeback").await;
+        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+
+        let alpha_parent_after = parent_of_content(&env, "Alpha").await;
+        let beta_parent_after = parent_of_content(&env, "Beta").await;
+        assert_eq!(
+            alpha_parent_after, alpha_parent_before,
+            "Alpha must keep its OWN parent identity across the swap (not re-homed onto Beta's \
+             twin): before {alpha_parent_before}, after {alpha_parent_after}"
+        );
+        assert_eq!(
+            beta_parent_after, beta_parent_before,
+            "Beta must keep its OWN parent identity across the swap: before {beta_parent_before}, \
+             after {beta_parent_after}"
+        );
+    });
+}
+
+/// RULING A2 (c): a genuinely NEW headline (no same-content candidate) still
+/// mints a fresh id, while the pre-existing headline keeps its id. Fresh-mint
+/// scope guard — A2 must not over-remap.
+#[test]
+fn genuinely_new_block_still_mints() {
+    let rt = runtime();
+    rt.block_on(async {
+        const KEEP: &str = "Existing note";
+        let one = format!("* {KEEP}\n");
+
+        let env = TestEnvironmentBuilder::new()
+            .without_loro()
+            .with_org_file("New.org", one.clone())
+            .build(rt.clone())
+            .await
+            .expect("boot");
+
+        let path = env.org_file_path("New.org");
+        wait_for_disk(
+            &env,
+            &path,
+            |c| c.contains(":ID:"),
+            "first writeback (mint)",
+        )
+        .await;
+        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+
+        let keep_before = ids_with_content(&env, KEEP).await;
+        assert_eq!(keep_before.len(), 1, "one headline ingests as one block");
+
+        // Append a brand-new ID-less headline alongside the (now ID-full) one,
+        // then re-write the whole file with BOTH still ID-less (stale re-write).
+        let two = format!("* {KEEP}\n* Brand new item\n");
+        FileSystem::write(env.org_fs.as_ref(), &path, two.as_bytes())
+            .await
+            .expect("stale re-write with new block");
+        wait_for_disk(
+            &env,
+            &path,
+            |c| c.contains("Brand new item"),
+            "second writeback",
+        )
+        .await;
+        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+
+        let keep_after = ids_with_content(&env, KEEP).await;
+        assert_eq!(
+            keep_after, keep_before,
+            "the pre-existing headline keeps its id (before {keep_before:?}, after {keep_after:?})"
+        );
+        let fresh = ids_with_content(&env, "Brand new item").await;
+        assert_eq!(
+            fresh.len(),
+            1,
+            "the genuinely-new headline mints exactly one fresh block"
         );
     });
 }
