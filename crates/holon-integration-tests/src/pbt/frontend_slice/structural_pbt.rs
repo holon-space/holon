@@ -1279,10 +1279,21 @@ mod teeth {
         const C2_RAW: &str = "See [[Linked Page]] here";
 
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+        // Pin the boot clock to the fixed keystone day (2026-01-15) so the boot
+        // auto-create rule mints a DETERMINISTIC journal day-page id
+        // (`keystone_boot_journal_id`) — not one keyed on the host's real date.
+        // The plain `new` boot uses the OS `SystemClock`, whose date-dependent
+        // day-page the structural oracle never modeled → a date-dependent
+        // `inv-viewmodel-entity-ids-subset-of-data` phantom (the day-page renders
+        // in the journals feed but is unknown to the ref). Mirrors the
+        // `full_headless_static_catalog_probe` recipe: pinned clock + awaited +
+        // `seed_boot_journal`d day-page.
         let comp = Arc::new(
-            HeadlessFrontendComponent::new(
+            HeadlessFrontendComponent::new_with_clock(
                 &[("structural-page.org", TREE_ORG)],
                 Duration::from_millis(300),
+                false,
+                crate::pbt::frontend_slice::components::keystone_boot_clock(),
             )
             .await,
         );
@@ -1301,10 +1312,36 @@ mod teeth {
         let tree: BTreeSet<EntityUri> = [ids.parent.clone(), ids.c1.clone(), ids.c2.clone()]
             .into_iter()
             .collect();
+
+        // The boot journal auto-create fires ASYNC off the clock CDC; the 300ms
+        // boot settle can return before the day-page lands. Await it (fail loud
+        // on timeout) so the scaffold snapshot below deterministically captures
+        // it and the widget-tree phantom check sees a settled, ref-known block.
+        let journal_id = crate::pbt::frontend_slice::components::keystone_boot_journal_id();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            tokio::time::sleep(SETTLE).await;
+            if sut_ids(&caps).await.contains(&journal_id) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "[org-link-marks] boot journal {journal_id} did not fire within budget"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
         let booted = sut_ids(&caps).await;
         let scaffold: BTreeSet<EntityUri> = booted.difference(&tree).cloned().collect();
 
         let mut oracle = structural_ref();
+        // Model the boot-fired journal day-page in the oracle's block_state so
+        // it enters `all_block_ids` — the ref-known universe the phantom check
+        // subtracts. `inject_scaffold_seed` (below) only touches `block_documents`,
+        // so WITHOUT this the auto-created day-page renders as an unknown
+        // (phantom) entity id. Mirrors `frontend_wired`'s seed for the composed
+        // keystone; the pinned keystone clock makes the SUT's day-page id match.
+        crate::pbt::composed::wide_e2e::seed_boot_journal(&mut oracle);
         // c2 on disk spells a wiki link: the reference holds the org-lens fixed
         // point — label-stripped content + the extracted Link mark.
         let (c2_content, c2_marks) = crate::pbt::types::normalize_content_for_org_roundtrip(
