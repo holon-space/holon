@@ -732,6 +732,9 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
         // recognizes a composed divergence.
         use crate::pbt::invariant_mode_override::ModeOverride;
         use crate::pbt::invariant_mode_override::invariant_mode_override;
+        // Softened ids are RETAINED (not dropped) — their layer ran and went
+        // red, so the coverage verdict must never call it green.
+        let mut softened_out: Vec<&'static str> = Vec::new();
         let hard: Vec<(&str, &str)> = report
             .failures()
             .into_iter()
@@ -740,6 +743,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
                     eprintln!(
                         "[HOLON_PBT_INVARIANTS] softened (DISCLOSED degraded run) {id}: {msg}"
                     );
+                    softened_out.push(*id);
                     false
                 }
                 _ => true,
@@ -753,10 +757,24 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
         if !hard.is_empty() && std::env::var_os("HOLON_PBT_DUMP_DB").is_some() {
             dump_matview_vs_base(sut);
         }
-        assert!(
-            hard.is_empty(),
-            "reconciled composed sequence diverged from the oracle: {hard:?}"
-        );
+        // FIRST-DIVERGENT-LAYER verdict: several invariants across the stack
+        // usually red at once (a store divergence re-projects into the matview,
+        // re-derives into the viewmodel, re-renders…), so name the EARLIEST
+        // (most upstream) layer + its wiring source to start triage at the root.
+        // Kept AFTER the unchanged `reconciled composed sequence diverged from
+        // the oracle` prefix so `bisect_driver::reproduction_signature()` still
+        // matches (substring). Fail-loud: an unmapped id is disclosed, not guessed.
+        // Built ONLY on the failure path — a green tick pays nothing (the walk
+        // is inside `inv-sql-budget`'s wall window).
+        if !hard.is_empty() {
+            let coverage = crate::pbt::composed::first_divergent::RunCoverage::from_report(
+                &report,
+                softened_out,
+            );
+            let verdict =
+                crate::pbt::composed::first_divergent::first_divergent_verdict(&hard, &coverage);
+            panic!("reconciled composed sequence diverged from the oracle: {hard:?}\n{verdict}");
+        }
         // Per-tick SELECTION floor: every required invariant must be selected
         // (present in `report.ran`) at every tick — a silent deselect fails
         // loud HERE. Selection alone, however, is not proof of exercise: a body
