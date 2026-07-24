@@ -124,6 +124,9 @@ impl SutRenderer for ToySut {
     async fn widget_tree_snapshot(&self) -> WidgetSnapshot {
         self.root.clone()
     }
+    async fn widget_tree_snapshot_fresh(&self) -> WidgetSnapshot {
+        self.root.clone()
+    }
     async fn root_data_row_ids(&self) -> std::collections::BTreeSet<EntityUri> {
         Default::default()
     }

@@ -890,6 +890,73 @@ impl HeadlessFrontendComponent {
         Arc::new(HeadlessBuilderServices::new(self.engine.clone()))
     }
 
+    /// The memo-free recompute behind `widget_tree_snapshot` /
+    /// `widget_tree_snapshot_fresh`: resolve the FULL tree via the engine's
+    /// RECURSIVE `snapshot` (NOT the shallow `interpret_pure`, whose
+    /// `live_block` regions stay placeholders). `ReactiveEngine::snapshot`
+    /// resolves each `live_block` via `ensure_watching` but stops at the first
+    /// still-loading child, so a single call only warms one level deep.
+    /// Headlessly there is no frontend event-loop populating nested watches, so
+    /// we re-snapshot after a CDC settle until the resolved tree reaches a
+    /// fixed point — the headless analogue of the windowed slice's
+    /// pump-settle. Each resample also re-drives `ensure_watching`, giving
+    /// async CDC deltas (e.g. a `focus_descendants` prune) a chance to
+    /// land, which is exactly what the bounded-wait `_fresh` caller depends
+    /// on.
+    async fn recompute_widget_snapshot(&self) -> WidgetSnapshot {
+        let empty = || WidgetSnapshot {
+            kind: "empty".into(),
+            entity_id: None,
+            props: Default::default(),
+            operations: Vec::new(),
+            children: Vec::new(),
+        };
+        let root_uri = holon_api::root_layout_block_uri();
+        if self.resolve_watch(&root_uri).await.is_none() {
+            return empty();
+        }
+        let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(5));
+        let mut snap = view_model_to_snapshot(&self.reactive.snapshot(&root_uri));
+        let mut last = (usize::MAX, usize::MAX);
+        let mut stable = 0u32;
+        loop {
+            let total = snap.walk().count();
+            let pending = snap
+                .walk()
+                .filter(|n| n.kind == "loading" || n.kind == "unknown")
+                .count();
+            if (total, pending) == last {
+                stable += 1;
+                // FULLY-RESOLVED fixed point (no loading/unknown placeholders):
+                // one confirming resample suffices — the composed harness has
+                // already converged CDC+Loro+org+reactive-consumer before any
+                // check (`settle_after_apply` → `converge_projections`, which
+                // now also waits the reactive apply-epoch quiet), so nothing
+                // async is still due. The former unconditional 4×120 ms
+                // resample predates that settle and was measured at ~83% of
+                // keystone wall time. A tree still holding placeholders keeps
+                // the cautious exit (4 stable samples at 120 ms) so slow
+                // watch delivery isn't cut short.
+                if pending == 0 || stable >= 4 {
+                    return inject_display_placed(snap);
+                }
+            } else {
+                stable = 0;
+                last = (total, pending);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return inject_display_placed(snap);
+            }
+            // Keep the proven 120 ms cadence: each resample drives
+            // `ensure_watching` (watch views + SQL), and sampling faster was
+            // measured to churn CDC enough to inflate the NEXT transition's
+            // quiet-floor settle (p50 5 ms → 70 ms) — the early exit above is
+            // the win, not a tighter poll.
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            snap = view_model_to_snapshot(&self.reactive.snapshot(&root_uri));
+        }
+    }
+
     /// Graft a block into the headless backend (used to attach a fixed-id
     /// subtree under the Main focus root so `inv-displayed-text` has known
     /// content to compare). Mirrors the windowed slice's
@@ -1289,88 +1356,35 @@ impl SutRenderer for HeadlessFrontendComponent {
                 return cached;
             }
         }
-        let empty = || WidgetSnapshot {
-            kind: "empty".into(),
-            entity_id: None,
-            props: Default::default(),
-            operations: Vec::new(),
-            children: Vec::new(),
-        };
-        let root_uri = holon_api::root_layout_block_uri();
-        if self.resolve_watch(&root_uri).await.is_none() {
-            let out = empty();
-            if armed {
-                *self
-                    .render_snapshot_cache
-                    .lock()
-                    .expect("render cache lock") = Some(out.clone());
-            }
-            return out;
+        let out = self.recompute_widget_snapshot().await;
+        if armed {
+            *self
+                .render_snapshot_cache
+                .lock()
+                .expect("render cache lock") = Some(out.clone());
         }
-        // Resolve the FULL tree via the engine's RECURSIVE `snapshot` — NOT the
-        // shallow `interpret_pure` (whose `live_block` regions stay placeholders).
-        // `ReactiveEngine::snapshot` recursively resolves each `live_block` via
-        // `ensure_watching`, but it stops at the first still-loading child, so a
-        // single call only warms one level deep. Headlessly there is no frontend
-        // event-loop populating the nested watches, so we re-snapshot after a CDC
-        // settle until the resolved tree reaches a fixed point — the headless
-        // analogue of the windowed slice's pump-settle. (Rich ViewModel, thin
-        // frontend: the shared `shadow_builders` produce the whole tree here; the
-        // only thing a real frontend adds is *waiting* for CDC, which we do too.)
-        let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(5));
-        let mut snap = view_model_to_snapshot(&self.reactive.snapshot(&root_uri));
-        let mut last = (usize::MAX, usize::MAX);
-        let mut stable = 0u32;
-        loop {
-            let total = snap.walk().count();
-            let pending = snap
-                .walk()
-                .filter(|n| n.kind == "loading" || n.kind == "unknown")
-                .count();
-            if (total, pending) == last {
-                stable += 1;
-                // FULLY-RESOLVED fixed point (no loading/unknown placeholders):
-                // one confirming resample suffices — the composed harness has
-                // already converged CDC+Loro+org+reactive-consumer before any
-                // check (`settle_after_apply` → `converge_projections`, which
-                // now also waits the reactive apply-epoch quiet), so nothing
-                // async is still due. The former unconditional 4×120 ms
-                // resample predates that settle and was measured at ~83% of
-                // keystone wall time. A tree still holding placeholders keeps
-                // the cautious exit (4 stable samples at 120 ms) so slow
-                // watch delivery isn't cut short.
-                if pending == 0 || stable >= 4 {
-                    let out = inject_display_placed(snap);
-                    if armed {
-                        *self
-                            .render_snapshot_cache
-                            .lock()
-                            .expect("render cache lock") = Some(out.clone());
-                    }
-                    return out;
-                }
-            } else {
-                stable = 0;
-                last = (total, pending);
-            }
-            if tokio::time::Instant::now() >= deadline {
-                let out = inject_display_placed(snap);
-                if armed {
-                    *self
-                        .render_snapshot_cache
-                        .lock()
-                        .expect("render cache lock") = Some(out.clone());
-                }
-                return out;
-            }
-            // Keep the proven 120 ms cadence: each resample drives
-            // `ensure_watching` (watch views + SQL), and sampling faster was
-            // measured to churn CDC enough to inflate the NEXT transition's
-            // quiet-floor settle (p50 5 ms → 70 ms) — the early exit above is
-            // the win, not a tighter poll.
-            tokio::time::sleep(Duration::from_millis(120)).await;
-            snap = view_model_to_snapshot(&self.reactive.snapshot(&root_uri));
+        out
+    }
+
+    /// Non-cached companion — bypasses the armed `render_snapshot_cache` so a
+    /// bounded-wait invariant re-sampling within ONE check tick observes a
+    /// self-healing transient (the `focus_descendants` recursive-CTE prune
+    /// delta that lands a frame after a STRICT one-shot BlockToPage snapshot).
+    /// Recomputes unconditionally and refreshes the memo, so a same-tick
+    /// consumer that runs later sees the newest frame. Mirrors
+    /// `SutLayout::rendered_elements_fresh`.
+    async fn widget_tree_snapshot_fresh(&self) -> WidgetSnapshot {
+        let out = self.recompute_widget_snapshot().await;
+        if self
+            .render_cache_enabled
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            *self
+                .render_snapshot_cache
+                .lock()
+                .expect("render cache lock") = Some(out.clone());
         }
+        out
     }
 
     async fn root_data_row_ids(&self) -> std::collections::BTreeSet<EntityUri> {

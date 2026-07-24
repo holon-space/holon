@@ -166,6 +166,11 @@ impl SutRenderer for BlockQueryFrontendComponent {
         view_model_to_snapshot(&vm)
     }
 
+    /// No internal caching — plain forward to `widget_tree_snapshot`.
+    async fn widget_tree_snapshot_fresh(&self) -> WidgetSnapshot {
+        self.widget_tree_snapshot().await
+    }
+
     async fn root_data_row_ids(&self) -> std::collections::BTreeSet<EntityUri> {
         let Some(rqr) = self.resolve_watch(&self.root).await else {
             return Default::default();

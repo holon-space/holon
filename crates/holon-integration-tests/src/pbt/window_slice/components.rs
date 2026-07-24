@@ -720,6 +720,12 @@ impl SutRenderer for GpuiFrontendEngineComponent {
         view_model_to_snapshot(&vm)
     }
 
+    /// No internal caching here — each `widget_tree_snapshot` is a fresh
+    /// `engine.snapshot`, so the fresh variant is a plain forward.
+    async fn widget_tree_snapshot_fresh(&self) -> WidgetSnapshot {
+        self.widget_tree_snapshot().await
+    }
+
     async fn widget_tree_for(&self, block_id: &EntityUri) -> Option<WidgetSnapshot> {
         let rqr = self.resolve_watch(block_id).await?;
         let (render_expr, data_rows) = rqr.snapshot();

@@ -424,6 +424,18 @@ impl<'a, S: SutRenderer> SutRenderer for CachingProxy<'a, S> {
         snap
     }
 
+    /// Deliberately uncached — bounded-wait invariants re-read per retry to
+    /// observe a self-healing transient. Forwards to the inner SUT's own
+    /// fresh path (which likewise bypasses its internal memo) and refreshes
+    /// the memoised slot, so a same-tick invariant that runs later sees the
+    /// newest frame instead of one frozen mid-poll. Mirrors
+    /// `rendered_elements_fresh`.
+    async fn widget_tree_snapshot_fresh(&self) -> WidgetSnapshot {
+        let snap = self.inner.widget_tree_snapshot_fresh().await;
+        *self.widget_tree_snapshot_cache.borrow_mut() = Some(snap.clone());
+        snap
+    }
+
     /// Memoised set snapshot — the root layout's data_rows are re-read by
     /// every renderer/matview invariant in the same tick.
     async fn root_data_row_ids(&self) -> BTreeSet<EntityUri> {
