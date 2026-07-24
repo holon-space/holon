@@ -21,6 +21,8 @@ use crate::Change;
 use crate::StorageEntity;
 use crate::Value;
 
+pub mod group_by;
+
 /// Pull `_rowid` (set by `process_cdc_event`) out of a row's data, if present.
 fn extract_rowid(data: &StorageEntity) -> Option<String> {
     match data.get("_rowid")? {
