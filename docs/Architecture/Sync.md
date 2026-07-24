@@ -485,6 +485,13 @@ once each source was wired to its sink directly. The authority (Loro for blocks)
 projects into Turso through a single writer, and reactive consumers read the
 projection back through a CDC-driven mirror.
 
+The reactive read side downstream of CDC (matviews, `LiveData` and its
+combinators, render caches, UI snapshots) is governed by the **derived-data
+contract** — every derived holder equals a live recomputation at quiescence;
+see [Reactivity.md](Reactivity.md) for the contract, its corollaries
+(stateful re-grouping via `LiveData::group_by`, retraction-before-assertion,
+atomic re-snapshot, combinator error policy) and its enforcement invariants.
+
 **Location**: `crates/holon-loro/src/{loro_sync_controller,consolidator}.rs`,
 `crates/holon-api/src/live_data.rs`. The residual `crates/holon-loro/src/event_bus.rs`
 keeps only shared vocabulary (re-exports of `EventOrigin`, `PublishErrorTracker`, and the
