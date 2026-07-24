@@ -605,6 +605,12 @@ impl NavigationProvider {
             .await
             .map_err(|e| format!("Failed to activate history row {history_id}: {e}"))?;
 
+        // The cursor-on-open-row invariant otherwise rests on activate intents
+        // being minted only from open focus_roots rows; a stale/racy intent for
+        // a just-closed tab would blank the panel through the same join-break
+        // go_back had — guard it like go_back/go_forward.
+        self.assert_cursor_on_open_row(region).await?;
+
         Ok(OperationResult::irreversible(vec![]))
     }
 
@@ -689,9 +695,9 @@ impl NavigationProvider {
         let mut params = HashMap::new();
         params.insert("region".to_string(), Value::from(region));
 
-        self.get_current_history_id(&mut params).await?;
+        let current_id = self.get_current_history_id(&mut params).await?;
 
-        // Find the previous history entry
+        // Find the previous history entry (traversal ordered by id — unchanged).
         let prev_result = self
             .db_handle
             .query(
@@ -701,24 +707,27 @@ impl NavigationProvider {
             .await
             .map_err(|e| format!("Failed to find previous entry: {}", e))?;
 
-        // Step 3: Update cursor - either to previous entry or to NULL (home)
-        if let Some(prev_row) = prev_result.first() {
-            if let Some(prev_id) = prev_row.get("id").and_then(|v| v.as_i64()) {
-                params.insert("new_id".to_string(), Value::Integer(prev_id));
-                self.db_handle
-                    .query(
-                        include_str!("../../sql/navigation/update_cursor.sql"),
-                        params,
-                    )
-                    .await
-                    .map_err(|e| format!("Failed to go back: {}", e))?;
-                tracing::debug!(
-                    "[NavigationProvider] go_back: moved to history_id={}",
-                    prev_id
-                );
-            }
+        if let Some(prev_id) = prev_result
+            .first()
+            .and_then(|row| row.get("id"))
+            .and_then(|v| v.as_i64())
+        {
+            // Write-side invariant (ruled option (a)): the main-panel focus query
+            // joins `focus_roots` (which is `navigation_history WHERE closed_at IS
+            // NULL` — open rows only) to `navigation_cursor` on `history_id`, so
+            // the cursor MUST land on an OPEN row. The back target was soft-closed
+            // by the forward `focus_replace` that superseded it; re-open it and
+            // close the departed row so the panel stays populated across back-nav
+            // (before this, the cursor pointed at a closed row → 0-row focus query
+            // → blank panel → creation-slot `0 live rows` panic).
+            self.reopen_target_close_departed(region, current_id, prev_id)
+                .await?;
+            tracing::debug!(
+                "[NavigationProvider] go_back: moved to history_id={prev_id} (target re-opened)"
+            );
         } else {
-            // No previous entry - go to home (NULL cursor)
+            // No previous entry — go to home (NULL cursor is a LEGAL invariant
+            // state: the panel intentionally falls through to default render).
             self.db_handle
                 .query(
                     include_str!("../../sql/navigation/nullify_cursor.sql"),
@@ -729,6 +738,7 @@ impl NavigationProvider {
             tracing::debug!("[NavigationProvider] go_back: went to home (no previous entry)");
         }
 
+        self.assert_cursor_on_open_row(region).await?;
         Ok(OperationResult::irreversible(vec![]))
     }
 
@@ -739,7 +749,7 @@ impl NavigationProvider {
         let mut params = HashMap::new();
         params.insert("region".to_string(), Value::from(region));
 
-        self.get_current_history_id(&mut params).await?;
+        let current_id = self.get_current_history_id(&mut params).await?;
 
         // Find the next history entry
         let next_result = self
@@ -751,28 +761,27 @@ impl NavigationProvider {
             .await
             .map_err(|e| format!("Failed to find next entry: {}", e))?;
 
-        // Step 3: Update cursor if next entry exists
-        if let Some(next_row) = next_result.first() {
-            if let Some(next_id) = next_row.get("id").and_then(|v| v.as_i64()) {
-                params.insert("new_id".to_string(), Value::Integer(next_id));
-                self.db_handle
-                    .query(
-                        include_str!("../../sql/navigation/update_cursor.sql"),
-                        params,
-                    )
-                    .await
-                    .map_err(|e| format!("Failed to go forward: {}", e))?;
-                tracing::debug!(
-                    "[NavigationProvider] go_forward: moved to history_id={}",
-                    next_id
-                );
-            }
+        // Step 3: Re-open + re-point the cursor if a next entry exists.
+        if let Some(next_id) = next_result
+            .first()
+            .and_then(|row| row.get("id"))
+            .and_then(|v| v.as_i64())
+        {
+            // Same write-side invariant as go_back: the forward target was
+            // soft-closed when we navigated back past it, so re-open it and close
+            // the departed row so the cursor lands on an OPEN focus_roots row.
+            self.reopen_target_close_departed(region, current_id, next_id)
+                .await?;
+            tracing::debug!(
+                "[NavigationProvider] go_forward: moved to history_id={next_id} (target re-opened)"
+            );
         } else {
             tracing::debug!(
                 "[NavigationProvider] go_forward: no next entry, staying at current position"
             );
         }
 
+        self.assert_cursor_on_open_row(region).await?;
         Ok(OperationResult::irreversible(vec![]))
     }
 
@@ -801,6 +810,120 @@ impl NavigationProvider {
 
         params.insert("current_id".to_string(), Value::Integer(current_history_id));
         Ok(current_history_id)
+    }
+
+    /// Move the region's cursor to a back/forward `target_id`, re-opening it
+    /// and soft-closing the `departed_id` in ONE transaction (write-side
+    /// invariant, ruled option (a)).
+    ///
+    /// The back/forward targets are soft-CLOSED rows (`focus_replace` closes
+    /// the prior open focus on every forward navigation), but the
+    /// main-panel focus query joins `focus_roots` — `navigation_history
+    /// WHERE closed_at IS NULL` — to `navigation_cursor` on `history_id`,
+    /// so pointing the cursor at a closed row yields a 0-row focus query
+    /// and a blank panel. Re-opening the target keeps the cursor on an OPEN
+    /// row; closing the departed row keeps the main region at "exactly one
+    /// open focus row". `closed_at` is a DISPLAY flag (in-vs-out of
+    /// `focus_roots`), not a departure timestamp — reopening only
+    /// flips it and never renumbers ids, so back/forward traversal (ordered by
+    /// `id`) is undisturbed.
+    ///
+    /// Atomicity is mandatory: the fork's deferred-FK/autocommit wart means a
+    /// multi-statement write MUST go through `transaction()` (a mid-sequence
+    /// autocommit would expose the empty-join intermediate the panel must never
+    /// observe).
+    async fn reopen_target_close_departed(
+        &self,
+        region: Region,
+        departed_id: i64,
+        target_id: i64,
+    ) -> Result<()> {
+        let region_str = region.as_str().to_string();
+        self.db_handle
+            .transaction(vec![
+                // Close the departed focus row (guarded on still-open; a no-op at
+                // home, where `departed_id` resolves to no row).
+                (
+                    "UPDATE navigation_history SET closed_at = datetime('now') \
+                     WHERE id = ? AND closed_at IS NULL"
+                        .to_string(),
+                    vec![turso::Value::Integer(departed_id)],
+                ),
+                // Re-open the back/forward target so `focus_roots` tracks it.
+                (
+                    "UPDATE navigation_history SET closed_at = NULL WHERE id = ?".to_string(),
+                    vec![turso::Value::Integer(target_id)],
+                ),
+                // Point the cursor at the (now open) target.
+                (
+                    "UPDATE navigation_cursor SET history_id = ? WHERE region = ?".to_string(),
+                    vec![
+                        turso::Value::Integer(target_id),
+                        turso::Value::Text(region_str),
+                    ],
+                ),
+            ])
+            .await
+            .map_err(|e| {
+                format!(
+                    "Failed to move nav cursor (region={region}, from={departed_id}, \
+                     to={target_id}): {e}"
+                )
+                .into()
+            })
+    }
+
+    /// Fail-loud per-region invariant (ruled option (a)): `navigation_cursor`
+    /// must point at an OPEN `navigation_history` row (`closed_at IS NULL`) —
+    /// or have NO row for the region, or a NULL (home) cursor. A cursor on
+    /// an open `NavigateHome` row (`block_id NULL`) is LEGAL
+    /// (open-but-not-focused; the panel falls through to default render),
+    /// so the check is "cursor row is OPEN", never "cursor row is in
+    /// focus_roots".
+    ///
+    /// A violation means the main panel would silently blank (the `focus_roots`
+    /// matview excludes closed rows, so the panel query's
+    /// `nc.history_id = fr.history_id` join yields nothing). Called after every
+    /// cursor move in this provider's back/forward ops. `focus` / `activate` /
+    /// `open_tab` / `close` maintain the invariant by construction (they only
+    /// ever point the cursor at a freshly-inserted or already-open row, or
+    /// delete the cursor row).
+    async fn assert_cursor_on_open_row(&self, region: Region) -> Result<()> {
+        let mut params = HashMap::new();
+        params.insert("region".to_string(), Value::from(region));
+        let rows = self
+            .db_handle
+            .query(
+                "SELECT nc.history_id AS history_id, nh.closed_at AS closed_at \
+                 FROM navigation_cursor nc \
+                 LEFT JOIN navigation_history nh ON nh.id = nc.history_id \
+                 WHERE nc.region = $region",
+                params,
+            )
+            .await
+            .map_err(|e| format!("cursor-invariant check failed (region={region}): {e}"))?;
+        let Some(row) = rows.first() else {
+            return Ok(()); // no cursor row for the region — legal (never navigated).
+        };
+        // NULL cursor = home — legal.
+        if !matches!(row.get("history_id"), Some(Value::Integer(_))) {
+            return Ok(());
+        }
+        // `closed_at` is a TEXT display flag: non-NULL (String/DateTime) = CLOSED.
+        if matches!(
+            row.get("closed_at"),
+            Some(Value::String(_)) | Some(Value::DateTime(_))
+        ) {
+            let hid = row.get("history_id").and_then(|v| v.as_i64()).unwrap_or(-1);
+            return Err(format!(
+                "[NavigationProvider] cursor invariant violated: region={region} \
+                 navigation_cursor points at CLOSED navigation_history row id={hid}. Closed rows \
+                 are excluded from the focus_roots matview, so the main panel would blank. Every \
+                 cursor move must land on an OPEN row (or a NULL/home cursor, or no row)."
+            )
+            .into());
+        }
+        Ok(())
     }
 }
 
