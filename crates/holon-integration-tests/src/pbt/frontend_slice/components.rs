@@ -956,14 +956,44 @@ impl HeadlessFrontendComponent {
         let mut out: Vec<Vec<String>> = rows
             .into_iter()
             .map(|row| {
-                let mut cells: Vec<String> =
-                    row.iter().map(|(k, v)| format!("{k}={v:?}")).collect();
+                let mut cells: Vec<String> = row
+                    .iter()
+                    .map(|(k, v)| format!("{k}={}", Self::canonical_value(v)))
+                    .collect();
                 cells.sort();
                 cells
             })
             .collect();
         out.sort();
         out
+    }
+
+    /// Deterministic stringification of a storage [`Value`] with nested JSON
+    /// **object keys sorted recursively**. A plain `{v:?}` renders
+    /// `Value::Object(HashMap<..>)` in HashMap-iteration order, which is
+    /// randomized per deserialization — so the matview read and the recompute
+    /// read of the SAME stored `properties` blob (e.g. `_provenance`) render
+    /// the identical logical object in DIFFERENT key orders and false-diverge.
+    /// JSON objects are unordered by spec, so sorting keys is the correct
+    /// canonical form; arrays stay in order (they are ordered).
+    fn canonical_value(v: &holon_api::Value) -> String {
+        use holon_api::Value;
+        match v {
+            Value::Object(map) => {
+                let mut kvs: Vec<(&String, &Value)> = map.iter().collect();
+                kvs.sort_by(|a, b| a.0.cmp(b.0));
+                let inner: Vec<String> = kvs
+                    .iter()
+                    .map(|(k, val)| format!("{k:?}: {}", Self::canonical_value(val)))
+                    .collect();
+                format!("Object({{{}}})", inner.join(", "))
+            }
+            Value::Array(arr) => {
+                let inner: Vec<String> = arr.iter().map(Self::canonical_value).collect();
+                format!("Array([{}])", inner.join(", "))
+            }
+            other => format!("{other:?}"),
+        }
     }
 
     fn sorted_fields(row: holon_api::StorageEntity) -> Vec<String> {
@@ -2131,6 +2161,22 @@ impl SutMatviews for HeadlessFrontendComponent {
         let views = self
             .sql_query("SELECT name, sql FROM sqlite_master WHERE type='view'")
             .await;
+        // RED-vector-B fault seam (composed keystone proof, plan §3 option 1).
+        // DEFAULT OFF: unless `HOLON_PBT_MATVIEW_STALE=<view>` is set this is a
+        // no-op with zero prod/test impact. When set, it serves a PERSISTENTLY
+        // stale snapshot of the named view: a ghost row is injected into the
+        // matview side that the recompute (fresh defining SELECT) never
+        // produces — modeling the IVM antijoin/consolidation "ghost row"
+        // drift the invariant exists to catch. Every re-snapshot within the
+        // body's 5s bounded-wait re-applies it, so the divergence never
+        // stabilizes and the invariant Fails END-TO-END naming the view. The
+        // CDC-apply path lives inside the vendored Turso IVM engine (only
+        // `subscribe_cdc` is exposed here) and `turso_seams.rs` is app-level
+        // reader plumbing unrelated to matview maintenance, so a real per-view
+        // CDC skip is a deep engine change; the sanctioned "serve a stale
+        // snapshot" seam at this read layer is the smallest honest analogue.
+        let stale_view = std::env::var("HOLON_PBT_MATVIEW_STALE").ok();
+        let mut stale_view_hit = false;
         let mut out = Vec::new();
         for row in &views {
             let name = Self::cell(row, "name").expect("sqlite_master view row must carry a name");
@@ -2160,10 +2206,30 @@ impl SutMatviews for HeadlessFrontendComponent {
                 );
                 continue;
             }
-            let matview_rows =
+            let mut matview_rows =
                 Self::canonicalize_rows(self.sql_query(&format!("SELECT * FROM {name}")).await);
             let recompute_rows = Self::canonicalize_rows(self.sql_query(&select_sql).await);
+            if stale_view.as_deref() == Some(name.as_str()) {
+                stale_view_hit = true;
+                matview_rows.push(vec![
+                    "__holon_pbt_matview_stale__=\"ghost row (recompute never produces this)\""
+                        .to_string(),
+                ]);
+                matview_rows.sort();
+            }
             out.push((name, matview_rows, recompute_rows));
+        }
+        // Fail loud if the seam was armed but never fired — a typo'd view name
+        // would otherwise silently leave the keystone GREEN and masquerade as
+        // "the invariant cannot go red", the exact false victory the
+        // pbt-model-first-red-green LAW forbids.
+        if let Some(v) = stale_view.as_deref() {
+            assert!(
+                stale_view_hit,
+                "HOLON_PBT_MATVIEW_STALE={v:?} named no MATERIALIZED view in \
+                 sqlite_master (enumerated: {:?}) — arm it with a real view name",
+                out.iter().map(|(n, ..)| n.as_str()).collect::<Vec<_>>()
+            );
         }
         out
     }
@@ -3307,6 +3373,11 @@ impl HeadlessFrontendComponent {
         // synthetic→real doc-uri mapping is the harness's generic per-tick
         // reconcile, not E2ESut's `block_tree_post_action`.
         caps.insert(self.clone() as Arc<dyn SutAppLifecycle>);
+        // `SutMatviews` — the IVM-vs-recompute differential read for
+        // `inv-matview-consistent-with-recompute`. Registered wherever the
+        // block matviews live (this component's real Turso projection) so the
+        // differential runs on the same slice that maintains them.
+        caps.insert(self.clone() as Arc<dyn SutMatviews>);
         caps.insert(self as Arc<dyn SutOrgRender>);
     }
 }

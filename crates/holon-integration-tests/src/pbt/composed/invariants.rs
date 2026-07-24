@@ -42,6 +42,7 @@ pub mod loro_children_match_ref;
 pub mod loro_no_errors;
 pub mod main_panel_rows_match_focus;
 pub mod mark_bounds_within_content;
+pub mod matview_recompute_matches;
 pub mod observed_errors;
 pub mod reseed_leak;
 pub mod sticky_accordion_spec;

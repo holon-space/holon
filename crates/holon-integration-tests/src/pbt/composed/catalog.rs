@@ -177,6 +177,14 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // RefBlockTree`). The `blocks_match` `/block_raw`+`/matview`+`/loro`
         // store family moved to the correspondence registry (spliced below).
         invariants::live_children_match_ref::wire(),
+        // IVM-vs-recompute differential (2026-07-24): every MATERIALIZED view
+        // must equal its OWN defining SELECT re-executed now — a bounded-wait
+        // STABLE fixed point that catches a PERSISTENT matview drift (the
+        // "22-vs-20 matview DUP"/ghost-row class) invisible to every
+        // ref-comparison invariant. Needs `SutMatviews`; only the frontend/
+        // keystone slice over the real Turso projection supplies it. Fast-path
+        // (already consistent) on the common case, so it adds no per-tick cost.
+        invariants::matview_recompute_matches::wire(),
         // Per-transition SQL/wall/RSS budget (`otel-testing`-gated, like its body):
         // needs the composed `ComposedBudget` cap (a span-metrics provider that
         // captured the transition + frozen oracle). Only the `wide_e2e` slice
@@ -321,6 +329,7 @@ const CENTRAL_INVARIANT_IDS_HEAD: &[&str] = &[
     "inv-viewmodel-state-toggle-correct",
     "inv-viewmodel-editable-text-triggers",
     "inv-live-children-match-ref",
+    "inv-matview-consistent-with-recompute",
 ];
 
 /// Correspondence-registry ids folded in after the (feature-gated) budget
