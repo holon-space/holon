@@ -25,7 +25,7 @@ The read path is **one incremental computation**:
 | 1 | **Replicas** | org files, Loro store, external APIs, UI editor | Every replica has a base; inbound intent = `diff(base, current)`. No replica writes another replica. |
 | 2 | **Consolidator** | one per vault, epoch-pinned (Loro when enabled; Turso-LWW in SqlOnly) | The only merger. Monopolist of order: it mints every fractional index. Text merges via the CRDT merge *function*; structure via the tree CRDT (store present) or AST 3-way (absent). |
 | 3 | **Projection** | Turso | Exactly one writer per mode; verbatim and total; never re-merges; ephemeral by contract. |
-| 4 | **Reactive pipeline** | matviews → CDC → `LiveData<Block>` / cells | Convergent state, not an event log; recovery is resync (`Replace`), not acks. |
+| 4 | **Reactive pipeline** | matviews → CDC → `LiveData<Block>` / cells | Convergent state, not an event log; recovery is resync (`Replace`), not acks. Every derived holder = live recompute at quiescence — the derived-data contract, [Reactivity.md](Reactivity.md). |
 | 5 | **UI** | ViewModel `Mutable`s + `Cell`s | Displays fields and captures intent; owns no entity values. Structural ops are commit points. |
 
 ## Four orthogonal mode axes
