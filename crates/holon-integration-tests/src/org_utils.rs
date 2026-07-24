@@ -87,7 +87,12 @@ pub fn serialize_block_recursive(
                     && !INTERNAL_PROPS.contains(&k.as_str())
                     && !matches!(
                         k.as_str(),
-                        "task_state" | "priority" | "tags" | "scheduled" | "deadline"
+                        "task_state"
+                            | "task_state_category"
+                            | "priority"
+                            | "tags"
+                            | "scheduled"
+                            | "deadline"
                     )
             })
             .collect();
@@ -173,9 +178,21 @@ pub fn serialize_block_recursive(
 
     for (k, v) in &block.properties {
         if k != "ID" && k != "id" && !INTERNAL_PROPS.contains(&k.as_str()) {
+            // `task_state_category` is the DERIVED sidecar of the TODO keyword
+            // (re-derived by the parser on ingest — see holon-orgmode
+            // `block_params`), so the canonical `OrgRenderer` never emits it into
+            // the drawer. This serializer must match, or an external whole-doc
+            // rewrite over a task block writes a non-canonical file whose SQL
+            // re-render drops the line, and `inv-org-render-fixed-point` sees a
+            // permanent render≠disk echo-loop.
             if matches!(
                 k.as_str(),
-                "task_state" | "priority" | "tags" | "scheduled" | "deadline"
+                "task_state"
+                    | "task_state_category"
+                    | "priority"
+                    | "tags"
+                    | "scheduled"
+                    | "deadline"
             ) {
                 continue;
             }
