@@ -34,17 +34,16 @@
 //!   edit, so ANY ungrounded drop is loss → [`ensure_ingest_lossless`] →
 //!   quarantine. Grounds only via the file's own projection; a permanent
 //!   tripwire, exempt from "delete defensive code" sweeps.
-//! - **`on_block_changed` / `on_block_removed` / `re_render_all_tracked`** are
-//!   MID-FLIGHT, state-driven paths. Since the ADR 0025 ROOT-ITEM threading the
-//!   feed preserves per-block `Remove` identity end-to-end (di.rs): a feed
-//!   removal is routed to the owning file (`on_block_removed`, reverse lookup
-//!   over the tracked projections) with the id as a sanctioned removal, and the
-//!   ids no single file could consume accumulate into the sanctioned set the
-//!   debounced `re_render_all_tracked` pass receives — every op-delivered
-//!   deletion is grounded. What remains ungroundable are shrinks with no
-//!   delivered op (cross-doc moves, TOCTOU-spent sanctions, matview-lag races),
-//!   so these paths still run a MASS-TRUNCATION tripwire off the
-//!   [`WritebackDrops`] verdict
+//! - **`on_block_changed` / `re_render_all_tracked`** are MID-FLIGHT,
+//!   state-driven paths. Since the ADR 0025 ROOT-ITEM threading the feed
+//!   preserves per-block `Remove` identity end-to-end (di.rs): the
+//!   `LiveData::group_by` routing knows each block's last owning doc, so a feed
+//!   removal — and a cross-doc departure — arrives as `OrgRerender::Block {
+//!   doc, BlockDelta::Remove(id) }` on the owning doc with the id as a
+//!   sanctioned removal (`on_block_changed`) — every op-delivered deletion is
+//!   grounded. What remains ungroundable are shrinks with no delivered op
+//!   (TOCTOU-spent sanctions, matview-lag races), so these paths still run a
+//!   MASS-TRUNCATION tripwire off the [`WritebackDrops`] verdict
 //!   (`FileSyncController::tripwire_mass_truncation`): veto+quarantine only
 //!   when the ungrounded-drop count exceeds a fraction of the block count (the
 //!   row-28 signature), letting single/small drops pass. ADR 0025 names the

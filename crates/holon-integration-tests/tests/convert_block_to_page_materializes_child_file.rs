@@ -57,7 +57,6 @@ const CHAIN_ORG: &str = "* la-outer\n:PROPERTIES:\n:ID: la-0\n:END:\n** la-middl
 :PROPERTIES:\n:ID: la-1\n:END:\n*** la-grandchild\n:PROPERTIES:\n:ID: la-2\n:END:\n";
 
 #[test]
-#[ignore = "RED lock (parked): cross-doc-move source-convergence defect — origin doc cache never sees the departed block; see morning handoff 2026-07-24 + logs locktest-converge-poll.log"]
 fn runtime_convert_block_to_page_materializes_rehomed_child_file() {
     let rt = runtime();
     rt.clone().block_on(async {

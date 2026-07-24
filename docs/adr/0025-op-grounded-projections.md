@@ -1,14 +1,14 @@
 # ADR 0025: Op-Grounded Projections and the Two Intent-less Boundaries
 
 **Status:** RATIFIED (Martin, 2026-07-12) — ROOT ITEM IMPLEMENTED (2026-07-12): per-block
-`Remove` deltas are threaded feed→writeback end-to-end. `di.rs` no longer collapses feed
-removals to `OrgRerender::All`; `FileSyncController::on_block_removed` reverse-looks the
-owning file up in its tracked projections and re-renders it with the removal sanctioned;
-ids no single file can consume accumulate into the sanctioned set the debounced
-`re_render_all_tracked` pass receives. The mass-truncation tripwire threshold
+`Remove` deltas are threaded feed→writeback end-to-end. Since 2026-07-24 the routing is
+`LiveData::group_by` (stateful: element→last-owning-doc accumulator), so `di.rs` delivers
+both feed removals AND cross-doc departures as `OrgRerender::Block { doc, Remove(id) }`
+directly to the owning doc, with the id sanctioned (`on_block_changed`); the former
+`on_block_removed` reverse lookup is deleted. The mass-truncation tripwire threshold
 (`max(3, 25%)`) is deliberately RETAINED: state-driven renders can still shrink a file
-without a delivered op (cross-doc moves land as an Upsert on the destination doc, leaving
-an op-less absence on the source file — the historical hard-veto false-fire class — plus
+without a delivered op (cross-doc moves are grounded since 2026-07-24 — `group_by` emits
+the source-doc departure Remove before the destination Upsert — leaving
 TOCTOU-spent sanctions and matview-lag races). Tightening toward zero requires grounding
 those classes too — the C2b history relation named below.
 **Context:** first-principles session on block loss, 2026-07-12; empirical basis: the seven

@@ -3109,85 +3109,6 @@ impl FileSyncController {
         Ok(true)
     }
 
-    /// ADR 0025 ROOT ITEM: route a per-block `Remove` delta from the block feed
-    /// to the one file whose projection still shows the block, with the removal
-    /// SANCTIONED. The feed itself cannot resolve the owning document (the
-    /// block is already gone from the feed map), so THIS is the reverse lookup:
-    /// the per-doc render cache (`doc_blocks`) first, then the tracked
-    /// `last_projection` strings (bare-id prefilter, parse-confirmed — a bare
-    /// id substring alone would also match `[[links]]` to the block).
-    ///
-    /// Returns `Ok(true)` when the removal was routed (the owning file was
-    /// re-rendered through [`on_block_changed`](Self::on_block_changed) with
-    /// the delta's `Remove` id as a sanctioned removal) or proven moot (the
-    /// block still exists in the authoritative store — matview churn/lag, the
-    /// paired upsert re-renders). Returns `Ok(false)` when no tracked
-    /// projection contains the block: the caller falls back to the bulk
-    /// recovery path CARRYING this id (di.rs accumulates it into the
-    /// `sanctioned_removals` set passed to
-    /// [`re_render_all_tracked`](Self::re_render_all_tracked)), so even the
-    /// bulk recovery path stays op-grounded.
-    #[tracing::instrument(skip(self), name = "org.on_block_removed", fields(block_id = %block_id))]
-    pub async fn on_block_removed(&mut self, block_id: &EntityUri) -> Result<bool> {
-        if self
-            .block_reader
-            .get_block_authoritative(block_id)
-            .await?
-            .is_some()
-        {
-            // Still present in the authoritative store: not a deletion (a
-            // matview delete+insert pair or lag). Nothing to sanction; the
-            // paired upsert delta re-renders the file.
-            return Ok(true);
-        }
-
-        let doc = match self.owning_doc_of_projected_block(block_id)? {
-            Some(doc) => doc,
-            None => return Ok(false),
-        };
-        if doc == *block_id {
-            // The removed block IS a document root (a deleted page owning its
-            // own file). Rendering a deleted doc is undefined; let the bulk
-            // recovery path handle it with the id sanctioned.
-            return Ok(false);
-        }
-        self.on_block_changed(&doc, &BlockDelta::Remove(block_id.clone()))
-            .await
-    }
-
-    /// Reverse lookup for [`on_block_removed`](Self::on_block_removed): which
-    /// document's projection currently shows `block_id`? Checks the per-doc
-    /// render cache first (cheap), then parses the `last_projection` entries
-    /// whose text contains the bare id (the prefilter never skips a real
-    /// containment; parse confirmation rejects mere `[[links]]` hits).
-    fn owning_doc_of_projected_block(&self, block_id: &EntityUri) -> Result<Option<EntityUri>> {
-        for (doc, blocks) in &self.doc_blocks {
-            if blocks.contains_key(block_id) {
-                return Ok(Some(doc.clone()));
-            }
-        }
-        let bare = block_id.id();
-        for (canonical, content) in &self.last_projection {
-            if !content.contains(bare) {
-                continue;
-            }
-            let path: PathBuf = (**canonical).to_path_buf();
-            let parsed = self
-                .format
-                .parse(&path, content, &EntityUri::no_parent(), &self.root_dir)
-                .with_context(|| {
-                    format!(
-                        "[on_block_removed] re-parsing tracked projection of {} failed",
-                        path.display()
-                    )
-                })?;
-            if parsed.document.id == *block_id || parsed.blocks.iter().any(|b| b.id == *block_id) {
-                return Ok(Some(parsed.document.id.clone()));
-            }
-        }
-        Ok(None)
-    }
-
     /// Render `doc_id`'s file, serving the block list from the per-doc
     /// incremental cache (`doc_blocks`) and updating that cache from `delta`.
     ///
@@ -4199,15 +4120,15 @@ impl FileSyncController {
     ///
     /// Since the ADR 0025 ROOT-ITEM threading the block-driven paths DO receive
     /// per-block `Remove` ids: `on_block_changed` sanctions its delta's
-    /// `Remove`, `on_block_removed` routes a feed removal to the owning
-    /// file, and `re_render_all_tracked` consumes the accumulated ids no
-    /// single file could (di.rs). Every op-delivered deletion is therefore
-    /// grounded. The residual UNGROUNDED-drop tolerance below exists
-    /// because state-driven renders can still legitimately shrink a file
-    /// without a delivered `Remove` op:
-    /// - a cross-doc MOVE — the block leaves this file on an Upsert routed to
-    ///   the DESTINATION doc; the source file's next render sees an ungrounded
-    ///   absence (the 97-false-fire history of a hard veto);
+    /// `Remove`, the block-feed resolver (di.rs) routes BOTH a genuine feed
+    /// removal AND a cross-doc DEPARTURE (via `LiveData::group_by`'s
+    /// `Remove{old doc}`) as an `on_block_changed` `Remove` delta grounded in
+    /// the owning file, and `re_render_all_tracked` handles the residual bulk
+    /// recovery reseeds (which carry no per-block intent). Every op-delivered
+    /// deletion — and now every group-key departure — is therefore grounded.
+    /// The residual UNGROUNDED-drop tolerance below exists because state-driven
+    /// renders can still legitimately shrink a file without a delivered
+    /// `Remove` op:
     /// - a sanction consumed by a render whose write was TOCTOU-skipped — the
     ///   id is spent, the shrink reappears on a later state-driven render;
     /// - matview-lag races between store truth and the delta that triggered the

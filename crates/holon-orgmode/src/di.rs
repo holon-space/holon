@@ -483,98 +483,157 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                 let (rerender_tx, rerender_rx) =
                     tokio::sync::mpsc::unbounded_channel::<OrgRerender>();
                 if let Some(feed) = block_feed.clone() {
-                    let resolver_feed = feed.clone();
                     let tx = rerender_tx.clone();
                     let feed_reader = feed_block_reader.clone();
                     let disclosure = share_disclosure.clone();
                     let disclosed: Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
                         Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
                     tokio::spawn(async move {
-                        use futures_signals::signal_map::MapDiff;
-                        use futures_signals::signal_map::SignalMapExt;
-                        resolver_feed
-                            .signal_map()
-                            .for_each(move |diff| {
-                                let tx = tx.clone();
-                                let feed = feed.clone();
-                                let feed_reader = feed_reader.clone();
-                                let disclosure = disclosure.clone();
-                                let disclosed = disclosed.clone();
-                                async move {
-                                    let msg = match diff {
-                                        MapDiff::Insert { value, .. }
-                                        | MapDiff::Update { value, .. } => {
-                                            // Inc 1: a block inside a shared subtree whose content
-                                            // cannot yet be materialized to its own on-disk org
-                                            // file (the mount is not a page-file) is DISCLOSED, not
-                                            // silently dropped/inlined. The edit is safe in Loro +
-                                            // SQL; only disk org is stale until Inc 2 wires
-                                            // materialization. Deduped once per share per session.
-                                            disclose_unmaterialized_share(
-                                                &feed,
-                                                &value,
-                                                disclosure.as_deref(),
-                                                &disclosed,
+                        use futures::StreamExt as _;
+
+                        // Re-group the block feed by owning document via the STATEFUL
+                        // `LiveData::group_by` combinator (its accumulator maps each
+                        // block -> its last-routed document). When a block re-homes to
+                        // another document (runtime `convert_block_to_page`) the stream
+                        // emits `Remove{old doc}` STRICTLY BEFORE `Upsert{new doc}`, so
+                        // the source document's render cache drops the departed block and
+                        // re-renders WITHOUT it. The previous stateless per-diff loop
+                        // grouped only by the new value's document, so the source doc
+                        // never saw a departure and its org file retained the block
+                        // forever (the cross-doc-move source-convergence defect).
+                        let key_reader = feed_reader.clone();
+                        let mut stream = std::pin::pin!(feed.group_by(move |value: Arc<Block>| {
+                            let reader = key_reader.clone();
+                            async move {
+                                // Resolve the owning document off the WRITE authority.
+                                // Both non-fatal fallbacks — no `Page` ancestor
+                                // (`Ok(None)`) and a transient authoritative point-read
+                                // fault (`Err`) — are encoded in the key as `Unresolved`
+                                // rather than surfaced as a `group_by` `Err`: an `Err`
+                                // item ENDS the stream, which for a transient store fault
+                                // would kill org write-back for the whole session. The
+                                // error is still surfaced loudly; only the stream
+                                // survives. `Unresolved` drives a full re-render at the
+                                // consumer, exactly as the stateless loop's `Ok(None)` /
+                                // `Err` arms did.
+                                let group =
+                                    match resolve_doc_for_block(reader.as_ref(), &value).await {
+                                        Ok(Some(doc)) => DocGroup::Resolved(doc),
+                                        Ok(None) => DocGroup::Unresolved,
+                                        Err(e) => {
+                                            tracing::error!(
+                                                "[OrgMode] authoritative doc resolution failed for \
+                                             block {}: {e:#} — falling back to full re-render",
+                                                value.id
                                             );
-                                            match resolve_doc_for_block(
-                                                feed_reader.as_ref(),
-                                                &value,
-                                            )
-                                            .await
-                                            {
-                                                Ok(Some(doc)) => OrgRerender::Block {
-                                                    doc,
-                                                    delta: BlockDelta::Upsert((*value).clone()),
-                                                },
-                                                // ALLOW(fallback): doc unresolved (block/parent
-                                                // absent from the write authority) → full
-                                                // re-render, which re-reads via the authoritative
-                                                // `get_blocks` CTE.
-                                                Ok(None) => OrgRerender::All,
-                                                // A point read failing is a real store fault, not
-                                                // a routing miss — surface it loudly, then take the
-                                                // (disclosed) bulk recovery path rather than
-                                                // silently mis-routing this block's writeback.
-                                                Err(e) => {
-                                                    tracing::error!(
-                                                        "[OrgMode] authoritative doc resolution                                                          failed for block {}: {e:#} — falling back                                                          to full re-render",
-                                                        value.id
-                                                    );
-                                                    OrgRerender::All
-                                                }
-                                            }
-                                        }
-                                        // ADR 0025 ROOT ITEM: a removed block is gone from the
-                                        // feed, so its owning document can't be resolved HERE —
-                                        // but the per-block Remove identity must not be
-                                        // discarded. Carry the id; the controller reverse-looks
-                                        // up the owning file in `last_projection` and re-renders
-                                        // it with the removal SANCTIONED (op-grounded).
-                                        MapDiff::Remove { key } => {
-                                            match EntityUri::parse(&key) {
-                                                Ok(id) => OrgRerender::Remove { id },
-                                                Err(e) => {
-                                                    // A feed key that is not a valid EntityUri is
-                                                    // a defect — surface it, then fall back to the
-                                                    // (disclosed) bulk recovery path.
-                                                    tracing::error!(
-                                                        "[OrgMode] block feed Remove key {key:?} \
-                                                         is not a valid EntityUri: {e} — falling \
-                                                         back to full re-render"
-                                                    );
-                                                    OrgRerender::All
-                                                }
-                                            }
-                                        }
-                                        // Bulk state resets carry no per-block intent → recovery.
-                                        MapDiff::Replace { .. } | MapDiff::Clear {} => {
-                                            OrgRerender::All
+                                            DocGroup::Unresolved
                                         }
                                     };
-                                    let _ = tx.send(msg);
+                                Ok::<DocGroup, anyhow::Error>(group)
+                            }
+                        }));
+
+                        // The initial feed snapshot (`MapDiff::Replace`) rendered as ONE
+                        // debounced bulk pass in the pre-`group_by` resolver
+                        // (`Replace -> OrgRerender::All`); `group_by` instead fans it into
+                        // one `Upsert` per seeded block. Per-block boot renders
+                        // destabilize the cold-boot matview — the frontend's creation slot
+                        // then resolves NO parent (0 live rows). So capture the snapshot's
+                        // block ids and FOLD their fanned `Upsert`s into that single bulk
+                        // render, exactly as before; only POST-boot changes route per
+                        // block (where the cross-doc departure fix lives). The set drains
+                        // as the snapshot is consumed, after which every item routes
+                        // incrementally.
+                        let mut snapshot_pending: std::collections::HashSet<String> =
+                            feed.read().keys().cloned().collect();
+                        let _ = tx.send(OrgRerender::All);
+
+                        while let Some(item) = stream.next().await {
+                            let msg = match item {
+                                Ok(holon_api::live_data::group_by::GroupedDiff::Upsert {
+                                    group,
+                                    key,
+                                    value,
+                                }) => {
+                                    if snapshot_pending.remove(&key) {
+                                        // Initial-snapshot block — already covered by the
+                                        // boot bulk render above. Matches the old `Replace`
+                                        // path, which likewise did not disclose per block.
+                                        continue;
+                                    }
+                                    // Inc 1: disclose a shared-subtree write-back gap on
+                                    // every upserted value (mount not yet a page-file).
+                                    // Deduped once per share per session — safe in Loro +
+                                    // SQL, only on-disk org is stale.
+                                    disclose_unmaterialized_share(
+                                        &feed,
+                                        &value,
+                                        disclosure.as_deref(),
+                                        &disclosed,
+                                    );
+                                    match group {
+                                        DocGroup::Resolved(doc) => OrgRerender::Block {
+                                            doc,
+                                            delta: BlockDelta::Upsert((*value).clone()),
+                                        },
+                                        // Unresolved (block/parent absent, or point-read
+                                        // fault) → full re-render via the authoritative
+                                        // `get_blocks` CTE.
+                                        DocGroup::Unresolved => OrgRerender::All,
+                                    }
                                 }
-                            })
-                            .await;
+                                Ok(holon_api::live_data::group_by::GroupedDiff::Remove {
+                                    group,
+                                    key,
+                                }) => {
+                                    // A snapshot block removed before its snapshot `Upsert`
+                                    // was folded away — keep the set consistent.
+                                    snapshot_pending.remove(&key);
+                                    match group {
+                                    // The DEPARTURE delta — the entire point of the
+                                    // increment. Route a Remove-shaped `BlockDelta` to the
+                                    // SOURCE document `group_by` supplies from its
+                                    // accumulator; `on_block_changed` drops the block from
+                                    // that doc's cache and re-renders without it. This is
+                                    // NOT `on_block_removed`: a moved block STILL EXISTS
+                                    // (under its new page), so `on_block_removed`'s
+                                    // authoritative-presence moot-check would short-circuit
+                                    // and leave the source file stale. A genuine deletion
+                                    // routes the same way (the block is gone everywhere, so
+                                    // the source re-renders without it) — one uniform path.
+                                    DocGroup::Resolved(doc) => match EntityUri::parse(&key) {
+                                        Ok(id) => OrgRerender::Block {
+                                            doc,
+                                            delta: BlockDelta::Remove(id),
+                                        },
+                                        Err(e) => {
+                                            tracing::error!(
+                                                "[OrgMode] block feed Remove key {key:?} is not \
+                                                 a valid EntityUri: {e} — falling back to full \
+                                                 re-render"
+                                            );
+                                            OrgRerender::All
+                                        }
+                                    },
+                                    // The block was last grouped `Unresolved` (never had a
+                                    // resolvable document) → recovery re-render.
+                                    DocGroup::Unresolved => OrgRerender::All,
+                                    }
+                                }
+                                // `group_by` yields `Err` only if the key fn returns `Err`;
+                                // ours never does (fallbacks are encoded in the key). If it
+                                // ever surfaces, the stream has ENDED — surface it loudly
+                                // and take a final recovery pass before the task winds down.
+                                Err(e) => {
+                                    tracing::error!(
+                                        "[OrgMode] block-feed group_by stream errored: {e:#} — \
+                                         final full re-render before the resolver task ends"
+                                    );
+                                    OrgRerender::All
+                                }
+                            };
+                            let _ = tx.send(msg);
+                        }
                     });
                 }
                 drop(rerender_tx);
@@ -617,17 +676,26 @@ pub enum OrgRerender {
         doc: EntityUri,
         delta: holon_filesystem::BlockDelta,
     },
-    /// A block disappeared from the feed (`MapDiff::Remove`). Its owning
-    /// document cannot be resolved from the feed (the block is gone), so the
-    /// controller reverse-looks it up in its tracked projections and re-renders
-    /// exactly that file with the removal SANCTIONED. If no projection contains
-    /// the block, the id is accumulated into the sanctioned set the debounced
-    /// `re_render_all_tracked` pass consumes (ADR 0025: per-block Remove
-    /// identity is preserved end-to-end instead of collapsing to `All`).
-    Remove { id: EntityUri },
     /// Document could not be resolved (matview lag, bulk feed reset, etc.) —
     /// reseed via a debounced re-render of every tracked file.
     All,
+}
+
+/// Grouping key for the block-feed resolver's [`LiveData::group_by`]: the
+/// owning document, or `Unresolved` when no `Page` ancestor could be resolved
+/// (block/ancestor absent) or an authoritative point-read faulted.
+///
+/// Encoding BOTH fallbacks as a key value — rather than surfacing a `group_by`
+/// `Err`, which ends the stream — keeps the resolver task alive across
+/// transient store faults. The `Unresolved` group drives a full re-render at
+/// the consumer, exactly as the previous stateless loop's `Ok(None)` / `Err`
+/// arms did (the error is still logged loudly at the key fn).
+///
+/// [`LiveData::group_by`]: holon_api::live_data::LiveData::group_by
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum DocGroup {
+    Resolved(EntityUri),
+    Unresolved,
 }
 
 /// Resolve the owning document URI for a changed `Block` by walking `parent_id`
@@ -984,13 +1052,6 @@ pub async fn run_file_sync_controller(
     // initial scans. The flag is set in the event arm; a
     // 50ms ticker drains it with a single re-render pass.
     let mut pending_full_rerender = false;
-    // ADR 0025: per-block `Remove` ids the feed delivered that could not be
-    // routed to a single file (deleted page owning its own file, cold
-    // projection cache). The debounced `re_render_all_tracked` pass consumes
-    // them as sanctioned removals, so even the bulk path grounds these
-    // deletions in the ops that authorized them.
-    let mut pending_sanctioned_removals: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
     let mut rerender_flush_tick = tokio::time::interval(tokio::time::Duration::from_millis(50));
     rerender_flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -1068,24 +1129,6 @@ pub async fn run_file_sync_controller(
                                 }
                             }
                         }
-                        OrgRerender::Remove { id } => {
-                            match controller.on_block_removed(&id).await {
-                                Ok(true) => {}
-                                // No tracked projection contains the block (deleted page
-                                // owning its own file / cold cache) → bulk recovery pass,
-                                // CARRYING the id so the removal stays op-grounded.
-                                Ok(false) => {
-                                    pending_sanctioned_removals.insert(id.as_str().to_string());
-                                    pending_full_rerender = true;
-                                }
-                                Err(e) => {
-                                    error!(
-                                        "[OrgMode] Block removal error for {}: {}",
-                                        id, e
-                                    );
-                                }
-                            }
-                        }
                         OrgRerender::All => { pending_full_rerender = true; }
                     }
                 }.instrument(span).await;
@@ -1093,8 +1136,14 @@ pub async fn run_file_sync_controller(
             }
             _ = rerender_flush_tick.tick(), if pending_full_rerender => {
                 pending_full_rerender = false;
-                let sanctioned = std::mem::take(&mut pending_sanctioned_removals);
-                if let Err(e) = controller.re_render_all_tracked(&sanctioned).await {
+                // Recovery reseeds carry no per-block Remove intent — departures and
+                // deletions route as `OrgRerender::Block { Remove }` and ground per
+                // file via `on_block_changed`, so the bulk pass never needs a
+                // sanctioned set.
+                if let Err(e) = controller
+                    .re_render_all_tracked(&std::collections::HashSet::new())
+                    .await
+                {
                     error!("[OrgMode] re_render_all_tracked (debounced) error: {}", e);
                 }
             }
