@@ -67,6 +67,42 @@ pub fn parse_rules_arg(value: Option<&Value>) -> Vec<RuleSpec> {
     out
 }
 
+/// Extract the ROOT-level sort-key spec a `tree(..)` render declares via its
+/// `rules:` (RULING C1'). The root key rides the SAME per-level override
+/// mechanism as the level-0 `role: "page_title"` / `show_bullet` rules — a
+/// `sortkey` (or `sort_key`) key inside a rule that fires for roots. The spec
+/// is a plain sort-key string (`"added_ts"` / `"-added_ts"`, `-` = DESC), the
+/// same grammar `sortkey:` accepts elsewhere.
+///
+/// Evaluated against a synthetic level-0 probe (`{level:0, depth:0}`) so only
+/// rules that fire on ROOTS contribute — a `when: gt("depth", 1)` rule never
+/// sets the root key. Row-column predicates are absent from the probe, so a
+/// data-dependent rule cannot set a single global root key (correct: the root
+/// order is one decision for the whole bucket). Last matching override wins,
+/// matching `evaluate_rules_with_positional`'s declaration-order semantics.
+///
+/// `None` (no rule declares a root key) leaves roots in `sort_col` order — the
+/// pre-C1' behavior.
+pub fn extract_root_sort_key(rules: &[RuleSpec]) -> Option<String> {
+    let probe: HashMap<String, Value> = HashMap::from([
+        ("level".to_string(), Value::Integer(0)),
+        ("depth".to_string(), Value::Integer(0)),
+    ]);
+    let mut spec: Option<String> = None;
+    for rule in rules {
+        if rule.when.evaluate(&probe) {
+            if let Some(Value::String(s)) = rule
+                .overrides
+                .get("sortkey")
+                .or_else(|| rule.overrides.get("sort_key"))
+            {
+                spec = Some(s.clone());
+            }
+        }
+    }
+    spec
+}
+
 /// Evaluate every rule's `when` predicate against the per-row context and
 /// merge matching `override` maps in declaration order (later wins per key).
 ///
@@ -313,6 +349,86 @@ mod tests {
 
         let m_open = evaluate_rules_with_positional(&rules, &positional, &row_open);
         assert!(m_open.is_empty());
+    }
+
+    /// RULING C1': a level-0 rule carrying `sortkey` yields the root key; the
+    /// SAME rule that sets `role: "page_title"` (the right-sidebar precedent)
+    /// declares it. A render with no such rule yields `None` (roots keep
+    /// `sort_key` order — no global flip).
+    #[test]
+    fn extract_root_sort_key_reads_level0_rule_override() {
+        // No rules → None.
+        assert_eq!(extract_root_sort_key(&[]), None);
+
+        // Level-0 rule with a `sortkey` override → that spec.
+        let rules = vec![RuleSpec {
+            when: Predicate::Eq {
+                field: "level".into(),
+                value: Value::Integer(0),
+            },
+            overrides: HashMap::from([
+                ("role".to_string(), Value::String("page_title".to_string())),
+                (
+                    "sortkey".to_string(),
+                    Value::String("-added_ts".to_string()),
+                ),
+            ]),
+        }];
+        assert_eq!(extract_root_sort_key(&rules), Some("-added_ts".to_string()));
+
+        // A rule that does NOT fire on roots (depth > 1) must not set the key.
+        let deep_rules = vec![RuleSpec {
+            when: Predicate::Gt {
+                field: "depth".into(),
+                value: Value::Integer(1),
+            },
+            overrides: HashMap::from([(
+                "sortkey".to_string(),
+                Value::String("content".to_string()),
+            )]),
+        }];
+        assert_eq!(extract_root_sort_key(&deep_rules), None);
+
+        // Level-0 rules WITHOUT a sortkey override → None (the common case:
+        // role/bullet-only rules leave roots in sort_key order).
+        let role_only = vec![RuleSpec {
+            when: Predicate::Eq {
+                field: "level".into(),
+                value: Value::Integer(0),
+            },
+            overrides: HashMap::from([(
+                "role".to_string(),
+                Value::String("page_title".to_string()),
+            )]),
+        }];
+        assert_eq!(extract_root_sort_key(&role_only), None);
+    }
+
+    /// Last matching override wins, matching declaration-order semantics: a
+    /// later level-0 rule's `sortkey` beats an earlier one (the explicit
+    /// override beating a would-be default).
+    #[test]
+    fn extract_root_sort_key_last_matching_override_wins() {
+        let rules = vec![
+            RuleSpec {
+                when: Predicate::Always,
+                overrides: HashMap::from([(
+                    "sortkey".to_string(),
+                    Value::String("content".to_string()),
+                )]),
+            },
+            RuleSpec {
+                when: Predicate::Eq {
+                    field: "level".into(),
+                    value: Value::Integer(0),
+                },
+                overrides: HashMap::from([(
+                    "sortkey".to_string(),
+                    Value::String("-added_ts".to_string()),
+                )]),
+            },
+        ];
+        assert_eq!(extract_root_sort_key(&rules), Some("-added_ts".to_string()));
     }
 
     /// Last rule wins per key when multiple rules match — declaration order

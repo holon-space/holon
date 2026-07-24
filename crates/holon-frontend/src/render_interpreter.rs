@@ -471,7 +471,14 @@ pub fn shared_tree_build<W: WithEntity>(
     // for deeply-nested rows.
     let rules = crate::row_pipeline::parse_rules_arg(ba.args.named.get("rules"));
 
-    let tree = OutlineTree::from_rows(rows, parent_id_col, sort_col);
+    // RULING C1': roots may sort by a per-level ROOT key the render declares
+    // through the SAME rules mechanism as the level-0 role/bullet overrides (a
+    // `sortkey` inside a level-0 rule), so a tree honors its backing query's
+    // top-level `ORDER BY` (which the CDC pipeline's `HashMap` accumulator
+    // drops the row order of) for roots while child buckets keep `sort_col`.
+    // `None` = no declared root key = pre-C1' behavior.
+    let root_sort_key = crate::row_pipeline::extract_root_sort_key(&rules);
+    let tree = OutlineTree::from_rows(rows, parent_id_col, sort_col, root_sort_key.as_deref());
     tree.walk_depth_first(|resolved_row, depth| {
         // Tree adjusts `ctx.depth` before the pipeline applies, so child
         // builders see the cumulative depth (parent's + tree's own).
