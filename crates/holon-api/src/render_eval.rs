@@ -249,7 +249,25 @@ pub struct OutlineTree {
 }
 
 impl OutlineTree {
-    pub fn from_rows(rows: &[Arc<DataRow>], parent_id_col: &str, sort_col: &str) -> Self {
+    /// Build the sibling-bucketed tree with **per-level sort keys** (RULING
+    /// C1'). Bucketing under a parent is structural (a row is a child iff its
+    /// `parent_id_col` names a present `id`); only the *within-bucket* order is
+    /// a sort concern, and it differs by level:
+    ///
+    /// - **CHILD buckets** keep `sort_col` (document order) — the streaming
+    ///   `sort_value` order the global sort below applies.
+    /// - **ROOTS** sort by `root_sort_key` when the render declares one (a spec
+    ///   like `"-added_ts"`, `-` = descending), so a tree can honor its backing
+    ///   query's top-level `ORDER BY` even though query row order does not
+    ///   survive the CDC pipeline (`CdcAccumulator` is a `HashMap`). A `None`
+    ///   root key leaves roots in `sort_col` order — **byte-identical** to the
+    ///   pre-C1' behavior for every render that declares no root key.
+    pub fn from_rows(
+        rows: &[Arc<DataRow>],
+        parent_id_col: &str,
+        sort_col: &str,
+        root_sort_key: Option<&str>,
+    ) -> Self {
         let mut sorted_rows = rows.to_vec();
         sorted_rows.sort_by(|a, b| {
             let ka = sort_value(a.get(sort_col));
@@ -278,6 +296,20 @@ impl OutlineTree {
             } else {
                 children_of.entry(pid.to_string()).or_default().push(i);
             }
+        }
+
+        // Per-level sort keys: child buckets already carry `sort_col` order
+        // (the global sort above); ROOTS re-sort by the declared root key when
+        // present. The re-sort is STABLE over the `sort_col`-ordered `roots`
+        // vec, so roots that tie on the root key keep `sort_col` order (the
+        // deterministic tie-break). `None` skips it → roots stay in `sort_col`
+        // order (pre-C1', byte-identical).
+        if let Some(spec) = root_sort_key {
+            let (col, descending) = parse_sort_key(spec);
+            roots.sort_by(|&a, &b| {
+                let ord = cmp_values(sorted_rows[a].get(col), sorted_rows[b].get(col));
+                if descending { ord.reverse() } else { ord }
+            });
         }
 
         Self {
@@ -1127,7 +1159,7 @@ mod tests {
             ])),
         ];
 
-        let tree = OutlineTree::from_rows(&rows, "parent_id", "sort_key");
+        let tree = OutlineTree::from_rows(&rows, "parent_id", "sort_key", None);
         assert_eq!(tree.roots.len(), 2);
 
         let items: Vec<(String, usize)> = tree.walk_depth_first(|row, depth| {
@@ -1141,6 +1173,134 @@ mod tests {
                 ("2".to_string(), 1),
                 ("3".to_string(), 0),
             ]
+        );
+    }
+
+    // ── RULING C1' — per-level tree sort keys ──────────────────────────
+    //
+    // Helper: DFS the tree, collecting `id`s in render order.
+    fn tree_ids(tree: &OutlineTree) -> Vec<String> {
+        tree.walk_depth_first(|row, _| row.get("id").unwrap().as_string().unwrap().to_string())
+    }
+
+    fn row(pairs: &[(&str, Value)]) -> Arc<DataRow> {
+        Arc::new(
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+        )
+    }
+
+    /// The C1' RED→GREEN core: two ROOT pins whose `added_ts` (pin recency) is
+    /// REVERSED vs `sort_key` (ingest order). With a declared root key
+    /// `"-added_ts"`, roots must render most-recently-pinned-first
+    /// (`[apple, zebra]`), while `apple`'s CHILDREN keep `sort_key` ASC — the
+    /// per-level split. Pre-C1' (root key ignored) roots would follow
+    /// `sort_key` → `[zebra, apple]`, so this reds until the per-level re-sort
+    /// lands.
+    #[test]
+    fn from_rows_roots_sort_by_root_key_children_keep_sort_key() {
+        let s = |x: &str| Value::String(x.into());
+        let i = |n: i64| Value::Integer(n);
+        let rows: Vec<Arc<DataRow>> = vec![
+            // zebra: ingested 1st (sort_key=1), pinned 1st (added_ts=10)
+            row(&[
+                ("id", s("zebra")),
+                ("parent_id", s("root")),
+                ("sort_key", i(1)),
+                ("added_ts", i(10)),
+            ]),
+            // apple: ingested 2nd (sort_key=2), pinned last (added_ts=20)
+            row(&[
+                ("id", s("apple")),
+                ("parent_id", s("root")),
+                ("sort_key", i(2)),
+                ("added_ts", i(20)),
+            ]),
+            // apple's children, supplied OUT of sort_key order in the input.
+            row(&[
+                ("id", s("apple-c2")),
+                ("parent_id", s("apple")),
+                ("sort_key", i(2)),
+                ("added_ts", i(99)),
+            ]),
+            row(&[
+                ("id", s("apple-c1")),
+                ("parent_id", s("apple")),
+                ("sort_key", i(1)),
+                ("added_ts", i(5)),
+            ]),
+        ];
+        let tree = OutlineTree::from_rows(&rows, "parent_id", "sort_key", Some("-added_ts"));
+        assert_eq!(
+            tree_ids(&tree),
+            vec![
+                "apple".to_string(),    // root, added_ts DESC → first
+                "apple-c1".to_string(), // child, sort_key ASC
+                "apple-c2".to_string(),
+                "zebra".to_string(), // root, added_ts DESC → last
+            ],
+            "roots must sort by the declared root key (added_ts DESC) while child \
+             buckets keep sort_key (document) order",
+        );
+    }
+
+    /// No root key declared → roots stay in `sort_key` order, byte-identical to
+    /// the pre-C1' behavior. Locks the "no global flip" guarantee.
+    #[test]
+    fn from_rows_none_root_key_keeps_sort_key_order_exactly() {
+        let s = |x: &str| Value::String(x.into());
+        let i = |n: i64| Value::Integer(n);
+        let rows: Vec<Arc<DataRow>> = vec![
+            row(&[
+                ("id", s("zebra")),
+                ("parent_id", s("root")),
+                ("sort_key", i(1)),
+                ("added_ts", i(10)),
+            ]),
+            row(&[
+                ("id", s("apple")),
+                ("parent_id", s("root")),
+                ("sort_key", i(2)),
+                ("added_ts", i(20)),
+            ]),
+        ];
+        let tree = OutlineTree::from_rows(&rows, "parent_id", "sort_key", None);
+        assert_eq!(
+            tree_ids(&tree),
+            vec!["zebra".to_string(), "apple".to_string()],
+            "with no root key, roots keep sort_key order (pre-C1' behavior)",
+        );
+    }
+
+    /// Roots that TIE on the root key fall back to `sort_key` order
+    /// deterministically (the re-sort is stable over the `sort_col`-ordered
+    /// bucket). `zebra` (sort_key=1) precedes `apple` (sort_key=2) despite both
+    /// having `added_ts=10`.
+    #[test]
+    fn from_rows_root_key_ties_fall_back_to_sort_key_deterministically() {
+        let s = |x: &str| Value::String(x.into());
+        let i = |n: i64| Value::Integer(n);
+        let rows: Vec<Arc<DataRow>> = vec![
+            row(&[
+                ("id", s("apple")),
+                ("parent_id", s("root")),
+                ("sort_key", i(2)),
+                ("added_ts", i(10)),
+            ]),
+            row(&[
+                ("id", s("zebra")),
+                ("parent_id", s("root")),
+                ("sort_key", i(1)),
+                ("added_ts", i(10)),
+            ]),
+        ];
+        let tree = OutlineTree::from_rows(&rows, "parent_id", "sort_key", Some("-added_ts"));
+        assert_eq!(
+            tree_ids(&tree),
+            vec!["zebra".to_string(), "apple".to_string()],
+            "root-key ties break deterministically on sort_key order",
         );
     }
 

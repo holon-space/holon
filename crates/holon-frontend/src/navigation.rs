@@ -168,7 +168,9 @@ impl TreeNavigator {
     ) -> Self {
         use holon_api::render_eval::OutlineTree;
 
-        let tree = OutlineTree::from_rows(rows, parent_id_col, sort_col);
+        // Navigation's flat DFS index has no per-level root ordering concern —
+        // roots keep `sort_col` order (RULING C1' root key = None).
+        let tree = OutlineTree::from_rows(rows, parent_id_col, sort_col, None);
         let mut dfs_order = Vec::new();
         let mut parent_map = HashMap::new();
 
