@@ -224,9 +224,11 @@ pub struct FileSyncController {
 
     /// Strategy deciding, per minted id-less headline, remap-onto-twin
     /// vs mint (the matching spectrum). Defaults to [`TieredMatcher`]
-    /// (T1 exact position + T3 content-unique-in-document, per the R2
-    /// ruling); `with_block_matcher` swaps in a different tier (e.g. the
-    /// narrower [`PositionalExactMatcher`] for tests).
+    /// (T1 exact position, guarded against wrong-twin re-home + T3
+    /// content-unique-in-document + T2 descendant-subtree-signature /
+    /// relative-position pairing, per RULING A2); `with_block_matcher` swaps
+    /// in a different tier (e.g. the narrower [`PositionalExactMatcher`] for
+    /// tests).
     block_matcher: Arc<dyn BlockMatchStrategy>,
 
     /// Initial-scan feed-barrier batching (boot ingest latency, Options 0+1).
@@ -4508,17 +4510,91 @@ impl BlockMatchStrategy for PositionalExactMatcher {
     }
 }
 
-/// v1 strategy: T0 id-identity (authored skipped) -> T1 exact content at the
-/// SAME sibling position (PR #81, retained as a tie-breaker within uniqueness)
-/// -> T3 exact content UNIQUE in the WHOLE DOCUMENT on BOTH sides (unclaimed
-/// existing AND incoming id-less) -> else MintAmbiguous / MintFresh.
+/// v1 strategy, RULING A2. Per minted (id-less) incoming headline, among the
+/// unclaimed EXISTING store children with equal content:
+/// - **empty** -> `MintFresh` (the ONLY fresh-mint path: genuinely new block).
+/// - **T1 exact position** (PR #81), GUARDED: the twin at the same sibling
+///   position under the resolved parent wins only if it is the SOLE candidate
+///   OR its descendant subtree signature matches -- so a position tie between
+///   several same-content twins with DIFFERENT subtrees defers to T2 rather
+///   than silently re-homing children onto the wrong twin.
+/// - **T3 content unique in the WHOLE DOCUMENT on BOTH sides** -> remap (basis
+///   `ContentUniqueInDocument`; handles cross-parent moves).
+/// - **T2 tie-break** (RULING A2, replaces the old MintAmbiguous branch):
+///   multiple same-content twins and/or a duplicated incoming side. Pair
+///   deterministically by DESCENDANT SUBTREE SIGNATURE first (a twin keeps its
+///   own children), then by relative sibling position (identical-subtree twins
+///   are interchangeable). This tier always claims a candidate.
 ///
-/// Document-scope uniqueness is Martin's ruling (not the sibling-scope T2 of
-/// the brief): it handles cross-parent moves (external agents restructure
-/// trees), and the both-sides-uniqueness gate carries the FP protection --
-/// repeated identical content (e.g. `TODO buy milk` under several parents)
-/// stays ambiguous and mints rather than being guessed into a wrong merge.
+/// Consequently `tiered_match` never emits `MintAmbiguous`: identical-content
+/// siblings stop duplicating, and children are never re-homed onto the wrong
+/// twin. (The `MintAmbiguous` variant survives for `PositionalExactMatcher`.)
 pub struct TieredMatcher;
+
+/// Structural fingerprint of a block's DESCENDANTS (ids irrelevant): the
+/// ordered list of each child's `(content, child-subtree-signature)`,
+/// recursively. Existing children are ordered by `seq`, incoming children by
+/// document order. Two blocks share a signature iff their whole subtrees are
+/// identical in content and order -- the RULING A2 discriminator that pairs a
+/// same-content twin with the store twin that kept its exact children.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SubtreeSig(Vec<(String, SubtreeSig)>);
+
+/// Post-order subtree signature of an existing store block, memoized by id.
+fn existing_subtree_sig(
+    id: &EntityUri,
+    by_parent: &HashMap<EntityUri, Vec<&ExistingChild>>,
+    cache: &mut HashMap<EntityUri, SubtreeSig>,
+) -> SubtreeSig {
+    if let Some(s) = cache.get(id) {
+        return s.clone();
+    }
+    let sig = SubtreeSig(
+        by_parent
+            .get(id)
+            .map(|kids| {
+                kids.iter()
+                    .map(|c| {
+                        (
+                            c.content.clone(),
+                            existing_subtree_sig(&c.id, by_parent, cache),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    );
+    cache.insert(id.clone(), sig.clone());
+    sig
+}
+
+/// Post-order subtree signature of an incoming parsed block, memoized by id.
+fn incoming_subtree_sig(
+    id: &EntityUri,
+    children_by_parent: &HashMap<EntityUri, Vec<&IncomingIdentity>>,
+    cache: &mut HashMap<EntityUri, SubtreeSig>,
+) -> SubtreeSig {
+    if let Some(s) = cache.get(id) {
+        return s.clone();
+    }
+    let sig = SubtreeSig(
+        children_by_parent
+            .get(id)
+            .map(|kids| {
+                kids.iter()
+                    .map(|c| {
+                        (
+                            c.content.clone(),
+                            incoming_subtree_sig(&c.id, children_by_parent, cache),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    );
+    cache.insert(id.clone(), sig.clone());
+    sig
+}
 
 #[async_trait::async_trait]
 impl BlockMatchStrategy for TieredMatcher {
@@ -4532,8 +4608,9 @@ impl BlockMatchStrategy for TieredMatcher {
 }
 
 /// Pure v1 matcher. Processes `incoming` in document order (parents-first) so a
-/// remapped parent regroups its subtree for the T1 positional tie-breaker.
-/// Greedy 1:1 claiming keeps each store id claimed at most once.
+/// remapped parent regroups its subtree for the T1 positional tie-breaker and
+/// so descendant subtree signatures are consistent across the pass. Greedy 1:1
+/// claiming keeps each store id claimed at most once.
 pub fn tiered_match(
     existing: &[ExistingChild],
     incoming: &[IncomingIdentity],
@@ -4545,6 +4622,26 @@ pub fn tiered_match(
     }
     for sibs in by_parent.values_mut() {
         sibs.sort_by_key(|e| e.seq);
+    }
+
+    // Incoming children, grouped by (raw) parent in document order -- the parse
+    // tree used to compute descendant subtree signatures (RULING A2 T2).
+    let mut incoming_children: HashMap<EntityUri, Vec<&IncomingIdentity>> = HashMap::new();
+    for i in incoming {
+        incoming_children
+            .entry(i.parent.clone())
+            .or_default()
+            .push(i);
+    }
+
+    // Precompute both sides' descendant subtree signatures (memoized post-order).
+    let mut existing_sig_cache: HashMap<EntityUri, SubtreeSig> = HashMap::new();
+    for e in existing {
+        existing_subtree_sig(&e.id, &by_parent, &mut existing_sig_cache);
+    }
+    let mut incoming_sig_cache: HashMap<EntityUri, SubtreeSig> = HashMap::new();
+    for i in incoming {
+        incoming_subtree_sig(&i.id, &incoming_children, &mut incoming_sig_cache);
     }
 
     // Existing ids matched verbatim by an incoming id are claimed up front -- an
@@ -4584,28 +4681,47 @@ pub fn tiered_match(
             continue; // authored `:ID:` -- the by-id diff owns it
         }
 
-        // T1: exact content at the SAME sibling position under the (resolved)
-        // parent -- the PR #81 rule, retained as a tie-breaker within uniqueness.
-        let t1 = by_parent
-            .get(&parent)
-            .and_then(|s| s.get(pos))
-            .filter(|e| e.content == inc.content && !claimed.contains(&e.id));
-        if let Some(e) = t1 {
-            claimed.insert(e.id.clone());
-            remaps.insert(inc.id.clone(), e.id.clone());
-            verdicts.push(MatchVerdict::Remap {
+        // Same-content, unclaimed existing candidates, ordered by sibling
+        // position (seq) then id -- a deterministic relative-position order.
+        let mut candidates: Vec<&ExistingChild> = existing
+            .iter()
+            .filter(|e| e.content == inc.content && !claimed.contains(&e.id))
+            .collect();
+        candidates.sort_by(|a, b| a.seq.cmp(&b.seq).then_with(|| a.id.id().cmp(b.id.id())));
+
+        if candidates.is_empty() {
+            // No candidate left -- genuinely new (RULING A2: the sole mint path).
+            verdicts.push(MatchVerdict::MintFresh {
                 minted: inc.id.clone(),
-                onto: e.id.clone(),
-                basis: MatchBasis::ContentAtPosition,
             });
             continue;
         }
 
+        let inc_sig = &incoming_sig_cache[&inc.id];
+
+        // T1: exact content at the SAME sibling position under the (resolved)
+        // parent (PR #81). GUARDED (RULING A2): the positional twin wins only if
+        // it is the SOLE candidate or its subtree signature matches -- otherwise
+        // several same-content twins with different subtrees would let position
+        // silently re-home children onto the wrong twin; defer to T2.
+        let positional = by_parent
+            .get(&parent)
+            .and_then(|s| s.get(pos))
+            .filter(|e| e.content == inc.content && !claimed.contains(&e.id));
+        if let Some(e) = positional {
+            if candidates.len() == 1 || existing_sig_cache[&e.id] == *inc_sig {
+                claimed.insert(e.id.clone());
+                remaps.insert(inc.id.clone(), e.id.clone());
+                verdicts.push(MatchVerdict::Remap {
+                    minted: inc.id.clone(),
+                    onto: e.id.clone(),
+                    basis: MatchBasis::ContentAtPosition,
+                });
+                continue;
+            }
+        }
+
         // T3: exact content UNIQUE in the whole document on BOTH sides.
-        let candidates: Vec<&ExistingChild> = existing
-            .iter()
-            .filter(|e| e.content == inc.content && !claimed.contains(&e.id))
-            .collect();
         let incoming_unique = incoming_dupes
             .get(inc.content.as_str())
             .copied()
@@ -4620,18 +4736,31 @@ pub fn tiered_match(
                 onto: e.id.clone(),
                 basis: MatchBasis::ContentUniqueInDocument,
             });
-        } else if candidates.is_empty() {
-            verdicts.push(MatchVerdict::MintFresh {
-                minted: inc.id.clone(),
-            });
-        } else {
-            // Content matched but not deterministically (multiple existing twins,
-            // or the incoming side is itself duplicated) -- disclose and mint.
-            verdicts.push(MatchVerdict::MintAmbiguous {
-                minted: inc.id.clone(),
-                candidates: candidates.iter().map(|e| e.id.clone()).collect(),
-            });
+            continue;
         }
+
+        // T2 (RULING A2): multiple same-content twins and/or a duplicated
+        // incoming side -- neither position-exact nor content-unique. Pair
+        // deterministically: prefer the candidate whose DESCENDANT SUBTREE
+        // SIGNATURE matches (that twin keeps its own children -- never re-homed
+        // onto the wrong twin); among matches, and when none match, the lowest
+        // (seq, id) candidate wins (relative position; identical-subtree twins
+        // are interchangeable). Always claims a candidate -- never MintAmbiguous.
+        let (e, basis) = match candidates
+            .iter()
+            .copied()
+            .find(|e| existing_sig_cache[&e.id] == *inc_sig)
+        {
+            Some(e) => (e, MatchBasis::SubtreeSignature),
+            None => (candidates[0], MatchBasis::ContentAtRelativePosition),
+        };
+        claimed.insert(e.id.clone());
+        remaps.insert(inc.id.clone(), e.id.clone());
+        verdicts.push(MatchVerdict::Remap {
+            minted: inc.id.clone(),
+            onto: e.id.clone(),
+            basis,
+        });
     }
     verdicts
 }
@@ -4983,11 +5112,6 @@ mod tiered_matcher_tests {
         remap(vs, minted).map(|(onto, _)| onto)
     }
 
-    fn is_ambiguous(vs: &[MatchVerdict], minted: &str) -> bool {
-        vs.iter()
-            .any(|v| matches!(v, MatchVerdict::MintAmbiguous { minted: m, .. } if m.id() == minted))
-    }
-
     fn is_mint_fresh(vs: &[MatchVerdict], minted: &str) -> bool {
         vs.iter()
             .any(|v| matches!(v, MatchVerdict::MintFresh { minted: m } if m.id() == minted))
@@ -5033,11 +5157,13 @@ mod tiered_matcher_tests {
         );
     }
 
-    /// Non-unique content that positional matching cannot tie-break (the twins
-    /// moved together / positions all shifted) stays ambiguous on BOTH -- no
-    /// guess. FP protection.
+    /// RULING A2 (was `reordered_identical_twins_both_mint_ambiguous`,
+    /// semantics FLIPPED): two identical LEAF twins whose positions all
+    /// shifted no longer mint-ambiguous. Their subtrees are equal (empty),
+    /// so they are interchangeable and pair by relative position -- both
+    /// remap onto distinct store ids, neither mints.
     #[tokio::test]
-    async fn reordered_identical_twins_both_mint_ambiguous() {
+    async fn reordered_identical_twins_pair_by_position() {
         let d = doc();
         let existing = vec![existing("A", &d, 0, "Dup"), existing("X", &d, 1, "Dup")];
         // Both incoming twins land under a different parent -> no positional twin.
@@ -5047,23 +5173,61 @@ mod tiered_matcher_tests {
             incoming("i2", &other, "Dup", true),
         ];
         let vs = verdicts(&existing, &incoming).await;
-        assert!(
-            is_ambiguous(&vs, "i1"),
-            "non-unique twin -> ambiguous, not remap"
+        assert_eq!(
+            remap_onto(&vs, "i1"),
+            Some(EntityUri::block("A")),
+            "first twin pairs onto the lowest-position store twin"
         );
-        assert!(
-            is_ambiguous(&vs, "i2"),
-            "non-unique twin -> ambiguous, not remap"
+        assert_eq!(
+            remap_onto(&vs, "i2"),
+            Some(EntityUri::block("X")),
+            "second twin pairs onto the remaining store twin"
         );
-        assert!(remap_onto(&vs, "i1").is_none());
-        assert!(remap_onto(&vs, "i2").is_none());
+        assert!(!is_mint_fresh(&vs, "i1") && !is_mint_fresh(&vs, "i2"));
     }
 
-    /// Incoming-side duplicates: two id-less blocks share content, only one
-    /// store twin exists -> we cannot know which incoming IS the twin, so
-    /// neither remaps (both-sides-uniqueness gate). They mint (disclosed).
+    /// RULING A2 signature discrimination: same-content twins with DIFFERENT
+    /// subtrees pair by descendant signature, crossing positions -- the twin
+    /// carrying `childB` reconciles onto the store twin that owns `childB`, not
+    /// the positionally-first one. This is what stops children being re-homed
+    /// onto the wrong same-content twin.
     #[tokio::test]
-    async fn incoming_side_duplicates_mint() {
+    async fn twins_with_distinct_subtrees_pair_by_signature() {
+        let d = doc();
+        let other = EntityUri::block("other");
+        // Store: twin A owns childA (seq 0), twin X owns childB (seq 1).
+        let existing = vec![
+            existing("A", &d, 0, "Dup"),
+            existing("ca", &EntityUri::block("A"), 0, "childA"),
+            existing("X", &d, 1, "Dup"),
+            existing("cb", &EntityUri::block("X"), 0, "childB"),
+        ];
+        // Incoming (reordered): i1 carries childB, i2 carries childA.
+        let incoming = vec![
+            incoming("i1", &other, "Dup", true),
+            incoming("i1c", &EntityUri::block("i1"), "childB", true),
+            incoming("i2", &other, "Dup", true),
+            incoming("i2c", &EntityUri::block("i2"), "childA", true),
+        ];
+        let vs = verdicts(&existing, &incoming).await;
+        assert_eq!(
+            remap(&vs, "i1"),
+            Some((EntityUri::block("X"), MatchBasis::SubtreeSignature)),
+            "the childB-carrying twin must pair onto the store twin that owns childB"
+        );
+        assert_eq!(
+            remap(&vs, "i2"),
+            Some((EntityUri::block("A"), MatchBasis::SubtreeSignature)),
+            "the childA-carrying twin must pair onto the store twin that owns childA"
+        );
+    }
+
+    /// RULING A2 (was `incoming_side_duplicates_mint`, semantics FLIPPED): one
+    /// store twin, two incoming id-less blocks with that content. The first
+    /// pairs onto the store twin; the second has NO unclaimed candidate left
+    /// and mints fresh (genuinely new).
+    #[tokio::test]
+    async fn incoming_side_duplicate_pairs_one_and_mints_the_rest() {
         let d = doc();
         let existing = vec![existing("A", &d, 0, "Solo")];
         let other = EntityUri::block("other");
@@ -5072,16 +5236,15 @@ mod tiered_matcher_tests {
             incoming("i2", &other, "Solo", true),
         ];
         let vs = verdicts(&existing, &incoming).await;
-        assert!(
-            remap_onto(&vs, "i1").is_none(),
-            "incoming dupe must not remap"
+        assert_eq!(
+            remap_onto(&vs, "i1"),
+            Some(EntityUri::block("A")),
+            "the first incoming twin pairs onto the sole store twin"
         );
         assert!(
-            remap_onto(&vs, "i2").is_none(),
-            "incoming dupe must not remap"
+            is_mint_fresh(&vs, "i2"),
+            "the surplus twin has no candidate left -> mints fresh"
         );
-        assert!(is_ambiguous(&vs, "i1"));
-        assert!(is_ambiguous(&vs, "i2"));
     }
 
     /// Claimed-id exclusion: an existing id matched verbatim by an authored
@@ -5108,22 +5271,29 @@ mod tiered_matcher_tests {
         );
     }
 
-    /// Document-wide duplicate content: the same content appears under multiple
-    /// parents in the store -> a single id-less incoming with that content is
-    /// ambiguous (existing side not unique). FP protection (repeated `TODO`s).
+    /// RULING A2 (was `document_wide_duplicate_content_is_ambiguous`, semantics
+    /// FLIPPED): the same content appears under multiple store parents; a
+    /// single id-less incoming with that content no longer mints-ambiguous.
+    /// Both store twins are leaf/interchangeable, so it pairs onto the
+    /// lowest-position one (A) -- the other is left for the whole-doc diff
+    /// to converge/delete.
     #[tokio::test]
-    async fn document_wide_duplicate_content_is_ambiguous() {
+    async fn document_wide_duplicate_content_pairs_by_position() {
         let existing = vec![
             existing("A", &EntityUri::block("P1"), 0, "Foo"),
             existing("B", &EntityUri::block("P2"), 0, "Foo"),
         ];
         let incoming = vec![incoming("i", &doc(), "Foo", true)];
         let vs = verdicts(&existing, &incoming).await;
-        assert!(
-            remap_onto(&vs, "i").is_none(),
-            "non-unique existing -> no remap"
+        assert_eq!(
+            remap_onto(&vs, "i"),
+            Some(EntityUri::block("A")),
+            "single incoming twin pairs onto the lowest (seq, id) store twin"
         );
-        assert!(is_ambiguous(&vs, "i"));
+        assert!(
+            !is_mint_fresh(&vs, "i"),
+            "a candidate exists -> never mints"
+        );
     }
 
     // ── Trait-contract tests (same contract as v0) ──
