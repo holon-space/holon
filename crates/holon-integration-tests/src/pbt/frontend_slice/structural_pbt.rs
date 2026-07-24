@@ -3524,4 +3524,152 @@ mod teeth {
              order. Got apple@{apple:?} zebra@{zebra:?}; rendered sidebar entity order = {order:?}"
         );
     }
+
+    /// **Right-sidebar ordering ORACLE — locks the declared-sort semantics
+    /// (vault deliverable: "Oracle-lock the right-sidebar ordering
+    /// semantics — compile+execute covered; ORDER BY semantics are not").**
+    ///
+    /// The right sidebar shows PINNED block subtrees. Its backing query
+    /// (`assets/default/index.org` `default-right-sidebar::src::0`) declares
+    /// `... RETURN d ORDER BY fr.added_ts DESC, d.sort_key` — so pin ROOTS
+    /// must render MOST-RECENTLY-PINNED-FIRST (`added_ts DESC`), which is
+    /// exactly what the reference models (`RefBoot::pin_block` move-to-top by
+    /// `added_ts_logical`, ref_caps/boot.rs). But the render
+    /// (`default-right-sidebar::render::0`) is `tree(sortkey:
+    /// col("sort_key"))`, and `OutlineTree::from_rows` (render_eval.rs)
+    /// sorts ALL rows — INCLUDING level-0 roots — by that single `sort_key`
+    /// before partitioning, silently DISCARDING the query's `ORDER BY
+    /// fr.added_ts DESC`. So pins render in `sort_key` (document/ingest)
+    /// order, not pin-recency order. This is the SAME class as the
+    /// left-sidebar bug (B, now fixed) and BugFunnel F7 (journals feed
+    /// ignores declared ORDER BY / sortkey).
+    ///
+    /// Repro: two sibling non-Page headings `zebra` (ingested FIRST → LOWER
+    /// `sort_key`) and `apple` (ingested SECOND → HIGHER `sort_key`). Pin
+    /// `zebra` FIRST (added_ts=1), then `apple` (added_ts=2). The declared
+    /// order (`added_ts DESC`) is `[apple, zebra]`; the `sort_key` order the
+    /// render actually applies is `[zebra, apple]`. They DIVERGE, so this
+    /// asserts the EFFECTIVE-declared-sort (`apple` before `zebra`):
+    ///   - RED on `tree(sortkey: col("sort_key"))` — renders `zebra` first.
+    ///   - GREEN once the render honors the query's `added_ts DESC` for roots.
+    ///
+    /// **TWO escalated causes gate this red (see the lane-7 report + BugFunnel
+    /// rows) — both need Martin's ruling, hence `#[ignore]`:**
+    ///
+    /// 1. REGION-LITERAL mismatch (the CURRENT red cause — the right sidebar
+    ///    renders EMPTY). The seed GQL filters `fr.region = 'right'`, but the
+    ///    production `focus_pin` op writes `navigation_history.region =
+    ///    Region::RightSidebar.as_str() = 'right_sidebar'`, and the GQL
+    ///    `focus_root` node maps that column verbatim
+    ///    (matview_focus_roots.sql). SQL equality can't match, so the real
+    ///    Turso GQL returns no rows — the right sidebar shows NOTHING (prod +
+    ///    SUT). The composed keystone never caught it because the
+    ///    reference-side interpreter (`pbt::query.rs` `gql_focus_region`)
+    ///    parses whatever literal the GQL carries, so ref and SUT MIRROR each
+    ///    other on `'right'` (both empty → agree). Fixing it spans the seed +
+    ///    `di/registration.rs` corpus + the ref interpreter + the ref's
+    ///    pin-region keying, with real risk to the currently-passing focus-root
+    ///    invariants — an entangled fork, ESCALATED not ruled here.
+    ///
+    /// 2. SORTKEY OVERRIDE (the deeper red, surfaces once (1) is resolved and
+    ///    pins render). A single-column tree() `sortkey` CANNOT express "roots
+    ///    by `added_ts DESC`, descendants by `sort_key`", so honoring the
+    ///    query's declared sort is a render-DSL fork (per-level sortkey via the
+    ///    existing `rules` mechanism, OR making `OutlineTree` preserve the
+    ///    backing query's row order for roots) with codebase-wide consequences.
+    ///
+    /// The oracle is the deliverable: with it in the catalog, BOTH an
+    /// empty/region-broken right sidebar AND a render-layer sortkey silently
+    /// overriding a query `ORDER BY` are a permanent RED. Its "both render"
+    /// precondition catches (1); the order assert catches (2). Remove
+    /// `#[ignore]` once the rulings + fixes land.
+    ///
+    /// @pbt kind harness
+    /// @pbt covers right-sidebar-sort-order — the right sidebar's rendered pin
+    /// order must match its query's declared `ORDER BY fr.added_ts DESC`
+    /// (pin-recency), not the `tree()` render's `sort_key` override.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "RED on main: right-sidebar tree() sortkey=sort_key silently \
+                overrides the query's ORDER BY added_ts DESC — open render-DSL \
+                semantics question escalated to Martin (lane 7 / BugFunnel)"]
+    async fn right_sidebar_renders_pins_in_declared_added_ts_order() {
+        use holon_pbt_core::capabilities::SutNavHistoryDrive;
+        use holon_pbt_core::capabilities::SutRenderer;
+
+        // Two sibling non-Page headings under a container doc-root, authored so
+        // that document/ingest order (== sort_key) is REVERSE-alphabetical:
+        // `zebra` first (lower sort_key), `apple` second (higher sort_key).
+        const ORG: &str = concat!(
+            "#+ID: rsort-container\n",
+            "* zzz-pin-zebra\n",
+            ":PROPERTIES:\n:ID: rsort-zebra\n:END:\n",
+            "* aaa-pin-apple\n",
+            ":PROPERTIES:\n:ID: rsort-apple\n:END:\n",
+        );
+
+        let comp = Arc::new(
+            HeadlessFrontendComponent::new(
+                &[("RsortContainer.org", ORG)],
+                Duration::from_millis(600),
+            )
+            .await,
+        );
+        tokio::time::sleep(SETTLE).await;
+
+        let zebra = EntityUri::parse("block:rsort-zebra").expect("zebra id");
+        let apple = EntityUri::parse("block:rsort-apple").expect("apple id");
+
+        // Pin zebra FIRST (added_ts=1), apple SECOND (added_ts=2). Declared
+        // `added_ts DESC` order is therefore `[apple, zebra]` — the OPPOSITE of
+        // the `sort_key` (ingest) order `[zebra, apple]` the render applies.
+        SutNavHistoryDrive::pin_block(comp.as_ref(), Region::RightSidebar, &zebra).await;
+        tokio::time::sleep(SETTLE).await;
+        SutNavHistoryDrive::pin_block(comp.as_ref(), Region::RightSidebar, &apple).await;
+        tokio::time::sleep(SETTLE).await;
+
+        // Render the FULL layout via the RECURSIVE snapshot (like the
+        // left-sidebar oracle) — `widget_tree_for` uses the shallow
+        // `interpret_pure`, whose nested `live_block`/tree rows stay
+        // placeholders, so the right-sidebar pin rows never resolve. The nested
+        // CDC settle can lag (esp. under concurrent-build CPU load), so
+        // RE-SNAPSHOT until both pins appear or a generous deadline — the
+        // "both render" precondition must not be a timing race, isolating the
+        // real ORDER assertion below (same pattern as the journal-feed oracle).
+        let sidebar_order = |root: &holon_pbt_core::capabilities::WidgetSnapshot| -> Vec<String> {
+            root.walk()
+                .find(|n| {
+                    n.entity_id
+                        .as_deref()
+                        .is_some_and(|e| e.contains("default-right-sidebar"))
+                })
+                .map(|s| s.walk().filter_map(|n| n.entity_id.clone()).collect())
+                .unwrap_or_default()
+        };
+        let mut order: Vec<String> = Vec::new();
+        for _ in 0..40 {
+            let root = comp.widget_tree_snapshot().await;
+            order = sidebar_order(&root);
+            let has_both = order.iter().any(|e| e.contains("rsort-apple"))
+                && order.iter().any(|e| e.contains("rsort-zebra"));
+            if has_both {
+                break;
+            }
+            tokio::time::sleep(SETTLE).await;
+        }
+        let pos = |needle: &str| order.iter().position(|e| e.contains(needle));
+        let apple_pos = pos("rsort-apple");
+        let zebra_pos = pos("rsort-zebra");
+
+        assert!(
+            apple_pos.is_some() && zebra_pos.is_some(),
+            "both pinned blocks must render in the right sidebar (apple={apple_pos:?}, \
+             zebra={zebra_pos:?}); rendered right-sidebar entity order = {order:?}"
+        );
+        assert!(
+            apple_pos < zebra_pos,
+            "the right sidebar must render pins in the query's declared ORDER BY fr.added_ts DESC \
+             (aaa-pin-apple pinned LAST → FIRST, before zzz-pin-zebra), NOT the tree()'s sort_key/ \
+             ingest order. Got apple@{apple_pos:?} zebra@{zebra_pos:?}; rendered order = {order:?}"
+        );
+    }
 }
