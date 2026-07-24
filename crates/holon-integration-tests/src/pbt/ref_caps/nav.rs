@@ -95,12 +95,64 @@ impl RefNavHistory for ReferenceState {
     }
 }
 
+impl ReferenceState {
+    /// Mirror prod `go_back`/`go_forward`'s write-side reopen (ruled option
+    /// (a)): the region's single open focus row becomes the back/forward
+    /// target, so `expected_focus_root_ids` (derived from `open_pins`) tracks
+    /// the page navigated to — not the departed page. Reopening flips the
+    /// `closed_at` display flag on an EXISTING `navigation_history` row; it
+    /// inserts nothing, so `next_history_id` is untouched. `target == None`
+    /// models a home row (block_id NULL, filtered out of `focus_roots` → the
+    /// panel falls through to its default render).
+    fn sync_open_pin_to_back_forward_target(&mut self, region: Region, target: Option<EntityUri>) {
+        // Precompute the defensive-fallback ids up front so the `open_pins`
+        // borrow below never overlaps another `self.ui` field borrow. The
+        // fallback branch only fires if `open_pins` is somehow empty — a
+        // `can_go_back`/`can_go_forward`-gated call always has the one open
+        // focus row `nav_focus` left behind.
+        let pins_empty = self
+            .ui
+            .user
+            .open_pins
+            .get(&region)
+            .map(|p| p.is_empty())
+            .unwrap_or(true);
+        let (fallback_history_id, fallback_ts) = if pins_empty {
+            let ts = self.ui.user.next_pin_ts;
+            self.ui.user.next_pin_ts += 1;
+            (self.ui.tab.next_history_id.saturating_sub(1), ts)
+        } else {
+            (0, 0)
+        };
+        let pins = self.ui.user.open_pins.entry(region).or_default();
+        match pins.last_mut() {
+            // Main region carries exactly one open row (nav_focus clears+pushes
+            // one); reopening only changes which block that row points at.
+            Some(pin) => pin.block_id = target,
+            None => pins.push(OpenPinEntry {
+                history_id: fallback_history_id,
+                block_id: target,
+                added_ts_logical: fallback_ts,
+            }),
+        }
+    }
+}
+
 impl RefNavHistoryMut for ReferenceState {
     fn nav_step_back(&mut self, region: Region) {
-        if let Some(history) = self.ui.tab.navigation_history.get_mut(&region)
-            && history.cursor > 0
-        {
-            history.cursor -= 1;
+        let target = self
+            .ui
+            .tab
+            .navigation_history
+            .get_mut(&region)
+            .and_then(|history| {
+                (history.cursor > 0).then(|| {
+                    history.cursor -= 1;
+                    history.entries.get(history.cursor).cloned().flatten()
+                })
+            });
+        if let Some(target) = target {
+            self.sync_open_pin_to_back_forward_target(region, target);
         }
         self.ui.tab.focused_entity_id.remove(&region);
         self.ui.tab.focused_cursor.remove(&region);
@@ -110,10 +162,19 @@ impl RefNavHistoryMut for ReferenceState {
     }
 
     fn nav_step_forward(&mut self, region: Region) {
-        if let Some(history) = self.ui.tab.navigation_history.get_mut(&region)
-            && history.cursor < history.entries.len() - 1
-        {
-            history.cursor += 1;
+        let target = self
+            .ui
+            .tab
+            .navigation_history
+            .get_mut(&region)
+            .and_then(|history| {
+                (history.cursor < history.entries.len() - 1).then(|| {
+                    history.cursor += 1;
+                    history.entries.get(history.cursor).cloned().flatten()
+                })
+            });
+        if let Some(target) = target {
+            self.sync_open_pin_to_back_forward_target(region, target);
         }
         self.ui.tab.focused_entity_id.remove(&region);
         self.ui.tab.focused_cursor.remove(&region);
