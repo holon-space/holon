@@ -707,8 +707,8 @@ mod bundled_gql_query_smoke {
             (
                 "desk:right-sidebar".into(),
                 "MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..20]-(d:block) WHERE \
-                 fr.region = 'right' AND root.id = fr.root_id RETURN d ORDER BY fr.added_ts \
-                 DESC, d.sort_key"
+                 fr.region = 'right_sidebar' AND root.id = fr.root_id RETURN d, \
+                 fr.added_ts AS added_ts ORDER BY fr.added_ts DESC, d.sort_key"
                     .into(),
             ),
             (
