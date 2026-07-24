@@ -1600,6 +1600,24 @@ pub trait SutRenderer {
     /// Returns the root widget; descendants reachable via `.children`.
     async fn widget_tree_snapshot(&self) -> WidgetSnapshot;
 
+    /// Non-cached companion to [`Self::widget_tree_snapshot`] for
+    /// bounded-wait / poll-style invariants that must RE-SAMPLE a
+    /// self-healing transient frame within one check tick — e.g.
+    /// `inv-embedded-page-collapsed-lazy` waiting out the
+    /// `focus_descendants` recursive-CTE prune delta that lands a frame
+    /// after the STRICT one-shot BlockToPage snapshot.
+    ///
+    /// The cached `widget_tree_snapshot` freezes ONE recompute per tick
+    /// (the `CachingProxy` per-tick memo AND the composed
+    /// `HeadlessFrontendComponent` armed `render_snapshot_cache`), so a
+    /// wait loop calling it can never observe the heal. This method
+    /// bypasses those memos, recomputes, and refreshes the memo so a
+    /// later same-tick consumer sees the newest frame — the exact
+    /// discipline `SutLayout::rendered_elements_fresh` uses for the
+    /// geometry poll invariants. SUTs with no caching forward to
+    /// `widget_tree_snapshot`.
+    async fn widget_tree_snapshot_fresh(&self) -> WidgetSnapshot;
+
     /// Block ids in the data_rows that feed the current root layout's
     /// widget tree — i.e. what the renderer is reading from query
     /// results. Used by `inv-viewmodel-entity-ids-subset-of-data` to
