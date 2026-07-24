@@ -223,9 +223,10 @@ pub struct FileSyncController {
     clock: Arc<dyn holon_api::Clock>,
 
     /// Strategy deciding, per minted id-less headline, remap-onto-twin
-    /// vs mint (the matching spectrum). Defaults to
-    /// [`PositionalExactMatcher`] (PR #81 exact position);
-    /// `with_block_matcher` swaps in a looser tier.
+    /// vs mint (the matching spectrum). Defaults to [`TieredMatcher`]
+    /// (T1 exact position + T3 content-unique-in-document, per the R2
+    /// ruling); `with_block_matcher` swaps in a different tier (e.g. the
+    /// narrower [`PositionalExactMatcher`] for tests).
     block_matcher: Arc<dyn BlockMatchStrategy>,
 
     /// Initial-scan feed-barrier batching (boot ingest latency, Options 0+1).
