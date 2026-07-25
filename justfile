@@ -124,6 +124,11 @@ keystone-smoke:
 # docs/Testing/HandAuthoredRegressions.md) through the keystone harness. Same
 # --features pbt gate as the keystone; fail-loud on any red or parse error.
 hand-authored *FLAGS:
+    #!/usr/bin/env bash
+    # pipefail is REQUIRED: without it the recipe's exit status is `tee`'s, so a
+    # failing suite exited 0 and every weave/land gate using this recipe was a
+    # silent false green (observed 2026-07-25).
+    set -euo pipefail
     cargo test \
         -p holon-integration-tests --features pbt --test hand_authored_regressions \
         -- --nocapture {{FLAGS}} 2>&1 | tee /tmp/pbt-hand-authored.log
@@ -169,6 +174,8 @@ pbt-all cases='32':
 # so the composed keystone exercises them). Replaces the retired standalone extended_gen_pbt
 # (§8.10: coverage lives in the ONE keystone, not a wiring-axis twin).
 pbt-extended-gen cases='64' *FLAGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
     PROPTEST_CASES={{cases}} HOLON_PBT_EXTENDED_GEN=1 cargo test \
         -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
         -- --nocapture {{FLAGS}} 2>&1 | tee /tmp/pbt-extended-gen.log
@@ -180,6 +187,8 @@ pbt-extended-gen cases='64' *FLAGS:
 # (capture /tmp/layout_full_8case_finding.captured.json) still reproduces here — triage via
 # the keystone, then remove this note.
 pbt-layout-override cases='64' *FLAGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
     PROPTEST_CASES={{cases}} HOLON_PBT_LAYOUT_OVERRIDE=1 cargo test \
         -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
         -- --nocapture {{FLAGS}} 2>&1 | tee /tmp/pbt-layout-override.log
@@ -288,6 +297,8 @@ tokio-console-app:
 # cfg(test) lib slice tests (catch triads, component integration tests) —
 # nextest's default filter EXCLUDES lib targets, so run them explicitly:
 pbt-lib-slices:
+    #!/usr/bin/env bash
+    set -euo pipefail
     cargo nextest run -p holon-integration-tests --lib --features pbt \
         2>&1 | tee /tmp/pbt-lib-slices.log
 
