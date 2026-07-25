@@ -290,6 +290,7 @@ pub trait ComposedSlice {
     async fn run_report(
         caps: &CapMap,
         resolver: &IdResolver,
+        burned: &BurnedPairs,
         scaffold_ids: &BTreeSet<EntityUri>,
         ref_state: &ReferenceState,
     ) -> RunReport {
@@ -304,8 +305,13 @@ pub trait ComposedSlice {
         // their org-ingest / Loro path records no engine history.
         {
             let inner = resolved.inner_mut();
-            inner.history_ever_created = map.values().cloned().collect();
-            inner.history_min_op_groups = map.iter().filter(|(k, v)| k != v).count();
+            inner.history_ever_created = map
+                .values()
+                .chain(burned.iter().map(|(_, real)| real))
+                .cloned()
+                .collect();
+            inner.history_min_op_groups = map.iter().filter(|(k, v)| k != v).count()
+                + burned.iter().filter(|(syn, real)| syn != real).count();
         }
         // Freeze the budget window for `inv-sql-budget` (if a span-metrics provider is
         // wired): everything up to this check is the transition's cost; the invariant
@@ -329,12 +335,21 @@ pub trait ComposedSlice {
 /// called on the gpui thread that owns the window.
 pub type SettleHook = Box<dyn Fn() + Send>;
 
+/// Synthetic→real pairs the reconcile map once held and the SUT has since
+/// destroyed (`UndoLastMutation` deletes the real block; a later `Redo`
+/// re-creates it under a FRESH uuid — prod burns block ids). The live resolver
+/// must re-point the synthetic at the new uuid, but the burned uuid still owns
+/// its `block_history` rows, so it stays here as the append-only half of the
+/// C2 provenance oracle (`history_ever_created` / `history_min_op_groups`).
+pub type BurnedPairs = BTreeSet<(EntityUri, EntityUri)>;
+
 /// The generic composed SUT: a `CapMap` driven through a slice's alphabet, with
 /// the per-tick `IdResolver` reconcile and the shared-catalog check.
 pub struct ComposedSut<S: ComposedSlice> {
     caps: CapMap,
     handle: S::Handle,
     resolver: IdResolver,
+    burned: BurnedPairs,
     scaffold_ids: BTreeSet<EntityUri>,
     rt: tokio::runtime::Runtime,
     /// Pumps an attached gpui window to a fixed point before each
@@ -401,6 +416,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
             caps,
             handle,
             resolver,
+            burned: BurnedPairs::new(),
             scaffold_ids,
             rt,
             settle,
@@ -443,6 +459,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
         self.rt.block_on(S::run_report(
             &self.caps,
             &self.resolver,
+            &self.burned,
             &self.scaffold_ids,
             ref_state,
         ))
@@ -541,6 +558,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             caps,
             handle,
             resolver,
+            burned: BurnedPairs::new(),
             scaffold_ids,
             rt,
             settle: Box::new(|| {}),
@@ -608,6 +626,30 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
         // its split-only mapping off — widening it there would make E2ESut
         // mis-treat doc-uris as splits).
         let mut map = sut.resolver.lock().expect("resolver lock");
+        // Resolver staleness across undo→redo. `UndoLastMutation` DELETES the real
+        // block a synthetic maps to; `Redo` then re-creates it under a FRESH uuid
+        // (prod burns block ids across undo — see `ReferenceState::pop_undo_to_redo`)
+        // while the oracle's redo snapshot restores the SAME synthetic label. Retire
+        // exactly the pairs that are BOTH live on the oracle side (the synthetic is
+        // a block the oracle currently holds) and dead on the SUT side (its uuid is
+        // gone) — those must re-pair below. A pair whose synthetic the oracle no
+        // longer holds is NOT retired: a deleted block's mapping is still needed to
+        // resolve oracle references that outlive it (e.g. `navigation_history`).
+        // The retired pair moves to `burned`, which still feeds the C2 provenance
+        // oracle — the dead uuid owns real `block_history` rows.
+        // Observed counterexample: [SplitBlock(c1,0), UndoLastMutation, Redo] —
+        // `tests/split_undo_redo_reconcile.rs`.
+        let retired: Vec<(EntityUri, EntityUri)> = map
+            .iter()
+            .filter(|(syn, real)| {
+                !after.contains(*real) && ref_state.domain.block_state.blocks.contains_key(*syn)
+            })
+            .map(|(syn, real)| (syn.clone(), real.clone()))
+            .collect();
+        for (syn, _) in &retired {
+            map.remove(syn);
+        }
+        sut.burned.extend(retired);
         // Born-equal doc pages: `WriteOrgFile` pins the oracle's `block:ref-doc-N`
         // into the file via `#+ID:`, so the SUT ingests the SAME id — synthetic in
         // scheme, but with no fresh real partner. Self-map those (identity), like
@@ -678,6 +720,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
         let report = sut.rt.block_on(S::run_report(
             &sut.caps,
             &sut.resolver,
+            &sut.burned,
             &sut.scaffold_ids,
             ref_state,
         ));
