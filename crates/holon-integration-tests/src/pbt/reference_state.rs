@@ -399,6 +399,13 @@ pub struct ReferenceState {
     /// check.
     pub history_ever_created: BTreeSet<EntityUri>,
     pub history_min_op_groups: usize,
+
+    /// Undo→redo burned-id oracle (NOT model state proper): the real block ids
+    /// the harness reconcile retired because a `Redo` re-minted their block
+    /// under a fresh uuid. Populated by `run_report` alongside the C2 fields;
+    /// empty on a bare state and on every run without a completed round trip.
+    /// Read by `inv-undo-redo-reference-heal` through `RefUndoRedoBurned`.
+    pub undo_redo_burned_ids: BTreeSet<EntityUri>,
 }
 
 /// Witness that a [`ReferenceState`]'s ids live in the SUT's id space — either
@@ -554,6 +561,7 @@ impl ReferenceState {
             sharing: super::sharing_state::SharingRefState::default(),
             history_ever_created: BTreeSet::new(),
             history_min_op_groups: 0,
+            undo_redo_burned_ids: BTreeSet::new(),
         }
     }
 

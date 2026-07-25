@@ -185,6 +185,15 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // keystone slice over the real Turso projection supplies it. Fast-path
         // (already consistent) on the common case, so it adds no per-tick cost.
         invariants::matview_recompute_matches::wire(),
+        // Undo→redo referential round trip (observability, 2026-07-26): prod's
+        // redo re-executes the forward op and mints a FRESH id, so a block that
+        // comes back after an undo comes back with a NEW identity. Every
+        // reference written against the old identity must have been re-pointed,
+        // or it dangles forever. Gated on `RefUndoRedoBurned`, whose set the
+        // harness fills ONLY once the round trip completed — so a reference
+        // dangling after a bare undo (correct: the block is genuinely gone) is
+        // structurally never reported.
+        invariants::undo_redo_reference_heal::wire(),
         // Per-transition SQL/wall/RSS budget (`otel-testing`-gated, like its body):
         // needs the composed `ComposedBudget` cap (a span-metrics provider that
         // captured the transition + frozen oracle). Only the `wide_e2e` slice
@@ -330,6 +339,7 @@ const CENTRAL_INVARIANT_IDS_HEAD: &[&str] = &[
     "inv-viewmodel-editable-text-triggers",
     "inv-live-children-match-ref",
     "inv-matview-consistent-with-recompute",
+    "inv-undo-redo-reference-heal",
 ];
 
 /// Correspondence-registry ids folded in after the (feature-gated) budget

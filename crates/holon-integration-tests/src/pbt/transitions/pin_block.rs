@@ -90,8 +90,13 @@ impl<R: RefLifecycle + RefBlockTree + RefPinsMut> TransitionFactory<R> for PinBl
                 .boxed();
             // Weight 2 — pin/unpin should fire often enough to expand the
             // open-pins set, but not drown out the more common navigation +
-            // edit transitions (NavigateFocus is weight 3).
-            (2, strat)
+            // edit transitions (NavigateFocus is weight 3). Biased up under
+            // `HOLON_PBT_UNDO_REDO_DENSITY=high`: an open pin is the only
+            // reference site in the keystone alphabet that SURVIVES an undo
+            // (pins push no undo snapshot), so it is the only way a sweep can
+            // observe whether a redo heals references — see
+            // `crate::pbt::undo_redo_density`.
+            (crate::pbt::undo_redo_density::weight(2), strat)
         })
     }
 }

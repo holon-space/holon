@@ -451,3 +451,12 @@ impl RefHistoryExpectation for ReferenceState {
         self.history_min_op_groups
     }
 }
+
+/// Undo→redo burned-id oracle. Stamped onto the resolved ref by the harness
+/// `run_report` from the reconcile's retired pairs; this cap just surfaces it
+/// to `inv-undo-redo-reference-heal`.
+impl holon_pbt_core::capabilities::RefUndoRedoBurned for ReferenceState {
+    fn burned_block_ids(&self) -> BTreeSet<EntityUri> {
+        self.undo_redo_burned_ids.clone()
+    }
+}

@@ -291,6 +291,7 @@ pub trait ComposedSlice {
         caps: &CapMap,
         resolver: &IdResolver,
         burned: &BurnedPairs,
+        redo_burned: &BTreeSet<EntityUri>,
         scaffold_ids: &BTreeSet<EntityUri>,
         ref_state: &ReferenceState,
     ) -> RunReport {
@@ -312,6 +313,11 @@ pub trait ComposedSlice {
                 .collect();
             inner.history_min_op_groups = map.iter().filter(|(k, v)| k != v).count()
                 + burned.iter().filter(|(syn, real)| syn != real).count();
+            // Undo→redo round-trip oracle: the real ids a `Redo` re-minted away
+            // from — the REDO-GATED set, not the cumulative existence-divergence
+            // one. `inv-undo-redo-reference-heal` asserts no SUT reference site
+            // still points at one.
+            inner.undo_redo_burned_ids = redo_burned.clone();
         }
         // Freeze the budget window for `inv-sql-budget` (if a span-metrics provider is
         // wired): everything up to this check is the transition's cost; the invariant
@@ -350,6 +356,16 @@ pub struct ComposedSut<S: ComposedSlice> {
     handle: S::Handle,
     resolver: IdResolver,
     burned: BurnedPairs,
+    /// The REDO-GATED subset of [`Self::burned`]: real ids retired by the
+    /// reconcile on a tick whose transition was a `Redo`. `burned` itself uses
+    /// an EXISTENCE-DIVERGENCE predicate (SUT lost the real id while the oracle
+    /// holds the synthetic), which a redo satisfies but is not exclusive to —
+    /// `pop_undo_to_redo` → `rematerialize_file_ingested_docs` can re-add a
+    /// doc-root page on a BARE undo and satisfy it too. Gating on the
+    /// transition makes "a completed undo→redo round trip" the literal
+    /// population rule for `inv-undo-redo-reference-heal`, instead of something
+    /// inferred from a set difference.
+    redo_burned: BTreeSet<EntityUri>,
     scaffold_ids: BTreeSet<EntityUri>,
     rt: tokio::runtime::Runtime,
     /// Pumps an attached gpui window to a fixed point before each
@@ -417,6 +433,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
             handle,
             resolver,
             burned: BurnedPairs::new(),
+            redo_burned: BTreeSet::new(),
             scaffold_ids,
             rt,
             settle,
@@ -460,6 +477,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
             &self.caps,
             &self.resolver,
             &self.burned,
+            &self.redo_burned,
             &self.scaffold_ids,
             ref_state,
         ))
@@ -559,6 +577,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             handle,
             resolver,
             burned: BurnedPairs::new(),
+            redo_burned: BTreeSet::new(),
             scaffold_ids,
             rt,
             settle: Box::new(|| {}),
@@ -570,6 +589,9 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
 
     fn apply(mut sut: Self, ref_state: &ReferenceState, transition: S::Transition) -> Self {
         let action = action_label(&transition);
+        // Kept for the post-apply redo gate below (`action` itself is moved into
+        // the timed async block's tracing field).
+        let is_redo = action == "Redo";
         // Weights-spike telemetry: pre-clone the kind label (the async block
         // moves `action`), record after the timed apply. No-op when the flag is
         // off — `record_label` stays `None`.
@@ -649,6 +671,12 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
         for (syn, _) in &retired {
             map.remove(syn);
         }
+        // `action` is the transition's Debug head (`Redo(Redo)` -> "Redo"), the
+        // discriminator the redo gate needs without constraining `S::Transition`.
+        if is_redo {
+            sut.redo_burned
+                .extend(retired.iter().map(|(_, real)| real.clone()));
+        }
         sut.burned.extend(retired);
         // Born-equal doc pages: `WriteOrgFile` pins the oracle's `block:ref-doc-N`
         // into the file via `#+ID:`, so the SUT ingests the SAME id — synthetic in
@@ -721,6 +749,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             &sut.caps,
             &sut.resolver,
             &sut.burned,
+            &sut.redo_burned,
             &sut.scaffold_ids,
             ref_state,
         ));

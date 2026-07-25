@@ -191,6 +191,11 @@ const LAYER_MAP: &[Entry] = &[
         Some(Layer::Projection),
         "pbt/composed/correspondences.rs (history_records_all_creates)",
     ),
+    (
+        "inv-undo-redo-reference-heal",
+        Some(Layer::Projection),
+        "pbt/composed/invariants/undo_redo_reference_heal.rs",
+    ),
     // ── viewmodel / reactive pipeline ─────────────────────────────────────
     (
         "inv-viewmodel-no-error-widgets",
