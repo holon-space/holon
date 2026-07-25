@@ -1807,6 +1807,7 @@ mod tests {
                 &caps,
                 &resolver,
                 &BurnedPairs::new(),
+                &std::collections::BTreeSet::new(),
                 &scaffold,
                 &ref_state,
             )

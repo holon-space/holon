@@ -2285,10 +2285,20 @@ impl SutFocus for HeadlessFrontendComponent {
         )
         .await
         .iter()
-        .filter_map(|r| {
-            let region = Self::cell(r, "region")?;
-            let block_id = Self::cell(r, "block_id")?;
-            Some((region, block_id))
+        .map(|r| {
+            // Fail loud: the SELECT already filters `block_id IS NOT NULL`, so a
+            // missing cell here is a schema/decode defect, not data. Dropping
+            // such a row (the previous `filter_map`) silently shrank the
+            // reference-integrity oracles that read this surface
+            // (`inv-focus-roots`, `inv-undo-redo-reference-heal`) — a swallowed
+            // error that makes them pass by seeing less.
+            let region = Self::cell(r, "region").unwrap_or_else(|| {
+                panic!("navigation_history row has no `region` cell: {r:?}")
+            });
+            let block_id = Self::cell(r, "block_id").unwrap_or_else(|| {
+                panic!("navigation_history row has no `block_id` cell (the SELECT filters IS NOT NULL): {r:?}")
+            });
+            (region, block_id)
         })
         .collect()
     }

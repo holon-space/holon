@@ -44,7 +44,12 @@ impl<R: RefLifecycle + RefBlockTreeMut> TransitionFactory<R> for Redo {
         ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Turso)
     }
     fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
-        Redo.preconditions(state).map(|()| (2, Just(Redo).boxed()))
+        // Weight 2 by default (unchanged). `HOLON_PBT_UNDO_REDO_DENSITY=high`
+        // biases it up so a measurement sweep can actually reach the undo->redo
+        // round trip `inv-undo-redo-reference-heal` reads — see
+        // `crate::pbt::undo_redo_density`.
+        Redo.preconditions(state)
+            .map(|()| (crate::pbt::undo_redo_density::weight(2), Just(Redo).boxed()))
     }
 }
 

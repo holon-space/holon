@@ -413,6 +413,19 @@ components:
   - RefTaskState
   - SutLoroTaskState
   - SutSqlProjection
+- file: crates/holon-integration-tests/src/pbt/composed/invariants/undo_redo_reference_heal.rs
+  kind: invariant-wiring
+  requires_ref_caps:
+  - RefUndoRedoBurned
+  requires_sut_caps:
+  - SutBackend
+  - SutFocus
+  - SutSqlProjection
+  declared_needs:
+  - RefUndoRedoBurned
+  - SutBackend
+  - SutFocus
+  - SutSqlProjection
 - file: crates/holon-integration-tests/src/pbt/composed/invariants/value_fn_provider_arg_variance_13.rs
   kind: invariant-wiring
   requires_ref_caps:
@@ -1130,6 +1143,29 @@ components:
   covers:
   - loro-sql-desync — either store disagrees with the ref (and so, transitively, with the other) on presence
     or value of task_state
+- file: crates/holon-integration-tests/src/pbt/invariants/bodies/undo_redo_reference_heal.rs
+  kind: invariant
+  invariant_ids:
+  - inv-undo-redo-reference-heal
+  requires_ref_caps:
+  - RefUndoRedoBurned
+  requires_sut_caps:
+  - SutBackend
+  - SutFocus
+  - SutSqlProjection
+  gates:
+  - HOLON_PBT_UNDO_REDO_HEAL
+  slips-if-removed:
+  - a redo brings a block back under a new id while every reference to its pre-undo id stays pointed
+    at the burned uuid — the reference dangles permanently, and the DIAGNOSIS is lost (inv-focus-roots
+    also fires when the site is a pin, but reports only a focus-root set mismatch)
+  oracle:
+  - roundtrip — on a COMPLETED undo→redo round trip (redo-gated burned-id set non-empty), no base-table
+    reference site may still name the burned id. Reference-prediction-free — compares the SUT against
+    the harness reconcile's burned record, not against an oracle projection.
+  covers:
+  - undo-redo-reference-heal — references to a block whose identity a `Redo` re-minted (undo deletes
+    the tail, redo re-executes the forward op and mints a FRESH uuid)
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/value_fn_provider_arg_variance_13.rs
   kind: invariant
   invariant_ids:

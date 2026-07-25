@@ -68,6 +68,7 @@ pub mod ui_actor_state;
 pub mod ui_harness;
 pub mod ui_interaction;
 pub mod ui_types;
+pub mod undo_redo_density;
 pub mod value_fn_invariants;
 pub mod vm_snapshot;
 pub mod window_slice;

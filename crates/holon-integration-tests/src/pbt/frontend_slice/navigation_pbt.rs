@@ -455,6 +455,7 @@ impl ComposedSlice for FrontendNavigation {
         _: &IdResolver,
         _: &crate::pbt::composed::harness::BurnedPairs,
         _: &BTreeSet<EntityUri>,
+        _: &BTreeSet<EntityUri>,
         ref_state: &ReferenceState,
     ) -> RunReport {
         run_focus_only(&composed_invariant_catalog(), caps, ref_state.clone()).await

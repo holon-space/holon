@@ -2726,6 +2726,23 @@ pub trait RefHistoryExpectation {
     fn min_recorded_op_groups(&self) -> usize;
 }
 
+/// Reference-side record of block ids the SUT BURNED across a COMPLETED
+/// undo→redo round trip, derived by the harness from the id-reconcile map.
+///
+/// A pair enters this set only when both halves hold: the SUT no longer has the
+/// real id, AND the oracle holds its synthetic label again. That conjunction is
+/// exactly "the block came back under a new identity" — it cannot be satisfied
+/// by a bare undo (there the oracle has dropped the label too), so a reference
+/// left dangling by an undo alone is never reported here. Feeds
+/// `inv-undo-redo-reference-heal`.
+#[holon_macros::capmap_adapter]
+pub trait RefUndoRedoBurned {
+    /// The real block ids retired by the reconcile because a redo re-minted
+    /// their block under a fresh id. Empty on any run without a completed
+    /// undo→redo round trip over a minted block.
+    fn burned_block_ids(&self) -> BTreeSet<EntityUri>;
+}
+
 /// SUT capability: app lifecycle for the wide PBT — boot, restart, document
 /// creation, and the concurrent-schema-init regression probe. `&self`,
 /// `ref_state`-free; `ref_state`-derived values are precomputed at the

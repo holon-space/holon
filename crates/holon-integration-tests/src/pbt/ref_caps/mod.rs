@@ -177,6 +177,11 @@ impl holon_pbt_core::composition::CapProvider for ReferenceState {
         // SUT∧ref cap sets, and only a Turso arm supplying the matching
         // `SutHistory` selects the history invariants.
         caps.insert(self.clone() as Arc<dyn RefHistoryExpectation>);
+        // `RefUndoRedoBurned` carries the ids a `Redo` re-minted away from
+        // (harness-stamped). Ref-only gate for `inv-undo-redo-reference-heal`;
+        // empty until a round trip completes, so the invariant is vacuously
+        // green on every other draw.
+        caps.insert(self.clone() as Arc<dyn holon_pbt_core::capabilities::RefUndoRedoBurned>);
         caps.insert(self.clone() as Arc<dyn RefGlobalFocus>);
         // `RefAudience` carries the ADR 0028 C2/H3 sharing overlay (per-block
         // policy audience + per-container effective audience + epoch) the

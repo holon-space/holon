@@ -48,7 +48,15 @@ impl<R: RefLifecycle + RefBlockTreeMut> TransitionFactory<R> for UndoLastMutatio
     fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         UndoLastMutation
             .preconditions(state)
-            .map(|_| (2, Just(UndoLastMutation).boxed()))
+            // Weight 2 by default (unchanged); biased up under
+            // `HOLON_PBT_UNDO_REDO_DENSITY=high` — see
+            // `crate::pbt::undo_redo_density`.
+            .map(|_| {
+                (
+                    crate::pbt::undo_redo_density::weight(2),
+                    Just(UndoLastMutation).boxed(),
+                )
+            })
     }
 }
 
