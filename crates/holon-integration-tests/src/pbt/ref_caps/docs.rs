@@ -105,6 +105,26 @@ impl RefDocumentsMut for ReferenceState {
         crate::org_utils::assign_reference_sequences_canonical(&mut blocks);
         let surviving: std::collections::BTreeMap<EntityUri, Block> =
             blocks.into_iter().map(|b| (b.id.clone(), b)).collect();
+        // The cascade removes the page block AND every descendant. Focus and the
+        // active-editor mirror must be cleared for ALL of them, not just the page
+        // (`clear_focus_if_deleted`'s contract: a deleted block closes its editor).
+        // Clearing only `doc_uri` left an ActiveEditor pinned to a descendant the
+        // ref had just deleted — a self-inconsistent oracle that made
+        // `inv-editor-text/mirror` compare that ghost editor's cached text against
+        // the SUT's (correctly empty) cell.
+        let removed: Vec<EntityUri> = self
+            .domain
+            .block_state
+            .blocks
+            .keys()
+            .filter(|id| !surviving.contains_key(*id))
+            .cloned()
+            .collect();
+        assert!(
+            removed.contains(&doc_uri),
+            "RefDocumentsMut::remove_document: cascade did not remove the page block \
+             {doc_uri} itself (removed={removed:?})"
+        );
         self.domain
             .block_state
             .block_documents
@@ -112,7 +132,9 @@ impl RefDocumentsMut for ReferenceState {
         self.domain.block_state.blocks = surviving;
         self.rebuild_profile_tracking();
 
-        self.clear_focus_if_deleted(&doc_uri);
+        for id in &removed {
+            self.clear_focus_if_deleted(id);
+        }
     }
 
     fn seed_org_file(

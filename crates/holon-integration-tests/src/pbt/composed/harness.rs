@@ -129,6 +129,14 @@ fn is_composed_minted_synthetic_id(id: &EntityUri) -> bool {
         // (hence in `history_ever_created`), keeping the append-only SUT create row
         // covered after a later delete/join — otherwise it looks like a false phantom.
         || id.as_str().starts_with("block:gen-")
+        // `BulkExternalAdd` writes each block into the org file WITH its oracle id
+        // in the `:ID:` drawer, so the SUT re-ingests the SAME `block:bulk-N-M` id.
+        // Born-equal exactly like `block:gen-`, and retained in the reconcile map
+        // for the same reason: `history_ever_created` is derived from that map, so
+        // without it a bulk block that a UI op touched (recording a real
+        // `block_history` row) and that a later `DeleteDocument` removed reads as a
+        // false phantom.
+        || id.as_str().starts_with("block:bulk-")
 }
 
 /// Ids of peer-created blocks (`block:peer-HHHH-LLLL-IIII-SSSS`, minted by
