@@ -77,6 +77,30 @@ impl holon_pbt_core::capabilities::RefTaskStateToggle for ReferenceState {
             .cloned()
             .unwrap_or_else(super::super::reference_state::default_root_render_expr);
 
+        // The composed main-panel render (assets/default/index.org) wraps its
+        // block collection in a `collection_view()` marker
+        // (`column(collection_view(), divider(), accordion(backlinks))`). Prod's
+        // `BlockDomain::render_for_block` substitutes that marker with the
+        // profile-derived collection view BEFORE the frontend interprets it;
+        // `collection_view()` itself has no shadow builder, so interpreting the
+        // raw marker yields an empty VM — zero `state_toggle` widgets and a
+        // spurious `NoTogglableStates`. Run the SAME prod substitution here so
+        // the oracle's interpreted tree matches the SUT's. The replacement is
+        // the ref's canonical default collection (`columns(item_template:
+        // render_entity())`) — every visible block row renders `render_entity`,
+        // whose block-profile default/editing variant carries the
+        // `state_toggle`, so the candidate set matches prod regardless of which
+        // view-mode container prod's switcher happens to pick.
+        let owned_render_expr =
+            if holon::api::block_domain::contains_collection_view(&owned_render_expr) {
+                holon::api::block_domain::substitute_collection_view(
+                    owned_render_expr,
+                    &super::super::reference_state::default_root_render_expr(),
+                )
+            } else {
+                owned_render_expr
+            };
+
         let main_focus_roots = self.expected_focus_root_ids(holon_api::Region::Main);
         let visible_text_block_ids: Vec<EntityUri> = self
             .domain

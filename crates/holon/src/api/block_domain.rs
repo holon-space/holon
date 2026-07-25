@@ -603,7 +603,14 @@ pub(crate) fn default_table_expr() -> holon_api::render_types::RenderExpr {
 const COLLECTION_VIEW_MARKER: &str = "collection_view";
 
 /// True if `expr` embeds a `collection_view()` marker anywhere in its tree.
-fn contains_collection_view(expr: &holon_api::render_types::RenderExpr) -> bool {
+///
+/// Public so reference/oracle code (the PBT `RefTaskStateToggle` cap) can run
+/// the SAME marker-substitution the prod render pipeline does before
+/// interpreting a composed panel expr — a replicated copy is what let the ref
+/// silently diverge (`collection_view()` has no shadow builder, so an
+/// un-substituted marker interprets to an empty VM and the oracle sees zero
+/// `state_toggle` widgets).
+pub fn contains_collection_view(expr: &holon_api::render_types::RenderExpr) -> bool {
     use holon_api::render_types::RenderExpr as RE;
     match expr {
         RE::FunctionCall { name, args } => {
@@ -622,7 +629,10 @@ fn contains_collection_view(expr: &holon_api::render_types::RenderExpr) -> bool 
 /// Replace every `collection_view()` marker node in `expr` with `replacement`
 /// (the block's profile-derived default collection view), recursing through the
 /// whole render tree.
-fn substitute_collection_view(
+///
+/// Public for the same reason as [`contains_collection_view`]: the PBT oracle
+/// reuses this exact substitution so its interpreted panel tree matches prod.
+pub fn substitute_collection_view(
     expr: holon_api::render_types::RenderExpr,
     replacement: &holon_api::render_types::RenderExpr,
 ) -> holon_api::render_types::RenderExpr {
