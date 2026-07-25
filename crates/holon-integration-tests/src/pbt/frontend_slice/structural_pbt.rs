@@ -3738,11 +3738,6 @@ mod teeth {
     /// order must match its query's declared `ORDER BY fr.added_ts DESC`
     /// (pin-recency), not the `tree()` render's `sort_key` override.
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "RED on main: right-sidebar tree() sortkey=sort_key silently \
-                overrides the query's ORDER BY added_ts DESC — open render-DSL \
-                semantics question (per-level sortkey) escalated to Martin (lane \
-                7 / BugFunnel). The region-literal cause is FIXED; the presence \
-                prong lives in right_sidebar_renders_pins (un-ignored)."]
     async fn right_sidebar_renders_pins_in_declared_added_ts_order() {
         let order = right_sidebar_pin_render_order().await;
         let pos = |needle: &str| order.iter().position(|e| e.contains(needle));
