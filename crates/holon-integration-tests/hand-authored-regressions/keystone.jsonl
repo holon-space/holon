@@ -138,3 +138,15 @@
 # ref-doc-0 -> ref-doc-0, and the SUT has the block). Distinct from FACET 1 (CreateDocument fresh-uuid,
 # above) which resolves ref-doc-0 -> a real uuid and is already green.
 {"name": "ref-doc-born-equal-create-under-focus", "description": "ref-doc remap gap FACET 3 (blocks the HOLON_PBT_EXTERNAL_RACES default-on flip): a WriteOrgFile-minted doc pins #+ID: block:ref-doc-0, so the SUT ingests a REAL ref-doc-0 page and the reconcile self-maps ref-doc-0 -> ref-doc-0 (born-equal). A born-equal CreateBlockUnderFocus under the focused doc resolves its focus-root parent to block:ref-doc-0 (a genuine SUT block), but apply_create_under_focus's remap-totality assert rejects every block:ref-doc- resolved parent as an unmapped synthetic and panics. GREEN once the guard admits born-equal self-maps (resolver entry present) and refuses only identity fallthrough.", "transitions": [{"WriteOrgFile": {"filename": "born.org", "blocks": [], "keyword_set": null}}, {"NavigateFocus": {"region": "main", "block_id": "block:ref-doc-0"}}, {"CreateBlockUnderFocus": {"content": "a", "id": "block:gen-1"}}]}
+
+#
+# --- main-panel prune-delta after re-parent + navigate (sweep signature 2026-07-25) --------
+# Indent re-parents block:mp1 under block:mp0, then NavigateFocus moves the Main focus root off
+# block:structural-page to the freshly created doc, so structural-page's whole subtree must
+# DEPART the main panel. The focus_descendants recursive-CTE matview's prune delta (dropping the
+# departed rows) lands a frame AFTER the frozen per-tick cached widget snapshot, so a one-shot
+# read judged a mid-prune frame and reported stale rows.
+# GREEN with the bounded-wait-for-stable re-sample in
+# invariants/bodies/main_panel_rows_match_focus.rs; the teeth are unchanged -- a stale row that
+# never heals still fails after the 5s budget.
+{"name": "main-panel-prune-delta-after-reparent-navigate", "description": "Keystone sweep signature (2026-07-25, 12 hits across 5 sweeps): inv-main-panel-rows-match-focus fired on a mid-prune frame. Indent re-parents block:mp1 under block:mp0, then NavigateFocus moves the Main focus root off block:structural-page entirely, so its whole subtree must DEPART the main panel. The focus_descendants recursive-CTE matview's prune delta lands a frame AFTER the frozen per-tick cached widget snapshot (sweep showed NavigateFocus ddl=0/6 -> watch view REUSED, so this is a prune delta, not view creation), and the one-shot read judged that mid-prune frame. Locks the settle contract: the panel must converge to the focus-root subtree within the bounded wait. Not a prod bug -- the invariant was asserting instantaneity the derived-data contract never promised.", "transitions": [{"CreateBlockUnderFocus": {"content": "mp0", "id": "block:mp0"}}, {"CreateBlockUnderFocus": {"content": "mp1", "id": "block:mp1"}}, {"Indent": {"block_id": "block:mp1"}}, {"CreateDocument": {"file_name": "doc_0.org"}}, {"NavigateFocus": {"region": "main", "block_id": "block:ref-doc-0"}}]}

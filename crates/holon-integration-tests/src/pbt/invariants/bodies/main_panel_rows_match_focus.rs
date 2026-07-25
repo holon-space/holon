@@ -29,8 +29,16 @@
 //!   `inv-viewmodel-entity-ids-subset-of-data`'s phantom check, not staleness.
 //! - Layout-less mode (no main-panel id) and not-ready snapshots Skip/Ok with
 //!   the same gating as `inv-viewmodel-root-matches-render-expr`; a rendered
-//!   panel with an out-of-subtree ref-known block always Fails — never
-//!   weakened.
+//!   panel with an out-of-subtree ref-known block that PERSISTS Fails.
+//! - Settle semantics (2026-07-25): the cached widget snapshot is frozen per
+//!   tick, so a one-shot read judges an asynchronously-settling projection at a
+//!   single instant. Re-parenting (Indent/Outdent) makes a subtree depart the
+//!   Main focus root and the `focus_descendants` recursive-CTE matview's prune
+//!   delta lands a frame later. The check therefore bounded-waits for a STABLE
+//!   pass over NON-cached re-samples (5s budget, 200ms stable window),
+//!   mirroring `inv-embedded-page-collapsed-lazy`. A genuine stale row never
+//!   heals, so it still Fails — the teeth are unchanged, only instantaneity is
+//!   no longer asserted.
 //!
 //! NOTE — no `has_root_render_expr()` gate: in the wide composed run the ref
 //! tracks no ROOT render-source (the default 3-column layout keeps its render
@@ -54,8 +62,12 @@
 //! lands). Divergences recorded in the WS-STALEROW report.
 
 use std::collections::BTreeSet;
+use std::time::Duration;
+use std::time::Instant;
 
+use holon_api::EntityUri;
 use holon_pbt_core::capabilities::CapRegion;
+use holon_pbt_core::capabilities::RefBlockTree;
 use holon_pbt_core::capabilities::RefFocus;
 use holon_pbt_core::capabilities::RefLayout;
 use holon_pbt_core::capabilities::RefViewSelection;
@@ -79,7 +91,7 @@ fn find_by_entity_id<'a>(root: &'a WidgetSnapshot, id: &str) -> Option<&'a Widge
 #[allow(async_fn_in_trait)]
 impl<R, S> Invariant<R, S> for InvMainPanelRowsMatchFocus
 where
-    R: RefViewSelection + RefLayout + RefFocus,
+    R: RefViewSelection + RefLayout + RefFocus + RefBlockTree,
     S: SutRenderer,
 {
     fn id(&self) -> InvariantId {
@@ -92,14 +104,78 @@ where
                 "root render not ready (loading / spacer / not watchable / interpret panic)".into(),
             );
         }
+
+        // Fast path: evaluate the current (cached) snapshot. This is the
+        // overwhelming common case — the panel is settled and the check
+        // passes, so it adds no latency and re-uses the tick-shared recompute.
+        match Self::evaluate(ref_, &sut.widget_tree_snapshot().await) {
+            InvariantResult::Ok => return InvariantResult::Ok,
+            InvariantResult::Skipped(s) => return InvariantResult::Skipped(s),
+            InvariantResult::Fail(_) => {}
+        }
+
+        // A FAIL here is NOT automatically a real stale row. Re-parenting
+        // (Indent/Outdent) makes a subtree DEPART the Main focus root; the
+        // `focus_descendants` recursive-CTE matview's PRUNE delta lands a
+        // frame AFTER this one-shot snapshot, so a mid-prune frame renders
+        // rows that are already out of the focus subtree in the ref. That
+        // heals within a settle. So model prod like the sibling fixed-point
+        // invariants: bounded-wait for a STABLE pass, re-sampling via the
+        // NON-cached `widget_tree_snapshot_fresh` (the cached snapshot is
+        // frozen per tick and can never observe the heal). Fail only if the
+        // violation PERSISTS — a genuine stale row never heals.
+        let budget = Duration::from_secs(5);
+        let stable_for = Duration::from_millis(200);
+        let deadline = Instant::now() + budget;
+        let mut stable_since: Option<Instant> = None;
+        let mut last_fail = String::new();
+        loop {
+            if Instant::now() >= deadline {
+                return InvariantResult::Fail(format!(
+                    "[inv-main-panel-rows-match-focus] violation PERSISTED for {budget:?} — not a \
+                     transient focus_descendants prune-delta frame but a real stale \
+                     row.\n{last_fail}"
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            match Self::evaluate(ref_, &sut.widget_tree_snapshot_fresh().await) {
+                InvariantResult::Ok => match stable_since {
+                    Some(t) if t.elapsed() >= stable_for => return InvariantResult::Ok,
+                    Some(_) => {}
+                    None => stable_since = Some(Instant::now()),
+                },
+                // A transient Skip mid-wait (panel dropped out of this frame)
+                // just resets the stability window — keep waiting for a stable
+                // pass rather than treating it as terminal.
+                InvariantResult::Skipped(s) => {
+                    stable_since = None;
+                    last_fail = format!("(transient skip) {s}");
+                }
+                InvariantResult::Fail(f) => {
+                    stable_since = None;
+                    last_fail = f;
+                }
+            }
+        }
+    }
+}
+
+impl InvMainPanelRowsMatchFocus {
+    /// Pure, snapshot-in / result-out evaluation against ONE widget-tree
+    /// snapshot. Split out so the bounded-wait loop can re-run it over fresh
+    /// re-samples. All reference reads are sync; only the SUT snapshot is
+    /// async (obtained by the caller).
+    fn evaluate<R>(ref_: &R, root: &WidgetSnapshot) -> InvariantResult
+    where
+        R: RefViewSelection + RefLayout + RefFocus + RefBlockTree,
+    {
         // Layout-less mode: no main panel exists, so there is no per-region
         // row set to judge — the whole tree is "the content".
         let Some(main_panel_id) = ref_.main_panel_block_id() else {
             return InvariantResult::Ok;
         };
 
-        let root = sut.widget_tree_snapshot().await;
-        let Some(panel) = find_by_entity_id(&root, main_panel_id.as_str()) else {
+        let Some(panel) = find_by_entity_id(root, main_panel_id.as_str()) else {
             return InvariantResult::Skipped(format!(
                 "main-panel node (entity_id '{}') not yet present under root '{}' (not rendered \
                  in this snapshot tick)",
@@ -139,13 +215,50 @@ where
         }
 
         let focus_roots: Vec<(String, Vec<String>)> = ref_.expected_focus_root_rows();
+
+        // The REF ancestor chain of each stale id is what separates a
+        // transient prune-delta frame (chain leads to a subtree that just
+        // DEPARTED the focus root via Indent/Outdent) from a real stale row
+        // (chain leads to a previously-focused root). Without it the red is
+        // unreadable.
+        let chains: Vec<String> = stale
+            .iter()
+            .map(|id| {
+                let Ok(uri) = EntityUri::parse(id) else {
+                    return format!("{id} -> <unparseable EntityUri>");
+                };
+                let mut chain = vec![uri.as_str().to_string()];
+                let mut cursor = uri;
+                // Bounded by the ref's block count: a cycle in `parent_of`
+                // would be a ref-model corruption, so cap and report it.
+                for _ in 0..ref_known.len() + 1 {
+                    match ref_.parent_of(&cursor) {
+                        Some(parent) => {
+                            chain.push(parent.as_str().to_string());
+                            cursor = parent;
+                        }
+                        None => return chain.join(" < "),
+                    }
+                }
+                panic!(
+                    "[inv-main-panel-rows-match-focus] ref `parent_of` chain for {id} exceeded \
+                     the ref block count — cycle in the reference block tree: {chain:?}"
+                );
+            })
+            .collect();
+
         InvariantResult::Fail(format!(
             "[inv-main-panel-rows-match-focus] STALE ROW(S) IN MAIN PANEL — ref-known blocks \
              rendered inside the main-panel subtree that are NOT in the current Main focus-root \
              subtree (previous root's rows lingering after navigation / focus_roots \
-             chained-matview delete not propagated?).\n  stale ids: {stale:?}\n  expected focus \
-             roots (per region): {focus_roots:?}\n  allowed set ({} ids), panel rendered ids \
-             ({}): {panel_ids:?}",
+             chained-matview delete not propagated?).\n  stale ids: {stale:?}\n  stale REF \
+             ancestor chains (child < parent < …):\n{}\n  expected focus roots (per region): \
+             {focus_roots:?}\n  allowed set ({} ids), panel rendered ids ({}): {panel_ids:?}",
+            chains
+                .iter()
+                .map(|c| format!("    {c}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
             allowed.len(),
             panel_ids.len(),
         ))

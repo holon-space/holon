@@ -1,7 +1,9 @@
 //! `inv-main-panel-rows-match-focus` — no stale rows in the main panel after
 //! navigation: every ref-known block rendered inside the main-panel subtree
 //! must be in the Main region's current focus-root subtree (or layout/profile
-//! scaffolding). `Needs SutRenderer + RefViewSelection + RefLayout + RefFocus`.
+//! scaffolding). `Needs SutRenderer + RefViewSelection + RefLayout + RefFocus
+//! + RefBlockTree` (the last for `parent_of`, to print each stale id's ref
+//! ancestor chain in the failure message).
 //! The SUT cap comes only from a renderer slice (the frontend slice's headless
 //! `ReactiveEngine`); storage-only slices deselect honestly.
 //!
@@ -10,6 +12,7 @@
 //! chained-matview CDC delete propagation suspect).
 
 use holon_pbt_core::RunMode;
+use holon_pbt_core::capabilities::RefBlockTree;
 use holon_pbt_core::capabilities::RefFocus;
 use holon_pbt_core::capabilities::RefLayout;
 use holon_pbt_core::capabilities::RefViewSelection;
@@ -32,6 +35,7 @@ pub fn wire() -> Box<dyn CapInvariant> {
                 CapId::of::<dyn RefViewSelection>(),
                 CapId::of::<dyn RefLayout>(),
                 CapId::of::<dyn RefFocus>(),
+                CapId::of::<dyn RefBlockTree>(),
             ],
         },
     ))
