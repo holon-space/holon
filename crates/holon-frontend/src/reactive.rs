@@ -539,6 +539,59 @@ pub trait BuilderServices: Send + Sync {
     >;
 }
 
+// ── generation-guard drop ledger ─────────────────────────────────────────
+
+/// Process-global ledger of CDC events discarded by a generation guard.
+///
+/// A discarded event is a permanently lost delta: the delta-driven frontend
+/// mirror has no other way to learn about it. This ledger makes the loss
+/// observable so a test or a debugging session can correlate a stale-row
+/// violation with the exact events that were dropped.
+pub mod generation_drops {
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
+
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    static RECORDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    const MAX_RECORDS: usize = 64;
+
+    pub fn record(site: &str, label: &str, event_gen: u64, current_gen: u64, detail: String) {
+        COUNT.fetch_add(1, Ordering::Relaxed);
+        let line = format!(
+            "{site} label={label} event_gen={event_gen} current_gen={current_gen} {detail}"
+        );
+        tracing::warn!("[gen-drop] {line}");
+        let mut records = RECORDS.lock().unwrap();
+        if records.len() < MAX_RECORDS {
+            records.push(line);
+        }
+    }
+
+    pub fn count() -> u64 {
+        COUNT.load(Ordering::Relaxed)
+    }
+
+    /// Human-readable report for embedding in a failure message.
+    pub fn report() -> String {
+        let records = RECORDS.lock().unwrap();
+        let n = COUNT.load(Ordering::Relaxed);
+        if n == 0 {
+            return "[gen-drop] no generation-guard drops recorded".to_string();
+        }
+        format!(
+            "[gen-drop] {n} event(s) discarded by a generation guard (first {} shown):\n  {}",
+            records.len(),
+            records.join("\n  ")
+        )
+    }
+
+    pub fn reset() {
+        COUNT.store(0, Ordering::Relaxed);
+        RECORDS.lock().unwrap().clear();
+    }
+}
+
 // ── ReactiveRowSet ──────────────────────────────────────────────────────
 
 /// Reactive accumulator for CDC row changes.
@@ -568,13 +621,21 @@ pub trait BuilderServices: Send + Sync {
 pub struct ReactiveRowSet {
     data: MutableBTreeMap<EntityUri, Mutable<Arc<DataRow>>>,
     generation: Mutable<u64>,
+    /// Which watched block this row set mirrors. Diagnostic only — it makes a
+    /// generation-guard drop attributable to a specific panel.
+    label: String,
 }
 
 impl ReactiveRowSet {
     pub fn new() -> Self {
+        Self::labeled("<unlabeled>".to_string())
+    }
+
+    pub fn labeled(label: String) -> Self {
         Self {
             data: MutableBTreeMap::new(),
             generation: Mutable::new(0),
+            label,
         }
     }
 
@@ -595,7 +656,28 @@ impl ReactiveRowSet {
     /// This prevents accidentally feeding raw storage data into the reactive
     /// pipeline.
     pub fn apply_change(&self, change: holon_api::Change<EnrichedRow>, generation: u64) {
-        if generation != self.generation.get() {
+        let current = self.generation.get();
+        if generation != current {
+            let detail = match &change {
+                holon_api::Change::Created { data, .. } => format!(
+                    "Created id={}",
+                    data.get("id")
+                        .and_then(|v| v.as_string())
+                        .unwrap_or("<none>")
+                ),
+                holon_api::Change::Updated { id, .. } => format!("Updated id={id}"),
+                holon_api::Change::Deleted { id, .. } => format!("Deleted id={id}"),
+                holon_api::Change::FieldsChanged { entity_id, .. } => {
+                    format!("FieldsChanged id={entity_id}")
+                }
+            };
+            generation_drops::record(
+                "ReactiveRowSet::apply_change",
+                &self.label,
+                generation,
+                current,
+                detail,
+            );
             return;
         }
         match change {
@@ -784,9 +866,13 @@ pub struct ReactiveRenderedRows {
 
 impl ReactiveRenderedRows {
     pub fn new() -> Self {
+        Self::labeled("<unlabeled>".to_string())
+    }
+
+    pub fn labeled(label: String) -> Self {
         Self {
             render_expr: Mutable::new(loading_expr()),
-            rows: ReactiveRowSet::new(),
+            rows: ReactiveRowSet::labeled(label),
             structure_ready: tokio::sync::Notify::new(),
             data_generation: std::sync::atomic::AtomicU64::new(0),
         }
@@ -843,7 +929,19 @@ impl ReactiveRenderedRows {
                 self.structure_ready.notify_waiters();
             }
             UiEvent::Data { batch, generation } => {
-                if generation != self.rows.generation() {
+                let current = self.rows.generation();
+                if generation != current {
+                    generation_drops::record(
+                        "ReactiveRenderedRows::apply_event",
+                        &self.rows.label,
+                        generation,
+                        current,
+                        format!(
+                            "relation={} items={}",
+                            batch.metadata.relation_name,
+                            batch.inner.items.len()
+                        ),
+                    );
                     return;
                 }
                 // First batch of a new generation = the full authoritative
@@ -1064,7 +1162,7 @@ impl ReactiveRegistry {
             .lock()
             .unwrap()
             .entry(id.clone())
-            .or_insert_with(|| Arc::new(ReactiveRenderedRows::new()))
+            .or_insert_with(|| Arc::new(ReactiveRenderedRows::labeled(id.as_str().to_string())))
             .clone()
     }
 

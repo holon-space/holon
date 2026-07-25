@@ -161,10 +161,11 @@ where
         let mut last_fail = String::new();
         loop {
             if Instant::now() >= deadline {
+                let drops = holon_frontend::reactive::generation_drops::report();
                 return InvariantResult::Fail(format!(
                     "[inv-main-panel-rows-match-focus] violation PERSISTED for {budget:?} — not a \
                      transient focus_descendants prune-delta frame but a real stale \
-                     row.\n{last_fail}"
+                     row.\n{last_fail}\n{drops}"
                 ));
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
