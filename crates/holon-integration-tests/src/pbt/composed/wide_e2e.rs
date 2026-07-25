@@ -51,6 +51,7 @@ use crate::pbt::composed::builder::compose_sut;
 use crate::pbt::composed::builder::compose_sut_seeded;
 use crate::pbt::composed::builder::compose_sut_windowed_base_seeded;
 use crate::pbt::composed::composed_invariant_catalog;
+use crate::pbt::composed::harness::BurnedPairs;
 use crate::pbt::composed::harness::ComposedSlice;
 use crate::pbt::composed::harness::sut_ids;
 use crate::pbt::composed::seed_primitives::C1;
@@ -1802,9 +1803,14 @@ mod tests {
         rt.block_on(async {
             let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
             let (caps, _handle, scaffold) = boot_and_seed_wide(&resolver, &ref_state).await;
-            let report =
-                <WideE2E as ComposedSlice>::run_report(&caps, &resolver, &scaffold, &ref_state)
-                    .await;
+            let report = <WideE2E as ComposedSlice>::run_report(
+                &caps,
+                &resolver,
+                &BurnedPairs::new(),
+                &scaffold,
+                &ref_state,
+            )
+            .await;
             assert!(
                 report.failures().is_empty(),
                 "Loro-only wide seed must run the catalog green; failures: {:?}",

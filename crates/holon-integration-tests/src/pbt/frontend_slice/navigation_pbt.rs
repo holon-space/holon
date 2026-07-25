@@ -453,6 +453,7 @@ impl ComposedSlice for FrontendNavigation {
     async fn run_report(
         caps: &CapMap,
         _: &IdResolver,
+        _: &crate::pbt::composed::harness::BurnedPairs,
         _: &BTreeSet<EntityUri>,
         ref_state: &ReferenceState,
     ) -> RunReport {
