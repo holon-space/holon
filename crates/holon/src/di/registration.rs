@@ -701,14 +701,20 @@ mod bundled_gql_query_smoke {
         let schema = build_graph_schema_registry(&type_registry).build();
 
         // Canonical desk panel queries: the forms the frontend emits and that
-        // real vaults persist on disk. The right-sidebar query orders by
-        // `fr.added_ts`, which is the exact reference that regressed.
+        // real vaults persist on disk. The right-sidebar orders pins by
+        // pin-recency. The recency key is `fr.history_id` (the monotonic
+        // `navigation_history.id` AUTOINCREMENT), NOT `fr.added_ts` (a
+        // second-granularity wall-clock that TIES when two pins land in the
+        // same second — see tab_strip.rs "ORDER BY history_id, never
+        // added_ts"). It is aliased `AS added_ts` because the render block's
+        // level-0 `sortkey: "-added_ts"` reads that column name; the alias
+        // carries the monotonic value under the render's expected column.
         let mut corpus: Vec<(String, String)> = vec![
             (
                 "desk:right-sidebar".into(),
                 "MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..20]-(d:block) WHERE \
                  fr.region = 'right_sidebar' AND root.id = fr.root_id RETURN d, \
-                 fr.added_ts AS added_ts ORDER BY fr.added_ts DESC, d.sort_key"
+                 fr.history_id AS added_ts ORDER BY fr.history_id DESC, d.sort_key"
                     .into(),
             ),
             (
