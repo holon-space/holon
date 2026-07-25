@@ -491,7 +491,9 @@ capability, = `wiring.has_actor(UI)`). Consequently:
   field set by the real-editor driver harness (`phased.rs`), which builds the ref
   state directly. No process-global env; deterministic and capture/replay-faithful
   via the construction path. `fixture::CAPTURE_ENV_FLAGS` shrinks to
-  `["PBT_MUTABLE_TEXT"]`.
+  `["PBT_MUTABLE_TEXT"]` — plus `"HOLON_FOLDER_COMPANION_SEED"` (2026-07-26),
+  which `wide_e2e_ref_for` consults to seed extra blocks into the reference
+  state, so a capture and a replay disagreeing on it start from different states.
 
 **Open question (shrink quality).** The `content` plant's greedy shrink retains the
 causally-irrelevant `EditorState` (lands at `{BlockTree, EditorState}`, not the

@@ -49,11 +49,10 @@ The on-disk/in-memory representation is the canonical **`Fixture<T>`** from
 `holon-pbt-core` (`holon_pbt_core::fixture::Fixture`) — the same value-level
 regression format the gated PBT slices replay from their `.fixtures/`
 directories. There is no bespoke `HandAuthoredCase` struct any more; the driver
-aliases `type HandAuthoredCase = Fixture<E2ETransition>` and deserializes each
-JSONL line straight into it. A hand-authored case is just a `Fixture` whose
-transition type `T = E2ETransition` and whose init type `I` is the default `()`.
+aliases `type HandAuthoredCase = Fixture<E2ETransition, Option<CapturedInitialState>>`
+and deserializes each JSONL line straight into it.
 
-`Fixture<T, I>` carries three author-facing fields plus two that hand-authored
+`Fixture<T, I>` carries four author-facing fields plus one that hand-authored
 cases leave defaulted:
 
 | field | hand-authored use |
@@ -61,15 +60,17 @@ cases leave defaulted:
 | `name: String` | stable slug (printed on run; referenced from `BugFunnel.md` / the fix commit) |
 | `description: String` (`#[serde(default)]`) | free-form provenance (the dogfood/report) |
 | `transitions: Vec<T>` | the repro, as the production `E2ETransition` enum |
+| `initial_state: Option<CapturedInitialState>` (`#[serde(default)]`) | the drawn wiring of the run being reproduced; omit to replay over `wide_e2e_ref()` |
 | `environment: CaptureEnvironment` (`#[serde(default)]`) | omitted — the wiring/env-flag capture is for generator-captured fixtures |
-| `initial_state: I = ()` (`#[serde(default)]`) | omitted — the base is the fixed `wide_e2e_ref()`, not a serialized `ReferenceState` |
 
-Because the last two are `#[serde(default)]`, a JSONL line that names only
-`name`/`description`/`transitions` deserializes losslessly. The sidecar is JSONL
-— one `Fixture<E2ETransition>` per line:
+Because `initial_state`/`environment` are `#[serde(default)]`, a JSONL line that
+names only `name`/`description`/`transitions` deserializes losslessly and
+replays exactly as it did before the field existed. The sidecar is JSONL — one
+`Fixture` per line:
 
 ```json
 {"name": "<slug>", "description": "<provenance>", "transitions": [ <E2ETransition>, … ]}
+{"name": "<slug>", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [ … ]}
 ```
 
 **Upstream convergence.** proptest PR #653 (value-level failure persistence,
@@ -87,20 +88,88 @@ Each transition is serde's external-tag form of the enum:
 `EntityUri` serializes as a plain string (`"block:slashy"`); `id` is
 `Option<EntityUri>` (omit or `null` for the mint-when-absent path).
 
-### The one thing that is NOT hand-authored: the initial state
+### The initial state: a wiring manifest, and that is the whole of it
 
 `ReferenceState` derives only `Debug, Clone` — **not** serde (it holds an
-`Arc<ShadowInterpreter>`, a Tokio `Runtime`, etc.). Serializing it is neither
-practical nor useful. Instead every hand-authored case starts from a **fixed
-base oracle**: `wide_e2e_ref()` — the `full_headless` wiring, byte-identical to
-running the keystone under `HOLON_PBT_FORCE_FULL=1`. It seeds one focused page
-(`block:structural-page`) with three leaf children, over the full Turso +
-frontend + org SUT. You express your repro purely as the transition list applied
-on top of that base.
+`Arc<ShadowInterpreter>`, a Tokio `Runtime`, live Loro peers). It cannot be
+serialized, and it does not need to be:
 
-If a repro needs a starting shape the base doesn't provide, grow it with
-transitions (create blocks, focus, navigate) rather than trying to serialize a
-bespoke `ReferenceState`.
+```rust
+fn init_state() -> BoxedStrategy<ReferenceState> {
+    any_valid_wiring().prop_map(|w| wide_e2e_ref_for(&w)).boxed()
+}
+```
+
+`WideE2EMachine::init_state` draws **exactly one value** — a
+`holon_pbt_core::wiring::Wiring` manifest — and maps it through
+`wide_e2e_ref_for`. So pinning `initial_state` captures the whole *generated*
+half of the starting state. This collapses what used to be described as two
+separate capture gaps ("generated `initial_state`" and "random wiring draw")
+into one field.
+
+`wide_e2e_ref_for` is **not** a pure function of that manifest, so the manifest
+alone is not the whole starting state. Two process-env reads change what it
+builds from byte-identical input:
+
+| env flag | effect on the starting `ReferenceState` |
+|---|---|
+| `HOLON_FOLDER_COMPANION_SEED` | `wide_e2e.rs::folder_companion_enabled` → `seed_folder_companion` **inserts blocks** into the ref |
+| `PBT_MUTABLE_TEXT` | `reference_state.rs::mutable_text_enabled` → different editor semantics |
+
+Both are listed in `holon_pbt_core::fixture::CAPTURE_ENV_FLAGS`, and
+`Fixture::environment` is the field that records them. The driver compares the
+recorded `environment` against the live env (and against the effective replay
+wiring) via `CaptureEnvironment::mismatch_report`, and **panics** on any
+difference — so a case captured under one flag set can never silently replay as
+something else. Leave `environment` off when you author under the default flags
+(the common case: both unset, so the recording and the live env agree).
+
+```json
+"initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}
+```
+
+Copy the manifest verbatim from the failing case's telemetry line
+(`[pbt-telemetry] {… "wiring": {…} …}`, emitted by
+`pbt/composed/telemetry.rs` in exactly this serde shape) or from its
+`[wide-e2e wiring] drawn:` line. Omit `initial_state` and the case replays over
+`wide_e2e_ref()` — the `full_headless` wiring, byte-identical to running the
+keystone under `HOLON_PBT_FORCE_FULL=1`, seeding one focused page
+(`block:structural-page`) with three leaf children.
+
+**Fail-loud on schema mismatch.** A case that replays a *subtly different*
+starting state than the one that failed is worse than no case at all, so the
+parser is total in both directions:
+
+* Every **top-level** key is checked against `KNOWN_CASE_KEYS` (the `Fixture`
+  field set). `Fixture` is shared with the gated slices' `.fixtures/` corpora
+  and is deliberately *not* `deny_unknown_fields`, so serde silently drops a
+  key it does not recognize — which makes a typo in the key itself the one
+  mistake the guards below structurally cannot see. `"initail_state": {…}`
+  parses fine, leaves `initial_state = None`, and would replay over
+  `full_headless` instead of the pinned wiring; the allowlist rejects it before
+  any SUT boots. **This is the mistake to expect**, because the round-trip check
+  cannot help: it compares `Null` against `Null`.
+* `CapturedInitialState` is `#[serde(deny_unknown_fields)]`, and `Wiring`'s
+  three axes have no serde defaults — a renamed or mistyped key *inside*
+  `initial_state` is a parse panic naming `file:line` and the raw line.
+* After parsing, the driver **re-serializes** the parsed `initial_state` and
+  compares it against the raw JSON sub-value. Any byte serde silently dropped
+  — including unknown keys nested inside `Wiring`, which `deny_unknown_fields`
+  on the outer struct cannot see — fails with `does not round-trip`.
+* The parsed manifest is run through `Wiring::validate()`. `init_state` only
+  ever draws valid manifests, so an invalid one means the case was hand-typed
+  wrong; it panics rather than booting a wiring no real run could produce.
+
+**A pinned wiring narrows the transition alphabet.** In a random run the
+generator narrows the drawn alphabet by the wiring's cap set; a hand-authored
+case bypasses the generator, so *you* must pin a wiring whose caps support your
+transitions. Pinning `storage_adapters: ["Loro"]` and then using
+`CreateBlockUnderFocus` panics with `capability "SutBlockCreate" was selected
+but is absent from the CapMap` — that is the fail-loud signal, not a bug.
+
+If a repro needs a starting *shape* the base doesn't provide (extra blocks,
+focus elsewhere), grow it with transitions rather than trying to serialize a
+bespoke `ReferenceState` — only the wiring is capturable.
 
 ## How replay works (same harness as the random keystone)
 
@@ -155,6 +224,35 @@ cargo test -p holon-integration-tests --features pbt \
 Each case prints `[hand-authored regression] running case "<name>"` before it
 runs and `PASSED case "<name>"` after — so a red pinpoints the failing line. The
 loop stops at the first failing case (fail-loud); put liveness/green cases first.
+
+### Env seams: running one case, or a case file that isn't committed
+
+Two env vars turn the sidecar from a fixed gate into an A/B instrument:
+
+| var | effect |
+|---|---|
+| `HOLON_HAND_AUTHORED_SIDECAR=<path>` | replace the sidecar (absolute, or relative to the crate root) |
+| `HOLON_HAND_AUTHORED_CASE=<name>[,<name>…]` | run only these cases, by exact `name` |
+
+Both fail loud: an unreadable override path panics; a filter naming a case the
+sidecar does not contain panics listing the known names.
+
+Why they exist: the driver stops at the **first** red, so without the filter a
+probe case is masked by any earlier failing case. And a cross-revision A/B probe
+(does this red exist at revision X but not Y?) had to *edit the committed JSONL
+in each tree*, which contaminates the diff under test. With the override, both
+trees point at one out-of-tree probe file:
+
+```bash
+HOLON_HAND_AUTHORED_SIDECAR=/tmp/probe.jsonl \
+  cargo test -p holon-integration-tests --features pbt \
+  --test hand_authored_regressions -- --nocapture hand_authored_keystone_regressions
+```
+
+Note the trailing test-name filter: the sidecar driver is
+`hand_authored_keystone_regressions`; the file also holds cheap schema unit
+tests and the in-source `echo_loop_block_to_page_child_render_leak_parked`
+case, none of which read the sidecar.
 
 ## Worked example (the shipped sidecar)
 
@@ -265,11 +363,60 @@ for sub-transition logic, exact-message assertions, or high-volume/fast checks.
 Use them where the value is "this whole flow converges correctly", and keep unit
 tests where the value is "this function returns exactly this".
 
+## Authoring gotchas
+
+Each of these cost a lane real time. They are not theoretical.
+
+**The keystone's `Debug` dump is NOT copy-pasteable into JSONL.** The failure
+report prints Rust `Debug`, the JSONL wants serde. They differ per field:
+
+| in the `Debug` dump | in the JSONL |
+|---|---|
+| `content_type: Text` | `"content_type": "text"` (enum variants are lowercased) |
+| `EntityUri("block:foo")` | `"block:foo"` (newtype is transparent) |
+| `region: Region::Main` | `"region": "main"` |
+| `Some("x")` / `None` | `"x"` / `null` |
+| `CreateBlockUnderFocus { content: "x", id: … }` | `{"CreateBlockUnderFocus": {"content": "x", "id": …}}` |
+
+Transcribe field by field and let the parser fail loud on the rest — an unknown
+variant or a mistyped enum string panics with the offending `file:line`.
+
+**`NavigateFocus` requires a sidebar-listed PAGE target.** The generator
+restricts it to `Region::Main` on pages the left sidebar lists, and the SUT
+drives it as a real sidebar click. Target anything else and
+`await_sidebar_nav_intent` (`pbt/frontend_slice/components.rs`, the assert at
+~line 1137) fails after 5 s with "LeftSidebar never bound a navigation.focus
+click-intent for …". That is a genuine precondition, not a flake: pick a page
+id (`block:ref-doc-0`, the base's focused page) as the target.
+
+**`BlockToPage` mints a NEW page id — the origin id is not navigable
+afterwards.** The origin block becomes a `[[P]]` link and a fresh page `P` is
+created with an id the case cannot predict. So a case cannot
+`BlockToPage{origin_id: X}` and then `NavigateFocus{block_id: X}`; the origin is
+no longer a page and `X` is not the minted page. Reorder so any navigation to a
+page happens before the conversion, or navigate to a page that already exists.
+
+**A pinned `initial_state` must supply the caps your transitions need.** See
+"The initial state" above — a Loro-only pin plus `CreateBlockUnderFocus` panics
+with `capability "SutBlockCreate" was selected but is absent from the CapMap`.
+
 ## Limitations
 
-- **Base state is fixed** (`wide_e2e_ref`). Shapes must be grown with
-  transitions; there is no serialized bespoke initial state (ReferenceState isn't
-  serde).
+- **Only the wiring is capturable from the initial state.** That is the whole of
+  what `init_state` generates (see above), but shapes beyond the base's seeded
+  page must still be grown with transitions — `ReferenceState` itself isn't serde.
+- **A pinned wiring does not make a timing-nondeterministic red deterministic.**
+  `watch-matview-retains-outdent-intermediate-row` was measured on
+  2026-07-26 at 9 runs per arm, twice, by two independent measurers: 0/9 vs 2/9
+  and 1/9 vs 1/9 (unpinned `full_headless` vs pinned `storage={Turso}`). At those
+  sample sizes **no wiring effect is demonstrated** — one-sided Fisher exact
+  p = 0.235 for the more favourable pair. Treat the wiring as *not shown* to
+  matter for this case; its red is the known open
+  `inv-matview-consistent-with-recompute` race in IVM watch-matview
+  maintenance, which no capturable input pins. Cases whose red is a race stay
+  rate-described no matter what `initial_state` records. **Corollary for
+  authors:** do not conclude a wiring is load-bearing from a handful of runs —
+  a red at a few percent needs tens of runs per arm to separate from noise.
 - **Only modeled transitions are expressible.** One `E2ETransition` variant per
   repro step; unmodeled UI layers (raw editor keystrokes, paint) are out of reach
   here — that's a keystone coverage boundary, not a harness one.

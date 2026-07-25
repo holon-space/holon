@@ -47,7 +47,12 @@ use crate::invariant::InvariantResult;
 /// Editor-shape env flags that change the PBT transition alphabet and
 /// reference semantics but live outside the `ComponentSet` lattice
 /// (ADR 0009 §4 follow-up: captures must record them or replay is unfaithful).
-pub const CAPTURE_ENV_FLAGS: &[&str] = &["PBT_MUTABLE_TEXT"];
+///
+/// `HOLON_FOLDER_COMPANION_SEED` belongs here for the same reason even though
+/// it is not editor-shaped: `wide_e2e_ref_for` consults it (via
+/// `folder_companion_enabled`) and INSERTS blocks into the reference state, so
+/// a capture and a replay that disagree on it start from different states.
+pub const CAPTURE_ENV_FLAGS: &[&str] = &["PBT_MUTABLE_TEXT", "HOLON_FOLDER_COMPANION_SEED"];
 
 /// Execution environment a capture/fixture was recorded under.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, serde::Deserialize)]
