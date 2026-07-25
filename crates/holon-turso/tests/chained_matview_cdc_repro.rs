@@ -769,3 +769,622 @@ fn canon_rows(rows: Vec<holon_core::storage::StorageEntity>) -> Vec<String> {
     out.sort();
     out
 }
+
+/// The main-panel watch shape with a **dynamic anchor**: the recursive CTE's
+/// base case is `JOIN focus_roots fr ON b.id = fr.root_id`, so the anchor SET
+/// itself is a matview that changes when the user navigates. Rungs 4–7 hold the
+/// anchor literal (`WHERE _v0.id = 'page'`) fixed and only move blocks; this
+/// shape is what `assets/default/index.org default-main-panel::src::0` really
+/// registers.
+const FOCUS_SWITCH_SQL: &str = "\
+    WITH RECURSIVE focus_descendants AS ( \
+        SELECT b.id AS node_id, b.id AS source_id, 0 AS depth, CAST(b.id AS TEXT) AS visited \
+        FROM blk b JOIN focus_roots fr ON b.id = fr.root_id \
+        UNION ALL \
+        SELECT child.id, focus_descendants.source_id, focus_descendants.depth + 1, \
+               focus_descendants.visited || ',' || CAST(child.id AS TEXT) \
+        FROM focus_descendants \
+        JOIN blk child ON child.parent_id = focus_descendants.node_id \
+        WHERE focus_descendants.depth < 20 \
+          AND ',' || focus_descendants.visited || ',' NOT LIKE \
+              '%,' || CAST(child.id AS TEXT) || ',%' \
+    ) \
+    SELECT d.id AS node_id, focus_descendants.depth AS depth \
+    FROM focus_roots fr \
+    JOIN blk root ON root.id = fr.root_id \
+    JOIN focus_descendants ON focus_descendants.source_id = root.id \
+    JOIN blk d ON d.id = focus_descendants.node_id \
+    JOIN navigation_cursor nc ON nc.region = fr.region AND nc.history_id = fr.history_id \
+    WHERE fr.region = 'main'";
+
+/// Seed the navigation tables + `focus_roots` matview with ONE open row (H1)
+/// focusing `page`, cursor on it. Mirrors `navigation.sql` /
+/// `matview_focus_roots.sql` verbatim (same shapes rung 3 uses).
+async fn seed_navigation_on_page(handle: &DbHandle) {
+    handle
+        .execute(
+            "CREATE TABLE navigation_history (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+             region TEXT NOT NULL, block_id TEXT, closed_at TEXT NULL)",
+            vec![],
+        )
+        .await
+        .expect("navigation_history");
+    handle
+        .execute(
+            "CREATE TABLE navigation_cursor (region TEXT PRIMARY KEY, history_id INTEGER)",
+            vec![],
+        )
+        .await
+        .expect("navigation_cursor");
+    handle
+        .execute(
+            "INSERT INTO navigation_history (id, region, block_id, closed_at) \
+             VALUES (1, 'main', 'page', NULL)",
+            vec![],
+        )
+        .await
+        .expect("H1 open on page");
+    handle
+        .execute(
+            "INSERT INTO navigation_cursor (region, history_id) VALUES ('main', 1)",
+            vec![],
+        )
+        .await
+        .expect("cursor at H1");
+    reconcile_named_view(
+        handle,
+        "focus_roots",
+        "SELECT region, block_id AS root_id, id AS history_id \
+         FROM navigation_history WHERE closed_at IS NULL AND block_id IS NOT NULL",
+    )
+    .await
+    .expect("focus_roots matview");
+}
+
+/// `focus_replace` + cursor move, as ONE transaction — the exact DML
+/// `NavigateFocus` runs: close the open row for the region, open a new one on
+/// the target, point the cursor at it.
+async fn navigate_focus_to(handle: &DbHandle, new_history_id: i64, target: &str) {
+    handle
+        .transaction(vec![
+            (
+                "UPDATE navigation_history SET closed_at = '2026-07-25T00:00:00' \
+                 WHERE region = 'main' AND closed_at IS NULL"
+                    .to_string(),
+                vec![],
+            ),
+            (
+                "INSERT INTO navigation_history (id, region, block_id, closed_at) \
+                 VALUES (?, 'main', ?, NULL)"
+                    .to_string(),
+                vec![
+                    turso::Value::Integer(new_history_id),
+                    turso::Value::Text(target.into()),
+                ],
+            ),
+            (
+                "UPDATE navigation_cursor SET history_id = ? WHERE region = 'main'".to_string(),
+                vec![turso::Value::Integer(new_history_id)],
+            ),
+        ])
+        .await
+        .expect("navigate focus txn");
+}
+
+/// Seed a deep chain under `page` plus a SEPARATE navigable root `page2`:
+///   page → c1 → n0 → n1 → n2      (the split/outdent working set)
+///   page2 → d1                    (the NavigateFocus target subtree)
+async fn seed_two_roots(handle: &DbHandle) {
+    handle
+        .execute(
+            "CREATE TABLE blk_raw (id TEXT PRIMARY KEY, parent_id TEXT, content TEXT, \
+             sort_key TEXT)",
+            vec![],
+        )
+        .await
+        .expect("create blk_raw");
+    for (id, parent, sk) in [
+        ("page", "root", "a"),
+        ("c1", "page", "b"),
+        ("n0", "c1", "c"),
+        ("n1", "n0", "d"),
+        ("n2", "n1", "e"),
+        ("page2", "root", "y"),
+        ("d1", "page2", "z"),
+    ] {
+        handle
+            .execute(
+                "INSERT INTO blk_raw (id, parent_id, content, sort_key) VALUES (?, ?, ?, ?)",
+                vec![
+                    turso::Value::Text(id.into()),
+                    turso::Value::Text(parent.into()),
+                    turso::Value::Text(id.into()),
+                    turso::Value::Text(sk.into()),
+                ],
+            )
+            .await
+            .expect("seed two-root row");
+    }
+    create_inner_matview(handle).await;
+}
+
+/// RUNG 8 — the ANCHOR SWITCH the earlier rungs never exercise: `NavigateFocus`
+/// retracts the whole old anchor's recursive closure and asserts a new one, in
+/// ONE batch. Rungs 4–7 move blocks under a LITERAL anchor; rung 3 collapses
+/// the anchor to empty. Neither covers "anchor A out, anchor B in".
+#[tokio::test]
+async fn rung8_focus_root_switch_retracts_old_subtree() {
+    let (handle, _rx) = new_db().await;
+    seed_two_roots(&handle).await;
+    seed_navigation_on_page(&handle).await;
+    reconcile_named_view(&handle, "fdesc8", FOCUS_SWITCH_SQL)
+        .await
+        .expect("fdesc8 dynamic-anchor recursive matview");
+
+    let before = canon_rows(
+        handle
+            .query("SELECT node_id, depth FROM fdesc8", HashMap::new())
+            .await
+            .expect("query fdesc8 baseline"),
+    );
+    assert_eq!(
+        before,
+        vec!["c1@d1", "n0@d2", "n1@d3", "n2@d4", "page@d0"],
+        "baseline: the panel shows the whole `page` subtree"
+    );
+
+    navigate_focus_to(&handle, 2, "page2").await;
+
+    let matview = canon_rows(
+        handle
+            .query("SELECT node_id, depth FROM fdesc8", HashMap::new())
+            .await
+            .expect("query fdesc8 matview"),
+    );
+    let recompute = canon_rows(
+        handle
+            .query(FOCUS_SWITCH_SQL, HashMap::new())
+            .await
+            .expect("recompute fdesc8"),
+    );
+    eprintln!(
+        "\n===== RUNG 8 focus-root switch: matview={matview:?} recompute={recompute:?} ====="
+    );
+    assert_eq!(
+        matview, recompute,
+        "MATVIEW-VS-RECOMPUTE DRIFT: switching the focus root left the previous root's rows in \
+         the dynamic-anchor recursive matview — the main-panel stale-row shape"
+    );
+}
+
+/// RUNG 9 — the OBSERVED sweep shape: blocks are CREATED under the old focus
+/// root (SplitBlock) and RE-PARENTED (Outdent) shortly before the focus root
+/// switches away. The recursive closure of the old anchor is therefore built
+/// from deltas that arrived AFTER the matview was created, which is the only
+/// difference from rung 8.
+#[tokio::test]
+async fn rung9_split_then_outdent_then_focus_switch_retracts_old_subtree() {
+    let (handle, _rx) = new_db().await;
+    seed_two_roots(&handle).await;
+    seed_navigation_on_page(&handle).await;
+    reconcile_named_view(&handle, "fdesc9", FOCUS_SWITCH_SQL)
+        .await
+        .expect("fdesc9 dynamic-anchor recursive matview");
+
+    // SplitBlock ×2: two NEW blocks born under the currently-focused subtree.
+    handle
+        .execute(
+            "INSERT INTO blk_raw (id, parent_id, content, sort_key) \
+             VALUES ('s1', 'n2', 's1', 'f')",
+            vec![],
+        )
+        .await
+        .expect("split 1");
+    handle
+        .execute(
+            "INSERT INTO blk_raw (id, parent_id, content, sort_key) \
+             VALUES ('s2', 's1', 's2', 'g')",
+            vec![],
+        )
+        .await
+        .expect("split 2");
+    // Outdent: re-parent s1 (carrying s2) one level up.
+    handle
+        .execute(
+            "UPDATE blk_raw SET parent_id = 'n1' WHERE id = 's1'",
+            vec![],
+        )
+        .await
+        .expect("outdent s1");
+
+    navigate_focus_to(&handle, 2, "page2").await;
+
+    let matview = canon_rows(
+        handle
+            .query("SELECT node_id, depth FROM fdesc9", HashMap::new())
+            .await
+            .expect("query fdesc9 matview"),
+    );
+    let recompute = canon_rows(
+        handle
+            .query(FOCUS_SWITCH_SQL, HashMap::new())
+            .await
+            .expect("recompute fdesc9"),
+    );
+    eprintln!(
+        "\n===== RUNG 9 split+outdent then focus switch: matview={matview:?} recompute={recompute:?} ====="
+    );
+    assert_eq!(
+        matview, recompute,
+        "MATVIEW-VS-RECOMPUTE DRIFT: rows created/re-parented under the OLD focus root survived \
+         the focus-root switch in the dynamic-anchor recursive matview — the observed sweep's \
+         stale-row shape (stale ids were freshly split blocks under a departed root)"
+    );
+}
+
+/// Same dynamic-anchor shape as [`FOCUS_SWITCH_SQL`], but projecting `id` (as
+/// the prod `SELECT d.*` does) so the CDC change payload carries an identity
+/// the delta-consuming frontend can key on.
+const FOCUS_SWITCH_SQL_WITH_ID: &str = "\
+    WITH RECURSIVE focus_descendants AS ( \
+        SELECT b.id AS node_id, b.id AS source_id, 0 AS depth, CAST(b.id AS TEXT) AS visited \
+        FROM blk b JOIN focus_roots fr ON b.id = fr.root_id \
+        UNION ALL \
+        SELECT child.id, focus_descendants.source_id, focus_descendants.depth + 1, \
+               focus_descendants.visited || ',' || CAST(child.id AS TEXT) \
+        FROM focus_descendants \
+        JOIN blk child ON child.parent_id = focus_descendants.node_id \
+        WHERE focus_descendants.depth < 20 \
+          AND ',' || focus_descendants.visited || ',' NOT LIKE \
+              '%,' || CAST(child.id AS TEXT) || ',%' \
+    ) \
+    SELECT d.id AS id, d.parent_id AS parent_id, d.content AS content, \
+           focus_descendants.depth AS depth \
+    FROM focus_roots fr \
+    JOIN blk root ON root.id = fr.root_id \
+    JOIN focus_descendants ON focus_descendants.source_id = root.id \
+    JOIN blk d ON d.id = focus_descendants.node_id \
+    JOIN navigation_cursor nc ON nc.region = fr.region AND nc.history_id = fr.history_id \
+    WHERE fr.region = 'main'";
+
+/// RUNG 10 — CDC DELTA BALANCE (not content). A delta-driven mirror (the
+/// frontend's keyed row provider → `MutableTree`) never re-reads the matview;
+/// it only applies the CDC stream. So the matview can be content-correct while
+/// its emitted deltas are unbalanced — a row asserted twice and retracted once
+/// stays in every downstream mirror forever. This rung replays the observed
+/// sweep (create under the focused subtree, re-parent, then switch the focus
+/// root) and asserts the NET per-id delta equals the final matview membership.
+#[tokio::test]
+async fn rung10_cdc_delta_balance_across_focus_switch() {
+    let (handle, mut rx) = new_db().await;
+    seed_two_roots(&handle).await;
+    seed_navigation_on_page(&handle).await;
+    reconcile_named_view(&handle, "fdesc10", FOCUS_SWITCH_SQL_WITH_ID)
+        .await
+        .expect("fdesc10 dynamic-anchor recursive matview");
+
+    // Seed the mirror with the matview's INITIAL population: a watch registers
+    // by reading the view once, then follows the CDC stream. Only the stream is
+    // under test here.
+    let mut net: HashMap<String, i64> = HashMap::new();
+    for r in handle
+        .query("SELECT id FROM fdesc10", HashMap::new())
+        .await
+        .expect("initial fdesc10 population")
+    {
+        let id = r.get("id").and_then(|v| v.as_string()).expect("id text");
+        *net.entry(id.to_string()).or_default() += 1;
+    }
+
+    let mut absorb = |batches: Vec<CapturedBatch>| {
+        for b in &batches {
+            for k in &b.kinds {
+                let (tag, id) = k.split_once(':').expect("kind tag");
+                match tag {
+                    "C" => *net.entry(id.to_string()).or_default() += 1,
+                    "D" => *net.entry(id.to_string()).or_default() -= 1,
+                    "U" | "F" => {}
+                    other => panic!("unexpected CDC kind tag {other:?} in {k:?}"),
+                }
+            }
+        }
+        eprintln!("  batches: {batches:?}");
+    };
+
+    absorb(drain(&mut rx, "fdesc10").await);
+
+    handle
+        .execute(
+            "INSERT INTO blk_raw (id, parent_id, content, sort_key) \
+             VALUES ('s1', 'n2', 's1', 'f')",
+            vec![],
+        )
+        .await
+        .expect("split 1");
+    absorb(drain(&mut rx, "fdesc10").await);
+    handle
+        .execute(
+            "INSERT INTO blk_raw (id, parent_id, content, sort_key) \
+             VALUES ('s2', 's1', 's2', 'g')",
+            vec![],
+        )
+        .await
+        .expect("split 2");
+    absorb(drain(&mut rx, "fdesc10").await);
+    handle
+        .execute(
+            "UPDATE blk_raw SET parent_id = 'n1' WHERE id = 's1'",
+            vec![],
+        )
+        .await
+        .expect("outdent s1");
+    absorb(drain(&mut rx, "fdesc10").await);
+
+    navigate_focus_to(&handle, 2, "page2").await;
+    absorb(drain(&mut rx, "fdesc10").await);
+
+    let mut delta_membership: Vec<String> = net
+        .iter()
+        .filter(|(_, n)| **n != 0)
+        .map(|(id, n)| format!("{id}x{n}"))
+        .collect();
+    delta_membership.sort();
+    let rows = handle
+        .query("SELECT id FROM fdesc10", HashMap::new())
+        .await
+        .expect("query fdesc10");
+    let mut actual: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            format!(
+                "{}x1",
+                r.get("id").and_then(|v| v.as_string()).expect("id text")
+            )
+        })
+        .collect();
+    actual.sort();
+    eprintln!(
+        "\n===== RUNG 10 CDC delta balance: net={delta_membership:?} matview={actual:?} ====="
+    );
+    assert_eq!(
+        delta_membership, actual,
+        "CDC DELTA IMBALANCE: the net of emitted Created/Deleted CDC events does not equal the \
+         matview's actual membership. A delta-driven mirror (the frontend row provider → \
+         MutableTree) can never converge — this is the main-panel stale-row shape."
+    );
+}
+
+/// RUNG 11 — DELETE (not re-parent) of nodes inside the anchored subtree.
+/// Rungs 4–7 only ever `UPDATE ... SET parent_id`; nothing here covers a base
+/// row being REMOVED, which is what an undo / external-rewrite / block-delete
+/// does. A retract-miss on delete leaves a row the recompute no longer has —
+/// the "matview has MORE rows than recompute" drift shape.
+#[tokio::test]
+async fn rung11_delete_inside_subtree_retracts_from_recursive_matview() {
+    let (handle, _rx) = new_db().await;
+    seed_two_roots(&handle).await;
+    seed_navigation_on_page(&handle).await;
+    reconcile_named_view(&handle, "fdesc11", FOCUS_SWITCH_SQL)
+        .await
+        .expect("fdesc11 dynamic-anchor recursive matview");
+
+    // Delete a LEAF, then an INTERMEDIATE node (whose descendant must cascade
+    // out of the closure), in separate batches.
+    handle
+        .execute("DELETE FROM blk_raw WHERE id = 'n2'", vec![])
+        .await
+        .expect("delete leaf n2");
+    let after_leaf = canon_rows(
+        handle
+            .query("SELECT node_id, depth FROM fdesc11", HashMap::new())
+            .await
+            .expect("query fdesc11 after leaf delete"),
+    );
+    let recompute_leaf = canon_rows(
+        handle
+            .query(FOCUS_SWITCH_SQL, HashMap::new())
+            .await
+            .expect("recompute after leaf delete"),
+    );
+    eprintln!(
+        "\n===== RUNG 11a leaf delete: matview={after_leaf:?} recompute={recompute_leaf:?} ====="
+    );
+    assert_eq!(
+        after_leaf, recompute_leaf,
+        "MATVIEW-VS-RECOMPUTE DRIFT: deleting a LEAF inside the anchored subtree left a stale \
+         row in the IVM recursive matview"
+    );
+
+    handle
+        .execute("DELETE FROM blk_raw WHERE id = 'n0'", vec![])
+        .await
+        .expect("delete intermediate n0");
+    let after_mid = canon_rows(
+        handle
+            .query("SELECT node_id, depth FROM fdesc11", HashMap::new())
+            .await
+            .expect("query fdesc11 after intermediate delete"),
+    );
+    let recompute_mid = canon_rows(
+        handle
+            .query(FOCUS_SWITCH_SQL, HashMap::new())
+            .await
+            .expect("recompute after intermediate delete"),
+    );
+    eprintln!(
+        "\n===== RUNG 11b intermediate delete: matview={after_mid:?} recompute={recompute_mid:?} \
+         ====="
+    );
+    assert_eq!(
+        after_mid, recompute_mid,
+        "MATVIEW-VS-RECOMPUTE DRIFT: deleting an INTERMEDIATE node left its transitive \
+         descendant (n1) in the IVM recursive matview"
+    );
+}
+
+/// RUNG 12 — re-parent DEEPER (the `bulk-3-*` sweep shape): a node moves from
+/// the subtree root to a node that is itself a descendant, so BOTH its own
+/// depth and its whole subtree's depths change, inside ONE batch alongside a
+/// sibling delete. This is the closest SQL-level model of the observed
+/// `inv-matview-consistent-with-recompute` drift (matview 13 / recompute 12,
+/// the extra row being a re-parented `bulk-3-5` at a stale depth).
+#[tokio::test]
+async fn rung12_reparent_deeper_with_concurrent_delete_no_drift() {
+    let (handle, _rx) = new_db().await;
+    seed_two_roots(&handle).await;
+    seed_navigation_on_page(&handle).await;
+    reconcile_named_view(&handle, "fdesc12", FOCUS_SWITCH_SQL)
+        .await
+        .expect("fdesc12 dynamic-anchor recursive matview");
+
+    handle
+        .execute(
+            "INSERT INTO blk_raw (id, parent_id, content, sort_key) \
+             VALUES ('m1', 'c1', 'm1', 'f')",
+            vec![],
+        )
+        .await
+        .expect("insert m1");
+    handle
+        .execute(
+            "INSERT INTO blk_raw (id, parent_id, content, sort_key) \
+             VALUES ('m2', 'm1', 'm2', 'g')",
+            vec![],
+        )
+        .await
+        .expect("insert m2");
+
+    // ONE batch: move m1 (carrying m2) deeper, under n1; delete n2 alongside.
+    handle
+        .transaction(vec![
+            (
+                "UPDATE blk_raw SET parent_id = 'n1' WHERE id = 'm1'".to_string(),
+                vec![],
+            ),
+            ("DELETE FROM blk_raw WHERE id = 'n2'".to_string(), vec![]),
+        ])
+        .await
+        .expect("commit deeper-reparent + delete txn");
+
+    let matview = canon_rows(
+        handle
+            .query("SELECT node_id, depth FROM fdesc12", HashMap::new())
+            .await
+            .expect("query fdesc12"),
+    );
+    let recompute = canon_rows(
+        handle
+            .query(FOCUS_SWITCH_SQL, HashMap::new())
+            .await
+            .expect("recompute fdesc12"),
+    );
+    eprintln!(
+        "\n===== RUNG 12 deeper re-parent + delete: matview={matview:?} recompute={recompute:?} \
+         ====="
+    );
+    assert_eq!(
+        matview, recompute,
+        "MATVIEW-VS-RECOMPUTE DRIFT: a depth-increasing re-parent batched with a sibling delete \
+         left a stale-depth row in the IVM recursive matview — the observed sweep's \
+         inv-matview-consistent-with-recompute shape"
+    );
+}
+
+/// RUNG 13 — the OBSERVED keystone drift shape, minimized. Outdent's
+/// sibling-adoption rule makes a node's parent move AND that node get re-homed
+/// onto its own moved parent inside ONE batch:
+///
+///   doc → b0 → b4 → b5
+///   Outdent(b5)  ⇒ b5's parent becomes b0 (it trails b4 as a sibling)
+///   Outdent(b4)  ⇒ b4's parent becomes doc, and b5 — b4's following sibling —
+///                  is re-adopted BY b4. Both UPDATEs land in the same batch,
+///                  and b5's new parent is the very node that moved.
+///
+/// Every earlier rung moves nodes whose new parent is STATIONARY in that batch.
+/// The sweep's `inv-matview-consistent-with-recompute` red is exactly this:
+/// the matview retained `bulk-3-5 @ parent bulk-3-0` (the intermediate state)
+/// while the recompute no longer had that row at all.
+#[tokio::test]
+async fn rung13_outdent_chain_child_readopted_by_its_own_moved_parent() {
+    let (handle, _rx) = new_db().await;
+    handle
+        .execute(
+            "CREATE TABLE blk_raw (id TEXT PRIMARY KEY, parent_id TEXT, content TEXT, \
+             sort_key TEXT)",
+            vec![],
+        )
+        .await
+        .expect("create blk_raw");
+    for (id, parent, sk) in [
+        ("page", "root", "a"),
+        ("b0", "page", "b"),
+        ("b4", "b0", "c"),
+        ("b5", "b4", "d"),
+    ] {
+        handle
+            .execute(
+                "INSERT INTO blk_raw (id, parent_id, content, sort_key) VALUES (?, ?, ?, ?)",
+                vec![
+                    turso::Value::Text(id.into()),
+                    turso::Value::Text(parent.into()),
+                    turso::Value::Text(id.into()),
+                    turso::Value::Text(sk.into()),
+                ],
+            )
+            .await
+            .expect("seed rung13 row");
+    }
+    create_inner_matview(&handle).await;
+    seed_navigation_on_page(&handle).await;
+    reconcile_named_view(&handle, "fdesc13", FOCUS_SWITCH_SQL)
+        .await
+        .expect("fdesc13 dynamic-anchor recursive matview");
+
+    // Outdent(b5): b5 rises to sit beside b4 under b0.
+    handle
+        .execute(
+            "UPDATE blk_raw SET parent_id = 'b0' WHERE id = 'b5'",
+            vec![],
+        )
+        .await
+        .expect("outdent b5");
+
+    // Outdent(b4): b4 rises under `page`, and its following sibling b5 is
+    // re-adopted by b4 — ONE batch, and b5's new parent is the moved node.
+    handle
+        .transaction(vec![
+            (
+                "UPDATE blk_raw SET parent_id = 'page' WHERE id = 'b4'".to_string(),
+                vec![],
+            ),
+            (
+                "UPDATE blk_raw SET parent_id = 'b4' WHERE id = 'b5'".to_string(),
+                vec![],
+            ),
+        ])
+        .await
+        .expect("commit outdent-b4 + readopt-b5 txn");
+
+    let matview = canon_rows(
+        handle
+            .query("SELECT node_id, depth FROM fdesc13", HashMap::new())
+            .await
+            .expect("query fdesc13"),
+    );
+    let recompute = canon_rows(
+        handle
+            .query(FOCUS_SWITCH_SQL, HashMap::new())
+            .await
+            .expect("recompute fdesc13"),
+    );
+    eprintln!(
+        "\n===== RUNG 13 outdent-chain re-adoption: matview={matview:?} recompute={recompute:?} \
+         ====="
+    );
+    assert_eq!(
+        matview, recompute,
+        "MATVIEW-VS-RECOMPUTE DRIFT: a child re-adopted by its OWN moved parent in the same \
+         batch left the intermediate-state row in the IVM recursive matview — the keystone \
+         inv-matview-consistent-with-recompute / main-panel stale-row shape"
+    );
+}
