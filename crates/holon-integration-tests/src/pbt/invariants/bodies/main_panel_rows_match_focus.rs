@@ -88,6 +88,36 @@ fn find_by_entity_id<'a>(root: &'a WidgetSnapshot, id: &str) -> Option<&'a Widge
     root.walk().find(|n| n.entity_id.as_deref() == Some(id))
 }
 
+/// The RENDERED ancestor chain of `id` inside `panel`, as `kind[entity_id]`
+/// segments from the panel down to the node. The ref chain alone cannot say
+/// WHICH widget under the main panel holds a stale row — the focus collection
+/// or the "Linked references" accordion's independent backlinks query render
+/// into the same subtree, and they fail for entirely different reasons.
+/// Returns `None` when `id` is not reachable (never a silent empty chain).
+fn rendered_chain(panel: &WidgetSnapshot, id: &str) -> Option<String> {
+    fn seg(n: &WidgetSnapshot) -> String {
+        match &n.entity_id {
+            Some(e) => format!("{}[{e}]", n.kind),
+            None => n.kind.clone(),
+        }
+    }
+    fn descend(node: &WidgetSnapshot, id: &str, acc: &mut Vec<String>) -> bool {
+        acc.push(seg(node));
+        if node.entity_id.as_deref() == Some(id) {
+            return true;
+        }
+        for child in &node.children {
+            if descend(child, id, acc) {
+                return true;
+            }
+        }
+        acc.pop();
+        false
+    }
+    let mut acc = Vec::new();
+    descend(panel, id, &mut acc).then(|| acc.join(" > "))
+}
+
 #[allow(async_fn_in_trait)]
 impl<R, S> Invariant<R, S> for InvMainPanelRowsMatchFocus
 where
@@ -247,14 +277,32 @@ impl InvMainPanelRowsMatchFocus {
             })
             .collect();
 
+        let rendered: Vec<String> = stale
+            .iter()
+            .map(|id| match rendered_chain(panel, id) {
+                Some(chain) => format!("{id} @ {chain}"),
+                None => panic!(
+                    "[inv-main-panel-rows-match-focus] {id} was collected from the panel's \
+                     canonical entity ids but is unreachable by a child walk from the panel node \
+                     — the snapshot's id collection and its tree structure disagree"
+                ),
+            })
+            .collect();
+
         InvariantResult::Fail(format!(
             "[inv-main-panel-rows-match-focus] STALE ROW(S) IN MAIN PANEL — ref-known blocks \
              rendered inside the main-panel subtree that are NOT in the current Main focus-root \
              subtree (previous root's rows lingering after navigation / focus_roots \
              chained-matview delete not propagated?).\n  stale ids: {stale:?}\n  stale REF \
-             ancestor chains (child < parent < …):\n{}\n  expected focus roots (per region): \
-             {focus_roots:?}\n  allowed set ({} ids), panel rendered ids ({}): {panel_ids:?}",
+             ancestor chains (child < parent < …):\n{}\n  stale RENDERED chains (panel > … > \
+             node):\n{}\n  expected focus roots (per region): {focus_roots:?}\n  allowed set ({} \
+             ids), panel rendered ids ({}): {panel_ids:?}",
             chains
+                .iter()
+                .map(|c| format!("    {c}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            rendered
                 .iter()
                 .map(|c| format!("    {c}"))
                 .collect::<Vec<_>>()
