@@ -2859,19 +2859,27 @@ impl SutBlockCreate for HeadlessFrontendComponent {
             // hit this gap.
             Some(uri) => {
                 let parent = self.resolve_id(parent);
-                // Remap totality (fail-loud, not best-effort): a SUT-minted doc
-                // synthetic that survives resolution unmapped would be dispatched
-                // as a non-existent parent. Refuse it, naming the id — never pass
-                // an unmapped synthetic through, never silently skip the create.
-                // (Born-equal `block:gen-`/`block:peer-` parents ARE valid SUT ids
-                // — the reconcile self-maps them — so identity resolution is
-                // correct for those and they are not covered here.)
+                // Remap totality (fail-loud, not best-effort): dispatch a born-equal
+                // create only under a parent the SUT REALLY holds. Verify EXISTENCE in
+                // `block_raw` rather than rejecting an id SCHEME — a `block:ref-doc-N`
+                // resolved parent is legitimate whenever the SUT ingested the doc page
+                // BORN-EQUAL: a `WriteOrgFile`-seeded doc pins `#+ID: ref-doc-N` into
+                // the file (see `write_org_file.rs`), so production's FileSyncController
+                // mints the page under that EXACT id and the per-tick reconcile
+                // self-maps `ref-doc-N -> ref-doc-N` (`harness.rs` born-equal arm). The
+                // SUT then genuinely owns `block:ref-doc-N`, and the create must
+                // dispatch. It is a bug only when the resolved id is an UNMAPPED
+                // identity fallthrough — a fresh-uuid `CreateDocument` doc whose real id
+                // was never reconciled — for which no such SUT row exists. Checking the
+                // row's existence admits the born-equal doc page (a real parent) and
+                // still refuses the genuinely-absent one, loud and named.
+                let parent_exists = self.all_blocks().await.iter().any(|b| b.id == parent);
                 assert!(
-                    !parent.as_str().starts_with("block:ref-doc-"),
+                    parent_exists,
                     "[SutBlockCreate::apply_create_under_focus] remap-totality violation: \
-                     focus-root parent {parent} is an unmapped CreateDocument-minted synthetic \
-                     doc id — its real SUT id was never reconciled; refusing to dispatch \
-                     block.create under a non-existent parent"
+                     focus-root parent {parent} has no `block_raw` row — an unmapped \
+                     synthetic doc id whose real SUT id was never reconciled; refusing to \
+                     dispatch block.create under a non-existent parent"
                 );
                 self.driver
                     .create_block_with_id(&parent, content, uri)

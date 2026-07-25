@@ -121,3 +121,20 @@
 # ingest doc-page create records one OpOrigin::Ingest op_group when genuinely-new + runtime
 # (!in_initial_scan). Recording-only (ingest creates are not on the undo stack — separate item).
 {"name": "doc-ingest-records-history-op-group", "description": "R3b: watcher-ingested doc-page creates record block_history provenance like engine-routed creates. Two user CreateDocument gestures record >=2 op_groups; inv-history-records-all-creates enforces (lower bound).", "transitions": [{"CreateDocument": {"file_name": "doc_0.org"}}, {"CreateDocument": {"file_name": "doc_1.org"}}]}
+#
+# --- ref-doc remap gap FACET 3: born-equal (WriteOrgFile-pinned) create-under-focus (blocks EXTERNAL_RACES flip) ---
+# The armed-race keystone red. A WriteOrgFile-minted doc pins `#+ID: block:ref-doc-0` into the file
+# (write_org_file.rs:232 — so production's FileSyncController ingests the SAME synthetic id the oracle
+# minted instead of a fresh uuid). The SUT therefore holds a REAL `block:ref-doc-0` page, and the
+# per-tick reconcile classifies it BORN-EQUAL (harness.rs:616) and SELF-MAPS ref-doc-0 -> ref-doc-0.
+# NavigateFocus focuses the ORACLE `block:ref-doc-0`; a born-equal CreateBlockUnderFocus (id:Some)
+# resolves the focus-root parent through the resolver -> ref-doc-0 (the self-mapped identity, a GENUINE
+# SUT block). apply_create_under_focus's remap-totality assert (components.rs:2869) rejects ANY
+# `block:ref-doc-` resolved parent as "an unmapped synthetic whose real id was never reconciled" and
+# panics -- a FALSE POSITIVE: the born-equal doc IS a real SUT parent, the create must dispatch.
+# RED (pre-fix): "[SutBlockCreate::apply_create_under_focus] remap-totality violation: focus-root parent
+# block:ref-doc-0 is an unmapped CreateDocument-minted synthetic doc id". GREEN once the guard refuses
+# only the identity-FALLTHROUGH case (no resolver entry) and admits born-equal self-maps (resolver holds
+# ref-doc-0 -> ref-doc-0, and the SUT has the block). Distinct from FACET 1 (CreateDocument fresh-uuid,
+# above) which resolves ref-doc-0 -> a real uuid and is already green.
+{"name": "ref-doc-born-equal-create-under-focus", "description": "ref-doc remap gap FACET 3 (blocks the HOLON_PBT_EXTERNAL_RACES default-on flip): a WriteOrgFile-minted doc pins #+ID: block:ref-doc-0, so the SUT ingests a REAL ref-doc-0 page and the reconcile self-maps ref-doc-0 -> ref-doc-0 (born-equal). A born-equal CreateBlockUnderFocus under the focused doc resolves its focus-root parent to block:ref-doc-0 (a genuine SUT block), but apply_create_under_focus's remap-totality assert rejects every block:ref-doc- resolved parent as an unmapped synthetic and panics. GREEN once the guard admits born-equal self-maps (resolver entry present) and refuses only identity fallthrough.", "transitions": [{"WriteOrgFile": {"filename": "born.org", "blocks": [], "keyword_set": null}}, {"NavigateFocus": {"region": "main", "block_id": "block:ref-doc-0"}}, {"CreateBlockUnderFocus": {"content": "a", "id": "block:gen-1"}}]}
