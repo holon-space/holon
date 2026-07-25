@@ -611,6 +611,14 @@ fn editor_ref() -> ReferenceState {
         b.set_sequence(i as i64);
     }
 
+    // Model the boot-fired journal day-page so it enters `all_block_ids` — the
+    // ref-known universe the `inv-viewmodel-entity-ids-subset-of-data` phantom
+    // check subtracts. `boot_and_seed_editor` pins the keystone boot clock, so the
+    // SUT's auto-created day-page id matches `keystone_boot_journal_id`; without
+    // this seed it renders in the journals feed as an unknown (phantom) id — the
+    // midnight-rollover class fixed for the org-link-marks twin in c21a8a00.
+    crate::pbt::composed::wide_e2e::seed_boot_journal(&mut state);
+
     // Mirror the SUT boot sequence EXACTLY so every invariant aligns: navigate
     // focus to the page root (this BLURS any open editor and sets the nav
     // matview to the page — the SUT's `NavigateFocus(page)`), then open the
@@ -642,11 +650,18 @@ async fn boot_and_seed_editor(
     resolver: &IdResolver,
     ref_state: &ReferenceState,
 ) -> (CapMap, BTreeSet<EntityUri>) {
+    // Pin the boot clock to the fixed keystone day so the boot auto-create rule
+    // mints a DETERMINISTIC journal day-page id (`keystone_boot_journal_id`), not
+    // one keyed on the host's real date. The plain `new_with_loro` boot uses the
+    // OS `SystemClock`, whose date-dependent day-page `editor_ref` never modeled →
+    // a date-dependent `inv-viewmodel-entity-ids-subset-of-data` phantom
+    // (midnight-rollover class, mirrors c21a8a00).
     let comp = Arc::new(
-        HeadlessFrontendComponent::new_with_loro(
+        HeadlessFrontendComponent::new_with_clock(
             &[("structural-page.org", WIDE_TREE_ORG)],
             Duration::from_millis(300),
             true,
+            crate::pbt::frontend_slice::components::keystone_boot_clock(),
         )
         .await,
     );
@@ -678,6 +693,25 @@ async fn boot_and_seed_editor(
     let tree: BTreeSet<EntityUri> = [ids.parent.clone(), ids.c1.clone(), ids.c2.clone()]
         .into_iter()
         .collect();
+
+    // The boot journal auto-create fires ASYNC off the clock CDC; the 300ms boot
+    // settle can return before the day-page lands. Await it (fail loud on timeout)
+    // so the scaffold snapshot below deterministically captures it and the
+    // widget-tree phantom check sees a settled, ref-known block.
+    let journal_id = crate::pbt::frontend_slice::components::keystone_boot_journal_id();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        tokio::time::sleep(SETTLE).await;
+        if sut_ids(&caps).await.contains(&journal_id) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "[editor-boot] boot journal {journal_id} did not fire within budget"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
     let booted = sut_ids(&caps).await;
     let scaffold: BTreeSet<EntityUri> = booted.difference(&tree).cloned().collect();
 
@@ -1188,10 +1222,18 @@ mod teeth {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         // File name = page content: the doc/page title the viewmodel renders comes
         // from the filename, and the oracle's page block content is "structural-page".
+        // Pin the boot clock to the fixed keystone day so the boot auto-create rule
+        // mints a DETERMINISTIC journal day-page id (`keystone_boot_journal_id`), not
+        // one keyed on the host's real date — the plain `new` (SystemClock) boot
+        // date-hashes today's day-page, which `structural_ref` never modeled → a
+        // date-dependent `inv-viewmodel-entity-ids-subset-of-data` phantom
+        // (midnight-rollover class, mirrors the org-link-marks twin in c21a8a00).
         let comp = Arc::new(
-            HeadlessFrontendComponent::new(
+            HeadlessFrontendComponent::new_with_clock(
                 &[("structural-page.org", TREE_ORG)],
                 Duration::from_millis(300),
+                false,
+                crate::pbt::frontend_slice::components::keystone_boot_clock(),
             )
             .await,
         );
@@ -1219,10 +1261,34 @@ mod teeth {
         let tree: BTreeSet<EntityUri> = [ids.parent.clone(), ids.c1.clone(), ids.c2.clone()]
             .into_iter()
             .collect();
+
+        // The boot journal auto-create fires ASYNC off the clock CDC; the 300ms boot
+        // settle can return before the day-page lands. Await it (fail loud on timeout)
+        // so the scaffold snapshot below deterministically captures it.
+        let journal_id = crate::pbt::frontend_slice::components::keystone_boot_journal_id();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            tokio::time::sleep(SETTLE).await;
+            if sut_ids(&caps).await.contains(&journal_id) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "[org-seed] boot journal {journal_id} did not fire within budget"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
         let booted = sut_ids(&caps).await;
         let scaffold: BTreeSet<EntityUri> = booted.difference(&tree).cloned().collect();
 
-        let oracle = structural_ref();
+        let mut oracle = structural_ref();
+        // Model the boot-fired journal day-page in the oracle's block_state so it
+        // enters `all_block_ids` — the ref-known universe the phantom check
+        // subtracts. `inject_scaffold_seed` (below) only touches `block_documents`,
+        // so WITHOUT this the auto-created day-page renders as an unknown (phantom)
+        // entity id. The pinned keystone clock makes the SUT's day-page id match.
+        crate::pbt::composed::wide_e2e::seed_boot_journal(&mut oracle);
         NavigateFocus {
             region: Region::Main,
             block_id: page_root(),
