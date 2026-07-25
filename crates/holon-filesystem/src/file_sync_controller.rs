@@ -1706,16 +1706,37 @@ impl FileSyncController {
                 .map(String::as_str)
                 .collect();
 
+            // `seq` is the block's DOCUMENT-ORDER position within its parent —
+            // the tier tiered_match's T1 (content-at-same-position) keys on.
+            // `get_blocks` already returns children in canonical document order
+            // (`block_raw ORDER BY sort_key, id`), so the position is a
+            // per-parent running index over that ordered list. It is NOT the
+            // `"sequence"` PROPERTY: the org parser stamps that on every
+            // parsed block from a DOCUMENT-GLOBAL DFS counter, while blocks
+            // created in-app afterwards (splits, creates) carry none and
+            // `OrgBlockExt::sequence()` collapses them to 0. Sorting by it
+            // therefore interleaves minted blocks ahead of their parsed
+            // siblings, making T1 match id-less incoming blocks against the
+            // WRONG existing twin — churning a stale re-edit's identity
+            // (MintAmbiguous) or remapping onto a mis-positioned sibling
+            // (sibling-order swap in the org projection). Mirrors the oracle's
+            // per-parent document-order
+            // `seq` in `stale_external_rewrite::apply_to_ref`.
+            let mut existing_seq_per_parent: HashMap<EntityUri, i64> = HashMap::new();
             let existing: Vec<ExistingChild> = existing_children
                 .iter()
-                .map(|b| ExistingChild {
-                    id: b.id.clone(),
-                    parent: b.parent_id.clone(),
-                    seq: b
-                        .get_property("sequence")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0),
-                    content: b.content.clone(),
+                .map(|b| {
+                    let counter = existing_seq_per_parent
+                        .entry(b.parent_id.clone())
+                        .or_insert(0);
+                    let seq = *counter;
+                    *counter += 1;
+                    ExistingChild {
+                        id: b.id.clone(),
+                        parent: b.parent_id.clone(),
+                        seq,
+                        content: b.content.clone(),
+                    }
                 })
                 .collect();
 

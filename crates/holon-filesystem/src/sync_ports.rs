@@ -419,8 +419,10 @@ pub trait MountRegistry: Send + Sync {
 pub struct ExistingChild {
     pub id: EntityUri,
     pub parent: EntityUri,
-    /// The org parser's DFS `sequence` property -- orders siblings within a
-    /// parent (children are otherwise unordered in the store snapshot).
+    /// The block's 0-based DOCUMENT-ORDER position within its parent: dense
+    /// per parent, derived from the canonical `get_blocks` ordering
+    /// (`ORDER BY sort_key, id`). Deliberately NOT the org parser's
+    /// `sequence` property.
     pub seq: i64,
     pub content: String,
 }
