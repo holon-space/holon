@@ -426,7 +426,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
     ) -> Self {
         // Same per-case observability isolation as `init_test` (the windowed
         // harness constructs the SUT through this entry point instead).
-        crate::test_tracing::mark_driver_thread();
+        crate::test_tracing::begin_test_scope();
         crate::test_tracing::SpanCollector::global().reset();
         Self {
             caps,
@@ -555,19 +555,19 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
         // window. Both halves guard against the shrink-time feedback loop
         // where the harness's own divergence panic re-entered the next
         // iteration's failure message (exponential escape blowup, 2026-07-11).
-        crate::test_tracing::mark_driver_thread();
+        let scope = crate::test_tracing::begin_test_scope();
         crate::test_tracing::SpanCollector::global().reset();
-        let rt = if S::MULTI_THREAD {
+        let mut builder = if S::MULTI_THREAD {
             tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("build multi-thread runtime")
         } else {
             tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("build current-thread runtime")
         };
+        builder.enable_all();
+        // Bind the SUT runtime's worker threads to THIS case's scope so a
+        // swallowed panic / `error!` on a worker is attributed here — the
+        // cross-thread capture `inv-no-observed-errors` exists for.
+        crate::test_tracing::attach_scope_to_runtime(&mut builder, scope);
+        let rt = builder.build().expect("build SUT runtime");
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let (caps, handle, scaffold_ids) = rt.block_on(S::build(&resolver, ref_state));
         S::align_ids(&handle, ref_state);

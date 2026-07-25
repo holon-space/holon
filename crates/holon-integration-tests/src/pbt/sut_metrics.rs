@@ -60,6 +60,12 @@ struct FrozenCheckMetrics {
 
 impl MetricsSut {
     pub(super) fn new() -> Self {
+        // A case's observability window opens here for harnesses that do not go
+        // through `ComposedSut::init_test` (slice tests, the `teeth` lockstep
+        // harness): without a scope, `on_transition_start`'s `reset` and the
+        // observed-errors read would have no window to address.
+        #[cfg(feature = "otel-testing")]
+        crate::test_tracing::ensure_test_scope();
         Self {
             #[cfg(feature = "otel-testing")]
             span_collector: crate::test_tracing::SpanCollector::global().clone(),
