@@ -84,18 +84,21 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
           components: rustfmt, clippy
 
-      - name: Cache Rust dependencies
-        uses: actions/cache@v4
+      # rust-cache keys on the rustc version (a nightly-toolchain bump can no
+      # longer reuse a stale-compiler target/) and prunes stale artifacts before
+      # saving, so the cached target/ can't grow unbounded and evict the
+      # infrequent release (tag) caches under the 10 GB repo budget. save-if
+      # restricts cache WRITES to main: PR branches restore from main's warm
+      # cache but never save, so the many parallel PR/agent branches stop
+      # churning the budget. rust-cache's built-in per-prefix lock-hash fallback
+      # replaces the old manual restore-keys. cache-on-failure keeps the old
+      # actions/cache behavior of warming even when the job fails.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+          key: rust-checks
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
 
       - name: Check formatting
         run: cargo fmt --check
@@ -138,19 +141,15 @@ jobs:
         with:
           toolchain: ${{ env.RUST_VERSION }}
 
-      - name: Cache Rust dependencies
-        uses: actions/cache@v4
+      # See rust-checks: rustc-version keying + prune + main-only save. Distinct
+      # `key` keeps this job's gated-integration-test target/ separate, as the
+      # old distinct `-cargo-gated-` prefix did.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-gated-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-gated-
-            ${{ runner.os }}-cargo-
+          key: gated-suites
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
 
       # The guard compiles the gated integration-test binaries; those link GPUI
       # (libfontconfig), so install its Linux build deps (mirrors latency-gate).
@@ -195,18 +194,15 @@ jobs:
         with:
           toolchain: ${{ env.RUST_VERSION }}
 
-      - name: Cache Rust dependencies
-        uses: actions/cache@v4
+      # See rust-checks: rustc-version keying + prune + main-only save. Distinct
+      # `key` keeps this job's cache separate, as the old `-cargo-quality-`
+      # prefix did.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-quality-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-quality-
+          key: rust-quality
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
 
       - name: Install cargo-machete
         uses: cargo-bins/cargo-binstall@main
