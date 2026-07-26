@@ -152,7 +152,7 @@ impl McpCallSurface for MockPeer {
 fn open_memory_conn() -> Arc<CoreConnection> {
     let io = Arc::new(MemoryIO::new());
     let opts = DatabaseOpts::default().with_views(true);
-    let db = Database::open_file_with_flags(io, ":memory:", OpenFlags::default(), opts, None)
+    let db = Database::open_file_with_flags(io, ":memory:", OpenFlags::default(), opts, None, Arc::new(turso_core::SqliteDialect))
         .expect("open in-memory database");
     db.connect().expect("connect")
 }

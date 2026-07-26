@@ -842,7 +842,7 @@ pub(crate) fn default_turso_config() -> TursoDatabaseConfig {
         // resolution devlog 2026-05-08-mcp-first-query-empty-matview.
         async_io: false,
         encryption: None,
-        vfs: None,
+        vfs: turso_sdk_kit::IoBackend::Default,
         io: None,
         db_file: None,
     }
@@ -1172,11 +1172,11 @@ impl TursoBackend {
 
         let db = if db_path_str.starts_with(":memory:") {
             let io = Arc::new(MemoryIO::new());
-            Database::open_file_with_flags(io, db_path_str, OpenFlags::default(), opts, None)
+            Database::open_file_with_flags(io, db_path_str, OpenFlags::default(), opts, None, Arc::new(turso_core::SqliteDialect))
         } else {
             let io =
                 Arc::new(UnixIO::new().map_err(|e| StorageError::DatabaseError(e.to_string()))?);
-            Database::open_file_with_flags(io, db_path_str, OpenFlags::default(), opts, None)
+            Database::open_file_with_flags(io, db_path_str, OpenFlags::default(), opts, None, Arc::new(turso_core::SqliteDialect))
         }
         .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
@@ -1197,7 +1197,7 @@ impl TursoBackend {
         let opts = DatabaseOpts::default().with_views(true);
         let db = if db_path_str.starts_with(":memory:") {
             let io = Arc::new(MemoryIO::new());
-            Database::open_file_with_flags(io, db_path_str, OpenFlags::default(), opts, None)
+            Database::open_file_with_flags(io, db_path_str, OpenFlags::default(), opts, None, Arc::new(turso_core::SqliteDialect))
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?
         } else {
             let io = wasm_io::registered().ok_or_else(|| {
@@ -1207,7 +1207,7 @@ impl TursoBackend {
                      file-backed database on wasm32"
                 ))
             })?;
-            Database::open_file_with_flags(io, db_path_str, OpenFlags::Create, opts, None)
+            Database::open_file_with_flags(io, db_path_str, OpenFlags::Create, opts, None, Arc::new(turso_core::SqliteDialect))
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?
         };
         tracing::info!("Turso database opened (wasm32) at: {}", db_path_str);
