@@ -87,6 +87,8 @@ pub use proposal::REJECT_PROPOSAL_OP;
 pub use provenance::PROVENANCE_PROPERTY;
 pub use provenance::ProvenanceStamp;
 pub use query_engine::QueryEngine;
+pub use storage_error::IDENTITY_COLLISION_MARKER;
+pub use storage_error::IdentityCollision;
 pub use storage_error::ParentNotFound;
 pub use storage_error::ProjectionInvariantViolated;
 pub use template::INSTANCE_OF_PROPERTY;

@@ -2430,14 +2430,58 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 // caller, instead of panicking a background worker whose crash the
                 // UI silently swallows.
                 let mut params = params;
-                let id = match params.get("id").and_then(|v| v.as_string()) {
-                    Some(existing) => existing.to_string(),
+                let (id, id_was_supplied) = match params.get("id").and_then(|v| v.as_string()) {
+                    Some(existing) => (existing.to_string(), true),
                     None => {
                         let minted = format!("{}:{}", self.entity_name, uuid::Uuid::new_v4());
                         params.insert("id".into(), Value::String(minted.clone()));
-                        minted
+                        (minted, false)
                     }
                 };
+                // FAIL-LOUD collision guard (identity plan §5, interim policy).
+                // A SUPPLIED, deterministically-derived id (e.g. a page's
+                // `PageId::for_path`) that is ALREADY held by a DIFFERENT entity
+                // must not silently `ON CONFLICT(id) DO UPDATE`-clobber the
+                // holder. "Different entity" = the holder's current canonical
+                // title differs from the requested content, under the SAME
+                // normalization `PageId::for_path` hashes (`normalize_for_hash`)
+                // — content, not `(content, parent)`, since page identity is a
+                // pure function of the path and a rename is the one thing that
+                // changes the title while preserving the id. A freshly MINTED
+                // uuid cannot collide, so this only touches supplied ids.
+                if id_was_supplied {
+                    if let Some(requested) = params.get("content").and_then(|v| v.as_string()) {
+                        let requested = requested.to_string();
+                        let held_sql = format!(
+                            "SELECT content FROM {} WHERE id = '{}'",
+                            self.table_name,
+                            id.replace('\'', "''")
+                        );
+                        let held_rows = self
+                            .db_handle
+                            .query(&held_sql, HashMap::new())
+                            .await
+                            .map_err(|e| {
+                                format!("identity collision guard: SELECT content for id {id}: {e}")
+                            })?;
+                        if let Some(held) = held_rows
+                            .first()
+                            .and_then(|r| r.get("content"))
+                            .and_then(|v| v.as_string())
+                        {
+                            if holon_api::link_parser::normalize_for_hash(held)
+                                != holon_api::link_parser::normalize_for_hash(&requested)
+                            {
+                                // ALLOW(entity_uri_from_raw): id is a validated create param
+                                return Err(Box::new(holon_api::IdentityCollision {
+                                    id: EntityUri::from_raw(&id),
+                                    held_title: held.to_string(),
+                                    requested_title: requested,
+                                }));
+                            }
+                        }
+                    }
+                }
                 let prepared = self.prepare_create(&params);
                 // block_links junction (links increment 2): derived from the
                 // marks param, written in the SAME transaction as the row +

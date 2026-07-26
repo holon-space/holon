@@ -2883,6 +2883,12 @@ impl BuilderServices for ReactiveEngine {
         // stale task must NOT stomp the newer focus. (Resolved-link clicks
         // mirror focus synchronously and have no such window.)
         let focus_at_click = focused_block.get_cloned();
+        // User-visible surface for a refused create (fail-loud). Captured before
+        // the spawn because the task can't borrow `&self`. Without this a
+        // collision-refused create (interim identity policy §5) would only log,
+        // and the user clicking a dangling link whose page name is taken would
+        // see nothing open AND no error — indistinguishable from a dead link.
+        let op_failure_sink = self.ui_state.op_failure_sink_handle();
         self.runtime_handle.spawn(async move {
             if let Err(e) = create_page_and_navigate(
                 &session,
@@ -2896,9 +2902,15 @@ impl BuilderServices for ReactiveEngine {
             {
                 // Disclose the failed follow: the user clicked a dangling link
                 // and nothing opened, so a dropped error would look like a dead
-                // link. The tracker is the PBT/monitoring seam.
-                session.error_tracker().record_error();
-                tracing::error!("follow_dangling_link({target}) failed: {e:#}");
+                // link. The tracker is the PBT/monitoring seam; the sink routes
+                // the verbatim message to a CommandFailed toast.
+                surface_op_failure(
+                    session.error_tracker(),
+                    &op_failure_sink,
+                    "block",
+                    "create_page_from_link",
+                    &e,
+                );
             }
         });
     }

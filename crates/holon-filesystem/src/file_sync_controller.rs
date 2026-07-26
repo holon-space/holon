@@ -955,6 +955,36 @@ impl FileSyncController {
         };
         let document_uri = document.id.clone();
 
+        // D3 / identity plan §5 guard (order matters: guard BEFORE any delete). A
+        // page rename re-homes the doc to a NEW `<new-title>.org` and removes the
+        // OLD file; that removal fires THIS handler for the old path, whose
+        // `#+ID:` still resolves to the (renamed, re-homed) doc. Cascade-deleting
+        // here would DELETE the very doc the rename just moved — the double
+        // defect the RenameDocument SUT comments flag. So: never cascade-delete a
+        // doc whose CURRENT authoritative file path is a DIFFERENT file than the
+        // vanished one. The vanished file is stale rename-cleanup — forget it and
+        // stop.
+        if document.is_page() {
+            let current_chain = self.authoritative_name_chain(&document_uri).await?;
+            if !current_chain.is_empty() {
+                let current_path = self
+                    .root_dir
+                    .join(current_chain.join("/"))
+                    .with_extension("org");
+                if CanonicalPath::new(&current_path) != *canonical {
+                    info!(
+                        "[FileSyncController] Deleted file {} is stale — document {} now lives at \
+                         {} (page-rename cleanup); NOT cascading the delete",
+                        path.display(),
+                        document_uri,
+                        current_path.display(),
+                    );
+                    self.forget_file_state(canonical);
+                    return Ok(());
+                }
+            }
+        }
+
         let blocks = self.block_reader.get_blocks(&document_uri).await?;
         info!(
             "[FileSyncController] File deleted externally: {} — cascade-deleting document {} ({} \
@@ -3726,6 +3756,19 @@ impl FileSyncController {
         }
         let path = self.root_dir.join(chain.join("/")).with_extension("org");
         let canonical = CanonicalPath::new(&path);
+        // D3 / identity plan §5: a page RENAME changes its authoritative title,
+        // so its file moves from `<old-title>.org` to this `<new-title>.org`.
+        // Capture the page's PREVIOUS on-disk home (the alias registry is
+        // rewritten to the new path below) so the now-orphaned old file can be
+        // removed after the new one is written — otherwise the page is
+        // DOUBLE-HOMED across two files (inv-every-page-has-its-own-file). The
+        // removal's own delete event is made safe by the stale-file guard in
+        // `on_file_deleted`.
+        let prior_path = if let Some(ref registrar) = self.alias_registrar {
+            registrar.resolve_alias_to_path(page_id).await
+        } else {
+            None
+        };
         // Already ours (we wrote it) — nothing to do.
         if self.last_projection.contains_key(&canonical) {
             return Ok(());
@@ -3770,6 +3813,28 @@ impl FileSyncController {
         // a watcher re-ingest round-trip to surface the file.
         if let Some(ref registrar) = self.alias_registrar {
             registrar.register_alias(page_id, &path).await;
+        }
+        // Remove the orphaned old file left by a page rename (see `prior_path`).
+        if let Some(prior) = prior_path {
+            let prior_canonical = CanonicalPath::new(&prior);
+            if prior_canonical != canonical && self.fs.exists(&prior) {
+                self.fs.remove(&prior).await.map_err(|e| {
+                    anyhow::anyhow!(
+                        "materialize_page_identity_file({page_id}): removing orphaned old file {} \
+                         after rename to {}: {e}",
+                        prior.display(),
+                        path.display()
+                    )
+                })?;
+                self.forget_file_state(&prior_canonical);
+                self.run_post_write_hook(&prior);
+                tracing::info!(
+                    "[FileSyncController] Removed orphaned old file {} after page {} renamed to {}",
+                    prior.display(),
+                    page_id,
+                    path.display(),
+                );
+            }
         }
         self.last_projection.insert(canonical, rendered);
         tracing::info!(

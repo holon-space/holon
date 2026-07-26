@@ -1782,20 +1782,20 @@ impl ReferenceState {
     /// that page as the parent, on a miss mint a page titled by the segment
     /// under the current parent.
     ///
-    /// The minted id is where the ORACLE ENCODES THE SPEC rather than the
-    /// current implementation. 5.3: "A *new* page created later under the new
-    /// name gets a new id; that is correct (it is a different logical page)."
-    /// So the deterministic `PageId::for_path(seg_path)` is used when it is
-    /// FREE, and when it is already occupied -- the state a rename leaves
-    /// behind -- the new page still becomes a DISTINCT entity. Prod today
-    /// instead reuses the occupied id and its `create` lands on
-    /// `ON CONFLICT(id) DO UPDATE`, silently overwriting the renamed page.
+    /// The minted id is where the ORACLE ENCODES THE SPEC. When
+    /// `PageId::for_path(seg_path)` is FREE the page is minted there. When it is
+    /// already occupied -- the state a `RenamePage` leaves behind (title
+    /// changed, id preserved) -- the INTERIM identity policy (plan §5) has
+    /// production REFUSE the `create` FAIL LOUD rather than let its
+    /// `ON CONFLICT(id) DO UPDATE` clobber the renamed page. So the reference
+    /// models the refusal: no new page, no undo entry, no state change. The SUT
+    /// driver mirrors it by tolerating the `IdentityCollision`.
     ///
-    /// NOTE for whoever fixes the defect: 5.3 fixes only that the new page must
-    /// be distinct, not HOW the id is disambiguated. The `#n` suffix below is a
-    /// placeholder; once prod mints a collision-free id, single-source that
-    /// rule here the way `BlockToPage` single-sources
-    /// `PageId::for_page_under`, so oracle and writer stay born-equal.
+    /// END-STATE (plan §5, ruled 2026-07-26): a recreate at a freed path will
+    /// mint a DISTINCT id and bind the NAME to it. When that lands, replace the
+    /// refusal below with the unique-mint and single-source the rule with the
+    /// writer the way `BlockToPage` single-sources `PageId::for_page_under`, so
+    /// oracle and writer stay born-equal.
     pub fn apply_create_page_at_path(&mut self, path: &str) {
         use holon_api::link_parser::PageId;
         use holon_orgmode::models::OrgBlockExt;
@@ -1824,17 +1824,27 @@ impl ReferenceState {
             match self.ref_resolve_page_name(&hint) {
                 Some(existing) => parent = existing,
                 None => {
-                    let mut id = PageId::for_path(&seg_path)
+                    let id = PageId::for_path(&seg_path)
                         .unwrap_or_else(|e| {
                             panic!("apply_create_page_at_path: PageId::for_path({seg_path:?}): {e}")
                         })
                         .into_entity_uri();
-                    let mut disambiguator = 1u32;
-                    while self.domain.block_state.blocks.contains_key(&id) {
-                        id = PageId::for_path(&format!("{seg_path}#{disambiguator}"))
-                            .expect("disambiguated page path is non-empty")
-                            .into_entity_uri();
-                        disambiguator += 1;
+                    // INTERIM identity policy (plan §5): a derived id already held
+                    // by a DIFFERENT entity — exactly the state a `RenamePage`
+                    // leaves (title changed, id preserved) — makes production's
+                    // `create` FAIL LOUD. The op is REFUSED: nothing created,
+                    // nothing clobbered, no undo entry. Model that refusal (no
+                    // state change) and stop; the SUT driver mirrors it by
+                    // tolerating the `IdentityCollision`. (Only the leaf is ever
+                    // minted here — the generator gates every strict prefix to
+                    // resolve — so a refused leaf refuses the whole op.)
+                    //
+                    // END-STATE (plan §5, ruled 2026-07-26): a recreate at a
+                    // freed path mints a DISTINCT id and binds the NAME to it.
+                    // When that lands, replace this early return with the
+                    // unique-mint and single-source the rule with the writer.
+                    if self.domain.block_state.blocks.contains_key(&id) {
+                        return;
                     }
                     let mut page = Block::new_text(id.clone(), parent.clone(), trimmed.to_string());
                     page.set_page(true);

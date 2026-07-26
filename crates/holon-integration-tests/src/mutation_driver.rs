@@ -439,12 +439,23 @@ impl holon_pbt_core::capabilities::SutPageIdentity for DirectUserDriver {
     async fn create_page_from_link(&self, target: &str) {
         let mut params: HashMap<String, Value> = HashMap::new();
         params.insert("target".to_string(), Value::String(target.to_string()));
-        self.synthetic_dispatch("block", "create_page_from_link", params)
+        if let Err(e) = self
+            .synthetic_dispatch("block", "create_page_from_link", params)
             .await
-            .unwrap_or_else(|e| {
-                panic!(
-                    "[DirectUserDriver floor] block/create_page_from_link({target:?}) failed: {e:#}"
-                )
-            });
+        {
+            // Interim identity policy (plan §5): re-creating a page at a path a
+            // `RenamePage` FREED is REFUSED fail-loud — the derived id is still
+            // held by the renamed page. That refusal is the SPECIFIED behaviour,
+            // NOT a driver failure: model it as a disclosed no-op (the reference
+            // mirrors it in `apply_create_page_at_path`). Any OTHER failure is a
+            // real defect — panic loud. Recognised by the stable marker because
+            // the concrete `IdentityCollision` type is erased by the dispatch
+            // chain's string-enriching wrappers.
+            let msg = format!("{e:#}");
+            assert!(
+                msg.contains(holon_api::IDENTITY_COLLISION_MARKER),
+                "[DirectUserDriver floor] block/create_page_from_link({target:?}) failed: {msg}"
+            );
+        }
     }
 }
