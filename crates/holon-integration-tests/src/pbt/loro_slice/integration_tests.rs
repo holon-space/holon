@@ -50,7 +50,7 @@ async fn loro_slice_runs_structural_block_invariants_over_loro() {
 
     let report = run_selected(&composed_invariant_catalog(), &sut, &ref_).await;
 
-    // With no reference wired, the no-ref invariants run: the three `SutBackend`-
+    // With no reference wired, the no-ref invariants run: the four `SutBackend`-
     // only structural ones (`no-orphan-blocks` became ref-free when its CDC-lag
     // gate was removed) **plus** `inv-loro-no-errors` (the Loro component also
     // provides `SutLoroLog`). Ref-comparing invariants are deselected.
@@ -60,6 +60,7 @@ async fn loro_slice_runs_structural_block_invariants_over_loro() {
         ran,
         [
             "inv-loro-no-errors",
+            "inv-mark-bounds-within-content",
             "inv-no-orphan-blocks",
             "inv-no-parent-cycles",
             "inv-source-language-iff-source",
