@@ -34,7 +34,7 @@ use turso_sdk_kit::rsapi::TursoDatabaseConfig;
 fn open_db(path: &str) -> turso::Connection {
     let io = Arc::new(UnixIO::new().expect("UnixIO"));
     let opts = DatabaseOpts::default().with_views(true);
-    let db = Database::open_file_with_flags(io, path, OpenFlags::default(), opts, None)
+    let db = Database::open_file_with_flags(io, path, OpenFlags::default(), opts, None, Arc::new(turso_core::SqliteDialect))
         .expect("open database");
     let db = Arc::new(db);
     let conn_core = db.connect().expect("connect");
@@ -43,7 +43,7 @@ fn open_db(path: &str) -> turso::Connection {
         experimental_features: None,
         async_io: false,
         encryption: None,
-        vfs: None,
+        vfs: turso_sdk_kit::IoBackend::Default,
         io: None,
         db_file: None,
     };

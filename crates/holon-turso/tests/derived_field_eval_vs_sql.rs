@@ -4,18 +4,15 @@
 //! The dual-eval PBT (holon-api side) proves eval == Rhai. This closes the
 //! triangle toward eval == SQL — the leg the verifier found untested.
 //!
-//! ⚠️ DISCOVERED FORK BUG (pinned below, flagged to the orchestrator): the
-//! Turso fork's IVM **matview** logical plan drops REAL affinity from
-//! whole-number float literals (`3.0` is planned as integer `3`), so `(3.0 /
-//! 2.0)` maintains as `1` and `(xi / 2.0)` as `4` inside a matview — although
-//! the direct query engine and any genuine REAL column (`xf`) are correct. This
-//! is a fork bug, NOT a rendering bug (inline_sql correctly emits `3.0`;
-//! verified in holon-api). A2 only *computes* the seat routing; it does not yet
-//! plant live derived matviews (that is the sidecar increment), so this does
-//! not regress production — it de-risks the next increment.
-//! `planted_sql_matches_eval` asserts agreement over the fork-CORRECT cases;
-//! `matview_whole_float_literal_ bug_is_pinned` records the fork bug as an
-//! executable, loud known-divergence that flips RED the day the fork is fixed.
+//! FIXED on the Turso v0.8 line (nightscape@holon 3ef4bece): the fork's IVM
+//! **matview** logical plan previously dropped REAL affinity from whole-number
+//! float literals (`3.0` was planned as integer `3`), so `(3.0 / 2.0)`
+//! maintained as `1` and `(xi / 2.0)` as `4` inside a matview. v0.8 keeps REAL
+//! affinity, matching `Computation::eval` and the direct query engine.
+//! `planted_sql_matches_eval` asserts agreement over the always-correct cases;
+//! `matview_whole_float_literal_affinity_matches_eval` (was the pinned-bug
+//! test) now guards the fix — it went RED on the v0.7 -> v0.8 pin bump exactly
+//! as its old contract promised, and was flipped to assert the correct values.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -145,40 +142,38 @@ async fn planted_sql_matches_eval() {
     }
 }
 
-/// PINNED FORK BUG (loud, executable record — see the module header). The Turso
-/// fork's matview logical plan integer-types whole-number float literals, so a
-/// planted `(3.0 / 2.0)` maintains as `1` and `(xi / 2.0)` as `4`, diverging
-/// from `Computation::eval` (1.5 and 4.5). Asserting the WRONG values here
-/// means this test flips RED the moment the fork is fixed — the signal to
-/// delete this test and fold these cases back into `planted_sql_matches_eval`.
-/// Flagged to the orchestrator; the sidecar increment (which actually plants)
-/// must not depend on whole-float-literal arithmetic over integer inputs until
-/// fixed.
+/// v0.8 FIX GUARD (was `matview_whole_float_literal_bug_is_pinned`). The Turso
+/// fork's matview logical plan used to integer-type whole-number float
+/// literals, so a planted `(3.0 / 2.0)` maintained as `1` and `(xi / 2.0)` as
+/// `4`, diverging from `Computation::eval` (1.5 and 4.5). The v0.8 line
+/// (nightscape@holon 3ef4bece) preserves REAL affinity; this test asserts the
+/// matview column now equals eval, so a regression would flip it RED. These
+/// cases could be folded back into `planted_sql_matches_eval`; kept as a named
+/// test to document the specific whole-float-affinity fix across the pin bump.
 #[tokio::test]
-async fn matview_whole_float_literal_bug_is_pinned() {
+async fn matview_whole_float_literal_affinity_matches_eval() {
     let handle = setup().await;
     let ctx: HashMap<String, Value> = HashMap::from([("xi".to_string(), Value::Integer(9))]);
 
-    // eval is CORRECT (type-faithful): 3.0 / 2.0 = 1.5.
+    // literal / literal: eval is type-faithful (3.0 / 2.0 = 1.5); v0.8 matches.
     let whole = div(flit(3.0), flit(2.0));
-    assert_eq!(whole.eval(&ctx).unwrap(), Value::Float(1.5));
-    // ... but the fork's matview mis-types the literals and integer-divides.
-    let sql = plant_and_read(&handle, "v_bug_litlit", whole).await;
-    assert_eq!(
-        sql,
-        Value::Integer(1),
-        "if this is no longer Integer(1), the fork bug is FIXED — delete this test"
+    let expected = whole.eval(&ctx).unwrap();
+    assert_eq!(expected, Value::Float(1.5));
+    let sql = plant_and_read(&handle, "v_litlit", whole).await;
+    assert!(
+        approx_eq(&expected, &sql),
+        "litlit: eval={expected:?} matview_sql={sql:?}"
     );
 
-    // int column / whole-float literal: eval promotes to float (4.5), fork does
-    // integer division (4).
+    // int column / whole-float literal: eval promotes to float (9 / 2.0 = 4.5);
+    // v0.8 keeps REAL affinity where v0.7 integer-divided to 4.
     let mixed = div(field("xi"), flit(2.0));
-    assert_eq!(mixed.eval(&ctx).unwrap(), Value::Float(4.5));
-    let sql = plant_and_read(&handle, "v_bug_intcol", mixed).await;
-    assert_eq!(
-        sql,
-        Value::Integer(4),
-        "fork bug: int-col / whole-float-lit"
+    let expected = mixed.eval(&ctx).unwrap();
+    assert_eq!(expected, Value::Float(4.5));
+    let sql = plant_and_read(&handle, "v_intcol_wholelit", mixed).await;
+    assert!(
+        approx_eq(&expected, &sql),
+        "intcol/wholelit: eval={expected:?} matview_sql={sql:?}"
     );
 }
 
@@ -189,9 +184,8 @@ async fn matview_whole_float_literal_bug_is_pinned() {
 /// round-trip through `block_derived.value_json`.
 ///
 /// Fractional literal (`* 1.5`) keeps REAL affinity, so the planted leg is
-/// fork-CORRECT. TODO(pin-bump): once `fix/matview-whole-float-affinity` is
-/// pinned, add a whole-float case here (its planted leg is wrong today — see
-/// `matview_whole_float_literal_bug_is_pinned`).
+/// correct. Whole-float-literal affinity is now also correct on the v0.8 line
+/// and covered by `matview_whole_float_literal_affinity_matches_eval`.
 #[tokio::test]
 async fn sidecar_value_matches_eval_and_planted_sql() {
     let handle = setup().await;
