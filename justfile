@@ -464,15 +464,21 @@ analyze-machete:
 # of the code-quality plan re-tightens this gate (`-D warnings`) once the
 # workspace backlog has been paid down incrementally.
 analyze-clippy:
+    #!/usr/bin/env bash
+    set -euo pipefail
     cargo clippy --workspace --all-targets 2>&1 \
         | tee /tmp/holon-analyze-clippy.log
 
 # Copy-paste / duplication detection via polydup.
 analyze-duplication:
+    #!/usr/bin/env bash
+    set -euo pipefail
     polydup scan . 2>&1 | tee /tmp/holon-analyze-duplication.log
 
 # Architecture lints (cycles, banned imports, etc.).
 analyze-arch:
+    #!/usr/bin/env bash
+    set -euo pipefail
     ./archlint/archlint --all 2>&1 | tee /tmp/holon-analyze-arch.log
 
 # Run every analyzer. Continues on failure; reports a summary at the end.
