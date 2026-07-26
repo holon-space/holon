@@ -291,6 +291,19 @@ pub struct FileSyncController {
     /// gate RACE-FREE: a late boot-seed delta arriving after `boot_seeding`
     /// flips still renders == pristine, so it is not mistaken for a user edit.
     seed_pristine: HashMap<CanonicalPath, String>,
+
+    /// Paths whose write-back hit a persistent read-only-filesystem error
+    /// (EROFS, os error 30) — e.g. a relay/synthetic doc whose resolved path
+    /// has no writable backing file, or a vault on a read-only mount. The
+    /// FIRST failure logs a loud, information-rich ERROR (doc_id, path, cause)
+    /// and records the path here; every subsequent CDC event for that path
+    /// SKIPS the write instead of re-issuing the doomed syscall (real-vault
+    /// boot 2026-07-22: `Read-only file system (os error 30)` on EVERY CDC
+    /// event). Disclosed degraded mode (Fail Loud, Never Fake): one loud
+    /// disclosure, then a quiet skip. Cleared when the doc (re)gains a
+    /// writable backing file (`register_alias`) or on a clean re-ingest, so a
+    /// later-writable path resumes write-back.
+    writeback_readonly: HashSet<CanonicalPath>,
 }
 
 impl FileSyncController {
@@ -336,6 +349,7 @@ impl FileSyncController {
             quarantine_skip_logged: std::sync::Mutex::new(HashSet::new()),
             boot_seeding: true,
             seed_pristine: HashMap::new(),
+            writeback_readonly: HashSet::new(),
         }
     }
 
@@ -1065,6 +1079,9 @@ impl FileSyncController {
                         path.display()
                     );
                 }
+                // EROFS row 346: a clean re-ingest also lifts a read-only
+                // write-back skip (path may have become writable again).
+                self.writeback_readonly.remove(&canonical);
                 Ok(())
             }
             Err(e) => {
@@ -1568,6 +1585,15 @@ impl FileSyncController {
         // Register UUID → file path alias (if Loro is available)
         if let Some(ref registrar) = self.alias_registrar {
             registrar.register_alias(&document_uri, path).await;
+        }
+        // EROFS row 346: a successful ingest of this file proves it has a
+        // writable-backed path again — lift any prior read-only write-back
+        // skip so edits resume (mirrors the quarantine clear-on-ingest).
+        if self.writeback_readonly.remove(&CanonicalPath::new(path)) {
+            tracing::info!(
+                path = %path.display(),
+                "[FileSyncController] read-only write-back skip CLEARED (file                  re-ingested with a writable backing path)",
+            );
         }
 
         // Old state = this file's diff **base**, read through the `BaseStore`
@@ -3109,10 +3135,17 @@ impl FileSyncController {
                 .await?;
         }
 
-        if let Some(parent) = path.parent() {
-            self.fs.create_dir_all(parent).await?;
+        // EROFS row 346: skip-with-one-loud-error for a doc whose path has no
+        // writable backing file — first failure discloses, later CDC events
+        // skip (no per-event storm). A skip returns Ok(true) up-stack (the loop
+        // survives) but does NOT stamp `last_projection`, so a later-writable
+        // path re-attempts.
+        if !self
+            .write_back_or_skip_readonly(doc_id, &path, rendered.as_bytes())
+            .await?
+        {
+            return Ok(true);
         }
-        self.fs.write(&path, rendered.as_bytes()).await?;
         self.run_post_write_hook(&path);
         // H2 image-gate: `materialize_images` re-reads the whole doc (a 2nd
         // recursive-CTE `get_blocks`). Content-only keystrokes never add images,
@@ -3556,10 +3589,13 @@ impl FileSyncController {
                 });
             }
 
-            if let Some(parent) = path.parent() {
-                self.fs.create_dir_all(parent).await?;
+            // EROFS row 346: skip-with-one-loud-error (see on_block_changed).
+            if !self
+                .write_back_or_skip_readonly(&doc.id, &path, rendered.as_bytes())
+                .await?
+            {
+                continue;
             }
-            self.fs.write(&path, rendered.as_bytes()).await?;
             self.run_post_write_hook(&path);
             self.materialize_images(&doc.id).await?;
             self.last_projection.insert(canonical, rendered);
@@ -3710,10 +3746,15 @@ impl FileSyncController {
         if self.gate_virtual_seed_write(page_id, &canonical, &rendered, false) {
             return Ok(());
         }
-        if let Some(parent) = path.parent() {
-            self.fs.create_dir_all(parent).await?;
+        // EROFS row 346: skip-with-one-loud-error. A skip returns early WITHOUT
+        // registering the alias — a path that could not be written does not own
+        // a file to advertise.
+        if !self
+            .write_back_or_skip_readonly(page_id, &path, rendered.as_bytes())
+            .await?
+        {
+            return Ok(());
         }
-        self.fs.write(&path, rendered.as_bytes()).await?;
         self.run_post_write_hook(&path);
         // Register the UUID → file-path alias NOW (mirrors the ingest path's
         // `register_alias`), so the page immediately OWNS its file in the alias
@@ -3787,10 +3828,13 @@ impl FileSyncController {
             if self.gate_virtual_seed_write(&doc_id, &canonical, &rendered, false) {
                 continue;
             }
-            if let Some(parent) = path.parent() {
-                self.fs.create_dir_all(parent).await?;
+            // EROFS row 346: skip-with-one-loud-error (see on_block_changed).
+            if !self
+                .write_back_or_skip_readonly(&doc_id, &path, rendered.as_bytes())
+                .await?
+            {
+                continue;
             }
-            self.fs.write(&path, rendered.as_bytes()).await?;
             self.run_post_write_hook(&path);
             self.last_projection.insert(canonical, rendered);
             info!(
@@ -4275,6 +4319,86 @@ impl FileSyncController {
         let path = self.root_dir.join(chain.join("/")).with_extension("org");
         Ok(Some(path))
     }
+
+    /// Write `rendered` to `path` for `doc_id`, applying the read-only
+    /// skip-with-one-loud-error posture (BugFunnel EROFS row 346).
+    ///
+    /// - `Ok(true)`  — the write succeeded (caller runs its post-write steps).
+    /// - `Ok(false)` — SKIPPED because this path is on a read-only filesystem
+    ///   (EROFS). The FIRST such failure logs a loud ERROR and marks the path;
+    ///   every later CDC event for it returns `Ok(false)` WITHOUT touching the
+    ///   fs — no per-event retry storm. `last_projection` is deliberately NOT
+    ///   updated by the caller on a skip, so if the path later becomes writable
+    ///   (alias change / re-ingest clears the mark) the next event re-attempts.
+    /// - `Err(e)`    — a non-EROFS IO error propagates LOUDLY, per-event: only
+    ///   the persistent read-only condition is de-duplicated; a transient or
+    ///   unexpected fault stays visible on every occurrence.
+    async fn write_back_or_skip_readonly(
+        &mut self,
+        doc_id: &EntityUri,
+        path: &Path,
+        rendered: &[u8],
+    ) -> Result<bool> {
+        let canonical = CanonicalPath::new(path);
+        if self.writeback_readonly.contains(&canonical) {
+            tracing::debug!(
+                doc_id = %doc_id,
+                path = %path.display(),
+                "[FileSyncController] write-back skipped for read-only path                  (already disclosed once)",
+            );
+            return Ok(false);
+        }
+        if let Some(parent) = path.parent() {
+            match self.fs.create_dir_all(parent).await {
+                Ok(()) => {}
+                Err(e) if is_read_only_fs(&e) => {
+                    self.mark_readonly_writeback(doc_id, path, &e, canonical);
+                    return Ok(false);
+                }
+                Err(e) => {
+                    return Err(e).with_context(|| {
+                        format!("create parent dir for org write-back to {}", path.display())
+                    });
+                }
+            }
+        }
+        match self.fs.write(path, rendered).await {
+            Ok(()) => Ok(true),
+            Err(e) if is_read_only_fs(&e) => {
+                self.mark_readonly_writeback(doc_id, path, &e, canonical);
+                Ok(false)
+            }
+            Err(e) => Err(e)
+                .with_context(|| format!("org write-back to {} failed", path.display())),
+        }
+    }
+
+    /// Record `path` as read-only for write-back and emit the ONE loud ERROR
+    /// (Fail Loud, Never Fake: disclose the degraded mode, then skip quietly).
+    fn mark_readonly_writeback(
+        &mut self,
+        doc_id: &EntityUri,
+        path: &Path,
+        err: &std::io::Error,
+        canonical: CanonicalPath,
+    ) {
+        if self.writeback_readonly.insert(canonical) {
+            tracing::error!(
+                doc_id = %doc_id,
+                path = %path.display(),
+                error = %err,
+                "[FileSyncController] org write-back FAILED on a read-only                  filesystem (EROFS os error 30) — this doc has no writable                  backing file (relay/synthetic doc, or a read-only vault                  mount). DISABLING write-back for this path so subsequent CDC                  events do NOT retry the doomed write; re-enabled when the doc                  (re)gains a writable backing file or on a clean re-ingest.",
+            );
+        }
+    }
+}
+
+/// True when an IO error is a persistent read-only-filesystem condition
+/// (EROFS, os error 30) — either the mapped `ErrorKind::ReadOnlyFilesystem`
+/// or the raw errno directly (belt-and-suspenders for adapters that build the
+/// error by kind without an errno, and for platforms whose mapping lags).
+fn is_read_only_fs(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::ReadOnlyFilesystem || e.raw_os_error() == Some(30)
 }
 
 /// Read a file's content, treating a missing file as empty content (a
