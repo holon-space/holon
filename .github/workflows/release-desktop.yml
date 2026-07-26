@@ -82,8 +82,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
-            platform: macos
+          # macOS is NOT in this matrix: universal2 needs two per-arch cargo
+          # builds, which run serially in one job (~70 min, the release critical
+          # path). It is split into the parallel build-macos + finalize-macos
+          # jobs below. Linux/Windows are single-target, so they stay here.
           # 22.04 (glibc 2.35), not ubuntu-latest (24.04 = glibc 2.39): a
           # dynamically-linked binary only runs on glibc >= the one it was
           # built against, so building on the older image lowers the floor
@@ -129,79 +131,6 @@ jobs:
 
       - name: Derive version from tag
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
-
-      # macOS ships one universal2 binary (arm64 + x86_64 lipo'd together)
-      # instead of two per-arch downloads: one artifact, no user confusion
-      # about which Mac they have, at the cost of a second cargo build.
-      - name: Build (macOS, universal2)
-        if: matrix.platform == 'macos'
-        run: |
-          rustup target add aarch64-apple-darwin x86_64-apple-darwin
-          cargo build --release --locked -p holon-gpui --target aarch64-apple-darwin
-          cargo build --release --locked -p holon-gpui --target x86_64-apple-darwin
-          mkdir -p dist
-          lipo -create \
-            target/aarch64-apple-darwin/release/holon-gpui \
-            target/x86_64-apple-darwin/release/holon-gpui \
-            -output dist/holon-gpui-universal
-          lipo -info dist/holon-gpui-universal
-
-      - name: Bundle Holon.app
-        if: matrix.platform == 'macos'
-        run: bash scripts/bundle-macos.sh dist/holon-gpui-universal dist
-
-      - name: Codesign + notarize Holon.app
-        if: matrix.platform == 'macos' && vars.APPLE_RELEASE_ENABLED == 'true'
-        env:
-          MACOS_DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_CERT_P12_BASE64 }}
-          MACOS_DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_CERT_PASSWORD }}
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
-          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
-        run: |
-          KEYCHAIN_PATH="$RUNNER_TEMP/release.keychain-db"
-          KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          printf '%s' "$MACOS_DEVELOPER_ID_CERT_P12_BASE64" | base64 -d > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN_PATH" \
-            -P "$MACOS_DEVELOPER_ID_CERT_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple: -s \
-            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
-
-          codesign --force --options runtime --timestamp \
-            --sign "Developer ID Application" dist/Holon.app/Contents/MacOS/holon-gpui
-          codesign --force --options runtime --timestamp \
-            --sign "Developer ID Application" dist/Holon.app
-          codesign --verify --deep --strict dist/Holon.app
-
-          printf '%s' "$APPLE_API_KEY_P8_BASE64" | base64 -d > "$RUNNER_TEMP/asc-key.p8"
-          ditto -c -k --keepParent dist/Holon.app "$RUNNER_TEMP/notarize.zip"
-          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
-            --key "$RUNNER_TEMP/asc-key.p8" \
-            --key-id "$APPLE_API_KEY_ID" \
-            --issuer "$APPLE_API_ISSUER_ID" \
-            --wait
-          xcrun stapler staple dist/Holon.app
-
-      - name: Package (macOS)
-        if: matrix.platform == 'macos'
-        env:
-          APPLE_RELEASE_ENABLED: ${{ vars.APPLE_RELEASE_ENABLED }}
-        run: |
-          if [ "$APPLE_RELEASE_ENABLED" = "true" ]; then
-            name="Holon-$VERSION-macOS-universal"
-          else
-            echo "::warning::macOS build is UNSIGNED: repo variable APPLE_RELEASE_ENABLED is not 'true'." \
-              "Enroll in the Apple Developer Program, add the MACOS_*/APPLE_* secrets, and set the" \
-              "variable to enable signing + notarization (docs/Operations/ReleasePipeline.md)."
-            name="Holon-$VERSION-macOS-universal-unsigned"
-          fi
-          ditto -c -k --keepParent dist/Holon.app "dist/$name.zip"
-          rm -rf dist/Holon.app dist/holon-gpui-universal
-          (cd dist && shasum -a 256 "$name.zip" > SHA256SUMS-macos.txt)
 
       - name: Build + package (Linux)
         if: matrix.platform == 'linux'
@@ -290,6 +219,165 @@ jobs:
         with:
           # dist/* also covers the SHA256SUMS files, so checksum manifests
           # carry provenance too, not just the payload artifacts.
+          subject-path: |
+            dist/*
+
+      - name: Upload artifacts to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber \
+            dist/Holon-* dist/SHA256SUMS-*.txt
+
+  # macOS universal2 = two per-arch cargo builds. Building them in one job runs
+  # them serially (~70 min wall, the release critical path). Split each arch onto
+  # its own runner so they compile in parallel, then finalize (lipo + bundle +
+  # sign + notarize + package + attest + upload) once in the dependent job below.
+  # The published universal binary is byte-identical to the old single-job one:
+  # same toolchain, same flags, same lipo of the same two per-arch builds — only
+  # the wall time changes.
+  build-macos:
+    name: Build macos (${{ matrix.arch }})
+    needs: create-release
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [aarch64-apple-darwin, x86_64-apple-darwin]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+
+      # Per-arch cache key: each runner now builds ONE target dir, so its cache
+      # is ~half the size of the old both-arches-in-one entry — smaller, faster
+      # to save/restore, and less likely to be evicted under the repo's cache
+      # budget. Keyed on rustc version (via rust-cache) so a toolchain bump can't
+      # reuse a stale-compiler cache.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-${{ matrix.arch }}
+          cache-on-failure: true
+
+      - name: Build (macOS, ${{ matrix.arch }})
+        run: |
+          rustup target add ${{ matrix.arch }}
+          cargo build --release --locked -p holon-gpui --target ${{ matrix.arch }}
+
+      # retention-days: 1 — this is a within-run handoff to finalize-macos, not a
+      # user-facing artifact (the signed .zip is uploaded to the Release below).
+      - name: Upload per-arch binary for finalize
+        uses: actions/upload-artifact@v4
+        with:
+          name: holon-gpui-${{ matrix.arch }}
+          path: target/${{ matrix.arch }}/release/holon-gpui
+          if-no-files-found: error
+          retention-days: 1
+
+  # Finalize the macOS universal2 artifact once both arches are built. Everything
+  # from lipo onward is identical to the old single macOS job — only the two
+  # cargo builds moved out (to build-macos) so they run in parallel.
+  finalize-macos:
+    name: Build macos
+    needs: build-macos
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    runs-on: macos-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Derive version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Download per-arch binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: arch-bins
+
+      # lipo the two per-arch builds into the same universal2 binary the old job
+      # produced. arch-bins/<artifact-name>/holon-gpui is where download-artifact
+      # unpacks each upload.
+      - name: Lipo → universal2
+        run: |
+          mkdir -p dist
+          lipo -create \
+            arch-bins/holon-gpui-aarch64-apple-darwin/holon-gpui \
+            arch-bins/holon-gpui-x86_64-apple-darwin/holon-gpui \
+            -output dist/holon-gpui-universal
+          lipo -info dist/holon-gpui-universal
+
+      - name: Bundle Holon.app
+        run: bash scripts/bundle-macos.sh dist/holon-gpui-universal dist
+
+      - name: Codesign + notarize Holon.app
+        if: vars.APPLE_RELEASE_ENABLED == 'true'
+        env:
+          MACOS_DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_CERT_P12_BASE64 }}
+          MACOS_DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_CERT_PASSWORD }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/release.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          printf '%s' "$MACOS_DEVELOPER_ID_CERT_P12_BASE64" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN_PATH" \
+            -P "$MACOS_DEVELOPER_ID_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+
+          codesign --force --options runtime --timestamp \
+            --sign "Developer ID Application" dist/Holon.app/Contents/MacOS/holon-gpui
+          codesign --force --options runtime --timestamp \
+            --sign "Developer ID Application" dist/Holon.app
+          codesign --verify --deep --strict dist/Holon.app
+
+          printf '%s' "$APPLE_API_KEY_P8_BASE64" | base64 -d > "$RUNNER_TEMP/asc-key.p8"
+          ditto -c -k --keepParent dist/Holon.app "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+            --key "$RUNNER_TEMP/asc-key.p8" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" \
+            --wait
+          xcrun stapler staple dist/Holon.app
+
+      - name: Package (macOS)
+        env:
+          APPLE_RELEASE_ENABLED: ${{ vars.APPLE_RELEASE_ENABLED }}
+        run: |
+          if [ "$APPLE_RELEASE_ENABLED" = "true" ]; then
+            name="Holon-$VERSION-macOS-universal"
+          else
+            echo "::warning::macOS build is UNSIGNED: repo variable APPLE_RELEASE_ENABLED is not 'true'." \
+              "Enroll in the Apple Developer Program, add the MACOS_*/APPLE_* secrets, and set the" \
+              "variable to enable signing + notarization (docs/Operations/ReleasePipeline.md)."
+            name="Holon-$VERSION-macOS-universal-unsigned"
+          fi
+          ditto -c -k --keepParent dist/Holon.app "dist/$name.zip"
+          rm -rf dist/Holon.app dist/holon-gpui-universal
+          (cd dist && shasum -a 256 "$name.zip" > SHA256SUMS-macos.txt)
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
           subject-path: |
             dist/*
 
