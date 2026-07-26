@@ -1,17 +1,19 @@
 # ADR 0029: Entity identity has one minting authority per family, lint-enforced
 
-**Status:** **Principle accepted (2026-07-26); specifics proposed, pending
-review.** Martin ruled the principle: *"entity identity must have a single
-authority, as an architectural concern. We had this issue multiple times and had
-actually decided to have one authority, but the implementation seems to have
-diverged."* That ruling is what is Accepted.
+**Status:** **Principle accepted (2026-07-26); D1/D2 RATIFIED AS AMENDED
+2026-07-26 (Martin, live review).** Martin ruled the principle: *"entity identity
+must have a single authority, as an architectural concern. We had this issue
+multiple times and had actually decided to have one authority, but the
+implementation seems to have diverged."*
 
-Everything below the principle -- the D1 owner assignments, the D2 prohibitions,
-the ratification of `PageId::for_page_under`, and the recorded page precedence
-chain -- is this ADR's **proposal**, derived from the census, not yet reviewed by
-Martin. Do not cite D1/D2 as settled until this line says so.
+In a live in-session review on 2026-07-26 Martin then reviewed D1 and D2 and
+**ratified both as amended**. The amendments are folded into the sections below
+and are the *only* deltas from the originally-proposed text; the census, the
+owner assignments (now cut by derivation class -- D1), the D2 prohibitions, the
+ratification of `PageId::for_page_under`, and the recorded page precedence chain
+now stand as **decided**, not proposed. D1/D2 may be cited as settled.
 
-**Deciders:** Martin (principle). D1/D2 await his ruling.
+**Deciders:** Martin (principle; D1/D2 as amended, 2026-07-26 live review).
 **Promotes / supersedes (scope):** `docs/Plans/PageIdentityDeterminism.md` §5
 (ACCEPTED 2026-07-18) — that ruling stays correct and in force for *pages*; this
 ADR is the general rule it was a special case of, and it amends the ruling's §5.1
@@ -180,14 +182,29 @@ their `Value` type differs between the Created and Updated paths and would
 otherwise "mint path-dependent ids and break cross-replica convergence". That is
 the standard every other family is now held to.
 
-### D1 — Owners, per family
+### D1 — Owners, by derivation class
 
-| Family | Owning type | Sanctioned constructors | Notes |
+**[Ratified as amended 2026-07-26.]** The reframing Martin ruled: the owning
+property belongs to the *derivation*, not to the *kind of entity*. Families are
+therefore cut by **how the id is derived**, and each derivation class mints
+through exactly one sanctioned constructor. (Page-vs-block is *not* the cut:
+page-ness is the `Page` tag, ADR 0014, not an identity family — see the
+construction-witness note below.)
+
+| Derivation class | Owning constructor | Current users | Notes |
 |---|---|---|---|
-| **Page id** | `PageId` (`crates/holon-api/src/link_parser.rs:131`) | `PageId::for_path` (`:158`), `PageId::for_page_under` (`:181`) | Both funnel through the single canonicalization `segments` (`:138`) → `from_segments` (`:143`). `for_page_under` is hereby **ratified** as a sanctioned sibling of `for_path` (it treats the leaf as one segment because it comes from block *content*, a title, not a path). `from_segments` is private and must stay private-in-effect: `classify_link`'s direct call (`:268`) is a violation to burn down (see OQ2). |
-| **Block id (non-page)** | `EntityUri` (`crates/holon-api/src/entity_uri.rs:23`) | `EntityUri::block_random()` (`:77`) for random mint; the deterministic derivations in `effect_id.rs` for their families | The *primitive* is settled by this ADR: hand-formatted `format!("block:{…}")` / `format!("{}:{}", entity_name, uuid)` are forbidden. Which *component* is the minting boundary is deliberately left open — see OQ1. |
-| **Doc / file id** | `generate_file_id` (`crates/holon-org-format/src/parser.rs:44-51`) | `generate_file_id`, `generate_file_id_from_relative_path` (`:54-56`) | Already single-authority. `file:` is **transient, parse-time only** (ADR 0014): a `file:` id that reaches the DB is a defect. |
-| **Effect / template / proposal / intent** | `crates/holon-api/src/effect_id.rs` | the four functions above | Already exemplary. No change; cited as the pattern. |
+| **(a) convergent-by-path** | `PageId::for_path` (`crates/holon-api/src/link_parser.rs:158`), `PageId::for_page_under` (`:181`) | pages, journals | Same inputs → same id on every peer. Both funnel through the single canonicalization `segments` (`:138`) → `from_segments` (`:143`). `for_page_under` is hereby **ratified** as a sanctioned sibling of `for_path` (it treats the leaf as one segment because it comes from block *content*, a title, not a path). **The property belongs to the derivation, not to page-ness** — any name-addressable entity minted this way converges; today's users happen to be pages and journals. `from_segments` stays private-in-effect: `classify_link`'s direct call (`:268`) is a violation to burn down (see OQ2). |
+| **(b) unique-random** | `EntityUri::block_random()` (`crates/holon-api/src/entity_uri.rs:77`) | non-page blocks | Uniqueness by construction, no convergence. Hand-formatted `format!("block:{…}")` / `format!("{}:{}", entity_name, uuid)` are forbidden — go through the primitive. Which *component* is the minting boundary is settled by D1c (mode-selected executor, OQ1 resolved). |
+| **(c) deterministic-by-typed-inputs** | `crates/holon-api/src/effect_id.rs` (the four functions) | rule effect, template instance, trust proposal, connector intent key | Already exemplary; unchanged. Cited as the pattern for the whole ADR. |
+| **(d) positional** | — (no sanctioned owner) | `parser.rs:361-364` (`::src::`), `:475` (`::img::`), `crates/holon-markdown/src/logseq.rs:235-238` / `obsidian.rs:194-200` (`::b::`) | **Reclassified as a DEFECT CLASS to burn down, not a family.** Deriving identity from ordinal position means reordering re-assigns identity. No sanctioned constructor exists or will; every site is debt (burn-down sequencing in OQ4). |
+| **(e) doc / file id** | `generate_file_id` (`crates/holon-org-format/src/parser.rs:44-51`) | transient parse-time only | Unchanged. `generate_file_id`, `generate_file_id_from_relative_path` (`:54-56`). `file:` is **transient, parse-time only** (ADR 0014): a `file:` id that reaches the DB is a defect. |
+
+**`PageId` is a construction-witness, not a second id type.** `PageId` is a
+newtype *witness* over the single `block:` id space that records **how** an id
+was constructed (the canonical path derivation); **there is no second id type at
+rest**. Page-ness is exclusively the `Page` tag — consistent with D2 prohibition
+5 and ADR 0014. "Convergent-by-path" is a property of the derivation the witness
+attests to, not of the entity being a page.
 
 Out of scope, deliberately: **element identity** (`(EntityUri, Occurrence)`,
 ADR 0015 §1a / ADR 0016) is a render-slot identity, not entity identity, and
@@ -196,6 +213,59 @@ keying. Both are correct as they stand and are not governed by this ADR. So is
 the cross-system entity *resolution* concern (`IdentityProvider`, merge/propose/
 accept/reject) tracked in the vault as G2 work — that is entity **matching**, not
 id **minting**, and conflating the two has already caused confusion.
+
+### D1b — Collision policy
+
+**[Ratified 2026-07-26.]** When a convergent-by-path derivation yields an id
+already held by a **different** entity:
+
+**Interim (ships first): FAIL LOUD.** The create is refused with a visible
+error; no silent substitution. The collision predicate is precise: the id's
+current holder's canonical path/title ≠ the requested (normalized) path — a
+path/title comparison under `PageId::for_path`'s normalization, **not** a
+`(content, parent)` comparison (content drifts over time and would misclassify).
+Autonomous callers — in particular the journal auto-create rule, which fires on
+a periodic tick — must not error-storm: they treat a collision-`Err` as
+**already-satisfied**, skipping with a single disclosed log rather than
+re-raising an error every cycle.
+
+**End-state (RULED 2026-07-26):** the **first** creation of a name-addressable
+entity stays **convergent-by-path**. A **recreate at a freed/collided path mints
+UNIQUE-RANDOM** and binds the name to that id through the existing name→id
+resolution machinery (`resolve_page_name` / the junction `resolved_id`) — so the
+*binding* converges by CRDT merge instead of the *id* converging by
+construction. Cross-peer concurrent recreate-at-the-same-freed-path then yields
+two random ids, the rare shape the existing `(name, parent)` repair already
+covers, confined to that corner instead of being the general regime.
+
+**The prior open question — a "convergent disambiguation input" (a suffix such
+that every peer disambiguates a collision identically) — is RESOLVED AS
+DISSOLVED.** It is structurally unanswerable for independent creations on
+different peers: the creation events differ, so any provenance / generation-count
+/ rename-tombstone key necessarily diverges (it asks for consensus without
+coordination); and for the *same* event re-entering it is a **recognition**
+failure that must never reach disambiguation at all. Full analysis:
+`~/.claude/plans/holon-identity-fable-review-2026-07-26.md` (F1, §5).
+
+### D1c — Minting topology (resolves OQ1)
+
+**[Ratified 2026-07-26.]** There is **one** minter trait with **three
+mode-selected implementations**: a Turso-backed impl, a Loro-backed impl, and a
+standalone **pure** impl (unique-random only; for storeless contexts such as the
+`holon-markdown` converters). The active implementation is reached through a
+consolidator DI accessor cloning the `order_key_minter` pattern
+(`crates/holon-core/src/traits.rs:886`). Org ingest is **not** a fourth minter:
+a separate org **INGEST-RESOLUTION** trait resolves `Recognized | AdoptForeign |
+NeedsMint`, and its `NeedsMint` arm delegates to the *active* minter —
+consistent with `Replication.md`'s ID-policy row (org = AcceptForeign +
+mint-on-new).
+
+**The principle, stated explicitly: the mode selects the mint EXECUTOR, never
+the id VALUE.** Ids must agree across modes and peers; order never had to.
+Derivation is mode-independent by construction; the consolidator only selects
+*who executes* the mint (whose store answers the recognition/collision query and
+records it atomically). A consolidator/epoch handover (`Model.md` invariant 10)
+is therefore identity-preserving — only order re-keys.
 
 ### D2 — One minting boundary
 
@@ -280,6 +350,32 @@ A new smell `archlint/smells/identity_minting.toml`, modelled directly on
 **The exclusion list only ever shrinks.** Adding a file to it is a reviewable
 change that must carry a reason; removing one is the burn-down.
 
+### Recognition (resolve-before-mint) is a first-class operation
+
+**[Added 2026-07-26.]** The lint and the owner table close the *minting* half of
+the problem; they do not close the half that produced the measured damage. Every
+boundary that can re-observe an existing entity (org re-ingest, MCP org-patch,
+share-mount accept, redo graft, sync echo) must **resolve before it mints** —
+emitting `Recognized(existing_id) | AdoptForeign(id) | NeedsMint`, with `mint`
+reachable only from the `NeedsMint` arm. The damage class this catches is
+**different-id-same-entity**, which a collision check *cannot* see: a fresh
+random id never collides with anything, so nothing at the mint site stops a
+sanctioned caller from minting for a thing that already exists. Recognition is
+the cure; the lint and traits are prophylaxis against the next mint site.
+
+### Witness types complement the lint at the type level
+
+**[Added 2026-07-26.]** The lint sees textual mint *expressions*, not id data
+*flows* — so `let id = address_of(path); create(id, …)` launders a derived id
+through sanctioned functions past the lint. Witness types close that back door:
+`mint` returns an unforgeable `MintedId`; parse boundaries yield a `CarriedId`
+via a small set of blessed constructors; `create` accepts only
+`Minted(MintedId) | Carried(CarriedId)` (a bare `String` / `EntityUri` id no
+longer typechecks into a create); and `address_of` returns a non-creatable
+`ResolvedAddress` usable only for read-side lookup and link resolution. This
+closes the caller-supplied-id-string back door that a regex structurally cannot
+see.
+
 ### Precondition: the arch gate cannot currently fail
 
 `justfile:475-476`:
@@ -343,15 +439,14 @@ CI can observe. (This ADR does not itself edit the justfile.)
 These are recorded as unresolved rather than invented, because the census found
 no ruling for them and this ADR will not manufacture one.
 
-- **OQ1 — which component is the block-id minting boundary?**
-  `Replication.md:59` assigns ID policy `Mint` to Loro (full) and
-  `AcceptForeign` to Turso, with the UI minting nothing. At `main`, in SqlOnly
-  mode, the op layer mints (`sql_operation_provider.rs:2432-2439`). Both cannot
-  be right. The likely resolution is that the minting boundary is mode-dependent
-  (it follows the consolidator — Loro when the store is on, Turso-LWW in
-  SqlOnly), which would be consistent with `Model.md` layer 2, but that has never
-  been ruled and is not ruled here. D1 settles the *primitive*; the *boundary*
-  needs a separate ruling.
+- **OQ1 — RESOLVED 2026-07-26 (see D1c).** The block-id minting boundary is
+  mode-dependent: **one** minter trait with **three** mode-selected executors
+  (Turso-backed, Loro-backed, and a standalone pure impl for storeless
+  contexts), reached through a consolidator DI accessor cloning `order_key_minter`;
+  org ingest *resolves* (`Recognized | AdoptForeign | NeedsMint`) rather than
+  mints, delegating its `NeedsMint` arm to the active minter. The mode selects
+  the mint *executor*, never the id *value* — ids must agree across modes and
+  peers; a consolidator handover is identity-preserving.
 - **OQ2 — the `from_segments` bypass in `classify_link`** (`link_parser.rs:268`)
   produces an optimistic link-target id for input that `for_path` would reject
   (`[[a//b]]`). The write is refused downstream, but the link *mark* still
