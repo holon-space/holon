@@ -418,6 +418,17 @@ async fn compose_sut_seeded_impl(
             comp.engine(),
             resolver.clone(),
         )) as Arc<dyn SutBlockToPage>);
+        // Page identity (`RenamePage` / `CreatePageAtFreedPath`) at the same
+        // op-floor rung and for the same reason: retitling a page and lazily
+        // creating one from a link are engine ops, not keystroke/click gestures,
+        // so there is no higher driver seam to route them through. Without this
+        // insert both transitions narrow out of the composed alphabet and the
+        // rename→recreate page-id collision is unreachable.
+        caps.insert(Arc::new(DirectUserDriver::with_resolver(
+            comp.engine(),
+            resolver.clone(),
+        ))
+            as Arc<dyn holon_pbt_core::capabilities::SutPageIdentity>);
         // The VM-rung driver (§8.11 layer-localization): install the frontend's OWN
         // headless `ReactiveEngineDriver` as THE driver backing the gesture caps, so
         // the composed `CapMap` drives user gestures UI-adjacently (click-intent
@@ -524,7 +535,10 @@ async fn compose_sut_seeded_impl(
         // Template-instantiation cap at the same op-floor rung.
         caps.insert(floor.clone() as Arc<dyn SutTemplateInstantiate>);
         // Block→page transform (`BlockToPage`) at the same op-floor rung.
-        caps.insert(floor as Arc<dyn SutBlockToPage>);
+        caps.insert(floor.clone() as Arc<dyn SutBlockToPage>);
+        // Page identity (`RenamePage` / `CreatePageAtFreedPath`) at the same
+        // op-floor rung.
+        caps.insert(floor as Arc<dyn holon_pbt_core::capabilities::SutPageIdentity>);
         engine = Some(eng);
     }
 
