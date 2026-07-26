@@ -308,6 +308,19 @@ pub struct FileSyncController {
     /// ingested (no on-disk `.org`) intentionally never clears — there is no
     /// writable file to resume write-back to.
     writeback_readonly: HashSet<CanonicalPath>,
+
+    /// Ingest quarantine for NEW-file discovery (`poll_new_files`, Inc 3b). A
+    /// freshly-discovered file whose ingest FAILED is recorded here keyed by the
+    /// exact `(mtime, size)` signature it failed at. `poll_new_files` skips a
+    /// path still carrying its recorded signature, so a single poisoned org file
+    /// is NOT re-attempted (and NOT re-logged) on every discovery tick -- before
+    /// this, one poison aborted the whole walk with `?`, so every later healthy
+    /// file was never ingested and each tick re-hit the same poison first. The
+    /// entry is dropped the moment the file CHANGES (signature no longer matches
+    /// -> re-attempted) or re-ingests cleanly. This is the disk->DB (ingest-side)
+    /// counterpart of the DB->disk write-back [`quarantined`](Self::quarantined)
+    /// set.
+    ingest_quarantine: HashMap<CanonicalPath, (std::time::SystemTime, u64)>,
 }
 
 impl FileSyncController {
@@ -354,6 +367,7 @@ impl FileSyncController {
             boot_seeding: true,
             seed_pristine: HashMap::new(),
             writeback_readonly: HashSet::new(),
+            ingest_quarantine: HashMap::new(),
         }
     }
 
@@ -1078,6 +1092,9 @@ impl FileSyncController {
         self.last_projection_hash.remove(canonical);
         self.disk_signatures.remove(canonical);
         self.base_source.remove(canonical);
+        // A deleted file must not leave a stale ingest-quarantine entry: if the
+        // same path reappears it starts un-quarantined (fresh discovery).
+        self.ingest_quarantine.remove(canonical);
     }
 
     /// Handle a file change event from the FileWatcher.
@@ -3437,13 +3454,73 @@ impl FileSyncController {
         });
         for path in scanned.files {
             let canonical = CanonicalPath::new(&path);
-            if !self.last_projection.contains_key(&canonical) {
-                info!(
-                    "[FileSyncController] poll_new_files: discovered new file {}",
-                    path.display()
+            if self.last_projection.contains_key(&canonical) {
+                continue;
+            }
+
+            // (mtime, size) signature — the ingest-quarantine key. A new file
+            // whose ingest failed is quarantined AT this signature; it is
+            // re-attempted only when the signature changes (the user editing
+            // the file to fix it). Reused as the fault-containment key below.
+            let sig = match self.fs.metadata(&path).await {
+                Ok(m) => (m.modified, m.len),
+                // Vanished between the scan and this stat (TOCTOU): nothing to
+                // ingest. A later discovery tick re-observes it if it reappears.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    return Err(e).with_context(|| {
+                        format!("[poll_new_files] Cannot stat {}", path.display())
+                    });
+                }
+            };
+
+            // Still the exact poisoned bytes we already reported loudly once:
+            // skip WITHOUT re-attempting or re-logging at ERROR, so one broken
+            // file does not storm the log every discovery tick (mirrors the
+            // write-back quarantine's once-per-episode disclosure).
+            if self.ingest_quarantine.get(&canonical) == Some(&sig) {
+                tracing::debug!(
+                    path = %path.display(),
+                    "[poll_new_files] skipping ingest-quarantined new file (unchanged since its \
+                     failure was reported); re-attempted when its content changes",
                 );
-                self.on_file_changed(&path).await?;
-                ingested += 1;
+                continue;
+            }
+
+            info!(
+                "[FileSyncController] poll_new_files: discovered new file {}",
+                path.display()
+            );
+
+            // PER-FILE CONTAINMENT (Inc 3b). One poisoned org file must NOT
+            // abort the whole discovery walk: propagating the `?` here left
+            // every later healthy file un-ingested, and the next tick re-hit the
+            // same poison first, so healthy files were NEVER ingested while the
+            // poison persisted. Instead: on failure log ONE loud, chain-rich
+            // error (Fail Loud, fall back VISIBLY), quarantine the file at its
+            // current signature, and CONTINUE so healthy files still ingest.
+            match self.on_file_changed(&path).await {
+                Ok(()) => {
+                    if self.ingest_quarantine.remove(&canonical).is_some() {
+                        info!(
+                            "[FileSyncController] poll_new_files: ingest quarantine CLEARED for {} \
+                             (re-ingest succeeded after the file changed)",
+                            path.display()
+                        );
+                    }
+                    ingested += 1;
+                }
+                Err(e) => {
+                    self.ingest_quarantine.insert(canonical.clone(), sig);
+                    tracing::error!(
+                        path = %path.display(),
+                        error = %format!("{e:#}"),
+                        "[FileSyncController] poll_new_files: CONTAINED a failed ingest -- this \
+                         file is QUARANTINED from re-ingest until its content changes; the \
+                         discovery walk CONTINUES so healthy files still ingest. Fix the file to \
+                         un-quarantine it. (on_file_changed also write-back-quarantined it.)",
+                    );
+                }
             }
         }
         Ok(ingested)
