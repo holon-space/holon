@@ -58,13 +58,15 @@ async fn memory_slice_runs_structural_block_invariants_without_turso() {
 
     let report = run_selected(&composed_invariant_catalog(), &sut, &ref_).await;
 
-    // The three `SutBackend`-only invariants run (`no-orphan-blocks` became
+    // The four `SutBackend`-only invariants run (`no-orphan-blocks` became
+    // ref-free when its CDC-lag gate was removed; `mark-bounds-within-content`
+    // is ref-free by design and landed 2026-07-20 over the RAW snapshot);
     // ref-free when its CDC-lag gate was removed); the ref-comparing
     // `blocks-match-ref/block_raw` is *deselected* (no `RefBackend` wired),
     // disclosed rather than faked — the §2 negative containment in action.
     assert_eq!(
         report.ran_ids().len(),
-        3,
+        4,
         "only the SutBackend invariants are cap-selected; ran={:?} deselected={:?}",
         report.ran_ids(),
         report.deselected,
