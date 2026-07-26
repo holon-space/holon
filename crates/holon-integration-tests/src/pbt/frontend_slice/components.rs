@@ -3972,7 +3972,6 @@ mod tests {
     /// `INSERT ... ON CONFLICT(id) DO UPDATE SET <every non-id column>` and
     /// overwrites the renamed title back to the date (and drops the Page tag).
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "red-for-the-right-reason: journal auto-create clobbers a renamed journal page (D4)"]
     async fn journal_autocreate_reraise_clobbers_renamed_journal_page() {
         use holon_pbt_core::capabilities::SutClockAdvance;
 
@@ -4090,13 +4089,18 @@ mod tests {
             "sanity: the re-minted row is still Page-tagged (the clobber is title-only)"
         );
         // SPEC: the rule is idempotent-by-name; re-firing it must NOT overwrite a
-        // page that merely CHANGED ITS NAME. RED-for-the-right-reason: prod's
-        // deterministic-id upsert clobbers the renamed title back to the date.
+        // page that merely CHANGED ITS NAME. GREEN under the interim identity
+        // collision guard (plan §5): the re-fired `create` hits the derived id
+        // still held by the renamed page, is REFUSED fail-loud
+        // (`IdentityCollision`), and the rule watcher treats the refusal as a
+        // benign skip (RuleStatus::Skipped, no ExecError storm) — so the title
+        // survives. Previously RED: prod's `ON CONFLICT(id) DO UPDATE` clobbered
+        // the renamed title back to the date.
         assert_eq!(
             title_after.as_deref(),
             Some("Renamed"),
-            "journal auto-create re-minted the same blake3 id and clobbered the renamed title \
-             back to the date"
+            "interim collision guard must refuse the journal re-mint so the renamed title \
+             survives; a clobber back to the date means the guard did not fire"
         );
     }
 

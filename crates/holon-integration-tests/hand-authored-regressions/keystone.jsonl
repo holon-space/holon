@@ -221,49 +221,31 @@
 # healing prod does not perform.
 # {"name": "undo-redo-pin-reference-not-healed", "description": "Observe-mode lock for inv-undo-redo-reference-heal: a pin written against a split tail's pre-undo identity is NOT re-pointed by the redo, so it dangles permanently. Behaviour is Martin-ruled to stay (2026-07-25, monotonic id minting); this case exists to keep the MEASUREMENT path alive. Teeth (enforce mode, both halves) live in tests/undo_redo_reference_heal.rs.", "transitions": [{"SplitBlock": {"block_id": "block:c1", "position": 0}}, {"PinBlock": {"region": "right_sidebar", "block_id": "block::split-0"}}, {"UndoLastMutation": null}, {"Redo": null}]}
 #
-# --- page-id rename collision (detection lane, 2026-07-26) -----------------------
+# --- page-id rename collision (interim policy, 2026-07-26) -----------------------
 # The deterministic witness for the page-identity defect the keystone could not previously
 # REACH. Page ids are blake3(path) (`PageId::for_path`), so a collision is only reachable
-# temporally: a path must be freed and then re-minted. No transition renamed a page
-# (`focus_editable_text.rs` excludes page blocks; `apply_mutation.rs` filters them out of
-# both candidate pools) and document names come off a monotonic counter, so no name was
-# ever recycled. `RenamePage` + `CreatePageAtFreedPath` close that generator gap.
+# temporally: a path must be freed (a rename) and then re-minted (a lazy page-create).
+# `RenamePage` + `CreatePageAtFreedPath` close that generator gap.
 #
 # Sequence: a `pagea` block with one child is converted to a page under the seed page
-# `structural-page` (id = H("structural-page/pagea") = block:a6bbdb1d-…); that page is
+# `structural-page` (id = H("structural-page/pagea") = block:a6bbdb1d-...); that page is
 # renamed to `Renamed` — the id correctly does NOT re-mint, so the path is now free while
 # its hash stays occupied; then the freed path is re-created through the production lazy
-# page-create op, the path a click on a newly typed `[[…]]` takes.
+# page-create op.
 #
-# EXPECTED per docs/Plans/PageIdentityDeterminism.md §5.3 ("a *new* page created later
-# under the new name gets a new id; that is correct — it is a different logical page"):
-# TWO pages, `Renamed` and `pagea`. OBSERVED: one, because the mint recomputes the taken
-# id and `INSERT … ON CONFLICT(id) DO UPDATE SET <every non-id field>`
-# (sql_operation_provider.rs) overwrites the renamed page's title back to `pagea`.
-# This line is RED ON PURPOSE until that defect is fixed.
-# PARKED as a comment, NOT active — for the same reason as the undo->redo case above: this
-# sequence trips a SECOND, INDEPENDENT production defect one tick EARLIER, at transition 5/6
-# (RenamePage), and that red is not owned by this lane:
-#   [inv-every-page-has-its-own-file] page `a6bbdb1d-…` is DOUBLE-HOMED across 2 files
-#   ["…/structural-page/Renamed.org", "…/structural-page/pagea.org"]
-# i.e. renaming a page WRITES the new org file but never removes the old one. (The converse —
-# renaming an org FILE does not rename the page — lives at
-# crates/holon-filesystem/src/file_sync_controller.rs:1479-1483, which takes `(doc, false)` and
-# never applies the filename-derived title.) Activating this line would make `just hand-authored`
-# deterministically red on that foreign signal instead of on the collision.
-#
-# To see the COLLISION red, soften the two org invariants for the replay:
-#   HOLON_PBT_INVARIANTS="inv-every-page-has-its-own-file:warn,inv-blocks-match-ref/org:warn" \
-#   HOLON_HAND_AUTHORED_CASE=page-id-rename-collision \
-#   cargo nextest run -p holon-integration-tests --features pbt \
-#     --test hand_authored_regressions --no-capture
-# Observed at transition 6/6 (2026-07-26):
-#   [inv-block-content/block_raw] block block:96a3cc1d-… present in ref (content "pagea") but
-#     missing from the SUT's block_raw snapshot          <- the second page never came into being
-#   [inv-displayed-text/viewmodel] text@block=block:a6bbdb1d-…
-#     shown: "pagea"  expected: "Renamed"                <- the rename was silently undone
-# Un-park once BOTH the org-file rename defect and the id collision are fixed.
-# {"name": "page-id-rename-collision", "description": "BugFunnel: rename A->B then re-create A re-mints the taken blake3 id and the ON CONFLICT DO UPDATE clobbers the renamed page. \u00a75.3 requires two distinct pages; prod yields one. Detection-only lane \u2014 red until the production mint stops colliding.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateBlockUnderFocus": {"content": "pagea", "id": "block:pgorigin"}}, {"CreateBlockUnderFocus": {"content": "child", "id": "block:pgchild"}}, {"Indent": {"block_id": "block:pgchild"}}, {"BlockToPage": {"origin_id": "block:pgorigin"}}, {"RenamePage": {"page_id": "block:a6bbdb1d-4e3d-e3d3-2c8d-c38a0efb5458", "new_title": "Renamed"}}, {"CreatePageAtFreedPath": {"path": "structural-page/pagea"}}]}
+# INTERIM identity policy (plan §5, RULED 2026-07-26): re-creating a page at a FREED path
+# whose derived id is still held by the renamed page is REFUSED FAIL-LOUD — production's
+# `create` returns `IdentityCollision` instead of letting `ON CONFLICT(id) DO UPDATE`
+# clobber the renamed page. So the RULED interim end-state of this replay is:
+#   * transition 6 (CreatePageAtFreedPath) errors visibly; the SUT driver tolerates the
+#     `IdentityCollision` and applies NOTHING (the reference models the refusal identically);
+#   * NOTHING is clobbered — exactly ONE page survives, titled `Renamed`, with its child;
+#   * `inv-every-page-has-its-own-file` stays GREEN because the page rename now removes the
+#     old `structural-page/pagea.org` (the D3 double-home fix), so no softening is needed.
+# END-STATE (plan §5): a recreate at a freed path will instead mint a unique id and bind the
+# NAME to it (two distinct pages); when that lands, flip transition 6's expectation to a
+# second page and single-source the mint rule oracle-side.
+{"name": "page-id-rename-collision", "description": "Interim identity policy (plan \u00a75): rename A->B then re-create A is REFUSED fail-loud (IdentityCollision) instead of the ON CONFLICT DO UPDATE clobbering the renamed page. Exactly one page survives, titled Renamed; nothing is clobbered. The D3 fix removes the old org file so the page is not double-homed. End-state = unique-mint + name binding.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateBlockUnderFocus": {"content": "pagea", "id": "block:pgorigin"}}, {"CreateBlockUnderFocus": {"content": "child", "id": "block:pgchild"}}, {"Indent": {"block_id": "block:pgchild"}}, {"BlockToPage": {"origin_id": "block:pgorigin"}}, {"RenamePage": {"page_id": "block:a6bbdb1d-4e3d-e3d3-2c8d-c38a0efb5458", "new_title": "Renamed"}}, {"CreatePageAtFreedPath": {"path": "structural-page/pagea"}}]}
 #
 # --- D2: renaming an org FILE does not rename the page (detection lane, 2026-07-26) ---
 # A user renames `A.org` -> `B.org`. Per the file-move spec a page's title FOLLOWS

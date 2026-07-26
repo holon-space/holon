@@ -371,11 +371,33 @@ async fn fire_emit(
         )
         .await
     {
-        status.set(rule_id.as_str(), RuleStatus::ExecError(format!("{e:#}")));
-        tracing::error!(
-            "[holon_rule_watcher] execute_operation failed for rule {}: {e:#}",
-            rule_id.as_str()
-        );
+        let msg = format!("{e:#}");
+        // Interim identity-collision refusal (plan §5): the page this rule would
+        // create already exists under the deterministic id (e.g. today's journal
+        // was renamed, freeing the name but not the id). This is NOT an execution
+        // failure — treat it as an already-satisfied SKIP so a periodic
+        // autonomous rule (the journal tick) does not error-storm. Recognised by
+        // the stable marker in the message (the concrete `IdentityCollision`
+        // type is erased by the dispatch chain's string-enriching wrappers). Log
+        // ONCE: only when the status is not already `Skipped`.
+        if msg.contains(holon_api::IDENTITY_COLLISION_MARKER) {
+            let already_skipped =
+                matches!(status.get(rule_id.as_str()), Some(RuleStatus::Skipped(_)));
+            if !already_skipped {
+                info!(
+                    "[holon_rule_watcher] {} skipped: target already exists under its \
+                     deterministic id (interim identity-collision refusal) — {msg}",
+                    rule_id.as_str()
+                );
+            }
+            status.set(rule_id.as_str(), RuleStatus::Skipped(msg));
+        } else {
+            status.set(rule_id.as_str(), RuleStatus::ExecError(msg.clone()));
+            tracing::error!(
+                "[holon_rule_watcher] execute_operation failed for rule {}: {msg}",
+                rule_id.as_str()
+            );
+        }
     }
 }
 

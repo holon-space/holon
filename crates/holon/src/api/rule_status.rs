@@ -30,6 +30,13 @@ pub enum RuleStatus {
     /// The rule fired but its effect execution failed. The message is the
     /// error.
     ExecError(String),
+    /// The rule fired but its effect was a benign no-op: the entity it would
+    /// create ALREADY EXISTS under the deterministic id (an interim
+    /// identity-collision refusal, plan §5). Distinct from [`ExecError`] so a
+    /// periodic autonomous rule (the journal auto-create tick) does not
+    /// error-storm — it settles on this status and logs ONCE. Disclosed
+    /// degraded mode, not a red error state.
+    Skipped(String),
     /// The rule uses the retired `action` language. It does NOT execute; it
     /// must be renamed to `holon_rule`. Surfaced loud, never silently inert
     /// (WP3 / A5).
@@ -50,6 +57,7 @@ impl std::fmt::Display for RuleStatus {
             RuleStatus::ParseError(msg) => write!(f, "parse error: {msg}"),
             RuleStatus::CompileError(msg) => write!(f, "compile error: {msg}"),
             RuleStatus::ExecError(msg) => write!(f, "execution failed: {msg}"),
+            RuleStatus::Skipped(msg) => write!(f, "skipped (already satisfied): {msg}"),
             RuleStatus::DeprecatedLanguage => {
                 write!(
                     f,
