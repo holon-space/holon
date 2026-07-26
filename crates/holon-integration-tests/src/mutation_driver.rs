@@ -405,3 +405,46 @@ impl SutBlockToPage for DirectUserDriver {
             });
     }
 }
+
+/// Op-floor `SutPageIdentity`: the two production ops the page-identity
+/// property needs, dispatched straight to the engine.
+///
+/// * `rename_page` → `block.set_field("content")`. This is the SAME op the
+///   editor's on-blur write takes, so a page rename is journaled for undo and
+///   is an ordinary edit to the existing entity — the id does not re-mint
+///   (`docs/Plans/PageIdentityDeterminism.md` §5.3).
+/// * `create_page_from_link` → `block.create_page_from_link(target)`, the lazy
+///   page-creation path a click on a dangling `[[Target]]` takes. It mints each
+///   missing segment's id as `PageId::for_path(accumulated_path)`.
+///
+/// `target` is a page PATH, not an id, so it is passed verbatim — there is no
+/// synthetic id to resolve.
+#[async_trait::async_trait(?Send)]
+impl holon_pbt_core::capabilities::SutPageIdentity for DirectUserDriver {
+    async fn rename_page(&self, page: &EntityUri, new_title: &str) {
+        let mut params: HashMap<String, Value> = HashMap::new();
+        params.insert(
+            "id".to_string(),
+            Value::String(self.resolve(page).to_string()),
+        );
+        params.insert("field".to_string(), Value::String("content".to_string()));
+        params.insert("value".to_string(), Value::String(new_title.to_string()));
+        self.synthetic_dispatch("block", "set_field", params)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[DirectUserDriver floor] block/set_field(content) on {page} failed: {e:#}")
+            });
+    }
+
+    async fn create_page_from_link(&self, target: &str) {
+        let mut params: HashMap<String, Value> = HashMap::new();
+        params.insert("target".to_string(), Value::String(target.to_string()));
+        self.synthetic_dispatch("block", "create_page_from_link", params)
+            .await
+            .unwrap_or_else(|e| {
+                panic!(
+                    "[DirectUserDriver floor] block/create_page_from_link({target:?}) failed: {e:#}"
+                )
+            });
+    }
+}

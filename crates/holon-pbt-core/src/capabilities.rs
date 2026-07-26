@@ -2807,3 +2807,79 @@ pub trait SutTemplateInstantiate {
 pub trait SutBlockToPage {
     async fn convert_block_to_page(&self, target: &EntityUri, destination_path: &str);
 }
+
+/// SUT capability: the two halves of the **page-identity lifecycle** — retitle
+/// an existing page, and lazily create a page from a wiki-link target.
+///
+/// Both are production op dispatches through the op-floor `DirectUserDriver`:
+///
+/// * `rename_page` → `block.set_field("content")` on the page block. Per
+///   `docs/Plans/PageIdentityDeterminism.md` §5.3 a rename is "an ordinary edit
+///   to the existing entity" — the id does NOT re-mint.
+/// * `create_page_from_link` → `block.create_page_from_link(target)`, the path
+///   a click on a newly typed `[[Target]]` takes when the page doesn't exist
+///   yet. It mints each missing segment's id as
+///   `PageId::for_path(accumulated_path)`.
+///
+/// They ship as ONE cap because the property that needs them is temporal and
+/// needs BOTH: a page name has to be *freed* by a rename before a later
+/// creation can re-mint it. A config that hosts only one half could never reach
+/// the state the `inv-blocks-match-ref` oracle judges, so splitting the cap
+/// would only buy a vacuous narrowing.
+#[holon_macros::capmap_adapter]
+pub trait SutPageIdentity {
+    /// Retitle the existing page `page` to `new_title` (ordinary content edit,
+    /// same entity, same id).
+    async fn rename_page(&self, page: &EntityUri, new_title: &str);
+    /// Lazily create the page chain named by the `/`-joined `target`.
+    async fn create_page_from_link(&self, target: &str);
+}
+
+/// Reference-side page-identity surface (`RenamePage` /
+/// `CreatePageAtFreedPath`).
+///
+/// Wide-only, like [`RefLayoutMutate`]: pages are a wide-PBT concept and the
+/// pure slice has none. The freed-path ledger is the **temporal** half of the
+/// generator — a page name can only be re-created after a rename has freed it,
+/// and nothing else in the reference records that a name once belonged to a
+/// page that no longer carries it.
+pub trait RefPageIdentity {
+    /// Page paths (`/`-joined, root→leaf) that a `RenamePage` has vacated and
+    /// that no page currently occupies. The `CreatePageAtFreedPath` generator
+    /// draws from this pool; empty until a rename happens.
+    fn freed_page_paths(&self) -> Vec<String>;
+
+    /// The `/`-joined page path (root→leaf) of an existing page block, or
+    /// `None` when `id` is not a page or any page in its chain has empty
+    /// content. Mirrors the backend planner's `page_path_of`.
+    fn page_path_of_ref(&self, id: &EntityUri) -> Option<String>;
+
+    /// Reference mirror of the backend's `resolve_page_name` — the title-only
+    /// lookup `create_page_from_link` uses per segment. Needed by the
+    /// `CreatePageAtFreedPath` generator so it only offers a path whose
+    /// ancestor chain already resolves and whose LEAF does not, i.e. a path the
+    /// op must mint exactly one page for.
+    fn ref_resolve_page_name(&self, hint: &str) -> Option<EntityUri>;
+
+    /// Trimmed titles of EVERY page in the reference, seed pages included. The
+    /// `RenamePage` generator refuses a new title already in use: the backend's
+    /// `resolve_page_name` matches on title alone, so a duplicate title makes
+    /// which page a later link resolves to depend on id order rather than on
+    /// the model.
+    fn page_titles(&self) -> Vec<String>;
+
+    /// `RenamePage`: retitle the existing page `page_id` to `new_title`. The id
+    /// is untouched (§5.3) and the page's OLD path enters the freed-path pool.
+    fn apply_page_rename(&mut self, page_id: &EntityUri, new_title: &str);
+
+    /// `CreatePageAtFreedPath`: mirror `create_page_from_link(path)` — walk the
+    /// `/`-joined `path` segment by segment, reusing a page whose title already
+    /// resolves and minting the missing ones.
+    ///
+    /// §5.3: "A *new* page created later under the new name gets a new id; that
+    /// is correct (it is a different logical page)." So a minted segment whose
+    /// deterministic `PageId::for_path` id is ALREADY occupied — the exact
+    /// state a rename leaves behind — must still become a **distinct entity**,
+    /// never an overwrite of the occupant.
+    fn apply_create_page_at_path(&mut self, path: &str);
+}

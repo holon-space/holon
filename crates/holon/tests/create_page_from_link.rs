@@ -574,3 +574,135 @@ proptest! {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Page-id collision after rename (EMPIRICAL probe, 2026-07-26)
+// ---------------------------------------------------------------------------
+//
+// `PageId::for_path` mints a page's id as blake3(normalized path). Per
+// docs/Plans/PageIdentityDeterminism.md §5.3 a RENAME is "an ordinary edit to
+// the existing entity — the id does NOT re-mint", and "a *new* page created
+// later under the new name gets a new id; that is correct (it is a different
+// logical page)".
+//
+// This test executes exactly that sequence:
+//   1. create page "A"          → id = H("A")
+//   2. rename A → B (content edit on the same entity, id unchanged)
+//   3. create page "A" again    → minting recomputes H("A") … already taken
+//
+// The assertions state what §5.3 PROMISES: step 3 yields a DIFFERENT entity
+// than step 1, and two distinct pages ("B" and "A") coexist.
+
+/// Rename a page: an ordinary content edit on the existing entity (§5.3).
+async fn rename_page(
+    provider: &SqlOperationProvider,
+    entity: &EntityName,
+    id: &str,
+    new_content: &str,
+) {
+    let mut p: holon_api::StorageEntity = HashMap::new();
+    p.insert("id".into(), Value::String(id.to_string()));
+    p.insert("content".into(), Value::String(new_content.to_string()));
+    provider
+        .execute_operation(entity, "update", p)
+        .await
+        .expect("rename page (update content)");
+}
+
+async fn page_rows(handle: &holon::storage::turso::DbHandle) -> Vec<(String, String)> {
+    let sql = "SELECT b.id AS id, b.content AS content FROM block_raw b JOIN block_tags t ON \
+               t.block_id = b.id AND t.tag = 'Page' ORDER BY b.id";
+    handle
+        .query(sql, HashMap::new())
+        .await
+        .expect("query pages")
+        .into_iter()
+        .map(|r| {
+            (
+                r.get("id").and_then(|v| v.as_string()).unwrap().to_string(),
+                r.get("content")
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recreating_a_renamed_pages_old_name_yields_a_distinct_page() {
+    let (_backend, handle) = TursoBackend::new_in_memory()
+        .await
+        .expect("in-memory turso");
+    setup_schema(&handle).await;
+    let provider = provider(handle.clone());
+    let entity: EntityName = ENTITY.to_string().into();
+
+    // 1. Create page A via the production lazy-create op.
+    let mut op: holon_api::StorageEntity = HashMap::new();
+    op.insert("target".into(), Value::String("A".to_string()));
+    let id_a = match provider
+        .execute_operation(&entity, "create_page_from_link", op)
+        .await
+        .expect("create page A")
+        .response
+    {
+        Some(Value::String(s)) => s,
+        other => panic!("expected leaf id, got {other:?}"),
+    };
+
+    // A child under A, so we can see whether it follows the renamed entity.
+    create_page(&provider, &entity, "block:childOfA", "Child", &id_a).await;
+
+    // 2. Rename A → B. Same entity, same id (§5.3).
+    rename_page(&provider, &entity, &id_a, "B").await;
+    assert_eq!(
+        block_content(&handle, &id_a).await.as_deref(),
+        Some("B"),
+        "after rename the entity {id_a} must be titled B"
+    );
+
+    // 3. Create a NEW page A.
+    let mut op2: holon_api::StorageEntity = HashMap::new();
+    op2.insert("target".into(), Value::String("A".to_string()));
+    let id_a2 = match provider
+        .execute_operation(&entity, "create_page_from_link", op2)
+        .await
+        .expect("create page A the second time")
+        .response
+    {
+        Some(Value::String(s)) => s,
+        other => panic!("expected leaf id, got {other:?}"),
+    };
+
+    let pages = page_rows(&handle).await;
+
+    assert_ne!(
+        id_a2, id_a,
+        "§5.3: the newly created page A must be a DIFFERENT entity than the page that was renamed \
+         to B, but both are {id_a}. Observed pages after the sequence: {pages:?}"
+    );
+
+    let titles: Vec<&str> = pages.iter().map(|(_, c)| c.as_str()).collect();
+    assert!(
+        titles.contains(&"B") && titles.contains(&"A"),
+        "both the renamed page B and the new page A must exist; observed pages: {pages:?}"
+    );
+
+    // The child was created under the page that is now titled "B". Asserting only
+    // that its parent is still `id_a` would pass VACUOUSLY under the defect: the
+    // collision leaves exactly one entity, so `parent == id_a` holds whether that
+    // entity is the surviving "B" or the clobbered "A". Assert on the parent's
+    // TITLE, which is what actually distinguishes the two worlds.
+    let child_parent = block_parent(&handle, "block:childOfA")
+        .await
+        .expect("child must still have a parent");
+    let child_parent_title = block_content(&handle, &child_parent).await;
+    assert_eq!(
+        child_parent_title.as_deref(),
+        Some("B"),
+        "the child must still hang under the RENAMED page B, but its parent \
+         {child_parent} is titled {child_parent_title:?} — the new page A overwrote the \
+         renamed entity instead of becoming a distinct one; observed pages: {pages:?}"
+    );
+}

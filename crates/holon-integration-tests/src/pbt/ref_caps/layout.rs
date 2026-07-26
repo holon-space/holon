@@ -306,3 +306,37 @@ impl RefLayoutMutate for ReferenceState {
         ReferenceState::apply_block_to_page(self, origin, page_id, destination_parent);
     }
 }
+
+/// The page-identity surface (`RenamePage` / `CreatePageAtFreedPath`). Every
+/// method delegates to the `ReferenceState` home above; nothing new lives here.
+impl holon_pbt_core::capabilities::RefPageIdentity for ReferenceState {
+    fn freed_page_paths(&self) -> Vec<String> {
+        ReferenceState::freed_page_paths_ref(self)
+    }
+
+    fn page_path_of_ref(&self, id: &EntityUri) -> Option<String> {
+        ReferenceState::page_path_of_ref(self, id)
+    }
+
+    fn ref_resolve_page_name(&self, hint: &str) -> Option<EntityUri> {
+        ReferenceState::ref_resolve_page_name(self, hint)
+    }
+
+    fn page_titles(&self) -> Vec<String> {
+        self.domain
+            .block_state
+            .blocks
+            .values()
+            .filter(|b| b.is_page())
+            .map(|b| b.content.trim().to_string())
+            .collect()
+    }
+
+    fn apply_page_rename(&mut self, page_id: &EntityUri, new_title: &str) {
+        ReferenceState::apply_page_rename(self, page_id, new_title);
+    }
+
+    fn apply_create_page_at_path(&mut self, path: &str) {
+        ReferenceState::apply_create_page_at_path(self, path);
+    }
+}

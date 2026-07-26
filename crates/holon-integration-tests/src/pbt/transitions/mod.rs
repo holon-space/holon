@@ -89,6 +89,7 @@ mod concurrent_schema_init;
 mod create_block_under_focus;
 mod create_directory;
 mod create_document;
+pub(crate) mod create_page_at_freed_path;
 pub mod delete_backward;
 mod delete_document;
 mod drag_drop_block;
@@ -116,6 +117,7 @@ mod pin_block;
 mod press_key;
 mod redo;
 mod remove_watch;
+pub(crate) mod rename_page;
 mod select_bias;
 pub mod set_edge_field;
 mod setup_watch;
@@ -149,6 +151,7 @@ pub use concurrent_schema_init::ConcurrentSchemaInit;
 pub use create_block_under_focus::CreateBlockUnderFocus;
 pub use create_directory::CreateDirectory;
 pub use create_document::CreateDocument;
+pub use create_page_at_freed_path::CreatePageAtFreedPath;
 pub use delete_backward::DeleteBackward;
 pub use delete_document::DeleteDocument;
 pub use deliver_block_content::DeliverBlockContent;
@@ -187,6 +190,7 @@ pub use pin_block::PinBlock;
 pub use press_key::PressKey;
 pub use redo::Redo;
 pub use remove_watch::RemoveWatch;
+pub use rename_page::RenamePage;
 pub use set_edge_field::SetEdgeField;
 pub use setup_watch::SetupWatch;
 pub use simulate_restart::SimulateRestart;
@@ -215,6 +219,8 @@ crate::declare_e2e_transitions! {
         ApplyMutation(ApplyMutation),
         ArrowNavigate(ArrowNavigate),
         BlockToPage(BlockToPage),
+        RenamePage(RenamePage),
+        CreatePageAtFreedPath(CreatePageAtFreedPath),
         NavigateBack(NavigateBack),
         BulkExternalAdd(BulkExternalAdd),
         StaleExternalRewrite(StaleExternalRewrite),

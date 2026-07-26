@@ -406,6 +406,22 @@ pub struct ReferenceState {
     /// empty on a bare state and on every run without a completed round trip.
     /// Read by `inv-undo-redo-reference-heal` through `RefUndoRedoBurned`.
     pub undo_redo_burned_ids: BTreeSet<EntityUri>,
+
+    /// Page paths (`/`-joined, root->leaf) a `RenamePage` has VACATED -- the
+    /// temporal fuel for `CreatePageAtFreedPath`.
+    ///
+    /// Page ids are `blake3(path)` (`PageId::for_path`), so a path can only be
+    /// re-minted after something frees it. Nothing else in the reference
+    /// records that a name once belonged to a page that no longer carries it: a
+    /// rename leaves the entity in place under its NEW title, and every other
+    /// name-producing transition draws from a monotonic counter. Without this
+    /// ledger the generator can never reach the "name freed, then reused"
+    /// state -- exactly the shape `PageIdentityDeterminism.md` 5.3 speaks to.
+    ///
+    /// Append-only within a run and read through
+    /// [`holon_pbt_core::capabilities::RefPageIdentity::freed_page_paths`],
+    /// which filters out any path a page has since re-occupied.
+    pub renamed_away_page_paths: Vec<String>,
 }
 
 /// Witness that a [`ReferenceState`]'s ids live in the SUT's id space — either
@@ -562,6 +578,7 @@ impl ReferenceState {
             history_ever_created: BTreeSet::new(),
             history_min_op_groups: 0,
             undo_redo_burned_ids: BTreeSet::new(),
+            renamed_away_page_paths: Vec::new(),
         }
     }
 
@@ -1629,6 +1646,217 @@ impl ReferenceState {
             .expect("apply_block_to_page: origin block must exist")
             .marks = Some(vec![link_mark]);
 
+        self.recanon_and_rebuild();
+    }
+
+    // ── Page identity (PageIdentityDeterminism.md 5.3) ────────────────────
+    //
+    // Page ids are `blake3(normalized path)`. A rename is an ordinary edit to
+    // the existing entity -- the id does NOT re-mint -- which means a rename
+    // FREES a path while leaving its blake3 id occupied. The two methods below
+    // are the reference halves of the transitions that reach that state.
+
+    /// The `/`-joined page path (root->leaf) of an existing page block.
+    ///
+    /// Mirrors the backend planner's `page_path_of` (and the twin in
+    /// `transitions::block_to_page`) so the ref hashes the SAME string the
+    /// writer does. `None` when `id` is not a page, or any page in its chain
+    /// has empty content (the backend would then produce an empty path segment
+    /// and `PageId::for_path` would reject it).
+    pub fn page_path_of_ref(&self, id: &EntityUri) -> Option<String> {
+        let mut segments: Vec<String> = Vec::new();
+        let mut seen: BTreeSet<EntityUri> = BTreeSet::new();
+        let mut cursor = Some(id.clone());
+        while let Some(cur) = cursor {
+            if !seen.insert(cur.clone()) {
+                break;
+            }
+            let block = self.domain.block_state.blocks.get(&cur)?;
+            if !block.is_page() {
+                break;
+            }
+            let title = block.content.trim().to_string();
+            if title.is_empty() {
+                return None;
+            }
+            segments.push(title);
+            cursor = Some(block.parent_id.clone())
+                .filter(|p| self.domain.block_state.blocks.contains_key(p));
+        }
+        if segments.is_empty() {
+            return None;
+        }
+        segments.reverse();
+        Some(segments.join("/"))
+    }
+
+    /// Reference mirror of `SqlOperationProvider::resolve_page_name` -- the
+    /// title-only lookup `create_page_from_link` uses to decide whether a
+    /// segment already exists.
+    ///
+    /// The production query matches Page-tagged blocks on `content = leaf`
+    /// GLOBALLY (no parent constraint), orders by "parent's content equals the
+    /// hint's second-to-last segment" first, then by id ascending, and takes
+    /// the first row. Mirroring the ordering exactly is what lets the reference
+    /// predict WHICH segments the op reuses and which it mints.
+    pub fn ref_resolve_page_name(&self, hint: &str) -> Option<EntityUri> {
+        let mut segs = hint.rsplit('/');
+        let leaf = segs.next().unwrap_or(hint).trim();
+        if leaf.is_empty() {
+            return None;
+        }
+        let parent_hint = segs.next().map(|s| s.trim().to_string());
+        let mut hits: Vec<(u8, EntityUri)> = self
+            .domain
+            .block_state
+            .blocks
+            .values()
+            .filter(|b| b.is_page() && b.content == leaf)
+            .map(|b| {
+                let parent_matches = parent_hint.as_deref().is_some_and(|h| {
+                    self.domain
+                        .block_state
+                        .blocks
+                        .get(&b.parent_id)
+                        .is_some_and(|p| p.content == h)
+                });
+                (u8::from(!parent_matches), b.id.clone())
+            })
+            .collect();
+        hits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.as_str().cmp(b.1.as_str())));
+        hits.into_iter().next().map(|(_, id)| id)
+    }
+
+    /// Page paths a rename has vacated and that NO page currently occupies.
+    ///
+    /// A path leaves the pool the moment some page re-occupies it (the
+    /// `CreatePageAtFreedPath` this ledger feeds, or a rename back), so the
+    /// generator never offers a name that is already taken.
+    pub fn freed_page_paths_ref(&self) -> Vec<String> {
+        let occupied: BTreeSet<String> = self
+            .domain
+            .block_state
+            .blocks
+            .values()
+            .filter(|b| b.is_page())
+            .filter_map(|b| self.page_path_of_ref(&b.id))
+            .collect();
+        let mut out: Vec<String> = self
+            .renamed_away_page_paths
+            .iter()
+            .filter(|p| !occupied.contains(*p))
+            .cloned()
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// `RenamePage` reference effect -- 5.3: "a rename is an ordinary edit to
+    /// the existing entity", so ONLY the content changes. The id, parent, tags,
+    /// document and children are untouched, and the page's OLD path enters the
+    /// freed-path ledger.
+    pub fn apply_page_rename(&mut self, page_id: &EntityUri, new_title: &str) {
+        // One User-origin `set_field("content")` => one undo entry, exactly like
+        // the content-mutation path.
+        self.push_undo_snapshot();
+        let old_path = self.page_path_of_ref(page_id).unwrap_or_else(|| {
+            panic!("apply_page_rename: {page_id} must be a page with a well-formed path")
+        });
+        let block = self
+            .domain
+            .block_state
+            .blocks
+            .get_mut(page_id)
+            .expect("apply_page_rename: page block must exist (precondition)");
+        block.content = new_title.to_string();
+        self.renamed_away_page_paths.push(old_path);
+        self.recanon_and_rebuild();
+    }
+
+    /// `CreatePageAtFreedPath` reference effect -- the ref-side mirror of the
+    /// production `block.create_page_from_link(target)` op.
+    ///
+    /// Walks `path` segment by segment exactly as the op does: resolve the
+    /// accumulated hint through [`Self::ref_resolve_page_name`]; on a hit reuse
+    /// that page as the parent, on a miss mint a page titled by the segment
+    /// under the current parent.
+    ///
+    /// The minted id is where the ORACLE ENCODES THE SPEC rather than the
+    /// current implementation. 5.3: "A *new* page created later under the new
+    /// name gets a new id; that is correct (it is a different logical page)."
+    /// So the deterministic `PageId::for_path(seg_path)` is used when it is
+    /// FREE, and when it is already occupied -- the state a rename leaves
+    /// behind -- the new page still becomes a DISTINCT entity. Prod today
+    /// instead reuses the occupied id and its `create` lands on
+    /// `ON CONFLICT(id) DO UPDATE`, silently overwriting the renamed page.
+    ///
+    /// NOTE for whoever fixes the defect: 5.3 fixes only that the new page must
+    /// be distinct, not HOW the id is disambiguated. The `#n` suffix below is a
+    /// placeholder; once prod mints a collision-free id, single-source that
+    /// rule here the way `BlockToPage` single-sources
+    /// `PageId::for_page_under`, so oracle and writer stay born-equal.
+    pub fn apply_create_page_at_path(&mut self, path: &str) {
+        use holon_api::link_parser::PageId;
+        use holon_orgmode::models::OrgBlockExt;
+
+        // `create_page_from_link` returns `declared_irreversible` -- it records
+        // NO undo entry -- so the reference must not push one either.
+        let mut parent = EntityUri::no_parent();
+        let mut accumulated = String::new();
+        for (i, seg) in path.split('/').enumerate() {
+            let trimmed = seg.trim();
+            assert!(
+                !trimmed.is_empty(),
+                "apply_create_page_at_path: empty segment in {path:?} (generator must gate this \
+                 out -- the op errors on it)"
+            );
+            let hint = if i == 0 {
+                trimmed.to_string()
+            } else {
+                format!("{accumulated}/{trimmed}")
+            };
+            let seg_path = if accumulated.is_empty() {
+                trimmed.to_string()
+            } else {
+                format!("{accumulated}/{trimmed}")
+            };
+            match self.ref_resolve_page_name(&hint) {
+                Some(existing) => parent = existing,
+                None => {
+                    let mut id = PageId::for_path(&seg_path)
+                        .unwrap_or_else(|e| {
+                            panic!("apply_create_page_at_path: PageId::for_path({seg_path:?}): {e}")
+                        })
+                        .into_entity_uri();
+                    let mut disambiguator = 1u32;
+                    while self.domain.block_state.blocks.contains_key(&id) {
+                        id = PageId::for_path(&format!("{seg_path}#{disambiguator}"))
+                            .expect("disambiguated page path is non-empty")
+                            .into_entity_uri();
+                        disambiguator += 1;
+                    }
+                    let mut page = Block::new_text(id.clone(), parent.clone(), trimmed.to_string());
+                    page.set_page(true);
+                    let max_seq = self
+                        .domain
+                        .block_state
+                        .blocks
+                        .values()
+                        .filter(|b| b.parent_id == parent)
+                        .map(|b| b.sequence())
+                        .max();
+                    page.set_sequence(max_seq.map_or(0, |s| s + 1));
+                    self.domain
+                        .block_state
+                        .block_documents
+                        .insert(id.clone(), id.clone());
+                    self.domain.block_state.blocks.insert(id.clone(), page);
+                    parent = id;
+                }
+            }
+            accumulated = seg_path;
+        }
         self.recanon_and_rebuild();
     }
 

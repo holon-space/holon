@@ -235,6 +235,7 @@ macro_rules! declare_e2e_transitions {
             + ::holon_pbt_core::capabilities::SutBlockCreate
             + ::holon_pbt_core::capabilities::SutTemplateInstantiate
             + ::holon_pbt_core::capabilities::SutBlockToPage
+            + ::holon_pbt_core::capabilities::SutPageIdentity
             + ::holon_pbt_core::capabilities::SutClockAdvance
             + ::holon_pbt_core::capabilities::SutFixtureFs
             + ::holon_pbt_core::capabilities::SutAppLifecycle
