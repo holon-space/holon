@@ -137,6 +137,42 @@ impl RefDocumentsMut for ReferenceState {
         }
     }
 
+    fn rename_document(&mut self, old_file_name: &str, new_file_name: &str) {
+        // File-move spec: a document page's title FOLLOWS its file name. Resolve
+        // the doc by its OLD filename, re-point the filename, and retitle the
+        // page block to the NEW file stem. Production's file_sync_controller
+        // (`#+ID`-resolves-to-existing-doc arm, :1479-1483) takes `(doc, false)`
+        // and never applies the filename-derived title -- so the SUT keeps the
+        // OLD title while this reference expects the new one.
+        let doc_uri = self
+            .files
+            .documents
+            .iter()
+            .find(|(_, name)| name.as_str() == old_file_name)
+            .map(|(uri, _)| uri.clone())
+            .unwrap_or_else(|| {
+                panic!(
+                    "RefDocumentsMut::rename_document: '{old_file_name}' not in \
+                     files.documents (precondition hole)"
+                )
+            });
+        let new_stem = std::path::Path::new(new_file_name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(new_file_name)
+            .to_string();
+        self.files
+            .documents
+            .insert(doc_uri.clone(), new_file_name.to_string());
+        self.domain
+            .block_state
+            .blocks
+            .get_mut(&doc_uri)
+            .expect("rename_document: doc page block must exist (precondition)")
+            .content = new_stem;
+        self.recanon_and_rebuild();
+    }
+
     fn seed_org_file(
         &mut self,
         filename: &str,

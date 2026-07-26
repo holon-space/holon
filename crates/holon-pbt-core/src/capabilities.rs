@@ -2108,6 +2108,12 @@ pub trait RefDocumentsMut: RefDocuments {
     /// + all descendants, re-canonicalizing sibling order and clearing
     /// dangling focus.
     fn remove_document(&mut self, file_name: &str);
+    /// `RenameDocument`: retitle the document tracked as `old_file_name` to
+    /// the stem of `new_file_name` and re-point its filename. The file-move
+    /// spec: a page's title FOLLOWS its file name, so the reference title
+    /// tracks the new stem (the behaviour production's `file_sync_controller`
+    /// `#+ID`-resolves-to-existing-doc arm fails to apply).
+    fn rename_document(&mut self, old_file_name: &str, new_file_name: &str);
     /// `WriteOrgFile`: (re)seed a document's blocks from generator-produced
     /// `Block`s before startup — remap placeholder parents, normalize the
     /// org round-trip, classify index-layout source blocks,
@@ -2761,6 +2767,13 @@ pub trait SutAppLifecycle {
     async fn simulate_restart(&self);
     async fn create_document(&self, file_name: &str);
     async fn delete_document(&self, file_name: &str);
+    /// `RenameDocument`: move the org file `old_file_name` -> `new_file_name`
+    /// on disk (a user-side `mv` in the vault), carrying the file's `#+ID:`
+    /// unchanged, then settle until the production `FileSyncController`
+    /// watcher re-ingests the moved file. The moved file's `#+ID:` resolves
+    /// to the SAME existing document, so this drives the ingest arm that
+    /// must -- per the file-move spec -- retitle the page to the new stem.
+    async fn rename_document(&self, old_file_name: &str, new_file_name: &str);
     async fn concurrent_schema_init(&self);
     async fn assert_epoch_flip_rejected(&self);
 }

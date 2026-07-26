@@ -117,6 +117,7 @@ mod pin_block;
 mod press_key;
 mod redo;
 mod remove_watch;
+mod rename_document;
 pub(crate) mod rename_page;
 mod select_bias;
 pub mod set_edge_field;
@@ -190,6 +191,7 @@ pub use pin_block::PinBlock;
 pub use press_key::PressKey;
 pub use redo::Redo;
 pub use remove_watch::RemoveWatch;
+pub use rename_document::RenameDocument;
 pub use rename_page::RenamePage;
 pub use set_edge_field::SetEdgeField;
 pub use setup_watch::SetupWatch;
@@ -229,6 +231,7 @@ crate::declare_e2e_transitions! {
         ClickBlock(ClickBlock),
         CreateBlockUnderFocus(CreateBlockUnderFocus),
         CreateDocument(CreateDocument),
+        RenameDocument(RenameDocument),
         WriteOrgFile(WriteOrgFile),
         CreateDirectory(CreateDirectory),
         DeleteBackward(DeleteBackward),
@@ -569,6 +572,7 @@ mod required_caps_guard {
         one!(ConcurrentSchemaInit, lc::SutAppLifecycle);
         one!(CreateDocument, lc::SutAppLifecycle);
         one!(DeleteDocument, lc::SutAppLifecycle);
+        one!(RenameDocument, lc::SutAppLifecycle);
         one!(EpochFlipRejected, lc::SutAppLifecycle);
         one!(SimulateRestart, lc::SutAppLifecycle);
         one!(StartApp, lc::SutAppLifecycle);

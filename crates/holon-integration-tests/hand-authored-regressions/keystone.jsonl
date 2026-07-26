@@ -264,3 +264,65 @@
 #     shown: "pagea"  expected: "Renamed"                <- the rename was silently undone
 # Un-park once BOTH the org-file rename defect and the id collision are fixed.
 # {"name": "page-id-rename-collision", "description": "BugFunnel: rename A->B then re-create A re-mints the taken blake3 id and the ON CONFLICT DO UPDATE clobbers the renamed page. \u00a75.3 requires two distinct pages; prod yields one. Detection-only lane \u2014 red until the production mint stops colliding.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateBlockUnderFocus": {"content": "pagea", "id": "block:pgorigin"}}, {"CreateBlockUnderFocus": {"content": "child", "id": "block:pgchild"}}, {"Indent": {"block_id": "block:pgchild"}}, {"BlockToPage": {"origin_id": "block:pgorigin"}}, {"RenamePage": {"page_id": "block:a6bbdb1d-4e3d-e3d3-2c8d-c38a0efb5458", "new_title": "Renamed"}}, {"CreatePageAtFreedPath": {"path": "structural-page/pagea"}}]}
+#
+# --- D2: renaming an org FILE does not rename the page (detection lane, 2026-07-26) ---
+# A user renames `A.org` -> `B.org`. Per the file-move spec a page's title FOLLOWS
+# its file name, so the reference retitles the doc page to the new stem. Production's
+# file_sync_controller.rs (#+ID-resolves-to-existing-doc arm, ~:1479-1483) takes
+# `(doc, false)` and NEVER applies `filename_title`, so the SUT page keeps its OLD
+# title. #99's RenamePage deliberately EXCLUDED document-root pages ("file-move
+# semantics the reference does not model"); the new external-rung `RenameDocument`
+# transition + `RefDocumentsMut::rename_document` model exactly that excluded case.
+#
+# Sequence: WriteOrgFile pins `#+ID: block:ref-doc-0` into `doc_seed.org` (so the SUT
+# ingests a born-equal ref-doc-0 page titled "doc_seed"); RenameDocument moves it to
+# `moved_a.org`. The reference retitles ref-doc-0 -> "moved_a"; the SUT keeps
+# "doc_seed" -> RED on the title/name invariants.
+#
+# PARKED as a comment (like page-id-rename-collision above): an active red would turn
+# `just hand-authored` deterministically red. Two entanglements to disclose:
+#   1. The FileChange port (change_source.rs) has NO atomic-Rename kind -- a `mv` is
+#      Remove(A)+Create(B). RenameDocument's SUT models the Create(B) half only. The
+#      Remove(A) half is omitted because on_file_deleted (~:902) resolves the vanished
+#      path's #+ID via last_projection and cascade-DELETES the very doc the moved file
+#      now owns (a SECOND defect) -- which masks the retitle signal AND makes a
+#      born-equal doc vanish, tripping the per-tick reconcile (harness.rs). The old
+#      file therefore lingers, DOUBLE-HOMING the doc.
+#   2. Because of the lingering old file, this trips inv-every-page-has-its-own-file
+#      and inv-blocks-match-ref/org -- soften them to isolate the OWNED retitle red.
+#
+# To see the RETITLE red (observed 2026-07-26 at transition 2/2):
+#   HOLON_PBT_INVARIANTS="inv-every-page-has-its-own-file:warn,inv-blocks-match-ref/org:warn,inv-org-render-fixed-point:warn" \
+#   HOLON_HAND_AUTHORED_CASE=doc-file-rename-title-not-followed \
+#   cargo nextest run -p holon-integration-tests --features pbt --test hand_authored_regressions --no-capture
+#   [inv-displayed-text/viewmodel] text@block=block:ref-doc-0  shown: "doc_seed"  expected: "moved_a"
+#   [inv-block-content/block_raw]  block block:ref-doc-0 content diverges: ref "moved_a" block_raw "doc_seed"
+#   [inv-block-content/sql] / [inv-blocks-match-ref/loro] same title mismatch; first-divergent-layer: store/CRDT
+# The generator arm is env-gated OFF (HOLON_PBT_DOC_RENAME) until both the removal-
+# cascade over-delete and the atomic-Rename-kind gaps are closed. Un-park once the
+# retitle bug (file_sync_controller.rs:1479-1483) is fixed.
+# {"name": "doc-file-rename-title-not-followed", "description": "D2: renaming an org file must retitle its page to the new file stem; prod's #+ID-resolves-to-existing-doc arm (file_sync_controller.rs:1479-1483) takes (doc,false) and never applies filename_title, so the page keeps its old title. RED until fixed. Softens the double-homing org invariants (the old file lingers -- the FileChange port has no atomic-Rename kind).", "transitions": [{"WriteOrgFile": {"filename": "doc_seed.org", "blocks": [], "keyword_set": null}}, {"RenameDocument": {"old_file_name": "doc_seed.org", "new_file_name": "moved_a.org"}}]}
+#
+# --- D4: journal auto-create autonomously re-mints and CLOBBERS a renamed page ---
+# NOT expressible as a keystone.jsonl case: AdvanceDay's `SutClockAdvance` cap is
+# intentionally UNREGISTERED in every composed wiring (builder.rs: "AdvanceDay stays
+# dormant"), so a RenamePage+AdvanceDay replay panics "capability SutClockAdvance ...
+# absent from the CapMap" before it can tick the clock. The clock-driven journal-rule
+# re-fire is only reachable in the DEDICATED directed harness (the ADR 0024 6
+# AdvanceDay capstone), so the red-for-the-right-reason witness lives there:
+#   crates/holon-integration-tests/src/pbt/frontend_slice/components.rs
+#     ::tests::journal_autocreate_reraise_clobbers_renamed_journal_page  (#[ignore])
+#   run: cargo test -p holon-integration-tests --features pbt --lib \
+#          journal_autocreate_reraise_clobbers -- --ignored --nocapture
+# Mechanism: block_exists("Journals/{today}") compiles to a NAME match
+# (pattern.rs::block_exists_sql), so renaming the boot journal frees the name. Rolling
+# the clock forward a day and back re-fires the rule for the boot day, whose name no
+# longer resolves; the action re-creates it at the SAME deterministic id
+# PageId::for_path("Journals/2026-01-15"), so block.create lands on ON CONFLICT(id) DO
+# UPDATE and clobbers the renamed title back to the date. Observed 2026-07-26:
+#   after rename:  title="Renamed"     page_tag=true
+#   after re-tick: title="2026-01-15"  page_tag=true   <- title clobbered
+# NB the Page tag is PRESERVED (the re-mint re-pages the row `place: page(journals)`),
+# so the clobber is TITLE-ONLY -- the page-tag-drop half of the hypothesis does NOT
+# reproduce. See docs report / the directed test for how to lift this into the keystone
+# (register SutClockAdvance in full_headless + model re-fired journals in the oracle).
