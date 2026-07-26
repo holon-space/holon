@@ -999,6 +999,36 @@ impl HeadlessFrontendComponent {
         parse_block_rows(&rows)
     }
 
+    /// Poll the `block_raw` id-set until it is stable across two consecutive
+    /// reads (the same convergence `simulate_restart` uses), so a watcher
+    /// re-ingest driven by an external file move has fully projected before the
+    /// invariants run. Fail loud on a 5s budget -- a never-stabilizing set
+    /// means the ingest cascade regressed.
+    async fn settle_block_id_set(&self, label: &str) {
+        let ids = || async {
+            self.all_blocks()
+                .await
+                .into_iter()
+                .map(|b| b.id)
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let timeout = Duration::from_secs(5);
+        let start = std::time::Instant::now();
+        let mut prev = ids().await;
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let now = ids().await;
+            if now == prev {
+                break;
+            }
+            prev = now;
+            assert!(
+                start.elapsed() < timeout,
+                "[{label}] block_raw id-set never stabilized after 5s"
+            );
+        }
+    }
+
     /// Run a read-only SQL statement against the headless engine and return the
     /// raw rows (the `SutSqlProjection` read surface — mirrors the sql_slice's
     /// `query`). Fail-loud on error.
@@ -3106,6 +3136,57 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
             .retain(|(_, p)| *p != file_path);
     }
 
+    async fn rename_document(&self, old_file_name: &str, new_file_name: &str) {
+        use holon_filesystem::FileSystem;
+        // A user renames `A.org` -> `B.org`. The `FileChange` port has NO
+        // atomic-Rename kind (`change_source.rs`: Modify/Create/Remove only), so
+        // production sees a `mv` as Remove(A) + Create(B). This models the
+        // Create(B) half: the moved file APPEARS carrying `A`'s `#+ID:`
+        // unchanged, so the watcher re-ingests it and its `#+ID:` resolves to
+        // the SAME existing document -- driving file_sync_controller's
+        // `(doc, false)` arm (~:1479-1483), which never applies the new
+        // filename-derived title. That stale-title divergence is what this
+        // transition exists to catch.
+        //
+        // The Remove(A) half is DELIBERATELY omitted: `on_file_deleted`
+        // (~:902) resolves the vanished path's document from
+        // `last_projection[A]`'s `#+ID:` and cascade-deletes it -- so removing
+        // the old file over-deletes the very document the moved file now owns
+        // (a SECOND, distinct defect). Performing it here would (a) mask the
+        // retitle signal by deleting the page outright and (b) make a
+        // born-equal doc vanish from the SUT while the oracle keeps it, which
+        // trips the per-tick reconcile (`harness.rs` synthetic/real parity).
+        // The old file therefore lingers, double-homing the doc -- the reason
+        // the replay softens `inv-every-page-has-its-own-file` /
+        // `inv-blocks-match-ref/org` (see the parked case in keystone.jsonl).
+        let old_path = self.org_root.join(old_file_name);
+        let new_path = self.org_root.join(new_file_name);
+        let content = FileSystem::read(self.org_fs.as_ref(), &old_path)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[SutAppLifecycle::rename_document] read {old_file_name} failed: {e:#}")
+            });
+        if let Some(parent) = new_path.parent() {
+            self.org_fs.mkdir_all(parent);
+        }
+        FileSystem::write(self.org_fs.as_ref(), &new_path, &content)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[SutAppLifecycle::rename_document] write {new_file_name} failed: {e:#}")
+            });
+        self.settle_block_id_set("rename_document(ingest-moved-file)")
+            .await;
+        // Track the doc's new home so later file-seam lookups resolve it.
+        {
+            let mut docs = self.documents.lock().expect("documents lock");
+            for entry in docs.iter_mut() {
+                if entry.1 == old_path {
+                    entry.1 = new_path.clone();
+                }
+            }
+        }
+    }
+
     async fn concurrent_schema_init(&self) {
         // Ported from the E2ESut/`SutHandle` impl: the regression this guards is the
         // double-`ensure_navigation_schema` "database is locked" bug — sequential
@@ -3863,6 +3944,160 @@ mod tests {
             after2.iter().map(|(_, n)| n).collect();
         assert_eq!(distinct_days.len(), 3, "one journal per distinct day");
         eprintln!("[advance-day] final journals: {after2:?} ✓");
+    }
+
+    /// Red 2 (D4): the journal auto-create rule autonomously RE-MINTS today's
+    /// journal id and CLOBBERS a page that merely renamed itself.
+    ///
+    /// `#[ignore]`d red-for-the-right-reason detection artifact (the
+    /// parked-case convention: an always-red witness stays out of the
+    /// default suite; run it explicitly with `--ignored` to capture the
+    /// red). NOT a composed keystone.jsonl case: `SutClockAdvance` is
+    /// intentionally UNREGISTERED in every composed wiring (`builder.rs`:
+    /// "AdvanceDay stays dormant"), so a hand-authored keystone replay of
+    /// RenamePage+AdvanceDay panics ("capability SutClockAdvance ... absent
+    /// from the CapMap") before it can tick the clock. This directed
+    /// harness -- the ADR 0024 6 AdvanceDay capstone's own -- is the only
+    /// place that registers the clock cap, so it is where the clobber is
+    /// deterministically reachable. See the report's prod/E2E similarity
+    /// gap for how to lift it into the keystone.
+    ///
+    /// Mechanism: `block_exists("Journals/{today}")` compiles to a NAME match
+    /// (`pattern.rs::block_exists_sql` joins on `name_column`), so renaming the
+    /// boot journal frees the name "2026-01-15". Rolling the clock forward a
+    /// day and back re-evaluates the rule for 2026-01-15, whose name no
+    /// longer resolves, so the action re-creates a page named "2026-01-15".
+    /// Its deterministic id `PageId::for_path("Journals/2026-01-15")` is
+    /// the SAME id the renamed page still holds, so `block.create` lands on
+    /// `INSERT ... ON CONFLICT(id) DO UPDATE SET <every non-id column>` and
+    /// overwrites the renamed title back to the date (and drops the Page tag).
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "red-for-the-right-reason: journal auto-create clobbers a renamed journal page (D4)"]
+    async fn journal_autocreate_reraise_clobbers_renamed_journal_page() {
+        use holon_pbt_core::capabilities::SutClockAdvance;
+
+        let boot_ms = noon_millis(2026, 1, 15);
+        let clock = Arc::new(holon_api::TestClock::new(boot_ms));
+        let boot_date = holon_api::CalendarDate::from_clock(clock.as_ref()).ymd();
+        let comp = HeadlessFrontendComponent::new_with_clock(
+            &[("Journals.org", "#+ID: journals\n")],
+            Duration::from_millis(500),
+            false,
+            clock.clone(),
+        )
+        .await;
+
+        // Boot fired today's journal page (Page-tagged, name = the boot date).
+        let boot_days = wait_for_journal_days(&comp, 1, Duration::from_secs(10)).await;
+        let journal_id = boot_days[0].0.clone();
+        assert_eq!(boot_days[0].1, boot_date, "boot journal is the boot day");
+        assert_eq!(
+            journal_id,
+            super::keystone_boot_journal_id().to_string(),
+            "boot journal id is the canonical PageId::for_path(Journals/<date>)"
+        );
+
+        let read_title = || async {
+            let rows = comp
+                .engine
+                .db_handle()
+                .query(
+                    &format!(
+                        "SELECT content FROM block_raw WHERE id = '{}'",
+                        journal_id.replace('\'', "''")
+                    ),
+                    std::collections::HashMap::new(),
+                )
+                .await
+                .expect("journal title query");
+            rows.first()
+                .and_then(|r| r.get("content").and_then(|v| v.as_string()))
+                .map(str::to_string)
+        };
+        let read_page_tag = || async {
+            let rows = comp
+                .engine
+                .db_handle()
+                .query(
+                    &format!(
+                        "SELECT 1 AS present FROM block_tags WHERE block_id = '{}' AND tag = \
+                         'Page' LIMIT 1",
+                        journal_id.replace('\'', "''")
+                    ),
+                    std::collections::HashMap::new(),
+                )
+                .await
+                .expect("journal page-tag query");
+            !rows.is_empty()
+        };
+
+        // Rename the journal page through the production `block.set_field(content)`
+        // op -- the exact op `RenamePage` drives.
+        let mut params: holon_api::StorageEntity = std::collections::HashMap::new();
+        params.insert("id".into(), Value::String(journal_id.clone()));
+        params.insert("field".into(), Value::String("content".to_string()));
+        params.insert("value".into(), Value::String("Renamed".to_string()));
+        comp.engine
+            .execute_operation(
+                &EntityName::new("block"),
+                "set_field",
+                params,
+                holon_api::OpOrigin::User,
+            )
+            .await
+            .expect("rename journal via block.set_field(content)");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            read_title().await.as_deref(),
+            Some("Renamed"),
+            "precondition: the rename applied"
+        );
+        assert!(
+            read_page_tag().await,
+            "precondition: the renamed page is still Page-tagged"
+        );
+        eprintln!(
+            "[journal-clobber] after rename: title={:?} page_tag={}",
+            read_title().await,
+            read_page_tag().await
+        );
+
+        // Re-fire TODAY's journal rule: roll the clock forward one day (creates
+        // that day's journal) and back to the boot day. The return CDC
+        // re-evaluates `not block_exists("Journals/2026-01-15")` -- now TRUE, the
+        // name was renamed away -- so the action re-creates "2026-01-15" at the
+        // SAME deterministic id the renamed page holds.
+        let d1 = comp.advance_clock_days(1).await;
+        eprintln!("[journal-clobber] rolled forward to {d1}");
+        let d0 = comp.advance_clock_days(-1).await;
+        eprintln!("[journal-clobber] rolled back to {d0}");
+        assert_eq!(d0, boot_date, "clock returned to the boot day");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let title_after = read_title().await;
+        let page_tag_after = read_page_tag().await;
+        eprintln!(
+            "[journal-clobber] after re-tick: title={title_after:?} page_tag={page_tag_after}"
+        );
+
+        // Observed (2026-07-26): the ON CONFLICT DO UPDATE overwrites the TITLE
+        // back to the date but PRESERVES the Page tag -- the re-mint re-creates
+        // the row `place: page(journals)`, so it re-pages the id rather than
+        // dropping the tag. The clobber is therefore title-only; the page-tag
+        // half of the originally-hypothesised signature does NOT reproduce.
+        assert!(
+            page_tag_after,
+            "sanity: the re-minted row is still Page-tagged (the clobber is title-only)"
+        );
+        // SPEC: the rule is idempotent-by-name; re-firing it must NOT overwrite a
+        // page that merely CHANGED ITS NAME. RED-for-the-right-reason: prod's
+        // deterministic-id upsert clobbers the renamed title back to the date.
+        assert_eq!(
+            title_after.as_deref(),
+            Some("Renamed"),
+            "journal auto-create re-minted the same blake3 id and clobbered the renamed title \
+             back to the date"
+        );
     }
 
     /// Fork B data-persistence gate (verifier half 2): a bullet added UNDER a
