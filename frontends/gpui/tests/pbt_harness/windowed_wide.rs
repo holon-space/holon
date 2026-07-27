@@ -182,7 +182,8 @@ pub fn with_windowed_wide_sut(
     // so the windowed per-apply settle converges CDC + Loro + org like the
     // headless path.
     let handle = WideHandle::from_bundle(&bundle);
-    let overlaid = overlay_windowed_caps(bundle.caps, frontend, geometry, engine.clone(), driver);
+    let overlaid =
+        overlay_windowed_caps(bundle.caps, frontend, geometry, engine.clone(), driver, resolver.clone());
 
     // The window-settle hook the ComposedSut pumps before each check (mirror sim
     // `pump_cycle`: real wall-clock time for backend watchers on their own worker

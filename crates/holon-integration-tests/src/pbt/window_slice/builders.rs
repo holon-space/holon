@@ -20,6 +20,7 @@ use crate::pbt::composed::seed_primitives::Plant;
 use crate::pbt::composed::seed_primitives::apply_plant;
 use crate::pbt::composed::seed_primitives::seed_ref_tree;
 use crate::pbt::driver_input::DriverInputComponent;
+use crate::pbt::op_write_cap::IdResolver;
 use crate::pbt::frontend_slice::components::HeadlessFrontendComponent;
 use crate::pbt::reference_capabilities::reference_state_ref_caps;
 use crate::pbt::reference_state::Resolved;
@@ -178,6 +179,7 @@ pub fn overlay_windowed_caps(
     geometry: Box<dyn GeometryProvider>,
     engine: Arc<ReactiveEngine>,
     driver: Arc<dyn UserDriver>,
+    resolver: IdResolver,
 ) -> CapMap {
     let driver_geometry = geometry.clone_box();
     Arc::new(GpuiWindowComponent::new(geometry)).register(&mut caps);
@@ -195,10 +197,11 @@ pub fn overlay_windowed_caps(
     caps.insert(frontend_engine.clone() as Arc<dyn SutFrontendEngine>);
     caps.insert(frontend_engine as Arc<dyn SutFrontendEmissions>);
 
-    Arc::new(DriverInputComponent::with_input(
+    Arc::new(DriverInputComponent::with_input_resolved(
         engine,
         driver.clone(),
         driver_geometry,
+        resolver,
     ))
     .register(&mut caps);
 

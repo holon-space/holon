@@ -285,7 +285,8 @@ fn overlay_windowed_caps_composes_layout_backend_and_driver_over_a_live_window()
         .frontend
         .clone()
         .expect("full_headless → booted HeadlessFrontendComponent");
-    let overlaid = overlay_windowed_caps(composed.caps, frontend, geometry, engine.clone(), driver);
+    let overlaid =
+        overlay_windowed_caps(composed.caps, frontend, geometry, engine.clone(), driver, resolver.clone());
 
     // (1) The overlay INSERTED the window driver rung (absent in the deferred
     // base).
@@ -435,6 +436,78 @@ fn windowed_composed_sut_replays_a_fixture_via_replay_steps_green() {
              the windowed ComposedSut<WideE2E> (FixtureAssertable bridge); catalog GREEN each tick",
             steps.len()
         );
+        Some(sut)
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SPLIT-BOUNDS REGRESSION — windowed id-minting reconcile through the driver.
+//
+// A `SplitBlock` mints a FRESH uuid in the real SUT backend; the composed
+// reconcile maps the oracle's synthetic `block::split-N` to that uuid in the
+// shared `IdResolver`. Before the fix, `overlay_windowed_caps` built the
+// windowed `DriverInputComponent` WITHOUT that resolver (`with_input`,
+// `resolver: None`), so the bounds precheck resolved `block::split-N` to
+// itself and false-failed `no registered bounds` — even though the row had
+// rendered under its real uuid. This drives Split→ClickBlock on the minted
+// block N times in one boot; each `ClickBlock` bounds-prechecks the freshly
+// minted row. RED before the fix on iter 0 (identity resolve → wrong id);
+// GREEN after (shared resolver → real uuid → registered bounds found).
+// ═══════════════════════════════════════════════════════════════════
+#[test]
+fn windowed_split_then_clickblock_resolves_minted_id() {
+    use holon_integration_tests::pbt::transitions::SplitBlock;
+    use std::collections::BTreeSet;
+
+    with_windowed_wide_sut(|mut sut, oracle0| {
+        ComposedSut::<WideE2E>::check_invariants(&sut, oracle0);
+        let mut oracle = oracle0.clone();
+        let iters: usize = std::env::var("SPLIT_AMP_ITERS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(8);
+        // Chain: split `c1` first, then split each freshly-minted tail (it carries
+        // the "c1" content, so it stays a splittable text leaf).
+        let mut target = EntityUri::block("c1");
+        let mut landed = 0usize;
+        for i in 0..iters {
+            let split = E2ETransition::SplitBlock(SplitBlock {
+                block_id: target.clone(),
+                position: 0,
+            });
+            if !<WideE2EMachine as ReferenceStateMachine>::preconditions(&oracle, &split) {
+                eprintln!("[split-reg] iter {i}: SplitBlock precondition false on {target}, stop");
+                break;
+            }
+            let before: BTreeSet<EntityUri> =
+                oracle.domain.block_state.blocks.keys().cloned().collect();
+            oracle = <WideE2EMachine as ReferenceStateMachine>::apply(oracle, &split);
+            let after: BTreeSet<EntityUri> =
+                oracle.domain.block_state.blocks.keys().cloned().collect();
+            sut = ComposedSut::<WideE2E>::apply(sut, &oracle, split);
+            ComposedSut::<WideE2E>::check_invariants(&sut, &oracle);
+            let minted: Vec<EntityUri> = after.difference(&before).cloned().collect();
+            assert_eq!(minted.len(), 1, "iter {i}: expected 1 minted split id, got {minted:?}");
+            let new_id = minted[0].clone();
+            // The regression probe: ClickBlock's FIRST act is `require_bounds` on the
+            // minted (synthetic) id — the exact precheck that false-failed pre-fix.
+            let click = E2ETransition::ClickBlock(ClickBlock {
+                region: Region::Main,
+                block_id: new_id.clone(),
+            });
+            assert!(
+                <WideE2EMachine as ReferenceStateMachine>::preconditions(&oracle, &click),
+                "iter {i}: ClickBlock precondition false for minted {new_id}"
+            );
+            oracle = <WideE2EMachine as ReferenceStateMachine>::apply(oracle, &click);
+            sut = ComposedSut::<WideE2E>::apply(sut, &oracle, click);
+            ComposedSut::<WideE2E>::check_invariants(&sut, &oracle);
+            landed += 1;
+            eprintln!("[split-reg] iter {i}: minted {new_id}, ClickBlock bounds precheck GREEN");
+            target = new_id;
+        }
+        assert!(landed >= 1, "regression vacuous: no split→click iteration ran");
+        eprintln!("[split-reg] PASS — {landed} split→ClickBlock iteration(s) resolved the minted id and found registered bounds");
         Some(sut)
     });
 }

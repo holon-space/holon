@@ -216,7 +216,14 @@ pub fn run(label: &'static str) {
     // Settle handle (engine + frontend) captured before `bundle.caps` is moved, so
     // the per-apply settle converges CDC + Loro + org like the headless path.
     let handle = WideHandle::from_bundle(&bundle);
-    let overlaid = overlay_windowed_caps(bundle.caps, frontend, geometry_box, reactive, tui_driver);
+    let overlaid = overlay_windowed_caps(
+        bundle.caps,
+        frontend,
+        geometry_box,
+        reactive,
+        tui_driver,
+        resolver.clone(),
+    );
 
     // Settle hook: the renderer self-drives on the backend runtime, so settling is
     // pure polling — wait until the element count is stable and no "loading"
