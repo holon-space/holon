@@ -3076,9 +3076,49 @@ impl HolonMcpServer {
     }
 
     #[tool(
+        description = "List the live keybinding registry as action → key chord (e.g. `move_up` → \
+                       [\"alt\",\"up\"]). The chord's key names are exactly what send_key_chord's \
+                       `keys` accepts, so a binding read here can be sent back verbatim — never \
+                       hardcode a shortcut."
+    )]
+    async fn list_keybindings(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        use holon_frontend::reactive::BuilderServices;
+
+        let services = self.builder_services().ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                "list_keybindings needs a frontend, which this session does not wire",
+                None,
+            )
+        })?;
+
+        let bindings: Vec<serde_json::Value> = services
+            .key_bindings_snapshot()
+            .into_iter()
+            .map(|(action, chord)| {
+                let keys: Vec<String> = chord.0.iter().map(|k| k.to_string()).collect();
+                serde_json::json!({ "action": action, "chord": keys })
+            })
+            .collect();
+
+        let result = serde_json::json!({
+            "bindings": bindings,
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    "serialization_failed",
+                    Some(serde_json::json!({"error": e.to_string()})),
+                )
+            })?,
+        )]))
+    }
+
+    #[tool(
         description = "Simulate a keyboard shortcut (key chord) at a specific entity. The chord \
                        bubbles up through the reactive tree via focus-path, matching against \
-                       bound operations. If a match is found, the operation is executed."
+                       bound operations. If a match is found, the operation is executed. Read the \
+                       chord from list_keybindings rather than hardcoding it."
     )]
     async fn send_key_chord(
         &self,
@@ -3465,34 +3505,10 @@ impl HolonMcpServer {
 
 // --- Key parsing helpers ---
 
-/// Parse a string key name into a holon_frontend Key enum.
+/// Parse a string key name into a `Key`, in the same vocabulary
+/// `list_keybindings` reports.
 fn parse_key(s: &str) -> Result<holon_frontend::input::Key, String> {
-    use holon_frontend::input::Key;
-    match s.to_lowercase().as_str() {
-        "cmd" | "command" | "platform" => Ok(Key::Cmd),
-        "ctrl" | "control" => Ok(Key::Ctrl),
-        "alt" | "option" => Ok(Key::Alt),
-        "shift" => Ok(Key::Shift),
-        "up" => Ok(Key::Up),
-        "down" => Ok(Key::Down),
-        "left" => Ok(Key::Left),
-        "right" => Ok(Key::Right),
-        "home" => Ok(Key::Home),
-        "end" => Ok(Key::End),
-        "pageup" => Ok(Key::PageUp),
-        "pagedown" => Ok(Key::PageDown),
-        "tab" => Ok(Key::Tab),
-        "enter" | "return" => Ok(Key::Enter),
-        "backspace" => Ok(Key::Backspace),
-        "delete" => Ok(Key::Delete),
-        "escape" | "esc" => Ok(Key::Escape),
-        "space" => Ok(Key::Space),
-        s if s.len() == 1 => Ok(Key::Char(s.chars().next().unwrap())),
-        s if s.starts_with('f') && s[1..].parse::<u8>().is_ok() => {
-            Ok(Key::F(s[1..].parse::<u8>().unwrap()))
-        }
-        other => Err(format!("Unknown key: '{other}'")),
-    }
+    s.parse()
 }
 
 /// Check if a string is a special key name (not regular text).

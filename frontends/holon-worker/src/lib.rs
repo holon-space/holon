@@ -1314,6 +1314,18 @@ mod backend {
                 Ok(serde_json::json!({"inserted_text": text}))
             }
 
+            "list_keybindings" => {
+                let bindings: Vec<serde_json::Value> = reactive
+                    .key_bindings_snapshot()
+                    .into_iter()
+                    .map(|(action, chord)| {
+                        let keys: Vec<String> = chord.0.iter().map(|k| k.to_string()).collect();
+                        serde_json::json!({ "action": action, "chord": keys })
+                    })
+                    .collect();
+                Ok(serde_json::json!({ "bindings": bindings }))
+            }
+
             "send_key_chord" => {
                 let entity_id = req_str(&args, "entity_id")?;
                 let keys = args
@@ -1501,38 +1513,10 @@ mod backend {
         }
     }
 
-    /// Parse a wire key name (lowercase, as the live-MCP twin sends) into a
-    /// `holon_api::Key`. Reverse of `mcp_user_driver::key_wire_name`; mirrors
-    /// the native `frontends/mcp` `parse_key`. Fails loud on an unknown name.
+    /// Parse a wire key name into a `holon_api::Key`, through the same name
+    /// table `list_keybindings` emits and the native `frontends/mcp` parses.
     fn parse_wire_key(s: &str) -> anyhow::Result<holon_api::Key> {
-        use holon_api::Key;
-        let lower = s.to_lowercase();
-        let key = match lower.as_str() {
-            "cmd" | "command" | "platform" => Key::Cmd,
-            "ctrl" | "control" => Key::Ctrl,
-            "alt" | "option" => Key::Alt,
-            "shift" => Key::Shift,
-            "up" => Key::Up,
-            "down" => Key::Down,
-            "left" => Key::Left,
-            "right" => Key::Right,
-            "home" => Key::Home,
-            "end" => Key::End,
-            "pageup" => Key::PageUp,
-            "pagedown" => Key::PageDown,
-            "tab" => Key::Tab,
-            "enter" | "return" => Key::Enter,
-            "backspace" => Key::Backspace,
-            "delete" => Key::Delete,
-            "escape" | "esc" => Key::Escape,
-            "space" => Key::Space,
-            other if other.chars().count() == 1 => Key::Char(other.chars().next().unwrap()),
-            other if other.starts_with('f') && other[1..].parse::<u8>().is_ok() => {
-                Key::F(other[1..].parse::<u8>().unwrap())
-            }
-            other => anyhow::bail!("unknown key: '{other}'"),
-        };
-        Ok(key)
+        s.parse::<holon_api::Key>().map_err(|e| anyhow::anyhow!(e))
     }
 
     fn req_str(args: &serde_json::Value, field: &str) -> anyhow::Result<String> {

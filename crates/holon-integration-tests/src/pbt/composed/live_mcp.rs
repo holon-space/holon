@@ -216,14 +216,50 @@ impl LiveMcp {
             });
     }
 
+    /// The chord the LIVE app binds to `action`, read from its own registry
+    /// over `list_keybindings`. A missing action is a real regression (the
+    /// binding was renamed or dropped), not a reason to guess a default.
+    async fn keybinding(&self, action: &str, ctx: &str) -> KeyChord {
+        let resp = self
+            .driver
+            .call_tool_json("list_keybindings", serde_json::json!({}))
+            .await
+            .unwrap_or_else(|e| panic!("[{ctx}] list_keybindings over MCP failed: {e:#}"));
+        let bindings = resp["bindings"].as_array().unwrap_or_else(|| {
+            panic!("[{ctx}] list_keybindings response missing `bindings`: {resp}")
+        });
+        let entry = bindings
+            .iter()
+            .find(|b| b["action"].as_str() == Some(action))
+            .unwrap_or_else(|| {
+                panic!("[{ctx}] the live app binds no `{action}` action — registry = {resp}")
+            });
+        let keys = entry["chord"]
+            .as_array()
+            .unwrap_or_else(|| panic!("[{ctx}] binding {entry} has no `chord` array"));
+        assert!(
+            !keys.is_empty(),
+            "[{ctx}] `{action}` is bound to an EMPTY chord — it can never dispatch"
+        );
+        KeyChord(
+            keys.iter()
+                .map(|k| {
+                    k.as_str()
+                        .unwrap_or_else(|| panic!("[{ctx}] chord key {k} is not a string"))
+                        .parse::<Key>()
+                        .unwrap_or_else(|e| panic!("[{ctx}] chord key {k}: {e}"))
+                })
+                .collect(),
+        )
+    }
+
     /// Drive a block-reorder op through the app's chord-resolution path,
-    /// exactly like `KeystrokeBlockTreeWriter::send_block_chord` — but with
-    /// the fixed production binding (Alt+Up / Alt+Down; the live registry
-    /// is in-process and unreadable over MCP). `send_key_chord`'s
+    /// exactly like `KeystrokeBlockTreeWriter::send_block_chord`, on whatever
+    /// chord the app currently binds to `action`. `send_key_chord`'s
     /// `root`/`tree` args are ignored by [`McpUserDriver`] (the app bubbles
     /// through its own tree), so a default VM is sound.
-    async fn send_reorder_chord(&self, resolved: &EntityUri, arrow: Key, ctx: &str) {
-        let chord = KeyChord([Key::Alt, arrow].into_iter().collect());
+    async fn send_reorder_chord(&self, resolved: &EntityUri, action: &str, ctx: &str) {
+        let chord = self.keybinding(action, ctx).await;
         let root = holon_api::root_layout_block_uri();
         let tree = ReactiveViewModel::default();
         let dispatched = self
@@ -565,13 +601,13 @@ impl SutBlockTreeWrite for LiveMcp {
 
     async fn apply_move_up(&self, id: &EntityUri) {
         let resolved = self.resolve(id);
-        self.send_reorder_chord(&resolved, Key::Up, "MoveBlockUp")
+        self.send_reorder_chord(&resolved, "move_up", "MoveBlockUp")
             .await;
     }
 
     async fn apply_move_down(&self, id: &EntityUri) {
         let resolved = self.resolve(id);
-        self.send_reorder_chord(&resolved, Key::Down, "MoveBlockDown")
+        self.send_reorder_chord(&resolved, "move_down", "MoveBlockDown")
             .await;
     }
 }

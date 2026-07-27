@@ -64,6 +64,8 @@ fetch_timestamp: 2026-04-23
 | `screenshot` | Capture UI screenshot |
 | `describe_navigation` | Describe current navigation cursor |
 | `send_navigation` | Programmatically navigate |
+| `list_keybindings` | The live chord registry: action → key names, as `send_key_chord` takes them |
+| `send_key_chord` | Dispatch a key chord at an entity |
 
 ### Resources
 

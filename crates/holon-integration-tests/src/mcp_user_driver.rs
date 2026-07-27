@@ -72,7 +72,6 @@ use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
 use holon_api::EntityUri;
-use holon_api::Key;
 use holon_api::KeyChord;
 use holon_api::Value;
 use holon_frontend::operations::OperationIntent;
@@ -213,34 +212,6 @@ impl McpUserDriver {
     }
 }
 
-/// Wire name for a [`Key`], matching `parse_key` in
-/// `frontends/mcp/src/tools.rs`.
-fn key_wire_name(key: &Key) -> String {
-    match key {
-        Key::Cmd => "cmd".into(),
-        Key::Ctrl => "ctrl".into(),
-        Key::Alt => "alt".into(),
-        Key::Shift => "shift".into(),
-        Key::Up => "up".into(),
-        Key::Down => "down".into(),
-        Key::Left => "left".into(),
-        Key::Right => "right".into(),
-        Key::Home => "home".into(),
-        Key::End => "end".into(),
-        Key::PageUp => "pageup".into(),
-        Key::PageDown => "pagedown".into(),
-        Key::Tab => "tab".into(),
-        Key::Enter => "enter".into(),
-        Key::Backspace => "backspace".into(),
-        Key::Delete => "delete".into(),
-        Key::Escape => "escape".into(),
-        Key::Space => "space".into(),
-        // Server-side parse_key lowercases before matching, so send lowercase.
-        Key::Char(c) => c.to_lowercase().collect(),
-        Key::F(n) => format!("f{n}"),
-    }
-}
-
 fn find_node<'a>(node: &'a ViewModel, target: &EntityUri) -> Option<&'a ViewModel> {
     if node.entity_id().as_ref() == Some(target) {
         return Some(node);
@@ -301,7 +272,7 @@ impl UserDriver for McpUserDriver {
                 extra_params.keys().collect::<Vec<_>>()
             );
         }
-        let keys: Vec<String> = chord.0.iter().map(key_wire_name).collect();
+        let keys: Vec<String> = chord.0.iter().map(|k| k.to_string()).collect();
         let response = self
             .call_tool_json(
                 "send_key_chord",
