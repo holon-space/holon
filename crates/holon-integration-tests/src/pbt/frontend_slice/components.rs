@@ -2669,6 +2669,47 @@ impl HeadlessFrontendComponent {
         }
     }
 
+    /// Settle barrier for a seam org write whose expected new ids are KNOWN:
+    /// wait until every `expected` id reaches `block_raw`, then until the
+    /// id-set stops changing.
+    ///
+    /// [`Self::settle_block_ids_stable`] cannot anchor such a write on its own:
+    /// two equal samples 100ms apart are the PRE-write state whenever the
+    /// watcher has not fired yet, so it reports "settled" on an ingest that has
+    /// not started and hands the harness a torn post-state (the write's blocks
+    /// arrive after the invariants and the per-tick reconcile have already
+    /// run).
+    async fn settle_until_ids_present(
+        &self,
+        expected: &[EntityUri],
+        timeout: Duration,
+        seam: &str,
+    ) {
+        let start = std::time::Instant::now();
+        loop {
+            let present: BTreeSet<EntityUri> =
+                self.all_blocks().await.into_iter().map(|b| b.id).collect();
+            let missing: Vec<&str> = expected
+                .iter()
+                .filter(|id| !present.contains(*id))
+                .map(|id| id.as_str())
+                .collect();
+            if missing.is_empty() {
+                break;
+            }
+            assert!(
+                start.elapsed() < timeout,
+                "[{seam}] org write never ingested: {}/{} expected ids still absent from \
+                 block_raw after {:?} — missing {missing:?}",
+                missing.len(),
+                expected.len(),
+                start.elapsed(),
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        self.settle_block_ids_stable(timeout).await;
+    }
+
     /// Preserve the SUT's real sibling order across a seam org rewrite.
     /// `block_raw.sort_key` is the order authority (ADR 0005), but the matview
     /// snapshot drops it and leaves every sibling tied at `sequence()==0`, so
@@ -2725,6 +2766,33 @@ fn resolve_mutation_ids(
     m
 }
 
+/// A document's own blocks within a `blocks_by_document` grouping.
+///
+/// A MISS is not "no blocks". `blocks_by_document` emits an entry for every
+/// page, so a genuinely childless doc still yields an entry with an empty vec;
+/// `None` means `doc_uri` is absent from — or not a page in — the snapshot the
+/// caller grouped. Every caller writes this result straight to the doc's org
+/// file, where an empty group erases the file and the live `FileSyncController`
+/// re-ingest then deletes the doc's whole subtree. Fail loud instead.
+fn doc_blocks_of<'a>(
+    grouped: &'a [(EntityUri, Vec<Block>)],
+    doc_uri: &EntityUri,
+    seam: &str,
+) -> Vec<&'a Block> {
+    grouped
+        .iter()
+        .find(|(u, _)| u == doc_uri)
+        .map(|(_, b)| b.iter().collect())
+        .unwrap_or_else(|| {
+            let grouped_docs: Vec<&str> = grouped.iter().map(|(u, _)| u.as_str()).collect();
+            panic!(
+                "[{seam}] doc {doc_uri} is not a page in the block snapshot — serializing an \
+                 empty group would erase its org file and the re-ingest would delete its \
+                 subtree. Grouped docs: {grouped_docs:?}"
+            )
+        })
+}
+
 /// `SutSeamMutate` over the headless component — the real composed equivalent
 /// of the `E2ESut` `block_tree_post_action` seam (which is `ref_state`-driven).
 /// Both methods rewrite the seeded USER docs' org files and let the live
@@ -2770,11 +2838,22 @@ impl SutSeamMutate for HeadlessFrontendComponent {
             docs_snapshot.iter().map(|(_, p)| p.clone()).collect();
         docs_snapshot.extend(self.materialized_doc_files_absent_from(&tracked).await);
         for (doc_uri, file_path) in &docs_snapshot {
-            let doc_blocks: Vec<&Block> = grouped
+            // A doc file on disk whose page is NOT in the snapshot is a stale
+            // artifact (e.g. a `DeleteDocument`ed page whose file lingers).
+            // Rewriting it from an empty group would erase whatever it still
+            // holds and let the re-ingest delete that subtree, so leave it
+            // alone — disclosed, never silent.
+            let Some(doc_blocks) = grouped
                 .iter()
                 .find(|(u, _)| u == doc_uri)
-                .map(|(_, b)| b.iter().collect())
-                .unwrap_or_default();
+                .map(|(_, b)| b.iter().collect::<Vec<&Block>>())
+            else {
+                eprintln!(
+                    "[apply_mutation/External] SKIP rewrite of {file_path:?}: doc {doc_uri} is \
+                     not a page in the block snapshot (stale on-disk file) — not erasing it"
+                );
+                continue;
+            };
             let doc_block = current.iter().find(|b| b.id == *doc_uri && b.is_page());
             let org = crate::serialize_blocks_to_org_with_doc(&doc_blocks, doc_uri, doc_block);
             FileSystem::write(self.org_fs.as_ref(), file_path, org.as_bytes())
@@ -2812,17 +2891,17 @@ impl SutSeamMutate for HeadlessFrontendComponent {
             current.push(nb);
         }
         let grouped = holon_api::blocks_by_document(&current);
-        let doc_blocks: Vec<&Block> = grouped
-            .iter()
-            .find(|(u, _)| *u == resolved_doc)
-            .map(|(_, b)| b.iter().collect())
-            .unwrap_or_default();
+        let doc_blocks: Vec<&Block> = doc_blocks_of(&grouped, &resolved_doc, "bulk_external_add");
         let doc_block = current.iter().find(|b| b.id == resolved_doc && b.is_page());
         let org = crate::serialize_blocks_to_org_with_doc(&doc_blocks, &resolved_doc, doc_block);
         FileSystem::write(self.org_fs.as_ref(), &file_path, org.as_bytes())
             .await
             .unwrap_or_else(|e| panic!("[bulk_external_add] write {file_path:?} failed: {e:#}"));
-        self.settle_block_ids_stable(Duration::from_secs(5)).await;
+        // Every bulk block is written WITH its oracle id in the `:ID:` drawer, so
+        // the ingest must surface all of them under exactly those ids.
+        let expected: Vec<EntityUri> = blocks.iter().map(|b| b.id.clone()).collect();
+        self.settle_until_ids_present(&expected, Duration::from_secs(5), "bulk_external_add")
+            .await;
     }
 
     async fn stale_external_rewrite(&self, doc_uri: &EntityUri) {
@@ -2842,11 +2921,8 @@ impl SutSeamMutate for HeadlessFrontendComponent {
         let mut current = self.live_block_snapshot().await;
         self.stamp_sequence_from_sort_key(&mut current).await;
         let grouped = holon_api::blocks_by_document(&current);
-        let doc_blocks: Vec<&Block> = grouped
-            .iter()
-            .find(|(u, _)| *u == resolved_doc)
-            .map(|(_, b)| b.iter().collect())
-            .unwrap_or_default();
+        let doc_blocks: Vec<&Block> =
+            doc_blocks_of(&grouped, &resolved_doc, "stale_external_rewrite");
         let doc_block = current.iter().find(|b| b.id == resolved_doc && b.is_page());
         let org = crate::serialize_blocks_to_org_with_doc(&doc_blocks, &resolved_doc, doc_block);
         let stale = strip_org_block_ids(&org);
