@@ -35,9 +35,11 @@
 //! Harness pattern mirrors `automations_journal_cdc.rs`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use holon_api::BatchWithMetadata;
+use holon_turso::matview_manager::MatviewManager;
 use holon_turso::matview_manager::reconcile_named_view;
 use holon_turso::turso::DbHandle;
 use holon_turso::turso::RowChange;
@@ -1664,5 +1666,355 @@ async fn rung14_multi_overlapping_recursive_matviews_per_reparent_commit() {
     eprintln!(
         "\n===== RUNG 14 — {iterations} re-adoption iterations over 4 overlapping matviews: \
          all views stayed consistent with recompute (no retract-miss observed this run) ====="
+    );
+}
+
+// ===========================================================================
+// RUNG 15 — the WATCH-REGISTRATION path (the ROUND-2 refined hypothesis)
+// ===========================================================================
+//
+// rung 14 registered its overlapping matviews via `reconcile_named_view`
+// (caller-named, plain `execute_ddl`, no rowid-tracked read) and stayed GREEN.
+// ROUND 2's refined hypothesis: the keystone's reds live specifically on
+// `watch_view_*` — matviews compiled by holon's `watch_query`/
+// `MatviewManager::watch`, carrying rowid tracking
+// (`SELECT *, rowid AS _rowid FROM watch_view_*`) and subscribed through the
+// CDC demux — a materially different IVM registration circuit. rung 15 drives
+// THAT circuit: three keystone-shaped focus views registered through the REAL
+// `MatviewManager::watch` (→ `watch_view_<hash>`, rowid-tracked `query_view`
+// read, live demux `subscribe_cdc` streams drained each iteration), maintained
+// alongside the `blk → bwp (blocks_with_paths) → rl (root_layout)` chained
+// named stack, plus a FOURTH watch view at the TOP of that chain (`watch over
+// rl`) — so `blk_raw → blk → bwp → rl → watch_view` is a five-deep chained
+// maintenance path, all maintained in the one `{b4→page, b5→b4}` re-adoption
+// commit.
+//
+// OUTCOME (2026-07-27, Turso rev `de14a597`): NO-RED. Green at 500 iters in one
+// process AND across 36 separate processes (the keystone's ~10% is per-process,
+// not per-iteration: one process replays one deterministic maintenance
+// computation). Neither concurrency (ROUND 2 refuted), nor overlapping-matview
+// topology (rung 14), nor the watch-registration path / rowid-tracked
+// `watch_view_*` circuit / chained blocks_with_paths→root_layout stack (rung
+// 15) reproduces the miss in isolation. The residual is a keystone-only DYNAMIC
+// factor: the delta reached from a VARIED accumulated matview state (rung 15
+// resets to one fixed pre-state) and/or the real op-execution reparent path.
+// If it ever reds, the signature is a `watch_view`-shaped view retaining the
+// intermediate `b5 @ parent b0 depth=1` derivation
+// (`ivm-race-det-run4.log:549`, `matview 13 / recompute 12`).
+
+/// `blocks_with_paths` shape (`sql/schema/blocks_with_paths.sql`) adapted to
+/// the `blk` base matview's columns: a recursive path-building matview anchored
+/// at the structural root (`parent_id = 'root'`, the seed's sentinel), the base
+/// of the composed keystone's `blk → blocks_with_paths → root_layout` chain.
+const BWP_SQL: &str = "\
+    WITH RECURSIVE paths AS ( \
+        SELECT id, parent_id, content, '/' || id AS path, id AS root_id, 0 AS depth \
+        FROM blk WHERE parent_id = 'root' \
+        UNION ALL \
+        SELECT b.id, b.parent_id, b.content, p.path || '/' || b.id AS path, p.root_id, \
+               p.depth + 1 \
+        FROM blk b JOIN paths p ON b.parent_id = p.id \
+        WHERE p.depth < 20 \
+    ) \
+    SELECT id, parent_id, content, path, root_id, depth FROM paths";
+
+/// `root_layout`-shaped chained projection over `bwp` (matview-over-matview).
+const RL_SQL: &str = "SELECT id, path, root_id FROM bwp";
+
+/// The watch view registered at the TOP of the chain: `watch over rl`.
+const WATCH_OVER_RL_SQL: &str = "SELECT id, path, root_id FROM rl";
+
+/// `id`+`path`-keyed canonicalizer for the `blocks_with_paths`/`root_layout`
+/// chained projection (view rows carry `id`, `path`).
+fn canon_path_rows(rows: Vec<holon_core::storage::StorageEntity>) -> Vec<String> {
+    let mut out: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            let id = r
+                .get("id")
+                .and_then(|v| v.as_string())
+                .expect("id text")
+                .to_string();
+            let path = r
+                .get("path")
+                .and_then(|v| v.as_string())
+                .expect("path text")
+                .to_string();
+            format!("{id}@{path}")
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Non-blocking drain of one watch view's demux CDC stream (kept LIVE so the
+/// per-view mpsc never fills → the demux never force-closes it, mirroring the
+/// keystone's live watch subscribers). Content discarded; oracle is
+/// matview-vs-recompute.
+fn drain_watch(rx: &mut tokio::sync::mpsc::Receiver<BatchWithMetadata<RowChange>>) -> usize {
+    let mut n = 0;
+    while rx.try_recv().is_ok() {
+        n += 1;
+    }
+    n
+}
+
+/// RUNG 15 — three keystone-shaped `watch_view_*` (real `MatviewManager::watch`
+/// registration, rowid-tracked, demux-subscribed) + the `blk → bwp → rl`
+/// chained stack + a fourth watch view at the chain's top, all maintained in
+/// the same `{b4→page, b5→b4}` re-adoption commit, looped to hit the ~10% miss.
+#[tokio::test]
+async fn rung15_watch_registration_path_multi_view_per_reparent_commit() {
+    let (handle, mut rx) = new_db().await;
+
+    // Seed the EXACT `bulk-3` fan-out from the red log (page plays `ref-doc-0`):
+    //   page → b0 → b4 → b5   (the outdent working chain)
+    //   page → b1 → {b6, b7}
+    //   page → b2 → b3
+    handle
+        .execute(
+            "CREATE TABLE blk_raw (id TEXT PRIMARY KEY, parent_id TEXT, content TEXT, \
+             sort_key TEXT)",
+            vec![],
+        )
+        .await
+        .expect("create blk_raw");
+    for (id, parent, sk) in [
+        ("page", "root", "a"),
+        ("b0", "page", "b"),
+        ("b4", "b0", "c"),
+        ("b5", "b4", "d"),
+        ("b1", "page", "e"),
+        ("b6", "b1", "f"),
+        ("b7", "b1", "g"),
+        ("b2", "page", "h"),
+        ("b3", "b2", "i"),
+    ] {
+        handle
+            .execute(
+                "INSERT INTO blk_raw (id, parent_id, content, sort_key) VALUES (?, ?, ?, ?)",
+                vec![
+                    turso::Value::Text(id.into()),
+                    turso::Value::Text(parent.into()),
+                    turso::Value::Text(id.into()),
+                    turso::Value::Text(sk.into()),
+                ],
+            )
+            .await
+            .expect("seed rung15 row");
+    }
+    create_inner_matview(&handle).await;
+    seed_navigation_on_page(&handle).await;
+
+    // The chained named stack maintained ALONGSIDE the watch views:
+    //   blk → bwp (blocks_with_paths) → rl (root_layout).
+    reconcile_named_view(&handle, "bwp", BWP_SQL)
+        .await
+        .expect("bwp blocks_with_paths-shaped recursive matview");
+    reconcile_named_view(&handle, "rl", RL_SQL)
+        .await
+        .expect("rl root_layout-shaped chained matview");
+
+    // The base tables/matviews above are created via plain `execute_ddl`
+    // (`reconcile_named_view`/`execute`), which does NOT register `provides`
+    // with the actor's DDL dependency coordinator. The REAL `watch` path
+    // (`ensure_view`) creates each `watch_view_*` via `execute_ddl_with_deps`
+    // and WAITS for its required schemas — in prod those are marked available by
+    // the boot-ordering machinery; here we mark them explicitly so the exact
+    // `watch` registration runs (the alternative, a 120 s DDL-dep timeout, is
+    // the harness gap, not an IVM result).
+    handle
+        .mark_available(vec![
+            holon_core::storage::Resource::schema("blk_raw"),
+            holon_core::storage::Resource::schema("blk"),
+            holon_core::storage::Resource::schema("navigation_history"),
+            holon_core::storage::Resource::schema("navigation_cursor"),
+            holon_core::storage::Resource::schema("focus_roots"),
+            holon_core::storage::Resource::schema("bwp"),
+            holon_core::storage::Resource::schema("rl"),
+        ])
+        .await
+        .expect("mark base resources available for the watch dep-coordinator");
+
+    // Register the keystone-shaped views through the REAL watch path:
+    // `MatviewManager::watch` → `watch_view_<hash>` (rowid-tracked, demux CDC).
+    let mgr = MatviewManager::new(handle.clone(), Arc::new(tokio::sync::Mutex::new(())));
+    let wa = mgr
+        .watch(FOCUS_SWITCH_SQL)
+        .await
+        .expect("watch view A (FOCUS_SWITCH_SQL)");
+    let wb = mgr
+        .watch(FOCUS_SWITCH_SQL_WITH_ID)
+        .await
+        .expect("watch view B (FOCUS_SWITCH_SQL_WITH_ID)");
+    let wc = mgr
+        .watch(FOCUS_DESCENDANTS_ND_SQL)
+        .await
+        .expect("watch view C (literal-anchor descendants)");
+    // Fourth watch view at the TOP of the chain: blk→bwp→rl→watch_view.
+    let wd = mgr
+        .watch(WATCH_OVER_RL_SQL)
+        .await
+        .expect("watch view D (watch over rl / root_layout)");
+
+    let (va, vb, vc, vd) = (
+        wa.view_name.clone(),
+        wb.view_name.clone(),
+        wc.view_name.clone(),
+        wd.view_name.clone(),
+    );
+    eprintln!("\n===== RUNG 15 watch views: A={va} B={vb} C={vc} D={vd} =====");
+
+    // Keep the demux streams LIVE and drainable (un-lagged) for the whole loop.
+    let mut sa = wa.stream.into_inner();
+    let mut sb = wb.stream.into_inner();
+    let mut sc = wc.stream.into_inner();
+    let mut sd = wd.stream.into_inner();
+
+    let iterations: usize = std::env::var("RUNG15_ITERATIONS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(200);
+
+    for iter in 0..iterations {
+        // Outdent(b5): b5 rises to sit beside b4 under b0.
+        handle
+            .execute(
+                "UPDATE blk_raw SET parent_id = 'b0' WHERE id = 'b5'",
+                vec![],
+            )
+            .await
+            .expect("outdent b5");
+
+        // Outdent(b4) + re-adopt(b5) in ONE batch — rung 13's exact delta.
+        handle
+            .transaction(vec![
+                (
+                    "UPDATE blk_raw SET parent_id = 'page' WHERE id = 'b4'".to_string(),
+                    vec![],
+                ),
+                (
+                    "UPDATE blk_raw SET parent_id = 'b4' WHERE id = 'b5'".to_string(),
+                    vec![],
+                ),
+            ])
+            .await
+            .expect("commit outdent-b4 + readopt-b5 txn");
+
+        // Keep every live subscriber consuming (demux + broadcast).
+        drain_watch(&mut sa);
+        drain_watch(&mut sb);
+        drain_watch(&mut sc);
+        drain_watch(&mut sd);
+        while rx.try_recv().is_ok() {}
+
+        // --- Per-view differential oracle: rowid-tracked matview READ (the real
+        // watch read path, `query_view`) vs. a fresh recompute of the defining
+        // SELECT off the quiescent base matviews. ---
+        let a_mv = canon_rows(mgr.query_view(&va).await.expect("query_view A"));
+        let a_re = canon_rows(
+            handle
+                .query(FOCUS_SWITCH_SQL, HashMap::new())
+                .await
+                .expect("recompute A"),
+        );
+        assert_eq!(
+            a_mv, a_re,
+            "iter {iter}: WATCH-VIEW DRIFT on A ({va}, FOCUS_SWITCH_SQL): the re-adoption batch \
+             left a stale intermediate row in a rowid-tracked watch_view_* recursive matview — \
+             the keystone inv-matview-consistent-with-recompute / main-panel stale-row shape"
+        );
+
+        let b_mv = canon_id_rows(mgr.query_view(&vb).await.expect("query_view B"));
+        let b_re = canon_id_rows(
+            handle
+                .query(FOCUS_SWITCH_SQL_WITH_ID, HashMap::new())
+                .await
+                .expect("recompute B"),
+        );
+        assert_eq!(
+            b_mv, b_re,
+            "iter {iter}: WATCH-VIEW DRIFT on B ({vb}, id projection): stale intermediate row \
+             retained in a rowid-tracked watch_view_* under multi-view per-commit maintenance"
+        );
+
+        let c_mv = canon_rows(mgr.query_view(&vc).await.expect("query_view C"));
+        let c_re = canon_rows(
+            handle
+                .query(FOCUS_DESCENDANTS_ND_SQL, HashMap::new())
+                .await
+                .expect("recompute C"),
+        );
+        assert_eq!(
+            c_mv, c_re,
+            "iter {iter}: WATCH-VIEW DRIFT on C ({vc}, literal anchor): stale intermediate row \
+             retained in a rowid-tracked watch_view_* under multi-view per-commit maintenance"
+        );
+
+        // --- Chained named stack: blk → bwp → rl, each matview vs its recompute. ---
+        let bwp_mv = canon_path_rows(
+            handle
+                .query("SELECT id, path FROM bwp", HashMap::new())
+                .await
+                .expect("query bwp"),
+        );
+        let bwp_re = canon_path_rows(
+            handle
+                .query(BWP_SQL, HashMap::new())
+                .await
+                .expect("recompute bwp"),
+        );
+        assert_eq!(
+            bwp_mv, bwp_re,
+            "iter {iter}: CHAINED-STACK DRIFT on bwp (blocks_with_paths): recursive path matview \
+             diverged from recompute after the re-adoption commit"
+        );
+
+        let rl_mv = canon_path_rows(
+            handle
+                .query("SELECT id, path FROM rl", HashMap::new())
+                .await
+                .expect("query rl"),
+        );
+        let rl_re = canon_path_rows(
+            handle
+                .query(RL_SQL, HashMap::new())
+                .await
+                .expect("recompute rl"),
+        );
+        assert_eq!(
+            rl_mv, rl_re,
+            "iter {iter}: CHAINED-STACK DRIFT on rl (root_layout, matview over bwp): chained \
+             per-commit maintenance dropped a delta"
+        );
+
+        // --- Watch view D at the top of the chain: watch_view over rl. ---
+        let d_mv = canon_path_rows(mgr.query_view(&vd).await.expect("query_view D"));
+        assert_eq!(
+            d_mv, rl_mv,
+            "iter {iter}: CHAINED WATCH-VIEW DRIFT on D ({vd}, watch over rl): the five-deep \
+             blk_raw→blk→bwp→rl→watch_view maintenance path diverged from its own source matview rl"
+        );
+
+        // Reset to the pre-state (page → b0 → b4 → b5): b5 is already under b4;
+        // only b4 must return under b0.
+        handle
+            .execute(
+                "UPDATE blk_raw SET parent_id = 'b0' WHERE id = 'b4'",
+                vec![],
+            )
+            .await
+            .expect("reset b4 under b0");
+        drain_watch(&mut sa);
+        drain_watch(&mut sb);
+        drain_watch(&mut sc);
+        drain_watch(&mut sd);
+        while rx.try_recv().is_ok() {}
+    }
+
+    eprintln!(
+        "\n===== RUNG 15 — {iterations} re-adoption iterations over 3 watch_view_* + the \
+         blk→bwp→rl chained stack + a chained watch view: all views stayed consistent with \
+         recompute (no retract-miss observed this run) ====="
     );
 }
