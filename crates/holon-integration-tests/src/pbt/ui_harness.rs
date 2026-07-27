@@ -20,6 +20,8 @@
 //! genuinely platform-specific.
 
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
+use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -147,8 +149,10 @@ pub fn screenshot_dir(subdir: &str) -> PathBuf {
 ///
 /// Mirrors the inline block at the top of each frontend PBT test:
 /// reads the port, enters the runtime, calls
-/// `holon_mcp::di::start_embedded_mcp_server`, and sleeps two seconds so
-/// the listener is bound before the renderer takes the main thread.
+/// `holon_mcp::di::start_embedded_mcp_server`, and blocks until the
+/// listener actually accepts a connection — the renderer takes the main
+/// thread the instant this returns, so an unbound port would race every
+/// early MCP client.
 ///
 /// `label` is used for the eprintln messages so logs disambiguate
 /// between simultaneous PBTs.
@@ -179,12 +183,52 @@ pub fn try_start_embedded_mcp(
     let _guard = runtime.enter();
     holon_mcp::di::start_embedded_mcp_server_with_debug(engine, Some(services), port, debug);
     eprintln!("[{label}] MCP server starting on port {port}");
-    std::thread::sleep(Duration::from_secs(2));
-    eprintln!("[{label}] MCP server should be ready on port {port}");
+    wait_for_mcp_listener(port, MCP_BIND_TIMEOUT, label);
 }
 
-/// Block (polling every 500 ms) until `geometry` reports an element with
-/// both `has_content` and `entity_id`, or until `timeout` elapses.
+/// How long `wait_for_mcp_listener` waits for the embedded MCP listener to
+/// bind before declaring the harness broken. Far longer than the bind takes
+/// in practice (single-digit ms) because its only job is to turn a hang into
+/// a named failure.
+pub const MCP_BIND_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Block until the embedded MCP server accepts a TCP connection on `port`.
+///
+/// Panics on timeout: a listener that never binds is a broken harness, not a
+/// slow one, and every downstream MCP failure it would cause is far harder to
+/// read than this message.
+pub fn wait_for_mcp_listener(port: u16, timeout: Duration, label: &str) {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let started = Instant::now();
+    let deadline = started + timeout;
+    loop {
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok() {
+            eprintln!(
+                "[{label}] MCP server ready on port {port} after {:?}",
+                started.elapsed(),
+            );
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "[{label}] embedded MCP server never accepted a connection on 127.0.0.1:{port} within \
+             {timeout:?} — the listener failed to bind"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Re-sample interval for `wait_for_geometry_ready`, ALSO the delay before the
+/// first sample. The pre-first-sample delay is load-bearing: the readiness
+/// predicate (`has_content && entity_id.is_some()`) is satisfied by a frame
+/// whose blocks have not yet been wrapped in their per-block `ReactiveShell`,
+/// so sampling immediately hands the PBT a bare-mount frame and reds
+/// `inv-live-block-shell-present`. Do not shorten without strengthening the
+/// predicate.
+const GEOMETRY_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Block until `geometry` reports an element with both `has_content` and
+/// `entity_id`, or until `timeout` elapses.
 ///
 /// This is the standard "frontend has rendered something the test can
 /// interact with" gate. Both GPUI and TUI use the same predicate
@@ -203,7 +247,7 @@ pub fn wait_for_geometry_ready(
 ) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(GEOMETRY_POLL_INTERVAL);
         let elements = geometry.all_elements();
         let has_real_content = elements
             .iter()
@@ -260,7 +304,9 @@ pub fn spawn_quit_on_pbt_finish(
 
     std::thread::spawn(move || {
         loop {
-            std::thread::sleep(Duration::from_millis(500));
+            // Granularity of the shutdown handoff: the window lingers this
+            // long after the PBT thread finishes.
+            std::thread::sleep(Duration::from_millis(25));
             if pbt_handle.is_finished() {
                 let thread_result = pbt_handle.join();
                 if thread_result.is_err() {

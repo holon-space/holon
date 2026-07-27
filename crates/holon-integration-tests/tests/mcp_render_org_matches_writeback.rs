@@ -117,7 +117,11 @@ fn mcp_render_org_matches_writeback() {
             debug,
         );
     }
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    holon_integration_tests::pbt::wait_for_mcp_listener(
+        port,
+        holon_integration_tests::pbt::ui_harness::MCP_BIND_TIMEOUT,
+        "mcp-render-org-writeback",
+    );
 
     let base_url = format!("http://127.0.0.1:{port}/mcp");
     let driver = sut

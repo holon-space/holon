@@ -109,4 +109,5 @@ pub use ui_harness::spawn_quit_on_pbt_finish;
 pub use ui_harness::standard_pbt_config;
 pub use ui_harness::try_start_embedded_mcp;
 pub use ui_harness::wait_for_geometry_ready;
+pub use ui_harness::wait_for_mcp_listener;
 pub use ui_interaction::UiInteraction;
