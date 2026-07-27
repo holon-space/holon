@@ -304,6 +304,94 @@ pub fn state_toggle_cycle_intent(
     walk(panel, entity_id)
 }
 
+/// Name why [`state_toggle_cycle_intent`] resolved nothing for `entity_id`.
+///
+/// That function returns a bare `None` for four structurally different states —
+/// no region panel, the entity absent from the region, the entity present but
+/// rendering no `state_toggle`, and the glyph present but binding no
+/// `set_field` op to dispatch. Only the third is "not a task row"; a driver
+/// that guesses sends every investigation down the wrong path.
+pub fn state_toggle_miss_reason(
+    root: &crate::view_model::ViewModel,
+    entity_id: &EntityUri,
+    region: &str,
+) -> String {
+    use crate::view_model::ViewKind;
+
+    fn collect_matches<'a>(
+        node: &'a crate::view_model::ViewModel,
+        entity_id: &EntityUri,
+        out: &mut Vec<&'a crate::view_model::ViewModel>,
+    ) {
+        if node.entity_id().as_ref() == Some(entity_id) {
+            out.push(node);
+        }
+        for child in node.children() {
+            collect_matches(child, entity_id, out);
+        }
+    }
+
+    fn collect_ids(node: &crate::view_model::ViewModel, out: &mut Vec<String>) {
+        if let Some(id) = node.entity_id() {
+            out.push(id.to_string());
+        }
+        for child in node.children() {
+            collect_ids(child, out);
+        }
+    }
+
+    let Some(panel) = find_region_panel(root, region) else {
+        return format!("region {region} renders no panel in the resolved tree at all");
+    };
+
+    let mut matched = Vec::new();
+    collect_matches(panel, entity_id, &mut matched);
+    if matched.is_empty() {
+        let mut ids = Vec::new();
+        collect_ids(panel, &mut ids);
+        ids.sort();
+        ids.dedup();
+        return format!(
+            "{entity_id} renders NO node in region {region} — the panel is not showing this \
+             block. It renders {} distinct entities: [{}]",
+            ids.len(),
+            ids.join(", ")
+        );
+    }
+
+    let kinds: Vec<&str> = matched
+        .iter()
+        .filter_map(|n| n.widget_name())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let Some(toggle) = matched
+        .iter()
+        .find(|n| matches!(n.kind, ViewKind::StateToggle { .. }))
+    else {
+        return format!(
+            "{entity_id} renders {} node(s) in region {region} but NONE is a state_toggle — the \
+             row is there, its glyph is not. Rendered as: [{}]",
+            matched.len(),
+            kinds.join(", ")
+        );
+    };
+
+    let ViewKind::StateToggle { field, .. } = &toggle.kind else {
+        unreachable!("matched on StateToggle above")
+    };
+    let ops: Vec<&str> = toggle
+        .operations
+        .iter()
+        .map(|ow| ow.descriptor.name.as_str())
+        .collect();
+    format!(
+        "{entity_id} DOES render a state_toggle on field `{field}` in region {region}, but no \
+         set_field op is wired to it — clicking the glyph would dispatch nothing. Bound ops: [{}]",
+        ops.join(", ")
+    )
+}
+
 /// True if `entity_id` is rendered anywhere within `region`'s panel subtree.
 ///
 /// Mirrors `find_click_intent_in_region`'s traversal (same panel scope, same

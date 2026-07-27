@@ -806,9 +806,9 @@ impl UserDriver for ReactiveEngineDriver {
             }
             if Instant::now() >= deadline {
                 anyhow::bail!(
-                    "cycle_state_toggle: no state_toggle glyph for {entity_id} in region {region} \
-                     within 2s — the target rendered no state_toggle (not a visible task row?), \
-                     so its cycle set_field intent could not be resolved."
+                    "cycle_state_toggle: could not resolve the state_toggle cycle intent for \
+                     {entity_id} in region {region} within 2s. {}",
+                    crate::focus_path::state_toggle_miss_reason(&resolved, entity_id, region)
                 );
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
