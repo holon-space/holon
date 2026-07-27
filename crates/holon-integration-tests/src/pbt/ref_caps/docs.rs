@@ -140,10 +140,10 @@ impl RefDocumentsMut for ReferenceState {
     fn rename_document(&mut self, old_file_name: &str, new_file_name: &str) {
         // File-move spec: a document page's title FOLLOWS its file name. Resolve
         // the doc by its OLD filename, re-point the filename, and retitle the
-        // page block to the NEW file stem. Production's file_sync_controller
-        // (`#+ID`-resolves-to-existing-doc arm, :1479-1483) takes `(doc, false)`
-        // and never applies the filename-derived title -- so the SUT keeps the
-        // OLD title while this reference expects the new one.
+        // page block to the NEW file stem. Production now matches this via the
+        // atomic Rename port: `FileSyncController::on_file_renamed` re-homes the
+        // doc and retitles the doc-root to the new stem (no delete window), so
+        // the SUT converges with this reference.
         let doc_uri = self
             .files
             .documents

@@ -7,18 +7,19 @@
 //! @pbt covers doc-file-rename — renaming a document's file must retitle its
 //! page to the new file stem (the file-move spec production violates)
 //!
-//! ## Why this transition exists (D2)
+//! ## Why this transition exists (D2 — CLOSED by the atomic Rename port)
 //!
 //! `docs/…`: a page's title FOLLOWS its file name. When a user renames
-//! `A.org` → `B.org`, the page titled "A" must become "B". Production's
-//! `file_sync_controller.rs` (`#+ID`-resolves-to-existing-doc arm, ~:1479-1483)
-//! takes `(doc, false)` and never applies the filename-derived title, so the
-//! page keeps its OLD title. `#99`'s `RenamePage` deliberately EXCLUDED
-//! document-root pages ("file-move semantics the reference does not model") —
-//! this transition models exactly that excluded case: the reference retitles
-//! the doc page to the new file stem, so the SUT (which does not) diverges on
-//! an existing title/name invariant (`inv-blocks-match-ref/block_raw`,
-//! `inv-displayed-text/viewmodel`).
+//! `A.org` → `B.org`, the page titled "A" must become "B". The `FileChange`
+//! port now carries an atomic `Rename { from }` kind; the in-memory fs emits it
+//! and `FileSyncController::on_file_renamed` re-homes the doc WITHOUT a
+//! delete-then-create window and retitles the doc-root to the new file stem.
+//! Both the reference (`RefDocumentsMut::rename_document`) and the SUT
+//! (`SutAppLifecycle::rename_document` → `FileSystem::rename`) now share that
+//! atomic path, so they CONVERGE on the retitle. `#99`'s `RenamePage`
+//! deliberately EXCLUDED document-root pages ("file-move semantics the
+//! reference does not model"); this transition models exactly that case and now
+//! passes green (see the `doc-file-rename-title-followed` keystone case).
 
 use holon_pbt_core::TransitionFactory;
 use holon_pbt_core::TransitionRef;
@@ -94,15 +95,13 @@ impl<R: RefLifecycle + RefDocumentsMut> TransitionFactory<R> for RenameDocument 
     fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let candidates = renameable_doc_names(state);
         let targets = free_targets(state);
-        // OFF by default: a faithful `mv` needs a `#+ID`-pinned doc for the
-        // `(doc, false)` retitle arm to fire born-equal. The synthetic
-        // `doc_<n>.org` files `CreateDocument` mints carry NO `#+ID:`, so
-        // moving one name-chain-mints a FRESH-uuid page while the old doc
-        // lingers -- a reconcile mismatch, not the retitle signal. The
-        // deterministic witness (a `#+ID`-bearing `WriteOrgFile` doc) runs via
-        // hand-authored replay, which is gated by `preconditions` alone. Opt in
-        // with `HOLON_PBT_DOC_RENAME=1` once the removal-cascade / atomic-Rename
-        // gaps (see the SUT cap + the parked keystone.jsonl case) are closed.
+        // OFF by default: kept env-gated so the RANDOM composed alphabet is
+        // unchanged (the atomic-Rename fix landed via the DETERMINISTIC
+        // `doc-file-rename-title-followed` keystone case, which is gated by
+        // `preconditions` alone, not this generator). The removal-cascade
+        // over-delete and the atomic-Rename-kind gaps are now CLOSED
+        // (`on_file_renamed` re-homes + retitles with no delete window). Opt the
+        // random rung in with `HOLON_PBT_DOC_RENAME=1`.
         let enabled = std::env::var("HOLON_PBT_DOC_RENAME").is_ok();
         let checks: Vec<Validated<(), Reason>> = vec![
             check(enabled, Reason::PreconditionFailed),

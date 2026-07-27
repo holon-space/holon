@@ -24,6 +24,7 @@ use holon_filesystem::BlockReader;
 use holon_filesystem::DocumentManager;
 use holon_filesystem::FileSyncController;
 
+use crate::file_watcher::FileEvent;
 use crate::file_watcher::OrgFileWatcher;
 use crate::org_renderer::OrgRenderer;
 
@@ -1063,22 +1064,41 @@ pub async fn run_file_sync_controller(
             return;
         };
         tokio::select! {
-            Some((maybe_path, change_seq)) = file_rx.recv() => {
-                if let Some(file_path) = maybe_path {
-                    tracing::debug!("[ORGSYNC_TRACE] file_rx -> on_file_changed({})", file_path.display());
-                    if let Err(e) = controller.on_file_changed(&file_path).await {
-                        tracing::debug!(
-                            "[ORGSYNC_TRACE] on_file_changed ERROR for {}: {}",
-                            file_path.display(), e
-                        );
-                        error!(
-                            "[OrgMode] File change error {}: {}",
-                            file_path.display(), e
-                        );
-                    } else {
-                        tracing::debug!("[ORGSYNC_TRACE] on_file_changed OK for {}", file_path.display());
+            Some((maybe_evt, change_seq)) = file_rx.recv() => {
+                match maybe_evt {
+                    Some(FileEvent::Changed(file_path)) => {
+                        tracing::debug!("[ORGSYNC_TRACE] file_rx -> on_file_changed({})", file_path.display());
+                        if let Err(e) = controller.on_file_changed(&file_path).await {
+                            tracing::debug!(
+                                "[ORGSYNC_TRACE] on_file_changed ERROR for {}: {}",
+                                file_path.display(), e
+                            );
+                            error!(
+                                "[OrgMode] File change error {}: {}",
+                                file_path.display(), e
+                            );
+                        } else {
+                            tracing::debug!("[ORGSYNC_TRACE] on_file_changed OK for {}", file_path.display());
+                        }
+                        idle_signal_for_task.mark_progress();
                     }
-                    idle_signal_for_task.mark_progress();
+                    Some(FileEvent::Renamed { from, to }) => {
+                        tracing::debug!("[ORGSYNC_TRACE] file_rx -> on_file_renamed({} -> {})", from.display(), to.display());
+                        if let Err(e) = controller.on_file_renamed(&from, &to).await {
+                            tracing::debug!(
+                                "[ORGSYNC_TRACE] on_file_renamed ERROR for {} -> {}: {}",
+                                from.display(), to.display(), e
+                            );
+                            error!(
+                                "[OrgMode] File rename error {} -> {}: {}",
+                                from.display(), to.display(), e
+                            );
+                        } else {
+                            tracing::debug!("[ORGSYNC_TRACE] on_file_renamed OK for {} -> {}", from.display(), to.display());
+                        }
+                        idle_signal_for_task.mark_progress();
+                    }
+                    None => {}
                 }
                 // Advance even on error / filtered events: the change was
                 // handled (errors are surfaced above); a wedged watermark

@@ -111,6 +111,53 @@ impl InMemoryFileSystem {
         });
         Ok(())
     }
+
+    /// Atomically move `from` to `to`, emitting ONE `Rename { from }` change on
+    /// `to` — the in-memory analog of the paired atomic rename the
+    /// `NotifyWatcher` reconstructs on real disk. Errors if `from` is absent or
+    /// `to`'s parent directory does not exist (parity with `std::fs::rename`).
+    /// The two paths are the ONLY event this move produces: no `Remove(from)` +
+    /// `Create(to)` pair, so `FileSyncController::on_file_renamed` re-homes the
+    /// document without the delete-then-create window a `mv` used to open.
+    pub fn rename_file(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        let from = normalize(from);
+        let to = normalize(to);
+        let seq = {
+            let mut st = self.lock();
+            match to.parent() {
+                Some(parent) if st.dirs.contains(parent) => {}
+                Some(parent) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!(
+                            "Parent directory does not exist (in-memory): {}",
+                            parent.display()
+                        ),
+                    ));
+                }
+                None => return Err(not_found(&to)),
+            }
+            let Some(entry) = st.files.remove(&from) else {
+                return Err(not_found(&from));
+            };
+            st.clock += 1;
+            let tick = st.clock;
+            st.files.insert(
+                to.clone(),
+                FileEntry {
+                    bytes: entry.bytes,
+                    mtime_tick: tick,
+                },
+            );
+            tick
+        };
+        let _ = self.tx.send(FileChange {
+            path: to,
+            kind: FileChangeKind::Rename { from },
+            seq,
+        });
+        Ok(())
+    }
 }
 
 fn normalize(path: &Path) -> PathBuf {
@@ -199,6 +246,10 @@ impl FileSystem for InMemoryFileSystem {
         // `write` — the in-memory analog of the `notify` deletion event, so
         // the org watcher's `on_file_changed` runs for the removed path.
         self.remove_file(path)
+    }
+
+    async fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        self.rename_file(from, to)
     }
 
     async fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {

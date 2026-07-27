@@ -1097,6 +1097,175 @@ impl FileSyncController {
         self.ingest_quarantine.remove(canonical);
     }
 
+    /// Move every per-file tracking entry from `from` to `to` — the rename
+    /// analog of [`forget_file_state`](Self::forget_file_state). Echo
+    /// suppression, the cold-boot hash, disk signatures, the diff base source,
+    /// and any quarantine follow the file to its new home WITHOUT a
+    /// forget/re-discover round-trip (which would re-ingest the file as new).
+    /// The diff `base` itself is keyed by document id, not path, so it needs no
+    /// migration.
+    fn migrate_file_state(&mut self, from: &CanonicalPath, to: &CanonicalPath) {
+        if let Some(v) = self.last_projection.remove(from) {
+            self.last_projection.insert(to.clone(), v);
+        }
+        if let Some(v) = self.last_projection_hash.remove(from) {
+            self.last_projection_hash.insert(to.clone(), v);
+        }
+        if let Some(v) = self.disk_signatures.remove(from) {
+            self.disk_signatures.insert(to.clone(), v);
+        }
+        if let Some(v) = self.base_source.remove(from) {
+            self.base_source.insert(to.clone(), v);
+        }
+        if let Some(v) = self.ingest_quarantine.remove(from) {
+            self.ingest_quarantine.insert(to.clone(), v);
+        }
+        if let Some(v) = self.seed_pristine.remove(from) {
+            self.seed_pristine.insert(to.clone(), v);
+        }
+        if self.quarantined.remove(from) {
+            self.quarantined.insert(to.clone());
+        }
+        if self.writeback_readonly.remove(from) {
+            self.writeback_readonly.insert(to.clone());
+        }
+    }
+
+    /// Handle an ATOMIC on-disk rename (`mv A.org B.org` in the vault). Reached
+    /// from the org sync loop when the change source delivers
+    /// `FileChangeKind::Rename { from }` — the maximal-information path that
+    /// carries BOTH the old and new paths in ONE event, so the owning document
+    /// is re-homed WITHOUT the delete-then-create window that makes a rename
+    /// indistinguishable from a delete. That window is the exact hazard
+    /// `on_file_deleted`'s D3 guard cannot close for a file rename whose title
+    /// has not yet followed: the vanished path's `#+ID:` still resolves to the
+    /// (not-yet-retitled) doc, whose authoritative title-chain still points at
+    /// the OLD file, so the guard reads "same file" and cascade-deletes the
+    /// very document the move re-homed.
+    ///
+    /// Re-homes the doc: migrates the per-file tracking state from `from` to
+    /// `to`, re-points the doc_id→path alias, retitles the doc-root page to the
+    /// new file stem (the file-move spec: a page's title FOLLOWS its file name),
+    /// then ingests `to` to reconcile its bytes. The doc KEEPS its id — a rename
+    /// never re-mints (ruled D1). NEVER cascade-deletes.
+    #[tracing::instrument(skip(self), name = "org.on_file_renamed", fields(from = %from.display(), to = %to.display()))]
+    pub async fn on_file_renamed(&mut self, from: &Path, to: &Path) -> Result<()> {
+        let from_canon = CanonicalPath::new(from);
+        let to_canon = CanonicalPath::new(to);
+
+        // Resolve the document that owned `from`. Identity comes from the last
+        // projected content's `#+ID:` (same authority `on_file_deleted` uses);
+        // the moved bytes now live at `to` carrying that same `#+ID:`. When we
+        // never projected `from` this session, fall back to a get-only
+        // name-chain lookup off `from`'s path (a rename must never MINT a doc).
+        let last = self.last_projection.get(&from_canon).cloned();
+        let document = match last
+            .as_deref()
+            .and_then(|l| self.format.doc_id_from_content(l))
+        {
+            Some(bare) => self.doc_manager.get_by_id(&EntityUri::block(&bare)).await?,
+            None => match from.strip_prefix(&self.root_dir) {
+                Ok(rel) => {
+                    let segments = path_to_name_chain(rel);
+                    let segment_refs: Vec<&str> =
+                        segments.iter().map(|s| s.as_str()).collect();
+                    self.doc_manager.find_by_name_chain(&segment_refs).await?
+                }
+                Err(_) => None,
+            },
+        };
+
+        let Some(document) = document else {
+            // `from` was never tracked as a document (e.g. a brand-new file
+            // moved in before its first ingest). Drop any stale from-state and
+            // ingest `to` as a fresh file — the standard discovery path.
+            self.forget_file_state(&from_canon);
+            info!(
+                "[FileSyncController] Rename {} -> {}: source had no known document; ingesting                  the destination as a new file",
+                from.display(),
+                to.display()
+            );
+            return self.on_file_changed(to).await;
+        };
+        let document_uri = document.id.clone();
+
+        info!(
+            "[FileSyncController] Atomic rename {} -> {}: re-homing document {} (no delete window)",
+            from.display(),
+            to.display(),
+            document_uri,
+        );
+
+        // Migrate per-file tracking state (echo-suppression, hashes, base
+        // source, quarantine) from the old path to the new one.
+        self.migrate_file_state(&from_canon, &to_canon);
+
+        // Re-point the alias so `inv-every-page-has-its-own-file` and every
+        // file-tracking consumer resolve the doc to its NEW home immediately.
+        if let Some(ref registrar) = self.alias_registrar {
+            registrar.register_alias(&document_uri, to).await;
+        }
+
+        // Reconcile the destination bytes into the store (children edits,
+        // header) and stamp `last_projection[to]`. The bytes are unchanged by a
+        // pure move, so echo-suppression usually short-circuits this — the doc
+        // stays alive throughout, never passing through a deleted state. Done
+        // BEFORE the retitle so the retitle is the LAST write and always wins,
+        // even when a rename coincides with a content edit that re-ingests.
+        self.on_file_changed(to).await?;
+
+        // File-move spec (D2): a document page's title FOLLOWS its file name.
+        // Retitle the doc-root page to the new file stem through the SAME single
+        // org->block write seam a normal update uses (the heal path's mechanism).
+        // A no-op when the stem is unchanged or the file is not a page.
+        if document.is_page() {
+            if let Ok(rel) = to.strip_prefix(&self.root_dir) {
+                let segments = path_to_name_chain(rel);
+                if let Some(new_stem) = segments.last() {
+                    if &document.content != new_stem {
+                        let mut params = holon_api::StorageEntity::new();
+                        params.insert("id".into(), Value::String(document_uri.to_string()));
+                        params.insert(
+                            "parent_id".into(),
+                            Value::String(document.parent_id.to_string()),
+                        );
+                        params.insert("content".into(), Value::String(new_stem.clone()));
+                        params.insert(
+                            "content_type".into(),
+                            Value::String(document.content_type.to_string()),
+                        );
+                        params.insert(
+                            ROUTING_DOC_URI_KEY.into(),
+                            Value::String(document_uri.to_string()),
+                        );
+                        self.ordering
+                            .apply_ingest_batch(vec![("update".to_string(), params)])
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "retitle-on-rename {} -> {} for {}: {e:#}",
+                                    from.display(),
+                                    to.display(),
+                                    document_uri
+                                )
+                            })?;
+                        if let Some(downstream) = &self.downstream {
+                            downstream.flush().await.map_err(|e| {
+                                anyhow::anyhow!("downstream flush after rename retitle: {e}")
+                            })?;
+                        }
+                        info!(
+                            "[FileSyncController] Rename retitled page {} to new file stem {:?}",
+                            document_uri, new_stem
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Handle a file change event from the FileWatcher.
     ///
     /// Thin write-back-quarantine wrapper around

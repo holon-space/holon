@@ -11,6 +11,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use holon_core::CanonicalPath;
+use holon_filesystem::FileChangeKind;
 use holon_filesystem::FileChangeSource;
 use holon_filesystem::FileSystem;
 pub use holon_filesystem::ScannedEntries;
@@ -57,16 +58,37 @@ fn is_ignored(path: &Path, gitignore: &Gitignore) -> bool {
         .is_ignore()
 }
 
+/// An org-relevant file event the sync loop must act on.
+///
+/// `Changed` is the Modify/Create/Remove path (`on_file_changed`, which stats
+/// the path and routes create-vs-delete). `Renamed` carries BOTH sides of an
+/// atomic `mv` so the loop can re-home the document via `on_file_renamed`
+/// WITHOUT the delete-then-create window that lets a rename be mis-read as a
+/// delete (and cascade-delete the re-homed doc).
+#[derive(Debug, Clone)]
+pub enum FileEvent {
+    /// A single-path change: the sync loop calls `on_file_changed`.
+    Changed(PathBuf),
+    /// An atomic rename: the sync loop calls `on_file_renamed(from, to)`.
+    Renamed { from: PathBuf, to: PathBuf },
+}
+
+/// Whether `path` is an org file the sync loop should track (`.org` extension,
+/// not gitignored / VCS-internal).
+fn is_org_relevant(path: &Path, gitignore: &Gitignore) -> bool {
+    path.extension().map(|e| e == "org").unwrap_or(false) && !is_ignored(path, gitignore)
+}
+
 /// File watcher for Org files: the org-side consumer of a [`FileChangeSource`].
 ///
-/// The channel carries `(Option<PathBuf>, seq)`: `Some(path)` for org-relevant
-/// changes the sync loop must ingest, `None` for filtered ones (non-`.org`,
-/// gitignored). Filtered events still flow through the SAME channel so the
-/// consumer can advance its processed-seq watermark strictly in delivery
+/// The channel carries `(Option<FileEvent>, seq)`: `Some(event)` for
+/// org-relevant changes the sync loop must ingest, `None` for filtered ones
+/// (non-`.org`, gitignored). Filtered events still flow through the SAME channel
+/// so the consumer can advance its processed-seq watermark strictly in delivery
 /// order — advancing for a filtered event from the bridge directly could
 /// overtake an unprocessed earlier forwarded event.
 pub struct OrgFileWatcher {
-    change_rx: mpsc::UnboundedReceiver<(Option<PathBuf>, u64)>,
+    change_rx: mpsc::UnboundedReceiver<(Option<FileEvent>, u64)>,
 }
 
 impl OrgFileWatcher {
@@ -85,14 +107,43 @@ impl OrgFileWatcher {
             loop {
                 match source_rx.recv().await {
                     Ok(change) => {
-                        let path = change.path;
-                        let relevant = path.extension().map(|e| e == "org").unwrap_or(false)
-                            && !is_ignored(&path, &gitignore);
-                        if relevant {
-                            debug!("File change detected: {}", path.display());
-                        }
-                        let msg = if relevant { Some(path) } else { None };
-                        if change_tx.send((msg, change.seq)).is_err() {
+                        let seq = change.seq;
+                        let msg = match change.kind {
+                            FileChangeKind::Rename { from } => {
+                                let to = change.path;
+                                if is_org_relevant(&to, &gitignore) {
+                                    debug!(
+                                        "File rename detected: {} -> {}",
+                                        from.display(),
+                                        to.display()
+                                    );
+                                    Some(FileEvent::Renamed { from, to })
+                                } else if is_org_relevant(&from, &gitignore) {
+                                    // Renamed OUT of org-space (`.org` -> `.txt`):
+                                    // the org side sees only the departure, so
+                                    // treat it as a change to the vanished `from`
+                                    // (stats NotFound -> delete).
+                                    debug!(
+                                        "Org file renamed out of org-space: {} -> {}",
+                                        from.display(),
+                                        to.display()
+                                    );
+                                    Some(FileEvent::Changed(from))
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => {
+                                let path = change.path;
+                                if is_org_relevant(&path, &gitignore) {
+                                    debug!("File change detected: {}", path.display());
+                                    Some(FileEvent::Changed(path))
+                                } else {
+                                    None
+                                }
+                            }
+                        };
+                        if change_tx.send((msg, seq)).is_err() {
                             // Receiver dropped — sync loop is gone.
                             return;
                         }
@@ -111,12 +162,12 @@ impl OrgFileWatcher {
     }
 
     /// Get a receiver for file change events
-    pub fn receiver(&mut self) -> &mut mpsc::UnboundedReceiver<(Option<PathBuf>, u64)> {
+    pub fn receiver(&mut self) -> &mut mpsc::UnboundedReceiver<(Option<FileEvent>, u64)> {
         &mut self.change_rx
     }
 
     /// Consume the watcher and return the filtered-path receiver.
-    pub fn into_receiver(self) -> mpsc::UnboundedReceiver<(Option<PathBuf>, u64)> {
+    pub fn into_receiver(self) -> mpsc::UnboundedReceiver<(Option<FileEvent>, u64)> {
         self.change_rx
     }
 }

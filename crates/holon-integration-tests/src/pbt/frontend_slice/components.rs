@@ -3149,43 +3149,30 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
 
     async fn rename_document(&self, old_file_name: &str, new_file_name: &str) {
         use holon_filesystem::FileSystem;
-        // A user renames `A.org` -> `B.org`. The `FileChange` port has NO
-        // atomic-Rename kind (`change_source.rs`: Modify/Create/Remove only), so
-        // production sees a `mv` as Remove(A) + Create(B). This models the
-        // Create(B) half: the moved file APPEARS carrying `A`'s `#+ID:`
-        // unchanged, so the watcher re-ingests it and its `#+ID:` resolves to
-        // the SAME existing document -- driving file_sync_controller's
-        // `(doc, false)` arm (~:1479-1483), which never applies the new
-        // filename-derived title. That stale-title divergence is what this
-        // transition exists to catch.
-        //
-        // The Remove(A) half is DELIBERATELY omitted: `on_file_deleted`
-        // (~:902) resolves the vanished path's document from
-        // `last_projection[A]`'s `#+ID:` and cascade-deletes it -- so removing
-        // the old file over-deletes the very document the moved file now owns
-        // (a SECOND, distinct defect). Performing it here would (a) mask the
-        // retitle signal by deleting the page outright and (b) make a
-        // born-equal doc vanish from the SUT while the oracle keeps it, which
-        // trips the per-tick reconcile (`harness.rs` synthetic/real parity).
-        // The old file therefore lingers, double-homing the doc -- the reason
-        // the replay softens `inv-every-page-has-its-own-file` /
-        // `inv-blocks-match-ref/org` (see the parked case in keystone.jsonl).
+        // A user renames `A.org` -> `B.org`. The `FileChange` port now carries an
+        // ATOMIC `Rename { from }` kind (`change_source.rs`), and the in-memory
+        // fs's `rename` emits exactly that single event on `B` carrying `A` as
+        // `from`. The org sync loop routes it to
+        // `FileSyncController::on_file_renamed`, which re-homes the doc WITHOUT a
+        // delete-then-create window: the doc keeps its `#+ID:`, its file record /
+        // alias moves to `B`, and its page retitles to the new file stem (the
+        // file-move spec). No Remove(A) half fires, so the old
+        // `on_file_deleted` cascade-over-delete never triggers and the doc is
+        // never double-homed — the atomic path both the reference and the SUT
+        // now share, which un-parks the `doc-file-rename` keystone case.
         let old_path = self.org_root.join(old_file_name);
         let new_path = self.org_root.join(new_file_name);
-        let content = FileSystem::read(self.org_fs.as_ref(), &old_path)
-            .await
-            .unwrap_or_else(|e| {
-                panic!("[SutAppLifecycle::rename_document] read {old_file_name} failed: {e:#}")
-            });
         if let Some(parent) = new_path.parent() {
             self.org_fs.mkdir_all(parent);
         }
-        FileSystem::write(self.org_fs.as_ref(), &new_path, &content)
+        FileSystem::rename(self.org_fs.as_ref(), &old_path, &new_path)
             .await
             .unwrap_or_else(|e| {
-                panic!("[SutAppLifecycle::rename_document] write {new_file_name} failed: {e:#}")
+                panic!(
+                    "[SutAppLifecycle::rename_document] rename {old_file_name} ->                      {new_file_name} failed: {e:#}"
+                )
             });
-        self.settle_block_id_set("rename_document(ingest-moved-file)")
+        self.settle_block_id_set("rename_document(atomic-rename)")
             .await;
         // Track the doc's new home so later file-seam lookups resolve it.
         {

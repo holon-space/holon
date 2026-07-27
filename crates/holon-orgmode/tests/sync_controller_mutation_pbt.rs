@@ -2869,3 +2869,135 @@ mod initial_scan_batched_barrier_tests {
         }
     }
 }
+
+// ============================================================================
+// Atomic file-rename port (Rename lane, 2026-07-27)
+// ============================================================================
+//
+// A user `mv A.org B.org` inside the vault. The pre-atomic pipeline saw this as
+// Remove(A) + Create(B): the Remove half (or a poll tick that finds A gone)
+// routes to `on_file_deleted`, whose D3 guard CANNOT tell a rename from a
+// delete when the page title has not yet followed the file (its authoritative
+// title-chain still points at A), so it cascade-deletes the very doc the move
+// re-homed. The atomic `on_file_renamed(from, to)` carries BOTH paths in one
+// call and re-homes the doc WITHOUT any delete window.
+//
+// Driven at the `FileSyncController` boundary (real controller, in-memory store
+// + doc manager, real on-disk files) — the level the parked keystone.jsonl case
+// could not reach without the atomic port. The doc-root Page lives in the mock
+// `DocumentManager` (as it lives in `block_raw` in prod); child blocks land in
+// the store. The cascade's observable here is the CHILD deletion; the atomic
+// path's observables are child survival + the doc-root retitled in the store.
+mod atomic_rename_tests {
+    use super::*;
+
+    /// Write `test.org` (`#+ID:` + one child) and ingest it so the store +
+    /// `last_projection` are established.
+    async fn seed_and_ingest(fx: &mut TestFixture, child: &Block) {
+        fx.ensure_parent_dirs().await;
+        let baseline = vec![child.clone()];
+        fx.seed_blocks(&baseline);
+        let org_children =
+            OrgRenderer::render_entitys(&baseline, &fx.file_path(), &fx.doc_id);
+        let org = format!("#+ID: {}\n{}", fx.doc_id.id(), org_children);
+        tokio::fs::write(&fx.file_path(), org.as_bytes())
+            .await
+            .expect("write test.org");
+        fx.controller
+            .on_file_changed(&fx.file_path())
+            .await
+            .expect("initial ingest of test.org");
+    }
+
+    /// Characterization of the DEFECT the atomic port fixes: a `mv` delivered as
+    /// Create(B) + a poll tick (which finds A gone → `on_file_deleted`)
+    /// cascade-deletes the re-homed doc's blocks. Kept GREEN by asserting the
+    /// defect is present — if it ever stops reproducing, the pipeline changed
+    /// and the atomic-path test's premise must be revisited.
+    #[tokio::test]
+    async fn nonatomic_rename_pipeline_cascade_deletes_the_doc() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut fx = TestFixture::new(temp.path());
+        let child = Block::new_text(
+            EntityUri::block_random(),
+            fx.doc_id.clone(),
+            "child body".to_string(),
+        );
+        seed_and_ingest(&mut fx, &child).await;
+
+        assert!(
+            BlockReader::get_block_authoritative(&*fx.store, &child.id)
+                .await
+                .unwrap()
+                .is_some(),
+            "precondition: child block ingested into the store"
+        );
+
+        let old = fx.file_path();
+        let moved = fx.root_dir.join("moved.org");
+        tokio::fs::rename(&old, &moved).await.unwrap();
+
+        // Create(B) half, then the poll tick between them.
+        fx.controller.on_file_changed(&moved).await.unwrap();
+        fx.controller.poll_tracked_files().await.unwrap();
+
+        let child_after = BlockReader::get_block_authoritative(&*fx.store, &child.id)
+            .await
+            .unwrap();
+        assert!(
+            child_after.is_none(),
+            "characterization: the non-atomic rename pipeline cascade-deletes the doc's blocks \
+             (the defect the atomic Rename port fixes). If this now PASSES with the child alive, \
+             the pipeline changed — revisit the atomic-path test premise."
+        );
+    }
+
+    /// The atomic port: the SAME `mv`, one `on_file_renamed` call, keeps the
+    /// child intact (NO cascade), and retitles the doc-root to the new file stem
+    /// (file-move spec D2). A poll tick after the rename must NOT cascade-delete.
+    #[tokio::test]
+    async fn atomic_rename_keeps_blocks_alive_and_retitles() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut fx = TestFixture::new(temp.path());
+        let child = Block::new_text(
+            EntityUri::block_random(),
+            fx.doc_id.clone(),
+            "child body".to_string(),
+        );
+        seed_and_ingest(&mut fx, &child).await;
+        let doc_id = fx.doc_id.clone();
+
+        let old = fx.file_path();
+        let moved = fx.root_dir.join("moved.org");
+        tokio::fs::rename(&old, &moved).await.unwrap();
+
+        // Atomic path — one call carrying both sides, no delete window.
+        fx.controller.on_file_renamed(&old, &moved).await.unwrap();
+        // A poll tick must be a no-op: the old path was re-homed, not left
+        // dangling in the tracked set.
+        fx.controller.poll_tracked_files().await.unwrap();
+
+        // Child survives — the anti-cascade property, the core fix.
+        assert!(
+            BlockReader::get_block_authoritative(&*fx.store, &child.id)
+                .await
+                .unwrap()
+                .is_some(),
+            "child block must survive an atomic rename (no cascade window)"
+        );
+
+        // Doc-root retitled to the new file stem — the file-move spec (D2). The
+        // retitle went through the same org->block write seam prod uses; the
+        // Page-tag preservation is prod's `update_in_tree` (minimal params)
+        // contract, exercised by `idonly_title_heal.rs` — not re-asserted here
+        // where the doc-root lives in the mock DocumentManager, not the store.
+        let doc_after = BlockReader::get_block_authoritative(&*fx.store, &doc_id)
+            .await
+            .unwrap()
+            .expect("atomic rename must materialize the retitled doc-root (id stable, no re-mint)");
+        assert_eq!(
+            doc_after.content, "moved",
+            "page title must follow the new file name (file-move spec D2)"
+        );
+    }
+}

@@ -41,6 +41,18 @@ pub trait FileSystem: Send + Sync {
     /// with a change-notification surface emit a `Remove` event, mirroring what
     /// the real `notify` watcher delivers for an on-disk deletion.
     async fn remove(&self, path: &Path) -> std::io::Result<()>;
+    /// Atomically move `from` to `to`. Adapters with a change-notification
+    /// surface emit ONE `Rename { from }` event on `to` — the atomic port that
+    /// lets a consumer re-home a document without a delete-then-create window.
+    ///
+    /// The default is the non-atomic read→write→remove fallback (kept so
+    /// minimal test doubles need not implement it); the real and in-memory
+    /// adapters override it with a genuine atomic move + paired event.
+    async fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        let bytes = self.read(from).await?;
+        self.write(to, &bytes).await?;
+        self.remove(from).await
+    }
     async fn create_dir_all(&self, path: &Path) -> std::io::Result<()>;
     /// Recursive walk respecting `.gitignore`, skipping hidden entries
     /// (`.git`, `.jj`, …). A missing `root` yields empty entries, not an
@@ -75,6 +87,15 @@ impl FileSystem for RealFileSystem {
         tokio::fs::remove_file(path)
             .await
             .map_err(|e| std::io::Error::new(e.kind(), format!("remove {}: {e}", path.display())))
+    }
+
+    async fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        tokio::fs::rename(from, to).await.map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!("rename {} -> {}: {e}", from.display(), to.display()),
+            )
+        })
     }
 
     async fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
