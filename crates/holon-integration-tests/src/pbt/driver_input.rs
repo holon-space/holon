@@ -152,6 +152,32 @@ impl DriverInputComponent {
         }
     }
 
+    /// Like [`Self::with_input`] but SHARES the composed runner's
+    /// [`IdResolver`], so the single-shot bounds precheck resolves an
+    /// oracle-space synthetic id (`block::split-N`, `block:ref-doc-N`) to the
+    /// SUT-minted real id BEFORE looking up its geometry. The windowed
+    /// `overlay_windowed_caps` build uses this: a real id-minting backend
+    /// (a split mints a fresh uuid) means the fixed-id assumption
+    /// [`Self::with_input`] encodes is FALSE — without the shared resolver a
+    /// gesture targeting a just-split block prechecks the unmapped synthetic
+    /// and false-fails `no registered bounds` even though the row rendered
+    /// under its real id.
+    pub fn with_input_resolved(
+        engine: Arc<ReactiveEngine>,
+        driver: Arc<dyn UserDriver>,
+        geometry: Box<dyn GeometryProvider>,
+        resolver: IdResolver,
+    ) -> Self {
+        Self {
+            engine,
+            forced_engine_focus: None,
+            driver: Some(driver),
+            geometry: Some(geometry),
+            headless: false,
+            resolver: Some(resolver),
+        }
+    }
+
     /// The **headless** input provider: wraps a headless production
     /// `UserDriver` (`ReactiveEngineDriver`) with **no geometry**. This is
     /// the UI-adjacent logic layer for the headless composed `CapMap` —
