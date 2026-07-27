@@ -48,6 +48,7 @@ use holon_pbt_core::capabilities::SutBackend;
 use holon_pbt_core::capabilities::SutBlockCreate;
 use holon_pbt_core::capabilities::SutBlockToPage;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
+use holon_pbt_core::capabilities::SutClockAdvance;
 use holon_pbt_core::capabilities::SutEdgeFieldWrite;
 use holon_pbt_core::capabilities::SutEditorMirrorRead;
 use holon_pbt_core::capabilities::SutFocus;
@@ -323,8 +324,9 @@ async fn compose_sut_seeded_impl(
         // whose content + deterministic id are known to the oracle
         // (`keystone_boot_journal_id`). Without a fixed clock the boot journal's
         // date would be the wall-clock day — non-deterministic, midnight-racy.
-        // `SutClockAdvance` is intentionally NOT registered (AdvanceDay stays
-        // dormant), so the clock never advances past boot in the keystone.
+        // `SutClockAdvance` is registered below (after `register_non_gesture`)
+        // ONLY under `HOLON_PBT_ADVANCE_DAY`; when off, `AdvanceDay` stays out
+        // of the alphabet and the clock never advances past boot (default).
         let comp = Arc::new(
             HeadlessFrontendComponent::new_with_clock(
                 frontend_seed_org,
@@ -387,6 +389,21 @@ async fn compose_sut_seeded_impl(
         // GitInit / JjGitInit / CreateStaleLoro) are `!app_started`-gated and
         // the composed oracle boots pre-started, so they stay honestly
         // unreachable (their cap methods fail loud if that ever changes).
+        // `SutClockAdvance` (ADR 0024 §6): the injected `TestClock` + the
+        // production `ClockScheduler`'s own `reconcile_clock`, so day-rollover
+        // fires the journal auto-create rule live. Registering it admits
+        // `AdvanceDay` into the composed alphabet (auto-narrowed by
+        // `aggregate_transitions`), driving the daily-journal behaviour in the
+        // composed loop (prod/E2E similarity gap: the clock never advanced past
+        // boot before). ENV-GATED behind `HOLON_PBT_ADVANCE_DAY` (same pattern
+        // as `HOLON_PBT_DOC_RENAME`): the composed ref now models the
+        // rule-fired journal day-block on advance (`RefClockMut::advance_day` →
+        // `seed_journal_day`), so the DEFAULT alphabet stays unchanged until the
+        // co-landed ref model + `inv-journal-one-per-day` prove green under the
+        // full catalog. Flip the env on to drive `AdvanceDay` in the keystone.
+        if std::env::var("HOLON_PBT_ADVANCE_DAY").is_ok() {
+            caps.insert(comp.clone() as Arc<dyn SutClockAdvance>);
+        }
         caps.insert(comp.clone() as Arc<dyn holon_pbt_core::capabilities::SutFixtureFs>);
         // Edge-field write cap (`tags` / `requires` on an existing block) — hosted
         // only when a Loro authority doc is present (`loro_doc_store()` is `Some`

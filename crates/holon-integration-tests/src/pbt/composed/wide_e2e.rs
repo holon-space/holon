@@ -531,29 +531,47 @@ pub fn seed_folder_companion_subdir(state: &mut ReferenceState) {
 /// `Actor::ActionEngine` is present (implies Turso); the SUT fires it live.
 pub fn seed_boot_journal(state: &mut ReferenceState) {
     use crate::pbt::frontend_slice::components::keystone_boot_journal_date;
-    use crate::pbt::frontend_slice::components::keystone_boot_journal_id;
+    // The boot rule fires ONCE at boot, appended after the seeded
+    // `Journal Auto-Create` heading (sequence 0) — sequence 1.
+    seed_journal_day(state, &keystone_boot_journal_date(), 1);
+}
+
+/// Seed the journal day-block the production `journals_auto_create` rule fires
+/// for `date` into the composed reference, as a NON-seed self-documenting
+/// `Page` child of the seed `block:journals` page — the reference half that
+/// makes the block-comparison invariants + the per-tick reconcile expect the
+/// rule-minted journal in the SUT projection.
+///
+/// Shared by the boot seed (`seed_boot_journal`) and the clock-advance path
+/// (`RefClockMut::advance_day`): both go through the SAME production emit
+/// (`fire_emit`'s `place: page(journals)` branch), so the id is the CANONICAL
+/// page identity `PageId::for_path("Journals/{date}")` — the exact
+/// deterministic id the `action_watcher` mints — and the shape is a `Page`
+/// owning its own subdir file `Journals/{date}.org` (LogSeq-parity daily-note
+/// ruling 2026-07-19). Idempotent: a date already present (same-day re-tick, or
+/// a re-seed) is left untouched.
+///
+/// `sequence` places the block in sibling order after the seed
+/// `Journal Auto-Create` heading (sequence 0). The oracle orders siblings by
+/// `(sibling_order_group, sequence, id)` (ADR 0005); the SUT appends each
+/// rule-fired journal LAST (fractional index after all prior siblings), so a
+/// strictly-increasing sequence per rollover (boot = 1, then 2, 3, …) matches
+/// the SUT's created-order — see `RefClockMut::advance_day`.
+pub fn seed_journal_day(state: &mut ReferenceState, date: &str, sequence: i64) {
+    let id = holon_api::link_parser::PageId::for_path(&format!("Journals/{date}"))
+        .expect("journal page path is well-formed")
+        .into_entity_uri();
+    // Idempotent: a same-day re-tick (or a re-seed) must not duplicate or churn.
+    if state.domain.block_state.blocks.contains_key(&id) {
+        return;
+    }
     let journals = EntityUri::parse("block:journals").expect("journals id");
-    let id = keystone_boot_journal_id();
-    let date = keystone_boot_journal_date();
-    let mut block = Block::new_text(id.clone(), journals.clone(), &date);
-    // LogSeq-parity daily-note ruling (2026-07-19): the auto-create rule emits
-    // `place: page(journals)`, so the day-block is a PAGE-file child of the
-    // journals shell — `Page`-tagged, a `[[{date}]]` link target, and materialized
-    // into its OWN subdir file `Journals/{date}.org` (name_chain → nearest ancestor
-    // page = journals), DE-INLINED from the `Journals.org` companion. Model that
-    // shape here (mirrors `seed_folder_companion_subdir`): a self-documenting
-    // NON-seed page owning its subdir file.
+    let mut block = Block::new_text(id.clone(), journals, date);
     block.set_page(true);
-    // The action creates the journal AFTER the boot seed, so the SUT's fractional
-    // index appends it after the seeded `Journal Auto-Create` heading (both are
-    // siblings of `block:journals`). The oracle orders siblings by
-    // `(sibling_order_group, sequence, id)` (ADR 0005); the heading has sequence 0,
-    // so give the journal sequence 1 to match the SUT's created-last order.
-    block.set_sequence(1);
+    block.set_sequence(sequence);
     state.domain.block_state.blocks.insert(id.clone(), block);
     // Self-documenting page (`block_documents[id]=id`, NON-seed) so it is INCLUDED
-    // in `all_non_seed_block_ids` — `inv-every-page-has-its-own-file` checks it (a
-    // seed-classified page would be skipped, leaving the oracle inert).
+    // in `all_non_seed_block_ids` — `inv-every-page-has-its-own-file` checks it.
     state
         .domain
         .block_state

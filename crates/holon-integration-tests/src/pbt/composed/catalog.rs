@@ -39,6 +39,14 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // frontend slice supplies it (production CacheBlockReader + OrgRenderer).
         invariants::org_render_fixed_point::wire(),
         invariants::no_orphan::wire(),
+        // Daily-journal rule cardinality (ADR 0024 §6): the production
+        // `journals_auto_create` rule yields exactly one journal date-page per
+        // calendar day and one for every clock-visited day. Needs
+        // `SutSqlProjection` + `RefClock`, so it selects only on frontend+Turso
+        // slices that host `SutClockAdvance` and can drive `AdvanceDay`
+        // (`HOLON_PBT_ADVANCE_DAY`). Vacuously green (boot day only) until the
+        // clock advances, so it adds no false RED to the default keystone.
+        invariants::journal_one_per_day::wire(),
         // Sidebar page-tag preservation: a ref `Page` doc-root must keep its
         // `Page` tag in the SUT projection (folder-companion demotion class,
         // dogfood 2026-07-12). Needs `SutBackend` + `RefBlockTree`.

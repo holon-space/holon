@@ -2225,13 +2225,50 @@ impl ReferenceState {
             if self.domain.block_state.blocks.contains_key(&doc_uri) {
                 continue;
             }
-            let doc_name = std::path::Path::new(&file_name)
+            let path = std::path::Path::new(&file_name);
+            let doc_name = path
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or(&file_name)
                 .to_string();
-            let mut doc_block = Block::new_text(doc_uri.clone(), EntityUri::no_parent(), doc_name);
+            // A file in a SUBDIRECTORY (e.g. `Journals/2026-01-16.org`) is a page
+            // NESTED under its folder-page, not a top-level doc-root — the
+            // name-chain nesting the original create used. The only such folder
+            // today is the `journals` companion (the auto-create rule emits
+            // `place: page(journals)`), whose seed id is `block:journals`. Preserve
+            // that parent on undo re-materialisation so the rule-created journal
+            // day-block returns under `block:journals` (where the SUT keeps it),
+            // not as a phantom top-level doc-root. Non-subdir docs stay `no_parent`.
+            let is_journal_subdir = path
+                .parent()
+                .and_then(|d| d.file_name())
+                .and_then(|s| s.to_str())
+                .is_some_and(|dir| dir == "Journals");
+            let parent_uri = if is_journal_subdir {
+                EntityUri::block("journals")
+            } else {
+                EntityUri::no_parent()
+            };
+            let mut doc_block = Block::new_text(doc_uri.clone(), parent_uri, doc_name);
             doc_block.set_page(true);
+            // Match the SUT's created-last sibling order under `block:journals`
+            // (see `RefClockMut::advance_day`): a re-materialised journal appends
+            // after every current sibling.
+            if is_journal_subdir {
+                use holon_orgmode::models::OrgBlockExt;
+                let journals = EntityUri::block("journals");
+                let next_seq = self
+                    .domain
+                    .block_state
+                    .blocks
+                    .values()
+                    .filter(|b| b.parent_id == journals)
+                    .map(|b| b.sequence())
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                doc_block.set_sequence(next_seq);
+            }
             self.domain
                 .block_state
                 .blocks

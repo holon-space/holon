@@ -137,6 +137,11 @@ const LAYER_MAP: &[Entry] = &[
         "pbt/composed/invariants/live_children_match_ref.rs",
     ),
     (
+        "inv-journal-one-per-day",
+        Some(Layer::Projection),
+        "pbt/composed/invariants/journal_one_per_day.rs",
+    ),
+    (
         "inv-matview-consistent-with-recompute",
         Some(Layer::Projection),
         "pbt/composed/invariants/matview_recompute_matches.rs",

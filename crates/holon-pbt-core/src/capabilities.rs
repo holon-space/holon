@@ -505,6 +505,13 @@ pub trait RefClock {
     /// How many distinct journal day-blocks the rule should have produced so
     /// far: the boot day plus every distinct day the clock has advanced to.
     fn expected_journal_day_count(&self) -> usize;
+
+    /// Every distinct calendar day (`YYYY-MM-DD`) the clock has visited — the
+    /// boot day plus each advanced-to day. Its cardinality equals
+    /// [`Self::expected_journal_day_count`]; the set itself lets
+    /// `inv-journal-one-per-day` assert the SUT's journal date-pages match the
+    /// visited days exactly (title equality, not just count).
+    fn visited_days(&self) -> std::collections::BTreeSet<String>;
 }
 
 /// Mutating half of [`RefClock`] — advancing the model's calendar day. Not
