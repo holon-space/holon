@@ -509,37 +509,60 @@ impl DispatchingOperationEngine {
         let plan = plan_instantiation(&nodes, &request)?;
 
         let block_entity = EntityName::new("block");
-        for create_params in plan.creates {
-            // Boxed for async recursion (this IS execute_operation calling
-            // itself one level deep; a nested instantiate cannot occur —
-            // the plan only emits `create`).
-            Box::pin(OperationEngine::execute_operation(
-                self,
-                &block_entity,
-                "create",
-                create_params,
-                origin.clone(),
-            ))
-            .await?;
+        let creates = plan.creates;
+        let replace_block = request.replace_block.clone();
+        let root_id = plan.root_id;
+
+        // Composite undo (Inc3): the whole instantiation is ONE user gesture, so
+        // wrap the per-create fan-out (+ any empty→in-place delete) in ONE undo
+        // group. Each sub-op still RE-ENTERS `execute_operation` UNCHANGED — C2a
+        // provenance stamping, the C2b history relation, and per-op undo
+        // classification all apply verbatim; only the undo PUSH is buffered, so
+        // the N per-create entries collapse into ONE composite entry (inverse =
+        // leaf-first deletes, so one undo removes every instance block). A
+        // Rule/Sync-origin instantiation buffers nothing (the push is
+        // User-gated), so its group materializes NOTHING.
+        self.begin_undo_group().await;
+        let fanout: Result<()> = async {
+            for create_params in creates {
+                // Boxed for async recursion (this IS execute_operation calling
+                // itself one level deep; a nested instantiate cannot occur —
+                // the plan only emits `create`).
+                Box::pin(OperationEngine::execute_operation(
+                    self,
+                    &block_entity,
+                    "create",
+                    create_params,
+                    origin.clone(),
+                ))
+                .await?;
+            }
+            // Empty→in-place placement (frontend picker): the instance is created,
+            // now delete the empty block it supersedes. Ordered AFTER the creates
+            // so a failed instantiation never destroys the target (the block is
+            // empty, so this never touches existing content). Routed through the
+            // normal `delete` op → provenance/history/undo classification apply.
+            if let Some(replace_id) = &replace_block {
+                let mut del_params: StorageEntity = StorageEntity::default();
+                del_params.insert(Arc::from("id"), Value::String(replace_id.clone()));
+                Box::pin(OperationEngine::execute_operation(
+                    self,
+                    &block_entity,
+                    "delete",
+                    del_params,
+                    origin.clone(),
+                ))
+                .await?;
+            }
+            Ok(())
         }
-        // Empty→in-place placement (frontend picker): the instance is created,
-        // now delete the empty block it supersedes. Ordered AFTER the creates so
-        // a failed instantiation never destroys the target (the block is empty,
-        // so this never touches existing content). Routed through the normal
-        // `delete` op → provenance/history/undo classification all apply.
-        if let Some(replace_id) = &request.replace_block {
-            let mut del_params: StorageEntity = StorageEntity::default();
-            del_params.insert(Arc::from("id"), Value::String(replace_id.clone()));
-            Box::pin(OperationEngine::execute_operation(
-                self,
-                &block_entity,
-                "delete",
-                del_params,
-                origin.clone(),
-            ))
-            .await?;
-        }
-        Ok(Some(Value::String(plan.root_id)))
+        .await;
+        // ALWAYS close the group — even on a mid-fan-out failure — so a partial
+        // instantiation is ONE undoable composite (of the sub-ops that landed)
+        // and never leaks an open group into the next operation.
+        self.end_undo_group().await?;
+        fanout?;
+        Ok(Some(Value::String(root_id)))
     }
 
     /// Dispatch ONE constituent write of the block→page compound through the
@@ -1747,15 +1770,105 @@ mod instantiate_template_tests {
             "the single undo of an instantiation must apply, got {outcome:?}"
         );
 
-        // The whole gesture must be gone after that one undo. Today only the
-        // instance CHILD is removed (last-pushed per-create entry) and the
-        // instance ROOT survives — this assertion is the red-for-the-right-reason.
+        // The whole gesture is gone after that one undo (Inc3 composite group).
+        // Before Inc3 this was RED: instantiate pushed N per-create entries, so
+        // one undo removed only the last-pushed CHILD and the instance ROOT
+        // survived. The Inc3 begin/end_undo_group collapse makes one undo remove
+        // ALL instance blocks (inverse = leaf-first deletes).
         let after = remaining_instance_blocks(&engine).await;
         assert!(
             after.is_empty(),
             "one undo must remove ALL instance blocks (instantiation is one gesture); \
              {} still present after a single undo: {after:?}",
             after.len()
+        );
+    }
+
+    /// Inc3 (ruling #1): a Rule-origin instantiation mutates state (blocks are
+    /// created) but journals NO undo entry — only User-origin ops enter the
+    /// user history. The composite group opens and closes around the
+    /// fan-out, but every per-create push is User-gated, so the group
+    /// materializes NOTHING.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rule_origin_instantiation_journals_no_undo_entry() {
+        let engine = block_engine().await;
+        let block = EntityName::new("block");
+        let rule = || OpOrigin::Rule {
+            transition_id: "rule:test-template".into(),
+        };
+        let params = |fields: &[(&str, Value)]| -> StorageEntity {
+            fields
+                .iter()
+                .map(|(k, v)| (Arc::from(*k), v.clone()))
+                .collect()
+        };
+        // Seed the target + template under RULE origin so the SEED itself
+        // journals nothing (ruling #1) — this isolates the instantiate's own
+        // journaling. `can_undo` is then a clean signal for the op under test.
+        engine
+            .execute_operation(
+                &block,
+                "create",
+                params(&[
+                    ("id", Value::String("block:target".into())),
+                    ("content", Value::String("Target".into())),
+                ]),
+                rule(),
+            )
+            .await
+            .unwrap();
+        engine
+            .execute_operation(
+                &block,
+                "create",
+                params(&[
+                    ("id", Value::String("block:tpl".into())),
+                    ("content", Value::String("{{date}}".into())),
+                    ("template", Value::String("daily".into())),
+                    ("template_vars", Value::String("date, mood=neutral".into())),
+                ]),
+                rule(),
+            )
+            .await
+            .unwrap();
+        engine
+            .execute_operation(
+                &block,
+                "create",
+                params(&[
+                    ("id", Value::String("block:tpl-c1".into())),
+                    ("parent_id", Value::String("block:tpl".into())),
+                    ("content", Value::String("see {{date}} now".into())),
+                ]),
+                rule(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !engine.can_undo().await,
+            "sanity: the rule-origin seed journals nothing"
+        );
+
+        engine
+            .execute_operation(
+                &block,
+                "instantiate_template",
+                instantiate_params("rule-key", &[("date", "2026-07-12")]),
+                rule(),
+            )
+            .await
+            .unwrap();
+
+        // The instance blocks (root + child) were really created …
+        assert_eq!(
+            remaining_instance_blocks(&engine).await.len(),
+            2,
+            "rule-origin instantiation still mutates state"
+        );
+        // … but nothing is undoable: the group materialized no composite entry.
+        assert!(
+            !engine.can_undo().await,
+            "a Rule-origin instantiation must journal NO undo entry (ruling #1)"
         );
     }
 
