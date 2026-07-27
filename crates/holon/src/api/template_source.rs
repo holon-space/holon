@@ -13,13 +13,13 @@ use anyhow::Result;
 use anyhow::bail;
 use async_trait::async_trait;
 use holon_api::Value;
+use holon_api::template_instantiation::TemplateNode;
 
-use crate::core::template_instantiation::TemplateNode;
 use crate::storage::turso::DbHandle;
 
 /// Loads a template's block subtree: root first, parent-before-child, siblings
 /// in `sort_key` order — the exact shape
-/// [`plan_instantiation`](crate::core::template_instantiation::plan_instantiation)
+/// [`plan_instantiation`](holon_api::template_instantiation::plan_instantiation)
 /// consumes.
 #[async_trait]
 pub trait TemplateSource: Send + Sync {

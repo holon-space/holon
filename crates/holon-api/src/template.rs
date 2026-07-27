@@ -1,6 +1,6 @@
 //! Template property keys and the instantiation operation name — the single
-//! spelling shared by the backend op (`holon::core::template_instantiation`,
-//! `holon::api::operation_engine`) and the frontend picker
+//! spelling shared by the pure planner (`crate::template_instantiation`), the
+//! backend op (`holon::api::operation_engine`), and the frontend picker
 //! (`holon_frontend::command_provider`). Colocated here (the boundary crate
 //! both sides depend on) so a rename can never desync the two.
 //!

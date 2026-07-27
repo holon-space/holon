@@ -13,18 +13,21 @@ use std::sync::Arc;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
-// Property keys live in `holon_api::template` (single spelling shared with the
+
+// Property keys live in `crate::template` (single spelling shared with the
 // frontend picker); re-exported here so existing `TEMPLATE_MARKER_PROPERTY`
 // references and `{TEMPLATE_MARKER_PROPERTY}` format strings keep resolving.
-pub use holon_api::INSTANCE_OF_PROPERTY;
-use holon_api::MarkSpan;
-pub use holon_api::TEMPLATE_MARKER_PROPERTY;
-pub use holon_api::TEMPLATE_VARS_PROPERTY;
-use holon_api::Value;
-use holon_api::effect_id::deterministic_instance_id;
-use holon_api::marks_from_json;
-use holon_api::marks_to_json;
-use holon_core::storage::types::StorageEntity;
+pub use crate::INSTANCE_OF_PROPERTY;
+use crate::MarkSpan;
+// `StorageEntity` is the SAME `HashMap<Arc<str>, Value>` alias in both crates;
+// this planner is pure and backend-free, so it uses holon-api's own alias.
+use crate::StorageEntity;
+pub use crate::TEMPLATE_MARKER_PROPERTY;
+pub use crate::TEMPLATE_VARS_PROPERTY;
+use crate::Value;
+use crate::effect_id::deterministic_instance_id;
+use crate::marks_from_json;
+use crate::marks_to_json;
 
 /// The org identity property (`:ID:` drawer entry, lifted into `properties` by
 /// the org parser). It DERIVES the block's id — so it must never be copied.
@@ -42,7 +45,7 @@ const ORG_ID_PROPERTY: &str = "ID";
 /// Template MARKER properties (`template`/`template_vars`) are handled
 /// separately (stripped from the instantiated ROOT only, so nested templates
 /// still round-trip verbatim per the proposal).
-const NON_COPYABLE_PROPERTIES: &[&str] = &[ORG_ID_PROPERTY, holon_api::PROVENANCE_PROPERTY];
+const NON_COPYABLE_PROPERTIES: &[&str] = &[ORG_ID_PROPERTY, crate::PROVENANCE_PROPERTY];
 
 /// One declared template variable: a name and an optional default.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,6 +94,9 @@ impl TemplateVars {
         self.0.iter().any(|d| d.name == name)
     }
 
+    /// Test-only helper (the planner resolves defaults inline via
+    /// [`Self::declares`] + the decl list, not through this accessor).
+    #[cfg(test)]
     fn default_of(&self, name: &str) -> Option<&str> {
         self.0
             .iter()
@@ -184,9 +190,8 @@ impl InstantiateRequest {
 }
 
 /// One node of a loaded template subtree, in the shape the planner consumes.
-/// Produced by a
-/// [`TemplateSource`](crate::api::operation_engine::TemplateSource)
-/// implementation from its storage rows.
+/// Produced by a `TemplateSource` implementation (in the `holon` crate) from
+/// its storage rows.
 #[derive(Clone, Debug, Default)]
 pub struct TemplateNode {
     pub id: String,
@@ -428,7 +433,7 @@ fn parse_properties(node: &TemplateNode) -> Result<BTreeMap<String, serde_json::
 }
 
 /// Case-insensitive lookup for template-marker keys. Delegates the casing rule
-/// to the shared authority in `holon_api::template` so the planner and the
+/// to the shared authority in `crate::template` so the planner and the
 /// frontend picker can never diverge on `:TEMPLATE:` (org, uppercase) vs
 /// `template` (programmatic, lowercase).
 fn template_marker_key<'a>(
@@ -436,7 +441,7 @@ fn template_marker_key<'a>(
     marker: &str,
 ) -> Option<&'a String> {
     let matched =
-        holon_api::template::find_template_marker_key(props.keys().map(String::as_str), marker)?;
+        crate::template::find_template_marker_key(props.keys().map(String::as_str), marker)?;
     props.get_key_value(matched).map(|(k, _)| k)
 }
 
@@ -560,9 +565,8 @@ fn remap_marks(spans: &[MarkSpan], replacements: &[Replacement]) -> Vec<MarkSpan
 
 #[cfg(test)]
 mod tests {
-    use holon_api::InlineMark;
-
     use super::*;
+    use crate::InlineMark;
 
     fn node(id: &str, parent: &str, content: &str) -> TemplateNode {
         TemplateNode {
@@ -736,7 +740,7 @@ mod tests {
                 start: 4,
                 end: 12,
                 mark: InlineMark::Link {
-                    target: holon_api::EntityRef::Name {
+                    target: crate::EntityRef::Name {
                         name: "Journals".to_string(),
                     },
                     label: "date".to_string(),

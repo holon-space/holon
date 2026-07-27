@@ -478,8 +478,8 @@ impl DispatchingOperationEngine {
         params: &StorageEntity,
         origin: &OpOrigin,
     ) -> Result<Option<Value>> {
-        use crate::core::template_instantiation::InstantiateRequest;
-        use crate::core::template_instantiation::plan_instantiation;
+        use holon_api::template_instantiation::InstantiateRequest;
+        use holon_api::template_instantiation::plan_instantiation;
 
         let source = self.template_source.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
