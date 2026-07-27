@@ -178,6 +178,7 @@ pub async fn compose_sut_windowed_base(set: &ComponentSet, resolver: &IdResolver
         DEFAULT_FRONTEND_SEED_ORG,
         &[],
         DriverPlacement::Deferred,
+        None,
     )
     .await
 }
@@ -199,6 +200,7 @@ pub async fn compose_sut_windowed_base_seeded(
         frontend_seed_org,
         seed_tree,
         DriverPlacement::Deferred,
+        None,
     )
     .await
 }
@@ -237,6 +239,29 @@ pub async fn compose_sut_seeded(
         frontend_seed_org,
         seed_tree,
         DriverPlacement::HeadlessReactive,
+        None,
+    )
+    .await
+}
+
+/// [`compose_sut_seeded`] with this session's Loro peer id pinned — the
+/// two-instance entry point. Two sessions in ONE process must not share a peer
+/// id (`HOLON_LORO_PEER_ID` is process-global), or their CRDT histories diverge
+/// silently instead of converging.
+pub async fn compose_sut_seeded_with_peer_id(
+    set: &ComponentSet,
+    resolver: &IdResolver,
+    frontend_seed_org: &[(&str, &str)],
+    seed_tree: &[NewBlock],
+    peer_id: u64,
+) -> ComposedSut {
+    compose_sut_seeded_impl(
+        set,
+        resolver,
+        frontend_seed_org,
+        seed_tree,
+        DriverPlacement::HeadlessReactive,
+        Some(peer_id),
     )
     .await
 }
@@ -250,6 +275,7 @@ async fn compose_sut_seeded_impl(
     frontend_seed_org: &[(&str, &str)],
     seed_tree: &[NewBlock],
     driver_placement: DriverPlacement,
+    peer_id: Option<u64>,
 ) -> ComposedSut {
     let has_turso = set.has_storage(StorageAdapter::Turso);
     let has_loro = set.has_storage(StorageAdapter::Loro);
@@ -328,13 +354,27 @@ async fn compose_sut_seeded_impl(
         // ONLY under `HOLON_PBT_ADVANCE_DAY`; when off, `AdvanceDay` stays out
         // of the alphabet and the clock never advances past boot (default).
         let comp = Arc::new(
-            HeadlessFrontendComponent::new_with_clock(
-                frontend_seed_org,
-                Duration::from_millis(300),
-                has_editor,
-                crate::pbt::frontend_slice::components::keystone_boot_clock(),
-            )
-            .await,
+            match peer_id {
+                Some(peer_id) => {
+                    HeadlessFrontendComponent::new_with_clock_and_peer_id(
+                        frontend_seed_org,
+                        Duration::from_millis(300),
+                        has_editor,
+                        crate::pbt::frontend_slice::components::keystone_boot_clock(),
+                        peer_id,
+                    )
+                    .await
+                }
+                None => {
+                    HeadlessFrontendComponent::new_with_clock(
+                        frontend_seed_org,
+                        Duration::from_millis(300),
+                        has_editor,
+                        crate::pbt::frontend_slice::components::keystone_boot_clock(),
+                    )
+                    .await
+                }
+            },
         );
         let eng = comp.engine();
         // Share the reconcile resolver so the component's id-taking nav/focus caps

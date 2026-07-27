@@ -176,8 +176,9 @@ impl FrontendInjectorExt for Injector {
         // Loro CRDT (must be before OrgMode so OrgMode can detect it)
         if loro_enabled {
             let loro_dir = loro_dir.clone();
+            let loro_peer_id = session_config.loro_peer_id;
             self.provide::<LoroConfig>(Provider::root(move |_| {
-                Shared::new(LoroConfig::new(loro_dir.clone()))
+                Shared::new(LoroConfig::new(loro_dir.clone()).with_peer_id(loro_peer_id))
             }));
             LoroModule
                 .configure(self)

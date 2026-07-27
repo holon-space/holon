@@ -38,12 +38,24 @@ use crate::sync::LoroSyncControllerHandle;
 pub struct LoroConfig {
     /// Root directory for Loro document storage
     pub storage_dir: PathBuf,
+    /// Peer id this session's global doc is minted under. `None` = the
+    /// env/random fallback. Injected by `SessionConfig::loro_peer_id` so two
+    /// sessions in one process (the two-instance sharing PBT) never collide.
+    pub peer_id: Option<u64>,
 }
 
 impl LoroConfig {
     pub fn new(storage_dir: PathBuf) -> Self {
         let storage_dir = std::fs::canonicalize(&storage_dir).unwrap_or(storage_dir);
-        Self { storage_dir }
+        Self {
+            storage_dir,
+            peer_id: None,
+        }
+    }
+
+    pub fn with_peer_id(mut self, peer_id: Option<u64>) -> Self {
+        self.peer_id = peer_id;
+        self
     }
 }
 
@@ -62,7 +74,7 @@ impl Module for LoroModule {
         // Register LoroDocumentStore
         injector.provide::<LoroDocumentStore>(Provider::root(|resolver| {
             let config = resolver.resolve::<LoroConfig>();
-            Shared::new(LoroDocumentStore::new(config.storage_dir.clone()))
+            Shared::new(LoroDocumentStore::new(config.storage_dir.clone()).with_peer_id(config.peer_id))
         }));
 
         // Register LoroBlocksDataSource

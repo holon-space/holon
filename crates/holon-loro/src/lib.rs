@@ -91,6 +91,9 @@ pub mod share_peer_id;
 ))]
 pub mod shared_snapshot_store;
 pub mod shared_tree;
+/// The transport seam every true-sharing backend implements. Not iroh-gated and
+/// pure-Rust: Android builds it.
+pub mod sync_transport;
 pub mod text_merge_provider;
 #[cfg(all(
     feature = "iroh-sync",

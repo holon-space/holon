@@ -408,7 +408,21 @@ impl HeadlessFrontendComponent {
         loro_enabled: bool,
         clock: Arc<holon_api::TestClock>,
     ) -> Self {
-        Self::new_impl(org_files, settle, loro_enabled, Some(clock)).await
+        Self::new_impl(org_files, settle, loro_enabled, Some(clock), None).await
+    }
+
+    /// [`Self::new_with_clock`] with the session's Loro peer id pinned. Required
+    /// when two components live in ONE process (the two-instance sharing
+    /// slice): `HOLON_LORO_PEER_ID` is process-global, so both would author
+    /// under the same peer id and never converge.
+    pub async fn new_with_clock_and_peer_id(
+        org_files: &[(&str, &str)],
+        settle: Duration,
+        loro_enabled: bool,
+        clock: Arc<holon_api::TestClock>,
+        peer_id: u64,
+    ) -> Self {
+        Self::new_impl(org_files, settle, loro_enabled, Some(clock), Some(peer_id)).await
     }
 
     /// `DebugServices` wired to THIS component's session, for backing an
@@ -453,7 +467,7 @@ impl HeadlessFrontendComponent {
         settle: Duration,
         loro_enabled: bool,
     ) -> Self {
-        Self::new_impl(org_files, settle, loro_enabled, None).await
+        Self::new_impl(org_files, settle, loro_enabled, None, None).await
     }
 
     async fn new_impl(
@@ -461,6 +475,7 @@ impl HeadlessFrontendComponent {
         settle: Duration,
         loro_enabled: bool,
         clock: Option<Arc<holon_api::TestClock>>,
+        peer_id: Option<u64>,
     ) -> Self {
         use holon_frontend::HolonConfig;
         use holon_frontend::SessionConfig;
@@ -503,7 +518,8 @@ impl HeadlessFrontendComponent {
             ..Default::default()
         };
         let config_dir = temp.path().to_path_buf();
-        let session_config = SessionConfig::new(holon_api::UiInfo::permissive()).without_wait();
+        let mut session_config = SessionConfig::new(holon_api::UiInfo::permissive()).without_wait();
+        session_config.loro_peer_id = peer_id;
         let org_fs_for_di = org_fs.clone();
         // Capture the DI injector (for `SutOrgRender`'s `QueryableCache<Block>` →
         // `CacheBlockReader`, the production ordered doc-scoped read).

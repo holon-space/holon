@@ -254,6 +254,12 @@ pub struct SessionConfig {
     /// `FrontendSession::new`. Mostly used by tests that assert on final
     /// state.
     pub wait_for_ready: bool,
+    /// Peer id this session's Loro documents are minted under. `None` = the
+    /// `HOLON_LORO_PEER_ID` env / random fallback. Set it when more than one
+    /// session lives in ONE process: the env var is process-global, so two
+    /// sessions reading it would author under the SAME peer id and their CRDT
+    /// histories would silently fail to converge.
+    pub loro_peer_id: Option<u64>,
 }
 
 impl SessionConfig {
@@ -261,11 +267,17 @@ impl SessionConfig {
         Self {
             ui_info,
             wait_for_ready: true,
+            loro_peer_id: None,
         }
     }
 
     pub fn without_wait(mut self) -> Self {
         self.wait_for_ready = false;
+        self
+    }
+
+    pub fn with_loro_peer_id(mut self, peer_id: u64) -> Self {
+        self.loro_peer_id = Some(peer_id);
         self
     }
 }
