@@ -688,74 +688,54 @@ impl SutDenseTools for LiveMcp {
             "SELECT * FROM block WHERE parent_id = '{}' ORDER BY sort_key",
             resolved.as_str().replace('\'', "''")
         );
-        // Single bounded retry (ruling 2026-07-27): dense_patch's create+
-        // position pair can hit the cross-provider visibility race (create
-        // commits on Loro, move_block's reader misses it pre-projection); the
-        // tool then COMPENSATES — rolls the create back and returns an error
-        // carrying the exact signature below. That disclosed-retryable
-        // transient is what a real agent retries, so the TRANSITION retries
-        // once (never the tool — its contract stays honest-fail) and logs the
-        // occurrence visibly. Any other error, or a second failure, panics.
-        // Retryable until single-op positional create lands (queued follow-up).
-        const RETRYABLE_SIG: &str = "created block rolled back (deleted)";
-        for attempt in 0..2 {
-            let proj = self
-                .driver
-                .call_tool_json(
-                    "dense_query",
-                    serde_json::json!({ "query": query, "language": "holon_sql" }),
-                )
-                .await
-                .unwrap_or_else(|e| {
-                    panic!("[DenseProjectionEdit] dense_query for {resolved} failed: {e:#}")
-                });
-            let handle = proj["projection_handle"].as_str().unwrap_or_else(|| {
-                panic!(
-                    "[DenseProjectionEdit] dense_query response missing projection_handle: {proj}"
-                )
+        // A positioned create is now a SINGLE create op carrying
+        // `after_block_id` (unified positional-create key, 2026-07-27) — the
+        // create-then-move seam and its cross-provider visibility race are
+        // gone, so the transition asserts DIRECT success with no retry.
+        let proj = self
+            .driver
+            .call_tool_json(
+                "dense_query",
+                serde_json::json!({ "query": query, "language": "holon_sql" }),
+            )
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[DenseProjectionEdit] dense_query for {resolved} failed: {e:#}")
             });
-            let dense = proj["dense_org"].as_str().unwrap_or_else(|| {
-                panic!("[DenseProjectionEdit] dense_query response missing dense_org: {proj}")
-            });
-            let rows = proj["block_count"].as_u64().unwrap_or_else(|| {
-                panic!("[DenseProjectionEdit] dense_query response missing block_count: {proj}")
-            });
-            // The generator guarantees ≥1 existing child; an empty projection
-            // would anchor to SYNTHETIC_ROOT (page context lost) and silently
-            // change the append target — fail loud instead.
-            assert!(
-                rows >= 1,
-                "[DenseProjectionEdit] projection for {resolved} is empty (dense_org = \
-                 {dense:?}) — generator precondition (≥1 child) not honored by the live projection"
-            );
-            let mut edited = dense.to_string();
-            if !edited.ends_with('\n') {
-                edited.push('\n');
-            }
-            edited.push_str(&format!("* {content}\n"));
-            match self
-                .driver
-                .call_tool_json(
-                    "dense_patch",
-                    serde_json::json!({ "handle": handle, "text": edited }),
-                )
-                .await
-            {
-                Ok(_) => return,
-                Err(e) if attempt == 0 && format!("{e:#}").contains(RETRYABLE_SIG) => {
-                    eprintln!(
-                        "[DenseProjectionEdit] transient positional-create race under {resolved} \
-                         (disclosed rollback: {RETRYABLE_SIG:?}) — retrying once: {e:#}"
-                    );
-                }
-                Err(e) => panic!(
-                    "[DenseProjectionEdit] dense_patch appending {content:?} under {resolved} \
-                     failed (attempt {}): {e:#}",
-                    attempt + 1
-                ),
-            }
+        let handle = proj["projection_handle"].as_str().unwrap_or_else(|| {
+            panic!("[DenseProjectionEdit] dense_query response missing projection_handle: {proj}")
+        });
+        let dense = proj["dense_org"].as_str().unwrap_or_else(|| {
+            panic!("[DenseProjectionEdit] dense_query response missing dense_org: {proj}")
+        });
+        let rows = proj["block_count"].as_u64().unwrap_or_else(|| {
+            panic!("[DenseProjectionEdit] dense_query response missing block_count: {proj}")
+        });
+        // The generator guarantees ≥1 existing child; an empty projection
+        // would anchor to SYNTHETIC_ROOT (page context lost) and silently
+        // change the append target — fail loud instead.
+        assert!(
+            rows >= 1,
+            "[DenseProjectionEdit] projection for {resolved} is empty (dense_org = \
+             {dense:?}) — generator precondition (≥1 child) not honored by the live projection"
+        );
+        let mut edited = dense.to_string();
+        if !edited.ends_with('\n') {
+            edited.push('\n');
         }
-        unreachable!("loop returns on success or panics on final failure");
+        edited.push_str(&format!("* {content}\n"));
+        self.driver
+            .call_tool_json(
+                "dense_patch",
+                serde_json::json!({ "handle": handle, "text": edited }),
+            )
+            .await
+            .unwrap_or_else(|e| {
+                panic!(
+                    "[DenseProjectionEdit] dense_patch appending {content:?} under {resolved} \
+                     failed: {e:#}"
+                )
+            });
     }
 
     async fn dense_move_first_child_to_end(&self, parent: &EntityUri) {

@@ -9,6 +9,7 @@ use holon_api::Block;
 use holon_api::Change;
 use holon_api::EntityName;
 use holon_api::EntityUri;
+use holon_api::POSITION_AFTER_BLOCK_ID_PARAM;
 use holon_api::QueryLanguage;
 use holon_api::Value;
 use holon_core::storage::types::StorageEntity;
@@ -271,9 +272,9 @@ fn describe_patch_op(op: &crate::dense_patch::PatchOp) -> serde_json::Value {
     }
     match op {
         // `parent`/`after` are disclosed so a dry_run mirrors the EXECUTED op
-        // stream: a create with `after` issues a positioning `move_block`
-        // after the create op (BugFunnel 2026-07-27 — the old one-field
-        // description hid that a "create" case would execute a move).
+        // stream. A positioned create is a SINGLE create op carrying
+        // `after_block_id` — no follow-up `move_block` (the create-then-move
+        // seam was retired 2026-07-27; positioning is atomic in the create).
         PatchOp::Create {
             title,
             parent,
@@ -284,7 +285,6 @@ fn describe_patch_op(op: &crate::dense_patch::PatchOp) -> serde_json::Value {
             "title": title,
             "parent": describe_ref(parent),
             "after": after.as_ref().map(describe_ref),
-            "positions_via_move_block": after.is_some(),
         }),
         PatchOp::UpdateTitle { block_id, title } => {
             serde_json::json!({"op": "update_title", "block": block_id.as_str(), "title": title})
@@ -2535,10 +2535,7 @@ impl HolonMcpServer {
                        them (with their subtrees). Optimistic concurrency: if any block you touch \
                        changed since dense_query, the whole patch is REJECTED with a conflict list \
                        (re-run dense_query and retry). Set `dry_run: true` to preview the planned \
-                       operations without applying. A stale/unknown handle is a loud error. An \
-                       error containing 'created block rolled back (deleted)' is a TRANSIENT \
-                       create+position visibility race — safe to retry the whole dense_query -> \
-                       dense_patch round trip (until single-op positional create lands)."
+                       operations without applying. A stale/unknown handle is a loud error."
     )]
     async fn dense_patch(
         &self,
@@ -2672,44 +2669,25 @@ impl HolonMcpServer {
                             Value::String(st.category.as_str().to_string()),
                         );
                     }
+                    // Create AND position in one op via the canonical positional
+                    // key: `after_block_id` places the new block immediately
+                    // after its predecessor sibling atomically across both
+                    // providers. Pre-order guarantees the predecessor is already
+                    // created, so `resolve` yields a real id. This retired the
+                    // create-then-`move_block` seam (and its
+                    // orphan-compensation block + projection-lag race).
+                    if let Some(a) = after {
+                        let after_id = resolve(a, &new_ids);
+                        storage.insert(
+                            POSITION_AFTER_BLOCK_ID_PARAM.into(),
+                            Value::String(after_id),
+                        );
+                    }
                     svc.execute_operation(&EntityName::new("block"), "create", storage)
                         .await
                         .map_err(|e| {
                             rmcp::ErrorData::internal_error(format!("create failed: {e:#}"), None)
                         })?;
-                    if let Some(a) = after {
-                        let after_id = resolve(a, &new_ids);
-                        let parent_id = resolve(parent, &new_ids);
-                        // The create op has already COMMITTED; a positioning
-                        // failure must not leak the block as an orphan (the
-                        // tool's "one batch" contract). No cross-op
-                        // transaction exists at this seam, so compensate:
-                        // delete the just-created block, then surface the
-                        // original error enriched with the cleanup outcome.
-                        if let Err(move_err) =
-                            move_block_after(&svc, &new_id, &parent_id, Some(&after_id)).await
-                        {
-                            let mut del: StorageEntity = HashMap::new();
-                            del.insert("id".into(), Value::String(new_id.clone()));
-                            let cleanup = svc
-                                .execute_operation(&EntityName::new("block"), "delete", del)
-                                .await;
-                            let cleanup_note = match cleanup {
-                                Ok(_) => "created block rolled back (deleted)".to_string(),
-                                Err(e) => format!(
-                                    "ROLLBACK FAILED — orphaned created block {new_id} left \
-                                     behind: {e:#}"
-                                ),
-                            };
-                            return Err(rmcp::ErrorData::internal_error(
-                                format!(
-                                    "create positioned-after failed: {}; {cleanup_note}",
-                                    move_err.message
-                                ),
-                                None,
-                            ));
-                        }
-                    }
                     new_ids.insert(*temp, new_id);
                     created += 1;
                 }
