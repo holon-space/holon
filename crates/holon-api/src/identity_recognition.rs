@@ -70,6 +70,32 @@ pub fn recognize_derived_id(
     }
 }
 
+/// Sanitize a raw block-content string into the canonical page TITLE it maps to
+/// (parse-don't-validate). Trim, then strip any TRAILING `/` (the slash-menu
+/// trigger still trailing at plan time, or a stray separator) — `trim_end` after
+/// each strip. Interior `/` is namespace-meaningful and preserved. `None` when
+/// nothing survives (empty content — the caller decides whether that is an
+/// error).
+///
+/// A page's TITLE, its deterministic id ([`PageId::for_path`](crate::link_parser::PageId::for_path)),
+/// and its on-disk filename must all agree on THIS value — and so must the
+/// [`recognize_derived_id`] step that compares a create's title against the id's
+/// current holder. `normalize_for_hash` keeps `/`, so a raw trailing-slash title
+/// recognized on one side and a sanitized one on the other would DIVERGE. This
+/// is the single source the convert planner, the reference model, and the
+/// recognition step all funnel through, so no such split can open.
+pub fn sanitize_page_title(content: &str) -> Option<String> {
+    let mut leaf = content.trim();
+    while leaf.ends_with('/') {
+        leaf = leaf[..leaf.len() - 1].trim_end();
+    }
+    if leaf.is_empty() {
+        None
+    } else {
+        Some(leaf.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,5 +137,31 @@ mod tests {
             }
             other => panic!("expected Collision, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn sanitize_then_recognize_is_stable_for_a_trailing_slash_title() {
+        // A holder stored under the SANITIZED title, re-recognized from the same
+        // sanitized title, reads AlreadySatisfied — the idempotent convergent
+        // re-fire, not a false Collision.
+        let raw = "My Page/";
+        let sanitized = sanitize_page_title(raw).expect("non-empty after sanitize");
+        assert_eq!(sanitized, "My Page");
+        assert_eq!(
+            recognize_derived_id(&id(), Some(&sanitized), &sanitized),
+            Recognition::AlreadySatisfied
+        );
+        // Recognizing the SAME holder with the RAW trailing-slash title would
+        // DIVERGE (normalize_for_hash keeps '/'): it reads Collision, not
+        // AlreadySatisfied. That is exactly the SUT/oracle split the single-source
+        // sanitize closes — both sides MUST sanitize before recognizing.
+        assert!(
+            matches!(
+                recognize_derived_id(&id(), Some(&sanitized), raw),
+                Recognition::Collision(_)
+            ),
+            "raw trailing-slash title must NOT match the sanitized holder — proving \
+             why planner and reference must both sanitize before recognition"
+        );
     }
 }

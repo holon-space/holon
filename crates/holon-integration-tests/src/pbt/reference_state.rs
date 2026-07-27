@@ -1562,10 +1562,18 @@ impl ReferenceState {
             .blocks
             .get(&page_id)
             .map(|b| b.content.clone());
+        // SINGLE-SOURCE the requested title through `sanitize_page_title` — the
+        // SAME sanitize the SUT planner applied to `plan.origin_content` (the
+        // title run_convert_block_to_page recognizes with). Recognizing the RAW
+        // content here would DIVERGE from the SUT for a trailing-slash title
+        // (normalize_for_hash keeps '/'). Fall back to raw only when sanitize
+        // yields nothing (empty content — unreachable past the planner's guard).
+        let requested_title = holon_api::sanitize_page_title(&origin_content_for_recognition)
+            .unwrap_or_else(|| origin_content_for_recognition.clone());
         if let holon_api::Recognition::Collision(_) = holon_api::recognize_derived_id(
             &page_id,
             holder_title.as_deref(),
-            &origin_content_for_recognition,
+            &requested_title,
         ) {
             return;
         }

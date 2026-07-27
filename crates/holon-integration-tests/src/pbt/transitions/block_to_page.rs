@@ -100,15 +100,10 @@ fn page_path_of<R: RefBlockTree>(state: &R, page: &EntityUri) -> Option<String> 
 /// `ReferenceState::apply_block_to_page` (page content) so both agree with the
 /// backend.
 pub(crate) fn sanitize_page_leaf(content: &str) -> Option<String> {
-    let mut leaf = content.trim();
-    while leaf.ends_with('/') {
-        leaf = leaf[..leaf.len() - 1].trim_end();
-    }
-    if leaf.is_empty() {
-        None
-    } else {
-        Some(leaf.to_string())
-    }
+    // Single-sourced: the canonical page-title sanitize lives in holon-api next
+    // to `recognize_derived_id` (ADR 0029) so the planner, this reference model,
+    // and the recognition step cannot drift on trailing-slash handling.
+    holon_api::sanitize_page_title(content)
 }
 
 /// Compute `(nearest_page_ancestor, born-equal page id)` for the origin, or
