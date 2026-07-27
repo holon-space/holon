@@ -179,10 +179,14 @@ pub fn register_loro_operation_engine(
     // a Loro-only session; an in-memory provider keeps per-device focus history
     // so click / arrow / back-forward navigation dispatches succeed.
     let nav_ops = crate::navigation::InMemoryNavigationProvider::new();
-    let dispatcher = OperationDispatcher::new(vec![
+    let mut dispatcher = OperationDispatcher::new(vec![
         Arc::new(block_ops) as Arc<dyn OperationProvider>,
         Arc::new(nav_ops) as Arc<dyn OperationProvider>,
     ]);
+    // ADR 0028 C3 — the Loro-only session dispatches through THIS dispatcher,
+    // so it needs the same boundary seam `OperationModule` installs; a
+    // dispatcher without one is an enforcement bypass, not a fast path.
+    dispatcher.set_boundary_enforcer(Arc::new(holon_sharing::PolicyOverlayEnforcer::inert()));
     // Same fail-loud assembly guard the Turso path runs via `OperationModule`:
     // this is the ONE dispatcher construction outside DI, so a future edit that
     // drops block CRUD here must crash at composition time, not silently drop
@@ -190,6 +194,9 @@ pub fn register_loro_operation_engine(
     dispatcher
         .assert_content_write_capability()
         .expect("[loro_block_query_source] operation-registry assembly check failed");
+    dispatcher
+        .assert_boundary_seam_installed()
+        .expect("[loro_block_query_source] boundary-seam assembly check failed");
     // History relation (C2b): no Turso query substrate here, so wire the
     // DISCLOSED degraded store (warns at construction; reads fail loud) rather
     // than silently omitting history.

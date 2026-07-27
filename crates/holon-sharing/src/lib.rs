@@ -63,6 +63,7 @@
 pub mod alias_ledger;
 pub mod arbitration;
 pub mod boundary;
+pub mod enforcement;
 pub mod journal;
 pub mod lease;
 pub mod log;
@@ -81,6 +82,8 @@ pub use arbitration::RejectedCrossing;
 pub use arbitration::arbitrate;
 pub use boundary::BoundaryDecision;
 pub use boundary::check_boundary;
+pub use enforcement::PolicyOverlayEnforcer;
+pub use enforcement::ROOT_CONTAINER;
 pub use journal::JournalStep;
 pub use journal::MigrationJournal;
 pub use journal::MigrationOp;

@@ -15,6 +15,7 @@
 
 pub mod block_op_catalog;
 pub mod block_ordering;
+pub mod boundary_enforcer;
 pub mod canonical_path;
 pub mod cell;
 pub mod cell_registry;
@@ -34,6 +35,8 @@ pub mod traits;
 pub mod undo;
 pub mod util;
 
+pub use boundary_enforcer::BoundaryEnforcer;
+pub use boundary_enforcer::BoundaryRejection;
 pub use canonical_path::CanonicalPath;
 pub use downstream_projection::DownstreamProjection;
 pub use entity_cache::CacheFactory;

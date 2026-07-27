@@ -60,6 +60,10 @@ holon-profiles.workspace = true
 # (it pulls iroh → QUIC/TLS/ring, native-only and fatal on wasm). holon's own
 # `iroh-sync` feature re-enables `holon-loro/iroh-sync`, so native is unchanged.
 holon-loro.workspace = true
+# ADR 0028 C3: the policy-overlay `BoundaryEnforcer` the operation dispatcher
+# installs. holon-sharing depends only on holon-api/holon-core/holon-loro, so
+# this edge introduces no cycle.
+holon-sharing.workspace = true
 fluxdi.workspace = true
 futures.workspace = true
 futures-signals.workspace = true

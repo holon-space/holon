@@ -18,6 +18,7 @@ use fluxdi::Shared;
 use holon_api::EntityName;
 use holon_api::Operation;
 use holon_api::OperationDescriptor;
+use holon_core::BoundaryEnforcer;
 use holon_core::OperationObserver;
 use holon_core::OperationProvider;
 use holon_core::OperationResult;
@@ -43,6 +44,7 @@ pub struct OperationDispatcher {
     observers: Vec<Arc<dyn OperationObserver>>,
     sync_token_store: Option<Arc<dyn SyncTokenStore>>,
     matview_manager: Option<Arc<crate::sync::MatviewManager>>,
+    boundary_enforcer: Option<Arc<dyn BoundaryEnforcer>>,
 }
 
 impl OperationDispatcher {
@@ -70,6 +72,13 @@ impl OperationDispatcher {
 
     pub fn set_matview_manager(&mut self, mgr: Arc<crate::sync::MatviewManager>) {
         self.matview_manager = Some(mgr);
+    }
+
+    /// Install the ADR 0028 boundary/authz seam (C3). Consulted before every
+    /// dispatched operation that names a subject block; a rejection is returned
+    /// as an `Err` and the provider never runs (D2 "reject loud").
+    pub fn set_boundary_enforcer(&mut self, enforcer: Arc<dyn BoundaryEnforcer>) {
+        self.boundary_enforcer = Some(enforcer);
     }
 
     /// Add an observer to this dispatcher
@@ -185,6 +194,27 @@ impl OperationDispatcher {
              block ops: {present:?}"
         )
         .into())
+    }
+
+    /// Fail-loud guard that a composed backend actually installed the ADR 0028
+    /// boundary seam.
+    ///
+    /// A dispatcher with no [`BoundaryEnforcer`] executes every op unchecked.
+    /// That is invisible from the outside — the vault behaves normally right up
+    /// to the point a share policy exists and is not enforced — so a second
+    /// composition site that forgets [`Self::set_boundary_enforcer`] must crash
+    /// at startup, exactly like the content-write guard above.
+    pub fn assert_boundary_seam_installed(&self) -> Result<()> {
+        if self.boundary_enforcer.is_some() {
+            return Ok(());
+        }
+        Err(
+            "[OperationDispatcher] no BoundaryEnforcer installed: every operation would execute \
+             without the ADR 0028 boundary check, so a committed share policy would not be \
+             enforced. Call `set_boundary_enforcer` at this composition site (prod installs \
+             `holon_sharing::PolicyOverlayEnforcer::inert()`)."
+                .into(),
+        )
     }
 }
 
@@ -987,12 +1017,22 @@ impl Module for OperationModule {
             }
             dispatcher.set_matview_manager(matview_mgr);
 
+            // ADR 0028 C3 — install the boundary/authz seam. The overlay is
+            // INERT today (no code mints or persists share policies yet), so a
+            // single-user vault pays one slice-length check per op; the moment
+            // a policy is committed the same seam enforces it.
+            dispatcher
+                .set_boundary_enforcer(Arc::new(holon_sharing::PolicyOverlayEnforcer::inert()));
+
             // Fail loud if a block pipeline is wired without its content-write
             // ops (the EventInfraModule-only trap). A silent "No provider" drop
             // of every create/set_field/delete is worse than a startup crash.
             dispatcher
                 .assert_content_write_capability()
                 .expect("[OperationModule] operation-registry startup check failed");
+            dispatcher
+                .assert_boundary_seam_installed()
+                .expect("[OperationModule] boundary-seam startup check failed");
 
             Shared::new(dispatcher)
         }));

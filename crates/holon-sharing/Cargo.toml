@@ -7,6 +7,9 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 holon-api.workspace = true
+# The `BoundaryEnforcer` port the engine's operation dispatch consults
+# (ADR 0028 C3). The edge points this way: holon-core knows nothing of sharing.
+holon-core.workspace = true
 # holon-loro inherited default-features = false (workspace root): gives the
 # unconditional `loro_backend::doc_lamport_height` without pulling iroh into the
 # library build. The device-key path (`share_peer_id::stable_peer_id`) is only
