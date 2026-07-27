@@ -1,0 +1,176 @@
+# archlint baseline — grandfathered architecture violations.
+# Format: <rule_id>\t<repo-relative-path>\t<whitespace-collapsed source line>
+# `archlint --all` FAILS ONLY on violations absent from this file; every
+# baselined hit is still disclosed in the summary so the tree never reads
+# as debt-free. Ratchet DOWN: as violations are fixed, regenerate with
+#   ./archlint/archlint --update-baseline
+# See archlint/BURNDOWN.md for the category table and burn-down priority.
+# Snapshot total: 154 violation(s) across 12 rule(s).
+#
+#   deleted_cell_symbol: 2
+#   entity_uri_from_raw: 65
+#   entity_uri_parse_default: 1
+#   fallback: 15
+#   frontend-provider-dep: 1
+#   frontend-raw-sql: 3
+#   frontend-storage-backend: 1
+#   mcp-client-holon-dep: 1
+#   no-underscore-params: 49
+#   ok: 8
+#   raw_sql_in_frontend: 7
+#   sole_block_writer: 1
+
+deleted_cell_symbol	crates/holon-api/src/block_write_field.rs	"_expected_content".to_string()
+deleted_cell_symbol	crates/holon-api/src/block_write_field.rs	BlockWriteField::parse("_expected_content"),
+entity_uri_from_raw	crates/holon-api/src/change_set.rs	.map(|s| EntityUri::from_raw(s)),
+entity_uri_from_raw	crates/holon-api/src/change_set.rs	.map(|s| EntityUri::from_raw(s));
+entity_uri_from_raw	crates/holon-api/src/change_set.rs	Some(Value::String(s)) => EntityUri::from_raw(s),
+entity_uri_from_raw	crates/holon-api/src/change_set.rs	Value::String(s) => EntityUri::from_raw(s),
+entity_uri_from_raw	crates/holon-api/src/widget_spec.rs	EntityUri::from_raw(id)
+entity_uri_from_raw	crates/holon-app/src/loro_seams.rs	EntityUri::from_raw(&parent),
+entity_uri_from_raw	crates/holon-app/src/loro_seams.rs	Ok(ids.iter().map(|s| EntityUri::from_raw(s)).collect())
+entity_uri_from_raw	crates/holon-app/src/loro_seams.rs	let after_uri = EntityUri::from_raw(&after_id);
+entity_uri_from_raw	crates/holon-app/src/loro_seams.rs	let block_uri = EntityUri::from_raw(&id);
+entity_uri_from_raw	crates/holon-app/src/loro_seams.rs	let parent_uri = EntityUri::from_raw(&parent);
+entity_uri_from_raw	crates/holon-app/src/loro_seams.rs	let parent_uri = EntityUri::from_raw(&parent);
+entity_uri_from_raw	crates/holon-app/src/turso_seams.rs	id: EntityUri::from_raw(rid),
+entity_uri_from_raw	crates/holon-app/src/turso_seams.rs	let existing_uri = EntityUri::from_raw(&existing_id);
+entity_uri_from_raw	crates/holon-core/src/block_operations_tests.rs	EntityUri::from_raw(id).as_str().to_string()
+entity_uri_from_raw	crates/holon-core/src/block_operations_tests.rs	block.parent_id = Some(EntityUri::from_raw(p));
+entity_uri_from_raw	crates/holon-core/src/block_operations_tests.rs	id: EntityUri::from_raw(&id),
+entity_uri_from_raw	crates/holon-core/src/block_operations_tests.rs	id: EntityUri::from_raw(&id),
+entity_uri_from_raw	crates/holon-frontend/src/reactive.rs	Some((EntityUri::from_raw(&block_id), offset.max(0) as usize))
+entity_uri_from_raw	crates/holon-frontend/src/reactive.rs	let key = EntityUri::from_raw(&format!(
+entity_uri_from_raw	crates/holon-frontend/src/render_interpreter.rs	let uri = holon_api::EntityUri::from_raw(id);
+entity_uri_from_raw	crates/holon-frontend/src/row_origin.rs	EntityUri::from_raw(id)
+entity_uri_from_raw	crates/holon-frontend/src/row_origin.rs	Some(EntityUri::from_raw(id))
+entity_uri_from_raw	crates/holon-frontend/src/row_origin.rs	let parent = EntityUri::from_raw(&format!("{scheme}:{parent_local}"));
+entity_uri_from_raw	crates/holon-frontend/src/shadow_builders/prelude.rs	let uri = holon_api::EntityUri::from_raw(&vp);
+entity_uri_from_raw	crates/holon-frontend/src/tour.rs	"block" => Ok(Self::Block(EntityUri::from_raw(rest))),
+entity_uri_from_raw	crates/holon-frontend/src/tour.rs	"entity" => Ok(Self::Entity(EntityUri::from_raw(rest))),
+entity_uri_from_raw	crates/holon-frontend/src/tour.rs	b.id = EntityUri::from_raw(id);
+entity_uri_from_raw	crates/holon-frontend/src/tour.rs	let block = AnchorSelector::Block(EntityUri::from_raw("page-x"));
+entity_uri_from_raw	crates/holon-frontend/src/tour.rs	let entity = AnchorSelector::Entity(EntityUri::from_raw("page-x"));
+entity_uri_from_raw	crates/holon-frontend/src/tour.rs	root.id = EntityUri::from_raw("t");
+entity_uri_from_raw	crates/holon-frontend/src/tour.rs	root.id = EntityUri::from_raw("t");
+entity_uri_from_raw	crates/holon-frontend/src/tour.rs	root.id = EntityUri::from_raw("tour-welcome");
+entity_uri_from_raw	crates/holon-frontend/src/tour.rs	under: AnchorSelector::Block(EntityUri::from_raw("page-x")),
+entity_uri_from_raw	crates/holon-loro/src/block_cell_registry.rs	EntityUri::from_raw(&placeholder)
+entity_uri_from_raw	crates/holon-loro/src/block_cell_registry.rs	let parent_uri = EntityUri::from_raw(parent_id);
+entity_uri_from_raw	crates/holon-loro/src/loro_backend.rs	id: EntityUri::from_raw(&id_str),
+entity_uri_from_raw	crates/holon-loro/src/loro_backend.rs	let new_parent_uri = EntityUri::from_raw(&new_parent_id);
+entity_uri_from_raw	crates/holon-loro/src/loro_backend.rs	let new_parent_uri = EntityUri::from_raw(new_parent_id);
+entity_uri_from_raw	crates/holon-loro/src/loro_backend.rs	let parent_uri = EntityUri::from_raw(parent_id);
+entity_uri_from_raw	crates/holon-loro/src/loro_backend.rs	let uri = EntityUri::from_raw(id);
+entity_uri_from_raw	crates/holon-loro/src/loro_backend.rs	let uri = EntityUri::from_raw(id);
+entity_uri_from_raw	crates/holon-loro/src/loro_backend.rs	let uri = EntityUri::from_raw(id);
+entity_uri_from_raw	crates/holon-loro/src/loro_backend.rs	let uri = EntityUri::from_raw(id_str);
+entity_uri_from_raw	crates/holon-loro/src/loro_backend.rs	let uri = EntityUri::from_raw(s);
+entity_uri_from_raw	crates/holon-mcp-client/src/entity_mirror.rs	Ok(EntityUri::from_raw(&raw).to_string())
+entity_uri_from_raw	crates/holon-mcp-client/src/entity_mirror.rs	let del_id = EntityUri::from_raw(created.get_string("id").unwrap().as_str()).to_string();
+entity_uri_from_raw	crates/holon-mcp-client/src/mcp_sync_engine.rs	EntityUri::from_raw(&format!("{SCHEME}:{id}")).to_string()
+entity_uri_from_raw	crates/holon-mcp-client/src/mcp_sync_engine.rs	EntityUri::from_raw(&raw).to_string()
+entity_uri_from_raw	crates/holon-mcp-client/src/mcp_sync_engine.rs	Ok(keys.iter().map(|k| EntityUri::from_raw(k)).collect())
+entity_uri_from_raw	crates/holon-org-format/src/parser.rs	.map(|s| EntityUri::from_raw(s))
+entity_uri_from_raw	crates/holon-org-format/src/parser.rs	let uri = EntityUri::from_raw(slug);
+entity_uri_from_raw	crates/holon-org-format/src/parser.rs	let uri = EntityUri::from_raw(slug);
+entity_uri_from_raw	crates/holon/src/core/sql_block_operations.rs	.map(|(id, _)| EntityUri::from_raw(&id))
+entity_uri_from_raw	crates/holon/src/core/sql_block_operations.rs	.map(|(id, _)| EntityUri::from_raw(&id)))
+entity_uri_from_raw	crates/holon/src/core/sql_block_operations.rs	.map(|(id, _)| EntityUri::from_raw(&id)))
+entity_uri_from_raw	crates/holon/src/core/sql_block_operations.rs	.map(|(sid, _)| EntityUri::from_raw(sid)))
+entity_uri_from_raw	crates/holon/src/core/sql_block_operations.rs	.map(|(sid, _)| EntityUri::from_raw(sid)))
+entity_uri_from_raw	crates/holon/src/core/sql_block_operations.rs	return Ok(kids.iter().map(|k| EntityUri::from_raw(k)).collect());
+entity_uri_from_raw	crates/holon/src/core/sql_operation_provider.rs	EntityUri::from_raw(existing),
+entity_uri_from_raw	frontends/gpui/src/views/editor_view.rs	let my_uri = holon_api::EntityUri::from_raw(&row_id_for_blur);
+entity_uri_from_raw	frontends/gpui/src/views/editor_view.rs	let row_uri = holon_api::EntityUri::from_raw(&row_id);
+entity_uri_from_raw	frontends/gpui/src/views/editor_view.rs	let row_uri = holon_api::EntityUri::from_raw(&row_id);
+entity_uri_from_raw	frontends/gpui/src/views/editor_view.rs	let row_uri_for_focus = holon_api::EntityUri::from_raw(&row_id);
+entity_uri_from_raw	frontends/tui/src/app_main.rs	let target_uri = holon_api::EntityUri::from_raw(&target.block_id);
+entity_uri_from_raw	frontends/tui/src/input_pump.rs	let block_uri = holon_api::EntityUri::from_raw(&entity_id);
+entity_uri_parse_default	frontends/gpui/src/render/builders/live_block.rs	EntityUri::parse(&block_id_str).unwrap_or_else(|_| EntityUri::block(&block_id_str));
+fallback	crates/holon-frontend/src/editor_view_model.rs	/// `target` is the SqlOnly authority text and doubles as the fallback the
+fallback	crates/holon-frontend/src/user_driver.rs	// Final fallback: if the router never saw the entity within the //
+fallback	crates/holon-frontend/src/user_driver.rs	/// This is NOT a fallback — it is the intended path for that feature. //
+fallback	crates/holon-frontend/src/user_driver.rs	/// Used as fallback when `ViewKind::DropZone { op_name }` isn't readable. //
+fallback	crates/holon-frontend/src/user_driver.rs	/// `send_key_chord` uses for its router fallback. If the entity is //
+fallback	crates/holon/src/api/loro_ui_watcher.rs	/// Turso arm's disclosed fallback); a broken pointer/perspective fails loud
+fallback	crates/holon/src/api/loro_ui_watcher.rs	/// fallback to the default layout.
+fallback	frontends/dioxus-web/src/render/builders/live_block.rs	/// initial/fallback render before the cell's own subscription delivers. //
+fallback	frontends/dioxus-web/src/render/builders/mod.rs	// per file. Variants not covered by a file hit the fallback (empty element //
+fallback	frontends/dioxus-web/src/render/builders/mod.rs	/// Fallback arm emitted by `builder_registry!` when a `ViewKind` variant //
+fallback	frontends/gpui/src/entity_view_registry.rs	/// fallback condition.
+fallback	frontends/gpui/src/render/builders/op_button.rs	/// Sighted-user fallback label sits underneath the icon because GPUI //
+fallback	frontends/gpui/src/user_driver.rs	/// (with a short poll fallback for idle windows, whose `changed()` may not
+fallback	frontends/gpui/src/user_driver.rs	/// Fallback (virtualized lists): if the wheel produced no visible movement
+fallback	frontends/gpui/src/user_driver.rs	/// unchanged (caller decides whether that is a fallback case or fails
+frontend-provider-dep	frontends/gpui/Cargo.toml	holon-orgmode.workspace = true
+frontend-raw-sql	crates/holon-frontend/src/advice_weaver.rs	"SELECT v.anchor_id, v.lesson_id, c.content FROM {view} v LEFT JOIN advice_suppressed s \
+frontend-raw-sql	crates/holon-frontend/src/advice_weaver.rs	"SELECT v.lesson_id AS id, v.anchor_id, c.content FROM {view} v LEFT JOIN \
+frontend-raw-sql	crates/holon-frontend/src/lib.rs	"SELECT * FROM journal_feed ORDER BY content DESC",
+frontend-storage-backend	crates/holon-frontend/src/rich_text_selection.rs	//! (`loro::cursor::Cursor` needs the `loro` crate). The GPUI integration
+mcp-client-holon-dep	crates/holon-mcp-client/src/write_authorization.rs	/// panel (increment 4c). Mirrors `holon::sync::ShareDegraded` on the degraded
+no-underscore-params	crates/holon-api/src/entity_profile.rs	fn resolve_collection_variants_named(&self, _name: &EntityName) -> Option<Vec<RenderVariant>> {
+no-underscore-params	crates/holon-api/src/identity_minting.rs	async fn mint(&self, _input: IdentityInput) -> Result<MintedId, BoxError> {
+no-underscore-params	crates/holon-core/src/block_ordering.rs	async fn reseed_content(&self, _blocks: &[(EntityUri, String)]) -> Result<usize> {
+no-underscore-params	crates/holon-core/src/cell_registry.rs	_field: &str,
+no-underscore-params	crates/holon-core/src/cell_registry.rs	_type_id: TypeId,
+no-underscore-params	crates/holon-core/src/cell_registry.rs	_uri: &EntityUri,
+no-underscore-params	crates/holon-core/src/cell_registry.rs	fn on_entity_deleted(&self, _uri: &EntityUri) {}
+no-underscore-params	crates/holon-frontend/src/render_interpreter.rs	let noop_interpret = |_e: &RenderExpr, _c: &RenderContext| -> ReactiveViewModel {
+no-underscore-params	crates/holon-frontend/src/render_interpreter.rs	let noop_interpret = |_e: &RenderExpr, _c: &RenderContext| -> ReactiveViewModel {
+no-underscore-params	crates/holon-loro/src/multi_peer.rs	_junk: &mut dyn FnMut(&Universe, usize)| {
+no-underscore-params	crates/holon-markdown/src/lib.rs	pub fn may_write(&self, _path: &Path) -> bool {
+no-underscore-params	crates/holon-markdown/src/logseq.rs	_rendered: &str,
+no-underscore-params	crates/holon-markdown/src/logseq.rs	_rendered: &str,
+no-underscore-params	crates/holon-markdown/src/logseq.rs	_root: &Path,
+no-underscore-params	crates/holon-markdown/src/logseq.rs	_root: &Path,
+no-underscore-params	crates/holon-markdown/src/logseq.rs	_sanctioned_removals: &std::collections::HashSet<String>,
+no-underscore-params	crates/holon-markdown/src/logseq.rs	_sanctioned_removals: &std::collections::HashSet<String>,
+no-underscore-params	crates/holon-markdown/src/logseq.rs	_sibling_renders: &[(&Path, &str)],
+no-underscore-params	crates/holon-markdown/src/logseq.rs	_sibling_renders: &[(&Path, &str)],
+no-underscore-params	crates/holon-markdown/src/logseq.rs	_source: &str,
+no-underscore-params	crates/holon-markdown/src/logseq.rs	_source: &str,
+no-underscore-params	crates/holon-markdown/src/logseq.rs	fn render_blocks(&self, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
+no-underscore-params	crates/holon-markdown/src/logseq.rs	fn render_blocks(&self, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
+no-underscore-params	crates/holon-markdown/src/logseq.rs	fn render_document(&self, _d: &Block, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
+no-underscore-params	crates/holon-markdown/src/logseq.rs	fn render_document(&self, _d: &Block, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
+no-underscore-params	crates/holon-markdown/src/logseq.rs	fn render_document(&self, _d: &Block, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
+no-underscore-params	crates/holon-markdown/src/logseq.rs	fn sync_document_metadata(&self, _parsed: &Block, _persisted: &mut Block) -> bool {
+no-underscore-params	crates/holon-markdown/src/logseq.rs	fn sync_document_metadata(&self, _parsed: &Block, _persisted: &mut Block) -> bool {
+no-underscore-params	crates/holon-markdown/src/obsidian.rs	_rendered: &str,
+no-underscore-params	crates/holon-markdown/src/obsidian.rs	_rendered: &str,
+no-underscore-params	crates/holon-markdown/src/obsidian.rs	_root: &Path,
+no-underscore-params	crates/holon-markdown/src/obsidian.rs	_root: &Path,
+no-underscore-params	crates/holon-markdown/src/obsidian.rs	_sanctioned_removals: &std::collections::HashSet<String>,
+no-underscore-params	crates/holon-markdown/src/obsidian.rs	_sanctioned_removals: &std::collections::HashSet<String>,
+no-underscore-params	crates/holon-markdown/src/obsidian.rs	_sibling_renders: &[(&Path, &str)],
+no-underscore-params	crates/holon-markdown/src/obsidian.rs	_sibling_renders: &[(&Path, &str)],
+no-underscore-params	crates/holon-markdown/src/obsidian.rs	_source: &str,
+no-underscore-params	crates/holon-markdown/src/obsidian.rs	_source: &str,
+no-underscore-params	crates/holon-markdown/src/obsidian.rs	fn doc_id_from_content(&self, _content: &str) -> Option<String> {
+no-underscore-params	crates/holon-markdown/src/obsidian.rs	fn render_blocks(&self, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
+no-underscore-params	crates/holon-markdown/src/obsidian.rs	fn render_blocks(&self, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
+no-underscore-params	crates/holon-markdown/src/obsidian.rs	fn render_document(&self, _d: &Block, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
+no-underscore-params	crates/holon-markdown/src/obsidian.rs	fn render_document(&self, _d: &Block, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
+no-underscore-params	crates/holon-markdown/src/obsidian.rs	fn render_document(&self, _d: &Block, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
+no-underscore-params	crates/holon-markdown/src/obsidian.rs	fn sync_document_metadata(&self, _parsed: &Block, _persisted: &mut Block) -> bool {
+no-underscore-params	crates/holon-markdown/src/obsidian.rs	fn sync_document_metadata(&self, _parsed: &Block, _persisted: &mut Block) -> bool {
+no-underscore-params	crates/holon-mcp-client/src/mcp_sync_engine.rs	async fn sync(&self, _position: StreamPosition) -> Result<StreamPosition> {
+no-underscore-params	frontends/gpui/src/render/builders/accordion.rs	pub fn render(_node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
+no-underscore-params	frontends/gpui/src/render/builders/divider.rs	pub fn render(_node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
+ok	crates/holon-frontend/src/advice_weaver.rs	let rows = query_engine
+ok	crates/holon-frontend/src/value_fns/chain_ops.rs	Value::String(s) => s.parse().ok(),
+ok	crates/holon-loro-testing/src/peer_ops.rs	let meta = tree.get_meta(node).ok()?;
+ok	crates/holon-loro/src/multi_peer.rs	let meta = tree.get_meta(node).ok()?;
+ok	crates/holon-markdown/src/logseq.rs	path.strip_prefix(root)
+ok	frontends/gpui/src/render/builders/render_entity.rs	any.clone()
+ok	frontends/gpui/src/views/reactive_shell.rs	.and_then(|any| any.clone().downcast::<ReactiveShell>().ok())
+ok	frontends/gpui/src/views/reactive_shell.rs	.and_then(|any| any.clone().downcast::<RenderEntityView>().ok())
+raw_sql_in_frontend	frontends/dioxus-web/src/main.rs	"SELECT id FROM {BLOCK_READ_TABLE} WHERE id='block:root-layout' LIMIT 1"
+raw_sql_in_frontend	frontends/gpui/src/oracles_ui.rs	let sql = format!("SELECT id, content_type, source_language FROM {BLOCK_WRITE_TABLE}");
+raw_sql_in_frontend	frontends/gpui/src/oracles_ui.rs	let sql = format!("SELECT id, parent_id FROM {table}");
+raw_sql_in_frontend	frontends/gpui/src/tab_strip.rs	const CURSOR_SQL: &str = "SELECT history_id FROM navigation_cursor WHERE region = 'main'";
+raw_sql_in_frontend	frontends/gpui/src/tab_strip.rs	const OPEN_TABS_SQL: &str = "SELECT fr.history_id, fr.root_id, b.content \
+raw_sql_in_frontend	frontends/holon-worker/src/lib.rs	"SELECT id FROM {} ORDER BY id",
+raw_sql_in_frontend	frontends/holon-worker/src/seed.rs	"SELECT b.* FROM block b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = \
+sole_block_writer	crates/holon/src/storage/turso_sink_reader.rs	"INSERT INTO block_raw (id, parent_id) VALUES ('sentinel:no_parent', \
