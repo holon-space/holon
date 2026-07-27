@@ -12781,6 +12781,7 @@ dependencies = [
  "tantivy-bitpacker",
  "tantivy-common",
  "tantivy-fst",
+ "zstd",
 ]
 
 [[package]]
@@ -13692,20 +13693,20 @@ dependencies = [
 
 [[package]]
 name = "turso"
-version = "0.7.0-pre.14"
-source = "git+https://github.com/nightscape/turso.git?rev=fa2c9d532bff91463c332b725b287339f2be20b1#fa2c9d532bff91463c332b725b287339f2be20b1"
+version = "0.8.0-pre.1"
+source = "git+https://github.com/nightscape/turso.git?rev=de14a597efa1ee45198592b039e5f8c62e543434#de14a597efa1ee45198592b039e5f8c62e543434"
 dependencies = [
  "thiserror 2.0.19",
  "turso_core",
  "turso_sdk_kit",
  "turso_sync_sdk_kit",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=fa2c9d532bff91463c332b725b287339f2be20b1)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=de14a597efa1ee45198592b039e5f8c62e543434)",
 ]
 
 [[package]]
 name = "turso_core"
-version = "0.7.0-pre.14"
-source = "git+https://github.com/nightscape/turso.git?rev=fa2c9d532bff91463c332b725b287339f2be20b1#fa2c9d532bff91463c332b725b287339f2be20b1"
+version = "0.8.0-pre.1"
+source = "git+https://github.com/nightscape/turso.git?rev=de14a597efa1ee45198592b039e5f8c62e543434#de14a597efa1ee45198592b039e5f8c62e543434"
 dependencies = [
  "aegis",
  "aes-gcm",
@@ -13766,35 +13767,35 @@ dependencies = [
  "uncased",
  "uuid",
  "windows-sys 0.61.2",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=fa2c9d532bff91463c332b725b287339f2be20b1)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=de14a597efa1ee45198592b039e5f8c62e543434)",
 ]
 
 [[package]]
 name = "turso_ext"
-version = "0.7.0-pre.14"
-source = "git+https://github.com/nightscape/turso.git?rev=fa2c9d532bff91463c332b725b287339f2be20b1#fa2c9d532bff91463c332b725b287339f2be20b1"
+version = "0.8.0-pre.1"
+source = "git+https://github.com/nightscape/turso.git?rev=de14a597efa1ee45198592b039e5f8c62e543434#de14a597efa1ee45198592b039e5f8c62e543434"
 dependencies = [
  "chrono",
  "getrandom 0.4.3",
  "turso_macros",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=fa2c9d532bff91463c332b725b287339f2be20b1)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=de14a597efa1ee45198592b039e5f8c62e543434)",
 ]
 
 [[package]]
 name = "turso_macros"
-version = "0.7.0-pre.14"
-source = "git+https://github.com/nightscape/turso.git?rev=fa2c9d532bff91463c332b725b287339f2be20b1#fa2c9d532bff91463c332b725b287339f2be20b1"
+version = "0.8.0-pre.1"
+source = "git+https://github.com/nightscape/turso.git?rev=de14a597efa1ee45198592b039e5f8c62e543434#de14a597efa1ee45198592b039e5f8c62e543434"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=fa2c9d532bff91463c332b725b287339f2be20b1)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=de14a597efa1ee45198592b039e5f8c62e543434)",
 ]
 
 [[package]]
 name = "turso_parser"
-version = "0.7.0-pre.14"
-source = "git+https://github.com/nightscape/turso.git?rev=fa2c9d532bff91463c332b725b287339f2be20b1#fa2c9d532bff91463c332b725b287339f2be20b1"
+version = "0.8.0-pre.1"
+source = "git+https://github.com/nightscape/turso.git?rev=de14a597efa1ee45198592b039e5f8c62e543434#de14a597efa1ee45198592b039e5f8c62e543434"
 dependencies = [
  "bitflags 2.13.1",
  "memchr",
@@ -13803,13 +13804,13 @@ dependencies = [
  "strum_macros 0.26.4",
  "thiserror 2.0.19",
  "turso_macros",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=fa2c9d532bff91463c332b725b287339f2be20b1)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=de14a597efa1ee45198592b039e5f8c62e543434)",
 ]
 
 [[package]]
 name = "turso_sdk_kit"
-version = "0.7.0-pre.14"
-source = "git+https://github.com/nightscape/turso.git?rev=fa2c9d532bff91463c332b725b287339f2be20b1#fa2c9d532bff91463c332b725b287339f2be20b1"
+version = "0.8.0-pre.1"
+source = "git+https://github.com/nightscape/turso.git?rev=de14a597efa1ee45198592b039e5f8c62e543434#de14a597efa1ee45198592b039e5f8c62e543434"
 dependencies = [
  "bindgen 0.69.5",
  "env_logger 0.11.11",
@@ -13820,27 +13821,28 @@ dependencies = [
  "turso_core",
  "turso_ext",
  "turso_sdk_kit_macros",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=fa2c9d532bff91463c332b725b287339f2be20b1)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=de14a597efa1ee45198592b039e5f8c62e543434)",
 ]
 
 [[package]]
 name = "turso_sdk_kit_macros"
-version = "0.7.0-pre.14"
-source = "git+https://github.com/nightscape/turso.git?rev=fa2c9d532bff91463c332b725b287339f2be20b1#fa2c9d532bff91463c332b725b287339f2be20b1"
+version = "0.8.0-pre.1"
+source = "git+https://github.com/nightscape/turso.git?rev=de14a597efa1ee45198592b039e5f8c62e543434#de14a597efa1ee45198592b039e5f8c62e543434"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=fa2c9d532bff91463c332b725b287339f2be20b1)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=de14a597efa1ee45198592b039e5f8c62e543434)",
 ]
 
 [[package]]
 name = "turso_sync_engine"
-version = "0.7.0-pre.14"
-source = "git+https://github.com/nightscape/turso.git?rev=fa2c9d532bff91463c332b725b287339f2be20b1#fa2c9d532bff91463c332b725b287339f2be20b1"
+version = "0.8.0-pre.1"
+source = "git+https://github.com/nightscape/turso.git?rev=de14a597efa1ee45198592b039e5f8c62e543434#de14a597efa1ee45198592b039e5f8c62e543434"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "crc32c",
  "genawaiter",
  "http",
  "libc",
@@ -13853,13 +13855,13 @@ dependencies = [
  "turso_core",
  "turso_parser",
  "uuid",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=fa2c9d532bff91463c332b725b287339f2be20b1)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=de14a597efa1ee45198592b039e5f8c62e543434)",
 ]
 
 [[package]]
 name = "turso_sync_sdk_kit"
-version = "0.7.0-pre.14"
-source = "git+https://github.com/nightscape/turso.git?rev=fa2c9d532bff91463c332b725b287339f2be20b1#fa2c9d532bff91463c332b725b287339f2be20b1"
+version = "0.8.0-pre.1"
+source = "git+https://github.com/nightscape/turso.git?rev=de14a597efa1ee45198592b039e5f8c62e543434#de14a597efa1ee45198592b039e5f8c62e543434"
 dependencies = [
  "bindgen 0.69.5",
  "env_logger 0.11.11",
@@ -13870,7 +13872,7 @@ dependencies = [
  "turso_sdk_kit",
  "turso_sdk_kit_macros",
  "turso_sync_engine",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=fa2c9d532bff91463c332b725b287339f2be20b1)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=de14a597efa1ee45198592b039e5f8c62e543434)",
 ]
 
 [[package]]
@@ -15721,7 +15723,7 @@ checksum = "beffa227304dbaea3ad6a06ac674f9bc83a3dec3b7f63eeb442de37e7cb6bb01"
 [[package]]
 name = "workspace-hack"
 version = "0.1.0"
-source = "git+https://github.com/nightscape/turso.git?rev=fa2c9d532bff91463c332b725b287339f2be20b1#fa2c9d532bff91463c332b725b287339f2be20b1"
+source = "git+https://github.com/nightscape/turso.git?rev=de14a597efa1ee45198592b039e5f8c62e543434#de14a597efa1ee45198592b039e5f8c62e543434"
 dependencies = [
  "aho-corasick",
  "anstream 0.6.21",
@@ -16315,6 +16317,34 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[package]]
+name = "zstd"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "7.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f49c4d5f0abb602a93fb8736af2a4f4dd9512e36f7f570d66e65ff867ed3b9d"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.0.16+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
+dependencies = [
+ "cc",
+ "pkg-config",
+]
 
 [[package]]
 name = "ztracing"
