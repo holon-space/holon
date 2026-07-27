@@ -1388,3 +1388,281 @@ async fn rung13_outdent_chain_child_readopted_by_its_own_moved_parent() {
          inv-matview-consistent-with-recompute / main-panel stale-row shape"
     );
 }
+
+/// `id`+`depth`-keyed canonicalizer for the `*_WITH_ID` projection (rung 14's
+/// view B), which carries `id` rather than `node_id`.
+fn canon_id_rows(rows: Vec<holon_core::storage::StorageEntity>) -> Vec<String> {
+    let mut out: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            let id = r
+                .get("id")
+                .and_then(|v| v.as_string())
+                .expect("id text")
+                .to_string();
+            let depth = r
+                .get("depth")
+                .and_then(|v| v.as_i64())
+                .expect("depth integer");
+            format!("{id}@d{depth}")
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// A THIRD recursive descendants shape over the SAME `blk` base rows, but with
+/// a LITERAL anchor (`WHERE b.id = 'page'`) instead of the dynamic
+/// `focus_roots` join — so it overlaps rungs A/B on every base row yet is a
+/// distinct IVM circuit maintained in the same reparent commit. Projects
+/// `node_id, depth` (reuses [`canon_rows`]).
+const FOCUS_DESCENDANTS_ND_SQL: &str = "\
+    WITH RECURSIVE _d AS ( \
+        SELECT b.id AS node_id, 0 AS depth, CAST(b.id AS TEXT) AS visited \
+        FROM blk b WHERE b.id = 'page' \
+        UNION ALL \
+        SELECT child.id, _d.depth + 1, _d.visited || ',' || CAST(child.id AS TEXT) \
+        FROM _d JOIN blk child ON child.parent_id = _d.node_id \
+        WHERE _d.depth < 20 \
+          AND ',' || _d.visited || ',' NOT LIKE '%,' || CAST(child.id AS TEXT) || ',%' \
+    ) \
+    SELECT node_id, depth FROM _d";
+
+/// Non-blocking drain of the CDC broadcast — keeps a LIVE subscriber consuming
+/// so the channel stays un-lagged during the reparent commits (mirrors the
+/// composed keystone's live watch subscriber), without the 250 ms settle that
+/// [`drain`] uses. Content is discarded; the oracle is matview-vs-recompute.
+fn drain_live(rx: &mut Receiver<BatchWithMetadata<RowChange>>) -> usize {
+    let mut n = 0;
+    while rx.try_recv().is_ok() {
+        n += 1;
+    }
+    n
+}
+
+/// RUNG 14 — the MISSING INGREDIENT the isolated rungs never add: **N
+/// overlapping recursive matviews maintained in the SAME reparent commit** over
+/// shared base rows, plus a live CDC subscriber, looping rung 13's exact
+/// re-adoption delta to hit the ~10% probabilistic retract-miss.
+///
+/// rung 13 replays the identical `{b4→page, b5→b4}` re-adoption batch and is
+/// GREEN 14/14 — because it maintains ONE outer recursive matview (`fdesc13`)
+/// with no live subscriber. The composed holon keystone REDS ~10% on exactly
+/// this delta because it maintains **three `watch_view_*` recursive matviews
+/// plus a chained stack** in the one commit. The unmodeled variable is
+/// TOPOLOGICAL (many overlapping recursive matviews per transaction), NOT
+/// concurrency: holon serializes every write and all matview maintenance
+/// through a single actor connection (investigation §3). This rung reproduces
+/// that topology at the storage layer:
+///
+///   A = `fdesc14a` (FOCUS_SWITCH_SQL, dynamic `focus_roots` anchor)
+///   B = `fdesc14b` (FOCUS_SWITCH_SQL_WITH_ID, same anchor, `id` projection)
+///   C = `fdesc14c` (literal-anchor recursive descendants over `blk`)
+///   D = `fdesc14d` (CHAINED matview: `SELECT node_id, depth FROM fdesc14a`)
+///
+/// All four close over `b4`/`b5`, so the atomic re-adoption batch maintains all
+/// four in one commit. Each iteration asserts `matview == recompute` for A/B/C
+/// (independent recompute of each defining SELECT off the base matviews) and
+/// `D == A` (chained-view self-consistency).
+///
+/// OUTCOME (2026-07-27, Turso rev `de14a597`): this rung stays **GREEN** — the
+/// `reconcile_named_view` storage-layer topology does NOT reproduce the miss,
+/// across three shape variations (bounded-reset 4-node, the exact `bulk-3`
+/// sibling fan-out, and accumulate-growing) at 200–500 iterations each. The
+/// holon-side keystone still reds ~10% on the identical delta, so the unmodeled
+/// factor is NOT matview count/topology alone: it is the **watch-registration
+/// path** — the composed keystone's matviews are `watch_view_*` compiled by
+/// holon's `watch_query` (carrying `rowid` tracking, `SELECT *, rowid AS _rowid
+/// FROM watch_view_*`), a different IVM circuit than `reconcile_named_view`
+/// produces — plus the full `blocks_with_paths`/`root_layout` chained stack.
+/// rung 14 therefore stands as the topology BOUNDARY (rung 13 = 1 matview
+/// green; rung 14 = 4 overlapping matviews still green) that narrows the Turso
+/// search to the watch-view circuit. It is a red-first gate for the eventual
+/// Turso fix if the watch path is later added here; keep the assert as-is.
+///
+/// If it ever reds, the signature is a `watch_view`-shaped view retaining the
+/// intermediate `b5 @ parent b0` derivation (`ivm-race-det-run4.log:549`,
+/// `matview 13 / recompute 12`).
+#[tokio::test]
+async fn rung14_multi_overlapping_recursive_matviews_per_reparent_commit() {
+    let (handle, mut rx) = new_db().await;
+
+    // Seed the EXACT `bulk-3` fan-out from the red log (page plays `ref-doc-0`):
+    //   page → b0 → b4 → b5   (the outdent working chain)
+    //   page → b1 → {b6, b7}
+    //   page → b2 → b3
+    // rung 13 minimized this to the bare 4-node chain and stays green; the
+    // sibling branches share base rows with the recursive closure and may be
+    // load-bearing for the multi-matview consolidation miss.
+    handle
+        .execute(
+            "CREATE TABLE blk_raw (id TEXT PRIMARY KEY, parent_id TEXT, content TEXT, \
+             sort_key TEXT)",
+            vec![],
+        )
+        .await
+        .expect("create blk_raw");
+    for (id, parent, sk) in [
+        ("page", "root", "a"),
+        ("b0", "page", "b"),
+        ("b4", "b0", "c"),
+        ("b5", "b4", "d"),
+        ("b1", "page", "e"),
+        ("b6", "b1", "f"),
+        ("b7", "b1", "g"),
+        ("b2", "page", "h"),
+        ("b3", "b2", "i"),
+    ] {
+        handle
+            .execute(
+                "INSERT INTO blk_raw (id, parent_id, content, sort_key) VALUES (?, ?, ?, ?)",
+                vec![
+                    turso::Value::Text(id.into()),
+                    turso::Value::Text(parent.into()),
+                    turso::Value::Text(id.into()),
+                    turso::Value::Text(sk.into()),
+                ],
+            )
+            .await
+            .expect("seed rung14 row");
+    }
+    create_inner_matview(&handle).await;
+    seed_navigation_on_page(&handle).await;
+
+    // The overlapping topology: three recursive matviews over the shared base
+    // rows + one chained matview reading the first.
+    reconcile_named_view(&handle, "fdesc14a", FOCUS_SWITCH_SQL)
+        .await
+        .expect("fdesc14a dynamic-anchor recursive matview");
+    reconcile_named_view(&handle, "fdesc14b", FOCUS_SWITCH_SQL_WITH_ID)
+        .await
+        .expect("fdesc14b dynamic-anchor recursive matview (id projection)");
+    reconcile_named_view(&handle, "fdesc14c", FOCUS_DESCENDANTS_ND_SQL)
+        .await
+        .expect("fdesc14c literal-anchor recursive matview");
+    reconcile_named_view(&handle, "fdesc14d", "SELECT node_id, depth FROM fdesc14a")
+        .await
+        .expect("fdesc14d chained matview over fdesc14a");
+
+    let iterations: usize = std::env::var("RUNG14_ITERATIONS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(200);
+
+    for iter in 0..iterations {
+        // Outdent(b5): b5 rises to sit beside b4 under b0.
+        handle
+            .execute(
+                "UPDATE blk_raw SET parent_id = 'b0' WHERE id = 'b5'",
+                vec![],
+            )
+            .await
+            .expect("outdent b5");
+
+        // Outdent(b4) + re-adopt(b5): b4 rises under `page`, and b5 — b4's
+        // following sibling — is re-adopted BY b4, in ONE batch. b5's new parent
+        // is the very node that also moved. This is rung 13's exact delta, now
+        // maintaining four overlapping recursive/chained matviews per commit.
+        handle
+            .transaction(vec![
+                (
+                    "UPDATE blk_raw SET parent_id = 'page' WHERE id = 'b4'".to_string(),
+                    vec![],
+                ),
+                (
+                    "UPDATE blk_raw SET parent_id = 'b4' WHERE id = 'b5'".to_string(),
+                    vec![],
+                ),
+            ])
+            .await
+            .expect("commit outdent-b4 + readopt-b5 txn");
+
+        // Live subscriber keeps consuming the CDC stream produced by the commit.
+        drain_live(&mut rx);
+
+        // Per-view differential oracle: each IVM matview vs. a fresh recompute
+        // of its own defining SELECT off the (quiescent) base matviews.
+        let a_mv = canon_rows(
+            handle
+                .query("SELECT node_id, depth FROM fdesc14a", HashMap::new())
+                .await
+                .expect("query fdesc14a"),
+        );
+        let a_re = canon_rows(
+            handle
+                .query(FOCUS_SWITCH_SQL, HashMap::new())
+                .await
+                .expect("recompute fdesc14a"),
+        );
+        assert_eq!(
+            a_mv, a_re,
+            "iter {iter}: MATVIEW-VS-RECOMPUTE DRIFT on view A (fdesc14a): the re-adoption batch \
+             left a stale intermediate row in one of N overlapping recursive matviews — the \
+             keystone inv-matview-consistent-with-recompute / main-panel stale-row shape"
+        );
+
+        let b_mv = canon_id_rows(
+            handle
+                .query("SELECT id, depth FROM fdesc14b", HashMap::new())
+                .await
+                .expect("query fdesc14b"),
+        );
+        let b_re = canon_id_rows(
+            handle
+                .query(FOCUS_SWITCH_SQL_WITH_ID, HashMap::new())
+                .await
+                .expect("recompute fdesc14b"),
+        );
+        assert_eq!(
+            b_mv, b_re,
+            "iter {iter}: MATVIEW-VS-RECOMPUTE DRIFT on view B (fdesc14b, id projection): stale \
+             intermediate row retained under multi-matview per-transaction maintenance"
+        );
+
+        let c_mv = canon_rows(
+            handle
+                .query("SELECT node_id, depth FROM fdesc14c", HashMap::new())
+                .await
+                .expect("query fdesc14c"),
+        );
+        let c_re = canon_rows(
+            handle
+                .query(FOCUS_DESCENDANTS_ND_SQL, HashMap::new())
+                .await
+                .expect("recompute fdesc14c"),
+        );
+        assert_eq!(
+            c_mv, c_re,
+            "iter {iter}: MATVIEW-VS-RECOMPUTE DRIFT on view C (fdesc14c, literal anchor): stale \
+             intermediate row retained under multi-matview per-transaction maintenance"
+        );
+
+        let d_mv = canon_rows(
+            handle
+                .query("SELECT node_id, depth FROM fdesc14d", HashMap::new())
+                .await
+                .expect("query fdesc14d"),
+        );
+        assert_eq!(
+            d_mv, a_mv,
+            "iter {iter}: CHAINED-MATVIEW DRIFT: view D (fdesc14d, matview over fdesc14a) diverged \
+             from its own source matview A — chained per-transaction maintenance dropped a delta"
+        );
+
+        // Reset to the pre-state (page → b0 → b4 → b5) for the next iteration:
+        // b5 is already under b4; only b4 must return under b0.
+        handle
+            .execute(
+                "UPDATE blk_raw SET parent_id = 'b0' WHERE id = 'b4'",
+                vec![],
+            )
+            .await
+            .expect("reset b4 under b0");
+        drain_live(&mut rx);
+    }
+
+    eprintln!(
+        "\n===== RUNG 14 — {iterations} re-adoption iterations over 4 overlapping matviews: \
+         all views stayed consistent with recompute (no retract-miss observed this run) ====="
+    );
+}
