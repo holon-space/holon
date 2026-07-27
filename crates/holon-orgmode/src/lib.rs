@@ -64,7 +64,9 @@ pub use file_io::{
     format_header_args_from_values, format_org_source_block, insert_source_block,
     update_source_block, value_to_header_arg_string,
 };
+pub use file_watcher::FileEvent;
 pub use file_watcher::OrgFileWatcher;
+pub use file_watcher::classify_change_to_event;
 // Core types
 // Note: Block is NOT re-exported here to avoid duplicate type issues with flutter_rust_bridge
 // Use holon_api::block::Block directly instead

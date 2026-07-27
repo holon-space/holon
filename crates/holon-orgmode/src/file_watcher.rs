@@ -11,6 +11,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use holon_core::CanonicalPath;
+use holon_filesystem::FileChange;
 use holon_filesystem::FileChangeKind;
 use holon_filesystem::FileChangeSource;
 use holon_filesystem::FileSystem;
@@ -79,6 +80,52 @@ fn is_org_relevant(path: &Path, gitignore: &Gitignore) -> bool {
     path.extension().map(|e| e == "org").unwrap_or(false) && !is_ignored(path, gitignore)
 }
 
+/// Map one raw [`FileChange`] to the org-relevant [`FileEvent`] the sync loop
+/// acts on, or `None` when it is filtered (non-`.org`, gitignored). This is the
+/// single source of truth for the bridge's kind→event routing — exposed so a
+/// test can drive SYNTHETIC notify-shaped changes through the SAME routing the
+/// production bridge uses (the ENVIRONMENT-parity rung for the pairing fallback,
+/// see docs/Testing/BugFunnel.md 2026-07-27).
+///
+/// `is_relevant` decides whether a path is one the org side tracks; the bridge
+/// passes a gitignore-aware predicate, a focused test may pass an extension
+/// check.
+pub fn classify_change_to_event(
+    change: FileChange,
+    is_relevant: &dyn Fn(&Path) -> bool,
+) -> Option<FileEvent> {
+    match change.kind {
+        FileChangeKind::Rename { from } => {
+            let to = change.path;
+            if is_relevant(&to) {
+                debug!("File rename detected: {} -> {}", from.display(), to.display());
+                Some(FileEvent::Renamed { from, to })
+            } else if is_relevant(&from) {
+                // Renamed OUT of org-space (`.org` -> `.txt`): the org side sees
+                // only the departure, so treat it as a change to the vanished
+                // `from` (stats NotFound -> delete).
+                debug!(
+                    "Org file renamed out of org-space: {} -> {}",
+                    from.display(),
+                    to.display()
+                );
+                Some(FileEvent::Changed(from))
+            } else {
+                None
+            }
+        }
+        _ => {
+            let path = change.path;
+            if is_relevant(&path) {
+                debug!("File change detected: {}", path.display());
+                Some(FileEvent::Changed(path))
+            } else {
+                None
+            }
+        }
+    }
+}
+
 /// File watcher for Org files: the org-side consumer of a [`FileChangeSource`].
 ///
 /// The channel carries `(Option<FileEvent>, seq)`: `Some(event)` for
@@ -108,41 +155,9 @@ impl OrgFileWatcher {
                 match source_rx.recv().await {
                     Ok(change) => {
                         let seq = change.seq;
-                        let msg = match change.kind {
-                            FileChangeKind::Rename { from } => {
-                                let to = change.path;
-                                if is_org_relevant(&to, &gitignore) {
-                                    debug!(
-                                        "File rename detected: {} -> {}",
-                                        from.display(),
-                                        to.display()
-                                    );
-                                    Some(FileEvent::Renamed { from, to })
-                                } else if is_org_relevant(&from, &gitignore) {
-                                    // Renamed OUT of org-space (`.org` -> `.txt`):
-                                    // the org side sees only the departure, so
-                                    // treat it as a change to the vanished `from`
-                                    // (stats NotFound -> delete).
-                                    debug!(
-                                        "Org file renamed out of org-space: {} -> {}",
-                                        from.display(),
-                                        to.display()
-                                    );
-                                    Some(FileEvent::Changed(from))
-                                } else {
-                                    None
-                                }
-                            }
-                            _ => {
-                                let path = change.path;
-                                if is_org_relevant(&path, &gitignore) {
-                                    debug!("File change detected: {}", path.display());
-                                    Some(FileEvent::Changed(path))
-                                } else {
-                                    None
-                                }
-                            }
-                        };
+                        let msg = classify_change_to_event(change, &|p| {
+                            is_org_relevant(p, &gitignore)
+                        });
                         if change_tx.send((msg, seq)).is_err() {
                             // Receiver dropped — sync loop is gone.
                             return;

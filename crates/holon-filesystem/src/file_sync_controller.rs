@@ -969,6 +969,49 @@ impl FileSyncController {
         };
         let document_uri = document.id.clone();
 
+        // Refutation fix (2026-07-27) — id-based reunification safety net
+        // (recognition principle). Before ANY cascade, check whether this doc's
+        // identity (`#+ID`) already lives at ANOTHER tracked path that still
+        // exists on disk. If so, the vanished file is the SOURCE side of a
+        // rename whose destination we already track — the watcher's pairing fell
+        // back to a bare `Remove` (a byte-syncer / lock file interposed, or the
+        // pair timed out), and the title-based D3 guard below cannot catch it
+        // because the title has not yet followed. Re-home instead of
+        // cascade-deleting a LIVE doc. A TRUE move-out-of-vault (the id lives
+        // nowhere else) falls through and still cascades below.
+        //
+        // Bounded: scans only the in-memory `last_projection` (the tracked set),
+        // not the whole vault. The Remove-arrives-before-the-destination-ingest
+        // ordering (which this scan cannot see yet) is prevented at the source by
+        // the pairing's relevance-gate + timeout-only flush, and any residual is
+        // repaired by `poll_new_files` + re-ingest.
+        let reunion: Option<PathBuf> = self
+            .last_projection
+            .iter()
+            .find_map(|(p, content)| {
+                if p == canonical {
+                    return None;
+                }
+                match self.format.doc_id_from_content(content) {
+                    Some(bare) if EntityUri::block(&bare) == document_uri => {
+                        Some(p.as_path_buf().clone())
+                    }
+                    _ => None,
+                }
+            })
+            .filter(|dest| self.fs.exists(dest));
+        if let Some(dest) = reunion {
+            info!(
+                "[FileSyncController] Deleted file {} is the SOURCE side of a rename — document                  {} already lives at {}; re-homing (id-based reunification) instead of                  cascade-deleting",
+                path.display(),
+                document_uri,
+                dest.display(),
+            );
+            // Box::pin breaks the async recursion cycle (on_file_deleted ->
+            // on_file_renamed -> on_file_changed -> on_file_deleted).
+            return Box::pin(self.on_file_renamed(path, &dest)).await;
+        }
+
         // D3 / identity plan §5 guard (order matters: guard BEFORE any delete). A
         // page rename re-homes the doc to a NEW `<new-title>.org` and removes the
         // OLD file; that removal fires THIS handler for the old path, whose

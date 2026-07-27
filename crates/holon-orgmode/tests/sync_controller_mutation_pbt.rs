@@ -52,13 +52,22 @@ use uuid::Uuid;
 
 struct InMemoryBlockStore {
     blocks: RwLock<HashMap<String, Vec<Block>>>,
+    /// Count of `delete_in_tree`/`apply_delete` removals — lets a test assert a
+    /// cascade-delete did (or did NOT) run, independent of any later re-ingest
+    /// that could restore a block's id from the org file bytes.
+    delete_count: std::sync::atomic::AtomicUsize,
 }
 
 impl InMemoryBlockStore {
     fn new() -> Self {
         Self {
             blocks: RwLock::new(HashMap::new()),
+            delete_count: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    fn delete_count(&self) -> usize {
+        self.delete_count.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn seed_blocks(&self, doc_id: &str, blocks: Vec<Block>) {
@@ -148,9 +157,14 @@ impl InMemoryBlockStore {
 
     fn apply_delete(&self, block_id: &str) {
         let mut store = self.blocks.write().unwrap();
+        let mut removed = 0usize;
         for blocks in store.values_mut() {
+            let before = blocks.len();
             blocks.retain(|b| b.id.as_str() != block_id);
+            removed += before - blocks.len();
         }
+        self.delete_count
+            .fetch_add(removed, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Create-or-update: replace the block in place if it already exists under
@@ -2909,13 +2923,15 @@ mod atomic_rename_tests {
             .expect("initial ingest of test.org");
     }
 
-    /// Characterization of the DEFECT the atomic port fixes: a `mv` delivered as
-    /// Create(B) + a poll tick (which finds A gone → `on_file_deleted`)
-    /// cascade-deletes the re-homed doc's blocks. Kept GREEN by asserting the
-    /// defect is present — if it ever stops reproducing, the pipeline changed
-    /// and the atomic-path test's premise must be revisited.
+    /// The POLL-backstop path is safety-netted too. When the destination is
+    /// ingested (Create half) and the source's disappearance is discovered by
+    /// `poll_tracked_files` (rather than an explicit Remove event), the
+    /// resulting `on_file_deleted` for the source must NOT cascade-delete the
+    /// re-homed doc — the id-based reunification finds the doc alive at the new
+    /// path and re-homes instead. (Before the refutation fix this poll path
+    /// cascade-deleted the live doc.)
     #[tokio::test]
-    async fn nonatomic_rename_pipeline_cascade_deletes_the_doc() {
+    async fn nonatomic_rename_via_poll_is_rescued_by_reunification() {
         let temp = tempfile::tempdir().unwrap();
         let mut fx = TestFixture::new(temp.path());
         let child = Block::new_text(
@@ -2937,18 +2953,22 @@ mod atomic_rename_tests {
         let moved = fx.root_dir.join("moved.org");
         tokio::fs::rename(&old, &moved).await.unwrap();
 
-        // Create(B) half, then the poll tick between them.
+        // Create(B) half, then a poll tick discovers A gone → on_file_deleted(A).
         fx.controller.on_file_changed(&moved).await.unwrap();
         fx.controller.poll_tracked_files().await.unwrap();
 
-        let child_after = BlockReader::get_block_authoritative(&*fx.store, &child.id)
-            .await
-            .unwrap();
+        assert_eq!(
+            fx.store.delete_count(),
+            0,
+            "the poll-discovered disappearance of the renamed-away source must be rescued by \
+             id-based reunification — NOT cascade-deleted"
+        );
         assert!(
-            child_after.is_none(),
-            "characterization: the non-atomic rename pipeline cascade-deletes the doc's blocks \
-             (the defect the atomic Rename port fixes). If this now PASSES with the child alive, \
-             the pipeline changed — revisit the atomic-path test premise."
+            BlockReader::get_block_authoritative(&*fx.store, &child.id)
+                .await
+                .unwrap()
+                .is_some(),
+            "child block survives a poll-discovered rename"
         );
     }
 
@@ -2999,5 +3019,148 @@ mod atomic_rename_tests {
             doc_after.content, "moved",
             "page title must follow the new file name (file-move spec D2)"
         );
+    }
+
+    /// REFUTATION RED (verifier 2026-07-27): the atomic port's fallback. When
+    /// the watcher's pairing degrades to a bare `Remove` + `Create` (a
+    /// byte-syncer / lock-file interposed between the two rename halves, or the
+    /// pair timed out), the stray `Remove` reaches `on_file_deleted` for a path
+    /// whose `#+ID` NOW LIVES at the moved file. The title-based D3 guard cannot
+    /// fire (the title has not followed the rename), so today the live doc is
+    /// cascade-deleted. The id-based reunification safety net must re-home
+    /// instead: NO cascade (delete_count == 0), child + doc survive, retitled.
+    #[tokio::test]
+    async fn rename_fallback_remove_does_not_cascade_a_live_doc() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut fx = TestFixture::new(temp.path());
+        let child = Block::new_text(
+            EntityUri::block_random(),
+            fx.doc_id.clone(),
+            "child body".to_string(),
+        );
+        seed_and_ingest(&mut fx, &child).await;
+        let doc_id = fx.doc_id.clone();
+
+        let old = fx.file_path();
+        let moved = fx.root_dir.join("moved.org");
+        tokio::fs::rename(&old, &moved).await.unwrap();
+
+        // Fallback ordering: the moved file's `Create` is processed first (so
+        // its `#+ID` is now tracked at `moved`), THEN the stray `Remove` of the
+        // old path arrives — the exact sequence a flush-then-create fallback
+        // hands the controller.
+        fx.controller.on_file_changed(&moved).await.unwrap();
+        fx.controller.on_file_changed(&old).await.unwrap();
+
+        assert_eq!(
+            fx.store.delete_count(),
+            0,
+            "a stray Remove of a renamed-away file must NOT cascade-delete a doc whose #+ID now              lives at another tracked path — the id-based reunification safety net must re-home"
+        );
+        assert!(
+            BlockReader::get_block_authoritative(&*fx.store, &child.id)
+                .await
+                .unwrap()
+                .is_some(),
+            "child block must survive the rename fallback"
+        );
+        let doc_after = BlockReader::get_block_authoritative(&*fx.store, &doc_id)
+            .await
+            .unwrap()
+            .expect("doc-root must stay alive through the rename fallback");
+        assert_eq!(
+            doc_after.content, "moved",
+            "reunification re-homes AND retitles to the new file stem"
+        );
+    }
+
+    /// ENVIRONMENT-PARITY RUNG (BugFunnel 2026-07-27). The composed keystone
+    /// enters BELOW `NotifyWatcher` (on `InMemoryFileSystem`), so `RenamePairing`
+    /// and the bridge's kind->`FileEvent` routing are structurally UNTRAVERSED —
+    /// the prod-only layer where the adversarial verifier found the
+    /// cascade-delete-on-interposition defect. This rung closes that parity gap:
+    /// it drives SYNTHETIC notify-shaped signals through the REAL
+    /// `RenamePairing::classify` -> the REAL bridge routing
+    /// (`classify_change_to_event`, the same fn the production `OrgFileWatcher`
+    /// uses) -> `FileEvent` -> the controller. Sequence: From -> interposing
+    /// byte-syncer write -> To. With the relevance-gate + timeout-only flush the
+    /// interposer does not disturb the pending, so the pair collapses to a
+    /// SINGLE atomic `Rename` — no `Remove`, no cascade. (Full composed-keystone
+    /// integration of a notify-shaped source remains open parity work.)
+    #[tokio::test]
+    async fn notify_shaped_interposed_rename_traverses_pairing_and_routing_no_cascade() {
+        use std::path::Path;
+        use std::time::Instant;
+
+        use holon_filesystem::FileChange;
+        use holon_filesystem::RawFsSignal;
+        use holon_filesystem::RenamePairing;
+        use holon_orgmode::FileEvent;
+        use holon_orgmode::classify_change_to_event;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut fx = TestFixture::new(temp.path());
+        let child = Block::new_text(
+            EntityUri::block_random(),
+            fx.doc_id.clone(),
+            "child body".to_string(),
+        );
+        seed_and_ingest(&mut fx, &child).await;
+        let doc_id = fx.doc_id.clone();
+
+        let old = fx.file_path();
+        let moved = fx.root_dir.join("moved.org");
+        tokio::fs::rename(&old, &moved).await.unwrap();
+
+        // (1) REAL pairing state machine over synthetic notify-shaped signals.
+        let mut pairing = RenamePairing::new();
+        let now = Instant::now();
+        let rel = |p: &Path| p.extension().is_some_and(|e| e == "org");
+        let mut emissions = Vec::new();
+        emissions.extend(pairing.classify(&RawFsSignal::RenameFrom(old.clone()), now, &rel));
+        emissions.extend(pairing.classify(
+            &RawFsSignal::Create(fx.root_dir.join(".syncthing.tmp")),
+            now,
+            &rel,
+        ));
+        emissions.extend(pairing.classify(&RawFsSignal::RenameTo(moved.clone()), now, &rel));
+
+        // (2) REAL bridge routing (classify_change_to_event) -> FileEvent, then
+        // (3) the sync-loop dispatch onto the controller.
+        for (seq, (path, kind)) in emissions.into_iter().enumerate() {
+            let change = FileChange {
+                path,
+                kind,
+                seq: seq as u64,
+            };
+            match classify_change_to_event(change, &rel) {
+                Some(FileEvent::Renamed { from, to }) => {
+                    fx.controller.on_file_renamed(&from, &to).await.unwrap()
+                }
+                Some(FileEvent::Changed(p)) => {
+                    fx.controller.on_file_changed(&p).await.unwrap()
+                }
+                None => {}
+            }
+        }
+
+        assert_eq!(
+            fx.store.delete_count(),
+            0,
+            "an interposed rename must pair into a single atomic Rename through the REAL pairing \
+             + routing — no cascade reaches the controller"
+        );
+        assert!(
+            BlockReader::get_block_authoritative(&*fx.store, &child.id)
+                .await
+                .unwrap()
+                .is_some(),
+            "child survives the interposed rename"
+        );
+        let doc_after = BlockReader::get_block_authoritative(&*fx.store, &doc_id)
+            .await
+            .unwrap()
+            .expect("doc-root alive");
+        assert_eq!(doc_after.content, "moved", "retitled to the new file stem");
     }
 }

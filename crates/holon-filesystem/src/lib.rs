@@ -36,6 +36,8 @@ pub use change_source::FileChange;
 pub use change_source::FileChangeKind;
 #[cfg(not(target_arch = "wasm32"))]
 pub use change_source::FileChangeSource;
+pub use change_source::RawFsSignal;
+pub use change_source::RenamePairing;
 #[cfg(not(target_arch = "wasm32"))]
 pub use change_source::NotifyWatcher;
 pub use error::FilesystemError;
