@@ -112,6 +112,18 @@ pub trait OperationProvider: Send + Sync {
         None
     }
 
+    /// The identity minter for this provider, present **only** when this
+    /// provider is the Turso block-identity authority (ADR 0029 D1c: the active
+    /// consolidator selects the mint EXECUTOR, never the id VALUE). Mirrors
+    /// `order_key_minter`: default `None`; the SqlOperationProvider overrides to
+    /// `Some(self)`. A `create` that omits an id (mint a fresh unique-random
+    /// one) or supplies a derived one (recognize it against its holder, D1b)
+    /// reaches minting through this seam — fail-loud when the mode that should
+    /// own it returns `None`.
+    fn identity_minter(&self) -> Option<&dyn holon_api::identity_minting::IdentityMinting> {
+        None
+    }
+
     /// Read the currently-stored `(content, marks)` of a block row, for the
     /// CRUD authority that owns block state.
     ///
@@ -1229,6 +1241,13 @@ where
         // would create an id-format mismatch — every later
         // `get_by_id`, `parent_id` lookup, and `EntityUri::try_from(Value)`
         // round-trip would silently miss this block.
+        // SEAM(ADR 0029 Inc 5): this unique-random block-id mint is hand-
+        // formatted (D2 prohibition 2). It is NOT migrated to the
+        // `IdentityMinting` witness surface here because `split_block`
+        // routes the create through the Loro cell registry when a Loro
+        // backing is present — so migrating it touches Loro-side minting,
+        // which is the Loro impl's increment (Inc 5), not this Turso lane.
+        // The value equals `EntityUri::block_random()` (class b).
         let new_block_uuid = Uuid::new_v4().to_string();
         let new_block_id = format!("block:{new_block_uuid}");
 

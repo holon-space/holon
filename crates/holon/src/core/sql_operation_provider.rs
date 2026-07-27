@@ -1808,8 +1808,74 @@ impl SqlOperationProvider {
     }
 }
 
+impl SqlOperationProvider {
+    /// Class (b) unique-random mint — PRIVATE to this impl (ADR 0029 D1c:
+    /// `mint_unique` is not public trait surface). Preserves the pre-existing
+    /// `{entity_name}:{uuid}` shape for every entity family; for the `block`
+    /// family it equals the D1 owner `EntityUri::block_random`.
+    fn mint_unique(&self) -> holon_api::identity_minting::MintedId {
+        holon_api::identity_minting::MintedId::random_for_entity(&self.entity_name)
+    }
+
+    /// Read the current holder `content`/title of `id` from THIS authority's
+    /// block table — the mode-specific half of D1b recognition. `Ok(None)` = the
+    /// id is unheld. This is the single-row PK lookup that formerly lived inline
+    /// in the create arm as the pre-SELECT collision guard; it now rides the
+    /// minter trait's `mint` (single-source predicate via `recognize_derived_id`).
+    async fn read_holder_title(
+        &self,
+        id: &EntityUri,
+    ) -> std::result::Result<Option<String>, holon_api::identity_minting::BoxError> {
+        let sql = format!(
+            "SELECT content FROM {} WHERE id = '{}'",
+            self.table_name,
+            id.as_str().replace('\'', "''")
+        );
+        let rows = self
+            .db_handle
+            .query(&sql, HashMap::new())
+            .await
+            .map_err(|e| format!("identity recognition: SELECT content for id {}: {e}", id.as_str()))?;
+        Ok(rows
+            .first()
+            .and_then(|r| r.get("content"))
+            .and_then(|v| v.as_string())
+            .map(|s| s.to_string()))
+    }
+}
+
+#[async_trait]
+impl holon_api::identity_minting::IdentityMinting for SqlOperationProvider {
+    async fn mint(
+        &self,
+        input: holon_api::identity_minting::IdentityInput,
+    ) -> std::result::Result<
+        holon_api::identity_minting::MintedId,
+        holon_api::identity_minting::BoxError,
+    > {
+        use holon_api::identity_minting::IdentityInput;
+        match input {
+            IdentityInput::UniqueRandom => Ok(self.mint_unique()),
+            IdentityInput::Carried { id, title } => {
+                // Mode-specific store read of the derived id's current holder,
+                // then the mode-INDEPENDENT single-source decision.
+                let holder = self.read_holder_title(&id).await?;
+                holon_api::identity_minting::bless_carried(id, holder.as_deref(), &title)
+                    .map_err(|c| Box::new(c) as holon_api::identity_minting::BoxError)
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl OperationProvider for SqlOperationProvider {
+    /// This IS the Turso block-identity authority (ADR 0029 D1c). The active
+    /// consolidator reaches the mint executor through this seam, mirroring
+    /// `order_key_minter`.
+    fn identity_minter(&self) -> Option<&dyn holon_api::identity_minting::IdentityMinting> {
+        Some(self)
+    }
+
     fn operations(&self) -> Vec<OperationDescriptor> {
         let mut ops = vec![
             OperationDescriptor {
@@ -2430,58 +2496,56 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 // caller, instead of panicking a background worker whose crash the
                 // UI silently swallows.
                 let mut params = params;
-                let (id, id_was_supplied) = match params.get("id").and_then(|v| v.as_string()) {
-                    Some(existing) => (existing.to_string(), true),
-                    None => {
-                        let minted = format!("{}:{}", self.entity_name, uuid::Uuid::new_v4());
-                        params.insert("id".into(), Value::String(minted.clone()));
-                        (minted, false)
-                    }
-                };
-                // FAIL-LOUD collision guard (identity plan §5, interim policy).
-                // A SUPPLIED, deterministically-derived id (e.g. a page's
-                // `PageId::for_path`) that is ALREADY held by a DIFFERENT entity
-                // must not silently `ON CONFLICT(id) DO UPDATE`-clobber the
-                // holder. "Different entity" = the holder's current canonical
-                // title differs from the requested content, under the SAME
-                // normalization `PageId::for_path` hashes (`normalize_for_hash`)
-                // — content, not `(content, parent)`, since page identity is a
-                // pure function of the path and a rename is the one thing that
-                // changes the title while preserving the id. A freshly MINTED
-                // uuid cannot collide, so this only touches supplied ids.
-                if id_was_supplied {
-                    if let Some(requested) = params.get("content").and_then(|v| v.as_string()) {
-                        let requested = requested.to_string();
-                        let held_sql = format!(
-                            "SELECT content FROM {} WHERE id = '{}'",
-                            self.table_name,
-                            id.replace('\'', "''")
-                        );
-                        let held_rows = self
-                            .db_handle
-                            .query(&held_sql, HashMap::new())
-                            .await
-                            .map_err(|e| {
-                                format!("identity collision guard: SELECT content for id {id}: {e}")
-                            })?;
-                        if let Some(held) = held_rows
-                            .first()
-                            .and_then(|r| r.get("content"))
-                            .and_then(|v| v.as_string())
-                        {
-                            if holon_api::link_parser::normalize_for_hash(held)
-                                != holon_api::link_parser::normalize_for_hash(&requested)
+                // Identity is minted / recognized through the single authority
+                // (ADR 0029 D1c) — the active consolidator's `identity_minter`,
+                // not inlined here. A create without an `id` mints a fresh
+                // unique-random one (the interactive / Rhai hot path); a SUPPLIED
+                // id is a caller-DERIVED value (e.g. a page's `PageId::for_path`)
+                // that must be RECOGNIZED against its current holder before it can
+                // `INSERT ... ON CONFLICT(id) DO UPDATE`-land, so a rename (id
+                // preserved, title changed) is never silently clobbered. The
+                // former inline pre-SELECT collision guard is SUBSUMED into
+                // `mint`, which uses the single-source `recognize_derived_id`
+                // predicate (D1b interim fail-loud). Content-gated exactly as
+                // before: with no title there is nothing to recognize.
+                let minter = self.identity_minter().ok_or_else(
+                    || -> Box<dyn std::error::Error + Send + Sync> {
+                        "SqlOnly create requires an IdentityMinting seam (the Turso mint authority)"
+                            .into()
+                    },
+                )?;
+                let create_id: holon_api::identity_minting::CreateId =
+                    match params.get("id").and_then(|v| v.as_string()) {
+                        Some(existing) => {
+                            // ALLOW(entity_uri_from_raw): id is a validated create param
+                            let carried = holon_api::identity_minting::CarriedId::from_stored(
+                                EntityUri::from_raw(existing),
+                            );
+                            if let Some(content) =
+                                params.get("content").and_then(|v| v.as_string())
                             {
-                                // ALLOW(entity_uri_from_raw): id is a validated create param
-                                return Err(Box::new(holon_api::IdentityCollision {
-                                    id: EntityUri::from_raw(&id),
-                                    held_title: held.to_string(),
-                                    requested_title: requested,
-                                }));
+                                // Recognize the carried id against its store
+                                // holder; Err(IdentityCollision) on a rename
+                                // clobber. The blessed MintedId is discarded — the
+                                // CarriedId witness is the create id.
+                                let content = content.to_string();
+                                let carried_id = carried.as_entity_uri().clone();
+                                minter
+                                    .mint(holon_api::identity_minting::IdentityInput::carried(
+                                        carried_id, content,
+                                    ))
+                                    .await?;
                             }
+                            holon_api::identity_minting::CreateId::Carried(carried)
                         }
-                    }
-                }
+                        None => holon_api::identity_minting::CreateId::Minted(
+                            minter
+                                .mint(holon_api::identity_minting::IdentityInput::UniqueRandom)
+                                .await?,
+                        ),
+                    };
+                let id = create_id.as_str().to_string();
+                params.insert("id".into(), Value::String(id.clone()));
                 let prepared = self.prepare_create(&params);
                 // block_links junction (links increment 2): derived from the
                 // marks param, written in the SAME transaction as the row +
@@ -3012,29 +3076,27 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 // title, its deterministic id, AND its filename all agree.
                 // Interior `/` is left intact (namespace-meaningful; the
                 // page-hierarchy ruling is PARKED).
+                // Single-source the page-title sanitize (parse-don't-validate):
+                // the convert planner, the reference model, and the recognition
+                // step all funnel through `holon_api::sanitize_page_title`, so a
+                // trailing-slash title can never be recognized raw on one side and
+                // sanitized on the other (normalize_for_hash keeps '/').
                 let raw_leaf = origin_content.trim();
-                let mut leaf_name = raw_leaf;
-                while leaf_name.ends_with('/') {
-                    leaf_name = leaf_name[..leaf_name.len() - 1].trim_end();
-                }
-                if leaf_name != raw_leaf {
+                let page_title = holon_api::sanitize_page_title(&origin_content).ok_or_else(|| {
+                    format!(
+                        "block_to_page_plan: origin '{origin_id}' has empty content — a page needs \
+                         a title"
+                    )
+                })?;
+                if page_title != raw_leaf {
                     tracing::warn!(
                         origin = %origin_id,
                         raw = %raw_leaf,
-                        sanitized = %leaf_name,
+                        sanitized = %page_title,
                         "block_to_page_plan: stripped trailing '/' from the page title so the \
                          title, its id, and its filename agree"
                     );
                 }
-                if leaf_name.is_empty() {
-                    return Err(format!(
-                        "block_to_page_plan: origin '{origin_id}' has empty content — a page needs \
-                         a title"
-                    )
-                    .into());
-                }
-                // The sanitized leaf is the page's authoritative title/content.
-                let page_title = leaf_name.to_string();
 
                 // Destination: an explicit `destination_path` (from the picker /
                 // MCP) wins; otherwise PRE-SELECT the origin's nearest page
@@ -3061,7 +3123,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 // silently mint phantom hierarchy). Only the `destination_path`
                 // is a real `/`-path, validated fail-loud inside `for_page_under`.
                 let page_id =
-                    holon_api::link_parser::PageId::for_page_under(&destination_path, leaf_name)?
+                    holon_api::link_parser::PageId::for_page_under(&destination_path, &page_title)?
                         .as_str()
                         .to_string();
                 let page_depth = destination_parent_depth + 1;
