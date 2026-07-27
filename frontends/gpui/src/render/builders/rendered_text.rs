@@ -51,6 +51,12 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
         _ => None,
     };
 
+    // The read-mode styling fingerprint the widget ACTUALLY paints: only the
+    // styled branch produces highlight runs (derived from the same
+    // `build_highlights` fed to `StyledText`), so a marked block that falls to
+    // the plain branch leaves this `None` — exactly the read-mode styling-drop
+    // bug `inv-paint-text-styling` catches on the painted output.
+    let mut styled_runs: Option<Vec<holon_api::StyledRun>> = None;
     let inner: AnyElement = if !has_content {
         // Empty block: placeholder text, plain click-to-focus. There is no
         // meaningful caret position, so the caret defaults to end-of-text
@@ -63,7 +69,15 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
         )
         .into_any_element()
     } else if wants_styled_render(has_content, marks.as_deref()) {
-        styled_run_render(&el_id, &content, &marks.unwrap(), &block_uri, services, ctx)
+        // One `build_highlights` per paint (as on main) — `styled_run_render`
+        // returns the painted styled-run fingerprint from that SAME computation,
+        // so the observation adds only a cheap run extraction, never a second
+        // partition pass (which would double the per-frame cost and widen
+        // windowed settle races).
+        let (el, runs) =
+            styled_run_render(&el_id, &content, marks.as_ref().unwrap(), &block_uri, services, ctx);
+        styled_runs = Some(runs);
+        el
     } else {
         // Content, no marks: a click both focuses the block AND seeds the caret
         // at the clicked offset (identity styled→buffer map). This closes the
@@ -72,7 +86,7 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
         plain_caret_click(&el_id, &content, block_uri, services)
     };
 
-    crate::geometry::tracked(
+    let mut tracker = crate::geometry::tracked(
         el_id,
         inner,
         &ctx.bounds_registry,
@@ -80,8 +94,11 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
         Some(&row_id),
         has_content,
         Some(std::sync::Arc::from(content)),
-    )
-    .into_any_element()
+    );
+    if let Some(runs) = styled_runs {
+        tracker = tracker.with_styled_runs(runs);
+    }
+    tracker.into_any_element()
 }
 
 /// Read mode renders styled runs whenever the block has content AND any mark of
@@ -176,7 +193,7 @@ fn styled_run_render(
     block_uri: &EntityUri,
     services: std::sync::Arc<dyn holon_frontend::reactive::BuilderServices>,
     ctx: &GpuiRenderContext,
-) -> AnyElement {
+) -> (AnyElement, Vec<holon_api::StyledRun>) {
     // Never abort on a corrupt persisted mark. A mark span outliving its
     // content ("N..M exceeds text length K") aborts EVERY paint of this block —
     // a page permanently un-openable. Disclosed degraded render: log loud with
@@ -218,6 +235,10 @@ fn styled_run_render(
 
     // One flowing, wrapping styled text: all marks become highlight runs.
     let highlights = build_highlights(content, marks, ctx);
+    // The paint-observable fingerprint, extracted from the SAME highlight runs
+    // handed to `StyledText` below (no second partition pass). Read back by
+    // `inv-paint-text-styling`.
+    let styled_runs = crate::render::builders::text::observed_styled_runs(&highlights);
     let styled =
         StyledText::new(SharedString::from(content.to_string())).with_highlights(highlights);
     // Clone the layout handle (shared `Rc`) BEFORE `styled` is consumed by the
@@ -230,7 +251,7 @@ fn styled_run_render(
     let segments = build_content_segments(content, marks);
 
     let block = block_uri.clone();
-    div()
+    let element = div()
         .id(hashed_id(el_id))
         .w_full()
         .px(px(12.0))
@@ -270,7 +291,8 @@ fn styled_run_render(
                 }
             },
         )
-        .into_any_element()
+        .into_any_element();
+    (element, styled_runs)
 }
 
 /// Build a `navigation.focus` intent for the main region targeting `block_id`.

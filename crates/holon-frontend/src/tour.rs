@@ -365,6 +365,7 @@ mod tests {
             parent_id: None,
             displayed_text: None,
             focused: None,
+            styled_runs: None,
             expected_size: Default::default(),
         }
     }

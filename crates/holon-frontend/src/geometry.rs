@@ -42,6 +42,12 @@ pub struct ElementInfo {
     /// follows via a spawned binding — drivers gate keystrokes on THIS field
     /// so a key can't be consumed by the previously-focused editor.
     pub focused: Option<bool>,
+    /// The read-mode styled-run fingerprint the widget actually painted for
+    /// this block, if any (only `rendered_text` / `text` builders that took the
+    /// mark-styling path set it). `None` means the widget painted plain text —
+    /// which for a block that HAS marks is the read-mode styling-drop bug the
+    /// `inv-paint-text-styling` PBT catches. Byte-range runs, theme-independent.
+    pub styled_runs: Option<std::sync::Arc<[holon_api::StyledRun]>>,
     /// Algebraic declaration of the widget's expected min/max size. The
     /// PBT layout invariant evaluates this against `(width, height)` and
     /// fails on out-of-bounds renders. Defaults to "unconstrained" (all

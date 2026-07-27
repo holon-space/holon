@@ -72,9 +72,11 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
         el = el.text_color(tc(ctx, |t| t.muted_foreground)).italic();
     }
 
+    let mut styled_runs: Option<Vec<holon_api::StyledRun>> = None;
     let inner: AnyElement = match marks {
         Some(ref m) if !m.is_empty() => {
             let highlights = build_highlights(&content, m, ctx);
+            styled_runs = Some(observed_styled_runs(&highlights));
             el.child(
                 StyledText::new(SharedString::from(content.clone())).with_highlights(highlights),
             )
@@ -99,7 +101,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     }
     let el_id = format!("text-{row_id}-content");
     let has_content = !content.is_empty();
-    crate::geometry::tracked(
+    let mut tracker = crate::geometry::tracked(
         el_id,
         inner,
         &ctx.bounds_registry,
@@ -107,8 +109,11 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
         Some(&row_id),
         has_content,
         Some(std::sync::Arc::from(content)),
-    )
-    .into_any_element()
+    );
+    if let Some(runs) = styled_runs {
+        tracker = tracker.with_styled_runs(runs);
+    }
+    tracker.into_any_element()
 }
 
 fn resolve_color(ctx: &GpuiRenderContext, color_name: &str) -> Hsla {
@@ -144,6 +149,35 @@ pub(crate) fn build_highlights(
         .into_iter()
         .map(|(range, active)| (range, merge_marks(&active, ctx)))
         .collect()
+}
+
+/// Extract the theme-independent paint fingerprint from the highlight runs the
+/// widget actually hands to `StyledText::with_highlights`. This reads the REAL
+/// painted `HighlightStyle` (not a recomputation from marks), so a renderer that
+/// silently dropped a mark's weight/decoration shows up here as plain flags.
+/// `inv-paint-text-styling` compares this against `holon_api::style_fingerprint`.
+pub(crate) fn observed_styled_runs(
+    highlights: &[(Range<usize>, HighlightStyle)],
+) -> Vec<holon_api::StyledRun> {
+    highlights
+        .iter()
+        .map(|(r, style)| holon_api::StyledRun {
+            start: r.start,
+            end: r.end,
+            flags: observed_style_flags(style),
+        })
+        .collect()
+}
+
+/// Map a painted `HighlightStyle` to its theme-independent paint attributes.
+fn observed_style_flags(h: &HighlightStyle) -> holon_api::StyleFlags {
+    holon_api::StyleFlags {
+        bold: h.font_weight == Some(FontWeight::BOLD),
+        italic: h.font_style == Some(FontStyle::Italic),
+        underline: h.underline.is_some(),
+        strikethrough: h.strikethrough.is_some(),
+        background: h.background_color.is_some(),
+    }
 }
 
 /// Walk unique boundaries (start/end offsets) and emit one segment per run of

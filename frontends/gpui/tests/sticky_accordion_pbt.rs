@@ -271,6 +271,7 @@ fn to_rendered(bounds: &BoundsRegistry) -> Vec<RenderedElement> {
             expected_size_violation: None,
             is_error_widget: false,
             focused: None,
+            styled_runs: None,
         })
         .collect()
 }

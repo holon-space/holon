@@ -241,6 +241,7 @@ fn fake(
             parent_id: parent.map(std::sync::Arc::from),
             displayed_text: None,
             focused: None,
+            styled_runs: None,
             expected_size: holon_frontend::size_expectation::SizeBounds::default(),
         },
     )
