@@ -36,12 +36,10 @@ impl std::fmt::Display for CrossingId {
 pub struct PolicyEditId(pub String);
 
 /// Stable per-device peer id — second component of the frozen ordering tuple
-/// (Inc 0(b)). Produced by `holon_loro::share_peer_id::stable_peer_id`
-/// (blake3 of device key × share × generation). The log stores the `u64` so
-/// the library need not depend on the device-key type; the harness supplies
-/// the real value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct StablePeerId(pub u64);
+/// (Inc 0(b)) AND the sender identity on every transport envelope. Defined once
+/// in `holon-loro` so the transport seam and this crate's arbitration name the
+/// SAME type.
+pub use holon_loro::sync_transport::StablePeerId;
 
 /// FROZEN ordering tuple (Inc 0(b), ratified):
 /// `(lamport_height(owner_log_doc) at append, stable_peer_id)`, ascending,

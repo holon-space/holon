@@ -122,12 +122,14 @@ mod rename_document;
 pub(crate) mod rename_page;
 mod select_bias;
 pub mod set_edge_field;
+pub mod share_container;
 mod setup_watch;
 mod simulate_restart;
 pub mod split_block;
 pub mod stale_external_rewrite;
 pub(crate) mod start_app;
 mod switch_view;
+pub mod sync_now;
 mod toggle_collapse;
 pub mod toggle_state;
 pub mod trigger_slash_command;
@@ -196,6 +198,7 @@ pub use remove_watch::RemoveWatch;
 pub use rename_document::RenameDocument;
 pub use rename_page::RenamePage;
 pub use set_edge_field::SetEdgeField;
+pub use share_container::ShareContainer;
 pub use setup_watch::SetupWatch;
 pub use simulate_restart::SimulateRestart;
 pub use split_block::SplitBlock;
@@ -203,6 +206,7 @@ pub use stale_external_rewrite::StaleExternalRewrite;
 pub use start_app::StartApp;
 pub use switch_view::SwitchView;
 pub use switch_view_mode::SwitchViewMode;
+pub use sync_now::SyncNow;
 pub use toggle_collapse::ToggleCollapse;
 pub use toggle_drawer::ToggleDrawer;
 pub use toggle_state::ToggleState;
@@ -284,6 +288,10 @@ crate::declare_e2e_transitions! {
         ToggleDrawer(ToggleDrawer),
         ToggleCollapse(ToggleCollapse),
         DeliverBlockContent(DeliverBlockContent),
+        // True sharing (two-instance slice only — cap-gated on `SutTwoInstance`,
+        // which no single-instance slice provides).
+        ShareContainer(ShareContainer),
+        SyncNow(SyncNow),
     }
 }
 

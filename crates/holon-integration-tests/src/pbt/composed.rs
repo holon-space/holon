@@ -89,6 +89,7 @@ pub mod seed_primitives;
 /// `general_e2e_composed_pbt` can drive `ComposedSut<WideE2E>`. Single source
 /// of truth (the lib slices `use` these).
 #[cfg(any(test, feature = "pbt"))]
+pub mod two_instance;
 pub mod wide_e2e;
 
 /// The out-of-process LIVE-MCP rung of the composed keystone:

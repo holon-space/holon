@@ -60,6 +60,7 @@
 //! verification. Swapping authorities required no log-layout change (the field
 //! shape was committed at Inc 4).
 
+pub mod acceptor;
 pub mod alias_ledger;
 pub mod arbitration;
 pub mod boundary;
@@ -70,8 +71,12 @@ pub mod log;
 pub mod policy;
 pub mod projection;
 pub mod registry_binding;
+pub mod sync;
 pub mod types;
 
+pub use acceptor::AcceptorContext;
+pub use acceptor::AdmitDecision;
+pub use acceptor::admit;
 pub use alias_ledger::AliasLedger;
 pub use alias_ledger::NonReplicated;
 pub use alias_ledger::SuccessionPointer;
@@ -116,6 +121,10 @@ pub use policy::evaluate_grant;
 pub use projection::OrphanRowError;
 pub use projection::assert_no_orphan_rows;
 pub use registry_binding::RegistryContainment;
+pub use sync::OutboundAuth;
+pub use sync::SyncReport;
+pub use sync::SyncSession;
+pub use sync::sync_once;
 pub use registry_binding::assert_registry_no_orphan_rows;
 pub use types::BlockContent;
 pub use types::BlockId;

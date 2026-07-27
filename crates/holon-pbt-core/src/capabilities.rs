@@ -2955,3 +2955,134 @@ pub trait RefPageIdentity {
     /// never an overwrite of the occupant.
     fn apply_create_page_at_path(&mut self, path: &str);
 }
+
+// ─── Two-instance true sharing (SyncTransport plan Inc0/Inc1) ─────────
+
+/// What ONE bounded sync round did, as the PBT observes it. The counters are
+/// the executed-witness: a "nothing was transported" assertion is only
+/// meaningful beside proof that the round RAN and consulted the transport.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SyncRoundWitness {
+    /// Rounds driven so far on this SUT (monotonic).
+    pub rounds_run: u64,
+    /// Containers the last round walked. `0` means the orchestrator did nothing.
+    pub containers_visited: usize,
+    pub pushed: usize,
+    pub imported: usize,
+    /// Rendered acceptor refusals — typed decisions, never silent drops.
+    pub refusals: Vec<String>,
+    /// Logs on the transport this side has no container mounted for.
+    pub unmounted: Vec<String>,
+    /// Containers the publisher declined to publish for want of a membership
+    /// proof — the "nothing left the device" witness on an unshared vault.
+    pub unauthorized: Vec<String>,
+    /// Cumulative transport consultations (push + pull + list) across all
+    /// rounds, read off the relay itself.
+    pub transport_consultations: u64,
+    /// Total envelopes the transport holds — the "was anything transported at
+    /// all" observable.
+    pub transport_envelopes: usize,
+}
+
+/// SUT-side control of a TWO-INSTANCE (owner + receiver) composed slice: share
+/// a container and drive one bounded sync round. Absent on every
+/// single-instance slice, so the sharing transitions and invariants deselect
+/// there by cap selection — disclosed, not faked.
+#[holon_macros::capmap_adapter]
+pub trait SutTwoInstance {
+    /// `(owner, receiver)` Loro peer ids the slice INTENDED to inject. Distinct
+    /// by construction — the whole point of the peer-id injection seam.
+    async fn instance_peer_ids(&self) -> (u64, u64);
+
+    /// `(owner, receiver)` peer ids the LIVE documents actually carry. Separate
+    /// from [`Self::instance_peer_ids`] so a test can catch an injection seam
+    /// that reports an intention it never applied.
+    async fn live_doc_peer_ids(&self) -> (u64, u64);
+
+    /// Grant `principal` membership over `selector` and put the container into
+    /// the replication set. Idempotent.
+    async fn share_container(&self, selector: &str, principal: &str);
+
+    /// One bounded sync round. `owner_to_receiver` picks which side publishes.
+    async fn sync_now(&self, owner_to_receiver: bool) -> SyncRoundWitness;
+
+    /// The round witness WITHOUT driving a round — for an invariant that must
+    /// read counters it did not produce.
+    async fn sync_witness(&self) -> SyncRoundWitness;
+}
+
+/// SUT-side observation of the RECEIVER instance's projections. Separate from
+/// [`SutBackend`] (which is always the owner) so an invariant naming this cap
+/// cannot accidentally read the owner and pass vacuously.
+#[holon_macros::capmap_adapter]
+pub trait SutReceiverBackend {
+    /// Block ids in the receiver's store, after settle.
+    async fn receiver_block_ids(&self) -> BTreeSet<EntityUri>;
+
+    /// Block ids the receiver's ORG files carry — the receiver-side writeback
+    /// round-trip half of convergence.
+    async fn receiver_org_block_ids(&self) -> BTreeSet<EntityUri>;
+
+    /// Block ids in the OWNER's store RIGHT NOW.
+    async fn owner_block_ids(&self) -> BTreeSet<EntityUri>;
+
+    /// Block ids the owner held when the last owner→receiver round ran — i.e.
+    /// exactly what that round could have carried. Empty before any round.
+    ///
+    /// Convergence must be judged against THIS, not against the owner's live
+    /// set: a block created after the last round has not been offered to the
+    /// receiver yet, so demanding it would fail a correct system. The set is
+    /// still fully load-bearing — anything that existed at push time and did
+    /// not arrive is a real loss.
+    async fn owner_block_ids_at_last_round(&self) -> BTreeSet<EntityUri>;
+
+    /// Ids the receiver already held at boot (its own disjoint seed + the
+    /// programmatic default layout, which both instances mint under the same
+    /// fixed ids). `owner_block_ids − receiver_boot_block_ids` is the
+    /// OWNER-EXCLUSIVE set: the only ids whose presence on the receiver proves
+    /// transport actually happened.
+    async fn receiver_boot_block_ids(&self) -> BTreeSet<EntityUri>;
+
+    /// The owner's ORG-carried block ids — the identity landing-zone reference
+    /// for the receiver's org half (whole-vault self-device sync maps paths 1:1).
+    async fn owner_org_block_ids(&self) -> BTreeSet<EntityUri>;
+
+    /// CRDT-level convergence: do the two instances' documents reach the same
+    /// state under a pairwise fork-and-sync fixed point? `None` when either
+    /// document is unavailable (the invariant then skips that layer, honestly).
+    async fn crdt_converged(&self) -> Option<bool>;
+}
+
+/// Reference-side view of what the receiver is ENTITLED to hold, and how many
+/// sync rounds the model believes have run. Ref-only; the SUT twin is
+/// [`SutReceiverBackend`].
+#[holon_macros::capmap_adapter]
+pub trait RefSharedView {
+    /// Is the vault (root container) shared with the receiver right now?
+    fn is_shared(&self) -> bool;
+
+    /// The principal the receiver acts as.
+    fn receiver_principal(&self) -> String;
+
+    /// Owner→receiver sync rounds the model has applied. `0` = nothing may have
+    /// crossed yet, whatever the SUT did.
+    fn owner_to_receiver_rounds(&self) -> u64;
+
+    /// The audience the container is shared with. Empty ⇒ local-only.
+    fn shared_audience(&self) -> Audience;
+}
+
+/// Write side of [`RefSharedView`] — the two model mutations the sharing
+/// transitions perform. Plain trait (no `capmap_adapter`): a `&mut self` cap
+/// cannot live behind the `Arc` a `CapMap` stores, exactly like
+/// [`RefBlockTreeMut`].
+pub trait RefSharedViewMut: RefSharedView {
+    /// Widen the WHOLE-VAULT policy audience to include `principal` and bump
+    /// the sharing epoch. Policy widens FIRST (H3): after this, every block —
+    /// including ones created later — is policy-covered, so the effective
+    /// audience can never over-approximate it.
+    fn apply_share_vault(&mut self, principal: &str);
+
+    /// Record one applied owner→receiver sync round.
+    fn note_owner_to_receiver_round(&mut self);
+}

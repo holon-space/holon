@@ -39,20 +39,59 @@ pub struct SharingRefState {
     /// local-only. A block's effective audience is the audience of the doc it
     /// currently lives in (`block_documents[block]`).
     pub container_audience: BTreeMap<EntityUri, Audience>,
+
+    /// WHOLE-VAULT share (true-sharing Inc1): the audience the root container —
+    /// and therefore every block and every doc in the vault — is shared with.
+    /// `None` ⇒ nothing is shared.
+    ///
+    /// A vault-wide default rather than a per-entry fan-out because H3 requires
+    /// the policy audience to widen FIRST and STAY wider: a block created after
+    /// the share must already carry the policy, or its effective (container)
+    /// audience would over-approximate its policy audience the instant it
+    /// lands. A default satisfies that for blocks the model has not seen yet;
+    /// an eagerly-materialized map cannot.
+    pub vault_share: Option<Audience>,
+
+    /// Owner→receiver sync rounds the model has applied since the share. The
+    /// convergence oracle only expects the receiver to hold owner state after
+    /// at least one.
+    pub owner_to_receiver_rounds: u64,
 }
 
+/// The principal the two-instance slice's receiver acts as. Fixed: the model
+/// needs one stable name for the audience, and a drawn principal would add a
+/// dimension the oracle cannot observe on the SUT.
+pub const RECEIVER_PRINCIPAL: &str = "receiver";
+
 impl SharingRefState {
-    /// The owner-intended audience for a block. Absent ⇒ local-only.
+    /// The owner-intended audience for a block. Falls back to the whole-vault
+    /// share, then local-only.
     pub fn policy_of(&self, block: &EntityUri) -> Audience {
-        self.policy_audience.get(block).cloned().unwrap_or_default()
+        self.policy_audience
+            .get(block)
+            .cloned()
+            .or_else(|| self.vault_share.clone())
+            .unwrap_or_default()
     }
 
-    /// The effective audience of a container/doc. Absent ⇒ local-only.
+    /// The effective audience of a container/doc. Falls back to the whole-vault
+    /// share, then local-only.
     pub fn container_of(&self, doc: &EntityUri) -> Audience {
         self.container_audience
             .get(doc)
             .cloned()
+            .or_else(|| self.vault_share.clone())
             .unwrap_or_default()
+    }
+
+    /// Share the WHOLE vault with `principal` (the Inc1 degenerate case: the
+    /// vault is every container in the replication set, not one mega
+    /// container). Bumps the epoch — a share is a policy edit.
+    pub fn share_vault_with(&mut self, principal: &str) {
+        let mut audience = self.vault_share.clone().unwrap_or_default();
+        audience.0.insert(principal.to_string());
+        self.vault_share = Some(audience);
+        self.epoch += 1;
     }
 
     /// Remap block/doc uris into the SUT id space (used by
@@ -61,6 +100,8 @@ impl SharingRefState {
         let resolve = |u: &EntityUri| map.get(u).cloned().unwrap_or_else(|| u.clone());
         Self {
             epoch: self.epoch,
+            vault_share: self.vault_share.clone(),
+            owner_to_receiver_rounds: self.owner_to_receiver_rounds,
             policy_audience: self
                 .policy_audience
                 .iter()

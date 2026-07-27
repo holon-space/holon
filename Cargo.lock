@@ -5374,6 +5374,7 @@ dependencies = [
  "holon-orgmode",
  "holon-pbt-core",
  "holon-profiles",
+ "holon-sharing",
  "holon-turso",
  "holon-turso-testing",
  "image",

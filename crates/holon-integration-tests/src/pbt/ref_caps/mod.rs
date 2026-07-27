@@ -68,6 +68,7 @@ mod layout;
 mod misc;
 mod nav;
 mod peers;
+mod shared_view;
 mod toggle;
 mod watches;
 
@@ -190,7 +191,12 @@ impl holon_pbt_core::composition::CapProvider for ReferenceState {
         // composed draw like `inv-no-page-under-non-page`; `shared_block_ids()`
         // is empty on a ref modeling no crossings, so the oracle is vacuously
         // green and adds no false RED to the keystone.
-        caps.insert(self as Arc<dyn holon_pbt_core::capabilities::RefAudience>);
+        caps.insert(self.clone() as Arc<dyn holon_pbt_core::capabilities::RefAudience>);
+        // `RefSharedView` carries the true-sharing whole-vault share + the
+        // owner→receiver round count the two-instance convergence/boundary
+        // oracles read. Ref-only; both invariants ALSO need a receiver SUT cap,
+        // so they deselect on every single-instance slice.
+        caps.insert(self as Arc<dyn holon_pbt_core::capabilities::RefSharedView>);
     }
 }
 

@@ -76,6 +76,12 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // boundary. Vacuously green on a ref modeling no crossings (default
         // keystone), so it adds no false RED.
         invariants::audience_never_over_approximates::wire(),
+        // True sharing (two-instance slice ONLY): the receiver holds exactly what
+        // the owner's policy sanctions, and everything it sanctions. Needs
+        // `SutReceiverBackend + SutTwoInstance` — no single-instance slice
+        // supplies those, so both deselect (disclosed) on the keystone.
+        invariants::two_instance_convergence::wire(),
+        invariants::boundary_respected::wire(),
         invariants::no_errors::wire(),
         // Mark-bounds tripwire (dogfood 2026-07-20): every inline mark's span
         // must lie within its block content (`end <= content.chars().count()`),

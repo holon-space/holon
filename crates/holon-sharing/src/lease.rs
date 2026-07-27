@@ -188,7 +188,7 @@ impl MembershipChain {
 
 /// Why a membership claim is UNCLAIMABLE. Every variant is loud (never a silent
 /// deny) so a misissued or lapsed chain is debuggable.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum MembershipError {
     #[error("empty chain proves no membership")]
     Empty,

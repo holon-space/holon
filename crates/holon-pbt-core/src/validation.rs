@@ -127,6 +127,11 @@ pub enum Reason {
     NoCollapsibleTargets,
     DeliverNotMeaningfulInBackendTests,
 
+    // ---------- true sharing (two-instance) ----------
+    /// The vault is already shared with the receiver — re-sharing changes
+    /// nothing and would burn a tick the sequence needs for syncing.
+    VaultAlreadyShared,
+
     // ---------- catch-all buckets ----------
     // Used when a transition's gate is hard to name in one variant; prefer a
     // specific variant whenever possible. Both still appear in the histogram

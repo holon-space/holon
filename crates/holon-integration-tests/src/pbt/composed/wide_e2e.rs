@@ -49,6 +49,7 @@ use proptest_state_machine::ReferenceStateMachine;
 
 use crate::pbt::composed::builder::compose_sut;
 use crate::pbt::composed::builder::compose_sut_seeded;
+use crate::pbt::composed::builder::compose_sut_seeded_with_peer_id;
 use crate::pbt::composed::builder::compose_sut_windowed_base_seeded;
 use crate::pbt::composed::composed_invariant_catalog;
 use crate::pbt::composed::harness::BurnedPairs;
@@ -168,6 +169,10 @@ impl WideHandle {
 /// the block/org invariants diverged; this covers all three. Signal-level core
 /// shared with the `HeadlessFrontendComponent` boot settle:
 /// [`crate::pbt::convergence::converge_signals`].
+pub async fn converge_handle(handle: &WideHandle, budget: Duration) {
+    converge_projections(handle, budget).await
+}
+
 async fn converge_projections(handle: &WideHandle, budget: Duration) {
     // The frontend accessors are queried at settle time, not at boot: the sync
     // controller / idle signal resolve on a spawned `post_ready_work` task.
@@ -720,6 +725,16 @@ const WIDE_HEADLESS_ABSENT_CAPS: &[(&str, &str)] = &[
          GpuiFrontendEngineComponent does",
     ),
     (
+        "SutTwoInstance",
+        "two-instance-only: sharing + sync control over a SECOND booted session and a relay; a \
+         single-instance compose_sut has no second side to share with",
+    ),
+    (
+        "SutReceiverBackend",
+        "two-instance-only: the RECEIVER session's projections; a single-instance compose_sut has \
+         no receiver, and reading the owner through this cap would pass vacuously",
+    ),
+    (
         "SutFrontendEmissions",
         "windowed-only: drain_vm_emissions / provider_stability_report need the live windowed \
          frontend engine; the headless ReactiveEngine returns honest-empty and deselects rather \
@@ -763,6 +778,17 @@ fn wide_seed_tree() -> Vec<NewBlock> {
 pub async fn boot_and_seed_wide(
     resolver: &IdResolver,
     ref_state: &ReferenceState,
+) -> (CapMap, WideHandle, BTreeSet<EntityUri>) {
+    boot_and_seed_wide_with_peer_id(resolver, ref_state, None).await
+}
+
+/// [`boot_and_seed_wide`] with this session's Loro peer id pinned — the
+/// two-instance slice's owner arm. `None` keeps the env/random default every
+/// single-instance caller relies on.
+pub async fn boot_and_seed_wide_with_peer_id(
+    resolver: &IdResolver,
+    ref_state: &ReferenceState,
+    peer_id: Option<u64>,
 ) -> (CapMap, WideHandle, BTreeSet<EntityUri>) {
     // SUT-side parameterization seam: the booted set follows the oracle's DRAWN
     // wiring (`init_state` draws `any_valid_wiring()`; `HOLON_PBT_FORCE_FULL=1`
@@ -862,7 +888,13 @@ pub async fn boot_and_seed_wide(
     for (name, body) in &soak_files {
         seed_files.push((name.as_str(), body.as_str()));
     }
-    let bundle = compose_sut_seeded(&set, resolver, &seed_files, &wide_seed_tree()).await;
+    let bundle = match peer_id {
+        Some(peer_id) => {
+            compose_sut_seeded_with_peer_id(&set, resolver, &seed_files, &wide_seed_tree(), peer_id)
+                .await
+        }
+        None => compose_sut_seeded(&set, resolver, &seed_files, &wide_seed_tree()).await,
+    };
     // The settle handles — the Turso engine (CDC watermark) and the frontend
     // component (Loro sync + org idle). Cloned out before `bundle.caps` is
     // moved so the post-write [`converge_projections`] settle can prove all

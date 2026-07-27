@@ -23,6 +23,7 @@
 
 pub mod advice_rows_woven;
 pub mod audience_never_over_approximates;
+pub mod boundary_respected;
 pub mod companion_has_no_child_page_headings;
 pub mod display_placement_canonical_inert;
 pub mod displayed_text;
@@ -79,3 +80,4 @@ pub mod viewmodel_state_toggle_correct;
 pub mod viewmodel_tree_virtual_slots;
 pub mod watch_rows;
 pub mod window_focus;
+pub mod two_instance_convergence;
