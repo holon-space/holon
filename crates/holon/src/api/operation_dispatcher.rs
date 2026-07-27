@@ -196,6 +196,49 @@ impl OperationDispatcher {
         .into())
     }
 
+    /// The ADR 0028 C3 boundary/authz decision for one dispatched operation.
+    ///
+    /// The op's declared [`holon_api::BoundaryBehavior`] plus the containers of
+    /// the subject (`id`) and — when the intent carries one — the reparent
+    /// destination (`parent_id`) decide allow vs. reject-loud. A rejection is
+    /// an `Err`, so the operation never reaches its provider and is never
+    /// silently dropped (D2).
+    ///
+    /// Scoped to ops that NAME a subject: an op naming no block sits in no
+    /// container, so there is no boundary to judge.
+    fn enforce_boundary(
+        &self,
+        available_ops: &[OperationDescriptor],
+        resolved_entity_name: &str,
+        op_name: &str,
+        params: &StorageEntity,
+    ) -> Result<()> {
+        let Some(enforcer) = &self.boundary_enforcer else {
+            return Ok(());
+        };
+        let Some(subject) = params.get("id").and_then(|v| v.as_string()) else {
+            return Ok(());
+        };
+        let descriptor = available_ops
+            .iter()
+            .find(|op| op.entity_name == resolved_entity_name && op.name == op_name)
+            .ok_or_else(|| {
+                format!(
+                    "boundary seam: no descriptor for {resolved_entity_name}.{op_name} after \
+                     provider resolution"
+                )
+            })?;
+        enforcer
+            .check(
+                op_name,
+                &descriptor.boundary_behavior,
+                subject,
+                params.get("parent_id").and_then(|v| v.as_string()),
+            )
+            .map_err(|e| format!("ADR 0028 boundary enforcement: {e}"))?;
+        Ok(())
+    }
+
     /// Fail-loud guard that a composed backend actually installed the ADR 0028
     /// boundary seam.
     ///
@@ -788,6 +831,10 @@ impl OperationProvider for OperationDispatcher {
                             .any(|op| op.entity_name == resolved_entity_name && op.name == op_name)
                     })
                     .ok_or_else(|| format!("No provider registered for entity: {}", entity_name))?;
+
+                // ADR 0028 C3 — THE boundary/authz seam, before the provider runs
+                // and before any I/O.
+                self.enforce_boundary(&available_ops, resolved_entity_name, op_name, &params)?;
 
                 info!(
                     "[OperationDispatcher] Routing operation to provider: entity={}, op={}",
