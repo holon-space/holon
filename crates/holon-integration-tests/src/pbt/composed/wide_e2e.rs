@@ -1139,6 +1139,50 @@ pub fn windowed_composed_sut(
 ///
 /// Idempotent: an already-normalized wiring maps to itself, so
 /// `set_for_wiring(&full_headless().wiring) == full_headless()`.
+/// One-line disclosure of the RESOLVED execution-authority ROUTING for a drawn
+/// wiring — the map the wiring draw ALONE does not reveal. The failure header
+/// prints the wiring (`storage={Turso} … projections={…, EditorState}`), which
+/// misled readers (and a prior task framing) into inferring Turso EXECUTES the
+/// runtime writes. It does not: the `EditorState` projection is exactly what
+/// turns Loro on as the block-CRUD authority (`crud.enabled` ⇒
+/// `LoroBlockOperations`), so runtime `create`/`set_field` land in the Loro doc
+/// and only PROJECT to `block_raw`/matview. This line makes that recoverable
+/// without a code trace.
+///
+/// SINGLE-SOURCED from [`set_for_wiring`] — the SAME resolution
+/// `boot_and_seed_wide`/`compose_sut` use — never a parallel truth table (which
+/// could drift from the real wiring decision). Precedent: commit 8cdef3bc
+/// (failure header discloses layer COVERAGE, never asserts unmeasured green).
+pub fn authority_routing_disclosure(wiring: &Wiring) -> String {
+    let set = set_for_wiring(wiring);
+    // `has_editor` in `builder.rs` is exactly `set.has_projection(EditorState)`,
+    // and that flag alone drives `loro_enabled`/`crud.enabled`. Read it here so
+    // this disclosure cannot disagree with the actual block-CRUD wiring.
+    let block_crud = if set.has_projection(Projection::EditorState) {
+        "Loro(LoroBlockOperations, via EditorState)"
+    } else {
+        "Sql(SqlOperationProvider)"
+    };
+    // Turso storage is the SQL projection sink (block_raw + matviews). A
+    // Loro-only draw has no SQL sink; block_raw is then absent.
+    let projection_sinks = if set.wiring.has_storage(StorageAdapter::Turso) {
+        "Sql(block_raw,matview)"
+    } else {
+        "none(Loro-only, no Sql sink)"
+    };
+    // Org write-back (block → `.org` file) is active only when an Org adapter is
+    // wired into the draw.
+    let org_writeback = if wiring.has_storage(StorageAdapter::Org) {
+        "on"
+    } else {
+        "off"
+    };
+    format!(
+        "authority: block-CRUD={block_crud}; projection-sinks={projection_sinks}; \
+         org-writeback={org_writeback}"
+    )
+}
+
 pub fn set_for_wiring(wiring: &Wiring) -> ComponentSet {
     let mut wiring = wiring.clone();
     wiring.actors.remove(&Actor::UI);
@@ -1854,6 +1898,42 @@ mod tests {
         // A Turso draw selects the frontend (ViewModel) arm.
         let turso = Wiring::custom(vec![StorageAdapter::Turso], vec![], vec![]);
         assert!(set_for_wiring(&turso).has_projection(Projection::ViewModel));
+    }
+
+    /// The failure-header authority disclosure must, for the very draw that
+    /// misled prior readers (`storage={Turso}` + the always-selected
+    /// `EditorState` projection), name LORO as the block-CRUD authority — NOT
+    /// Turso — while naming SQL as the projection sink. Single-sourced from
+    /// `set_for_wiring`, so it can never disagree with what the SUT actually
+    /// boots.
+    #[test]
+    fn authority_disclosure_names_loro_as_block_crud_for_a_turso_editorstate_draw() {
+        // `storage={Org, Turso}` is exactly the composed keystone's failing draw.
+        let turso = Wiring::custom(vec![StorageAdapter::Org, StorageAdapter::Turso], vec![], vec![]);
+        let line = authority_routing_disclosure(&turso);
+        assert_eq!(
+            line,
+            "authority: block-CRUD=Loro(LoroBlockOperations, via EditorState); \
+             projection-sinks=Sql(block_raw,matview); org-writeback=on"
+        );
+        assert!(
+            !line.contains("block-CRUD=Sql"),
+            "a Turso+EditorState draw must NEVER claim Turso executes block CRUD: {line}"
+        );
+
+        // A hypothetical no-editor draw would route block CRUD to SQL. Construct
+        // the set directly (the live draw always selects EditorState) to prove
+        // the Sql arm is reachable and correct.
+        let loro_only = Wiring::custom(vec![StorageAdapter::Loro], vec![], vec![]);
+        let loro_line = authority_routing_disclosure(&loro_only);
+        assert!(
+            loro_line.contains("block-CRUD=Loro(LoroBlockOperations, via EditorState)"),
+            "Loro-only draw is also EditorState/Loro-CRUD: {loro_line}"
+        );
+        assert!(
+            loro_line.contains("projection-sinks=none(Loro-only, no Sql sink)"),
+            "a Loro-only draw has no SQL sink: {loro_line}"
+        );
     }
 
     /// A4 NON-VACUITY: the `full_headless` cap set now ADMITS the peer

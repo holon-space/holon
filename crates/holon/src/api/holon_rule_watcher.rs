@@ -340,6 +340,51 @@ async fn fire_emit(
             .to_string()
     };
 
+    // RECOGNITION (resolve-before-mint, ADR 0029). The content-based inhibitor
+    // (`already_present`) above only sees a block whose CONTENT still equals the
+    // day name; it MISSES a page RENAMED away from the date that still holds this
+    // derived id. Recognize by the DERIVED ID against the id's current holder (a
+    // mode-correct `block_raw` read — the SAME source `already_present` uses — so
+    // it is correct whether Turso or Loro is the block-write authority):
+    //   - Collision (id held by a DIFFERENT normalized title = the renamed page):
+    //     refuse — skip idempotently, do NOT dispatch the create, so both the
+    //     Turso and Loro block-CRUD authorities take the same no-clobber path. A
+    //     guard on the SQL write alone can never reach this in Loro mode, where
+    //     the create lands in the Loro doc and only projects to `block_raw`.
+    //   - AlreadySatisfied: the id already holds this exact name — nothing to do.
+    //   - Free: fall through and mint/create below.
+    let holder_title = match current_title_of(engine, &id).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!(
+                "[holon_rule_watcher] {} recognition read failed: {e:#}",
+                rule_id.as_str()
+            );
+            status.set(rule_id.as_str(), RuleStatus::ExecError(format!("{e:#}")));
+            return;
+        }
+    };
+    // ALLOW(entity_uri_from_raw): `id` is a freshly derived, validated create id.
+    let derived_uri = holon_api::EntityUri::from_raw(&id);
+    match holon_api::recognize_derived_id(&derived_uri, holder_title.as_deref(), &content) {
+        holon_api::Recognition::Collision(collision) => {
+            let msg = format!("{collision}");
+            let already_skipped =
+                matches!(status.get(rule_id.as_str()), Some(RuleStatus::Skipped(_)));
+            if !already_skipped {
+                info!(
+                    "[holon_rule_watcher] {} skipped: derived id already held by a different \
+                     entity (recognition refusal, resolve-before-mint) — {msg}",
+                    rule_id.as_str()
+                );
+            }
+            status.set(rule_id.as_str(), RuleStatus::Skipped(msg));
+            return;
+        }
+        holon_api::Recognition::AlreadySatisfied => return,
+        holon_api::Recognition::Free => {}
+    }
+
     let mut params = StorageEntity::new();
     params.insert("id".into(), Value::String(id));
     params.insert("parent_id".into(), Value::String(parent_id));
@@ -437,6 +482,26 @@ async fn already_present(engine: &BackendEngine, parent_id: &str, content: &str)
         .await
         .context("inhibitor existence read failed")?;
     Ok(!rows.is_empty())
+}
+
+/// The CURRENT `content`/title of the block that holds `id`, or `None` if no
+/// block holds it. A direct base-table read (`block_raw`) — the same
+/// mode-correct source [`already_present`] uses, so recognition observes the
+/// same projected state regardless of whether Turso or Loro executed the last
+/// write.
+async fn current_title_of(engine: &BackendEngine, id: &str) -> Result<Option<String>> {
+    let mut params = HashMap::new();
+    params.insert("id".to_string(), Value::String(id.to_string()));
+    let rows = engine
+        .db_handle()
+        .query("SELECT content FROM block_raw WHERE id = $id", params)
+        .await
+        .context("recognition: holder title read failed")?;
+    Ok(rows
+        .first()
+        .and_then(|r| r.get("content"))
+        .and_then(|v| v.as_string())
+        .map(str::to_string))
 }
 
 /// The `/`-joined page-title chain of `block_id`, walking up `parent_id` while

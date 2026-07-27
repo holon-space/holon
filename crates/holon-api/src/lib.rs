@@ -36,6 +36,7 @@ pub mod inline_mark;
 pub mod input_types;
 /// flutter_rust_bridge:ignore
 pub mod interp_value;
+pub mod identity_recognition;
 pub mod latency_e2e;
 pub mod link_candidate;
 pub mod link_parser;
@@ -89,6 +90,8 @@ pub use provenance::ProvenanceStamp;
 pub use query_engine::QueryEngine;
 pub use storage_error::IDENTITY_COLLISION_MARKER;
 pub use storage_error::IdentityCollision;
+pub use identity_recognition::Recognition;
+pub use identity_recognition::recognize_derived_id;
 pub use storage_error::ParentNotFound;
 pub use storage_error::ProjectionInvariantViolated;
 pub use template::INSTANCE_OF_PROPERTY;

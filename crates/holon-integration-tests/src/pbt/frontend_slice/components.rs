@@ -4104,6 +4104,145 @@ mod tests {
         );
     }
 
+    /// LORO-AUTHORITY twin of the clobber test above (Inc 2 topology finding).
+    /// Identical scenario, but boots with Loro CRDT ON (`loro_enabled = true`),
+    /// which is what the composed keystone's failing draw (`projections={..,
+    /// EditorState}`) selects. Under Loro authority, block CRUD
+    /// (`create`/`set_field`) is served by `LoroBlockOperations` — the create
+    /// lands in the Loro doc and is PROJECTED to `block_raw`, so it NEVER
+    /// traverses `SqlOperationProvider::execute_operation` where Inc 1 placed
+    /// its collision guard. The SqlOnly twin above is green (the guard fires);
+    /// this one is RED until the recognition seam refuses the re-mint at a
+    /// mode-independent chokepoint (Inc 2 Option B). Red for the right reason:
+    /// the renamed title is clobbered back to the date because the derived-id
+    /// collision is invisible to the content-based `already_present` inhibitor
+    /// and to a guard that only runs on the SQL write path.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn journal_autocreate_reraise_clobbers_renamed_journal_page_loro_authority() {
+        use holon_pbt_core::capabilities::SutClockAdvance;
+
+        let boot_ms = noon_millis(2026, 1, 15);
+        let clock = Arc::new(holon_api::TestClock::new(boot_ms));
+        let boot_date = holon_api::CalendarDate::from_clock(clock.as_ref()).ymd();
+        let comp = HeadlessFrontendComponent::new_with_clock(
+            &[("Journals.org", "#+ID: journals\n")],
+            Duration::from_millis(500),
+            true, // Loro authority ON — block CRUD lands in the Loro doc.
+            clock.clone(),
+        )
+        .await;
+
+        // Boot fired today's journal page (Page-tagged, name = the boot date).
+        let boot_days = wait_for_journal_days(&comp, 1, Duration::from_secs(10)).await;
+        let journal_id = boot_days[0].0.clone();
+        assert_eq!(boot_days[0].1, boot_date, "boot journal is the boot day");
+        assert_eq!(
+            journal_id,
+            super::keystone_boot_journal_id().to_string(),
+            "boot journal id is the canonical PageId::for_path(Journals/<date>)"
+        );
+
+        let read_title = || async {
+            let rows = comp
+                .engine
+                .db_handle()
+                .query(
+                    &format!(
+                        "SELECT content FROM block_raw WHERE id = '{}'",
+                        journal_id.replace('\'', "''")
+                    ),
+                    std::collections::HashMap::new(),
+                )
+                .await
+                .expect("journal title query");
+            rows.first()
+                .and_then(|r| r.get("content").and_then(|v| v.as_string()))
+                .map(str::to_string)
+        };
+        let read_page_tag = || async {
+            let rows = comp
+                .engine
+                .db_handle()
+                .query(
+                    &format!(
+                        "SELECT 1 AS present FROM block_tags WHERE block_id = '{}' AND tag = \
+                         'Page' LIMIT 1",
+                        journal_id.replace('\'', "''")
+                    ),
+                    std::collections::HashMap::new(),
+                )
+                .await
+                .expect("journal page-tag query");
+            !rows.is_empty()
+        };
+
+        // Rename the journal page through the production `block.set_field(content)`
+        // op -- the exact op `RenamePage` drives. Under Loro authority this lands
+        // in the Loro doc and projects to `block_raw`.
+        let mut params: holon_api::StorageEntity = std::collections::HashMap::new();
+        params.insert("id".into(), Value::String(journal_id.clone()));
+        params.insert("field".into(), Value::String("content".to_string()));
+        params.insert("value".into(), Value::String("Renamed".to_string()));
+        comp.engine
+            .execute_operation(
+                &EntityName::new("block"),
+                "set_field",
+                params,
+                holon_api::OpOrigin::User,
+            )
+            .await
+            .expect("rename journal via block.set_field(content)");
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            read_title().await.as_deref(),
+            Some("Renamed"),
+            "precondition: the rename applied"
+        );
+        assert!(
+            read_page_tag().await,
+            "precondition: the renamed page is still Page-tagged"
+        );
+        eprintln!(
+            "[journal-clobber-loro] after rename: title={:?} page_tag={}",
+            read_title().await,
+            read_page_tag().await
+        );
+
+        // Re-fire TODAY's journal rule: roll the clock forward one day and back to
+        // the boot day. The return CDC re-evaluates `not block_exists(
+        // "Journals/2026-01-15")` -- now TRUE, the name was renamed away -- so the
+        // action re-creates "2026-01-15" at the SAME deterministic id the renamed
+        // page holds.
+        let d1 = comp.advance_clock_days(1).await;
+        eprintln!("[journal-clobber-loro] rolled forward to {d1}");
+        let d0 = comp.advance_clock_days(-1).await;
+        eprintln!("[journal-clobber-loro] rolled back to {d0}");
+        assert_eq!(d0, boot_date, "clock returned to the boot day");
+        tokio::time::sleep(Duration::from_millis(600)).await;
+
+        let title_after = read_title().await;
+        let page_tag_after = read_page_tag().await;
+        eprintln!(
+            "[journal-clobber-loro] after re-tick: title={title_after:?} \
+             page_tag={page_tag_after}"
+        );
+
+        // SPEC: the rule is idempotent-by-name; re-firing it must NOT overwrite a
+        // page that merely CHANGED ITS NAME. GREEN once the recognition seam
+        // refuses the re-mint at a mode-independent chokepoint (the derived id is
+        // still held by the renamed page, a DIFFERENT normalized title) and the
+        // rule watcher takes the existing `IdentityCollision`->Skipped path. RED
+        // today under Loro authority: the create lands in the Loro doc, bypassing
+        // the SqlOperationProvider guard, and clobbers the renamed title back to
+        // the date.
+        assert_eq!(
+            title_after.as_deref(),
+            Some("Renamed"),
+            "recognition seam must refuse the journal re-mint under Loro authority so the \
+             renamed title survives; a clobber back to the date means recognition did not fire"
+        );
+    }
+
     /// Fork B data-persistence gate (verifier half 2): a bullet added UNDER a
     /// runtime-materialized journal date page — via the REACTIVE store path (a
     /// `block.create`, the way the user typing a bullet reaches the store), NOT
