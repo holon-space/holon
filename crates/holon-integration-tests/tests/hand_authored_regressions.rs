@@ -54,6 +54,11 @@
 //! * `HOLON_HAND_AUTHORED_CASE` — comma-separated list of case `name`s to run.
 //!   The driver stops at the first red, so without this a probe case is masked
 //!   by any earlier failing case.
+//! * `HOLON_HAND_AUTHORED_SKIP` — comma-separated list of case `name`s to
+//!   QUARANTINE (skip a known-bad case without editing the committed sidecar,
+//!   so un-quarantining can never be forgotten in a code edit). Each skip is
+//!   disclosed LOUD on stderr plus a summary count, so a green can never read
+//!   as full coverage. An unknown name is a hard error, never a silent no-op.
 //!
 //! Fail LOUD (parse-don't-validate): an unreadable sidecar, a malformed line,
 //! an unknown transition variant, a non-round-tripping `initial_state`, an
@@ -91,6 +96,11 @@ const SIDECAR_ENV: &str = "HOLON_HAND_AUTHORED_SIDECAR";
 
 /// Env var holding a comma-separated list of case names to run in isolation.
 const CASE_FILTER_ENV: &str = "HOLON_HAND_AUTHORED_CASE";
+
+/// Env var holding a comma-separated list of case names to QUARANTINE (skip),
+/// so a known-bad case can be excluded via env instead of a code edit that
+/// could be forgotten when the underlying fix lands.
+const SKIP_FILTER_ENV: &str = "HOLON_HAND_AUTHORED_SKIP";
 
 /// The generated half of a keystone case's starting point.
 ///
@@ -187,6 +197,21 @@ fn case_filter() -> Option<Vec<String>> {
     }
 }
 
+/// Case names to quarantine, from [`SKIP_FILTER_ENV`]; an empty vec means "skip
+/// nothing". Same parse plumbing as [`case_filter`], mirrored deliberately.
+fn skip_filter() -> Vec<String> {
+    match std::env::var(SKIP_FILTER_ENV) {
+        Ok(spec) => spec
+            .split(',')
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Err(std::env::VarError::NotPresent) => Vec::new(),
+        Err(e) => panic!("{SKIP_FILTER_ENV} is set but unreadable: {e}"),
+    }
+}
+
 /// Parse ONE sidecar line into a case, failing loud on anything short of a
 /// total, lossless read.
 ///
@@ -241,20 +266,61 @@ fn load_cases() -> Vec<HandAuthoredCase> {
         .map(|(lineno, line)| parse_case(&path, lineno, line))
         .collect();
 
-    let Some(wanted) = case_filter() else {
-        return cases;
-    };
     let known: Vec<&str> = cases.iter().map(|c| c.name.as_str()).collect();
-    for name in &wanted {
+
+    // Quarantine (skip) filter. Validated against ALL parsed cases up front so a
+    // typo in the skip list is a hard error, never a silent quarantine-nothing.
+    let skip = skip_filter();
+    for name in &skip {
         assert!(
             known.contains(&name.as_str()),
-            "{CASE_FILTER_ENV} names case {name:?}, absent from {path:?}; known cases: {known:?}"
+            "{SKIP_FILTER_ENV} names case {name:?} to skip, absent from {path:?}; \
+             known cases: {known:?}"
         );
     }
-    cases
+
+    let cases: Vec<HandAuthoredCase> = match case_filter() {
+        None => cases,
+        Some(wanted) => {
+            for name in &wanted {
+                assert!(
+                    known.contains(&name.as_str()),
+                    "{CASE_FILTER_ENV} names case {name:?}, absent from {path:?}; \
+                     known cases: {known:?}"
+                );
+            }
+            cases
+                .into_iter()
+                .filter(|c| wanted.contains(&c.name))
+                .collect()
+        }
+    };
+
+    if skip.is_empty() {
+        return cases;
+    }
+    let mut skipped = 0usize;
+    let kept: Vec<HandAuthoredCase> = cases
         .into_iter()
-        .filter(|c| wanted.contains(&c.name))
-        .collect()
+        .filter(|c| {
+            if skip.contains(&c.name) {
+                eprintln!(
+                    "[hand-authored regression] SKIPPED case {:?} via {SKIP_FILTER_ENV} \
+                     (known issue \u{2014} see docs/Testing/BugFunnel.md)",
+                    c.name
+                );
+                skipped += 1;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    eprintln!(
+        "[hand-authored regression] {skipped} case(s) SKIPPED via {SKIP_FILTER_ENV} \
+         \u{2014} coverage is NOT full (see docs/Testing/BugFunnel.md)"
+    );
+    kept
 }
 
 /// Replay every hand-authored keystone regression through the production

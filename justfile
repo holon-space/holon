@@ -129,6 +129,8 @@ hand-authored *FLAGS:
     # failing suite exited 0 and every weave/land gate using this recipe was a
     # silent false green (observed 2026-07-25).
     set -euo pipefail
+    # quarantined: turso IVM retract-race under concurrent CDC — BugFunnel row 2026-07-27; un-quarantine when the turso-side fix lands (delete this line)
+    export HOLON_HAND_AUTHORED_SKIP=${HOLON_HAND_AUTHORED_SKIP-watch-matview-retains-outdent-intermediate-row}
     cargo test \
         -p holon-integration-tests --features pbt --test hand_authored_regressions \
         -- --nocapture {{FLAGS}} 2>&1 | tee /tmp/pbt-hand-authored.log
