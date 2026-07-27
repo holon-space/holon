@@ -114,7 +114,7 @@ three independent axes — there is ONE test, never a per-focus twin binary:
 
 | Env var | Axis | Effect |
 |---|---|---|
-| `HOLON_PBT_LIVE_MCP=1` | composition | run the keystone through the **live MCP server** (`LiveMcpE2E`, windowless) instead of headless-direct. Same `E2ETransition` alphabet + invariant catalog; every transition is driven via `McpUserDriver` over `http://127.0.0.1:$MCP_SERVER_PORT/mcp`. Wrapper: `just keystone-mcp [port] [cases] [weights]` (app must be up, e.g. `HOLON_MCP_ALLOW_RESET=1 just live-verify 8710`). |
+| `HOLON_PBT_LIVE_MCP=1` | composition | run the keystone through the **live MCP server** (`LiveMcpE2E`, windowless) instead of headless-direct. Same `E2ETransition` alphabet + invariant catalog; every transition is driven via `McpUserDriver` over `http://127.0.0.1:$MCP_SERVER_PORT/mcp`. Wrapper: `just keystone-mcp [port] [cases] [weights]`. The app MUST be launched with `HOLON_MCP_ALLOW_RESET=1` (e.g. `HOLON_MCP_ALLOW_RESET=1 just live-verify 8710`): the flag both un-gates `reset_vault` and routes the desktop launch through the rebindable TEST-MODE window that installs the reset builder — without it every case fails at reset ("no window/pump wired"). |
 | `HOLON_PBT_WEIGHTS='glob:mult,…'` | alphabet | reweight transition families by glob × u32 multiplier; `0` removes a family. E.g. an MCP-data-tool-only walk: `HOLON_PBT_WEIGHTS='*:0,DenseProjectionEdit:100'`. A focused run must still draw its target a non-zero number of times — an all-zero alphabet fails loud. |
 | `HOLON_PBT_INVARIANTS='glob:mode'` | oracles | per-invariant `skip`/`warn`/`enforce` override — any softening is a DISCLOSED degraded run and is printed as such. |
 

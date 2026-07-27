@@ -46,6 +46,7 @@ use holon_frontend::user_driver::UserDriver;
 use holon_pbt_core::capabilities::CapRegion;
 use holon_pbt_core::capabilities::SutBackend;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
+use holon_pbt_core::capabilities::SutDenseTools;
 use holon_pbt_core::capabilities::SutEditorMirrorWrite;
 use holon_pbt_core::capabilities::SutFocusWrite;
 use holon_pbt_core::capabilities::SutLoroLog;
@@ -675,6 +676,159 @@ impl SutQuiesce for LiveMcp {
     }
 }
 
+/// `SutDenseTools` (the `DenseProjectionEdit` transition): the agent-facing
+/// dense_query → edit → dense_patch round trip through the REAL MCP tool → op
+/// path. Every error is a loud panic — the ref has already applied the append,
+/// so a swallowed failure would mis-diagnose as a block-set divergence.
+#[async_trait::async_trait(?Send)]
+impl SutDenseTools for LiveMcp {
+    async fn dense_append_child(&self, parent: &EntityUri, content: &str) {
+        let resolved = self.resolve(parent);
+        let query = format!(
+            "SELECT * FROM block WHERE parent_id = '{}' ORDER BY sort_key",
+            resolved.as_str().replace('\'', "''")
+        );
+        // Single bounded retry (ruling 2026-07-27): dense_patch's create+
+        // position pair can hit the cross-provider visibility race (create
+        // commits on Loro, move_block's reader misses it pre-projection); the
+        // tool then COMPENSATES — rolls the create back and returns an error
+        // carrying the exact signature below. That disclosed-retryable
+        // transient is what a real agent retries, so the TRANSITION retries
+        // once (never the tool — its contract stays honest-fail) and logs the
+        // occurrence visibly. Any other error, or a second failure, panics.
+        // Retryable until single-op positional create lands (queued follow-up).
+        const RETRYABLE_SIG: &str = "created block rolled back (deleted)";
+        for attempt in 0..2 {
+            let proj = self
+                .driver
+                .call_tool_json(
+                    "dense_query",
+                    serde_json::json!({ "query": query, "language": "holon_sql" }),
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("[DenseProjectionEdit] dense_query for {resolved} failed: {e:#}")
+                });
+            let handle = proj["projection_handle"].as_str().unwrap_or_else(|| {
+                panic!(
+                    "[DenseProjectionEdit] dense_query response missing projection_handle: {proj}"
+                )
+            });
+            let dense = proj["dense_org"].as_str().unwrap_or_else(|| {
+                panic!("[DenseProjectionEdit] dense_query response missing dense_org: {proj}")
+            });
+            let rows = proj["block_count"].as_u64().unwrap_or_else(|| {
+                panic!("[DenseProjectionEdit] dense_query response missing block_count: {proj}")
+            });
+            // The generator guarantees ≥1 existing child; an empty projection
+            // would anchor to SYNTHETIC_ROOT (page context lost) and silently
+            // change the append target — fail loud instead.
+            assert!(
+                rows >= 1,
+                "[DenseProjectionEdit] projection for {resolved} is empty (dense_org = \
+                 {dense:?}) — generator precondition (≥1 child) not honored by the live projection"
+            );
+            let mut edited = dense.to_string();
+            if !edited.ends_with('\n') {
+                edited.push('\n');
+            }
+            edited.push_str(&format!("* {content}\n"));
+            match self
+                .driver
+                .call_tool_json(
+                    "dense_patch",
+                    serde_json::json!({ "handle": handle, "text": edited }),
+                )
+                .await
+            {
+                Ok(_) => return,
+                Err(e) if attempt == 0 && format!("{e:#}").contains(RETRYABLE_SIG) => {
+                    eprintln!(
+                        "[DenseProjectionEdit] transient positional-create race under {resolved} \
+                         (disclosed rollback: {RETRYABLE_SIG:?}) — retrying once: {e:#}"
+                    );
+                }
+                Err(e) => panic!(
+                    "[DenseProjectionEdit] dense_patch appending {content:?} under {resolved} \
+                     failed (attempt {}): {e:#}",
+                    attempt + 1
+                ),
+            }
+        }
+        unreachable!("loop returns on success or panics on final failure");
+    }
+
+    async fn dense_move_first_child_to_end(&self, parent: &EntityUri) {
+        let resolved = self.resolve(parent);
+        let query = format!(
+            "SELECT * FROM block WHERE parent_id = '{}' ORDER BY sort_key",
+            resolved.as_str().replace('\'', "''")
+        );
+        let proj = self
+            .driver
+            .call_tool_json(
+                "dense_query",
+                serde_json::json!({ "query": query, "language": "holon_sql" }),
+            )
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[DenseProjectionEdit] dense_query for {resolved} failed: {e:#}")
+            });
+        let handle = proj["projection_handle"].as_str().unwrap_or_else(|| {
+            panic!("[DenseProjectionEdit] dense_query response missing projection_handle: {proj}")
+        });
+        let dense = proj["dense_org"].as_str().unwrap_or_else(|| {
+            panic!("[DenseProjectionEdit] dense_query response missing dense_org: {proj}")
+        });
+        // Split into the `#+ID:` header and the top-level ROWS (a row = its
+        // `* ` headline plus any continuation lines, e.g. a property drawer);
+        // move the first row (with its `{#alias}` token) to the end. The
+        // generator guarantees >= 2 children, so fewer rows is a loud drift.
+        let mut lines = dense.lines();
+        let header = lines.next().unwrap_or_default();
+        assert!(
+            header.starts_with("#+ID:"),
+            "[DenseProjectionEdit] dense_org for {resolved} missing #+ID: header: {dense:?}"
+        );
+        let mut rows: Vec<Vec<&str>> = Vec::new();
+        for line in lines {
+            if line.starts_with('*') || rows.is_empty() {
+                rows.push(vec![line]);
+            } else {
+                rows.last_mut().expect("rows non-empty checked").push(line);
+            }
+        }
+        assert!(
+            rows.len() >= 2,
+            "[DenseProjectionEdit] projection for {resolved} has {} rows, need >= 2 for a move \
+             (dense_org = {dense:?}) — generator precondition not honored by the live projection",
+            rows.len()
+        );
+        let first = rows.remove(0);
+        rows.push(first);
+        let mut edited = String::from(header);
+        edited.push('\n');
+        for row in &rows {
+            for l in row {
+                edited.push_str(l);
+                edited.push('\n');
+            }
+        }
+        self.driver
+            .call_tool_json(
+                "dense_patch",
+                serde_json::json!({ "handle": handle, "text": edited }),
+            )
+            .await
+            .unwrap_or_else(|e| {
+                panic!(
+                    "[DenseProjectionEdit] dense_patch move-first-to-end under {resolved} \
+                     failed: {e:#}"
+                )
+            });
+    }
+}
+
 /// Register every cap the live rung honestly provides. The captured [`CapSet`]
 /// of the resulting map is what narrows the generated alphabet + non-vacuity
 /// floor. Absent (honest) caps: `SutLoro` (peer docs), the renderer / ViewModel
@@ -691,6 +845,7 @@ fn register_live_caps(caps: &mut CapMap, provider: Arc<LiveMcp>) {
     caps.insert(provider.clone() as Arc<dyn SutBlockTreeWrite>);
     caps.insert(provider.clone() as Arc<dyn SutFocusWrite>);
     caps.insert(provider.clone() as Arc<dyn SutEditorMirrorWrite>);
+    caps.insert(provider.clone() as Arc<dyn SutDenseTools>);
     caps.insert(provider as Arc<dyn SutQuiesce>);
 }
 

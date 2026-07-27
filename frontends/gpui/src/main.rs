@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use gpui::*;
 use holon_app::BootComponent;
@@ -167,6 +169,45 @@ fn main() -> Result<()> {
             }
         };
 
+    // TEST MODE seam (single flag check): `HOLON_MCP_ALLOW_RESET` — the same
+    // env that un-gates the MCP `reset_vault` tool — additionally routes the
+    // desktop launch through the REBINDABLE window and installs the gpui-side
+    // reset builder + reset pump (previously mobile-only, which made the
+    // live-MCP keystone iOS-sim-only). Without the flag this arm is dead and
+    // the desktop launch path is unchanged.
+    let mcp_reset_test_mode = std::env::var("HOLON_MCP_ALLOW_RESET").is_ok();
+
+    // Reset-safe debug handles for `await_quiescence` / `debug_pbt_snapshot`
+    // (mirrors the mobile boot's cell population; a later `reset_vault` swaps
+    // the cell for the fresh session's handles).
+    if mcp_reset_test_mode {
+        let injector_for_cell = injector.clone();
+        let session_for_cell = session.clone();
+        let engine_for_cell = engine.clone();
+        let cell = runtime.block_on(async move {
+            let loro_sync_handle = injector_for_cell
+                .try_resolve_async::<holon::sync::LoroSyncControllerHandle>()
+                .await
+                .ok();
+            let block_query_source = Some(session_for_cell.block_query().clone());
+            let org_idle_signal = injector_for_cell
+                .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
+                .ok();
+            let loro_doc_store = injector_for_cell
+                .try_resolve::<holon::sync::LoroBlockOperations>()
+                .ok()
+                .map(|ops| ops.shared_doc_store());
+            holon_mcp::server::DebugHandlesCell {
+                loro_sync_handle,
+                org_idle_signal,
+                block_query_source,
+                loro_doc_store,
+                reactive_engine: Some(engine_for_cell),
+            }
+        });
+        *debug.live_debug.write().expect("live_debug cell poisoned") = cell;
+    }
+
     #[cfg(feature = "desktop")]
     {
         let gpui_app = Application::with_platform(gpui_platform::current_platform(false));
@@ -177,14 +218,76 @@ fn main() -> Result<()> {
             if let Some(store) = pending_writes {
                 cx.set_global(holon_gpui::share_ui::PendingWritesGlobal(store));
             }
-            launch_holon_window_with_engine_and_share(
-                session,
-                engine,
-                debug,
-                share_backend,
-                rt_handle,
-                cx,
-            );
+            if mcp_reset_test_mode {
+                // Disclosed degraded/test mode — unmissable by design.
+                tracing::warn!(
+                    "MCP reset builder enabled — TEST MODE (HOLON_MCP_ALLOW_RESET): rebindable \
+                     window, share UI bridge not wired"
+                );
+                eprintln!("[holon] MCP reset builder enabled — TEST MODE (HOLON_MCP_ALLOW_RESET)");
+
+                let mut nav = holon_gpui::navigation_state::NavigationState::with_input_router(
+                    debug.input_router.clone(),
+                );
+                nav.set_navigation_debug(debug.navigation_state.clone());
+                let bounds_registry = holon_gpui::geometry::BoundsRegistry::new();
+                let handle = holon_gpui::launch_holon_window_rebindable(
+                    session,
+                    engine,
+                    rt_handle,
+                    nav,
+                    bounds_registry,
+                    Some(debug.clone()),
+                    "Holon",
+                    cx,
+                )
+                .unwrap_or_else(|| {
+                    eprintln!("[holon] rebindable Holon window failed to open");
+                    std::process::exit(1);
+                });
+
+                // gpui-side reset builder: boots a fresh seeded SUT for the
+                // (tokio) `reset_vault` tool. Mirrors the mobile install.
+                let reset_builder: holon_mcp::server::ResetBuilderFn = Arc::new(|files| {
+                    Box::pin(holon_gpui::reset::build_fresh_sut_from_files(files))
+                        as futures::future::BoxFuture<
+                            'static,
+                            anyhow::Result<holon_mcp::server::ResetBuildOutput>,
+                        >
+                });
+                debug.reset_builder.set(reset_builder).ok();
+
+                // Main-thread reset pump: owns the `!Send` `RebindHandle` and
+                // re-points the live window on each `ResetRequest`. This
+                // repo's gpui fork makes `AsyncApp::update` infallible (it
+                // returns the closure result directly), so the rebind always
+                // runs on the main thread before the ack fires.
+                let (reset_tx, mut reset_rx) =
+                    futures::channel::mpsc::channel::<holon_mcp::server::ResetRequest>(4);
+                debug.reset_tx.set(reset_tx).ok();
+                cx.spawn(async move |cx| {
+                    use futures::StreamExt;
+                    while let Some(req) = reset_rx.next().await {
+                        let holon_mcp::server::ResetRequest {
+                            session,
+                            engine,
+                            ack,
+                        } = req;
+                        cx.update(|cx| handle.rebind(session, engine, cx));
+                        ack.send(Ok(())).ok();
+                    }
+                })
+                .detach();
+            } else {
+                launch_holon_window_with_engine_and_share(
+                    session,
+                    engine,
+                    debug,
+                    share_backend,
+                    rt_handle,
+                    cx,
+                );
+            }
             cx.activate(true);
         });
     }

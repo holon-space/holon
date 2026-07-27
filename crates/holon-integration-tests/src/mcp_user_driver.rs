@@ -190,9 +190,14 @@ impl McpUserDriver {
 
     /// Run raw SQL on the live app and return the rows JSON. Read side of
     /// the smoke rung's assertions (and, later, the full loop's caps).
+    /// `format: "json"` is load-bearing: the tool's DEFAULT output is TOON
+    /// (dense tabular text, PR #94/95), which `call_tool_json` cannot parse.
     pub async fn execute_raw_sql(&self, sql: &str) -> Result<serde_json::Value> {
-        self.call_tool_json("execute_raw_sql", serde_json::json!({ "sql": sql }))
-            .await
+        self.call_tool_json(
+            "execute_raw_sql",
+            serde_json::json!({ "sql": sql, "format": "json" }),
+        )
+        .await
     }
 
     fn with_snapshot<T>(&self, verb: &str, f: impl FnOnce(&ViewModel) -> T) -> T {

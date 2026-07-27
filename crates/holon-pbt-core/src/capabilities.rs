@@ -843,6 +843,37 @@ pub trait SutMcpEmit {
     async fn emit_mcp_data(&self);
 }
 
+/// SUT capability: the agent-facing MCP **data tools** are drivable —
+/// `dense_query` → edit → `dense_patch` round trips against a served MCP
+/// surface. Drives the `DenseProjectionEdit` PBT transition (`Dense*` weight
+/// family).
+///
+/// This is the explicit MCP-tool gate (mirrors the Loro idiom: `SutLoro` cap +
+/// wiring): only compositions that actually serve MCP tools insert it — today
+/// the live-MCP composition (`LiveMcpE2E`) — so every headless composition
+/// deselects `Dense*` transitions naturally via cap-set narrowing. A future
+/// product mode with the MCP server disabled maps onto the same axis: a
+/// composition without this cap IS that mode. Deliberately NOT implied by
+/// `SutMcpEmit` (which is a frontend-side emission hook, drivable headless).
+#[holon_macros::capmap_adapter]
+pub trait SutDenseTools {
+    /// Project the children of `parent` via `dense_query`, append a new
+    /// top-level headline `content` to the dense text, and apply it back via
+    /// `dense_patch` — the canonical agent round trip. The patch is the SUT
+    /// action; any tool error is a loud panic (never swallowed into a no-op:
+    /// the ref state HAS applied the create, so a swallowed failure would
+    /// surface as an unrelated block-set divergence).
+    async fn dense_append_child(&self, parent: &EntityUri, content: &str);
+
+    /// Project the children of `parent` via `dense_query`, move the FIRST
+    /// top-level row to the END of the dense text (keeping its `{#alias}`
+    /// token), and apply it back via `dense_patch` — the planner emits a
+    /// positional `Move { after: last }` op. The patch reporting success while
+    /// the row lands anywhere but last is exactly the silent-anchor-drop
+    /// defect the order invariants then catch.
+    async fn dense_move_first_child_to_end(&self, parent: &EntityUri);
+}
+
 /// SUT capability: undo/redo the last committed mutation. Drives the
 /// `UndoLastMutation` / `Redo` PBT transitions. The block-convergence settle is
 /// `ref_state`-dependent and lives in the harness seam
@@ -1754,10 +1785,11 @@ pub struct RenderedElement {
     /// steal-back/zombie-editor bug family.
     pub focused: Option<bool>,
     /// The read-mode styled-run fingerprint this element actually painted for
-    /// its block (byte-range runs, theme-independent), or `None` when it painted
-    /// plain text / carries no marks. `inv-paint-text-styling` compares this
-    /// against the fingerprint the block's `(content, marks)` demand — a marked
-    /// block that painted plain shows up here as `None`/empty.
+    /// its block (byte-range runs, theme-independent), or `None` when it
+    /// painted plain text / carries no marks. `inv-paint-text-styling`
+    /// compares this against the fingerprint the block's `(content, marks)`
+    /// demand — a marked block that painted plain shows up here as
+    /// `None`/empty.
     pub styled_runs: Option<Vec<holon_api::StyledRun>>,
 }
 
@@ -2783,9 +2815,9 @@ pub trait SutAppLifecycle {
     /// `RenameDocument`: move the org file `old_file_name` -> `new_file_name`
     /// on disk (a user-side `mv` in the vault) via `FileSystem::rename`, which
     /// emits ONE atomic `Rename { from }` change. Production's
-    /// `FileSyncController::on_file_renamed` re-homes the SAME existing document
-    /// (identity kept via its `#+ID:`) with NO delete window and retitles the
-    /// page to the new stem — the file-move spec.
+    /// `FileSyncController::on_file_renamed` re-homes the SAME existing
+    /// document (identity kept via its `#+ID:`) with NO delete window and
+    /// retitles the page to the new stem — the file-move spec.
     async fn rename_document(&self, old_file_name: &str, new_file_name: &str);
     async fn concurrent_schema_init(&self);
     async fn assert_epoch_flip_rejected(&self);

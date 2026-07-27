@@ -220,36 +220,40 @@ async fn set_field(
         .execute_operation(&EntityName::new("block"), "set_field", storage)
         .await
         .map_err(|e| {
-            rmcp::ErrorData::internal_error(format!("set_field({field}) on {id} failed: {e}"), None)
+            rmcp::ErrorData::internal_error(
+                format!("set_field({field}) on {id} failed: {e:#}"),
+                None,
+            )
         })?;
     Ok(())
 }
 
-/// Move a block: optionally reparent (`parent_id`) and/or reposition after a
-/// sibling (`position_after_block_id`; `None` = first child). Used by the
-/// dense_patch applier.
+/// Move a block under `parent_id`, positioned after `after_id` (`None` =
+/// first child). Used by the dense_patch applier.
+///
+/// `parent_id` is REQUIRED (the `move_block` op's param bridge rejects its
+/// absence) and the anchor key MUST be `after_block_id` — the op's macro
+/// bridge maps params by exact arg name, so the former
+/// `position_after_block_id` key was SILENTLY dropped and every "positioned"
+/// move landed first-child (BugFunnel 2026-07-27, both dense_patch defects).
 async fn move_block_after(
     service: &HolonService,
     id: &str,
-    parent_id: Option<&str>,
+    parent_id: &str,
     after_id: Option<&str>,
 ) -> Result<(), rmcp::ErrorData> {
     let mut storage: StorageEntity = HashMap::new();
     storage.insert("id".into(), Value::String(id.to_string()));
-    if let Some(p) = parent_id {
-        storage.insert("parent_id".into(), Value::String(p.to_string()));
-    }
-    if let Some(a) = after_id {
-        storage.insert(
-            "position_after_block_id".into(),
-            Value::String(a.to_string()),
-        );
-    }
+    storage.insert("parent_id".into(), Value::String(parent_id.to_string()));
+    match after_id {
+        Some(a) => storage.insert("after_block_id".into(), Value::String(a.to_string())),
+        None => storage.insert("after_block_id".into(), Value::Null),
+    };
     service
         .execute_operation(&EntityName::new("block"), "move_block", storage)
         .await
         .map_err(|e| {
-            rmcp::ErrorData::internal_error(format!("move_block on {id} failed: {e}"), None)
+            rmcp::ErrorData::internal_error(format!("move_block on {id} failed: {e:#}"), None)
         })?;
     Ok(())
 }
@@ -257,8 +261,31 @@ async fn move_block_after(
 /// One-line JSON description of a planned patch op (for dense_patch dry_run).
 fn describe_patch_op(op: &crate::dense_patch::PatchOp) -> serde_json::Value {
     use crate::dense_patch::PatchOp;
+    use crate::dense_patch::Ref as PRef;
+    fn describe_ref(r: &PRef) -> serde_json::Value {
+        match r {
+            PRef::Root => serde_json::json!("root"),
+            PRef::Existing(id) => serde_json::json!(id.as_str()),
+            PRef::New(t) => serde_json::json!(format!("new#{t}")),
+        }
+    }
     match op {
-        PatchOp::Create { title, .. } => serde_json::json!({"op": "create", "title": title}),
+        // `parent`/`after` are disclosed so a dry_run mirrors the EXECUTED op
+        // stream: a create with `after` issues a positioning `move_block`
+        // after the create op (BugFunnel 2026-07-27 — the old one-field
+        // description hid that a "create" case would execute a move).
+        PatchOp::Create {
+            title,
+            parent,
+            after,
+            ..
+        } => serde_json::json!({
+            "op": "create",
+            "title": title,
+            "parent": describe_ref(parent),
+            "after": after.as_ref().map(describe_ref),
+            "positions_via_move_block": after.is_some(),
+        }),
         PatchOp::UpdateTitle { block_id, title } => {
             serde_json::json!({"op": "update_title", "block": block_id.as_str(), "title": title})
         }
@@ -270,9 +297,16 @@ fn describe_patch_op(op: &crate::dense_patch::PatchOp) -> serde_json::Value {
             "block": block_id.as_str(),
             "state": task_state.as_ref().map(|s| s.keyword.clone()),
         }),
-        PatchOp::Move { block_id, .. } => {
-            serde_json::json!({"op": "move", "block": block_id.as_str()})
-        }
+        PatchOp::Move {
+            block_id,
+            parent,
+            after,
+        } => serde_json::json!({
+            "op": "move",
+            "block": block_id.as_str(),
+            "parent": describe_ref(parent),
+            "after": after.as_ref().map(describe_ref),
+        }),
         PatchOp::Delete { block_id } => {
             serde_json::json!({"op": "delete", "block": block_id.as_str()})
         }
@@ -509,7 +543,7 @@ impl HolonMcpServer {
             .await
             .map_err(|e| {
                 rmcp::ErrorData::internal_error(
-                    format!("Query failed: {}", e),
+                    format!("Query failed: {e:#}"),
                     Some(serde_json::json!({"query": params.query, "language": params.language})),
                 )
             })?;
@@ -606,7 +640,7 @@ impl HolonMcpServer {
             .await
             .map_err(|e| {
                 rmcp::ErrorData::internal_error(
-                    format!("Query failed: {}", e),
+                    format!("Query failed: {e:#}"),
                     Some(serde_json::json!({"block_id": block_id, "language": language_str})),
                 )
             })?;
@@ -648,7 +682,7 @@ impl HolonMcpServer {
             .await
             .map_err(|e| {
                 rmcp::ErrorData::internal_error(
-                    format!("Watch query failed: {}", e),
+                    format!("Watch query failed: {e:#}"),
                     Some(serde_json::json!({"query": params.query, "language": params.language})),
                 )
             })?;
@@ -1057,7 +1091,7 @@ impl HolonMcpServer {
             .await
             .map_err(|e| {
                 rmcp::ErrorData::internal_error(
-                    format!("Raw SQL execution failed: {}", e),
+                    format!("Raw SQL execution failed: {e:#}"),
                     Some(serde_json::json!({"sql": params.sql})),
                 )
             })?;
@@ -1124,7 +1158,7 @@ impl HolonMcpServer {
             .compile_query(&params.query, language)
             .map_err(|e| {
                 rmcp::ErrorData::internal_error(
-                    format!("Query compilation failed: {}", e),
+                    format!("Query compilation failed: {e:#}"),
                     Some(serde_json::json!({"query": params.query, "language": params.language})),
                 )
             })?;
@@ -2442,7 +2476,7 @@ impl HolonMcpServer {
             .await
             .map_err(|e| {
                 rmcp::ErrorData::internal_error(
-                    format!("Query failed: {e}"),
+                    format!("Query failed: {e:#}"),
                     Some(serde_json::json!({"query": params.query, "language": params.language})),
                 )
             })?;
@@ -2501,7 +2535,10 @@ impl HolonMcpServer {
                        them (with their subtrees). Optimistic concurrency: if any block you touch \
                        changed since dense_query, the whole patch is REJECTED with a conflict list \
                        (re-run dense_query and retry). Set `dry_run: true` to preview the planned \
-                       operations without applying. A stale/unknown handle is a loud error."
+                       operations without applying. A stale/unknown handle is a loud error. An \
+                       error containing 'created block rolled back (deleted)' is a TRANSIENT \
+                       create+position visibility race — safe to retry the whole dense_query -> \
+                       dense_patch round trip (until single-op positional create lands)."
     )]
     async fn dense_patch(
         &self,
@@ -2638,11 +2675,40 @@ impl HolonMcpServer {
                     svc.execute_operation(&EntityName::new("block"), "create", storage)
                         .await
                         .map_err(|e| {
-                            rmcp::ErrorData::internal_error(format!("create failed: {e}"), None)
+                            rmcp::ErrorData::internal_error(format!("create failed: {e:#}"), None)
                         })?;
                     if let Some(a) = after {
                         let after_id = resolve(a, &new_ids);
-                        move_block_after(&svc, &new_id, None, Some(&after_id)).await?;
+                        let parent_id = resolve(parent, &new_ids);
+                        // The create op has already COMMITTED; a positioning
+                        // failure must not leak the block as an orphan (the
+                        // tool's "one batch" contract). No cross-op
+                        // transaction exists at this seam, so compensate:
+                        // delete the just-created block, then surface the
+                        // original error enriched with the cleanup outcome.
+                        if let Err(move_err) =
+                            move_block_after(&svc, &new_id, &parent_id, Some(&after_id)).await
+                        {
+                            let mut del: StorageEntity = HashMap::new();
+                            del.insert("id".into(), Value::String(new_id.clone()));
+                            let cleanup = svc
+                                .execute_operation(&EntityName::new("block"), "delete", del)
+                                .await;
+                            let cleanup_note = match cleanup {
+                                Ok(_) => "created block rolled back (deleted)".to_string(),
+                                Err(e) => format!(
+                                    "ROLLBACK FAILED — orphaned created block {new_id} left \
+                                     behind: {e:#}"
+                                ),
+                            };
+                            return Err(rmcp::ErrorData::internal_error(
+                                format!(
+                                    "create positioned-after failed: {}; {cleanup_note}",
+                                    move_err.message
+                                ),
+                                None,
+                            ));
+                        }
                     }
                     new_ids.insert(*temp, new_id);
                     created += 1;
@@ -2682,13 +2748,8 @@ impl HolonMcpServer {
                 } => {
                     let parent_id = resolve(parent, &new_ids);
                     let after_id = after.as_ref().map(|a| resolve(a, &new_ids));
-                    move_block_after(
-                        &svc,
-                        block_id.as_str(),
-                        Some(&parent_id),
-                        after_id.as_deref(),
-                    )
-                    .await?;
+                    move_block_after(&svc, block_id.as_str(), &parent_id, after_id.as_deref())
+                        .await?;
                     moved += 1;
                 }
                 PatchOp::Delete { block_id } => {

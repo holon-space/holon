@@ -226,6 +226,7 @@ macro_rules! declare_e2e_transitions {
             + ::holon_pbt_core::capabilities::SutWatchRegister
             + ::holon_pbt_core::capabilities::SutViewControl
             + ::holon_pbt_core::capabilities::SutMcpEmit
+            + ::holon_pbt_core::capabilities::SutDenseTools
             + ::holon_pbt_core::capabilities::SutHistoryWrite
             + ::holon_pbt_core::capabilities::SutNavHistoryDrive
             + ::holon_pbt_core::capabilities::SutBlockInteract

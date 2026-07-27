@@ -92,6 +92,7 @@ mod create_document;
 pub(crate) mod create_page_at_freed_path;
 pub mod delete_backward;
 mod delete_document;
+mod dense_projection_edit;
 mod drag_drop_block;
 mod emit_mcp_data;
 mod epoch_flip_rejected;
@@ -156,6 +157,7 @@ pub use create_page_at_freed_path::CreatePageAtFreedPath;
 pub use delete_backward::DeleteBackward;
 pub use delete_document::DeleteDocument;
 pub use deliver_block_content::DeliverBlockContent;
+pub use dense_projection_edit::DenseProjectionEdit;
 pub use drag_drop_block::DragDropBlock;
 pub use emit_mcp_data::EmitMcpData;
 pub use epoch_flip_rejected::EpochFlipRejected;
@@ -236,6 +238,7 @@ crate::declare_e2e_transitions! {
         CreateDirectory(CreateDirectory),
         DeleteBackward(DeleteBackward),
         DeleteDocument(DeleteDocument),
+        DenseProjectionEdit(DenseProjectionEdit),
         DragDropBlock(DragDropBlock),
         EmitMcpData(EmitMcpData),
         EpochFlipRejected(EpochFlipRejected),

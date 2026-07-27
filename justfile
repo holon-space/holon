@@ -143,6 +143,10 @@ keystone-full cases='16':
 # windowless — same E2ETransition alphabet + invariant catalog as headless).
 # Needs a running app serving MCP with reset enabled, e.g.:
 #   HOLON_MCP_ALLOW_RESET=1 just live-verify 8710
+# HOLON_MCP_ALLOW_RESET is REQUIRED at app launch: besides un-gating the
+# reset_vault tool it routes the desktop window through the rebindable
+# TEST-MODE launch that installs the reset builder (main.rs); without it the
+# per-case reset fails with "no window/pump wired".
 # Focus the alphabet with the standard weights knob, e.g. an MCP-data-tool-only
 # walk: just keystone-mcp 8710 32 '*:0,DenseProjectionEdit:100'
 keystone-mcp port='8710' cases='8' weights='':
