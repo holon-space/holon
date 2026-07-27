@@ -290,3 +290,8 @@
 # so the clobber is TITLE-ONLY -- the page-tag-drop half of the hypothesis does NOT
 # reproduce. See docs report / the directed test for how to lift this into the keystone
 # (register SutClockAdvance in full_headless + model re-fired journals in the oracle).
+# InstantiateTemplate wiring follow-up (2026-07-27): the transition is now LIVE in the
+# composed keystone (registered on the frontend arm; the storage-only branch it used to
+# sit on is unreachable once a ViewModel projection is present). This case replays it +
+# the landed composite undo over full_headless — one undo pops the WHOLE instantiation.
+{"name": "instantiate-template-undo-removes-whole-instantiation", "description": "InstantiateTemplate wiring follow-up (2026-07-27, BugFunnel silent-vacuity row): the transition is now a LIVE keystone transition. Replays [CreateBlockUnderFocus host, InstantiateTemplate under host, UndoLastMutation] over full_headless: one UndoLastMutation pops the whole instantiation (instance root + child) via the landed composite push_undo_snapshot, leaving only the host block — GREEN. Was the Inc0 red-for-the-right-reason (one undo left the instance root a phantom) before composite undo landed.", "transitions": [{"CreateBlockUnderFocus": {"content": "host", "id": "block:cu-host"}}, {"InstantiateTemplate": {"parent_id": "block:cu-host", "date": "abc", "mood": "xyz"}}, {"UndoLastMutation": null}]}

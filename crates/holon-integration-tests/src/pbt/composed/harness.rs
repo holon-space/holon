@@ -696,6 +696,24 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
         for id in born_equal {
             map.insert(id.clone(), id);
         }
+        // Born-equal DETERMINISTIC ids minted THIS tick (in the SUT's new set AND
+        // already held by the oracle) — e.g. `InstantiateTemplate`'s instance blocks,
+        // whose production deterministic instance id (`plan_instantiation`) the oracle
+        // reproduces exactly. Self-map them (identity) so `history_ever_created`
+        // (derived from this map) knows every real id the oracle minted; without it a
+        // later `UndoLastMutation` leaves the append-only `block_history` create row
+        // looking like a phantom (`inv-history-no-phantom-rows`). Restricted to this
+        // tick's `after \ before` so seeds/layout are untouched; `k == v` self-maps
+        // never count toward `history_min_op_groups`.
+        for id in after.difference(&before) {
+            if ref_state.domain.block_state.blocks.contains_key(id)
+                && !is_peer_scheme_id(id)
+                && !is_composed_minted_synthetic_id(id)
+                && !map.contains_key(id)
+            {
+                map.insert(id.clone(), id.clone());
+            }
+        }
         // Peer-merged blocks (`block:peer-…`) surface in the SUT `block_raw` with a
         // stable id already shared with the oracle — they need no synthetic→real
         // mapping, so exclude them from `real_new` to keep the 1:1 split/doc

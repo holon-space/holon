@@ -446,6 +446,18 @@ async fn compose_sut_seeded_impl(
             resolver.clone(),
         ))
             as Arc<dyn holon_pbt_core::capabilities::SutPageIdentity>);
+        // Template instantiation (`InstantiateTemplate`) — same op-floor rung as
+        // `SutBlockToPage`/`SutPageIdentity` above: seeding the canned template
+        // definition and dispatching `block.instantiate_template` are engine ops,
+        // not keystroke/click gestures, so there is no higher driver seam. Route
+        // through THIS frontend's own engine via a resolver-sharing
+        // `DirectUserDriver`. This cap MUST register here on the frontend arm: the
+        // storage-only op-floor arm (`else if has_turso`) is unreachable once a
+        // ViewModel projection is present, so a cap only there is never drawn.
+        caps.insert(Arc::new(DirectUserDriver::with_resolver(
+            comp.engine(),
+            resolver.clone(),
+        )) as Arc<dyn SutTemplateInstantiate>);
         // The VM-rung driver (§8.11 layer-localization): install the frontend's OWN
         // headless `ReactiveEngineDriver` as THE driver backing the gesture caps, so
         // the composed `CapMap` drives user gestures UI-adjacently (click-intent

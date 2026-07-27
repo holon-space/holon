@@ -1478,6 +1478,23 @@ impl ReferenceState {
         // it irreversible — that path would then need to skip this snapshot to
         // match, mirroring the join/slash-delete leaf gates.
         self.push_undo_snapshot();
+        self.insert_block_under_no_snapshot(parent, content, new_id);
+        self.recanon_and_rebuild();
+    }
+
+    /// Insert one text block under `parent` with `new_id`, WITHOUT pushing an
+    /// undo snapshot and WITHOUT re-canonicalizing. The snapshot + recanon
+    /// wrapper lives in the callers: `create_block_under_with_id` (one
+    /// block = one undo boundary) and `apply_instantiate_template` (a
+    /// multi-block composite that snapshots + recanons ONCE, so one undo
+    /// removes the whole instantiation).
+    fn insert_block_under_no_snapshot(
+        &mut self,
+        parent: &EntityUri,
+        content: &str,
+        new_id: EntityUri,
+    ) {
+        use holon_orgmode::models::OrgBlockExt;
 
         let mut new_block = Block::new_text(new_id.clone(), parent.clone(), content.to_string());
         let max_seq = self
@@ -1512,6 +1529,37 @@ impl ReferenceState {
             .block_state
             .blocks
             .insert(new_id.clone(), new_block);
+    }
+
+    /// Reference effect for `InstantiateTemplate`: mint the instance subtree
+    /// (root + child) under `target_parent` as ONE undoable unit, mirroring the
+    /// SUT's composite-undo group so one `UndoLastMutation` removes every
+    /// instance block. `inst_root_id`/`inst_child_id` are the production
+    /// deterministic instance ids the caller computed — born-equal with
+    /// `plan_instantiation`'s `(template_id, context_key, node.id)`, so no
+    /// synthetic→real reconcile.
+    pub fn apply_instantiate_template(
+        &mut self,
+        target_parent: &EntityUri,
+        inst_root_id: EntityUri,
+        inst_child_id: EntityUri,
+        root_content: &str,
+        child_content: &str,
+        template_id: &str,
+    ) {
+        self.push_undo_snapshot();
+        self.insert_block_under_no_snapshot(target_parent, root_content, inst_root_id.clone());
+        self.insert_block_under_no_snapshot(&inst_root_id, child_content, inst_child_id);
+        // The engine stamps the instance ROOT (only) with the persisted
+        // `instance_of` provenance property (`template_instantiation.rs`); it
+        // org-round-trips like any property, so the oracle carries it or
+        // `inv-blocks-match-ref/*` diverges.
+        if let Some(b) = self.domain.block_state.blocks.get_mut(&inst_root_id) {
+            b.properties.insert(
+                holon_api::INSTANCE_OF_PROPERTY.to_string(),
+                holon_api::Value::String(template_id.to_string()),
+            );
+        }
         self.recanon_and_rebuild();
     }
 
@@ -1570,11 +1618,9 @@ impl ReferenceState {
         // yields nothing (empty content — unreachable past the planner's guard).
         let requested_title = holon_api::sanitize_page_title(&origin_content_for_recognition)
             .unwrap_or_else(|| origin_content_for_recognition.clone());
-        if let holon_api::Recognition::Collision(_) = holon_api::recognize_derived_id(
-            &page_id,
-            holder_title.as_deref(),
-            &requested_title,
-        ) {
+        if let holon_api::Recognition::Collision(_) =
+            holon_api::recognize_derived_id(&page_id, holder_title.as_deref(), &requested_title)
+        {
             return;
         }
 
@@ -1821,8 +1867,8 @@ impl ReferenceState {
     /// under the current parent.
     ///
     /// The minted id is where the ORACLE ENCODES THE SPEC. When
-    /// `PageId::for_path(seg_path)` is FREE the page is minted there. When it is
-    /// already occupied -- the state a `RenamePage` leaves behind (title
+    /// `PageId::for_path(seg_path)` is FREE the page is minted there. When it
+    /// is already occupied -- the state a `RenamePage` leaves behind (title
     /// changed, id preserved) -- the INTERIM identity policy (plan §5) has
     /// production REFUSE the `create` FAIL LOUD rather than let its
     /// `ON CONFLICT(id) DO UPDATE` clobber the renamed page. So the reference

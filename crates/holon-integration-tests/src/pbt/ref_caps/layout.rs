@@ -297,6 +297,26 @@ impl RefLayoutMutate for ReferenceState {
         ReferenceState::create_block_under_with_id(self, parent, content, id);
     }
 
+    fn apply_instantiate_template(
+        &mut self,
+        target_parent: &EntityUri,
+        inst_root_id: EntityUri,
+        inst_child_id: EntityUri,
+        root_content: &str,
+        child_content: &str,
+        template_id: &str,
+    ) {
+        ReferenceState::apply_instantiate_template(
+            self,
+            target_parent,
+            inst_root_id,
+            inst_child_id,
+            root_content,
+            child_content,
+            template_id,
+        );
+    }
+
     fn apply_block_to_page(
         &mut self,
         origin: &EntityUri,

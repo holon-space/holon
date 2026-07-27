@@ -2400,6 +2400,20 @@ pub trait RefLayoutMutate {
     /// synthetic→real reconcile.
     fn create_block_under_with_id(&mut self, parent: &EntityUri, content: &str, id: EntityUri);
 
+    /// `InstantiateTemplate`: mint the instance subtree (root + child) under
+    /// `target_parent` as ONE undoable unit, so a single `UndoLastMutation`
+    /// removes the whole instantiation. The ids are caller-computed and must
+    /// be born-equal with the SUT's; the instance root carries `instance_of`.
+    fn apply_instantiate_template(
+        &mut self,
+        target_parent: &EntityUri,
+        inst_root_id: EntityUri,
+        inst_child_id: EntityUri,
+        root_content: &str,
+        child_content: &str,
+        template_id: &str,
+    );
+
     /// `BlockToPage` (Option B): mint a NEW page block `page_id` (Page-tagged,
     /// its own document) as the last child of `destination_parent`, re-home
     /// `origin`'s direct children (and their non-page subtrees) under it, and

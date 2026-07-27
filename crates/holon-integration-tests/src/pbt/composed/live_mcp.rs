@@ -829,6 +829,30 @@ fn register_live_caps(caps: &mut CapMap, provider: Arc<LiveMcp>) {
     caps.insert(provider as Arc<dyn SutQuiesce>);
 }
 
+/// The `CapId`s [`register_live_caps`] provides — the live-MCP composition's
+/// static cap surface, exposed for the non-vacuity guard so a transition alive
+/// ONLY over live-MCP (e.g. `DenseProjectionEdit` via `SutDenseTools`, which no
+/// `blessed_manifests` compose_sut registers) still counts as ALIVE — the CAP
+/// is the evidence, NOT a name allowlist. MUST stay in sync with the inserts in
+/// [`register_live_caps`] above: it inserts typed `Arc`s, which needs a live
+/// provider (a real MCP connection), so the guard cannot derive this by
+/// booting; co-located here so a cap added above is added here too.
+pub fn live_mcp_cap_ids() -> Vec<holon_pbt_core::composition::CapId> {
+    use holon_pbt_core::composition::CapId;
+    vec![
+        CapId::of::<dyn SutBackend>(),
+        CapId::of::<dyn SutSqlProjection>(),
+        CapId::of::<dyn SutLoroLog>(),
+        CapId::of::<dyn SutOrgRead>(),
+        CapId::of::<dyn SutOrgRender>(),
+        CapId::of::<dyn SutBlockTreeWrite>(),
+        CapId::of::<dyn SutFocusWrite>(),
+        CapId::of::<dyn SutEditorMirrorWrite>(),
+        CapId::of::<dyn SutDenseTools>(),
+        CapId::of::<dyn SutQuiesce>(),
+    ]
+}
+
 /// The browser-worker (dioxus-web) variant of [`register_live_caps`]. The
 /// in-browser `holon-worker` engine is headless (`BackendEngine` +
 /// `ReactiveEngine`, no `LoroDocumentStore` and no on-wasm org parser —

@@ -361,6 +361,28 @@ macro_rules! declare_e2e_transitions {
             );
             Union::new_weighted(arms).boxed()
         }
+
+        /// Every declared variant's drawability gate: `(name, required_wiring,
+        /// required_caps)` — the SAME two conditions `aggregate_transitions` checks
+        /// to admit a variant into a wiring's alphabet. Macro-generated from the one
+        /// variant list, so a NEW variant is covered automatically and cannot drift.
+        /// Consumed by the non-vacuity guard, which asserts each gate is satisfiable
+        /// by at least one shipped (blessed) composition.
+        $vis fn all_transition_gates() -> ::std::vec::Vec<(
+            &'static str,
+            ::holon_pbt_core::RequiredWiring,
+            ::std::vec::Vec<::holon_pbt_core::composition::CapId>,
+        )> {
+            ::std::vec![ $((
+                stringify!($variant),
+                <$ty as ::holon_pbt_core::TransitionFactory<
+                    $crate::pbt::reference_state::ReferenceState,
+                >>::required_wiring(),
+                <$ty as ::holon_pbt_core::TransitionFactory<
+                    $crate::pbt::reference_state::ReferenceState,
+                >>::required_caps(),
+            )),* ]
+        }
     };
 }
 

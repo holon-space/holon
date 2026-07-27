@@ -317,6 +317,14 @@ impl SutTemplateInstantiate for DirectUserDriver {
         // Seed the template blocks idempotent (UPSERT).
         let mut root_params: HashMap<String, Value> = HashMap::new();
         root_params.insert("id".to_string(), Value::String(template_id.to_string()));
+        // The template DEFINITION root is a top-level (parentless) block. Supply
+        // the canonical root sentinel explicitly so BOTH engines accept the seed as
+        // a root — the frontend Loro engine fails loud when `parent_id` is absent.
+        // `sentinel:no_parent` is the same parent pages/journals boot under.
+        root_params.insert(
+            "parent_id".to_string(),
+            Value::String(EntityUri::no_parent().to_string()),
+        );
         root_params.insert("content".to_string(), Value::String("{{date}}".to_string()));
         root_params.insert("template".to_string(), Value::String("t".to_string()));
         root_params.insert(

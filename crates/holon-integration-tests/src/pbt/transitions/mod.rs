@@ -593,3 +593,144 @@ mod required_caps_guard {
         none!(DeliverBlockContent);
     }
 }
+
+/// Systemic non-vacuity guard: every variant REGISTERED in the `E2ETransition`
+/// alphabet must be DRAWABLE — its `required_wiring` + `required_caps`
+/// satisfiable — in at least one SHIPPED (blessed) composition. A transition
+/// that no composition can satisfy auto-narrows out of every wiring's alphabet
+/// and runs ZERO times while looking wired: it certifies nothing. This guard
+/// turns that into a loud failure naming the dead variant.
+///
+/// The variant list is macro-generated (`all_transition_gates`), so a NEW
+/// transition is covered automatically — the guard cannot drift out of date.
+/// "Shipped composition" spans TWO homes:
+///   1. each `Wiring::blessed_manifests()` entry mapped through the SAME
+///      `set_for_wiring` normalization + `compose_sut` the keystone boots
+///      (`required_wiring` checked against the RAW blessed manifest exactly as
+///      `aggregate_transitions` checks it against `state.harness.wiring`); and
+///   2. the live-MCP slice (`LiveMcpE2E`), whose compose path boots a real MCP
+///      server so it is NOT in `blessed_manifests` — represented statically by
+///      its `register_live_caps` cap surface over the `full_headless` wiring it
+///      mirrors. This keeps a live-MCP-only transition (`DenseProjectionEdit` /
+///      `SutDenseTools`) counted as ALIVE by its CAP, not by a name allowlist.
+/// A transition alive in NEITHER home (and not env-gated) fails the guard.
+#[cfg(test)]
+mod non_vacuity_guard {
+    use holon_pbt_core::composition::CapId;
+    use holon_pbt_core::composition::CapSet;
+    use holon_pbt_core::wiring::RequiredWiring;
+    use holon_pbt_core::wiring::Wiring;
+
+    use crate::pbt::composed::live_mcp::live_mcp_cap_ids;
+    use crate::pbt::composed::wide_e2e::cap_set_for_wiring;
+
+    /// Transitions intentionally undrawable in the DEFAULT shipped compositions
+    /// because an ENV flag (not `required_wiring`, which the guard can see)
+    /// gates their cap OFF by default. Each entry MUST cite the flag and
+    /// why it is deliberately dormant — this is the ONLY sanctioned reason
+    /// a registered transition may be undrawable by default; anything else
+    /// is the silent-vacuity bug the guard exists to catch. Keep this list
+    /// MINIMAL. (Distinct from the LIVE-MCP class below: this is a bare-name
+    /// env-gate allowlist; that one is CAP-checked against a real compose
+    /// path.)
+    const ENV_GATED_ALLOWLIST: &[&str] = &[
+        // AdvanceDay: `SutClockAdvance` registers ONLY under
+        // `HOLON_PBT_ADVANCE_DAY` (composed/builder.rs) — deliberately off by
+        // default until the co-landed ref model + `inv-journal-one-per-day`
+        // prove green under the full catalog. Flip the env on to draw it.
+        "AdvanceDay",
+    ];
+
+    /// The blessed compositions as `(raw manifest, composed cap set)`.
+    fn blessed_compositions() -> Vec<(Wiring, CapSet)> {
+        Wiring::blessed_manifests()
+            .into_iter()
+            .map(|w| {
+                let cs = cap_set_for_wiring(&w);
+                (w, cs)
+            })
+            .collect()
+    }
+
+    /// Is `(req_wiring, req_caps)` satisfiable by at least one shipped
+    /// composition — a blessed manifest's `compose_sut`, OR the live-MCP
+    /// slice's compose path? The live-MCP home checks `req_caps` against
+    /// the ACTUAL `register_live_caps` surface (cap evidence, not a name),
+    /// over the `full_headless` wiring the slice mirrors. Pure predicate so
+    /// the teeth of the guard are unit-testable directly.
+    fn gate_covered(
+        blessed: &[(Wiring, CapSet)],
+        live_mcp_wiring: &Wiring,
+        live_mcp_caps: &[CapId],
+        req_wiring: &RequiredWiring,
+        req_caps: &[CapId],
+    ) -> bool {
+        let in_blessed = blessed
+            .iter()
+            .any(|(w, cs)| req_wiring.satisfied_by(w) && req_caps.iter().all(|c| cs.contains(c)));
+        let in_live_mcp = req_wiring.satisfied_by(live_mcp_wiring)
+            && req_caps.iter().all(|c| live_mcp_caps.contains(c));
+        in_blessed || in_live_mcp
+    }
+
+    #[test]
+    fn every_transition_is_drawable_in_a_shipped_composition() {
+        let blessed = blessed_compositions();
+        assert!(
+            !blessed.is_empty(),
+            "no blessed compositions to check — Wiring::blessed_manifests() is empty"
+        );
+        let live_mcp_wiring = holon_pbt_core::component_set::ComponentSet::full_headless().wiring;
+        let live_mcp_caps = live_mcp_cap_ids();
+
+        let dead: Vec<&'static str> = super::all_transition_gates()
+            .into_iter()
+            .filter(|(name, _, _)| !ENV_GATED_ALLOWLIST.contains(name))
+            .filter(|(_name, req_wiring, req_caps)| {
+                !gate_covered(
+                    &blessed,
+                    &live_mcp_wiring,
+                    &live_mcp_caps,
+                    req_wiring,
+                    req_caps,
+                )
+            })
+            .map(|(name, _, _)| name)
+            .collect();
+
+        assert!(
+            dead.is_empty(),
+            "DEAD E2ETransition(s): registered in the alphabet but NO shipped composition \
+             (blessed manifest OR the live-MCP slice) satisfies both required_wiring AND \
+             required_caps, so they can never be drawn — silent vacuity (the \
+             InstantiateTemplate class, BugFunnel 2026-07-27): {dead:?}.\nEither register \
+             the missing cap in a shipped composition \
+             (crates/holon-integration-tests/src/pbt/composed/builder.rs — mirror how e.g. \
+             SutBlockToPage / SutTemplateInstantiate register on the frontend arm; or \
+             register_live_caps for a live-MCP-only cap) or gate the transition out \
+             explicitly. A transition present only on the unreachable storage-only \
+             `else if has_turso` branch is exactly this bug.",
+        );
+    }
+
+    /// Teeth check: a cap NO shipped composition provides must read as DEAD, so
+    /// the guard cannot vacuously pass everything. Uses a real cap
+    /// (`SutTemplateInstantiate`) but hands `gate_covered` EMPTY compositions —
+    /// modelling a transition registered nowhere — and asserts it is uncovered.
+    #[test]
+    fn gate_covered_reds_for_a_cap_no_composition_provides() {
+        let orphan = CapId::of::<dyn holon_pbt_core::capabilities::SutTemplateInstantiate>();
+        let covered = gate_covered(
+            &[], // no blessed homes
+            &holon_pbt_core::component_set::ComponentSet::full_headless().wiring,
+            &[],                  // live-MCP provides nothing
+            &RequiredWiring::Any, // wiring trivially met
+            &[orphan],
+        );
+        assert!(
+            !covered,
+            "a transition whose required cap is provided by NO composition must read as \
+             DEAD — the guard's teeth are gone otherwise"
+        );
+    }
+}

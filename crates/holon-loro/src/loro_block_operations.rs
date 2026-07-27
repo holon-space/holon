@@ -880,17 +880,34 @@ impl CrudOperations<Block> for LoroBlockOperations {
             "tags",
             "requires",
             "advice_suppressed",
-            // Positional anchors (see below). `after_block_id` is the canonical
-            // key every prod caller uses (matches `POSITION_AFTER_BLOCK_ID_PARAM`
-            // and the SQL provider boundary); `after` is the internal
-            // delete-inverse restore key. Both are operation-control metadata —
-            // stripped here so they NEVER land in the persisted properties blob.
+            // Positional anchors (applied below). `after_block_id` is the canonical
+            // key every prod caller uses; `after` is the delete-inverse restore key.
+            // Both are operation-control metadata — stripped here so they NEVER land
+            // in the persisted properties blob.
             holon_api::POSITION_AFTER_BLOCK_ID_PARAM,
             "after",
+            // Flattened below, not stored verbatim.
+            "properties",
         ];
         for (key, value) in &fields {
             if !handled_fields.contains(&key.as_ref()) {
                 props.insert(key.to_string(), value.clone());
+            }
+        }
+        // `properties` arrives as a JSON-object string. Flatten it into individual
+        // keys, exactly like `SqlOperationProvider` — storing the raw string under a
+        // literal `properties` key would diverge the Loro store from Turso on every
+        // create-with-properties. Explicit per-key params win over the blob
+        // (`or_insert`), matching Turso's merge order. Fail loud on a malformed blob.
+        if let Some(props_val) = fields.get("properties") {
+            let json = props_val.as_string().unwrap_or_else(|| {
+                panic!("block.create 'properties' param must be a JSON string, got {props_val:?}")
+            });
+            let map: HashMap<String, Value> = serde_json::from_str(json).unwrap_or_else(|e| {
+                panic!("block.create 'properties' is not a valid JSON object ({json:?}): {e}")
+            });
+            for (k, v) in map {
+                props.entry(k).or_insert(v);
             }
         }
         if !props.is_empty() {
@@ -912,16 +929,15 @@ impl CrudOperations<Block> for LoroBlockOperations {
         }
 
         // Positional placement. One canonical primitive serves two callers:
-        //   * `after_block_id` (`POSITION_AFTER_BLOCK_ID_PARAM`) — the canonical
-        //     positional-create key every prod caller uses (MCP dense_patch, the op
-        //     bridge, `move_block`'s trigger field). Places a freshly created block
-        //     immediately after its predecessor sibling in ONE op.
-        //   * `after` — the internal delete-inverse restore key, restoring a
-        //     resurrected block to its original sibling slot.
-        // Both carry identical value semantics: a String predecessor sibling id,
-        // or `Null` for "first child". Absent ⇒ leave it where `create` put it
-        // (append) — the common create caller. Loro owns order via the
-        // fractional index, so `update_block_position` is the single primitive.
+        //   * `after_block_id` (`POSITION_AFTER_BLOCK_ID_PARAM`) — the
+        //     positional-create key every prod caller uses; places a freshly created
+        //     block immediately after its predecessor sibling in one op.
+        //   * `after` — the delete-inverse restore key, restoring a resurrected block
+        //     to its original sibling slot.
+        // Both carry identical value semantics: a String predecessor sibling id, or
+        // `Null` for "first child". Absent ⇒ leave it where `create` put it (append).
+        // Loro owns order via the fractional index, so `update_block_position` is the
+        // single primitive.
         let parse_anchor = |key: &str, v: &Value| -> Result<Option<String>> {
             match v {
                 Value::String(p) => Ok(Some(p.clone())),
@@ -2448,13 +2464,9 @@ mod advice_dismiss_tests {
 
     /// A `create` op carrying the canonical positional key `after_block_id`
     /// must place the new block immediately AFTER the named predecessor
-    /// sibling — the single-op equivalent of the MCP dense_patch
-    /// create-then-move — and the key must NEVER land in the `properties`
-    /// blob. It is operation-control metadata, stripped at the create
-    /// boundary exactly like the `SqlOperationProvider` strips
-    /// `POSITION_AFTER_BLOCK_ID_PARAM`. Before unification the Loro create
-    /// honored only `after` (the delete-inverse restore key), so a positioned
-    /// create appended at the end AND leaked `after_block_id` into properties.
+    /// sibling, and the key must NEVER land in the `properties` blob — it is
+    /// operation-control metadata, stripped at the create boundary exactly like
+    /// the `SqlOperationProvider` strips `POSITION_AFTER_BLOCK_ID_PARAM`.
     #[tokio::test]
     async fn positioned_create_honors_after_block_id_and_never_leaks_it() {
         let (ops, _dir, anchor) = ops_with_anchor().await;
