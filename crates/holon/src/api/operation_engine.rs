@@ -1625,6 +1625,80 @@ mod instantiate_template_tests {
         );
     }
 
+    /// Instance blocks minted by a template instantiation: everything in
+    /// `block_raw` that is neither the seed target nor a template-definition
+    /// block (`seed_template` seeds `block:target`, `block:tpl`,
+    /// `block:tpl-c1`).
+    async fn remaining_instance_blocks(engine: &BackendEngine) -> Vec<String> {
+        engine
+            .db_handle()
+            .query(
+                "SELECT id FROM block_raw WHERE id LIKE 'block:%' AND id NOT IN ('block:target', \
+                 'block:tpl', 'block:tpl-c1') ORDER BY id",
+                HashMap::new(),
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| str_field(row, "id").to_string())
+            .collect()
+    }
+
+    /// composite-undo Inc0 (red-for-the-right-reason): `instantiate_template`
+    /// is ONE user gesture, so ONE `undo()` must remove ALL instance
+    /// blocks. Today the engine re-enters `execute_operation` per create
+    /// and pushes N separate `UndoEntry`s (`run_instantiate_template`), so
+    /// a single undo pops only the LAST create — the instance CHILD — and
+    /// leaves the instance ROOT behind. Inc3's composite grouping makes
+    /// instantiate push ONE `UndoEntry` (all creates grouped, inverse =
+    /// leaf-first deletes) so one undo removes every instance block. RED
+    /// until Inc3: the assertion below fails because the instance root
+    /// survives the single undo.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn instantiate_template_is_one_undo_gesture() {
+        let engine = block_engine().await;
+        seed_template(&engine).await;
+        let entity = EntityName::new("block");
+
+        // User origin so the constituent creates journal undo entries
+        // (Rule/Sync/Ingest never push to the user history — ruling #1).
+        engine
+            .execute_operation(
+                &entity,
+                "instantiate_template",
+                instantiate_params("undo-key", &[("date", "2026-07-12")]),
+                OpOrigin::User,
+            )
+            .await
+            .unwrap();
+
+        // A two-node template ⇒ two instance blocks (root + child).
+        let before = remaining_instance_blocks(&engine).await;
+        assert_eq!(
+            before.len(),
+            2,
+            "instantiation minted root + child; got {before:?}"
+        );
+
+        // ONE undo. It IS an observable change (a delete), so `Applied`.
+        let outcome = engine.undo().await.unwrap();
+        assert!(
+            matches!(outcome, UndoOutcome::Applied),
+            "the single undo of an instantiation must apply, got {outcome:?}"
+        );
+
+        // The whole gesture must be gone after that one undo. Today only the
+        // instance CHILD is removed (last-pushed per-create entry) and the
+        // instance ROOT survives — this assertion is the red-for-the-right-reason.
+        let after = remaining_instance_blocks(&engine).await;
+        assert!(
+            after.is_empty(),
+            "one undo must remove ALL instance blocks (instantiation is one gesture); \
+             {} still present after a single undo: {after:?}",
+            after.len()
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn missing_binding_fails_loud_and_creates_nothing() {
         let engine = block_engine().await;

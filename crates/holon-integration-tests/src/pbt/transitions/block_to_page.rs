@@ -26,6 +26,7 @@ use holon_api::link_parser::PageId;
 use holon_pbt_core::TransitionFactory;
 use holon_pbt_core::TransitionRef;
 use holon_pbt_core::capabilities::RefBlockTree;
+use holon_pbt_core::capabilities::RefBlockTreeMut;
 use holon_pbt_core::capabilities::RefLayoutMutate;
 use holon_pbt_core::capabilities::RefLifecycle;
 use holon_pbt_core::validation::Reason;
@@ -159,7 +160,9 @@ impl<R: RefLifecycle + RefBlockTree + RefLayoutMutate> TransitionFactory<R> for 
     }
 }
 
-impl<R: RefLifecycle + RefBlockTree + RefLayoutMutate> TransitionRef<R> for BlockToPage {
+impl<R: RefLifecycle + RefBlockTree + RefBlockTreeMut + RefLayoutMutate> TransitionRef<R>
+    for BlockToPage
+{
     type Reason = Reason;
 
     fn preconditions(&self, state: &R) -> Validated<(), Reason> {
@@ -191,6 +194,11 @@ impl<R: RefLifecycle + RefBlockTree + RefLayoutMutate> TransitionRef<R> for Bloc
     fn apply_to_ref(&self, state: &mut R) {
         let (ancestor, page_id) = plan_new_page(state, &self.origin_id)
             .expect("BlockToPage precondition guarantees a legal page-conversion candidate");
+        // One conversion = ONE undoable unit (the convert equivalence oracle):
+        // a single UndoLastMutation must reverse the whole transform. The SUT
+        // already assembles ONE composite UndoEntry for convert, so this must
+        // stay GREEN across the Inc1-3 refactor.
+        state.push_undo_snapshot();
         state.apply_block_to_page(&self.origin_id, page_id, &ancestor);
     }
 }

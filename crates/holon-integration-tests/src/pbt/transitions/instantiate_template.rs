@@ -16,6 +16,7 @@ use holon_api::EntityUri;
 use holon_pbt_core::TransitionFactory;
 use holon_pbt_core::TransitionRef;
 use holon_pbt_core::capabilities::RefBlockTree;
+use holon_pbt_core::capabilities::RefBlockTreeMut;
 use holon_pbt_core::capabilities::RefLayoutMutate;
 use holon_pbt_core::capabilities::RefLifecycle;
 use holon_pbt_core::validation::Reason;
@@ -69,7 +70,9 @@ impl<R: RefLifecycle + RefBlockTree + RefLayoutMutate> TransitionFactory<R>
     }
 }
 
-impl<R: RefLifecycle + RefBlockTree + RefLayoutMutate> TransitionRef<R> for InstantiateTemplate {
+impl<R: RefLifecycle + RefBlockTree + RefBlockTreeMut + RefLayoutMutate> TransitionRef<R>
+    for InstantiateTemplate
+{
     type Reason = Reason;
 
     fn preconditions(&self, state: &R) -> Validated<(), Reason> {
@@ -92,6 +95,12 @@ impl<R: RefLifecycle + RefBlockTree + RefLayoutMutate> TransitionRef<R> for Inst
         let inst_child_id =
             holon_api::effect_id::deterministic_instance_id(TPL_ROOT, CTX_KEY, TPL_CHILD);
 
+        // One instantiation = ONE undoable unit: snapshot the pre-instantiation
+        // tree so a single UndoLastMutation restores it wholesale. The SUT's
+        // composite undo (Inc3) must match this; before Inc3 the SUT pushes N
+        // per-create entries, so one undo leaves the instance root behind — the
+        // red-for-the-right-reason this snapshot arms.
+        state.push_undo_snapshot();
         state.create_block_under_with_id(&self.parent_id, &self.date, inst_root_id.clone());
         state.create_block_under_with_id(
             &inst_root_id,
