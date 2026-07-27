@@ -122,6 +122,49 @@ impl Precondition {
     }
 }
 
+/// Merge per-`(entity, field)` fingerprints across a composite group's buffered
+/// entries into one [`Precondition`], excluding derived positional columns
+/// ([`is_derived_positional_field`]). `last_wins=true` keeps the LAST
+/// contributor per field (the post-group forward precondition, checked before
+/// undo); `false` keeps the FIRST (the pre-group redo precondition, checked
+/// before redo). Output is deterministic (sorted by `(entity_id, field)`).
+fn merge_fingerprints<'a>(
+    preconditions: impl Iterator<Item = &'a Precondition>,
+    last_wins: bool,
+) -> Precondition {
+    use std::collections::BTreeMap;
+    use std::collections::btree_map::Entry;
+
+    let mut by_key: BTreeMap<(String, String), Value> = BTreeMap::new();
+    for pre in preconditions {
+        for fp in &pre.fields {
+            if is_derived_positional_field(&fp.field) {
+                continue;
+            }
+            match by_key.entry((fp.entity_id.clone(), fp.field.clone())) {
+                Entry::Vacant(v) => {
+                    v.insert(fp.expected.clone());
+                }
+                Entry::Occupied(mut o) => {
+                    if last_wins {
+                        o.insert(fp.expected.clone());
+                    }
+                }
+            }
+        }
+    }
+    Precondition {
+        fields: by_key
+            .into_iter()
+            .map(|((entity_id, field), expected)| FieldFingerprint {
+                entity_id,
+                field,
+                expected,
+            })
+            .collect(),
+    }
+}
+
 /// A single reversible history step. Serializable so it survives a restart and
 /// is re-verified against live state (the same staleness policy) at replay.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -242,6 +285,30 @@ struct OpenGroup {
     mode: GroupMode,
 }
 
+/// An open composite-undo transaction: while present, [`UndoStack::push`]
+/// buffers pushed entries here instead of appending them, so `begin_group` …
+/// `end_group` collapses N sub-ops into ONE composite [`UndoEntry`]. `depth`
+/// tracks nesting: nested `begin_group` deepens it and only the OUTERMOST
+/// `end_group` materializes the composite (flatten semantics — a composite is a
+/// flat entry, and the product law is one gesture ⇒ one undo).
+#[derive(Debug, Clone)]
+struct GroupBuffer {
+    depth: u32,
+    entries: Vec<UndoEntry>,
+}
+
+/// Whether `field` is a DERIVED positional column (`depth`, `sort_key`) that
+/// structural ops RECOMPUTE from the live tree rather than restore to a
+/// captured value — so its post-replay value is a function of the current
+/// parent chain, not the pre-op value. Fingerprinting it makes a legitimate
+/// undo→redo trip spuriously "stale". Excluded from every composite
+/// [`Precondition`] here; the engine-level `convert_block_to_page` compound
+/// applies the SAME rule to its hand-assembled entry (single-sourced so the two
+/// cannot drift).
+pub fn is_derived_positional_field(field: &str) -> bool {
+    field == "depth" || field == "sort_key"
+}
+
 /// Undo/redo history stack of C-shaped [`UndoEntry`] records.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UndoStack {
@@ -253,6 +320,11 @@ pub struct UndoStack {
     /// group so the first post-restart edit starts a fresh group.
     #[serde(skip)]
     open: Option<OpenGroup>,
+    /// Transient composite-group buffer; never serialized — a restart abandons
+    /// any in-flight group (its sub-op writes already landed; only the undo
+    /// bookkeeping is dropped, exactly as a crash mid-instantiation would).
+    #[serde(skip)]
+    group: Option<GroupBuffer>,
 }
 
 impl UndoStack {
@@ -267,6 +339,7 @@ impl UndoStack {
             max_size,
             next_group_id: 0,
             open: None,
+            group: None,
         }
     }
 
@@ -277,6 +350,14 @@ impl UndoStack {
     /// so one undo restores the pre-group state. Any new push clears redo.
     pub fn push(&mut self, mut entry: UndoEntry) {
         self.redo.clear();
+
+        // Inside an open composite group: buffer raw, in execution order. No
+        // word-boundary coalescing applies (the whole group is one gesture); the
+        // buffered entries are folded into ONE composite entry at `end_group`.
+        if let Some(group) = self.group.as_mut() {
+            group.entries.push(entry);
+            return;
+        }
 
         if let Some((entity_id, field, old_text, new_text)) = entry.coalescible_edit() {
             let key = (entity_id, field);
@@ -351,6 +432,89 @@ impl UndoStack {
         top.precondition = entry.precondition;
         if close {
             self.open = None;
+        }
+    }
+
+    /// Open a composite-undo group. Every User-origin [`push`](Self::push)
+    /// until the matching [`end_group`](Self::end_group) is buffered and
+    /// folded into ONE composite [`UndoEntry`], so a multi-op operation
+    /// (e.g. template instantiation) is ONE undo gesture. Nestable: a
+    /// nested `begin_group` just deepens the counter (flatten — see
+    /// [`GroupBuffer`]). Opening a group closes any open word-boundary
+    /// typing run (a structural boundary).
+    pub fn begin_group(&mut self) {
+        match self.group.as_mut() {
+            Some(group) => group.depth += 1,
+            None => {
+                self.open = None;
+                self.group = Some(GroupBuffer {
+                    depth: 1,
+                    entries: Vec::new(),
+                });
+            }
+        }
+    }
+
+    /// Close the innermost composite-undo group. Loud on imbalance (an
+    /// `end_group` with no open group is a programming error, never silent). At
+    /// depth 0 the buffered sub-ops materialize as ONE composite entry: forward
+    /// `ops` concatenated in execution order (redo replays forward); inverse
+    /// `ops` concatenated in REVERSE entry order with each entry's internal
+    /// inverse order preserved (undo replays leaf-first / FK-safe). An empty
+    /// group (no User pushes) materializes nothing.
+    pub fn end_group(&mut self) {
+        let group = self
+            .group
+            .as_mut()
+            .expect("end_group without a matching begin_group (unbalanced undo group)");
+        assert!(group.depth > 0, "undo group depth underflow");
+        group.depth -= 1;
+        if group.depth > 0 {
+            return; // inner close: flatten, keep buffering
+        }
+        let entries = self.group.take().expect("group present above").entries;
+        if entries.is_empty() {
+            return;
+        }
+        let mut composite = Self::compose(entries);
+        self.fresh_group_id(&mut composite);
+        self.append(composite);
+        self.open = None;
+    }
+
+    /// Fold N buffered single-step entries into ONE composite [`UndoEntry`].
+    ///
+    /// - `ops`: every entry's forward ops, in execution order (redo replays
+    ///   forward).
+    /// - `inverse_ops`: entries in REVERSE order, each entry's own inverse
+    ///   order preserved (leaf-first / FK-safe — a create-then-child group
+    ///   undoes child-then-parent).
+    /// - `precondition` (checked BEFORE undo ⇒ must equal the POST-group
+    ///   state): per (entity, field) the LAST writer's forward fingerprint
+    ///   wins.
+    /// - `redo_precondition` (checked BEFORE redo ⇒ must equal the PRE-group
+    ///   state): per (entity, field) the FIRST writer's inverse fingerprint
+    ///   wins. Derived positional columns (`depth`/`sort_key`) are excluded
+    ///   from both (see [`is_derived_positional_field`]).
+    fn compose(entries: Vec<UndoEntry>) -> UndoEntry {
+        let mut ops: Vec<Operation> = Vec::new();
+        for e in &entries {
+            ops.extend(e.ops.iter().cloned());
+        }
+        let mut inverse_ops: Vec<Operation> = Vec::new();
+        for e in entries.iter().rev() {
+            inverse_ops.extend(e.inverse_ops.iter().cloned());
+        }
+        UndoEntry {
+            ops,
+            inverse_ops,
+            origin: OpOrigin::User,
+            group_id: 0,
+            precondition: merge_fingerprints(entries.iter().map(|e| &e.precondition), true),
+            redo_precondition: merge_fingerprints(
+                entries.iter().map(|e| &e.redo_precondition),
+                false,
+            ),
         }
     }
 
@@ -617,5 +781,225 @@ mod tests {
         assert_eq!(classify_delta("abc", "ab"), EditDelta::DeleteOne);
         assert_eq!(classify_delta("abc", "axc"), EditDelta::Other);
         assert_eq!(classify_delta("ab", "abcd"), EditDelta::Other);
+    }
+
+    // ── Composite-undo grouping (Inc1) ──────────────────────────────────
+
+    /// A create-shaped entry: forward `create{id}`, inverse `delete{id}`.
+    fn create_entry(id: &str) -> UndoEntry {
+        let mut p = HashMap::new();
+        p.insert("id".to_string(), Value::String(id.to_string()));
+        UndoEntry {
+            ops: vec![Operation::new("block", "create", "Create", p.clone())],
+            inverse_ops: vec![Operation::new("block", "delete", "Delete", p)],
+            origin: OpOrigin::User,
+            group_id: 0,
+            precondition: Precondition::default(),
+            redo_precondition: Precondition::default(),
+        }
+    }
+
+    /// The `id` param of each op, in order.
+    fn ids_of(ops: &[Operation]) -> Vec<String> {
+        ops.iter()
+            .map(|o| {
+                o.params
+                    .get("id")
+                    .and_then(Value::as_string_owned)
+                    .expect("op has an id param")
+            })
+            .collect()
+    }
+
+    fn op_names(ops: &[Operation]) -> Vec<String> {
+        ops.iter().map(|o| o.op_name.clone()).collect()
+    }
+
+    #[test]
+    fn group_of_n_creates_is_one_composite_entry_inverse_reversed() {
+        let mut stack = UndoStack::new();
+        stack.begin_group();
+        stack.push(create_entry("block:a"));
+        stack.push(create_entry("block:b"));
+        stack.push(create_entry("block:c"));
+        stack.end_group();
+
+        assert_eq!(stack.undo_len(), 1, "the whole group is ONE undo entry");
+        let e = stack.peek_undo().unwrap();
+        // Forward ops in execution order (redo replays forward).
+        assert_eq!(op_names(&e.ops), vec!["create", "create", "create"]);
+        assert_eq!(ids_of(&e.ops), vec!["block:a", "block:b", "block:c"]);
+        // Inverse ops reversed (leaf-first / FK-safe: delete c, b, a).
+        assert_eq!(op_names(&e.inverse_ops), vec!["delete", "delete", "delete"]);
+        assert_eq!(
+            ids_of(&e.inverse_ops),
+            vec!["block:c", "block:b", "block:a"]
+        );
+    }
+
+    /// Amendment 1: when two ops touch the SAME (entity, field), the
+    /// composite's forward `precondition` (checked before undo ⇒ POST-group
+    /// state) keeps the LAST writer's new value, and its
+    /// `redo_precondition` (checked before redo ⇒ PRE-group state) keeps
+    /// the FIRST writer's old value.
+    #[test]
+    fn composite_precondition_merges_first_pre_and_last_post() {
+        let mut stack = UndoStack::new();
+        stack.begin_group();
+        stack.push(edit_entry("b1", "content", "A", "B")); // A -> B
+        stack.push(edit_entry("b1", "content", "B", "C")); // B -> C
+        stack.end_group();
+
+        assert_eq!(stack.undo_len(), 1);
+        let e = stack.peek_undo().unwrap();
+
+        // Forward precondition = LAST op's post-state (C).
+        assert_eq!(e.precondition.fields.len(), 1, "one merged field");
+        assert_eq!(e.precondition.fields[0].entity_id, "b1");
+        assert_eq!(e.precondition.fields[0].field, "content");
+        assert_eq!(
+            e.precondition.fields[0].expected.as_string_owned(),
+            Some("C".to_string()),
+            "precondition = last-post"
+        );
+
+        // Redo precondition = FIRST op's pre-state (A).
+        assert_eq!(e.redo_precondition.fields.len(), 1);
+        assert_eq!(
+            e.redo_precondition.fields[0].expected.as_string_owned(),
+            Some("A".to_string()),
+            "redo_precondition = first-pre"
+        );
+
+        // The two set_field forwards survive in order; inverses reversed.
+        assert_eq!(e.ops.len(), 2);
+        assert_eq!(e.inverse_ops.len(), 2);
+    }
+
+    /// Derived positional columns never enter a composite precondition (they
+    /// are recomputed from the live tree, not restored).
+    #[test]
+    fn composite_precondition_excludes_depth_and_sort_key() {
+        assert!(is_derived_positional_field("depth"));
+        assert!(is_derived_positional_field("sort_key"));
+        assert!(!is_derived_positional_field("content"));
+
+        let with_depth = |id: &str, field: &str, val: &str| {
+            let changes = vec![FieldDelta::new(
+                id,
+                field,
+                Value::Null,
+                Value::String(val.to_string()),
+            )];
+            UndoEntry {
+                ops: vec![set_field_op(id, field, val)],
+                inverse_ops: vec![set_field_op(id, field, "")],
+                origin: OpOrigin::User,
+                group_id: 0,
+                precondition: Precondition::forward(&changes),
+                redo_precondition: Precondition::inverse(&changes),
+            }
+        };
+        let mut stack = UndoStack::new();
+        stack.begin_group();
+        stack.push(with_depth("b1", "content", "x"));
+        stack.push(with_depth("b1", "depth", "3"));
+        stack.push(with_depth("b1", "sort_key", "A0"));
+        stack.end_group();
+
+        let e = stack.peek_undo().unwrap();
+        assert_eq!(
+            e.precondition.fields.len(),
+            1,
+            "only the content field is fingerprinted; depth/sort_key excluded"
+        );
+        assert_eq!(e.precondition.fields[0].field, "content");
+    }
+
+    #[test]
+    fn nested_begin_end_flattens_into_one_entry() {
+        let mut stack = UndoStack::new();
+        stack.begin_group();
+        stack.push(create_entry("block:a"));
+        stack.begin_group(); // nested: just deepens
+        stack.push(create_entry("block:b"));
+        stack.end_group(); // inner close: still buffering
+        assert_eq!(stack.undo_len(), 0, "inner end does not materialize");
+        stack.push(create_entry("block:c"));
+        stack.end_group(); // outer close: materialize ONE entry
+
+        assert_eq!(stack.undo_len(), 1);
+        let e = stack.peek_undo().unwrap();
+        assert_eq!(ids_of(&e.ops), vec!["block:a", "block:b", "block:c"]);
+        assert_eq!(
+            ids_of(&e.inverse_ops),
+            vec!["block:c", "block:b", "block:a"]
+        );
+    }
+
+    #[test]
+    fn empty_group_materializes_nothing() {
+        let mut stack = UndoStack::new();
+        stack.begin_group();
+        stack.end_group();
+        assert_eq!(stack.undo_len(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "end_group without a matching begin_group")]
+    fn end_group_without_begin_is_loud() {
+        let mut stack = UndoStack::new();
+        stack.end_group();
+    }
+
+    #[test]
+    fn a_group_boundary_closes_the_open_typing_run() {
+        let mut stack = UndoStack::new();
+        type_string(&mut stack, "b1", "content", "ab"); // one typing group
+        assert_eq!(stack.undo_len(), 1);
+
+        stack.begin_group(); // closes the typing run
+        stack.push(create_entry("block:x"));
+        stack.end_group();
+        assert_eq!(stack.undo_len(), 2);
+
+        // A further alnum edit must NOT coalesce back into the pre-group typing
+        // run — the boundary closed it.
+        stack.push(edit_entry("b1", "content", "ab", "abc"));
+        assert_eq!(stack.undo_len(), 3);
+    }
+
+    #[test]
+    fn composite_entry_survives_serialization_roundtrip() {
+        let mut stack = UndoStack::new();
+        stack.begin_group();
+        stack.push(create_entry("block:a"));
+        stack.push(create_entry("block:b"));
+        stack.end_group();
+
+        let json = serde_json::to_string(&stack).unwrap();
+        let restored: UndoStack = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.undo_len(), 1);
+        let e = restored.peek_undo().unwrap();
+        assert_eq!(ids_of(&e.ops), vec!["block:a", "block:b"]);
+        assert_eq!(ids_of(&e.inverse_ops), vec!["block:b", "block:a"]);
+    }
+
+    /// An in-flight (open) group is transient: it is never serialized, so a
+    /// restart abandons its buffered entries (their writes already landed; only
+    /// the undo bookkeeping is dropped).
+    #[test]
+    fn an_open_group_is_not_serialized() {
+        let mut stack = UndoStack::new();
+        stack.begin_group();
+        stack.push(create_entry("block:a")); // buffered, not yet materialized
+        assert_eq!(stack.undo_len(), 0);
+
+        let json = serde_json::to_string(&stack).unwrap();
+        let mut restored: UndoStack = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.undo_len(), 0, "buffered group entry not persisted");
+        // No open group after restore: the next push is its own normal entry.
+        restored.push(create_entry("block:b"));
+        assert_eq!(restored.undo_len(), 1);
     }
 }

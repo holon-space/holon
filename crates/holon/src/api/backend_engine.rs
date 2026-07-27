@@ -833,6 +833,27 @@ impl BackendEngine {
         self.op_engine.can_redo().await
     }
 
+    /// Open a composite-undo group (Inc1): buffer subsequent User-origin ops
+    /// into ONE undo entry until [`end_undo_group`](Self::end_undo_group).
+    /// Delegates to the shared op engine. See
+    /// [`DispatchingOperationEngine::begin_undo_group`].
+    pub async fn begin_undo_group(&self) {
+        self.op_engine.begin_undo_group().await
+    }
+
+    /// Close the innermost composite-undo group, materializing the buffered
+    /// sub-ops into one composite entry. Delegates to the shared op engine.
+    pub async fn end_undo_group(&self) -> Result<()> {
+        self.op_engine.end_undo_group().await
+    }
+
+    /// Test-only: push a hand-crafted [`holon_core::UndoEntry`] onto the shared
+    /// engine's stack to exercise composite-inverse replay paths.
+    #[cfg(test)]
+    pub(crate) async fn push_undo_entry_for_test(&self, entry: holon_core::UndoEntry) {
+        self.op_engine.push_undo_entry_for_test(entry).await;
+    }
+
     /// Register a custom OperationProvider
     ///
     /// This allows registering additional operation providers for entity types.

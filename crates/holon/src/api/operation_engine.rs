@@ -361,6 +361,40 @@ impl DispatchingOperationEngine {
         Ok(())
     }
 
+    /// Open a composite-undo group (Inc1). While open, every User-origin op
+    /// dispatched through [`execute_operation`](Self::execute_operation) is
+    /// buffered into ONE composite [`UndoEntry`] instead of pushing its own —
+    /// so a multi-op compound (template instantiation) is ONE undo gesture.
+    /// Nestable (flatten): only the outermost
+    /// [`end_undo_group`](Self::end_undo_group) materializes the composite.
+    /// Per-op provenance stamping and the history relation are UNCHANGED
+    /// (they run per sub-op); only the undo bookkeeping is grouped. The
+    /// lock is acquired and released here — the fan-out's own per-op pushes
+    /// re-acquire it, so there is no re-entrant hold.
+    pub async fn begin_undo_group(&self) {
+        self.undo_stack.write().await.begin_group();
+    }
+
+    /// Close the innermost composite-undo group opened by
+    /// [`begin_undo_group`](Self::begin_undo_group). At the outermost close the
+    /// buffered sub-ops materialize as one composite entry (forward ops in
+    /// order, inverses reversed leaf-first) and the snapshot is persisted. Loud
+    /// on imbalance.
+    pub async fn end_undo_group(&self) -> Result<()> {
+        self.undo_stack.write().await.end_group();
+        self.persist().await
+    }
+
+    /// Test-only: push a hand-crafted [`UndoEntry`] directly onto the stack.
+    /// Used to exercise the composite-inverse REPLAY paths (e.g.
+    /// partial-failure index naming) that natural provider ops cannot force
+    /// — the SQL provider's `delete` cascades and its `create` is an
+    /// idempotent upsert, so neither fails on a well-formed tree.
+    #[cfg(test)]
+    pub(crate) async fn push_undo_entry_for_test(&self, entry: UndoEntry) {
+        self.undo_stack.write().await.push(entry);
+    }
+
     /// Inject the `_provenance` stamp into an authoring op's params. For
     /// non-authoring ops (or a `set_field`/chord shape) the params pass through
     /// unchanged — those are covered by the C2b history relation, not the block
@@ -1353,8 +1387,23 @@ impl OperationEngine for DispatchingOperationEngine {
         }
 
         let mut changes = Vec::new();
-        for op in &entry.inverse_ops {
-            changes.extend(self.replay(op).await?);
+        // Partial-failure discipline (Inc1): a composite entry replays N
+        // inverses in order. On the FIRST failure, stop and fail loud naming the
+        // failing inverse index — never silently swallow a half-applied undo.
+        // (The already-replayed inverses are NOT rolled back; the entry stays on
+        // the undo stack, un-committed, so the loud error is the single source of
+        // truth about the partial state.)
+        let inverse_count = entry.inverse_ops.len();
+        for (idx, op) in entry.inverse_ops.iter().enumerate() {
+            let replayed = self.replay(op).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "undo: composite inverse op {idx} of {inverse_count} ('{}' on '{}') failed — \
+                     stopping (partial undo, earlier inverses already applied): {e}",
+                    op.op_name,
+                    op.entity_name
+                )
+            })?;
+            changes.extend(replayed);
         }
         // Fail-loud (CLAUDE.md): the entry is consumed either way — a stale-top
         // poison entry must not be re-attempted — but if the inverse replay
@@ -1383,8 +1432,19 @@ impl OperationEngine for DispatchingOperationEngine {
         }
 
         let mut changes = Vec::new();
-        for op in &entry.ops {
-            changes.extend(self.replay(op).await?);
+        // Symmetric partial-failure discipline (Inc1): a composite redo replays
+        // N forwards in order; the first failure stops and names its index.
+        let forward_count = entry.ops.len();
+        for (idx, op) in entry.ops.iter().enumerate() {
+            let replayed = self.replay(op).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "redo: composite forward op {idx} of {forward_count} ('{}' on '{}') failed — \
+                     stopping (partial redo, earlier ops already applied): {e}",
+                    op.op_name,
+                    op.entity_name
+                )
+            })?;
+            changes.extend(replayed);
         }
         self.undo_stack.write().await.commit_redo();
         self.persist().await?;
@@ -1696,6 +1756,133 @@ mod instantiate_template_tests {
             "one undo must remove ALL instance blocks (instantiation is one gesture); \
              {} still present after a single undo: {after:?}",
             after.len()
+        );
+    }
+
+    /// How many of `ids` currently exist in `block_raw`.
+    async fn ids_present(engine: &BackendEngine, ids: &[&str]) -> usize {
+        let quoted = ids
+            .iter()
+            .map(|i| format!("'{}'", i.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        engine
+            .db_handle()
+            .query(
+                &format!("SELECT id FROM block_raw WHERE id IN ({quoted})"),
+                HashMap::new(),
+            )
+            .await
+            .unwrap()
+            .len()
+    }
+
+    /// A block-op with a single `id` param.
+    fn id_op(entity: &str, op: &str, id: &str) -> Operation {
+        let mut p = HashMap::new();
+        p.insert("id".to_string(), Value::String(id.to_string()));
+        Operation::new(entity, op, op, p)
+    }
+
+    /// Inc1 engine seam: `begin_undo_group` … `end_undo_group` collapses N
+    /// User-origin dispatches into ONE composite undo entry, so a single undo
+    /// reverses the whole group. This is the seam Inc3's instantiate migration
+    /// rides on.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn begin_end_undo_group_is_one_undo_gesture() {
+        let engine = block_engine().await;
+        let entity = EntityName::new("block");
+        let create = |id: &str, content: &str| {
+            let mut p = StorageEntity::new();
+            p.insert("id".into(), Value::String(id.to_string()));
+            p.insert("content".into(), Value::String(content.to_string()));
+            p
+        };
+
+        engine.begin_undo_group().await;
+        engine
+            .execute_operation(&entity, "create", create("block:g-a", "a"), OpOrigin::User)
+            .await
+            .unwrap();
+        engine
+            .execute_operation(&entity, "create", create("block:g-b", "b"), OpOrigin::User)
+            .await
+            .unwrap();
+        engine.end_undo_group().await.unwrap();
+
+        assert_eq!(
+            ids_present(&engine, &["block:g-a", "block:g-b"]).await,
+            2,
+            "both grouped creates landed"
+        );
+        assert!(engine.can_undo().await);
+
+        // ONE undo reverses the WHOLE group.
+        let outcome = engine.undo().await.unwrap();
+        assert!(matches!(outcome, UndoOutcome::Applied));
+        assert_eq!(
+            ids_present(&engine, &["block:g-a", "block:g-b"]).await,
+            0,
+            "one undo removed BOTH grouped blocks"
+        );
+        assert!(
+            !engine.can_undo().await,
+            "the group was ONE entry — nothing left to undo"
+        );
+    }
+
+    /// Amendment 2: a composite undo that fails PART-WAY through its inverses
+    /// stops loud and names the failing inverse index (never a silent
+    /// half-undo). Forced with a hand-crafted entry because the SQL
+    /// provider's cascade-delete and idempotent-create cannot naturally
+    /// fail on a well-formed tree.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn partial_failure_mid_composite_undo_names_the_failing_inverse_index() {
+        let engine = block_engine().await;
+        // A real block so the FIRST inverse succeeds (is deleted).
+        create_block(
+            &engine,
+            &[
+                ("id", Value::String("block:keep".into())),
+                ("content", Value::String("k".into())),
+            ],
+        )
+        .await;
+
+        // inverse[0] deletes a real block (ok); inverse[1] is a `block.delete`
+        // with NO `id` param ⇒ the provider rejects it loud ("Missing 'id'
+        // parameter"). undo() must stop at index 1.
+        let entry = UndoEntry {
+            ops: vec![id_op("block", "create", "block:keep")],
+            inverse_ops: vec![
+                id_op("block", "delete", "block:keep"),
+                Operation::new("block", "delete", "Delete", HashMap::new()),
+            ],
+            origin: OpOrigin::User,
+            group_id: 0,
+            precondition: Precondition::default(),
+            redo_precondition: Precondition::default(),
+        };
+        engine.push_undo_entry_for_test(entry).await;
+
+        let err = engine
+            .undo()
+            .await
+            .expect_err("a mid-inverse failure must surface, not be swallowed");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("composite inverse op 1"),
+            "error must name the failing inverse index (1): {msg}"
+        );
+        assert!(
+            msg.contains("Missing 'id'"),
+            "error must carry the underlying cause: {msg}"
+        );
+        // Disclosed partial state: inverse[0] applied before the failure.
+        assert_eq!(
+            ids_present(&engine, &["block:keep"]).await,
+            0,
+            "the earlier inverse applied before the failure (partial undo, disclosed)"
         );
     }
 
