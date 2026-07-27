@@ -1746,6 +1746,12 @@ pub struct RenderedElement {
     /// spawned binding — the divergence window is exactly the
     /// steal-back/zombie-editor bug family.
     pub focused: Option<bool>,
+    /// The read-mode styled-run fingerprint this element actually painted for
+    /// its block (byte-range runs, theme-independent), or `None` when it painted
+    /// plain text / carries no marks. `inv-paint-text-styling` compares this
+    /// against the fingerprint the block's `(content, marks)` demand — a marked
+    /// block that painted plain shows up here as `None`/empty.
+    pub styled_runs: Option<Vec<holon_api::StyledRun>>,
 }
 
 #[holon_macros::capmap_adapter]

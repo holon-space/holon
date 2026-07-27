@@ -304,6 +304,7 @@ pub fn tracked(
         has_content,
         displayed_text,
         focused: None,
+        styled_runs: None,
         expected_size: SizeBounds::default(),
         child: Some(child),
     }
@@ -324,6 +325,15 @@ impl BoundsTracker {
         self.focused = Some(focused);
         self
     }
+
+    /// Record the read-mode styled-run fingerprint this widget painted (the
+    /// runs handed to `StyledText::with_highlights`). Only the mark-styling
+    /// path sets it; a plain-text render leaves it `None`. Read back by
+    /// `inv-paint-text-styling` via the `GeometryProvider`.
+    pub fn with_styled_runs(mut self, runs: Vec<holon_api::StyledRun>) -> Self {
+        self.styled_runs = Some(Arc::from(runs));
+        self
+    }
 }
 
 /// Transparent wrapper element that records its child's bounds into a
@@ -342,6 +352,7 @@ pub struct BoundsTracker {
     has_content: bool,
     displayed_text: Option<Arc<str>>,
     focused: Option<bool>,
+    styled_runs: Option<Arc<[holon_api::StyledRun]>>,
     expected_size: SizeBounds,
     child: Option<AnyElement>,
 }
@@ -460,6 +471,7 @@ impl Element for TransparentTracker {
                 parent_id,
                 displayed_text: None,
                 focused: None,
+                styled_runs: None,
                 expected_size: self.expected_size.clone(),
             },
         );
@@ -542,6 +554,7 @@ impl Element for BoundsTracker {
                 parent_id,
                 displayed_text: self.displayed_text.clone(),
                 focused: self.focused,
+                styled_runs: self.styled_runs.clone(),
                 expected_size: self.expected_size.clone(),
             },
         );
@@ -582,6 +595,7 @@ mod tests {
             parent_id: None,
             displayed_text: None,
             focused: None,
+            styled_runs: None,
             expected_size: SizeBounds::default(),
         }
     }

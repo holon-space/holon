@@ -89,6 +89,10 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         invariants::wheel_occlusion_routing::wire(),
         invariants::displayed_text::wire_widget(),
         invariants::displayed_text::wire_viewmodel(),
+        // Read-mode inline STYLING at the paint level (bold/italic/underline/
+        // strike/code/link). Needs `SutLayout` (painted styled runs) +
+        // `SutBackend` (write-side marks); windowed slice only.
+        invariants::paint_text_styling::wire(),
         // Windowed focus coherence (E4 inc4): needs `SutDriver` (now CapMap-hosted)
         // + `SutLayout`; no ref cap. Only the full windowed slice supplies both.
         invariants::window_focus::wire(),

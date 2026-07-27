@@ -475,6 +475,125 @@ pub fn split_content_marks(
     }
 }
 
+// --- Read-mode styling fingerprint (paint-observable single source) ---
+//
+// The gpui read-mode renderer turns `[MarkSpan]` into styled text runs
+// (`build_highlights` -> `StyledText::with_highlights`). That styling is
+// otherwise pinned only by gpui unit tests and is structurally invisible to the
+// headless keystone. `style_fingerprint` is the SINGLE oracle both the renderer
+// (whose `merge_marks` layers theme colors on top of these booleans) and the
+// GPUI-tier composed PBT (`inv-paint-text-styling`) agree on: the
+// theme-independent PAINT signature — weight / slant / decoration / background —
+// per byte-range run. Exact colors are the frontend's concern and deliberately
+// NOT part of the fingerprint.
+
+/// The theme-independent paint attributes covering one styled run. `false`
+/// everywhere = plain text (no mark contributes a visible attribute, e.g. a
+/// `Sub`/`Super`-only run today).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StyleFlags {
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub strikethrough: bool,
+    /// A background fill is painted (Code / Verbatim). The exact color is
+    /// theme-dependent and not compared.
+    pub background: bool,
+}
+
+impl StyleFlags {
+    /// No visible attribute — the run paints as plain body text.
+    pub fn is_plain(&self) -> bool {
+        !(self.bold || self.italic || self.underline || self.strikethrough || self.background)
+    }
+
+    /// Union: any attribute set by either side is set in the result. Used to
+    /// fold the active marks covering a segment into one run signature.
+    pub fn or(self, o: StyleFlags) -> StyleFlags {
+        StyleFlags {
+            bold: self.bold || o.bold,
+            italic: self.italic || o.italic,
+            underline: self.underline || o.underline,
+            strikethrough: self.strikethrough || o.strikethrough,
+            background: self.background || o.background,
+        }
+    }
+}
+
+/// The paint attributes a single mark kind contributes. SINGLE SOURCE for the
+/// read-mode renderer's boolean styling and the PBT oracle alike. `Link`
+/// underlines (its distinguishing color is not a fingerprint attribute);
+/// `Code`/`Verbatim` fill a background; `Sub`/`Super` have no paint attribute in
+/// the current `HighlightStyle` model (no baseline-shift field).
+pub fn mark_style_flags(mark: &InlineMark) -> StyleFlags {
+    let mut f = StyleFlags::default();
+    match mark {
+        InlineMark::Bold => f.bold = true,
+        InlineMark::Italic => f.italic = true,
+        InlineMark::Underline => f.underline = true,
+        InlineMark::Strike => f.strikethrough = true,
+        InlineMark::Code | InlineMark::Verbatim => f.background = true,
+        InlineMark::Link { .. } => f.underline = true,
+        InlineMark::Sub | InlineMark::Super => {}
+    }
+    f
+}
+
+/// One styled run of a block's content: a half-open BYTE range and the paint
+/// attributes covering it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StyledRun {
+    /// Byte offset into the block content (gpui `TextRun`/highlight ranges are
+    /// byte-based).
+    pub start: usize,
+    pub end: usize,
+    pub flags: StyleFlags,
+}
+
+/// Partition `content` by its marks into the styled runs a read-mode renderer
+/// must paint, in ascending order. Mirrors the gpui renderer's
+/// `compute_segments`/`build_highlights` exactly: boundaries are the mark edges
+/// (clamped into the content's scalar length), only segments covered by at
+/// least one mark are emitted (unstyled gaps are omitted), and offsets are
+/// converted scalar -> byte at the segment level. A segment whose only active
+/// marks are attribute-less (`Sub`/`Super`) is still emitted, with plain flags —
+/// matching the renderer, which emits a default highlight for it.
+pub fn style_fingerprint(content: &str, marks: &[MarkSpan]) -> Vec<StyledRun> {
+    let mut char_to_byte: Vec<usize> = content.char_indices().map(|(i, _)| i).collect();
+    char_to_byte.push(content.len());
+    let total_chars = char_to_byte.len() - 1;
+
+    let mut boundaries: Vec<usize> = marks
+        .iter()
+        .flat_map(|m| [m.start, m.end])
+        .filter(|&b| b <= total_chars)
+        .collect();
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    let mut runs = Vec::with_capacity(boundaries.len());
+    for w in boundaries.windows(2) {
+        let (start_char, end_char) = (w[0], w[1]);
+        let mut flags = StyleFlags::default();
+        let mut any = false;
+        for m in marks {
+            if m.start <= start_char && m.end >= end_char && m.start < m.end {
+                flags = flags.or(mark_style_flags(&m.mark));
+                any = true;
+            }
+        }
+        if !any {
+            continue;
+        }
+        runs.push(StyledRun {
+            start: char_to_byte[start_char],
+            end: char_to_byte[end_char],
+            flags,
+        });
+    }
+    runs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

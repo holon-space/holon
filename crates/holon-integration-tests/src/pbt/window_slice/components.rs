@@ -89,6 +89,7 @@ impl SutLayout for GpuiWindowComponent {
                     expected_size_violation,
                     is_error_widget: info.widget_type.as_ref() == "error",
                     focused: info.focused,
+                    styled_runs: info.styled_runs.as_deref().map(<[_]>::to_vec),
                 }
             })
             .collect()

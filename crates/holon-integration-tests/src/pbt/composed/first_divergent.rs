@@ -359,6 +359,11 @@ const LAYER_MAP: &[Entry] = &[
         "pbt/composed/invariants/displayed_text.rs (widget)",
     ),
     (
+        "inv-paint-text-styling",
+        Some(Layer::Render),
+        "pbt/composed/invariants/paint_text_styling.rs",
+    ),
+    (
         "inv-window-focus-matches-engine-focus",
         Some(Layer::Render),
         "pbt/composed/invariants/window_focus.rs",
