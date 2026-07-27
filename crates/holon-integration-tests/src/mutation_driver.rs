@@ -398,11 +398,25 @@ impl SutBlockToPage for DirectUserDriver {
                 Value::String(destination_path.to_string()),
             );
         }
-        self.synthetic_dispatch("block", "convert_block_to_page", params)
+        if let Err(e) = self
+            .synthetic_dispatch("block", "convert_block_to_page", params)
             .await
-            .unwrap_or_else(|e| {
-                panic!("[DirectUserDriver floor] block/convert_block_to_page failed: {e:#}")
-            });
+        {
+            // Interim identity policy (plan §5) / resolve-before-mint (ADR 0029):
+            // a convert whose destination page id is already held by a DIFFERENT
+            // entity (a page renamed away from that name but still holding its
+            // derived id) is REFUSED fail-loud before any constituent runs. That
+            // refusal is the SPECIFIED behaviour, NOT a driver failure: model it
+            // as a disclosed no-op (the reference mirrors it in
+            // `apply_block_to_page`). Any OTHER failure is a real defect — panic
+            // loud. Recognised by the stable marker (the concrete
+            // `IdentityCollision` type is erased by the dispatch chain's wrappers).
+            let msg = format!("{e:#}");
+            assert!(
+                msg.contains(holon_api::IDENTITY_COLLISION_MARKER),
+                "[DirectUserDriver floor] block/convert_block_to_page failed: {msg}"
+            );
+        }
     }
 }
 

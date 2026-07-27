@@ -1540,6 +1540,36 @@ impl ReferenceState {
         use holon_api::inline_mark::MarkSpan;
         use holon_orgmode::models::OrgBlockExt;
 
+        // RECOGNITION refusal (resolve-before-mint, ADR 0029): if `page_id` is
+        // ALREADY held by a DIFFERENT-titled entity — the state a `RenamePage`
+        // leaves (title changed, id preserved) — production REFUSES the convert
+        // fail-loud rather than clobber. Model the refusal: no page minted, no
+        // re-home, no origin rewrite, and NO undo entry (checked BEFORE the
+        // snapshot). Uses the SAME `recognize_derived_id` as the SUT seam in
+        // `run_convert_block_to_page`; the SUT driver mirrors it by tolerating the
+        // `IdentityCollision`. Free / same-title ids fall through and convert.
+        let origin_content_for_recognition = self
+            .domain
+            .block_state
+            .blocks
+            .get(origin)
+            .expect("apply_block_to_page: origin block must exist (precondition)")
+            .content
+            .clone();
+        let holder_title = self
+            .domain
+            .block_state
+            .blocks
+            .get(&page_id)
+            .map(|b| b.content.clone());
+        if let holon_api::Recognition::Collision(_) = holon_api::recognize_derived_id(
+            &page_id,
+            holder_title.as_deref(),
+            &origin_content_for_recognition,
+        ) {
+            return;
+        }
+
         // Undo-stack correspondence: the compound records ONE User-origin undo
         // entry, so the ref snapshots exactly once here (mirrors
         // `create_block_under_with_id`).

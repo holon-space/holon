@@ -581,6 +581,33 @@ impl DispatchingOperationEngine {
         let plan = BlockToPagePlan::from_value(&plan_value)
             .map_err(|e| anyhow::anyhow!("convert_block_to_page: {e}"))?;
 
+        // RECOGNITION (resolve-before-mint, ADR 0029): before materializing the
+        // destination page P, recognize whether `plan.page_id` is ALREADY held by
+        // a DIFFERENT-titled entity — the state a `RenamePage` leaves (title
+        // changed, id preserved). Minting P there would clobber the rename. Read
+        // the id's current holder from the live-state reader (the projected
+        // `block_raw` base table — mode-correct in BOTH Turso and Loro authority
+        // modes, the SAME source the journal rule's inhibitor reads) and REFUSE
+        // BEFORE dispatching any constituent, so no partial state is left. Free or
+        // same-title ids proceed (a fresh mint, or an idempotent upsert of
+        // unchanged content). The reference mirrors this refusal with the SAME
+        // `recognize_derived_id`; the SUT driver tolerates the `IdentityCollision`.
+        if let Some(reader) = &self.reader {
+            let holder_title = reader
+                .field_value(&plan.page_id, "content")
+                .await?
+                .and_then(|v| v.as_string().map(str::to_string));
+            // ALLOW(entity_uri_from_raw): plan.page_id is a derived PageId::for_path id.
+            let page_uri = holon_api::EntityUri::from_raw(&plan.page_id);
+            if let holon_api::Recognition::Collision(collision) = holon_api::recognize_derived_id(
+                &page_uri,
+                holder_title.as_deref(),
+                &plan.origin_content,
+            ) {
+                return Err(anyhow::Error::new(collision));
+            }
+        }
+
         // Inverses are bucketed per step, NOT blanket-reversed: the undo order
         // must reverse the STEPS while keeping the child re-homes in FORWARD
         // order (each child's move-back anchors on its original predecessor, so

@@ -802,7 +802,19 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             );
             let verdict =
                 crate::pbt::composed::first_divergent::first_divergent_verdict(&hard, &coverage);
-            panic!("reconciled composed sequence diverged from the oracle: {hard:?}\n{verdict}");
+            // Disclose the RESOLVED execution-authority routing (who actually
+            // executes runtime block writes for this draw), single-sourced from
+            // the same `set_for_wiring` resolution the SUT boots with — so a
+            // reader is not misled by the wiring line into thinking Turso
+            // executes the writes when `EditorState` ⇒ Loro is the block-CRUD
+            // authority. Prefix kept verbatim so `bisect_driver`'s
+            // `reproduction_signature()` still matches (substring).
+            let authority = crate::pbt::composed::wide_e2e::authority_routing_disclosure(
+                &ref_state.harness.wiring,
+            );
+            panic!(
+                "reconciled composed sequence diverged from the oracle: {hard:?}\n{authority}\n{verdict}"
+            );
         }
         // Per-tick SELECTION floor: every required invariant must be selected
         // (present in `report.ran`) at every tick — a silent deselect fails
