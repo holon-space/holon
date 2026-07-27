@@ -107,6 +107,24 @@ feature:** add a CI step that runs it with that feature — the guard will fail
 until you do. The guard proves the binary is non-empty and wired; only the
 actual run (step 1) proves the tests pass.
 
+### Focusing the ONE keystone (composition · alphabet · invariants)
+
+The composed keystone (`general_e2e_composed_pbt`) is env-configured along
+three independent axes — there is ONE test, never a per-focus twin binary:
+
+| Env var | Axis | Effect |
+|---|---|---|
+| `HOLON_PBT_LIVE_MCP=1` | composition | run the keystone through the **live MCP server** (`LiveMcpE2E`, windowless) instead of headless-direct. Same `E2ETransition` alphabet + invariant catalog; every transition is driven via `McpUserDriver` over `http://127.0.0.1:$MCP_SERVER_PORT/mcp`. Wrapper: `just keystone-mcp [port] [cases] [weights]` (app must be up, e.g. `HOLON_MCP_ALLOW_RESET=1 just live-verify 8710`). |
+| `HOLON_PBT_WEIGHTS='glob:mult,…'` | alphabet | reweight transition families by glob × u32 multiplier; `0` removes a family. E.g. an MCP-data-tool-only walk: `HOLON_PBT_WEIGHTS='*:0,DenseProjectionEdit:100'`. A focused run must still draw its target a non-zero number of times — an all-zero alphabet fails loud. |
+| `HOLON_PBT_INVARIANTS='glob:mode'` | oracles | per-invariant `skip`/`warn`/`enforce` override — any softening is a DISCLOSED degraded run and is printed as such. |
+
+Plus the generation knobs: `PROPTEST_CASES`, `HOLON_PBT_EXTENDED_GEN=1`,
+`HOLON_PBT_SHAPE_PROFILE`, `HOLON_PBT_UNDO_REDO_DENSITY`.
+
+"Focus on component X" = compose these — never fork the keystone. If the
+component has no transition presence yet (nothing to weight up), that is a
+COVERAGE gap: add the transition to the shared catalog first.
+
 ## Code Coverage
 
 Code coverage helps identify dead code for elimination. We use `cargo-llvm-cov` to collect coverage data from tests.

@@ -139,6 +139,26 @@ hand-authored *FLAGS:
 keystone-full cases='16':
     just pbt general {{cases}}
 
+# The ONE keystone driven over the LIVE MCP surface (LiveMcpE2E composition,
+# windowless — same E2ETransition alphabet + invariant catalog as headless).
+# Needs a running app serving MCP with reset enabled, e.g.:
+#   HOLON_MCP_ALLOW_RESET=1 just live-verify 8710
+# Focus the alphabet with the standard weights knob, e.g. an MCP-data-tool-only
+# walk: just keystone-mcp 8710 32 '*:0,DenseProjectionEdit:100'
+keystone-mcp port='8710' cases='8' weights='':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! curl -sf "http://127.0.0.1:{{port}}/health" > /dev/null; then
+        echo "no app serving http://127.0.0.1:{{port}} — start one first, e.g.:"
+        echo "  HOLON_MCP_ALLOW_RESET=1 just live-verify {{port}}"
+        exit 1
+    fi
+    HOLON_PBT_LIVE_MCP=1 MCP_SERVER_PORT={{port}} PROPTEST_CASES={{cases}} \
+        HOLON_PBT_WEIGHTS="{{weights}}" cargo test \
+        -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
+        general_e2e_composed_pbt_live_mcp \
+        -- --nocapture 2>&1 | tee /tmp/pbt-keystone-mcp.log
+
 # Launch the app for live MCP-driven verification: throwaway config+vault, own
 # MCP port (registry: 8710/8720/8730/... — pick one per verifier). Leaves the
 # app running in the background; caller drives it over http://127.0.0.1:PORT/mcp
