@@ -83,6 +83,10 @@ pub struct HolonConfig {
 
     #[cfg_attr(not(target_arch = "wasm32"), command(flatten))]
     #[serde(default)]
+    pub mcp: McpConfig,
+
+    #[cfg_attr(not(target_arch = "wasm32"), command(flatten))]
+    #[serde(default)]
     pub hooks: HooksConfig,
 
     /// MCP integrations directory (default: `{config_dir}/integrations`)
@@ -145,6 +149,34 @@ pub struct CrdtPreferences {
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_dir: Option<PathBuf>,
+}
+
+/// Preferences for the embedded MCP server (the debug/automation control
+/// surface every frontend launches on loopback by default).
+///
+/// Security-conscious users can disable it entirely (`mcp.enabled = false`) to
+/// remove that attack surface: with it off, the frontend boots with NO MCP
+/// server — nothing listens, no MCP task is spawned. Default is ON so existing
+/// behavior is unchanged.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(clap::Args))]
+#[serde(deny_unknown_fields)]
+pub struct McpConfig {
+    /// Launch the embedded MCP server at boot. Default: `true` (unchanged
+    /// behavior). Set to `false` to boot with no MCP server / no listener —
+    /// attack-surface reduction. Boot-time on/off only; not per-tool.
+    // `id` MUST be set explicitly: clap derive defaults the argument id to the
+    // FIELD NAME (`enabled`), and `CrdtPreferences.enabled` is also flattened
+    // into `HolonConfig` — two args with id `enabled` make clap `debug_assert`
+    // at Command-build time, panicking EVERY CLI parse (incl. `--help`). The
+    // `long`/`env` rename does not change the id; only `id` does. Guarded by
+    // `clap_command_arg_ids_are_unique` below.
+    #[cfg_attr(
+        not(target_arch = "wasm32"),
+        arg(id = "mcp_enabled", long = "mcp-enabled", env = "HOLON_MCP_ENABLED")
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -460,6 +492,14 @@ impl HolonConfig {
 
     pub fn crdt_enabled(&self) -> bool {
         self.crdt.enabled.unwrap_or(false)
+    }
+
+    /// Whether the embedded MCP server should launch at boot. Defaults to
+    /// `true` (unchanged behavior); set `mcp.enabled = false` in `holon.toml`
+    /// (or `HOLON_MCP_ENABLED=false` / `--mcp-enabled=false`) to boot with no
+    /// MCP server — no listener, no MCP task (attack-surface reduction).
+    pub fn mcp_enabled(&self) -> bool {
+        self.mcp.enabled.unwrap_or(true)
     }
 
     pub fn glass_background(&self) -> bool {
@@ -878,6 +918,73 @@ mod tests {
             err.to_string().contains("Config errors"),
             "error must surface the config parse failure: {err}"
         );
+    }
+
+    /// The clap `Command` built from `HolonConfig` must have unique argument
+    /// ids across ALL flattened sub-structs. clap derive uses the FIELD NAME as
+    /// the arg id (not the `long` rename), so two flattened fields both named
+    /// `enabled` (`CrdtPreferences.enabled` + `McpConfig.enabled`) collide and
+    /// clap `debug_assert`s at Command-build time — i.e. every CLI parse
+    /// (including `--help`) panics on launch. cargo check and struct-only DI
+    /// tests cannot see this (it is a runtime assert on the built Command), so
+    /// this is the guard for it — and for the NEXT flattened `enabled` too.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn clap_command_arg_ids_are_unique() {
+        use clap::CommandFactory;
+        HolonConfig::command().debug_assert();
+    }
+
+    /// `--mcp-enabled false` must land in `mcp.enabled` (proves the flag is
+    /// wired to the field, not just id-deconflicted).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn clap_mcp_enabled_flag_parses_into_field() {
+        use clap::Parser;
+        let cfg = HolonConfig::try_parse_from(["holon", "--mcp-enabled", "false"])
+            .expect("parse must succeed");
+        assert_eq!(cfg.mcp.enabled, Some(false));
+        assert!(!cfg.mcp_enabled(), "--mcp-enabled false must disable");
+
+        let cfg_on = HolonConfig::try_parse_from(["holon", "--mcp-enabled", "true"])
+            .expect("parse must succeed");
+        assert_eq!(cfg_on.mcp.enabled, Some(true));
+        assert!(cfg_on.mcp_enabled());
+    }
+
+    /// Env parse + absent-default, in ONE test. `HOLON_MCP_ENABLED` is a
+    /// process-global mutated here; splitting the env assertion from the absent
+    /// assertion lets the two run in parallel and the "absent" parse observe
+    /// the env test's half-set var (`Some(false)` instead of `None`).
+    /// Keeping both in a single test is the only serialization that holds —
+    /// this is the sole test that touches `HOLON_MCP_ENABLED`, and
+    /// explicit-flag tests override env so they are unaffected regardless
+    /// of ordering.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn clap_mcp_enabled_env_and_absent_default() {
+        use clap::Parser;
+
+        // Absent flag/env → None, and `mcp_enabled()` defaults to TRUE (opt-out).
+        // Asserted BEFORE any env mutation.
+        let absent = HolonConfig::try_parse_from(["holon"]).expect("parse must succeed");
+        assert_eq!(absent.mcp.enabled, None, "absent flag → None");
+        assert!(absent.mcp_enabled(), "absent → default enabled (TRUE)");
+
+        // `HOLON_MCP_ENABLED=false` (env) must land in `mcp.enabled`.
+        unsafe {
+            std::env::set_var("HOLON_MCP_ENABLED", "false");
+        }
+        let from_env = HolonConfig::try_parse_from(["holon"]).expect("parse must succeed");
+        unsafe {
+            std::env::remove_var("HOLON_MCP_ENABLED");
+        }
+        assert_eq!(
+            from_env.mcp.enabled,
+            Some(false),
+            "HOLON_MCP_ENABLED=false must disable via env"
+        );
+        assert!(!from_env.mcp_enabled());
     }
 
     /// HYP-5: a pre-rename `[orgmode]` section must fail loud with a migration
