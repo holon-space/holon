@@ -53,6 +53,21 @@ fn marker_gutter_px(style: &super::style::LayoutStyle) -> f32 {
     style.tree_chevron_size
 }
 
+/// The disclosure chevron's opacity, as a pure function of its marker and the
+/// row's hover state. Hover-reveal (Logseq convention): a chevron row that
+/// carries a `hovered` cell is transparent (0.0) until its row is hovered,
+/// opaque (1.0) once it is. Rows with no `hovered` cell (static gallery /
+/// shadow) and every non-chevron marker are always fully visible. The result
+/// drives `opacity` — never layout — so the chevron's bounds stay registered
+/// for hit-testing and PBT `ToggleCollapse` regardless of hover. Kept pure so
+/// the reveal contract is unit-testable without a window.
+fn chevron_reveal_opacity(marker: LeadingMarker, hovered: Option<bool>) -> f32 {
+    match (marker, hovered) {
+        (LeadingMarker::Chevron, Some(false)) => 0.0,
+        _ => 1.0,
+    }
+}
+
 /// Extract a stable ID from the first child's entity data for collapse state
 /// tracking. Walks into wrapper nodes (render_entity, live_query) to find the
 /// actual entity with an "id".
@@ -262,16 +277,8 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     // transparent until the whole ROW is hovered (the hover zone is the row,
     // not the chevron box). Absent (static gallery / shadow) → always visible.
     let hovered_handle = node.hovered.clone();
-    let chevron_opacity = match (&marker, &hovered_handle) {
-        (LeadingMarker::Chevron, Some(h)) => {
-            if h.get() {
-                1.0
-            } else {
-                0.0
-            }
-        }
-        _ => 1.0,
-    };
+    let chevron_opacity =
+        chevron_reveal_opacity(marker, hovered_handle.as_ref().map(|h| h.get()));
 
     let mut row = div()
         .w_full()
@@ -356,6 +363,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
 #[cfg(test)]
 mod marker_tests {
     use super::LeadingMarker;
+    use super::chevron_reveal_opacity;
     use super::leading_marker;
     use super::marker_gutter_px;
 
@@ -398,5 +406,41 @@ mod marker_tests {
         assert_eq!(leading_marker(false, false, true), LeadingMarker::Bullet);
         // Chevron wins over bullet on a parent — never both.
         assert_eq!(leading_marker(true, true, true), LeadingMarker::Chevron);
+    }
+
+    #[test]
+    fn chevron_hidden_until_its_row_is_hovered() {
+        // Green-from-start lock for the row-scoped hover-reveal behavior landed
+        // via the row-scoped-hover-chevron work (cb1d0e7e family). A chevron row
+        // carrying a seeded `hovered` cell is transparent (opacity 0) while the
+        // row is NOT hovered and opaque (1.0) once it is — the reveal is opacity,
+        // never layout. Proven red by reverting `chevron_reveal_opacity`'s match
+        // to a constant 1.0 (see /tmp/chevron_lock_mutation.log): the `Some(false)`
+        // assertion then reads 1.0 and fails.
+        assert_eq!(
+            chevron_reveal_opacity(LeadingMarker::Chevron, Some(false)),
+            0.0,
+            "chevron must be transparent while its row is not hovered"
+        );
+        assert_eq!(
+            chevron_reveal_opacity(LeadingMarker::Chevron, Some(true)),
+            1.0,
+            "chevron must be fully opaque once its row is hovered"
+        );
+    }
+
+    #[test]
+    fn chevron_without_a_hover_cell_is_always_visible() {
+        // Static gallery / shadow rows seed no `hovered` cell — there is no hover
+        // source to gate on, so the chevron never hides (disclosed degraded mode).
+        assert_eq!(chevron_reveal_opacity(LeadingMarker::Chevron, None), 1.0);
+    }
+
+    #[test]
+    fn non_chevron_markers_are_never_hover_gated() {
+        // Only the disclosure chevron hover-reveals. Bullets and marker-less rows
+        // stay fully visible regardless of hover state.
+        assert_eq!(chevron_reveal_opacity(LeadingMarker::Bullet, Some(false)), 1.0);
+        assert_eq!(chevron_reveal_opacity(LeadingMarker::None, Some(false)), 1.0);
     }
 }
