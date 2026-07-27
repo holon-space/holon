@@ -19,6 +19,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
@@ -163,6 +164,10 @@ impl BlockOrdering for StubOrdering {
 struct ReadOnlyWriteFs {
     inner: RealFileSystem,
     write_attempts: AtomicUsize,
+    /// When true, `write` fails with EROFS; flip to false to simulate the path
+    /// becoming writable again (e.g. a read-only mount remounted rw), so the
+    /// resume test can prove edits resume after a re-ingest clears the mark.
+    readonly: AtomicBool,
 }
 
 impl ReadOnlyWriteFs {
@@ -170,10 +175,14 @@ impl ReadOnlyWriteFs {
         Self {
             inner: RealFileSystem,
             write_attempts: AtomicUsize::new(0),
+            readonly: AtomicBool::new(true),
         }
     }
     fn write_attempts(&self) -> usize {
         self.write_attempts.load(Ordering::SeqCst)
+    }
+    fn set_writable(&self) {
+        self.readonly.store(false, Ordering::SeqCst);
     }
 }
 
@@ -185,12 +194,15 @@ impl FileSystem for ReadOnlyWriteFs {
     async fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
         self.inner.read(path).await
     }
-    async fn write(&self, path: &Path, _contents: &[u8]) -> std::io::Result<()> {
+    async fn write(&self, path: &Path, contents: &[u8]) -> std::io::Result<()> {
         self.write_attempts.fetch_add(1, Ordering::SeqCst);
-        Err(std::io::Error::new(
-            std::io::ErrorKind::ReadOnlyFilesystem,
-            format!("Read-only file system (os error 30): {}", path.display()),
-        ))
+        if self.readonly.load(Ordering::SeqCst) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ReadOnlyFilesystem,
+                format!("Read-only file system (os error 30): {}", path.display()),
+            ));
+        }
+        self.inner.write(path, contents).await
     }
     async fn remove(&self, path: &Path) -> std::io::Result<()> {
         self.inner.remove(path).await
@@ -273,5 +285,97 @@ async fn readonly_writeback_logs_once_then_skips_no_per_cdc_retry() {
         all_ok,
         "a CDC event propagated the EROFS error instead of the disclosed \
          skip — that would kill the sync loop for every other document",
+    );
+}
+
+/// RESUME regression (coverage for the LANDED clear path, not red-first): after
+/// the EROFS storm marks a path, a successful re-ingest of the file — the SOLE
+/// resume trigger, `ingest_file` (reached via `on_file_changed`) — lifts the
+/// mark, so the NEXT CDC edit issues a REAL write to disk again. Mutation-check:
+/// removing the clear in `ingest_file` leaves the mark set and this test goes
+/// red (assert (4) fails — the resumed edit never reaches disk).
+#[tokio::test]
+async fn readonly_writeback_resumes_after_reingest_clears_the_mark() {
+    let (doc, blocks) = make_doc_and_blocks();
+    let reader = Arc::new(StubReader {
+        doc_id: doc.id.clone(),
+        blocks: Mutex::new(blocks),
+    });
+    let doc_manager = Arc::new(StubDocManager { doc: doc.clone() });
+    let tmp = tempfile::tempdir().unwrap();
+    // Canonicalize so the controller's strip_prefix(root) sees the same
+    // /private/var shape it derives on macOS (where /var is a symlink).
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let path = root.join("doc.org");
+    let fs = Arc::new(ReadOnlyWriteFs::new());
+    let mut controller = new_org_sync_controller(
+        reader.clone(),
+        doc_manager,
+        root.clone(),
+        Arc::new(StubOrdering {
+            reader: reader.clone(),
+        }),
+        fs.clone(),
+    );
+
+    // (1) Storm on a read-only path: the mark is set with exactly one attempt.
+    let mut edited = reader.blocks.lock().unwrap()[0].clone();
+    edited.content = "First heading edit A".to_string();
+    reader.set_block(&edited);
+    controller
+        .on_block_changed(&doc.id, &BlockDelta::Upsert(edited))
+        .await
+        .unwrap();
+    assert_eq!(
+        fs.write_attempts(),
+        1,
+        "storm must set the read-only mark with exactly one write attempt",
+    );
+
+    // (2) The path becomes writable AND the file now exists on disk (a real
+    //     re-ingest reads it). Write a matching bare-`#+ID:` file directly.
+    std::fs::write(&path, format!("#+ID: {}\n", doc.id.id())).unwrap();
+    fs.set_writable();
+
+    // (3) Re-ingest via on_file_changed — the SOLE resume trigger. Clears the
+    //     mark (ingest_file) before any reconciliation/write-back.
+    controller
+        .on_file_changed(&path)
+        .await
+        .expect("re-ingest of a writable-backed file must not error");
+
+    // (4) The next CDC edit must issue a REAL write that reaches disk.
+    let base_attempts = fs.write_attempts();
+    let mut edited2 = reader.blocks.lock().unwrap()[0].clone();
+    edited2.content = "RESUMED-MARKER-XYZ".to_string();
+    reader.set_block(&edited2);
+    let r = controller
+        .on_block_changed(&doc.id, &BlockDelta::Upsert(edited2))
+        .await;
+    assert!(r.is_ok(), "resumed write-back must return Ok");
+    assert!(
+        fs.write_attempts() > base_attempts,
+        "a REAL write must be attempted after resume — the mark did not clear",
+    );
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        on_disk.contains("RESUMED-MARKER-XYZ"),
+        "the resumed edit must reach disk — the read-only mark did NOT clear on \
+         re-ingest (resume regression; on-disk = {on_disk:?})",
+    );
+
+    // (5) last_projection was stamped by the resumed write: an IDENTICAL re-edit
+    //     renders == last and issues NO further write.
+    let after_resume = fs.write_attempts();
+    let same = reader.blocks.lock().unwrap()[0].clone();
+    controller
+        .on_block_changed(&doc.id, &BlockDelta::Upsert(same))
+        .await
+        .unwrap();
+    assert_eq!(
+        fs.write_attempts(),
+        after_resume,
+        "an idempotent re-edit must not write — last_projection was not stamped \
+         by the resumed write",
     );
 }
