@@ -37,6 +37,7 @@ SGCONFIG = ARCHLINT_DIR / "sgconfig.yml"
 SMELLS_DIR = ARCHLINT_DIR / "smells"
 CACHE_DIR = ARCHLINT_DIR / "cache"
 JSONB_CACHE = CACHE_DIR / "jsonb-fields.json"
+BASELINE_FILE = ARCHLINT_DIR / "baseline.txt"
 
 # Standard skips (mirror architecture_rules.rs::scan_rs_files).
 DEFAULT_SKIPS = (
@@ -722,7 +723,82 @@ def cmd_hook(fmt: str = "text") -> int:
     return cmd_check(files, fmt=fmt)
 
 
-def cmd_all(fmt: str = "text") -> int:
+# ---------------------------------------------------------------- baseline ratchet
+#
+# Identity of a violation = rule_id + repo-relative path + the normalised source
+# line (whitespace-collapsed). We deliberately do NOT key on line number so a
+# baselined violation survives edits elsewhere in the file (line drift). Multiple
+# identical-text hits in the same file are tracked by MULTIPLICITY: the baseline
+# is a multiset, so adding a 4th identical hit where 3 were baselined surfaces as
+# 1 NEW violation, and removing one leaves a STALE baseline entry (ratchet down).
+
+def diag_snippet(d: dict) -> str:
+    lines = read_lines(d["file"])
+    idx = d["line"] - 1
+    if 0 <= idx < len(lines):
+        return " ".join(lines[idx].split())
+    return ""
+
+
+def diag_identity(d: dict) -> str:
+    return f"{d['id']}\t{relpath(Path(d['file']))}\t{diag_snippet(d)}"
+
+
+def load_baseline() -> "Counter[str]":
+    from collections import Counter
+    if not BASELINE_FILE.exists():
+        return Counter()
+    entries: list[str] = []
+    for raw in BASELINE_FILE.read_text(encoding="utf-8").splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        entries.append(raw.rstrip("\n"))
+    return Counter(entries)
+
+
+def write_baseline(diags: list[dict]) -> None:
+    from collections import Counter
+    counts = Counter(diag_identity(d) for d in diags)
+    by_rule: dict[str, int] = {}
+    for ident, n in counts.items():
+        by_rule[ident.split("\t", 1)[0]] = by_rule.get(ident.split("\t", 1)[0], 0) + n
+    header = [
+        "# archlint baseline — grandfathered architecture violations.",
+        "# Format: <rule_id>\\t<repo-relative-path>\\t<whitespace-collapsed source line>",
+        "# `archlint --all` FAILS ONLY on violations absent from this file; every",
+        "# baselined hit is still disclosed in the summary so the tree never reads",
+        "# as debt-free. Ratchet DOWN: as violations are fixed, regenerate with",
+        "#   ./archlint/archlint --update-baseline",
+        "# See archlint/BURNDOWN.md for the category table and burn-down priority.",
+        f"# Snapshot total: {sum(counts.values())} violation(s) across {len(by_rule)} rule(s).",
+        "#",
+    ]
+    for rule in sorted(by_rule):
+        header.append(f"#   {rule}: {by_rule[rule]}")
+    header.append("")
+    body = sorted(counts.elements())
+    BASELINE_FILE.write_text("\n".join(header + body) + "\n", encoding="utf-8")
+
+
+def split_by_baseline(diags: list[dict]) -> tuple[list[dict], list[dict], int]:
+    """Return (new_diags, baselined_diags, stale_count)."""
+    baseline = load_baseline()
+    remaining = dict(baseline)
+    new: list[dict] = []
+    baselined: list[dict] = []
+    for d in diags:
+        ident = diag_identity(d)
+        if remaining.get(ident, 0) > 0:
+            remaining[ident] -= 1
+            baselined.append(d)
+        else:
+            new.append(d)
+    stale = sum(c for c in remaining.values() if c > 0)
+    return new, baselined, stale
+
+
+def scan_all() -> tuple[list[dict], int]:
+    """Full-repo scan. Returns (post-suppression diags, files scanned)."""
     files = collect_all_files()
     jsonb_fields = discover_jsonb_fields()
     write_jsonb_cache(jsonb_fields)
@@ -731,12 +807,51 @@ def cmd_all(fmt: str = "text") -> int:
     rust_files = [f for f in files if f.suffix == ".rs" and not is_default_skipped(relpath(f))]
     diags += aggregate_scattered_match_as_str(rust_files)
     diags = filter_suppressed(diags)
+    return diags, len(files)
 
-    if fmt == "text" and not diags:
-        sys.stderr.write(f"archlint: 0 violations across {len(files)} files.\n")
-        return 0
-    emit_diagnostics(diags, fmt, files_scanned=len(files))
-    return 2 if diags else 0
+
+def cmd_update_baseline() -> int:
+    diags, nfiles = scan_all()
+    write_baseline(diags)
+    sys.stderr.write(
+        f"archlint: wrote baseline with {len(diags)} violation(s) "
+        f"across {nfiles} files -> {relpath(BASELINE_FILE)}\n"
+    )
+    return 0
+
+
+def cmd_all(fmt: str = "text") -> int:
+    diags, nfiles = scan_all()
+    new, baselined, stale = split_by_baseline(diags)
+
+    if fmt == "json":
+        # JSON reports ONLY the gate-failing (new) violations, but discloses the
+        # baselined + stale counts alongside so pipelines see the full picture.
+        emit_diagnostics(new, fmt, files_scanned=nfiles)
+        sys.stderr.write(
+            f"archlint: {len(baselined)} baselined violation(s) suppressed "
+            f"(see {relpath(BASELINE_FILE)}), {len(new)} new violation(s).\n"
+        )
+        if stale:
+            sys.stderr.write(
+                f"archlint: baseline stale - {stale} entry(ies) no longer fire; "
+                f"run ./archlint/archlint --update-baseline to ratchet down.\n"
+            )
+        return 2 if new else 0
+
+    # text mode
+    if new:
+        sys.stderr.write(format_diagnostics(new) + "\n")
+    sys.stderr.write(
+        f"archlint: {len(baselined)} baselined violation(s) suppressed "
+        f"(see {relpath(BASELINE_FILE)}), {len(new)} new violation(s).\n"
+    )
+    if stale:
+        sys.stderr.write(
+            f"archlint: baseline stale - {stale} entry(ies) no longer fire; "
+            f"run ./archlint/archlint --update-baseline to ratchet down.\n"
+        )
+    return 2 if new else 0
 
 
 def cmd_discover() -> int:
@@ -811,6 +926,9 @@ def cmd_dylint(
 def main() -> None:
     ap = argparse.ArgumentParser(prog="archlint")
     ap.add_argument("--all", action="store_true", help="Scan whole repo (CI mode)")
+    ap.add_argument("--update-baseline", action="store_true",
+                    help="Rescan the repo and overwrite archlint/baseline.txt "
+                         "with the current violation set (ratchet snapshot).")
     ap.add_argument(
         "--format",
         choices=("text", "json"),
@@ -848,6 +966,8 @@ def main() -> None:
     )
     args = ap.parse_args()
 
+    if args.update_baseline:
+        sys.exit(cmd_update_baseline())
     if args.all:
         sys.exit(cmd_all(fmt=args.format))
     if args.cmd == "check":
