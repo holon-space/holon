@@ -2398,6 +2398,17 @@ impl SutClockAdvance for HeadlessFrontendComponent {
         holon::sync::clock_scheduler::reconcile_clock(self.engine.db_handle(), clock.as_ref())
             .await
             .expect("reconcile_clock after advancing the injected clock");
+        // The journal auto-create action fires REACTIVELY off the clock-relation
+        // CDC (action_watcher → `block.create`), so the new day-block lands AFTER
+        // `reconcile_clock` returns. Await the block-id set stabilizing here, so
+        // (a) the block exists before this tick's invariants read it, and (b) the
+        // per-tick `converge_projections` that follows (which waits on the
+        // org-writeback idle signal) actually MATERIALIZES the new journal's
+        // `Journals/{date}.org` file — otherwise a rollover as the LAST transition
+        // races the writeback and `inv-every-page-has-its-own-file` reads a
+        // still-fileless page. A same-day re-tick (`days == 0`) is a no-op create,
+        // so this returns immediately.
+        self.settle_block_ids_stable(Duration::from_secs(5)).await;
         holon_api::CalendarDate::from_clock(clock.as_ref()).ymd()
     }
 }
