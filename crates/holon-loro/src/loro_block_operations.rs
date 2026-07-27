@@ -880,7 +880,12 @@ impl CrudOperations<Block> for LoroBlockOperations {
             "tags",
             "requires",
             "advice_suppressed",
-            // Positional anchor for a delete-inverse restore (see below).
+            // Positional anchors (see below). `after_block_id` is the canonical
+            // key every prod caller uses (matches `POSITION_AFTER_BLOCK_ID_PARAM`
+            // and the SQL provider boundary); `after` is the internal
+            // delete-inverse restore key. Both are operation-control metadata —
+            // stripped here so they NEVER land in the persisted properties blob.
+            holon_api::POSITION_AFTER_BLOCK_ID_PARAM,
             "after",
         ];
         for (key, value) in &fields {
@@ -906,25 +911,49 @@ impl CrudOperations<Block> for LoroBlockOperations {
                 .map_err(|e| format!("create: restore marks for {}: {e}", block.id))?;
         }
 
-        // Positional restore (delete inverse): place the block at its original
-        // sibling slot. `after` = predecessor sibling id (String), or Null for
-        // "first child". Absent ⇒ leave it where `create` put it (append) —
-        // every normal create caller. Loro owns order via the fractional index,
-        // so this is the single primitive that restores sibling position.
-        if let Some(after_val) = fields.get("after") {
-            let predecessor = match after_val {
-                Value::String(p) => Some(p.as_str()),
-                Value::Null => None,
+        // Positional placement. One canonical primitive serves two callers:
+        //   * `after_block_id` (`POSITION_AFTER_BLOCK_ID_PARAM`) — the canonical
+        //     positional-create key every prod caller uses (MCP dense_patch, the op
+        //     bridge, `move_block`'s trigger field). Places a freshly created block
+        //     immediately after its predecessor sibling in ONE op.
+        //   * `after` — the internal delete-inverse restore key, restoring a
+        //     resurrected block to its original sibling slot.
+        // Both carry identical value semantics: a String predecessor sibling id,
+        // or `Null` for "first child". Absent ⇒ leave it where `create` put it
+        // (append) — the common create caller. Loro owns order via the
+        // fractional index, so `update_block_position` is the single primitive.
+        let parse_anchor = |key: &str, v: &Value| -> Result<Option<String>> {
+            match v {
+                Value::String(p) => Ok(Some(p.clone())),
+                Value::Null => Ok(None),
                 other => {
-                    return Err(
-                        format!("create: 'after' must be String or Null, got {other:?}").into(),
-                    );
+                    Err(format!("create: '{key}' must be String or Null, got {other:?}").into())
                 }
-            };
+            }
+        };
+        let canonical = fields
+            .get(holon_api::POSITION_AFTER_BLOCK_ID_PARAM)
+            .map(|v| parse_anchor(holon_api::POSITION_AFTER_BLOCK_ID_PARAM, v))
+            .transpose()?;
+        let restore = fields
+            .get("after")
+            .map(|v| parse_anchor("after", v))
+            .transpose()?;
+        // Fail loud when both keys arrive disagreeing — an illegal, ambiguous
+        // op we refuse rather than silently pick a winner.
+        if let (Some(c), Some(r)) = (&canonical, &restore)
+            && c != r
+        {
+            return Err(format!(
+                "create: conflicting positional anchors — after_block_id={c:?} but after={r:?}"
+            )
+            .into());
+        }
+        if let Some(predecessor) = canonical.or(restore) {
             backend
-                .update_block_position(block.id.as_str(), &parent_id, predecessor)
+                .update_block_position(block.id.as_str(), &parent_id, predecessor.as_deref())
                 .await
-                .map_err(|e| format!("create: restore position for {}: {e}", block.id))?;
+                .map_err(|e| format!("create: set position for {}: {e}", block.id))?;
         }
 
         // Save
@@ -2414,6 +2443,58 @@ mod advice_dismiss_tests {
             restored.source_language.as_ref().map(|l| l.to_string()),
             Some("holon_sql".to_string()),
             "source_language must be restored on undo"
+        );
+    }
+
+    /// A `create` op carrying the canonical positional key `after_block_id`
+    /// must place the new block immediately AFTER the named predecessor
+    /// sibling — the single-op equivalent of the MCP dense_patch
+    /// create-then-move — and the key must NEVER land in the `properties`
+    /// blob. It is operation-control metadata, stripped at the create
+    /// boundary exactly like the `SqlOperationProvider` strips
+    /// `POSITION_AFTER_BLOCK_ID_PARAM`. Before unification the Loro create
+    /// honored only `after` (the delete-inverse restore key), so a positioned
+    /// create appended at the end AND leaked `after_block_id` into properties.
+    #[tokio::test]
+    async fn positioned_create_honors_after_block_id_and_never_leaks_it() {
+        let (ops, _dir, anchor) = ops_with_anchor().await;
+        let backend = ops.get_backend("").await.expect("backend");
+
+        let c1 = seed_child(&backend, &anchor, "c1", "first").await;
+        let c2 = seed_child(&backend, &anchor, "c2", "last").await;
+        ops.save_doc("").await.expect("save");
+
+        // Create `cmid` under the anchor, positioned AFTER c1 via the
+        // canonical `after_block_id` positional key.
+        let mut create_params: StorageEntity = HashMap::new();
+        create_params.insert("id".into(), Value::String("block:cmid".into()));
+        create_params.insert("parent_id".into(), Value::String(anchor.clone()));
+        create_params.insert("content".into(), Value::String("middle".into()));
+        create_params.insert(
+            holon_api::POSITION_AFTER_BLOCK_ID_PARAM.into(),
+            Value::String(c1.clone()),
+        );
+        ops.execute_operation(&EntityName::new("block"), "create", create_params)
+            .await
+            .expect("positioned create");
+        ops.save_doc("").await.expect("save");
+
+        let cmid = "block:cmid".to_string();
+
+        // (1) Positioned exactly between c1 and c2 — NOT appended at the end.
+        assert_eq!(
+            backend.list_children(&anchor).await.expect("children"),
+            vec![c1, cmid.clone(), c2],
+            "after_block_id must place the new block immediately after its predecessor"
+        );
+
+        // (2) The positional key is operation-control metadata — stripped at
+        // the create boundary, never persisted into the `properties` blob.
+        let created = backend.get_block(&cmid).await.expect("read created");
+        assert_eq!(
+            created.get_property(holon_api::POSITION_AFTER_BLOCK_ID_PARAM),
+            None,
+            "after_block_id must NOT leak into the properties blob"
         );
     }
 
