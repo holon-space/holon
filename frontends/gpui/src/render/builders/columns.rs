@@ -76,12 +76,13 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
                 .and_then(|v| v.as_string())
                 .unwrap_or("panel");
             let id = hashed_id(scroll_id);
-            // Accordion flow-panel split (plan §4): a Flex flow column carrying
-            // an accordion child becomes a scrollable main region + pinned
-            // bounded footer. Every other item takes the byte-identical
-            // original path below (sidebar firewall).
+            // Main-panel flow-panel split: a Flex flow column carrying an
+            // accordion child OR a scrollable collection (the outline) becomes a
+            // VIRTUALIZED main region (gpui::list) + pinned footer. Every other
+            // item takes the byte-identical original path below (sidebar
+            // firewall — sidebars are Fixed/shrink-drawer, never Flex flow).
             if matches!(item.layout_hint, LayoutHint::Flex { .. })
-                && super::column::has_accordion_child(item)
+                && super::column::is_main_panel_flow_column(item)
             {
                 container = container.child(panel_wrap(move |inner| {
                     super::column::render_accordion_split(inner, item, id, None, ctx)
@@ -246,10 +247,10 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
             let id = hashed_id(scroll_id);
             let pad_x = ctx.style().content_padding_x;
             let pad_y = ctx.style().content_padding_y;
-            // Accordion flow-panel split, drawer branch (plan §4): same as the
-            // plain flow branch but the padded main-panel viewport.
+            // Main-panel flow-panel split, drawer branch: same as the plain
+            // flow branch (accordion OR collection outline) but padded.
             if matches!(item.layout_hint, LayoutHint::Flex { .. })
-                && super::column::has_accordion_child(item)
+                && super::column::is_main_panel_flow_column(item)
             {
                 container = container.child(panel_wrap(move |inner| {
                     super::column::render_accordion_split(

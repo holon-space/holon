@@ -236,3 +236,34 @@ pub(crate) fn render_content_height(
     }
     container.into_any_element()
 }
+
+/// VIRTUALIZED main-panel variant (Inc 5): renders the slot collection through
+/// the nested collection-mode `ReactiveShell` + `gpui::list` (only viewport
+/// rows built per frame) instead of `render_content_height`'s eager
+/// `eager_collection_div`. Used ONLY from `column::push_main_child`, which
+/// places this inside a `flex_1 min_h_0` region — the DEFINITE viewport height
+/// that made virtualization collapse to 0 in the old content-sized column (the
+/// reason `render_content_height` existed). The switcher bar is overlaid
+/// (absolute), identical to the other two paths. The list owns its own scroll.
+pub(crate) fn render_virtualized(
+    node: &ReactiveViewModel,
+    ctx: &GpuiRenderContext,
+) -> AnyElement {
+    let slot = node
+        .slot
+        .as_ref()
+        .expect("view_mode_switcher requires a slot");
+    let slot_content = slot.content.lock_ref().clone();
+    // `super::render` routes a collection node to the virtualized shell wrapper
+    // (`scrollable_list_wrapper`); a non-collection slot falls back to a normal
+    // render rather than being dropped.
+    let content = super::render(&slot_content, ctx);
+
+    let mut container = div().size_full().flex().flex_col().relative().child(
+        div().flex_1().min_h_0().w_full().child(content),
+    );
+    if let Some(switcher_bar) = build_switcher_bar(node, ctx) {
+        container = container.child(switcher_bar);
+    }
+    container.into_any_element()
+}

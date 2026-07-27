@@ -117,7 +117,6 @@ fn distinct_rows_rendered(registry: &BoundsRegistry) -> HashSet<String> {
 }
 
 
-#[ignore = "red-for-the-right-reason: eager path builds O(N) rows/frame; un-ignore with the Inc 5 virtualization implementation (needs Martin ruling: Integrations pin-vs-scroll)"]
 #[gpui::test]
 fn main_outline_renders_o_viewport_rows_per_frame(cx: &mut TestAppContext) {
     cx.update(|cx| {
