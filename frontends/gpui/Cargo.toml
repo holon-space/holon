@@ -100,6 +100,7 @@ holon-frontend = { workspace = true, features = ["otel"] }
 holon-app.workspace = true
 holon-api.workspace = true
 holon-core.workspace = true
+holon-filesystem.workspace = true
 holon-orgmode.workspace = true
 holon-macros.workspace = true
 holon-mcp = { path = "../mcp" }

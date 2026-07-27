@@ -149,7 +149,7 @@ It must run on the **GPUI main thread** (holds `cx: &mut App`).
   it through accessors **per call**. Mirrors the window's `LiveEngine` cell
   (lib.rs:947-949). The reset tool swaps it right before sending `ResetRequest`.
 - Also stale but Phase-2-deferrable (used only by `inspect_loro_blocks` /
-  `read_org_file` / `render_org_from_blocks`): the `DebugServices` OnceLock
+  `read_org_file` / `render_org`): the `DebugServices` OnceLock
   slots `loro_doc_store`, `orgmode_root`, `org_fs` populated once by
   `DebugServicesPopulatorModule` (`frontends/mcp/src/di.rs:73-79`). Either
   convert to `RwLock<Option<...>>` and swap in the reset, or document them as

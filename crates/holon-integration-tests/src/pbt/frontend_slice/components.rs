@@ -411,6 +411,35 @@ impl HeadlessFrontendComponent {
         Self::new_impl(org_files, settle, loro_enabled, Some(clock)).await
     }
 
+    /// `DebugServices` wired to THIS component's session, for backing an
+    /// embedded MCP server over it. The test-side twin of
+    /// `holon_mcp::di::DebugServicesPopulatorModule`, which cannot run here
+    /// because the component owns its injector rather than a module lifecycle.
+    pub async fn mcp_debug_services(&self) -> Arc<holon_mcp::server::DebugServices> {
+        let debug = Arc::new(holon_mcp::server::DebugServices::default());
+        debug
+            .org_fs
+            .set(self.org_fs.clone() as Arc<dyn holon_filesystem::FileSystem>)
+            .ok();
+        debug.orgmode_root.set(self.org_root.clone()).ok();
+        if let Ok(ops) = self
+            .injector
+            .try_resolve::<holon::sync::LoroBlockOperations>()
+        {
+            debug.loro_doc_store.set(ops.shared_doc_store()).ok();
+        }
+        debug
+            .live_debug
+            .write()
+            .expect("live_debug cell poisoned")
+            .writeback_renderer = Some(
+            self.injector
+                .resolve_async::<holon_filesystem::WritebackRenderer>()
+                .await,
+        );
+        debug
+    }
+
     /// Like [`Self::new`] but with the Loro CRDT layer ENABLED — the production
     /// bootstrap then registers `LoroModule` (the `BlockCellRegistry` backing
     /// `MutableText`) and ingests the org tree through Loro storage, so the

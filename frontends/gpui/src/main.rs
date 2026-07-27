@@ -177,10 +177,10 @@ fn main() -> Result<()> {
     // the desktop launch path is unchanged.
     let mcp_reset_test_mode = std::env::var("HOLON_MCP_ALLOW_RESET").is_ok();
 
-    // Reset-safe debug handles for `await_quiescence` / `debug_pbt_snapshot`
-    // (mirrors the mobile boot's cell population; a later `reset_vault` swaps
-    // the cell for the fresh session's handles).
-    if mcp_reset_test_mode {
+    // Reset-safe debug handles for the MCP inspection tools (`render_org`,
+    // `await_quiescence`, `debug_pbt_snapshot`); a later `reset_vault` swaps the
+    // cell for the fresh session's handles.
+    {
         let injector_for_cell = injector.clone();
         let session_for_cell = session.clone();
         let engine_for_cell = engine.clone();
@@ -197,12 +197,17 @@ fn main() -> Result<()> {
                 .try_resolve::<holon::sync::LoroBlockOperations>()
                 .ok()
                 .map(|ops| ops.shared_doc_store());
+            let writeback_renderer = injector_for_cell
+                .try_resolve_async::<holon_filesystem::WritebackRenderer>()
+                .await
+                .ok();
             holon_mcp::server::DebugHandlesCell {
                 loro_sync_handle,
                 org_idle_signal,
                 block_query_source,
                 loro_doc_store,
                 reactive_engine: Some(engine_for_cell),
+                writeback_renderer,
             }
         });
         *debug.live_debug.write().expect("live_debug cell poisoned") = cell;

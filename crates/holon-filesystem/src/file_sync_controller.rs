@@ -147,6 +147,11 @@ pub struct FileSyncController {
     /// matter which render path last updated it.
     base_source: HashMap<CanonicalPath, String>,
 
+    /// The write-back render itself, shared with inspection callers (the
+    /// `render_org` MCP tool) so "what write-back would produce" is
+    /// answered by the code that produces it.
+    renderer: Arc<crate::writeback_render::WritebackRenderer>,
+
     /// Reads blocks by document ID.
     block_reader: Arc<dyn BlockReader>,
 
@@ -310,16 +315,16 @@ pub struct FileSyncController {
     writeback_readonly: HashSet<CanonicalPath>,
 
     /// Ingest quarantine for NEW-file discovery (`poll_new_files`, Inc 3b). A
-    /// freshly-discovered file whose ingest FAILED is recorded here keyed by the
-    /// exact `(mtime, size)` signature it failed at. `poll_new_files` skips a
-    /// path still carrying its recorded signature, so a single poisoned org file
-    /// is NOT re-attempted (and NOT re-logged) on every discovery tick -- before
-    /// this, one poison aborted the whole walk with `?`, so every later healthy
-    /// file was never ingested and each tick re-hit the same poison first. The
-    /// entry is dropped the moment the file CHANGES (signature no longer matches
-    /// -> re-attempted) or re-ingests cleanly. This is the disk->DB (ingest-side)
-    /// counterpart of the DB->disk write-back [`quarantined`](Self::quarantined)
-    /// set.
+    /// freshly-discovered file whose ingest FAILED is recorded here keyed by
+    /// the exact `(mtime, size)` signature it failed at. `poll_new_files`
+    /// skips a path still carrying its recorded signature, so a single
+    /// poisoned org file is NOT re-attempted (and NOT re-logged) on every
+    /// discovery tick -- before this, one poison aborted the whole walk
+    /// with `?`, so every later healthy file was never ingested and each
+    /// tick re-hit the same poison first. The entry is dropped the moment
+    /// the file CHANGES (signature no longer matches -> re-attempted) or
+    /// re-ingests cleanly. This is the disk->DB (ingest-side) counterpart
+    /// of the DB->disk write-back [`quarantined`](Self::quarantined) set.
     ingest_quarantine: HashMap<CanonicalPath, (std::time::SystemTime, u64)>,
 }
 
@@ -339,12 +344,18 @@ impl FileSyncController {
         // Canonicalize root_dir so strip_prefix works with canonical file paths
         // (macOS: /var → /private/var symlink resolution).
         let root_dir = CanonicalPath::new(&root_dir).into_path_buf();
+        let renderer = Arc::new(crate::writeback_render::WritebackRenderer::new(
+            block_reader.clone(),
+            doc_manager.clone(),
+            format.clone(),
+        ));
         Self {
             last_projection: HashMap::new(),
             last_projection_hash: HashMap::new(),
             disk_signatures: HashMap::new(),
             base_store: SyncBaseStore::in_memory(),
             base_source: HashMap::new(),
+            renderer,
             block_reader,
             doc_manager,
             root_dir,
@@ -1188,9 +1199,9 @@ impl FileSyncController {
     ///
     /// Re-homes the doc: migrates the per-file tracking state from `from` to
     /// `to`, re-points the doc_id→path alias, retitles the doc-root page to the
-    /// new file stem (the file-move spec: a page's title FOLLOWS its file name),
-    /// then ingests `to` to reconcile its bytes. The doc KEEPS its id — a rename
-    /// never re-mints (ruled D1). NEVER cascade-deletes.
+    /// new file stem (the file-move spec: a page's title FOLLOWS its file
+    /// name), then ingests `to` to reconcile its bytes. The doc KEEPS its
+    /// id — a rename never re-mints (ruled D1). NEVER cascade-deletes.
     #[tracing::instrument(skip(self), name = "org.on_file_renamed", fields(from = %from.display(), to = %to.display()))]
     pub async fn on_file_renamed(&mut self, from: &Path, to: &Path) -> Result<()> {
         let from_canon = CanonicalPath::new(from);
@@ -1210,8 +1221,7 @@ impl FileSyncController {
             None => match from.strip_prefix(&self.root_dir) {
                 Ok(rel) => {
                     let segments = path_to_name_chain(rel);
-                    let segment_refs: Vec<&str> =
-                        segments.iter().map(|s| s.as_str()).collect();
+                    let segment_refs: Vec<&str> = segments.iter().map(|s| s.as_str()).collect();
                     self.doc_manager.find_by_name_chain(&segment_refs).await?
                 }
                 Err(_) => None,
@@ -4207,14 +4217,9 @@ impl FileSyncController {
         Ok(())
     }
 
-    /// Render blocks for a document by its ID.
-    ///
-    /// Fetches the Document to preserve file-level metadata (e.g. `#+TODO:`
-    /// keywords) in the rendered output. Falls back to block-only rendering
-    /// if the Document is not found.
+    /// Render a document from the authoritative doc-scoped read.
     async fn render_file_by_doc_id(&self, doc_id: &EntityUri, path: &Path) -> Result<String> {
-        let blocks = self.block_reader.get_blocks(doc_id).await?;
-        self.render_doc_blocks(doc_id, path, &blocks).await
+        self.renderer.render_document(doc_id, path).await
     }
 
     /// Render an already-resolved, ordered block slice for `doc_id`. Shared by
@@ -4227,27 +4232,7 @@ impl FileSyncController {
         path: &Path,
         blocks: &[Block],
     ) -> Result<String> {
-        let rendered = match self.doc_manager.get_by_id(doc_id).await? {
-            // Use the document block's actual ID as the root parent reference,
-            // since blocks have parent_id = doc.id (may differ from the doc_id
-            // used for lookup, e.g. file: vs block: URI schemes).
-            Some(doc) => self.format.render_document(&doc, blocks, path, &doc.id),
-            None => self.format.render_blocks(blocks, path, doc_id),
-        };
-        assert!(
-            blocks.is_empty() || !rendered.trim().is_empty(),
-            "[render_doc_blocks] {} blocks for doc {} but render is empty!\nBlocks: {:?}",
-            blocks.len(),
-            doc_id,
-            blocks
-                .iter()
-                .map(|b| format!(
-                    "{{id={}, parent_id={}, content_type={}}}",
-                    b.id, b.parent_id, b.content_type
-                ))
-                .collect::<Vec<_>>()
-        );
-        Ok(rendered)
+        self.renderer.render_blocks(doc_id, path, blocks).await
     }
 
     /// Write image files to disk for all image blocks in this document.
@@ -4729,8 +4714,9 @@ impl FileSyncController {
                 self.mark_readonly_writeback(doc_id, path, &e, canonical);
                 Ok(false)
             }
-            Err(e) => Err(e)
-                .with_context(|| format!("org write-back to {} failed", path.display())),
+            Err(e) => {
+                Err(e).with_context(|| format!("org write-back to {} failed", path.display()))
+            }
         }
     }
 

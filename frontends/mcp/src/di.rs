@@ -82,6 +82,16 @@ impl Module for DebugServicesPopulatorModule {
             if let Ok(fs) = injector.try_resolve::<dyn holon_filesystem::FileSystem>() {
                 debug.org_fs.set(fs).ok();
             }
+            if let Ok(renderer) = injector
+                .try_resolve_async::<holon_filesystem::WritebackRenderer>()
+                .await
+            {
+                debug
+                    .live_debug
+                    .write()
+                    .expect("live_debug cell poisoned")
+                    .writeback_renderer = Some(renderer);
+            }
             Ok(())
         })
     }

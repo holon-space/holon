@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use holon::api::holon_service::HolonService;
@@ -14,7 +15,6 @@ use holon_api::QueryLanguage;
 use holon_api::Value;
 use holon_core::storage::types::StorageEntity;
 use holon_loro::LoroBackend;
-use holon_orgmode::org_renderer::OrgRenderer;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
 use rmcp::tool;
@@ -2102,6 +2102,36 @@ impl HolonMcpServer {
 /// was dropped — no focus consumed any of them, so the input silently vanished
 /// and the caller must fail loud instead of reporting a fake `keystrokes_sent`.
 /// An empty keystroke set is a vacuous success (`Ok(0)`), never a drop.
+/// `doc_uri`'s descendants within a whole-tree block set, in the set's order.
+///
+/// Mirrors the doc-scoped walk the SQL side does (`BlockReader::get_blocks`):
+/// breadth-first from the document's direct children, stopping at any nested
+/// page — a sub-document owns its own file. The document block itself is not a
+/// descendant and is excluded.
+fn document_subtree(doc_uri: &EntityUri, tree: &[Block]) -> Vec<Block> {
+    let mut included: HashSet<String> = HashSet::from([doc_uri.to_string()]);
+    let mut out = Vec::new();
+    // One pass per depth level: `tree` order is the CRDT's, not necessarily
+    // parent-before-child.
+    loop {
+        let grown: Vec<&Block> = tree
+            .iter()
+            .filter(|b| {
+                !b.is_page()
+                    && !included.contains(b.id.as_str())
+                    && included.contains(b.parent_id.as_str())
+            })
+            .collect();
+        if grown.is_empty() {
+            return out;
+        }
+        for block in grown {
+            included.insert(block.id.to_string());
+            out.push(block.clone());
+        }
+    }
+}
+
 fn type_text_drop_outcome(total: usize, handled: usize) -> Result<usize, usize> {
     if total > 0 && handled == 0 {
         Err(total)
@@ -2385,31 +2415,86 @@ impl HolonMcpServer {
     }
 
     #[tool(
-        description = "Render org text from current Loro block state (what OrgRenderer would \
-                       write to disk). Compare with read_org_file to spot sync mismatches."
+        description = "Render a document's org text, from either store, at either scope. `source`: \
+                       `sql` (default) is the write authority — what org write-back projects to \
+                       disk; `loro` is the CRDT tree. `scope`: `document` (default) includes the \
+                       `#+TITLE:`/`#+ID:` header, `blocks` is the body alone. Diff \
+                       `source=sql` against read_org_file to see pending or lost write-back, and \
+                       `sql` against `loro` at the SAME scope to spot Loro↔SQL divergence."
     )]
-    async fn render_org_from_blocks(
+    async fn render_org(
         &self,
         Parameters(params): Parameters<RenderOrgParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let blocks = self.get_loro_blocks(&params.doc_id).await?;
-        let file_path = self
-            .resolve_to_file_path(&params.doc_id)
-            .await
-            .unwrap_or_else(|_| std::path::PathBuf::from("unknown.org"));
+        let renderer = self
+            .debug
+            .live_debug
+            .read()
+            .expect("live_debug cell poisoned")
+            .writeback_renderer
+            .clone()
+            .ok_or_else(|| {
+                rmcp::ErrorData::internal_error(
+                    "render_org needs org file sync, which this session does not wire",
+                    None,
+                )
+            })?;
 
-        let doc_uri = EntityUri::parse(&params.doc_id).map_err(|e| {
-            rmcp::ErrorData::invalid_params(
-                format!("invalid doc_id `{}`: {e}", params.doc_id),
-                None,
-            )
-        })?;
-        let rendered = OrgRenderer::render_entitys(&blocks, &file_path, &doc_uri);
+        let file_path = self.resolve_to_file_path(&params.doc_id).await?;
+        // ALLOW(entity_uri_from_raw): MCP doc_id param, schemed or bare
+        let doc_uri = EntityUri::from_raw(&params.doc_id);
+
+        // The Loro store is ONE global tree, so its blocks are scoped to the
+        // document here; the SQL reader is already doc-scoped.
+        let loro_tree = match params.source {
+            RenderSource::Sql => Vec::new(),
+            RenderSource::Loro => self.get_loro_blocks(&params.doc_id).await?,
+        };
+        let blocks = match params.source {
+            RenderSource::Sql => renderer.read_blocks(&doc_uri).await.map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("reading `{doc_uri}` from the write authority failed: {e:#}"),
+                    None,
+                )
+            })?,
+            RenderSource::Loro => document_subtree(&doc_uri, &loro_tree),
+        };
+
+        let rendered = match (params.source, params.scope) {
+            (_, RenderScope::Blocks) => renderer.render_body(&doc_uri, &file_path, &blocks),
+            // The write-back path proper: the header comes from the document
+            // store, exactly as the FileSyncController takes it.
+            (RenderSource::Sql, RenderScope::Document) => renderer
+                .render_blocks(&doc_uri, &file_path, &blocks)
+                .await
+                .map_err(|e| {
+                    rmcp::ErrorData::internal_error(
+                        format!("write-back render of `{doc_uri}` failed: {e:#}"),
+                        None,
+                    )
+                })?,
+            // Loro must supply its OWN header block, or the render would mix
+            // stores and stop being a divergence probe.
+            (RenderSource::Loro, RenderScope::Document) => {
+                let doc_block = loro_tree.iter().find(|b| b.id == doc_uri).ok_or_else(|| {
+                    rmcp::ErrorData::invalid_params(
+                        format!(
+                            "source=loro scope=document: the Loro tree holds no block `{doc_uri}` \
+                             to render a header from; retry with scope=blocks"
+                        ),
+                        None,
+                    )
+                })?;
+                renderer.render_with_document_block(doc_block, &blocks, &file_path)
+            }
+        };
 
         let result = serde_json::json!({
             "doc_id": params.doc_id,
             "file_path": file_path.display().to_string(),
-            "rendered_org": rendered,
+            "source": params.source,
+            "scope": params.scope,
+            "rendered": rendered,
             "block_count": blocks.len(),
         });
 

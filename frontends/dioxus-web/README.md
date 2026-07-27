@@ -261,7 +261,7 @@ These tools return a `"not supported in browser worker"` error — they require
 `LoroDocumentStore` or GPUI APIs not wired into the worker:
 
 - `inspect_loro_blocks`, `diff_loro_sql`, `list_loro_documents`
-- `read_org_file`, `render_org_from_blocks`
+- `read_org_file`, `render_org`
 
 All other tools (SQL/PRQL queries, UI introspection, operations, commands, Petri-net
 ranking) work against the live in-browser DB.

@@ -1487,7 +1487,7 @@ mod backend {
             | "diff_loro_sql"
             | "list_loro_documents"
             | "read_org_file"
-            | "render_org_from_blocks"
+            | "render_org"
             | "create_entity_type"
             | "screenshot"
             | "scroll"

@@ -27,6 +27,8 @@ pub mod in_memory;
 pub mod sync_base_store;
 pub mod sync_conflict;
 pub mod sync_ports;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod writeback_render;
 
 use std::path::Path;
 
@@ -36,10 +38,10 @@ pub use change_source::FileChange;
 pub use change_source::FileChangeKind;
 #[cfg(not(target_arch = "wasm32"))]
 pub use change_source::FileChangeSource;
-pub use change_source::RawFsSignal;
-pub use change_source::RenamePairing;
 #[cfg(not(target_arch = "wasm32"))]
 pub use change_source::NotifyWatcher;
+pub use change_source::RawFsSignal;
+pub use change_source::RenamePairing;
 pub use error::FilesystemError;
 pub use file::ChangesWithMetadata;
 pub use file::File;
@@ -77,6 +79,8 @@ pub use sync_ports::MatchVerdict;
 pub use sync_ports::MountRegistry;
 pub use sync_ports::ShareWritebackDisclosure;
 pub use sync_ports::ThreeWayTextMerge;
+#[cfg(not(target_arch = "wasm32"))]
+pub use writeback_render::WritebackRenderer;
 
 /// Filesystem utilities
 pub struct Filesystem;

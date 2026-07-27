@@ -344,10 +344,36 @@ pub struct ReadOrgFileParams {
     pub doc_id: String,
 }
 
+/// Which store the blocks are read from.
+#[derive(Serialize, Deserialize, JsonSchema, Default, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum RenderSource {
+    /// The SQL write authority — the state write-back projects to disk.
+    #[default]
+    Sql,
+    /// The Loro CRDT tree.
+    Loro,
+}
+
+/// How much of the file the render covers.
+#[derive(Serialize, Deserialize, JsonSchema, Default, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum RenderScope {
+    /// The whole file: document header (`#+TITLE:`, `#+ID:`) plus body.
+    #[default]
+    Document,
+    /// The body alone, no header.
+    Blocks,
+}
+
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RenderOrgParams {
     /// Document ID — can be a UUID or a file path
     pub doc_id: String,
+    #[serde(default)]
+    pub source: RenderSource,
+    #[serde(default)]
+    pub scope: RenderScope,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]

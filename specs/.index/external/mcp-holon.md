@@ -55,7 +55,7 @@ fetch_timestamp: 2026-04-23
 | Tool | Description |
 |------|-------------|
 | `read_org_file` | Read and parse an org file |
-| `render_org_from_blocks` | Serialize blocks back to org format |
+| `render_org` | Render a document's org text; `source` = `sql`\|`loro`, `scope` = `document`\|`blocks` |
 
 #### UI & Navigation
 | Tool | Description |

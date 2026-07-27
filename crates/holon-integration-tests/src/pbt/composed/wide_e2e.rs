@@ -127,6 +127,13 @@ impl WideHandle {
         self.frontend.as_ref().map(|f| f.reactive())
     }
 
+    /// The booted frontend component (`None` for a Loro-only draw). Tests that
+    /// attach an embedded MCP server to this session get its `DebugServices`
+    /// population from here.
+    pub fn frontend(&self) -> Option<&Arc<HeadlessFrontendComponent>> {
+        self.frontend.as_ref()
+    }
+
     /// Build the settle handle from a booted builder bundle — the windowed
     /// harness ([`windowed_composed_sut`]) reuses the base session's
     /// engine/frontend so its per-apply settle converges the same three
@@ -1976,7 +1983,11 @@ mod tests {
     #[test]
     fn authority_disclosure_names_loro_as_block_crud_for_a_turso_editorstate_draw() {
         // `storage={Org, Turso}` is exactly the composed keystone's failing draw.
-        let turso = Wiring::custom(vec![StorageAdapter::Org, StorageAdapter::Turso], vec![], vec![]);
+        let turso = Wiring::custom(
+            vec![StorageAdapter::Org, StorageAdapter::Turso],
+            vec![],
+            vec![],
+        );
         let line = authority_routing_disclosure(&turso);
         assert_eq!(
             line,

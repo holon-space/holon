@@ -5310,6 +5310,7 @@ dependencies = [
  "holon-api",
  "holon-app",
  "holon-core",
+ "holon-filesystem",
  "holon-frontend",
  "holon-integration-tests",
  "holon-layout-testing",

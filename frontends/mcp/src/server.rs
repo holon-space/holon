@@ -232,6 +232,9 @@ pub struct DebugHandlesCell {
     /// focus, exposed via `debug_pbt_snapshot` so the live-MCP PBT driver can
     /// wait for a click's focus to land before dispatching caret keystrokes.
     pub reactive_engine: Option<Arc<holon_frontend::reactive::ReactiveEngine>>,
+    /// The org write-back renderer — backs `render_org`. `None` when the
+    /// running config wires no file sync.
+    pub writeback_renderer: Option<Arc<holon_filesystem::WritebackRenderer>>,
 }
 
 impl DebugServices {

@@ -138,12 +138,17 @@ pub async fn build_fresh_sut(
             .try_resolve::<holon::sync::LoroBlockOperations>()
             .ok()
             .map(|ops| ops.shared_doc_store());
+        let writeback_renderer = injector
+            .try_resolve_async::<holon_filesystem::WritebackRenderer>()
+            .await
+            .ok();
         holon_mcp::server::DebugHandlesCell {
             loro_sync_handle,
             org_idle_signal,
             block_query_source,
             loro_doc_store,
             reactive_engine: Some(reactive.clone()),
+            writeback_renderer,
         }
     };
 

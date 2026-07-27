@@ -197,6 +197,10 @@ fn open_holon_window(
                 .try_resolve::<holon::sync::LoroBlockOperations>()
                 .ok()
                 .map(|ops| ops.shared_doc_store());
+            let writeback_renderer = injector
+                .try_resolve_async::<holon_filesystem::WritebackRenderer>()
+                .await
+                .ok();
             *debug.live_debug.write().expect("live_debug cell poisoned") =
                 holon_mcp::server::DebugHandlesCell {
                     loro_sync_handle,
@@ -204,6 +208,7 @@ fn open_holon_window(
                     block_query_source,
                     loro_doc_store,
                     reactive_engine: Some(engine.clone()),
+                    writeback_renderer,
                 };
         }
 

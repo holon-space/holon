@@ -295,6 +295,17 @@ pub async fn seed_default_org_assets(
     }
 }
 
+/// The container's file-format adapter, defaulting to org when none is bound.
+async fn resolve_file_format(resolver: &Injector) -> Arc<dyn holon_core::FileFormatAdapter> {
+    resolver
+        .optional_resolve_async::<dyn holon_core::FileFormatAdapter>()
+        .await
+        .unwrap_or_else(|| {
+            Arc::new(crate::file_format::OrgFormatAdapter::new())
+                as Arc<dyn holon_core::FileFormatAdapter>
+        })
+}
+
 /// Register the backend-blind file-sync core: FileSystem/FileChangeSource
 /// port defaults, the ready/idle signals, OrgRenderer, and the
 /// [`FileSyncStarted`] marker whose resolution spawns the controller over
@@ -367,6 +378,20 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
     // Register OrgRenderer
     injector.provide::<OrgRenderer>(Provider::root(|_resolver| Shared::new(OrgRenderer)));
 
+    // The write-back render, resolvable on its own so inspection callers (the
+    // `render_org` MCP tool) answer from the same code path — and the same
+    // seams — the FileSyncController writes through. Stateless, so this
+    // instance and the controller's are interchangeable.
+    injector.provide::<holon_filesystem::WritebackRenderer>(Provider::root_async(
+        |resolver| async move {
+            Shared::new(holon_filesystem::WritebackRenderer::new(
+                resolver.resolve_async::<dyn BlockReader>().await,
+                resolver.resolve_async::<dyn DocumentManager>().await,
+                resolve_file_format(&resolver).await,
+            ))
+        },
+    ));
+
     // FileSyncStarted: resolving this marker builds the backend-blind
     // FileSyncController over the DI-provided seams and spawns its loop.
     // Root scope => built once. Both backends resolve it AFTER seeding
@@ -393,13 +418,7 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                     .optional_resolve_async::<holon_api::live_data::BlockFeed>()
                     .await
                     .map(|bf| bf.0.clone());
-                let format = resolver
-                    .optional_resolve_async::<dyn holon_core::FileFormatAdapter>()
-                    .await
-                    .unwrap_or_else(|| {
-                        Arc::new(crate::file_format::OrgFormatAdapter::new())
-                            as Arc<dyn holon_core::FileFormatAdapter>
-                    });
+                let format = resolve_file_format(&resolver).await;
                 // The alias registrar (doc_id ↔ path) is a Loro-backed seam
                 // registered at the composition root — `dyn AliasRegistrar` in
                 // both the Turso container (app `wiring.rs`, off `LoroBlockOperations`)

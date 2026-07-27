@@ -371,5 +371,5 @@ the window is minimized) · `execute_operation{entity_name,operation,params}` ·
 Introspect: `execute_query{query,language,…}` · `execute_raw_sql{sql}` (error detail is swallowed —
 "Failed to execute raw SQL" with no cause; iterate on the SQL) · `diff_loro_sql` ·
 `inspect_loro_blocks{doc_id}` · `list_loro_documents` · `read_org_file{doc_id}` ·
-`render_org_from_blocks` · `watch_query`/`poll_changes`.
+`render_org` · `watch_query`/`poll_changes`.
 NOT present on all branches: `reset_vault` (check `--list` first).

@@ -58,10 +58,10 @@ use tempfile::TempDir;
 use tokio::sync::RwLock;
 
 /// Resolve the DI-registered `DebugServices` and pre-populate its
-/// optional fields (`loro_doc_store`) from other DI services. Mirrors
-/// what `holon_mcp::di::DebugServicesPopulatorModule` does for
-/// module-using consumers — the test path runs it inline because the
-/// `extra_resolve` callback is the natural post-`on_start` hook.
+/// optional fields from other DI services. Mirrors what
+/// `holon_mcp::di::DebugServicesPopulatorModule` does for module-using
+/// consumers — the test path runs it inline because the `extra_resolve`
+/// callback is the natural post-`on_start` hook.
 fn populate_debug_services(injector: &fluxdi::Injector) -> Arc<holon_mcp::server::DebugServices> {
     let debug = injector.resolve::<holon_mcp::server::DebugServices>();
     if let Ok(ops) = injector.try_resolve::<holon::sync::LoroBlockOperations>() {
@@ -1341,6 +1341,12 @@ impl TestEnvironment {
     /// server. `None` before `start_app()` runs.
     pub fn debug_services(&self) -> Option<&Arc<holon_mcp::server::DebugServices>> {
         self.debug_services.get()
+    }
+
+    /// The startup DI injector, for tests that need a production service the
+    /// harness does not surface. `None` before `start_app()` runs.
+    pub fn injector(&self) -> Option<&fluxdi::Injector> {
+        self.injector.get()
     }
 
     /// The `LoroSyncController` handle, if Loro is enabled. Shared into

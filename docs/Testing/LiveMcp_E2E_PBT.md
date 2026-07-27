@@ -45,11 +45,10 @@ not exercise it.
   `SutBackend`/`SutSqlProjection` via `execute_raw_sql` (+ `debug_pbt_snapshot`
   for the LiveData mirrors), `SutLoroLog` via `debug_pbt_snapshot` +
   `inspect_loro_blocks`, `SutOrgRead` (alias-scoped org files, parsed
-  client-side), `SutOrgRender` via client-side `OrgRenderer::render_document`
-  over the lifted `CacheBlockReader` CTE (byte-faithful production render; the
-  `render_org_from_blocks` tool is Loro-sourced `render_entitys` and drops the
-  `#+ID:` header). Loro peer docs / reactive VM / editor mirror: honestly
-  absent, auto-deselected.
+  client-side), `SutOrgRender` via the `render_org` tool at `source=sql`
+  `scope=document` — the server's own write-back render, so the fixed point
+  compares disk against the code that wrote it. Loro peer docs / reactive VM /
+  editor mirror: honestly absent, auto-deselected.
 - **Gesture caps**: production keystroke/click sequences over `McpUserDriver`
   verbs; navigation dispatches `navigation.focus` (phone-width sidebar is a
   closed drawer — no clickable bounds).

@@ -418,26 +418,23 @@ impl SutOrgRead for LiveMcp {
 #[async_trait::async_trait(?Send)]
 impl SutOrgRender for LiveMcp {
     async fn snapshot_org_render_pairs(&self) -> Vec<(String, String, String)> {
-        // The PRODUCTION render path: `OrgRenderer::render_document` (header
-        // incl. `#+ID:` + body) over SQL state — the same inputs the
-        // FileSyncController re-render uses. The server's
-        // `render_org_from_blocks` tool is Loro-sourced `render_entitys`
-        // (no document header) and would false-RED the fixed point.
-        use holon_orgmode::org_renderer::OrgRenderer;
-        let raw = <Self as SutBackend>::block_raw_snapshot(self).await;
-        let by_id: std::collections::HashMap<String, &Block> =
-            raw.iter().map(|b| (b.id.to_string(), b)).collect();
         let mut out = Vec::new();
         for (alias, _) in self.list_org_aliases().await {
             let (path, disk) = self.read_org(&alias).await;
-            // ALLOW(entity_uri_from_raw): MCP aliases arrive already-schemed
-            let doc_uri = EntityUri::from_raw(&alias);
-            let doc_block = by_id
-                .get(&doc_uri.to_string())
-                .unwrap_or_else(|| panic!("SutOrgRender: doc block {doc_uri} not in block_raw"));
-            let descendants = self.doc_descendants(&doc_uri).await;
-            let rendered =
-                OrgRenderer::render_document(doc_block, &descendants, &path, &doc_block.id);
+            let resp = self
+                .driver
+                .call_tool_json(
+                    "render_org",
+                    serde_json::json!({ "doc_id": alias, "source": "sql", "scope": "document" }),
+                )
+                .await
+                .unwrap_or_else(|e| panic!("render_org({alias}) over MCP failed: {e:#}"));
+            let rendered = resp["rendered"]
+                .as_str()
+                .unwrap_or_else(|| {
+                    panic!("render_org({alias}) response missing `rendered`: {resp}")
+                })
+                .to_string();
             out.push((path.to_string_lossy().to_string(), disk, rendered));
         }
         out
@@ -502,31 +499,6 @@ impl LiveMcp {
                     .is_some_and(|n| ORACLE_TRACKED_ORG_FILES.contains(&n.to_str().unwrap()))
             })
             .collect()
-    }
-
-    /// A doc's descendant blocks in production render order — the SAME
-    /// recursive CTE `CacheBlockReader::get_blocks` runs (doc-scoped BFS over
-    /// `block_raw`, `Page`-tag boundary, `ORDER BY sort_key, id`), executed
-    /// over MCP so the rendered text is byte-faithful to what the
-    /// FileSyncController would write.
-    async fn doc_descendants(&self, doc_uri: &EntityUri) -> Vec<Block> {
-        let sql = format!(
-            "WITH RECURSIVE descendants(id, depth_acc) AS ( SELECT b.id, 0 FROM block_raw b LEFT \
-             JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' WHERE b.parent_id = \
-             '{doc_uri}' AND bt.block_id IS NULL UNION ALL SELECT b.id, d.depth_acc + 1 FROM \
-             block_raw b JOIN descendants d ON b.parent_id = d.id LEFT JOIN block_tags bt ON \
-             bt.block_id = b.id AND bt.tag = 'Page' WHERE bt.block_id IS NULL AND d.depth_acc < \
-             100 ) SELECT b.id, b.parent_id, b.depth, b.sort_key, b.content, b.content_type, \
-             b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.completed, \
-             b.block_type, b.created_at, b.updated_at, COALESCE((SELECT json_group_array(tag) \
-             FROM block_tags WHERE block_id = b.id), '[]') AS tags, COALESCE((SELECT \
-             json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS \
-             requires FROM block_raw b JOIN descendants d ON d.id = b.id ORDER BY b.sort_key, b.id"
-        );
-        let rows = self.rows(&sql).await;
-        let entities: Vec<holon_core::storage::types::StorageEntity> =
-            rows.iter().map(json_row_to_storage_entity).collect();
-        parse_block_rows(&entities)
     }
 
     /// `(file_path, disk_bytes)` for a doc via `read_org_file`.
@@ -859,7 +831,7 @@ pub fn live_mcp_cap_ids() -> Vec<holon_pbt_core::composition::CapId> {
 /// `holon-orgmode` pulls `notify`, which has no wasm backend), so the three
 /// caps whose bodies call the Loro/org MCP tools that the worker rejects
 /// (`SutLoroLog` → `inspect_loro_blocks`/`list_loro_documents`, `SutOrgRead` →
-/// `read_org_file`, `SutOrgRender` → `render_org_from_blocks`) are OMITTED.
+/// `read_org_file`, `SutOrgRender` → `render_org`) are OMITTED.
 ///
 /// The gesture WRITE caps stay registered: the worker answers `click` /
 /// `type_text` / `insert_text` / `send_key_chord` headlessly through the same
