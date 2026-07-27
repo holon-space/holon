@@ -18,6 +18,10 @@ permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
+  # Release-CI-only compile-speed lever (Martin 2026-07-27): more parallel
+  # codegen units, marginally less cross-unit inlining. Local/dev builds and
+  # the workspace profile (codegen-units = 4) are unaffected.
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
 
 jobs:
   create-release:
