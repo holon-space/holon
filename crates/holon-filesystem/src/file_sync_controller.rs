@@ -300,9 +300,13 @@ pub struct FileSyncController {
     /// SKIPS the write instead of re-issuing the doomed syscall (real-vault
     /// boot 2026-07-22: `Read-only file system (os error 30)` on EVERY CDC
     /// event). Disclosed degraded mode (Fail Loud, Never Fake): one loud
-    /// disclosure, then a quiet skip. Cleared when the doc (re)gains a
-    /// writable backing file (`register_alias`) or on a clean re-ingest, so a
-    /// later-writable path resumes write-back.
+    /// disclosure, then a quiet skip. The SOLE resume trigger is a successful
+    /// `ingest_file` of the path (runtime re-ingest via `on_file_changed`, or
+    /// a boot re-scan): that path re-resolves the doc identity and
+    /// re-registers its alias before clearing the mark, proving the file is
+    /// writable-backed again. A pure relay/synthetic doc that is never
+    /// ingested (no on-disk `.org`) intentionally never clears — there is no
+    /// writable file to resume write-back to.
     writeback_readonly: HashSet<CanonicalPath>,
 }
 
@@ -1079,9 +1083,6 @@ impl FileSyncController {
                         path.display()
                     );
                 }
-                // EROFS row 346: a clean re-ingest also lifts a read-only
-                // write-back skip (path may have become writable again).
-                self.writeback_readonly.remove(&canonical);
                 Ok(())
             }
             Err(e) => {
@@ -1586,13 +1587,19 @@ impl FileSyncController {
         if let Some(ref registrar) = self.alias_registrar {
             registrar.register_alias(&document_uri, path).await;
         }
-        // EROFS row 346: a successful ingest of this file proves it has a
-        // writable-backed path again — lift any prior read-only write-back
-        // skip so edits resume (mirrors the quarantine clear-on-ingest).
+        // EROFS row 346: this is the SOLE resume trigger. A successful
+        // `ingest_file` of this file (runtime re-ingest via `on_file_changed`,
+        // or a boot re-scan) reaches HERE only after the doc's identity was
+        // resolved and its alias re-registered — proof the path is
+        // writable-backed again — so lift any prior read-only write-back skip
+        // and edits resume. Pure relay/synthetic docs that are never ingested
+        // never reach this point, and intentionally stay skipped (there is no
+        // writable file to resume to).
         if self.writeback_readonly.remove(&CanonicalPath::new(path)) {
             tracing::info!(
                 path = %path.display(),
-                "[FileSyncController] read-only write-back skip CLEARED (file                  re-ingested with a writable backing path)",
+                "[FileSyncController] read-only write-back skip CLEARED \
+                 (file re-ingested with a writable backing path)",
             );
         }
 
