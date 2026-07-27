@@ -1026,13 +1026,25 @@ pub async fn boot_and_seed_wide_windowed_base(
         "the windowed wide base needs a frontend (ViewModel) session for the window to render; \
          got {set:?}"
     );
-    let bundle = compose_sut_windowed_base_seeded(
-        &set,
-        resolver,
-        &[("structural-page.org", WIDE_TREE_ORG)],
-        &wide_seed_tree(),
-    )
-    .await;
+    // Seed-parity with the headless `boot_and_seed_wide`: the windowed oracle is a
+    // frontend (ViewModel) draw, so `wide_e2e_ref_for` ALWAYS injects the
+    // forward-edge corpus (`seed_forward_edge_corpus`). The windowed base MUST
+    // ingest the matching `forward-edge-page.org` file or the SUT is permanently
+    // missing `fe-parent`/`fe-blocked`/`fe-target` that the oracle models — a
+    // `SetEdgeField`/`SetupWatch` targeting any fe-* then fails loud ("Block not
+    // found: block:fe-target") or diverges `inv-watch-rows-match-ref`. Key it on
+    // the oracle carrying the corpus, exactly like the headless path.
+    let mut seed_files: Vec<(&str, &str)> = vec![("structural-page.org", WIDE_TREE_ORG)];
+    if ref_state
+        .domain
+        .block_state
+        .blocks
+        .contains_key(&forward_edge_page())
+    {
+        seed_files.push(("forward-edge-page.org", FORWARD_EDGE_ORG));
+    }
+    let bundle =
+        compose_sut_windowed_base_seeded(&set, resolver, &seed_files, &wide_seed_tree()).await;
 
     // Align the initial focus onto the oracle's page root via the production
     // `NavigateFocus` cap — `SutFocusWrite` dispatches through the reactive
@@ -1065,7 +1077,44 @@ pub async fn boot_and_seed_wide_windowed_base(
         &mut seed_focus_caps,
     )
     .await;
-    tokio::time::sleep(SETTLE).await;
+
+    // Real START barrier (replaces the flat `sleep(SETTLE)`): drive the async
+    // seed chains to a STORE-VISIBLE fixed point BEFORE the window loop begins
+    // driving. `forward-edge-page.org` ingests through the REAL FileSyncController
+    // (file -> Turso -> CDC -> Loro) and the boot journal fires async off the
+    // clock CDC — both can lag a flat sleep, so the first transition could hit a
+    // store where fe-* / the journal do not yet exist (the windowed-loop flake).
+    // Await them through the SAME `sut_ids` read path the transitions use — the
+    // headless `boot_and_seed_wide` uses this exact loop for the boot journal.
+    // Fail loud on timeout so a genuinely-dropped seed is a RED, not a silent
+    // green.
+    let start_handle = WideHandle::from_bundle(&bundle);
+    let mut start_expected: BTreeSet<EntityUri> = BTreeSet::new();
+    if ref_state
+        .domain
+        .block_state
+        .blocks
+        .contains_key(&forward_edge_page())
+    {
+        start_expected.insert(forward_edge_page());
+        start_expected.extend(FORWARD_EDGE_IDS.into_iter().map(EntityUri::block));
+    }
+    start_expected.insert(crate::pbt::frontend_slice::components::keystone_boot_journal_id());
+    let start_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        converge_projections(&start_handle, Duration::from_millis(300)).await;
+        let booted_now = sut_ids(&bundle.caps).await;
+        if start_expected.iter().all(|id| booted_now.contains(id)) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < start_deadline,
+            "[windowed base start barrier] seed set never became store-visible within budget; \
+             missing: {:?}",
+            start_expected.difference(&booted_now).collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     // Scaffold = booted UNION ref_ids MINUS working tree (identical to
     // `boot_and_seed_wide`).
