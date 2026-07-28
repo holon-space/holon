@@ -531,3 +531,33 @@ fn section_sql_locks_ivm_equijoin_on_shape() {
         );
     });
 }
+
+/// A backlink row is enriched through the `block` entity profile like any other
+/// block row, so the section's query must project the whole block row. A narrow
+/// projection leaves the profile's computed fields structurally unbound and the
+/// enrich seat warns `DECLARED column absent from row` once per field
+/// (dogfood 2026-07-28: `bullet_shape`/`collapsed` plus `is_rule_head`,
+/// `is_holon_source`, `is_legacy_rule` on `source_language`).
+#[test]
+fn backlinks_section_query_projects_whole_block_row() {
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (engine, ordering) = fresh_engine(dir.path().join("fresh.db")).await;
+        holon_app::seed_default_layout(&engine, ordering, false, false)
+            .await
+            .expect("seed_default_layout");
+
+        let db = engine.db_handle();
+        let render = main_panel_render_content(&db)
+            .await
+            .expect("main panel must have a seeded render block");
+        let sql = extract_backlinks_sql(&render);
+
+        assert!(
+            sql.contains("SELECT bl.*"),
+            "backlinks section must project the whole backlink row so the block \
+             entity profile's computed fields bind: {sql}"
+        );
+    });
+}

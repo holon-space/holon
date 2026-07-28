@@ -31,6 +31,16 @@ use crate::schema_module::SchemaModule;
 use crate::sql_utils::sql_statements;
 use crate::turso::DbHandle;
 
+/// The canonical `block_raw` DDL (table + index).
+///
+/// Exposed so a test fixture standing up a PARTIAL schema binds the production
+/// column set instead of hand-listing one. A hand-rolled narrow `block_raw` is
+/// silently accepted by `CREATE MATERIALIZED VIEW` and only fails at query
+/// time, with a misleading "incompatible DBSP version" parse error.
+pub fn block_raw_schema_sql() -> &'static str {
+    include_str!("../sql/schema/blocks.sql")
+}
+
 /// Core schema module providing the fundamental tables: block_raw, files, and
 /// the `clock` relation.
 ///
@@ -58,7 +68,7 @@ impl SchemaModule for CoreSchemaModule {
     async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
         tracing::info!("[CoreSchemaModule] Creating core tables");
 
-        for stmt in sql_statements(include_str!("../sql/schema/blocks.sql")) {
+        for stmt in sql_statements(block_raw_schema_sql()) {
             db_handle.execute_ddl(stmt).await?;
         }
         tracing::debug!("[CoreSchemaModule] block_raw table + index created");
@@ -895,6 +905,28 @@ impl SchemaModule for JournalFeedSchemaModule {
     }
 }
 
+/// SELECT for the `backlinks` matview: one row per resolved link, carrying
+/// `target_id` plus the FULL source-block row.
+///
+/// Entity-shaped over base tables only (`block_links ⋈ block_raw` — no
+/// matview-on-matview hazard). The full block row is not decoration: a backlink
+/// row is rendered through the same `block` entity profile as any other block,
+/// so a narrower projection silently unbinds that profile's computed fields
+/// (`bullet_shape` needs `collapsed`; `is_rule_head`/`is_holon_source`/
+/// `is_legacy_rule` need `source_language`).
+pub fn backlinks_view_select() -> String {
+    let block_cols = BLOCK_RAW_COLUMNS
+        .iter()
+        .map(|c| format!("b.{c} AS {c}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "SELECT bl.resolved_id AS target_id, {block_cols} FROM block_links bl \
+         JOIN block_raw b ON b.id = bl.source_block_id \
+         WHERE bl.resolved_id IS NOT NULL"
+    )
+}
+
 /// Link schema module providing the block_link table.
 ///
 /// Indexes wiki-style `[[...]]` links extracted from block content.
@@ -930,20 +962,9 @@ impl SchemaModule for LinkSchemaModule {
         for stmt in sql_statements(include_str!("../sql/schema/block_links.sql")) {
             db_handle.execute_ddl(stmt).await?;
         }
-        // backlinks: entity-shaped (carries the source block's `id`) IVM
-        // matview over base tables only (block_links ⋈ block_raw — no
-        // matview-on-matview hazard). One row per resolved link: which block
-        // references `target_id`, with enough of the source block to render a
-        // backlink entry.
-        reconcile_named_view(
-            db_handle,
-            "backlinks",
-            "SELECT bl.resolved_id AS target_id, b.id AS id, b.parent_id AS parent_id, b.content \
-             AS content, b.content_type AS content_type FROM block_links bl JOIN block_raw b ON \
-             b.id = bl.source_block_id WHERE bl.resolved_id IS NOT NULL",
-        )
-        .await
-        .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+        reconcile_named_view(db_handle, "backlinks", &backlinks_view_select())
+            .await
+            .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
         tracing::info!("[LinkSchemaModule] block_links + backlinks ready");
         Ok(())
     }
@@ -1067,6 +1088,24 @@ mod tests {
             source_col: "source_id".into(),
             target_col: "target_id".into(),
         }
+    }
+
+    // A backlink row is rendered through the `block` entity profile like any
+    // other block row, so the matview must carry the whole block row. A
+    // narrower projection unbinds the profile's computed fields — the shipped
+    // `assets/default/types/block_profile.yaml` reads `collapsed`
+    // (`bullet_shape`) and `source_language` (`is_rule_head`,
+    // `is_holon_source`, `is_legacy_rule`).
+    #[test]
+    fn backlinks_view_projects_every_block_column() {
+        let sql = backlinks_view_select();
+        for column in BLOCK_RAW_COLUMNS {
+            assert!(
+                sql.contains(&format!("b.{column} AS {column}")),
+                "backlinks matview drops block column '{column}': {sql}"
+            );
+        }
+        assert!(sql.contains("bl.resolved_id AS target_id"));
     }
 
     #[test]

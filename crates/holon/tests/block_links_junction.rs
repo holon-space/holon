@@ -29,6 +29,8 @@ use holon_api::MarkSpan;
 use holon_api::Value;
 use holon_core::OperationProvider;
 use holon_turso::schema_modules::LinkSchemaModule;
+use holon_turso::schema_modules::block_raw_schema_sql;
+use holon_turso::sql_utils::sql_statements;
 
 const ENTITY: &str = "block";
 const TABLE: &str = "block_raw";
@@ -44,21 +46,12 @@ fn tags_descriptor() -> EdgeFieldDescriptor {
 }
 
 async fn setup_schema(handle: &holon::storage::turso::DbHandle) {
-    handle
-        .execute_ddl(
-            "CREATE TABLE block_raw (
-                id TEXT PRIMARY KEY,
-                parent_id TEXT,
-                content TEXT NOT NULL DEFAULT '',
-                content_type TEXT NOT NULL DEFAULT 'text',
-                properties TEXT,
-                marks TEXT,
-                created_at INTEGER NOT NULL DEFAULT 0,
-                updated_at INTEGER NOT NULL DEFAULT 0
-            )",
-        )
-        .await
-        .expect("block_raw table");
+    // Bind the PRODUCTION block_raw DDL. A hand-listed subset silently rots
+    // behind the real schema and only surfaces when a matview over the missing
+    // columns is queried (misleading "incompatible DBSP version" at read time).
+    for stmt in sql_statements(block_raw_schema_sql()) {
+        handle.execute_ddl(stmt).await.expect("block_raw schema");
+    }
     handle
         .execute_ddl(
             "CREATE TABLE block_tags (

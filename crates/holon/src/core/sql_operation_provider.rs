@@ -3413,18 +3413,14 @@ mod delete_inverse_classification_tests {
         let (_backend, db_handle) = crate::storage::turso::TursoBackend::new_in_memory()
             .await
             .expect("in-memory turso");
-        // `content_type` is required by the `backlinks` matview
-        // (`LinkSchemaModule`) which joins `block_raw`; without it the schema
-        // module's view creation fails.
-        db_handle
-            .execute(
-                "CREATE TABLE block_raw (id TEXT PRIMARY KEY, parent_id TEXT, content TEXT, \
-                 content_type TEXT NOT NULL DEFAULT 'text', sort_key TEXT, depth INTEGER, \
-                 properties TEXT, created_at INTEGER, updated_at INTEGER)",
-                vec![],
-            )
-            .await
-            .expect("create table");
+        // The `backlinks` matview (`LinkSchemaModule`) projects the WHOLE
+        // block_raw row, so bind the production DDL — a hand-listed subset is
+        // accepted at CREATE and only fails when the matview is read.
+        for stmt in holon_turso::sql_utils::sql_statements(
+            holon_turso::schema_modules::block_raw_schema_sql(),
+        ) {
+            db_handle.execute_ddl(stmt).await.expect("block_raw schema");
+        }
         // The `delete` cascade cleans up `block_links` (drop outbound, un-resolve
         // inbound), so the table must exist. Reuse the canonical DDL via the
         // schema module rather than a duplicated string literal.
@@ -3432,6 +3428,20 @@ mod delete_inverse_classification_tests {
             .ensure_schema(&db_handle)
             .await
             .expect("block_links schema");
+        // The production block_raw carries a parent FK, so the fixture needs a
+        // real root chain: the sentinel anchor plus the `block:root` every test
+        // below parents its seeds under.
+        for sql in [
+            "INSERT OR IGNORE INTO block_raw (id, parent_id) VALUES \
+             ('sentinel:no_parent', 'sentinel:no_parent')",
+            "INSERT OR IGNORE INTO block_raw (id, parent_id) VALUES ('block:root', \
+             'sentinel:no_parent')",
+        ] {
+            db_handle
+                .execute(sql, vec![])
+                .await
+                .expect("seed root chain");
+        }
         let provider = SqlOperationProvider::new(
             db_handle.clone(),
             "block_raw".to_string(),
@@ -3528,15 +3538,14 @@ mod link_resolution_rewrite_tests {
         let (_backend, db_handle) = crate::storage::turso::TursoBackend::new_in_memory()
             .await
             .expect("in-memory turso");
-        db_handle
-            .execute(
-                "CREATE TABLE block_raw (id TEXT PRIMARY KEY, parent_id TEXT, content TEXT, \
-                 content_type TEXT NOT NULL DEFAULT 'text', properties TEXT, created_at INTEGER, \
-                 updated_at INTEGER)",
-                vec![],
-            )
-            .await
-            .expect("create block_raw");
+        // The `backlinks` matview (`LinkSchemaModule`) projects the WHOLE
+        // block_raw row, so bind the production DDL — a hand-listed subset is
+        // accepted at CREATE and only fails when the matview is read.
+        for stmt in holon_turso::sql_utils::sql_statements(
+            holon_turso::schema_modules::block_raw_schema_sql(),
+        ) {
+            db_handle.execute_ddl(stmt).await.expect("block_raw schema");
+        }
         LinkSchemaModule
             .ensure_schema(&db_handle)
             .await
