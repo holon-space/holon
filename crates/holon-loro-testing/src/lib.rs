@@ -79,32 +79,8 @@ pub fn pbt_contribution() -> PbtContribution {
     }
 }
 
-/// Static, boot-free footprint — the ladder-floor enumeration for `holon-loro`.
-/// Held in lockstep with [`pbt_contribution`] by the anti-rot test below.
+/// Boot-free footprint — the ladder-floor enumeration for `holon-loro`, derived
+/// from the live contribution so it cannot drift.
 pub fn pbt_footprint() -> PbtFootprint {
-    PbtFootprint {
-        crate_id: CrateId::Loro,
-        invariant_ids: vec![
-            "inv-loro-no-errors",
-            "inv-loro-children-match-ref",
-            "inv-blocks-match-ref/loro",
-        ],
-        transition_kinds: Vec::new(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Parse-don't-validate anti-rot: the static footprint must list exactly
-    /// the live contribution's invariant ids, in order.
-    #[test]
-    fn footprint_matches_contribution() {
-        assert_eq!(
-            pbt_footprint().invariant_ids,
-            pbt_contribution().invariant_ids(),
-            "holon-loro-testing footprint drifted from its live contribution",
-        );
-    }
+    pbt_contribution().footprint()
 }

@@ -10,10 +10,10 @@
 //! Two entry points per contributor:
 //! - [`PbtContribution`] — the **live** payload folded into the composed run:
 //!   boxed [`CapInvariant`]s, cap installers, and generator factories.
-//! - [`PbtFootprint`] — the **static, boot-free** enumeration (ids only) the
-//!   wiring-ladder's floor and offline map verification read. Kept honest
-//!   against the live contribution by a per-crate
-//!   `footprint_matches_contribution()` anti-rot test (parse-don't-validate).
+//! - [`PbtFootprint`] — the boot-free enumeration (ids only) the
+//!   wiring-ladder's floor and offline map verification read. DERIVED from the
+//!   contribution via [`PbtContribution::footprint`], so it cannot drift from
+//!   what actually runs.
 //!
 //! ## Ref-state independence (modularization-friendliness, plan §4)
 //! A contribution NEVER names a concrete reference-state type. Invariants,
@@ -95,17 +95,33 @@ pub struct PbtContribution {
 }
 
 impl PbtContribution {
-    /// The ids of the invariants this contribution carries, in order — the live
-    /// counterpart the anti-rot test compares its static [`PbtFootprint`]
-    /// against.
+    /// The ids of the invariants this contribution carries, in order.
     pub fn invariant_ids(&self) -> Vec<&'static str> {
         self.invariants.iter().map(|inv| inv.id().0).collect()
     }
+
+    /// The transition variants this contribution generates, in order.
+    pub fn transition_kinds(&self) -> Vec<&'static str> {
+        self.generators
+            .iter()
+            .map(|g| g.transition_kind())
+            .collect()
+    }
+
+    /// This contribution's [`PbtFootprint`], DERIVED — the enumeration is a
+    /// projection of the live payload, so it cannot drift from it.
+    pub fn footprint(&self) -> PbtFootprint {
+        PbtFootprint {
+            crate_id: self.crate_id,
+            invariant_ids: self.invariant_ids(),
+            transition_kinds: self.transition_kinds(),
+        }
+    }
 }
 
-/// The static, boot-free enumeration of a crate's PBT footprint. Read by the
-/// ladder floor and offline map verification; NOT the runtime alphabet. Kept in
-/// lockstep with the live [`PbtContribution`] by an anti-rot test.
+/// The boot-free enumeration of a crate's PBT footprint. Read by the ladder
+/// floor and offline map verification; NOT the runtime alphabet. Built only by
+/// [`PbtContribution::footprint`] — never hand-listed.
 pub struct PbtFootprint {
     pub crate_id: CrateId,
     pub invariant_ids: Vec<&'static str>,

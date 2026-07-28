@@ -51,37 +51,8 @@ pub fn pbt_contribution() -> PbtContribution {
     }
 }
 
-/// Static, boot-free footprint — the ladder-floor enumeration for
-/// `holon-turso`. Held in lockstep with [`pbt_contribution`] by the anti-rot
-/// test below. Order matches `correspondences::wire_all()` (per-observable,
-/// per-store).
+/// Boot-free footprint — the ladder-floor enumeration for `holon-turso`,
+/// derived from the live contribution so it cannot drift.
 pub fn pbt_footprint() -> PbtFootprint {
-    PbtFootprint {
-        crate_id: CrateId::Turso,
-        invariant_ids: vec![
-            "inv-blocks-match-ref/block_raw",
-            "inv-blocks-match-ref/matview",
-            "inv-block-content/block_raw",
-            "inv-block-content/sql",
-            "inv-block-parent/block_raw",
-            "inv-advice-matview-matches-ref/matview",
-        ],
-        transition_kinds: Vec::new(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Parse-don't-validate anti-rot: the static footprint must list exactly
-    /// the live contribution's invariant ids, in order.
-    #[test]
-    fn footprint_matches_contribution() {
-        assert_eq!(
-            pbt_footprint().invariant_ids,
-            pbt_contribution().invariant_ids(),
-            "holon-turso-testing footprint drifted from its live contribution",
-        );
-    }
+    pbt_contribution().footprint()
 }
