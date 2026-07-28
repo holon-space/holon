@@ -301,7 +301,16 @@ impl Module for LoroModule {
                 .0
                 .clone();
 
-            match controller.start(block_live).await {
+            // Boot ordering: hold the reconcile loop until the org initial
+            // scan has released the write path. `SyncGate` is opened by
+            // `post_ready` on EVERY scan-completion path (success, per-file
+            // degradation, fail-loud stall), so the loop always eventually
+            // runs. Required, not optional: the only wiring that registers
+            // LoroModule registers the gate alongside it, so a missing gate is
+            // a wiring bug and must not degrade into an ungated projector.
+            let gate = resolver.resolve::<holon_core::SyncGate>();
+
+            match controller.start_gated(block_live, &gate).await {
                 Ok(handle) => Shared::new(handle),
                 Err(e) => {
                     error!("[LoroModule] Failed to start LoroSyncController: {}", e);

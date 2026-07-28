@@ -90,4 +90,42 @@ impl SyncGate {
             rx.changed().await.map_err(|_| SyncGateClosed)?;
         }
     }
+
+    /// A receive-only view for waiters that must be able to observe
+    /// "every gate holder is gone".
+    ///
+    /// [`wait_open`](Self::wait_open) borrows `self`, so a waiter that owns a
+    /// `SyncGate` keeps a sender alive and its `SyncGateClosed` arm is
+    /// unreachable by construction. A waiter that holds only a
+    /// [`SyncGateWatcher`] can actually reach it.
+    pub fn watcher(&self) -> SyncGateWatcher {
+        SyncGateWatcher {
+            rx: self.tx.subscribe(),
+        }
+    }
+}
+
+/// Receive-only handle to a [`SyncGate`]. Holding one does NOT keep the gate
+/// open-able — dropping every `SyncGate` while a watcher waits resolves the
+/// wait with [`SyncGateClosed`] instead of parking forever.
+#[derive(Debug, Clone)]
+pub struct SyncGateWatcher {
+    rx: watch::Receiver<SyncGateState>,
+}
+
+impl SyncGateWatcher {
+    /// Current state (for assertions / diagnostics).
+    pub fn state(&self) -> SyncGateState {
+        *self.rx.borrow()
+    }
+
+    /// Resolve once the gate is `Open`. Returns immediately if already open.
+    pub async fn wait_open(&mut self) -> std::result::Result<(), SyncGateClosed> {
+        loop {
+            if *self.rx.borrow_and_update() == SyncGateState::Open {
+                return Ok(());
+            }
+            self.rx.changed().await.map_err(|_| SyncGateClosed)?;
+        }
+    }
 }

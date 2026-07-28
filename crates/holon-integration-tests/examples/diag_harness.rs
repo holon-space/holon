@@ -91,6 +91,59 @@ fn build_org_file(file_idx: usize, blocks: usize) -> String {
     s
 }
 
+/// The real vault's file-size distribution (1,001 files, 40,989 headlines,
+/// measured 2026-07-28): 274 empty, 210 with 1-4, 272 with 5-19, 225 with
+/// 20-99, 19 with 100-999 headlines, and ONE file with 24,084. The single
+/// huge file is what exercises the O(K²) sibling re-read term, so a corpus
+/// of uniform small files cannot reproduce the prod cost curve.
+const VAULT_BUCKETS: [(usize, usize, usize); 5] = [
+    (274, 0, 0),
+    (210, 1, 4),
+    (272, 5, 19),
+    (225, 20, 99),
+    (19, 100, 999),
+];
+
+/// Block count for the `i`-th non-huge file of a vault-shaped corpus of
+/// `files` files, drawn deterministically from [`VAULT_BUCKETS`].
+fn vault_shape_blocks(i: usize, files: usize) -> usize {
+    let total: usize = VAULT_BUCKETS.iter().map(|(n, _, _)| n).sum();
+    let scaled = i * total / files.max(1);
+    let mut acc = 0;
+    for (n, lo, hi) in VAULT_BUCKETS {
+        acc += n;
+        if scaled < acc {
+            return if hi == 0 {
+                0
+            } else {
+                lo + (i * 7919) % (hi - lo + 1)
+            };
+        }
+    }
+    0
+}
+
+/// Vault-shaped corpus: `files` files whose sizes follow the real vault's
+/// distribution, one of them carrying `big` blocks, spread over a few
+/// directory levels like the real vault. Never emits an `X.org` next to a
+/// directory `X/` — that folder-companion shape is a separate (identity)
+/// concern and would confound the timing.
+fn build_vault_corpus(files: usize, big: usize) -> Vec<(String, String)> {
+    let mut out = Vec::with_capacity(files);
+    out.push(("big/Dominant.org".to_string(), build_org_file(0, big)));
+    for i in 1..files {
+        let blocks = vault_shape_blocks(i, files);
+        let name = match i % 4 {
+            0 => format!("page-{i}.org"),
+            1 => format!("area/page-{i}.org"),
+            2 => format!("area/sub/page-{i}.org"),
+            _ => format!("proj/page-{i}.org"),
+        };
+        out.push((name, build_org_file(i, blocks)));
+    }
+    out
+}
+
 fn main() -> anyhow::Result<()> {
     // dhat: dropping this guard at the end of main writes dhat-heap.json.
     // The global allocator itself is installed by holon-frontend when the
@@ -138,12 +191,41 @@ fn main() -> anyhow::Result<()> {
     // Cold-boot many-file benchmark when HOLON_SOAK_SEED_FILES > 1.
     let seed_files = env_usize("HOLON_SOAK_SEED_FILES", 1);
     let blocks_per_file = env_usize("HOLON_SOAK_BLOCKS_PER_FILE", 10);
+    // Vault-shaped corpus (real distribution + one dominant file).
+    let vault_files = env_usize("HOLON_SOAK_VAULT_FILES", 0);
+    let vault_big = env_usize("HOLON_SOAK_VAULT_BIG", 2000);
+    // Prod-faithful boot: GPUI runs with `wait_for_ready=false` AND resolves
+    // `LoroSyncControllerHandle` right after bootstrap, so the projector run
+    // loop reconciles CONCURRENTLY with the org initial scan — one pass per
+    // Loro commit. The default fixture boot waits for the scan first, so the
+    // run loop never sees the scan's commits and the per-op cadence is absent.
+    let prod_boot = env_usize("HOLON_SOAK_PROD_BOOT", 0) != 0;
+    let wait_secs = env_usize("HOLON_SOAK_WAIT_SECS", 180) as u64;
 
     let rt2 = rt.clone();
     rt.block_on(async move {
-        let mut builder = TestEnvironmentBuilder::new();
+        let mut builder = TestEnvironmentBuilder::new().wait_for_file_watcher(!prod_boot);
         let last_block: String;
-        if seed_files > 1 {
+        // Set for the vault-shaped corpus: scan order is not file order, so
+        // completion is a COUNT watermark, not one nominated block.
+        let mut expect_blocks = 0usize;
+        if vault_files > 1 {
+            eprintln!(
+                "[diag] vault-shaped cold boot: {vault_files} files, dominant file \
+                 {vault_big} blocks, prod_boot={prod_boot}…"
+            );
+            let corpus = build_vault_corpus(vault_files, vault_big);
+            for (i, (name, content)) in corpus.into_iter().enumerate() {
+                expect_blocks += if i == 0 {
+                    vault_big
+                } else {
+                    vault_shape_blocks(i, vault_files)
+                };
+                builder = builder.with_org_file(name, content);
+            }
+            eprintln!("[diag] corpus: {expect_blocks} headline block(s)");
+            last_block = String::new();
+        } else if seed_files > 1 {
             eprintln!(
                 "[diag] cold-boot many-file bench: {seed_files} files × {blocks_per_file} blocks \
                  (empty Turso by construction)…"
@@ -163,10 +245,71 @@ fn main() -> anyhow::Result<()> {
         // block projecting into the SQL read model marks ingest complete.
         let t_boot = std::time::Instant::now();
         let env = builder.build(rt2.clone()).await?;
-        let ok = env
-            .wait_for_block(&last_block, Duration::from_secs(180))
-            .await;
-        anyhow::ensure!(ok, "last block {last_block} never projected within 180s");
+        // Prod parity: GPUI resolves `LoroSyncControllerHandle` immediately
+        // after bootstrap (its MCP debug-handles cell, `frontends/gpui/src/
+        // main.rs`), which STARTS the projector run loop while the org initial
+        // scan is still running. `TestEnvironmentBuilder` only `try_resolve`s
+        // it synchronously, which misses the async provider unless something
+        // already awaited it — so without this the fixture boots with the run
+        // loop dead and cannot reproduce the per-commit cadence.
+        let _prod_run_loop = if prod_boot {
+            let injector = env
+                .injector()
+                .ok_or_else(|| anyhow::anyhow!("no injector on TestEnvironment"))?;
+            Some(
+                injector
+                    .try_resolve_async::<holon::sync::LoroSyncControllerHandle>()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("resolve LoroSyncControllerHandle: {e}"))?,
+            )
+        } else {
+            None
+        };
+        eprintln!(
+            "[diag] boot returned at {} ms, run_loop_live={}",
+            t_boot.elapsed().as_millis(),
+            _prod_run_loop.is_some(),
+        );
+        if expect_blocks > 0 {
+            let deadline = std::time::Instant::now() + Duration::from_secs(wait_secs);
+            let mut next_sample = std::time::Instant::now();
+            loop {
+                let n = env
+                    .query("from block | select {id}", QueryLanguage::HolonPrql)
+                    .await?
+                    .len();
+                if std::time::Instant::now() >= next_sample {
+                    let s = holon::sync::projection_stats::snapshot();
+                    eprintln!(
+                        "[diag] t={}ms blocks={} passes={} ops={}",
+                        t_boot.elapsed().as_millis(),
+                        n,
+                        s.passes,
+                        s.ops
+                    );
+                    next_sample = std::time::Instant::now() + Duration::from_secs(5);
+                }
+                if n >= expect_blocks {
+                    break;
+                }
+                anyhow::ensure!(
+                    std::time::Instant::now() < deadline,
+                    "only {n} of {expect_blocks} block(s) projected within {wait_secs}s"
+                );
+                // 2s, not sub-second: the count query returns every row and
+                // contends with the ingest for the DatabaseActor, which would
+                // itself perturb the cadence being measured.
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        } else {
+            let ok = env
+                .wait_for_block(&last_block, Duration::from_secs(wait_secs))
+                .await;
+            anyhow::ensure!(
+                ok,
+                "last block {last_block} never projected in {wait_secs}s"
+            );
+        }
         eprintln!(
             "[diag] BOOT-TO-PAGES-COMPLETE: {} ms  ({} files, {} blocks/file)",
             t_boot.elapsed().as_millis(),
@@ -176,6 +319,21 @@ fn main() -> anyhow::Result<()> {
             } else {
                 seed
             },
+        );
+
+        // Cold-boot CADENCE — the parity metric. Prod (real vault, 2026-07-28)
+        // ran 16,333 passes for 25,139 ops, 87.2 % of them single-op, because
+        // the projector run loop reconciles per Loro commit during the scan.
+        let st = holon::sync::projection_stats::snapshot();
+        eprintln!(
+            "[diag] PROJECTION CADENCE: passes={} ops={} ops/pass={:.2} \
+             single_op={:.1}% snapshot_ms={} apply_ms={}",
+            st.passes,
+            st.ops,
+            st.ops as f64 / st.passes.max(1) as f64,
+            100.0 * st.single_op_passes as f64 / st.passes.max(1) as f64,
+            st.snapshot_ms,
+            st.apply_ms,
         );
 
         // Exercise the read path.

@@ -45,7 +45,9 @@ pub use file_format::FileFormatAdapter;
 pub use file_format::FileFormatParseResult;
 pub use publish_errors::PublishErrorTracker;
 pub use sync_gate::SyncGate;
+pub use sync_gate::SyncGateClosed;
 pub use sync_gate::SyncGateState;
+pub use sync_gate::SyncGateWatcher;
 
 #[cfg(test)]
 mod block_operations_tests;

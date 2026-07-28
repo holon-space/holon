@@ -40,6 +40,7 @@ use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -64,6 +65,125 @@ use crate::loro_backend::snapshot_blocks_from_doc_settled;
 /// Filename of the sidecar file that persists the sync watermark next to the
 /// `.loro` snapshot. One file per `LoroDocumentStore`.
 pub const SIDECAR_FILENAME: &str = "holon_tree.loro.sync";
+
+/// Process-global tally of `LoroProjection::project` passes that actually
+/// emitted ops. The per-pass `holon_latency` events are `debug!`, which the
+/// workspace's `release_max_level_info` compiles OUT of release builds — so
+/// boot cadence (how many projection passes a cold scan costs, and how many
+/// ops each carries) is unmeasurable from logs at the only scale that matters.
+/// Three relaxed atomics per pass; read via [`projection_stats::snapshot`].
+pub mod projection_stats {
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
+
+    static PASSES: AtomicU64 = AtomicU64::new(0);
+    static OPS: AtomicU64 = AtomicU64::new(0);
+    static SNAPSHOT_MS: AtomicU64 = AtomicU64::new(0);
+    static APPLY_MS: AtomicU64 = AtomicU64::new(0);
+    static SINGLE_OP_PASSES: AtomicU64 = AtomicU64::new(0);
+
+    /// One projection pass that emitted `ops` op(s).
+    pub fn record(ops: usize, snapshot_ms: u128, apply_ms: u64) {
+        PASSES.fetch_add(1, Ordering::Relaxed);
+        OPS.fetch_add(ops as u64, Ordering::Relaxed);
+        SNAPSHOT_MS.fetch_add(snapshot_ms as u64, Ordering::Relaxed);
+        APPLY_MS.fetch_add(apply_ms, Ordering::Relaxed);
+        if ops == 1 {
+            SINGLE_OP_PASSES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Cumulative counters: passes, ops, single-op passes, snapshot ms, apply
+    /// ms.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Stats {
+        pub passes: u64,
+        pub ops: u64,
+        pub single_op_passes: u64,
+        pub snapshot_ms: u64,
+        pub apply_ms: u64,
+    }
+
+    pub fn snapshot() -> Stats {
+        Stats {
+            passes: PASSES.load(Ordering::Relaxed),
+            ops: OPS.load(Ordering::Relaxed),
+            single_op_passes: SINGLE_OP_PASSES.load(Ordering::Relaxed),
+            snapshot_ms: SNAPSHOT_MS.load(Ordering::Relaxed),
+            apply_ms: APPLY_MS.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// How often to re-warn while the reconcile loop is still parked behind the
+/// boot gate, and the absolute ceiling after which it starts anyway in
+/// disclosed degraded mode. Same shape and same values as the sibling gate
+/// waiter `await_gate` in `holon-mcp-client` — one gate-escape policy, not two.
+const BOOT_GATE_WARN_EVERY: Duration = Duration::from_secs(60);
+const BOOT_GATE_WATCHDOG: Duration = Duration::from_secs(600);
+
+/// Why [`wait_for_boot_gate`] stopped waiting. Every variant proceeds to run
+/// the loop — a projector that never starts strands every Loro change short of
+/// the SQL sink, which is strictly worse than reconciling during a scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootGateOutcome {
+    /// The org initial scan finished and opened the gate.
+    Opened,
+    /// Every gate holder was dropped before it opened (teardown).
+    Closed,
+    /// The gate never opened within [`BOOT_GATE_WATCHDOG`].
+    WatchdogExpired,
+}
+
+/// Park until the org initial scan releases the write path, keeping a stuck
+/// deferral VISIBLE (periodic `warn!`) and bounded (watchdog), never silent.
+pub async fn wait_for_boot_gate(
+    mut watcher: holon_core::SyncGateWatcher,
+    warn_every: Duration,
+    watchdog: Duration,
+) -> BootGateOutcome {
+    if watcher.state() == holon_core::SyncGateState::Open {
+        return BootGateOutcome::Opened;
+    }
+    info!("[LoroSyncController] reconcile loop deferred until org initial scan completes");
+    let started = tokio::time::Instant::now();
+    let mut warn_tick = tokio::time::interval_at(started + warn_every, warn_every);
+    let watchdog = tokio::time::sleep(watchdog);
+    tokio::pin!(watchdog);
+    loop {
+        tokio::select! {
+            r = watcher.wait_open() => {
+                return match r {
+                    Ok(()) => BootGateOutcome::Opened,
+                    Err(e) => {
+                        error!(
+                            error = %e,
+                            "[LoroSyncController] boot gate dropped before opening — \
+                             starting the reconcile loop in DISCLOSED degraded mode"
+                        );
+                        BootGateOutcome::Closed
+                    }
+                };
+            }
+            _ = &mut watchdog => {
+                error!(
+                    waited_s = started.elapsed().as_secs(),
+                    "[LoroSyncController] boot gate never opened — org initial scan may be \
+                     wedged; starting the reconcile loop in DISCLOSED degraded mode (it will \
+                     contend with the scan)"
+                );
+                return BootGateOutcome::WatchdogExpired;
+            }
+            _ = warn_tick.tick() => {
+                warn!(
+                    waited_s = started.elapsed().as_secs(),
+                    "[LoroSyncController] reconcile loop still deferred — org initial scan \
+                     in progress"
+                );
+            }
+        }
+    }
+}
 
 /// Above this many pending facts in one drain, the incremental fast path defers
 /// to a full reseed: one bulk `snapshot_blocks_from_doc_settled` is cheaper
@@ -157,6 +277,10 @@ pub struct LoroSyncControllerHandle {
     error_count: Arc<AtomicUsize>,
     /// Allows tests to trigger a reconciliation cycle without mutating Loro.
     wake: Arc<Notify>,
+    /// Flipped by the spawned task once it is past the boot gate and about to
+    /// enter `run_loop`. Observable because "is the projector reconciling yet?"
+    /// is a boot-ordering fact with no other witness.
+    run_loop_started: Arc<AtomicBool>,
 }
 
 impl LoroSyncControllerHandle {
@@ -177,6 +301,12 @@ impl LoroSyncControllerHandle {
     /// pass without touching the doc.
     pub fn wake(&self) {
         self.wake.notify_one();
+    }
+
+    /// Whether the outbound reconcile loop is past its boot gate and running.
+    /// `false` while the org initial scan still owns the write path.
+    pub fn run_loop_started(&self) -> bool {
+        self.run_loop_started.load(Ordering::SeqCst)
     }
 }
 
@@ -205,6 +335,32 @@ impl LoroSyncController {
     pub async fn start(
         self,
         block_live: Arc<holon_api::live_data::LiveData<Block>>,
+    ) -> Result<LoroSyncControllerHandle> {
+        self.start_gated(block_live, &holon_core::SyncGate::opened())
+            .await
+    }
+
+    /// [`start`](Self::start), with the run loop held behind `gate`.
+    ///
+    /// The org initial scan already batches its own sink writes (one
+    /// `DownstreamProjection` flush per file). A run loop reconciling
+    /// concurrently with the scan undoes that: it wakes once per Loro commit,
+    /// so the vault projects one block at a time, each pass paying a full
+    /// sibling-scope snapshot and its own SQL transaction.
+    ///
+    /// The gate lives here rather than at the call sites because *resolving*
+    /// the handle is what starts the loop, and any frontend that wants the
+    /// handle early (the GPUI MCP debug-handles cell) would otherwise start it.
+    /// Only the loop waits — the handle itself is returned immediately, so a
+    /// caller blocking on the resolve cannot deadlock. The subscription is
+    /// still registered up front, so the scan's flushes drain real pending
+    /// facts instead of falling back to full reseeds. The wait is bounded and
+    /// noisy (see [`wait_for_boot_gate`]): a wedged scan degrades loudly, it
+    /// never parks the projector forever.
+    pub async fn start_gated(
+        self,
+        block_live: Arc<holon_api::live_data::LiveData<Block>>,
+        gate: &holon_core::SyncGate,
     ) -> Result<LoroSyncControllerHandle> {
         // (1) Loro subscription — synchronous, before spawn.
         let wake_for_callback = self.wake.clone();
@@ -250,7 +406,14 @@ impl LoroSyncController {
         // and was load-bearing for ordering in non-obvious ways — removed.
 
         // (4) Spawn the main loop.
+        let run_loop_started = Arc::new(AtomicBool::new(false));
+        let started_for_task = run_loop_started.clone();
+        // Receive-only: the task must NOT hold a gate sender, or
+        // all-holders-dropped becomes unobservable and the degraded path dead.
+        let watcher = gate.watcher();
         let task = tokio::spawn(async move {
+            wait_for_boot_gate(watcher, BOOT_GATE_WARN_EVERY, BOOT_GATE_WATCHDOG).await;
+            started_for_task.store(true, Ordering::SeqCst);
             self.run_loop().await;
         });
 
@@ -261,6 +424,7 @@ impl LoroSyncController {
             last_synced,
             error_count,
             wake,
+            run_loop_started,
         })
     }
 
@@ -901,7 +1065,13 @@ impl LoroProjection {
                 command_id: None,
                 base_ref,
             };
-            self.consolidator.apply(ops, provenance).await?;
+            // Recorded before the `?`: a pass that FAILED its sink write still
+            // walked the doc and still cost the boot its snapshot time, and a
+            // cadence measurement that silently omits failing passes would
+            // understate exactly the boots that are going wrong.
+            let applied = self.consolidator.apply(ops, provenance).await;
+            projection_stats::record(op_count, snapshot_ms, t0.elapsed().as_millis() as u64);
+            applied?;
             tracing::debug!(
                 "[LoroProjection] applied {} op(s) in {}ms (snapshot {}ms, after={} before={}) \
                  [{}]",
@@ -1221,6 +1391,74 @@ fn topological_sort_deletes<'a>(
     let mut creates_order = topological_sort_creates(deletes.clone(), all);
     creates_order.reverse();
     creates_order
+}
+
+/// The boot gate must never be able to park the projector forever: a wedged
+/// org scan (gate never opened) and a torn-down session (every gate holder
+/// dropped) both have to resolve into a DISCLOSED degraded start, because a
+/// projector that never runs strands every Loro change short of the SQL sink.
+#[cfg(test)]
+mod boot_gate_tests {
+    use super::*;
+
+    /// Short stand-ins for `BOOT_GATE_WARN_EVERY` / `BOOT_GATE_WATCHDOG`; the
+    /// production values (60 s / 600 s) are the same shape, just slower.
+    const WARN: Duration = Duration::from_millis(20);
+    const WATCHDOG: Duration = Duration::from_millis(200);
+
+    #[tokio::test]
+    async fn opens_immediately_when_the_scan_is_already_done() {
+        let gate = holon_core::SyncGate::opened();
+        let out = wait_for_boot_gate(gate.watcher(), WARN, WATCHDOG).await;
+        assert_eq!(out, BootGateOutcome::Opened);
+    }
+
+    #[tokio::test]
+    async fn releases_when_the_scan_completes() {
+        let gate = holon_core::SyncGate::new();
+        let g = gate.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            g.open();
+        });
+        let out = wait_for_boot_gate(gate.watcher(), WARN, WATCHDOG).await;
+        assert_eq!(out, BootGateOutcome::Opened);
+    }
+
+    /// A scan that never signals: the loop must still be released, loudly.
+    #[tokio::test]
+    async fn watchdog_releases_a_gate_that_never_opens() {
+        let gate = holon_core::SyncGate::new();
+        let started = std::time::Instant::now();
+        let out = wait_for_boot_gate(gate.watcher(), WARN, WATCHDOG).await;
+        assert_eq!(out, BootGateOutcome::WatchdogExpired);
+        assert!(
+            started.elapsed() >= WATCHDOG,
+            "watchdog fired early: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Session teardown: every gate holder is dropped. Reachable only because
+    /// the waiter holds a receive-only `SyncGateWatcher` — with an owned
+    /// `SyncGate` it would keep its own sender alive and park until the
+    /// watchdog instead.
+    #[tokio::test]
+    async fn dropped_gate_is_observed_before_the_watchdog() {
+        let gate = holon_core::SyncGate::new();
+        let watcher = gate.watcher();
+        let started = std::time::Instant::now();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            drop(gate);
+        });
+        let out = wait_for_boot_gate(watcher, WARN, WATCHDOG).await;
+        assert_eq!(out, BootGateOutcome::Closed);
+        assert!(
+            started.elapsed() < WATCHDOG,
+            "fell through to the watchdog instead of observing the drop"
+        );
+    }
 }
 
 #[cfg(test)]
