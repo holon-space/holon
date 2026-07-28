@@ -3240,7 +3240,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
         let count = operations.len();
 
         // Phase 2: Execute all SQL in a single transaction
-        tracing::info!(
+        tracing::debug!(
             "[SqlOperationProvider] Executing batch: {} operations, {} SQL statements",
             count,
             all_sql.len()
@@ -3270,7 +3270,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 manifest.join(", ")
             )
         })?;
-        tracing::info!(
+        tracing::debug!(
             "[SqlOperationProvider] batch timing: {} ops, {} sql stmts → tx {}ms",
             count,
             _sql_count,

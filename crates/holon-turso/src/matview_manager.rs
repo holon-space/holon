@@ -389,7 +389,7 @@ impl MatviewManager {
                                 let sub_count = subscribers.get(view_name).map(|s| s.len()).unwrap_or(0);
                                 if !batch.inner.items.is_empty() {
                                     if sub_count > 0 {
-                                        tracing::info!(
+                                        tracing::debug!(
                                             "[Demux] view='{}' items={} subscribers={}",
                                             view_name, batch.inner.items.len(), sub_count
                                         );

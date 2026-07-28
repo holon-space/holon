@@ -957,6 +957,12 @@ pub async fn run_file_sync_controller(
             files = files as u64,
             "holon_latency",
         );
+        tracing::info!(
+            "[OrgMode] initial scan complete: {} file(s) in {}ms, {} failure(s)",
+            files,
+            t_scan.elapsed().as_millis(),
+            failures.len(),
+        );
         failures
     }
     .instrument(tracing::info_span!("org.initial_scan.ingest"))

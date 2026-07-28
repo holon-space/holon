@@ -902,7 +902,7 @@ impl LoroProjection {
                 base_ref,
             };
             self.consolidator.apply(ops, provenance).await?;
-            tracing::info!(
+            tracing::debug!(
                 "[LoroProjection] applied {} op(s) in {}ms (snapshot {}ms, after={} before={}) \
                  [{}]",
                 op_count,

@@ -471,6 +471,14 @@ impl FileSyncController {
             caught_up = caught_up,
             "holon_latency",
         );
+        // The once-per-boot INFO replacement for the demoted per-batch chatter:
+        // matview/CDC delivery is what the readiness gate actually waits on.
+        tracing::info!(
+            "[InitialScan] feed convergence: {} block(s) in {}ms (caught_up={})",
+            ids.len(),
+            t.elapsed().as_millis(),
+            caught_up,
+        );
         // Steady-state guard: the scan flag must not leak past finish.
         debug_assert!(
             self.scan_feed_ids.is_none(),
