@@ -98,6 +98,7 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // `SutViewSelection` / `SutRenderer` over a live gpui `TestPlatform` window.
         invariants::frontend_bounds_rendered::wire(),
         invariants::live_block_shell_present::wire(),
+        invariants::inline_row_mount_present::wire(),
         invariants::sticky_accordion_spec::wire(),
         invariants::wheel_two_mode_motion_law::wire(),
         invariants::wheel_occlusion_routing::wire(),
@@ -324,6 +325,7 @@ const CENTRAL_INVARIANT_IDS_HEAD: &[&str] = &[
     "inv-task-state-storage-coherence",
     "inv-frontend-bounds-rendered",
     "inv-live-block-shell-present",
+    "inv-inline-row-mount-present",
     "inv-sticky-accordion-spec",
     "inv-wheel-two-mode-motion-law",
     "inv-wheel-occlusion-routing",

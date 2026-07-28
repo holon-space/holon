@@ -52,6 +52,7 @@ use holon_integration_tests::pbt::fixtures::replay_steps;
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_integration_tests::pbt::transitions::ClickBlock;
 use holon_integration_tests::pbt::transitions::E2ETransition;
+use holon_integration_tests::pbt::window_slice::builders::WindowMountConvention;
 use holon_integration_tests::pbt::window_slice::builders::overlay_windowed_caps;
 use holon_integration_tests::pbt::window_slice::builders::window_layout;
 use holon_pbt_core::ComponentSet;
@@ -292,6 +293,7 @@ fn overlay_windowed_caps_composes_layout_backend_and_driver_over_a_live_window()
         engine.clone(),
         driver,
         resolver.clone(),
+        WindowMountConvention::PerBlockShell,
     );
 
     // (1) The overlay INSERTED the window driver rung (absent in the deferred

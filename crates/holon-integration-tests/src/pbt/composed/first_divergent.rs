@@ -344,6 +344,11 @@ const LAYER_MAP: &[Entry] = &[
         "pbt/composed/invariants/live_block_shell_present.rs",
     ),
     (
+        "inv-inline-row-mount-present",
+        Some(Layer::Render),
+        "pbt/composed/invariants/inline_row_mount_present.rs",
+    ),
+    (
         "inv-sticky-accordion-spec",
         Some(Layer::Render),
         "pbt/composed/invariants/sticky_accordion_spec.rs",

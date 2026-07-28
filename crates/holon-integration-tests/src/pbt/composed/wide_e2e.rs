@@ -725,6 +725,19 @@ const WIDE_HEADLESS_ABSENT_CAPS: &[(&str, &str)] = &[
          GpuiFrontendEngineComponent does",
     ),
     (
+        "SutPerBlockShellMount",
+        "windowed-only, and GPUI-only within that: names the frontend mount convention under \
+         test (panel blocks wrapped in a per-block ReactiveShell, tracked as `live_block`). \
+         Registered by overlay_windowed_caps from WindowMountConvention; headless compose_sut \
+         mounts nothing",
+    ),
+    (
+        "SutInlineRowMount",
+        "windowed-only, and TUI-only within that: the sibling mount convention (doc-block rows \
+         resolved inline, tracked as `render_entity`). Registered by overlay_windowed_caps from \
+         WindowMountConvention; headless compose_sut mounts nothing",
+    ),
+    (
         "SutTwoInstance",
         "two-instance-only: sharing + sync control over a SECOND booted session and a relay; a \
          single-instance compose_sut has no second side to share with",

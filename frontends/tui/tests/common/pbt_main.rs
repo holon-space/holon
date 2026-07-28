@@ -52,6 +52,7 @@ use holon_integration_tests::pbt::composed::wide_e2e::windowed_composed_sut;
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_integration_tests::pbt::ui_harness::try_start_embedded_mcp;
 use holon_integration_tests::pbt::ui_harness::wait_for_geometry_ready;
+use holon_integration_tests::pbt::window_slice::builders::WindowMountConvention;
 use holon_integration_tests::pbt::window_slice::builders::overlay_windowed_caps;
 use holon_mcp::server::DebugServices;
 use holon_tui::app_main::AppSignal;
@@ -223,6 +224,7 @@ pub fn run(label: &'static str) {
         reactive,
         tui_driver,
         resolver.clone(),
+        WindowMountConvention::InlineRow,
     );
 
     // Settle hook: the renderer self-drives on the backend runtime, so settling is

@@ -24,10 +24,20 @@
 //! present. Engagement is gated (in the wiring) on `SutLayout +
 //! SutFrontendEngine`, i.e. only the live windowed slice.
 
+use holon_api::EntityUri;
 use holon_pbt_core::capabilities::SutLayout;
 use holon_pbt_core::invariant::Invariant;
 use holon_pbt_core::invariant::InvariantId;
 use holon_pbt_core::invariant::InvariantResult;
+
+/// The shell-faithfulness observable: `live_block::render` tags a panel
+/// container only after `get_or_create_live_block` built the block's
+/// `ReactiveShell`, so this predicate holds iff the production per-block
+/// mount path ran. GPUI-only — the TUI resolves rows inline and emits
+/// [`is_inline_row_tag`] instead.
+pub fn is_live_block_shell_tag(widget_type: &str, entity_id: Option<&str>) -> bool {
+    widget_type == "live_block" && entity_id.is_some_and(|eid| eid.starts_with("block:default-"))
+}
 
 pub struct InvLiveBlockShellPresent;
 
@@ -59,11 +69,10 @@ where
         }
 
         let shell_tagged = elements.iter().any(|el| {
-            el.widget_type == "live_block"
-                && el
-                    .entity_id
-                    .as_ref()
-                    .is_some_and(|eid| eid.as_str().starts_with("block:default-"))
+            is_live_block_shell_tag(
+                &el.widget_type,
+                el.entity_id.as_ref().map(EntityUri::as_str),
+            )
         });
 
         if shell_tagged {

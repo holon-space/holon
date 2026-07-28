@@ -10,6 +10,8 @@ use holon_pbt_core::Actor;
 use holon_pbt_core::ComponentSet;
 use holon_pbt_core::capabilities::SutFrontendEmissions;
 use holon_pbt_core::capabilities::SutFrontendEngine;
+use holon_pbt_core::capabilities::SutInlineRowMount;
+use holon_pbt_core::capabilities::SutPerBlockShellMount;
 use holon_pbt_core::composition::CapMap;
 use holon_pbt_core::composition::CapProvider;
 use holon_pbt_core::composition::Config;
@@ -173,6 +175,38 @@ pub fn compose_windowed_sut(
 /// window's `GpuiUserDriver`.
 ///
 /// [`SutLayout`]: holon_pbt_core::capabilities::SutLayout
+/// How the window under test mounts blocks into its geometry registry — a
+/// property of the frontend's production render path, not a test knob. It
+/// selects the matching mount-faithfulness invariant, so each frontend is
+/// checked against the observable it actually emits instead of one of them
+/// failing on a foreign frontend's marker.
+#[derive(Clone, Copy, Debug)]
+pub enum WindowMountConvention {
+    /// GPUI: each PANEL block (`block:default-*`) is wrapped in its own
+    /// `ReactiveShell` entity, tracked as `live_block`.
+    PerBlockShell,
+    /// TUI: doc-block rows are resolved inline at the `tree`/`table`/`outline`
+    /// collection boundary and tracked as `render_entity`; no per-block shell
+    /// wrapper survives into the registry.
+    InlineRow,
+}
+
+/// Sole provider of the two mount-convention caps. Which one it is inserted
+/// as is decided by [`WindowMountConvention`] at overlay time.
+struct MountConventionComponent;
+
+impl SutPerBlockShellMount for MountConventionComponent {
+    fn panel_shell_widget_type(&self) -> String {
+        "live_block".to_string()
+    }
+}
+
+impl SutInlineRowMount for MountConventionComponent {
+    fn inline_row_widget_type(&self) -> String {
+        "render_entity".to_string()
+    }
+}
+
 pub fn overlay_windowed_caps(
     mut caps: CapMap,
     frontend: Arc<HeadlessFrontendComponent>,
@@ -180,6 +214,7 @@ pub fn overlay_windowed_caps(
     engine: Arc<ReactiveEngine>,
     driver: Arc<dyn UserDriver>,
     resolver: IdResolver,
+    mount: WindowMountConvention,
 ) -> CapMap {
     let driver_geometry = geometry.clone_box();
     Arc::new(GpuiWindowComponent::new(geometry)).register(&mut caps);
@@ -196,6 +231,15 @@ pub fn overlay_windowed_caps(
     let frontend_engine = Arc::new(GpuiFrontendEngineComponent::new(engine.clone()));
     caps.insert(frontend_engine.clone() as Arc<dyn SutFrontendEngine>);
     caps.insert(frontend_engine as Arc<dyn SutFrontendEmissions>);
+
+    match mount {
+        WindowMountConvention::PerBlockShell => {
+            caps.insert(Arc::new(MountConventionComponent) as Arc<dyn SutPerBlockShellMount>);
+        }
+        WindowMountConvention::InlineRow => {
+            caps.insert(Arc::new(MountConventionComponent) as Arc<dyn SutInlineRowMount>);
+        }
+    }
 
     Arc::new(DriverInputComponent::with_input_resolved(
         engine,

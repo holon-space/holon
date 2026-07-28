@@ -1793,6 +1793,30 @@ pub struct RenderedElement {
     pub styled_runs: Option<Vec<holon_api::StyledRun>>,
 }
 
+/// Windowed frontends whose production mount path wraps each PANEL block
+/// (`block:default-*`) in its own `ReactiveShell` entity and tracks that
+/// wrapper in the geometry registry. GPUI does this
+/// (`render/builders/live_block.rs`); the TUI deliberately does not, so it
+/// registers [`SutInlineRowMount`] instead and the shell-wrapper invariant
+/// honestly deselects there rather than failing on an observable that
+/// frontend never emits.
+#[holon_macros::capmap_adapter]
+pub trait SutPerBlockShellMount {
+    /// The `widget_type` the shell wrapper is tagged with in the registry.
+    fn panel_shell_widget_type(&self) -> String;
+}
+
+/// Windowed frontends whose production mount path resolves each doc-block row
+/// inline, leaving no per-block shell wrapper in the geometry registry — rows
+/// are tracked directly as the rendering of their entity. The TUI does this
+/// (`render/mod.rs`, the `tree`/`table`/`outline` collection boundary); it is
+/// the mount-faithfulness counterpart to [`SutPerBlockShellMount`].
+#[holon_macros::capmap_adapter]
+pub trait SutInlineRowMount {
+    /// The `widget_type` an inline-resolved doc-block row is tagged with.
+    fn inline_row_widget_type(&self) -> String;
+}
+
 #[holon_macros::capmap_adapter]
 pub trait SutLayout {
     /// Snapshot every tracked element in the rendered window's geometry

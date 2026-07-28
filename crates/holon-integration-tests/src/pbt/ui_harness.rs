@@ -35,6 +35,8 @@ use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive::ReactiveEngine;
 
+use crate::pbt::invariants::bodies::inline_row_mount_present::is_inline_row_tag;
+
 /// Default `PBT_MEMORY_MULTIPLIER` for a frontend PBT.
 ///
 /// A live frontend (GPUI window or TUI render task) adds ~40 MB of
@@ -219,23 +221,20 @@ pub fn wait_for_mcp_listener(port: u16, timeout: Duration, label: &str) {
 }
 
 /// Re-sample interval for `wait_for_geometry_ready`, ALSO the delay before the
-/// first sample. The pre-first-sample delay is load-bearing: the readiness
-/// predicate (`has_content && entity_id.is_some()`) is satisfied by a frame
-/// whose blocks have not yet been wrapped in their per-block `ReactiveShell`,
-/// so sampling immediately hands the PBT a bare-mount frame and reds
-/// `inv-live-block-shell-present`. Do not shorten without strengthening the
-/// predicate.
-const GEOMETRY_POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// first sample. Short because the readiness predicate identifies a
+/// block-bearing frame on its own — no timing margin is standing in for it.
+const GEOMETRY_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
-/// Block until `geometry` reports an element with both `has_content` and
-/// `entity_id`, or until `timeout` elapses.
+/// Block until `geometry` reports a `render_entity`-tagged `block:*` row, or
+/// until `timeout` elapses.
 ///
-/// This is the standard "frontend has rendered something the test can
-/// interact with" gate. Both GPUI and TUI use the same predicate
-/// (`has_content && entity_id.is_some()`) — placeholders that the
-/// auto-`tag()` pipeline registers don't carry an entity_id, so this
-/// only fires once `tracked()`/`render_entity()` has populated a real
-/// row.
+/// This is the "frontend has rendered something the test can interact with"
+/// gate. The predicate is the mount observable
+/// `inv-inline-row-mount-present` asserts (shared via [`is_inline_row_tag`]),
+/// and it is frontend-neutral: both GPUI's `render_entity` builder and the
+/// TUI's collection boundary register a laid-out block row under that tag.
+/// The weaker `has_content && entity_id.is_some()` admitted frames carrying
+/// only chrome, which is what let a boot race look like a render bug.
 ///
 /// On timeout, dumps a `widget_type` histogram + a sample of entity
 /// ids so the test failure includes enough context to diagnose why the
@@ -245,17 +244,22 @@ pub fn wait_for_geometry_ready(
     timeout: Duration,
     label: &str,
 ) -> bool {
-    let deadline = Instant::now() + timeout;
+    let started = Instant::now();
+    let deadline = started + timeout;
+    let mut samples: u32 = 0;
     loop {
         std::thread::sleep(GEOMETRY_POLL_INTERVAL);
         let elements = geometry.all_elements();
-        let has_real_content = elements
+        samples += 1;
+        let row_mounted = elements
             .iter()
-            .any(|(_, info)| info.has_content && info.entity_id.is_some());
-        if has_real_content {
+            .any(|(_, info)| is_inline_row_tag(&info.widget_type, info.entity_id.as_deref()));
+        if row_mounted {
             let n_content = elements.iter().filter(|(_, i)| i.has_content).count();
             eprintln!(
-                "[{label}] Window ready: {} elements ({} with has_content)",
+                "[{label}] Window ready after {:?} ({samples} samples): {} elements ({} with \
+                 has_content)",
+                started.elapsed(),
                 elements.len(),
                 n_content,
             );
@@ -272,8 +276,9 @@ pub fn wait_for_geometry_ready(
                 .take(5)
                 .collect();
             eprintln!(
-                "[{label}] Window ready timeout — {} elements, widget_type hist={:?}, has_content \
-                 count={}, sample entity_ids={:?}",
+                "[{label}] Window ready timeout — no `render_entity`-tagged `block:*` row after \
+                 {} elements, widget_type hist={:?}, has_content count={}, sample \
+                 entity_ids={:?}",
                 elements.len(),
                 hist,
                 elements.iter().filter(|(_, i)| i.has_content).count(),

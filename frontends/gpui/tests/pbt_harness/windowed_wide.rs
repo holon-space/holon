@@ -33,6 +33,7 @@ use holon_integration_tests::pbt::composed::wide_e2e::windowed_composed_sut;
 use holon_integration_tests::pbt::fixtures::NamedFixture;
 use holon_integration_tests::pbt::fixtures::replay_steps;
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
+use holon_integration_tests::pbt::window_slice::builders::WindowMountConvention;
 use holon_integration_tests::pbt::window_slice::builders::overlay_windowed_caps;
 
 use super::sim_windowed_replay::SimUserDriver;
@@ -189,6 +190,7 @@ pub fn with_windowed_wide_sut(
         engine.clone(),
         driver,
         resolver.clone(),
+        WindowMountConvention::PerBlockShell,
     );
 
     // The window-settle hook the ComposedSut pumps before each check (mirror sim
