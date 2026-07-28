@@ -950,9 +950,9 @@ async fn chk_after_commit(
         let rc = match chk_recompute_count(conn, &select_sql).await {
             Ok(n) => n,
             Err(e) => {
-                outcome
-                    .lines
-                    .push(format!("CHK|commit{commit_idx}|{name}|ERROR recompute: {e}"));
+                outcome.lines.push(format!(
+                    "CHK|commit{commit_idx}|{name}|ERROR recompute: {e}"
+                ));
                 continue;
             }
         };
@@ -1680,13 +1680,9 @@ async fn replay_sql_directive(
             progress.commit_idx += 1;
             let matview_names = extract_matview_names(&progress.executed_sqls);
             if !matview_names.is_empty() {
-                let outcome = chk_after_commit(
-                    conn,
-                    &matview_names,
-                    progress.commit_idx,
-                    args.chk_precise,
-                )
-                .await;
+                let outcome =
+                    chk_after_commit(conn, &matview_names, progress.commit_idx, args.chk_precise)
+                        .await;
                 if outcome.mismatch {
                     let was_first = !progress.has_data_mismatch;
                     progress.has_data_mismatch = true;
@@ -1862,7 +1858,10 @@ async fn cmd_replay(args: &ReplayArgs, replay_file: &str) -> anyhow::Result<()> 
     }
     println!();
 
-    let db_path = args.db_path.as_deref().unwrap_or("/tmp/turso-sql-replay.db");
+    let db_path = args
+        .db_path
+        .as_deref()
+        .unwrap_or("/tmp/turso-sql-replay.db");
     for ext in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{db_path}{ext}"));
     }
@@ -2893,7 +2892,8 @@ fn parse_first_divergence_commit(output: &str) -> Option<usize> {
 }
 
 /// Byte-index bounds `(begin_idx, commit_idx)` of the `k`-th (1-based)
-/// transaction in `directives`, delimited by `actor_tx_begin` / `actor_tx_commit`.
+/// transaction in `directives`, delimited by `actor_tx_begin` /
+/// `actor_tx_commit`.
 fn nth_transaction_bounds(directives: &[Directive], k: usize) -> Option<(usize, usize)> {
     let mut last_begin: Option<usize> = None;
     let mut commit_count = 0usize;
@@ -3067,7 +3067,8 @@ fn sweep_one(
                         break;
                     }
                     let db = format!("{keep_dir}/sweep-{label}-{i}.db");
-                    let mut child_args = vec![file.to_string(), "--db-path".to_string(), db.clone()];
+                    let mut child_args =
+                        vec![file.to_string(), "--db-path".to_string(), db.clone()];
                     child_args.extend(extra.iter().cloned());
                     let run = run_replay_child(&child_args);
                     if run.red {
@@ -3124,11 +3125,20 @@ fn cmd_sweep(args: &SweepArgs) -> anyhow::Result<()> {
     println!("  Replay args: {extra:?}");
     println!("  Artifacts (red runs kept): {keep_dir}\n");
 
-    let rate_a = sweep_one(&args.replay_file, "A", args.runs, args.jobs, &keep_dir, &extra)?;
+    let rate_a = sweep_one(
+        &args.replay_file,
+        "A",
+        args.runs,
+        args.jobs,
+        &keep_dir,
+        &extra,
+    )?;
     let mut rate_b = None;
     if let Some(other) = &args.compare {
         println!();
-        rate_b = Some(sweep_one(other, "B", args.runs, args.jobs, &keep_dir, &extra)?);
+        rate_b = Some(sweep_one(
+            other, "B", args.runs, args.jobs, &keep_dir, &extra,
+        )?);
     }
 
     let pct = |r: &SweepRate| 100.0 * r.red as f64 / r.total.max(1) as f64;
@@ -3516,7 +3526,10 @@ mod tests {
             strip_trailing_order_limit("SELECT a FROM t LIMIT 5"),
             "SELECT a FROM t"
         );
-        assert_eq!(strip_trailing_order_limit("SELECT a FROM t;"), "SELECT a FROM t");
+        assert_eq!(
+            strip_trailing_order_limit("SELECT a FROM t;"),
+            "SELECT a FROM t"
+        );
         // A window ORDER BY is inside parens (depth > 0) and must survive.
         let win = "SELECT row_number() OVER (ORDER BY a) FROM t";
         assert_eq!(strip_trailing_order_limit(win), win);
