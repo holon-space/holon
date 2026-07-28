@@ -42,9 +42,11 @@ use holon_pbt_core::capabilities::RefBlockTree;
 use holon_pbt_core::capabilities::SutAdviceMatview;
 use holon_pbt_core::capabilities::SutBackend;
 use holon_pbt_core::capabilities::SutSqlProjection;
+use holon_pbt_core::composition::Attribution;
 use holon_pbt_core::composition::CapId;
 use holon_pbt_core::composition::CapInvariant;
 use holon_pbt_core::composition::CapMap;
+use holon_pbt_core::composition::Layer;
 use holon_pbt_core::composition::Needs;
 use holon_pbt_core::correspondence::Converge;
 use holon_pbt_core::correspondence::Correspondence;
@@ -86,6 +88,7 @@ pub fn non_seed_blocks() -> Correspondence<NonSeedBlocks> {
             // columns the matview joins, so a full compare would false-fail.
             StoreProjection {
                 id: "inv-blocks-match-ref/block_raw",
+                attribution: Attribution::at(Layer::Projection, file!()),
                 store: "block_raw",
                 needs: Needs {
                     sut_present: vec![CapId::of::<dyn SutBackend>()],
@@ -107,6 +110,7 @@ pub fn non_seed_blocks() -> Correspondence<NonSeedBlocks> {
             // with the observed lag as the reason — never silently.
             StoreProjection {
                 id: "inv-blocks-match-ref/matview",
+                attribution: Attribution::at(Layer::Projection, file!()),
                 store: "matview",
                 needs: Needs {
                     sut_present: vec![
@@ -302,6 +306,7 @@ pub fn block_content() -> Correspondence<BlockContent> {
             // moved `inv-no-orphan-blocks` off `SutSqlProjection`.
             StoreProjection {
                 id: "inv-block-content/block_raw",
+                attribution: Attribution::at(Layer::Projection, file!()),
                 store: "block_raw",
                 needs: Needs {
                     sut_present: vec![CapId::of::<dyn SutBackend>()],
@@ -320,6 +325,7 @@ pub fn block_content() -> Correspondence<BlockContent> {
             // Turso. Selected only where a slice supplies `SutSqlProjection`.
             StoreProjection {
                 id: "inv-block-content/sql",
+                attribution: Attribution::at(Layer::Projection, file!()),
                 store: "sql",
                 needs: Needs {
                     sut_present: vec![CapId::of::<dyn SutSqlProjection>()],
@@ -459,6 +465,7 @@ pub fn block_parent() -> Correspondence<BlockParent> {
         ref_project: ref_block_parent,
         stores: vec![StoreProjection {
             id: "inv-block-parent/block_raw",
+            attribution: Attribution::at(Layer::Projection, file!()),
             store: "block_raw",
             needs: Needs {
                 sut_present: vec![CapId::of::<dyn SutBackend>()],
@@ -560,6 +567,7 @@ pub fn advice_matviews() -> Correspondence<AdviceMatviews> {
         ref_project: ref_advice_matviews,
         stores: vec![StoreProjection {
             id: "inv-advice-matview-matches-ref/matview",
+            attribution: Attribution::at(Layer::Projection, file!()),
             store: "matview",
             needs: Needs {
                 sut_present: vec![CapId::of::<dyn SutAdviceMatview>()],

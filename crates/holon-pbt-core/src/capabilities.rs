@@ -424,6 +424,7 @@ holon_macros::capability_pair! {
             sut = current_focus_rows,
             ref = navigation_focus_rows,
             id = "inv-navigation-focus",
+            layer = ViewModel,
             with = crate::capabilities::compare_navigation_focus
         )]
         fn current_focus_rows(&self) -> Vec<(String, Option<String>)>;
@@ -1377,7 +1378,7 @@ holon_macros::capability_pair! {
         /// The currently selected view mode (e.g. `"all"`, `"today"`) — UI
         /// view-selection state. Auto-compared SUT-vs-reference by
         /// `inv-pair-view-selection-current-view`.
-        #[compare]
+        #[compare(layer = ViewModel)]
         fn current_view(&self) -> String;
 
         /// Drain pending ViewModel emissions. Drain-once semantics —
@@ -2527,6 +2528,7 @@ holon_macros::capability_pair! {
         #[compare(
             ref = active_watch_ids,
             id = "inv-active-watches-match-ref",
+            layer = ViewModel,
             with = crate::capabilities::compare_watch_ids
         )]
         fn watch_query_ids(&self) -> Vec<String>;
@@ -3111,4 +3113,27 @@ pub trait RefSharedViewMut: RefSharedView {
 
     /// Record one applied owner→receiver sync round.
     fn note_owner_to_receiver_round(&mut self);
+}
+
+#[cfg(test)]
+mod attribution_tests {
+    /// `capability_pair!` emits `file!()` INTO the generated constructor, so a
+    /// derived invariant's wiring names the file that declared the pair rather
+    /// than `holon-macros`. Without it all three pair-derived invariants would
+    /// point triage at the macro crate.
+    #[test]
+    fn derived_pair_invariants_are_wired_to_their_declaring_file() {
+        for inv in [
+            super::inv_pair_focus_current_focus_rows(),
+            super::inv_pair_watch_watch_query_ids(),
+            super::inv_pair_view_selection_current_view(),
+        ] {
+            let wiring = inv.attribution().wiring();
+            assert!(
+                wiring.ends_with("capabilities.rs"),
+                "{} wired to {wiring}, expected the declaring file",
+                inv.id().0,
+            );
+        }
+    }
 }

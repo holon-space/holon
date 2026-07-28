@@ -17,9 +17,11 @@ use holon_pbt_core::capabilities::RefFocus;
 use holon_pbt_core::capabilities::RefLayout;
 use holon_pbt_core::capabilities::RefViewSelection;
 use holon_pbt_core::capabilities::SutRenderer;
+use holon_pbt_core::composition::Attribution;
 use holon_pbt_core::composition::BridgedInvariant;
 use holon_pbt_core::composition::CapId;
 use holon_pbt_core::composition::CapInvariant;
+use holon_pbt_core::composition::Layer;
 use holon_pbt_core::composition::Needs;
 
 use crate::pbt::invariants::bodies::main_panel_rows_match_focus::InvMainPanelRowsMatchFocus;
@@ -38,5 +40,6 @@ pub fn wire() -> Box<dyn CapInvariant> {
                 CapId::of::<dyn RefBlockTree>(),
             ],
         },
+        Attribution::at(Layer::ViewModel, file!()),
     ))
 }

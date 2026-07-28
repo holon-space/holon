@@ -3,8 +3,7 @@
 //! When the keystone reds, several invariants across the stack usually fail at
 //! once: a store/CRDT divergence re-projects into the matview, which re-derives
 //! into the ViewModel, which re-renders — so the raw `{hard:?}` list buries the
-//! ROOT layer under its downstream echoes. This module maps every catalog
-//! invariant id to the pipeline layer it observes and computes the EARLIEST
+//! ROOT layer under its downstream echoes. This module computes the EARLIEST
 //! (most upstream) layer that diverged, so triage starts at the root instead of
 //! hand-localizing.
 //!
@@ -14,10 +13,10 @@
 //! at layer N forces every layer > N to diverge too, so the min-layer failure
 //! is the one to chase.
 //!
-//! Fail-loud, no guessing: an id with no layer mapping is reported EXPLICITLY
-//! as unmapped rather than silently assigned.
-//! [`tests::every_catalog_id_is_mapped`] holds the map complete against the
-//! live catalog so a new invariant forces an explicit layer decision.
+//! Every id arrives already attributed: a
+//! [`CapInvariant`](holon_pbt_core::composition::CapInvariant) cannot be built
+//! without an [`Attribution`], and `run_selected` records one per registry
+//! entry. There is no map to consult, so there is no unmapped id to guess at.
 //!
 //! COVERAGE, not assumption: "first divergent" only means anything if the
 //! layers beneath were actually observed. Absence from the failing list is NOT
@@ -28,438 +27,12 @@
 //! those dispositions in, and the verdict names every unverified layer as a
 //! blind spot instead of calling it green.
 
-/// The single-edit data-flow pipeline. Declared bottom→top: `derive(Ord)` makes
-/// `StoreCrdt < Projection < … < OrgRoundTrip`, so `min` over the failing
-/// layers is the first-divergent one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Layer {
-    /// Block store, tree structure, Loro/CRDT consolidator (Model.md layers
-    /// 1–2).
-    StoreCrdt,
-    /// Turso base tables + materialized views + SQL projection (Model.md layer
-    /// 3).
-    Projection,
-    /// Reactive pipeline → ViewModel tree, focus, watches, value-fns, editor
-    /// mirror (Model.md layers 4–5, headless).
-    ViewModel,
-    /// Windowed paint: bounds registry, wheel/scroll, displayed widget text,
-    /// draggable handles (Model.md layer 5, windowed).
-    Render,
-    /// Org-file writeback replica: render fixed point, per-page files, page
-    /// headings (Model.md layer 1, the org replica).
-    OrgRoundTrip,
-}
+use holon_pbt_core::attribution::ALL_LAYERS;
+use holon_pbt_core::attribution::Attribution;
+use holon_pbt_core::attribution::Layer;
 
-/// Every pipeline layer, bottom→top. Used to enumerate the layers BELOW the
-/// failing one so each gets an explicit verified/unverified disposition.
-const ALL_LAYERS: &[Layer] = &[
-    Layer::StoreCrdt,
-    Layer::Projection,
-    Layer::ViewModel,
-    Layer::Render,
-    Layer::OrgRoundTrip,
-];
-
-impl Layer {
-    pub fn label(self) -> &'static str {
-        match self {
-            Layer::StoreCrdt => "store/CRDT",
-            Layer::Projection => "matview/SQL",
-            Layer::ViewModel => "viewmodel",
-            Layer::Render => "render",
-            Layer::OrgRoundTrip => "org round-trip",
-        }
-    }
-}
-
-/// `(invariant id, layer, wiring source anchor)`. `None` layer = a
-/// cross-cutting health/budget guard with no single pipeline position (reported
-/// separately, not forced into an ordering). Held complete against the live
-/// catalog by [`tests::every_catalog_id_is_mapped`].
-type Entry = (&'static str, Option<Layer>, &'static str);
-
-const LAYER_MAP: &[Entry] = &[
-    // ── store/CRDT ────────────────────────────────────────────────────────
-    (
-        "inv-no-parent-cycles",
-        Some(Layer::StoreCrdt),
-        "pbt/composed/invariants/no_parent_cycles.rs",
-    ),
-    (
-        "inv-no-orphan-blocks",
-        Some(Layer::StoreCrdt),
-        "pbt/composed/invariants/no_orphan.rs",
-    ),
-    (
-        "inv-source-language-iff-source",
-        Some(Layer::StoreCrdt),
-        "pbt/composed/invariants/source_language.rs",
-    ),
-    (
-        "inv-mark-bounds-within-content",
-        Some(Layer::StoreCrdt),
-        "pbt/composed/invariants/mark_bounds_within_content.rs",
-    ),
-    (
-        "inv-task-state-storage-coherence",
-        Some(Layer::StoreCrdt),
-        "pbt/composed/invariants/task_state_storage_coherence.rs",
-    ),
-    (
-        "inv-audience-never-over-approximates",
-        Some(Layer::StoreCrdt),
-        "pbt/composed/invariants/audience_never_over_approximates.rs",
-    ),
-    (
-        "inv-no-page-under-non-page",
-        Some(Layer::StoreCrdt),
-        "pbt/composed/invariants/no_page_under_non_page.rs",
-    ),
-    (
-        "inv-loro-no-errors",
-        Some(Layer::StoreCrdt),
-        "holon-loro-testing (loro_no_errors)",
-    ),
-    (
-        "inv-loro-children-match-ref",
-        Some(Layer::StoreCrdt),
-        "pbt/composed/invariants/loro_children_match_ref.rs",
-    ),
-    (
-        "inv-blocks-match-ref/loro",
-        Some(Layer::StoreCrdt),
-        "holon-loro-testing (blocks_match/loro)",
-    ),
-    // No cross-instance axis exists in this pipeline (it's single-SUT,
-    // single-edit); both two-instance invariants below read block-set
-    // membership in the receiver's store — the same substrate as the other
-    // StoreCrdt entries, just compared across two instances instead of one —
-    // so they're attributed here rather than inventing a new axis.
-    (
-        "inv-two-instance-convergence",
-        Some(Layer::StoreCrdt),
-        "pbt/invariants/bodies/two_instance_convergence.rs",
-    ),
-    (
-        "inv-boundary-respected",
-        Some(Layer::StoreCrdt),
-        "pbt/invariants/bodies/boundary_respected.rs",
-    ),
-    // ── matview/SQL projection ────────────────────────────────────────────
-    (
-        "inv-live-children-match-ref",
-        Some(Layer::Projection),
-        "pbt/composed/invariants/live_children_match_ref.rs",
-    ),
-    (
-        "inv-journal-one-per-day",
-        Some(Layer::Projection),
-        "pbt/composed/invariants/journal_one_per_day.rs",
-    ),
-    (
-        "inv-matview-consistent-with-recompute",
-        Some(Layer::Projection),
-        "pbt/composed/invariants/matview_recompute_matches.rs",
-    ),
-    (
-        "inv-sidebar-page-tag-preserved",
-        Some(Layer::Projection),
-        "pbt/composed/invariants/sidebar_page_tag_preserved.rs",
-    ),
-    (
-        "inv-blocks-match-ref/block_raw",
-        Some(Layer::Projection),
-        "holon-turso-testing (blocks_match/block_raw)",
-    ),
-    (
-        "inv-blocks-match-ref/matview",
-        Some(Layer::Projection),
-        "holon-turso-testing (blocks_match/matview)",
-    ),
-    (
-        "inv-block-content/block_raw",
-        Some(Layer::Projection),
-        "holon-turso-testing (block_content/block_raw)",
-    ),
-    (
-        "inv-block-content/sql",
-        Some(Layer::Projection),
-        "holon-turso-testing (block_content/sql)",
-    ),
-    (
-        "inv-block-parent/block_raw",
-        Some(Layer::Projection),
-        "holon-turso-testing (block_parent/block_raw)",
-    ),
-    (
-        "inv-advice-matview-matches-ref/matview",
-        Some(Layer::Projection),
-        "holon-turso-testing (advice_matview)",
-    ),
-    (
-        "inv-matview-consistent-with-ref/root_layout",
-        Some(Layer::Projection),
-        "pbt/composed/correspondences.rs (matview_ghost_rows)",
-    ),
-    (
-        "inv-history-no-phantom-rows/block_history",
-        Some(Layer::Projection),
-        "pbt/composed/correspondences.rs (history_no_phantom_rows)",
-    ),
-    (
-        "inv-history-records-all-creates/block_history",
-        Some(Layer::Projection),
-        "pbt/composed/correspondences.rs (history_records_all_creates)",
-    ),
-    (
-        "inv-undo-redo-reference-heal",
-        Some(Layer::Projection),
-        "pbt/composed/invariants/undo_redo_reference_heal.rs",
-    ),
-    // ── viewmodel / reactive pipeline ─────────────────────────────────────
-    (
-        "inv-viewmodel-no-error-widgets",
-        Some(Layer::ViewModel),
-        "pbt/composed/invariants/viewmodel_no_error_widgets.rs",
-    ),
-    (
-        "inv-frontend-engine",
-        Some(Layer::ViewModel),
-        "pbt/composed/invariants/frontend_engine.rs",
-    ),
-    (
-        "inv-frontend-root-not-error",
-        Some(Layer::ViewModel),
-        "pbt/composed/invariants/frontend_root_not_error.rs",
-    ),
-    (
-        "inv-live-tree-matches-fresh",
-        Some(Layer::ViewModel),
-        "pbt/composed/invariants/live_tree_matches_fresh.rs",
-    ),
-    (
-        "inv-main-panel-rows-match-focus",
-        Some(Layer::ViewModel),
-        "pbt/composed/invariants/main_panel_rows_match_focus.rs",
-    ),
-    (
-        "inv-embedded-page-collapsed-lazy",
-        Some(Layer::ViewModel),
-        "pbt/composed/invariants/embedded_page_collapsed_lazy.rs",
-    ),
-    (
-        "inv-pair-view-selection-current-view",
-        Some(Layer::ViewModel),
-        "holon-pbt-core (ViewSelection pair)",
-    ),
-    (
-        "inv-value-fn-provider-identity",
-        Some(Layer::ViewModel),
-        "pbt/composed/invariants/value_fn_provider_identity.rs",
-    ),
-    (
-        "inv-value-fn-provider-arg-variance-13",
-        Some(Layer::ViewModel),
-        "pbt/composed/invariants/value_fn_provider_arg_variance_13.rs",
-    ),
-    (
-        "inv-viewmodel-snapshot",
-        Some(Layer::ViewModel),
-        "pbt/composed/invariants/viewmodel_snapshot.rs",
-    ),
-    (
-        "inv-viewmodel-tree-virtual-slots",
-        Some(Layer::ViewModel),
-        "pbt/composed/invariants/viewmodel_tree_virtual_slots.rs",
-    ),
-    (
-        "inv-display-placement-canonical-inert",
-        Some(Layer::ViewModel),
-        "pbt/composed/invariants/display_placement_canonical_inert.rs",
-    ),
-    (
-        "inv-advice-rows-woven",
-        Some(Layer::ViewModel),
-        "pbt/composed/invariants/advice_rows_woven.rs",
-    ),
-    (
-        "inv-viewmodel-root-matches-render-expr",
-        Some(Layer::ViewModel),
-        "pbt/composed/invariants/viewmodel_root_matches_render_expr.rs",
-    ),
-    (
-        "inv-viewmodel-decompiled-rows-match-query",
-        Some(Layer::ViewModel),
-        "pbt/composed/invariants/viewmodel_decompiled_rows_match_query.rs",
-    ),
-    (
-        "inv-viewmodel-shows-source-when-no-query",
-        Some(Layer::ViewModel),
-        "pbt/composed/invariants/viewmodel_shows_source_when_no_query.rs",
-    ),
-    (
-        "inv-viewmodel-entity-ids-subset-of-data",
-        Some(Layer::ViewModel),
-        "pbt/composed/invariants/viewmodel_entity_ids_subset_of_data.rs",
-    ),
-    (
-        "inv-viewmodel-state-toggle-correct",
-        Some(Layer::ViewModel),
-        "pbt/composed/invariants/viewmodel_state_toggle_correct.rs",
-    ),
-    (
-        "inv-viewmodel-editable-text-triggers",
-        Some(Layer::ViewModel),
-        "pbt/composed/invariants/viewmodel_editable_text_triggers.rs",
-    ),
-    (
-        "inv-displayed-text/viewmodel",
-        Some(Layer::ViewModel),
-        "pbt/composed/invariants/displayed_text.rs (viewmodel)",
-    ),
-    (
-        "inv-active-watches-match-ref",
-        Some(Layer::ViewModel),
-        "holon-pbt-core (Watch pair)",
-    ),
-    (
-        "inv-watch-rows-match-ref",
-        Some(Layer::ViewModel),
-        "pbt/composed/invariants/watch_rows.rs",
-    ),
-    (
-        "inv-navigation-focus",
-        Some(Layer::ViewModel),
-        "holon-pbt-core (Focus pair)",
-    ),
-    (
-        "inv-focus-roots",
-        Some(Layer::ViewModel),
-        "pbt/composed/invariants/focus_roots.rs",
-    ),
-    (
-        "inv-editor-text/mirror",
-        Some(Layer::ViewModel),
-        "pbt/composed/correspondences.rs (active_editor_text)",
-    ),
-    (
-        "inv-editor-caret/mirror",
-        Some(Layer::ViewModel),
-        "pbt/composed/correspondences.rs (active_editor_caret)",
-    ),
-    // ── render / windowed paint ───────────────────────────────────────────
-    (
-        "inv-frontend-bounds-rendered",
-        Some(Layer::Render),
-        "pbt/composed/invariants/frontend_bounds_rendered.rs",
-    ),
-    (
-        "inv-live-block-shell-present",
-        Some(Layer::Render),
-        "pbt/composed/invariants/live_block_shell_present.rs",
-    ),
-    (
-        "inv-inline-row-mount-present",
-        Some(Layer::Render),
-        "pbt/composed/invariants/inline_row_mount_present.rs",
-    ),
-    (
-        "inv-sticky-accordion-spec",
-        Some(Layer::Render),
-        "pbt/composed/invariants/sticky_accordion_spec.rs",
-    ),
-    (
-        "inv-wheel-two-mode-motion-law",
-        Some(Layer::Render),
-        "pbt/composed/invariants/wheel_two_mode_motion_law.rs",
-    ),
-    (
-        "inv-wheel-occlusion-routing",
-        Some(Layer::Render),
-        "pbt/composed/invariants/wheel_occlusion_routing.rs",
-    ),
-    (
-        "inv-displayed-text/widget",
-        Some(Layer::Render),
-        "pbt/composed/invariants/displayed_text.rs (widget)",
-    ),
-    (
-        "inv-paint-text-styling",
-        Some(Layer::Render),
-        "pbt/composed/invariants/paint_text_styling.rs",
-    ),
-    (
-        "inv-window-focus-matches-engine-focus",
-        Some(Layer::Render),
-        "pbt/composed/invariants/window_focus.rs",
-    ),
-    (
-        "inv-frontend-no-error-widgets",
-        Some(Layer::Render),
-        "pbt/composed/invariants/frontend_no_error_widgets.rs",
-    ),
-    (
-        "inv-focus-matches-ref",
-        Some(Layer::Render),
-        "pbt/composed/invariants/focus_matches_ref.rs",
-    ),
-    (
-        "inv-editable-text-has-draggable",
-        Some(Layer::Render),
-        "pbt/composed/invariants/editable_text_has_draggable.rs",
-    ),
-    // ── org round-trip ────────────────────────────────────────────────────
-    (
-        "inv-org-render-fixed-point",
-        Some(Layer::OrgRoundTrip),
-        "pbt/composed/invariants/org_render_fixed_point.rs",
-    ),
-    (
-        "inv-blocks-match-ref/org",
-        Some(Layer::OrgRoundTrip),
-        "pbt/composed/correspondences.rs (org_blocks)",
-    ),
-    (
-        "inv-every-page-has-its-own-file",
-        Some(Layer::OrgRoundTrip),
-        "pbt/composed/invariants/every_page_has_its_own_file.rs",
-    ),
-    (
-        "inv-companion-has-no-child-page-headings",
-        Some(Layer::OrgRoundTrip),
-        "pbt/composed/invariants/companion_has_no_child_page_headings.rs",
-    ),
-    // ── cross-cutting health/budget (no single pipeline position) ─────────
-    (
-        "inv-no-errors",
-        None,
-        "pbt/composed/invariants/no_errors.rs",
-    ),
-    (
-        "inv-no-observed-errors",
-        None,
-        "pbt/composed/invariants/observed_errors.rs",
-    ),
-    (
-        "inv-sql-budget",
-        None,
-        "pbt/composed/invariants/sql_budget.rs",
-    ),
-    (
-        "inv-settle-budget",
-        None,
-        "pbt/composed/invariants/settle_budget.rs",
-    ),
-    (
-        "inv-no-steady-reseed-leak",
-        None,
-        "pbt/composed/invariants/reseed_leak.rs",
-    ),
-];
-
-fn classify(id: &str) -> Option<&'static Entry> {
-    LAYER_MAP.iter().find(|(entry_id, _, _)| *entry_id == id)
-}
+/// One dispositioned id together with the attribution its wiring declared.
+type Attributed = (&'static str, Attribution);
 
 /// Why an invariant produced no evidence about its layer this run. Every
 /// variant means "we did NOT observe this layer", never "this layer is fine".
@@ -473,8 +46,8 @@ enum Unverified {
     /// The body ran AND failed, but `HOLON_PBT_INVARIANTS=<id>:warn|skip`
     /// demoted the failure. The layer is known-red, not green.
     SoftenedOut,
-    /// The id is in `LAYER_MAP` but appears in neither `ran` nor `deselected`
-    /// (e.g. a correspondence sub-id minted only on failure). No evidence.
+    /// No id at this layer appears in the run at all — the registry that ran
+    /// carried none. No evidence.
     NotInRun,
 }
 
@@ -513,11 +86,11 @@ enum LayerCoverage {
 #[derive(Debug, Default, Clone)]
 pub struct RunCoverage {
     /// Ran with a non-`Skipped` verdict: this id genuinely observed its layer.
-    pub measured: Vec<&'static str>,
-    pub skipped: Vec<&'static str>,
-    pub deselected: Vec<&'static str>,
+    pub measured: Vec<Attributed>,
+    pub skipped: Vec<Attributed>,
+    pub deselected: Vec<Attributed>,
     /// Failed, then demoted by `HOLON_PBT_INVARIANTS`.
-    pub softened_out: Vec<&'static str>,
+    pub softened_out: Vec<Attributed>,
 }
 
 impl RunCoverage {
@@ -529,30 +102,47 @@ impl RunCoverage {
         softened_out: Vec<&'static str>,
     ) -> Self {
         use holon_pbt_core::composition::InvariantResult;
+        // `run_selected` records one attribution per registry entry, so every
+        // dispositioned id resolves; a miss is a runner bug, not a missing map.
+        let attribution_of = |id: &'static str| -> Attribution {
+            report
+                .attributions
+                .iter()
+                .find(|(known, _)| known.0 == id)
+                .unwrap_or_else(|| {
+                    panic!("dispositioned id {id} carries no attribution in the run report")
+                })
+                .1
+        };
         let mut measured = Vec::new();
         let mut skipped = Vec::new();
+        let mut softened = Vec::new();
         for (id, result) in &report.ran {
+            let entry = (id.0, attribution_of(id.0));
             if softened_out.contains(&id.0) {
+                softened.push(entry);
                 continue;
             }
             match result {
-                InvariantResult::Skipped(_) => skipped.push(id.0),
-                InvariantResult::Ok | InvariantResult::Fail(_) => measured.push(id.0),
+                InvariantResult::Skipped(_) => skipped.push(entry),
+                InvariantResult::Ok | InvariantResult::Fail(_) => measured.push(entry),
             }
         }
         Self {
             measured,
             skipped,
-            deselected: report.deselected.iter().map(|id| id.0).collect(),
-            softened_out,
+            deselected: report
+                .deselected
+                .iter()
+                .map(|id| (id.0, attribution_of(id.0)))
+                .collect(),
+            softened_out: softened,
         }
     }
 
-    /// Dispositioned ids with no `LAYER_MAP` entry. Non-empty means at least
-    /// one layer's denominator in [`Self::coverage_of`] is understated — the
-    /// verdict discloses them instead of counting one fewer in silence.
-    /// Walked only on the failure path.
-    fn unmapped_coverage_ids(&self) -> Vec<&'static str> {
+    /// The attribution a failing id declared at its wiring site. Every id in
+    /// `hard` came from `report.ran`, so a miss is a caller bug.
+    fn attribution_of(&self, id: &str) -> Attribution {
         [
             &self.measured,
             &self.skipped,
@@ -561,9 +151,9 @@ impl RunCoverage {
         ]
         .into_iter()
         .flatten()
-        .copied()
-        .filter(|id| classify(id).is_none())
-        .collect()
+        .find(|(known, _)| *known == id)
+        .unwrap_or_else(|| panic!("failing id {id} was not dispositioned by this run"))
+        .1
     }
 
     /// How well this run covered one layer. ONE measured invariant is not a
@@ -572,32 +162,16 @@ impl RunCoverage {
     /// its own verdict and never folds into [`LayerCoverage::Verified`].
     ///
     /// The denominator is the layer's ids that this run has ANY disposition for
-    /// (`ran` ∪ `deselected`), and that set IS the full catalog at the layer:
+    /// (`ran` ∪ `deselected`), and that set IS the whole registry at the layer:
     /// `run_selected` (`holon-pbt-core/src/composition.rs`) walks every entry
-    /// of the registry it is handed and pushes each into exactly one of
-    /// `ran` / `deselected` — no early return, no filter, no error path can
-    /// drop one — and both call sites hand it the whole
-    /// `composed_invariant_catalog()`. The per-facet ids
-    /// (`inv-blocks-match-ref/loro`, `inv-block-content/sql`,
-    /// `inv-editor-text/mirror`, …) are NOT excluded here: they are
-    /// independently registered `CapInvariant`s (the catalog is extended with
-    /// the `correspondences::…().wire()` set and the
-    /// `holon_{loro,turso}_testing::pbt_contribution()` sets), so they are
-    /// dispositioned like any other and DO count toward their layer. Catalog
-    /// and `LAYER_MAP` are a bijection — 66 ids, held by
-    /// [`tests::every_catalog_id_is_mapped`] in one direction and
-    /// [`tests::layer_map_has_no_ids_outside_the_catalog`] in the other.
+    /// it is handed, records its attribution, and pushes it into exactly
+    /// one of `ran` / `deselected`. Each id carries its own layer here, so
+    /// no lookup can miss and no denominator can be understated.
     ///
     /// A layer with NO disposition at all is [`Unverified::NotInRun`].
     fn coverage_of(&self, layer: Layer) -> LayerCoverage {
-        // An id absent from `LAYER_MAP` would silently vanish from its layer's
-        // denominator and could let the layer read `Verified` vacuously. That
-        // cannot happen silently: `unmapped_coverage_ids` is checked on the
-        // failure path and disclosed in the verdict.
-        let count = |ids: &[&'static str]| -> usize {
-            ids.iter()
-                .filter(|id| matches!(classify(id), Some((_, Some(l), _)) if *l == layer))
-                .count()
+        let count = |ids: &[Attributed]| -> usize {
+            ids.iter().filter(|(_, a)| a.layer() == Some(layer)).count()
         };
         let measured = count(&self.measured);
         let softened = count(&self.softened_out);
@@ -644,12 +218,11 @@ pub fn first_divergent_verdict(hard: &[(&str, &str)], coverage: &RunCoverage) ->
     }
     let mut layered: Vec<(Layer, &str, &str)> = Vec::new(); // (layer, id, source)
     let mut cross_cutting: Vec<&str> = Vec::new();
-    let mut unmapped: Vec<&str> = Vec::new();
     for (id, _) in hard {
-        match classify(id) {
-            Some((_, Some(layer), source)) => layered.push((*layer, id, source)),
-            Some((_, None, _)) => cross_cutting.push(id),
-            None => unmapped.push(id),
+        let attribution = coverage.attribution_of(id);
+        match attribution.layer() {
+            Some(layer) => layered.push((layer, id, attribution.wiring())),
+            None => cross_cutting.push(id),
         }
     }
 
@@ -737,7 +310,7 @@ pub fn first_divergent_verdict(hard: &[(&str, &str)], coverage: &RunCoverage) ->
     } else {
         out.push_str(
             "first-divergent-layer: none — every diverged invariant is \
-             cross-cutting/unmapped (no pipeline layer)",
+             cross-cutting (no pipeline layer)",
         );
     }
     if !cross_cutting.is_empty() {
@@ -746,48 +319,27 @@ pub fn first_divergent_verdict(hard: &[(&str, &str)], coverage: &RunCoverage) ->
             cross_cutting.join(", "),
         ));
     }
-    if !unmapped.is_empty() {
-        out.push_str(&format!(
-            "\n  UNMAPPED (add to first_divergent::LAYER_MAP): {}",
-            unmapped.join(", "),
-        ));
-    }
-    // Fail-loud on the coverage side too: an id the run dispositioned but
-    // `LAYER_MAP` doesn't know silently shrinks its layer's denominator, which
-    // is exactly how a layer could read "verified" on partial evidence. Say so
-    // rather than quietly counting one fewer.
-    let unmapped_coverage = coverage.unmapped_coverage_ids();
-    if !unmapped_coverage.is_empty() {
-        out.push_str(&format!(
-            "\n  UNMAPPED IN COVERAGE — layer denominators UNDERSTATED, a layer above may read \
-             verified vacuously (add to first_divergent::LAYER_MAP): {}",
-            unmapped_coverage.join(", "),
-        ));
-    }
     out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pbt::composed::composed_invariant_catalog;
 
-    /// Fail-loud completeness: every id the live catalog can emit must have a
-    /// `LAYER_MAP` entry, so a new invariant forces an explicit layer decision
-    /// instead of silently becoming "unmapped" at failure time. Prints the
-    /// missing ids so the fix is a copy-paste.
-    #[test]
-    fn every_catalog_id_is_mapped() {
-        let missing: Vec<&str> = composed_invariant_catalog()
-            .iter()
-            .map(|inv| inv.id().0)
-            .filter(|id| classify(id).is_none())
-            .collect();
-        assert!(
-            missing.is_empty(),
-            "LAYER_MAP is missing entries for live catalog invariants — add a \
-             (id, Some(Layer)|None, source) row for each:\n{missing:#?}",
-        );
+    /// A dispositioned id at a pipeline layer. These tests pin the verdict's
+    /// LOGIC, so the wiring string is a fixture, not a catalog fact.
+    fn at(id: &'static str, layer: Layer) -> Attributed {
+        (id, Attribution::at(layer, "test/wiring.rs"))
+    }
+
+    /// A dispositioned id with a distinguishable wiring pointer, for asserting
+    /// that co-equal failures each get their own.
+    fn wired(id: &'static str, layer: Layer, wiring: &'static str) -> Attributed {
+        (id, Attribution::at(layer, wiring))
+    }
+
+    fn cross(id: &'static str) -> Attributed {
+        (id, Attribution::cross_cutting("test/wiring.rs"))
     }
 
     /// Coverage where every pipeline layer was genuinely measured — one
@@ -795,67 +347,14 @@ mod tests {
     fn fully_measured() -> RunCoverage {
         RunCoverage {
             measured: vec![
-                "inv-no-orphan-blocks",
-                "inv-matview-consistent-with-recompute",
-                "inv-viewmodel-snapshot",
-                "inv-frontend-bounds-rendered",
-                "inv-org-render-fixed-point",
+                at("inv-no-orphan-blocks", Layer::StoreCrdt),
+                at("inv-matview-consistent-with-recompute", Layer::Projection),
+                at("inv-viewmodel-snapshot", Layer::ViewModel),
+                at("inv-frontend-bounds-rendered", Layer::Render),
+                at("inv-org-render-fixed-point", Layer::OrgRoundTrip),
             ],
             ..RunCoverage::default()
         }
-    }
-
-    /// The other half of the bijection. `every_catalog_id_is_mapped` proves
-    /// catalog ⊆ LAYER_MAP; this proves LAYER_MAP ⊆ catalog, which is what
-    /// makes `coverage_of`'s denominator (`ran` ∪ `deselected` at the layer)
-    /// the COMPLETE set of obligations for that layer. A stale row left behind
-    /// after an invariant is deleted would inflate nothing today but would make
-    /// the doc-comment's claim false — catch it here.
-    #[test]
-    fn layer_map_has_no_ids_outside_the_catalog() {
-        let catalog: Vec<&str> = composed_invariant_catalog()
-            .iter()
-            .map(|inv| inv.id().0)
-            .collect();
-        let stale: Vec<&str> = LAYER_MAP
-            .iter()
-            .map(|(id, _, _)| *id)
-            .filter(|id| !catalog.contains(id))
-            .collect();
-        assert!(
-            stale.is_empty(),
-            "LAYER_MAP rows with no live catalog invariant — delete them, they are dead \
-             denominator weight:\n{stale:#?}",
-        );
-    }
-
-    /// A dispositioned id missing from `LAYER_MAP` shrinks its layer's
-    /// denominator. That must never be silent: the layer would read
-    /// `Verified` on incomplete evidence — the exact overclaim this module
-    /// exists to prevent.
-    #[test]
-    fn unmapped_coverage_id_is_disclosed_not_silently_undercounted() {
-        let coverage = RunCoverage {
-            measured: vec!["inv-no-orphan-blocks", "inv-viewmodel-snapshot"],
-            // Not in LAYER_MAP: invisible to every per-layer count.
-            deselected: vec!["inv-brand-new-store-check"],
-            ..RunCoverage::default()
-        };
-        assert_eq!(
-            coverage.unmapped_coverage_ids(),
-            vec!["inv-brand-new-store-check"]
-        );
-        // store/CRDT counts 1/1 and would read Verified…
-        assert_eq!(
-            coverage.coverage_of(Layer::StoreCrdt),
-            LayerCoverage::Verified
-        );
-        let hard = &[("inv-viewmodel-snapshot", "vm drift")][..];
-        let v = first_divergent_verdict(hard, &coverage);
-        // …so the understatement itself is spelled out in the header.
-        assert!(v.contains("UNMAPPED IN COVERAGE"), "got: {v}");
-        assert!(v.contains("denominators UNDERSTATED"), "got: {v}");
-        assert!(v.contains("inv-brand-new-store-check"), "got: {v}");
     }
 
     #[test]
@@ -870,11 +369,15 @@ mod tests {
     #[test]
     fn deselected_lower_layers_are_a_disclosed_blind_spot_not_green() {
         let coverage = RunCoverage {
-            measured: vec!["inv-frontend-bounds-rendered", "inv-viewmodel-snapshot"],
+            measured: vec![
+                at("inv-frontend-bounds-rendered", Layer::Render),
+                at("inv-displayed-text/widget", Layer::Render),
+                at("inv-viewmodel-snapshot", Layer::ViewModel),
+            ],
             deselected: vec![
-                "inv-no-orphan-blocks",
-                "inv-matview-consistent-with-recompute",
-                "inv-org-render-fixed-point",
+                at("inv-no-orphan-blocks", Layer::StoreCrdt),
+                at("inv-matview-consistent-with-recompute", Layer::Projection),
+                at("inv-org-render-fixed-point", Layer::OrgRoundTrip),
             ],
             ..RunCoverage::default()
         };
@@ -904,8 +407,11 @@ mod tests {
     #[test]
     fn softened_out_layer_is_never_reported_green() {
         let coverage = RunCoverage {
-            measured: vec!["inv-matview-consistent-with-recompute"],
-            softened_out: vec!["inv-no-orphan-blocks"],
+            measured: vec![at(
+                "inv-matview-consistent-with-recompute",
+                Layer::Projection,
+            )],
+            softened_out: vec![at("inv-no-orphan-blocks", Layer::StoreCrdt)],
             ..RunCoverage::default()
         };
         let hard = &[("inv-matview-consistent-with-recompute", "row drift")][..];
@@ -942,10 +448,10 @@ mod tests {
     fn skipped_lower_layer_is_unverified() {
         let coverage = RunCoverage {
             measured: vec![
-                "inv-viewmodel-snapshot",
-                "inv-matview-consistent-with-recompute",
+                at("inv-viewmodel-snapshot", Layer::ViewModel),
+                at("inv-matview-consistent-with-recompute", Layer::Projection),
             ],
-            skipped: vec!["inv-no-orphan-blocks"],
+            skipped: vec![at("inv-no-orphan-blocks", Layer::StoreCrdt)],
             ..RunCoverage::default()
         };
         let hard = &[("inv-viewmodel-snapshot", "vm drift")][..];
@@ -957,12 +463,12 @@ mod tests {
         assert!(v.contains("verified green below: matview/SQL"), "got: {v}");
     }
 
-    /// A mapped layer that appears in neither `ran` nor `deselected` yields no
+    /// A layer that appears in neither `ran` nor `deselected` yields no
     /// evidence at all — disclosed, never assumed green.
     #[test]
     fn layer_absent_from_the_run_report_is_unverified() {
         let coverage = RunCoverage {
-            measured: vec!["inv-viewmodel-snapshot"],
+            measured: vec![at("inv-viewmodel-snapshot", Layer::ViewModel)],
             ..RunCoverage::default()
         };
         let hard = &[("inv-viewmodel-snapshot", "vm drift")][..];
@@ -979,7 +485,8 @@ mod tests {
 
     /// `RunCoverage::from_report` is the only builder the call sites use:
     /// `Ok`/`Fail` count as measured, `Skipped` does not, softened ids move out
-    /// of `measured` into their own bucket.
+    /// of `measured` into their own bucket — each carrying the attribution the
+    /// runner recorded for it.
     #[test]
     fn coverage_from_report_classifies_every_disposition() {
         use holon_pbt_core::composition::InvariantId;
@@ -1002,18 +509,44 @@ mod tests {
                 ),
             ],
             deselected: vec![InvariantId("inv-frontend-bounds-rendered")],
+            attributions: vec![
+                (
+                    InvariantId("inv-viewmodel-snapshot"),
+                    Attribution::at(Layer::ViewModel, "test/wiring.rs"),
+                ),
+                (
+                    InvariantId("inv-matview-consistent-with-recompute"),
+                    Attribution::at(Layer::Projection, "test/wiring.rs"),
+                ),
+                (
+                    InvariantId("inv-org-render-fixed-point"),
+                    Attribution::at(Layer::OrgRoundTrip, "test/wiring.rs"),
+                ),
+                (
+                    InvariantId("inv-no-orphan-blocks"),
+                    Attribution::at(Layer::StoreCrdt, "test/wiring.rs"),
+                ),
+                (
+                    InvariantId("inv-frontend-bounds-rendered"),
+                    Attribution::at(Layer::Render, "test/wiring.rs"),
+                ),
+            ],
         };
         let coverage = RunCoverage::from_report(&report, vec!["inv-no-orphan-blocks"]);
+        let ids = |b: &[Attributed]| -> Vec<&'static str> { b.iter().map(|(id, _)| *id).collect() };
         assert_eq!(
-            coverage.measured,
+            ids(&coverage.measured),
             vec![
                 "inv-viewmodel-snapshot",
                 "inv-matview-consistent-with-recompute"
             ]
         );
-        assert_eq!(coverage.skipped, vec!["inv-org-render-fixed-point"]);
-        assert_eq!(coverage.deselected, vec!["inv-frontend-bounds-rendered"]);
-        assert_eq!(coverage.softened_out, vec!["inv-no-orphan-blocks"]);
+        assert_eq!(ids(&coverage.skipped), vec!["inv-org-render-fixed-point"]);
+        assert_eq!(
+            ids(&coverage.deselected),
+            vec!["inv-frontend-bounds-rendered"]
+        );
+        assert_eq!(ids(&coverage.softened_out), vec!["inv-no-orphan-blocks"]);
         assert_eq!(
             coverage.coverage_of(Layer::ViewModel),
             LayerCoverage::Verified
@@ -1041,13 +574,14 @@ mod tests {
         let coverage = RunCoverage {
             measured: vec![
                 // store/CRDT: 1 of 2 dispositioned ids measured…
-                "inv-no-orphan-blocks",
-                "inv-matview-consistent-with-recompute",
-                "inv-viewmodel-snapshot",
+                at("inv-no-orphan-blocks", Layer::StoreCrdt),
+                at("inv-matview-consistent-with-recompute", Layer::Projection),
+                at("inv-viewmodel-snapshot", Layer::ViewModel),
+                at("inv-frontend-bounds-rendered", Layer::Render),
             ],
             // …the other one — the one that would have caught the divergence —
             // never ran.
-            deselected: vec!["inv-no-parent-cycles"],
+            deselected: vec![at("inv-no-parent-cycles", Layer::StoreCrdt)],
             ..RunCoverage::default()
         };
         assert_eq!(
@@ -1083,31 +617,63 @@ mod tests {
     fn picks_the_most_upstream_layer() {
         // A store divergence echoing up into projection + viewmodel: the verdict
         // must name store/CRDT (the root), not the downstream echoes.
+        let coverage = RunCoverage {
+            measured: vec![
+                wired(
+                    "inv-no-orphan-blocks",
+                    Layer::StoreCrdt,
+                    "crates/holon-integration-tests/src/pbt/composed/invariants/no_orphan.rs",
+                ),
+                at("inv-matview-consistent-with-recompute", Layer::Projection),
+                at("inv-viewmodel-entity-ids-subset-of-data", Layer::ViewModel),
+            ],
+            ..RunCoverage::default()
+        };
         let hard = &[
             ("inv-viewmodel-entity-ids-subset-of-data", "downstream echo"),
             ("inv-matview-consistent-with-recompute", "projection echo"),
             ("inv-no-orphan-blocks", "the root divergence"),
         ][..];
-        let v = first_divergent_verdict(hard, &fully_measured());
+        let v = first_divergent_verdict(hard, &coverage);
         assert!(
             v.starts_with("first-divergent-layer: store/CRDT (inv-no-orphan-blocks)"),
             "got: {v}"
         );
         assert!(v.contains("nothing below it"), "got: {v}");
         assert!(
-            v.contains("↳ wiring: pbt/composed/invariants/no_orphan.rs"),
+            v.contains(
+                "↳ wiring: crates/holon-integration-tests/src/pbt/composed/invariants/\
+                 no_orphan.rs"
+            ),
             "got: {v}"
         );
     }
 
     #[test]
     fn groups_co_equal_layer_failures_and_discloses_cross_cutting() {
+        let coverage = RunCoverage {
+            measured: vec![
+                at("inv-no-orphan-blocks", Layer::StoreCrdt),
+                wired(
+                    "inv-matview-consistent-with-recompute",
+                    Layer::Projection,
+                    "matview_recompute_matches.rs",
+                ),
+                wired(
+                    "inv-block-content/sql",
+                    Layer::Projection,
+                    "turso/correspondences.rs",
+                ),
+                cross("inv-no-errors"),
+            ],
+            ..RunCoverage::default()
+        };
         let hard = &[
             ("inv-matview-consistent-with-recompute", "m1"),
             ("inv-block-content/sql", "m2"),
             ("inv-no-errors", "a swallowed error"),
         ][..];
-        let v = first_divergent_verdict(hard, &fully_measured());
+        let v = first_divergent_verdict(hard, &coverage);
         assert!(
             v.starts_with("first-divergent-layer: matview/SQL ("),
             "got: {v}"
@@ -1115,10 +681,7 @@ mod tests {
         // Every co-equal min-layer id gets its own wiring pointer, not just the
         // first one found.
         assert!(
-            v.contains(
-                "↳ wiring: pbt/composed/invariants/matview_recompute_matches.rs; \
-                 holon-turso-testing (block_content/sql)"
-            ),
+            v.contains("↳ wiring: matview_recompute_matches.rs; turso/correspondences.rs"),
             "got: {v}"
         );
         assert!(
@@ -1134,20 +697,16 @@ mod tests {
 
     #[test]
     fn only_cross_cutting_reports_no_pipeline_layer() {
+        let coverage = RunCoverage {
+            measured: vec![cross("inv-no-errors")],
+            ..RunCoverage::default()
+        };
         let hard = &[("inv-no-errors", "x")][..];
-        let v = first_divergent_verdict(hard, &fully_measured());
+        let v = first_divergent_verdict(hard, &coverage);
         assert!(v.starts_with("first-divergent-layer: none"), "got: {v}");
         assert!(
             v.contains("cross-cutting (no pipeline layer): inv-no-errors"),
             "got: {v}"
         );
-    }
-
-    #[test]
-    fn unmapped_id_is_disclosed_not_guessed() {
-        let hard = &[("inv-brand-new-not-in-map", "x")][..];
-        let v = first_divergent_verdict(hard, &fully_measured());
-        assert!(v.contains("UNMAPPED"), "got: {v}");
-        assert!(v.contains("inv-brand-new-not-in-map"), "got: {v}");
     }
 }

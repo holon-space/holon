@@ -16,9 +16,11 @@ use holon_pbt_core::capabilities::RefBlockTree;
 use holon_pbt_core::capabilities::RefEditorMirror;
 use holon_pbt_core::capabilities::SutLayout;
 use holon_pbt_core::capabilities::SutRenderer;
+use holon_pbt_core::composition::Attribution;
 use holon_pbt_core::composition::BridgedInvariant;
 use holon_pbt_core::composition::CapId;
 use holon_pbt_core::composition::CapInvariant;
+use holon_pbt_core::composition::Layer;
 use holon_pbt_core::composition::Needs;
 
 use crate::pbt::invariants::bodies::displayed_text::InvDisplayedTextViewModel;
@@ -37,6 +39,7 @@ pub fn wire_widget() -> Box<dyn CapInvariant> {
                 CapId::of::<dyn RefBlockTree>(),
             ],
         },
+        Attribution::at(Layer::Render, file!()),
     ))
 }
 
@@ -53,5 +56,6 @@ pub fn wire_viewmodel() -> Box<dyn CapInvariant> {
                 CapId::of::<dyn RefBlockTree>(),
             ],
         },
+        Attribution::at(Layer::ViewModel, file!()),
     ))
 }

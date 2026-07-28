@@ -55,6 +55,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use crate::RunMode;
+use crate::attribution::Attribution;
 use crate::composition::CapInvariant;
 use crate::composition::CapMap;
 use crate::composition::Needs;
@@ -118,6 +119,9 @@ pub struct StoreProjection<O: Observable> {
     pub store: &'static str,
     /// Cap selection — same `Needs` data hand-written wires declare.
     pub needs: Needs,
+    /// Per-FACET pipeline position: one observable's stores sit at different
+    /// layers (`/loro` = store, `/matview` = projection, `/org` = round-trip).
+    pub attribution: Attribution,
     pub extract: ExtractFn<O::Value>,
     pub compare: NamedCompare<O::Value>,
     pub converge: Converge,
@@ -171,6 +175,10 @@ impl<O: Observable> CapInvariant for StoreInvariant<O> {
 
     fn needs(&self) -> Needs {
         self.store.needs.clone()
+    }
+
+    fn attribution(&self) -> Attribution {
+        self.store.attribution
     }
 
     fn check_boxed<'a>(

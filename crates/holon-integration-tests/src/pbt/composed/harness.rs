@@ -831,7 +831,8 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
         // (most upstream) layer + its wiring source to start triage at the root.
         // Kept AFTER the unchanged `reconciled composed sequence diverged from
         // the oracle` prefix so `bisect_driver::reproduction_signature()` still
-        // matches (substring). Fail-loud: an unmapped id is disclosed, not guessed.
+        // matches (substring). Every id arrives attributed by its wiring, so no
+        // layer is ever guessed.
         // Built ONLY on the failure path — a green tick pays nothing (the walk
         // is inside `inv-sql-budget`'s wall window).
         if !hard.is_empty() {

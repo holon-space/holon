@@ -16,10 +16,12 @@ use holon_pbt_core::RunMode;
 use holon_pbt_core::capabilities::RefTaskState;
 use holon_pbt_core::capabilities::SutLoroTaskState;
 use holon_pbt_core::capabilities::SutSqlProjection;
+use holon_pbt_core::composition::Attribution;
 use holon_pbt_core::composition::BridgedInvariant;
 use holon_pbt_core::composition::CapId;
 use holon_pbt_core::composition::CapInvariant;
 use holon_pbt_core::composition::CapMap;
+use holon_pbt_core::composition::Layer;
 use holon_pbt_core::composition::Needs;
 
 use crate::pbt::invariants::bodies::task_state_storage_coherence::InvTaskStateStorageCoherence;
@@ -38,6 +40,7 @@ pub fn wire() -> Box<dyn CapInvariant> {
             // to `RefTaskState`, so the ref cap is a real selection dependency.
             ref_present: vec![CapId::of::<dyn RefTaskState>()],
         },
+        Attribution::at(Layer::StoreCrdt, file!()),
     ))
 }
 

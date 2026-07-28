@@ -37,6 +37,7 @@ extern crate self as holon_pbt_core;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
+pub mod attribution;
 pub mod bisect;
 pub mod block_compare;
 pub mod budget;

@@ -10,9 +10,11 @@ use holon_pbt_core::capabilities::RefLayout;
 use holon_pbt_core::capabilities::RefToggle;
 use holon_pbt_core::capabilities::RefViewSelection;
 use holon_pbt_core::capabilities::SutRenderer;
+use holon_pbt_core::composition::Attribution;
 use holon_pbt_core::composition::BridgedInvariant;
 use holon_pbt_core::composition::CapId;
 use holon_pbt_core::composition::CapInvariant;
+use holon_pbt_core::composition::Layer;
 use holon_pbt_core::composition::Needs;
 
 use crate::pbt::invariants::bodies::embedded_page_collapsed_lazy::InvEmbeddedPageCollapsedLazy;
@@ -32,5 +34,6 @@ pub fn wire() -> Box<dyn CapInvariant> {
                 CapId::of::<dyn RefToggle>(),
             ],
         },
+        Attribution::at(Layer::ViewModel, file!()),
     ))
 }

@@ -30,9 +30,11 @@ use holon_api::Block;
 use holon_pbt_core::block_compare::compare_block_fields;
 use holon_pbt_core::capabilities::RefBackend;
 use holon_pbt_core::capabilities::SutLoroLog;
+use holon_pbt_core::composition::Attribution;
 use holon_pbt_core::composition::CapId;
 use holon_pbt_core::composition::CapInvariant;
 use holon_pbt_core::composition::CapMap;
+use holon_pbt_core::composition::Layer;
 use holon_pbt_core::composition::Needs;
 use holon_pbt_core::correspondence::Converge;
 use holon_pbt_core::correspondence::Correspondence;
@@ -48,6 +50,7 @@ pub fn loro_blocks_correspondence() -> Correspondence<NonSeedBlocks> {
         ref_project: ref_non_seed_blocks,
         stores: vec![StoreProjection {
             id: "inv-blocks-match-ref/loro",
+            attribution: Attribution::at(Layer::StoreCrdt, file!()),
             store: "loro",
             needs: Needs {
                 sut_present: vec![CapId::of::<dyn SutLoroLog>()],

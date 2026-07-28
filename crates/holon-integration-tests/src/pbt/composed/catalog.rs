@@ -12,7 +12,8 @@
 //!
 //! **Adding an invariant = add its module under `invariants/` and append one
 //! `wire()` line here.** Nothing else changes; every slice picks it up for
-//! free.
+//! free. Its first-divergent layer travels with the `wire()`'s `Attribution`,
+//! so no central table needs touching.
 //!
 //! @pbt kind infra
 //! @pbt covers invariant-catalog — the shared CapInvariant catalog assembled as

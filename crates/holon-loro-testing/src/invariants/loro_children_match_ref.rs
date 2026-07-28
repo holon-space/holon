@@ -25,9 +25,11 @@ use holon_pbt_core::RunMode;
 use holon_pbt_core::capabilities::EntityUri;
 use holon_pbt_core::capabilities::RefBlockTree;
 use holon_pbt_core::capabilities::SutLoroLog;
+use holon_pbt_core::composition::Attribution;
 use holon_pbt_core::composition::BridgedInvariant;
 use holon_pbt_core::composition::CapId;
 use holon_pbt_core::composition::CapInvariant;
+use holon_pbt_core::composition::Layer;
 use holon_pbt_core::composition::Needs;
 use holon_pbt_core::invariant::Invariant;
 use holon_pbt_core::invariant::InvariantId;
@@ -108,5 +110,6 @@ pub fn wire() -> Box<dyn CapInvariant> {
             sut_absent: Vec::new(),
             ref_present: vec![CapId::of::<dyn RefBlockTree>()],
         },
+        Attribution::at(Layer::StoreCrdt, file!()),
     ))
 }

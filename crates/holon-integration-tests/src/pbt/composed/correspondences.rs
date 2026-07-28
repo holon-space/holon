@@ -21,8 +21,10 @@ use holon_pbt_core::capabilities::SutEditorMirrorRead;
 use holon_pbt_core::capabilities::SutHistory;
 use holon_pbt_core::capabilities::SutOrgRead;
 use holon_pbt_core::capabilities::SutRenderer;
+use holon_pbt_core::composition::Attribution;
 use holon_pbt_core::composition::CapId;
 use holon_pbt_core::composition::CapMap;
+use holon_pbt_core::composition::Layer;
 use holon_pbt_core::composition::Needs;
 use holon_pbt_core::correspondence::Converge;
 use holon_pbt_core::correspondence::Correspondence;
@@ -68,6 +70,7 @@ pub fn active_editor_text() -> Correspondence<ActiveEditorText> {
         ref_project: ref_active_editor_text,
         stores: vec![StoreProjection {
             id: "inv-editor-text/mirror",
+            attribution: Attribution::at(Layer::ViewModel, file!()),
             store: "mirror",
             needs: Needs {
                 sut_present: vec![CapId::of::<dyn SutEditorMirrorRead>()],
@@ -150,6 +153,7 @@ pub fn active_editor_caret() -> Correspondence<ActiveEditorCaret> {
         ref_project: ref_active_editor_caret,
         stores: vec![StoreProjection {
             id: "inv-editor-caret/mirror",
+            attribution: Attribution::at(Layer::ViewModel, file!()),
             store: "mirror",
             needs: Needs {
                 sut_present: vec![CapId::of::<dyn SutEditorMirrorRead>()],
@@ -229,6 +233,7 @@ pub fn org_blocks() -> Correspondence<OrgBlocks> {
         ref_project: ref_org_blocks,
         stores: vec![StoreProjection {
             id: "inv-blocks-match-ref/org",
+            attribution: Attribution::at(Layer::OrgRoundTrip, file!()),
             store: "org",
             needs: Needs {
                 sut_present: vec![CapId::of::<dyn SutOrgRead>()],
@@ -310,6 +315,7 @@ pub fn matview_ghost_rows() -> Correspondence<MatviewGhostRows> {
         ref_project: ref_block_universe,
         stores: vec![StoreProjection {
             id: "inv-matview-consistent-with-ref/root_layout",
+            attribution: Attribution::at(Layer::Projection, file!()),
             store: "root_layout",
             needs: Needs {
                 sut_present: vec![CapId::of::<dyn SutRenderer>()],
@@ -399,6 +405,7 @@ pub fn history_no_phantom_rows() -> Correspondence<HistoryNoPhantomRows> {
         ref_project: ref_history_universe,
         stores: vec![StoreProjection {
             id: "inv-history-no-phantom-rows/block_history",
+            attribution: Attribution::at(Layer::Projection, file!()),
             store: "block_history",
             needs: Needs {
                 sut_present: vec![CapId::of::<dyn SutHistory>()],
@@ -479,6 +486,7 @@ pub fn history_records_all_creates() -> Correspondence<HistoryOpGroupFloor> {
         ref_project: ref_min_op_groups,
         stores: vec![StoreProjection {
             id: "inv-history-records-all-creates/block_history",
+            attribution: Attribution::at(Layer::Projection, file!()),
             store: "block_history",
             needs: Needs {
                 sut_present: vec![CapId::of::<dyn SutHistory>()],

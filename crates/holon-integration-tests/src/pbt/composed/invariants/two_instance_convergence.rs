@@ -9,9 +9,11 @@ use holon_pbt_core::RunMode;
 use holon_pbt_core::capabilities::RefSharedView;
 use holon_pbt_core::capabilities::SutReceiverBackend;
 use holon_pbt_core::capabilities::SutTwoInstance;
+use holon_pbt_core::composition::Attribution;
 use holon_pbt_core::composition::BridgedInvariant;
 use holon_pbt_core::composition::CapId;
 use holon_pbt_core::composition::CapInvariant;
+use holon_pbt_core::composition::Layer;
 use holon_pbt_core::composition::Needs;
 
 use crate::pbt::invariants::bodies::two_instance_convergence::InvTwoInstanceConvergence;
@@ -28,5 +30,6 @@ pub fn wire() -> Box<dyn CapInvariant> {
             sut_absent: Vec::new(),
             ref_present: vec![CapId::of::<dyn RefSharedView>()],
         },
+        Attribution::at(Layer::StoreCrdt, file!()),
     ))
 }

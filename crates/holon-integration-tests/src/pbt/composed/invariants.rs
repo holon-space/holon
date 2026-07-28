@@ -8,7 +8,9 @@
 //! 1. Pick the registry body (`crate::pbt::invariants::bodies::*`) and the caps
 //!    its `where` bounds require.
 //! 2. Copy the nearest existing module here (e.g. `no_orphan` for a `SutBackend
-//!    + RefBackend` body) and adjust the `wire()` `Needs`.
+//!    + RefBackend` body) and adjust the `wire()` `Needs` and `Attribution` —
+//!    the pipeline layer this invariant OBSERVES (or `cross_cutting` for a
+//!    health/budget guard), always with `file!()` as the wiring pointer.
 //! 3. Write the test triad against `crate::pbt::composed::fixtures::*`: a
 //!    positive (cap wired ⇒ selected + passes), a negative-containment (cap
 //!    absent ⇒ in `report.deselected`, not faked), and a catch (inject a

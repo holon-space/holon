@@ -72,6 +72,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+pub use crate::attribution::Attribution;
+pub use crate::attribution::Layer;
 pub use crate::invariant::InvariantId;
 pub use crate::invariant::InvariantResult;
 pub use crate::invariant::RunMode;
@@ -375,6 +377,9 @@ pub trait CapInvariant {
     fn id(&self) -> InvariantId;
     fn mode(&self) -> RunMode;
     fn needs(&self) -> Needs;
+    /// Pipeline position + wiring pointer for the first-divergent verdict. No
+    /// default body: an unattributed invariant must not compile.
+    fn attribution(&self) -> Attribution;
     fn check_boxed<'a>(
         &'a self,
         sut: &'a CapMap,
@@ -386,9 +391,13 @@ pub trait CapInvariant {
 /// (selection) AND the in-body lookups, so they cannot drift. `sut_absent`
 /// expresses a degraded-mode twin (runs only when a cap is *not* wired).
 ///
+/// `attribution` is required and takes `file!()` from the invocation site, so
+/// the wiring pointer names the declaring file.
+///
 /// ```ignore
 /// cap_invariant! {
 ///     name: InvNoOrphanBlocks, id: "inv-no-orphan-blocks", mode: Strict,
+///     attribution: Attribution::at(Layer::StoreCrdt, file!()),
 ///     sut: { backend: dyn SutBackend },
 ///     sut_absent: [],
 ///     ref: { tree: dyn RefBlockTree },
@@ -401,6 +410,7 @@ macro_rules! cap_invariant {
         name: $name:ident,
         id: $id:literal,
         mode: $mode:ident,
+        attribution: $attribution:expr,
         sut: { $($sbind:ident : dyn $scap:path),* $(,)? },
         sut_absent: [ $(dyn $acap:path),* $(,)? ],
         ref: { $($rbind:ident : dyn $rcap:path),* $(,)? },
@@ -422,6 +432,9 @@ macro_rules! cap_invariant {
                     sut_absent:  vec![ $( $crate::composition::CapId::of::<dyn $acap>() ),* ],
                     ref_present: vec![ $( $crate::composition::CapId::of::<dyn $rcap>() ),* ],
                 }
+            }
+            fn attribution(&self) -> $crate::composition::Attribution {
+                $attribution
             }
             #[allow(unused_variables)] // `sut`/`ref_` may be unused when a side declares no caps
             fn check_boxed<'a>(
@@ -451,6 +464,9 @@ macro_rules! cap_invariant {
 pub struct RunReport {
     pub ran: Vec<(InvariantId, InvariantResult)>,
     pub deselected: Vec<InvariantId>,
+    /// Every registry entry's attribution, ran or deselected — the COMPLETE
+    /// per-layer denominator the first-divergent verdict counts against.
+    pub attributions: Vec<(InvariantId, Attribution)>,
 }
 
 impl RunReport {
@@ -480,6 +496,7 @@ pub async fn run_selected(
     let have_ref = ref_.cap_set();
     let mut report = RunReport::default();
     for inv in registry {
+        report.attributions.push((inv.id(), inv.attribution()));
         if inv.needs().selected_against(&have_sut, &have_ref) {
             let result = inv.check_boxed(sut, ref_).await;
             report.ran.push((inv.id(), result));
@@ -487,6 +504,13 @@ pub async fn run_selected(
             report.deselected.push(inv.id());
         }
     }
+    // Structural backstop: a partial `attributions` would understate a layer's
+    // denominator and let it read verified on incomplete evidence.
+    debug_assert_eq!(
+        report.attributions.len(),
+        registry.len(),
+        "every registry entry must contribute its attribution",
+    );
     report
 }
 
@@ -511,11 +535,19 @@ pub struct BridgedInvariant<I> {
     inv: I,
     mode: RunMode,
     needs: Needs,
+    attribution: Attribution,
 }
 
 impl<I> BridgedInvariant<I> {
-    pub fn new(inv: I, mode: RunMode, needs: Needs) -> Self {
-        Self { inv, mode, needs }
+    /// `attribution` takes `file!()` from the CALLER so the wiring pointer
+    /// names the wire site, not this constructor.
+    pub fn new(inv: I, mode: RunMode, needs: Needs, attribution: Attribution) -> Self {
+        Self {
+            inv,
+            mode,
+            needs,
+            attribution,
+        }
     }
 }
 
@@ -531,6 +563,9 @@ where
     }
     fn needs(&self) -> Needs {
         self.needs.clone()
+    }
+    fn attribution(&self) -> Attribution {
+        self.attribution
     }
     fn check_boxed<'a>(
         &'a self,
@@ -753,6 +788,7 @@ mod poc {
     // the body in `Box::pin(async move { … })` so cap reads can `.await`.
     cap_invariant! {
         name: InvNoOrphanBlocks, id: "inv-no-orphan-blocks", mode: Strict,
+        attribution: Attribution::at(Layer::StoreCrdt, file!()),
         sut: { backend: dyn SutBackend },
         sut_absent: [],
         ref: { tree: dyn RefBlockTree },
@@ -770,6 +806,7 @@ mod poc {
 
     cap_invariant! {
         name: InvEditorCaretMatchesRef, id: "inv-editor-caret-matches-ref", mode: Strict,
+        attribution: Attribution::at(Layer::ViewModel, file!()),
         sut: { editor: dyn SutEditorMirror },
         sut_absent: [],
         ref: { r_editor: dyn RefEditor },
@@ -785,6 +822,7 @@ mod poc {
     // Full-mode render check: needs BOTH a renderer AND a query engine.
     cap_invariant! {
         name: InvDecompiledRowsRendered, id: "inv-decompiled-rows-rendered", mode: Strict,
+        attribution: Attribution::at(Layer::ViewModel, file!()),
         sut: { render: dyn SutRender, query: dyn SutQueryResults },
         sut_absent: [],
         ref: { },
@@ -802,6 +840,7 @@ mod poc {
     // the negative-selection primitive the Ref audit said we need.
     cap_invariant! {
         name: InvShowsSourceWhenNoQuery, id: "inv-shows-source-when-no-query", mode: Strict,
+        attribution: Attribution::at(Layer::ViewModel, file!()),
         sut: { render: dyn SutRender },
         sut_absent: [dyn SutQueryResults],
         ref: { },
