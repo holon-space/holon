@@ -2965,7 +2965,8 @@ pub trait RefPageIdentity {
 pub struct SyncRoundWitness {
     /// Rounds driven so far on this SUT (monotonic).
     pub rounds_run: u64,
-    /// Containers the last round walked. `0` means the orchestrator did nothing.
+    /// Containers the last round walked. `0` means the orchestrator did
+    /// nothing.
     pub containers_visited: usize,
     pub pushed: usize,
     pub imported: usize,
@@ -3044,7 +3045,8 @@ pub trait SutReceiverBackend {
     async fn receiver_boot_block_ids(&self) -> BTreeSet<EntityUri>;
 
     /// The owner's ORG-carried block ids — the identity landing-zone reference
-    /// for the receiver's org half (whole-vault self-device sync maps paths 1:1).
+    /// for the receiver's org half (whole-vault self-device sync maps paths
+    /// 1:1).
     async fn owner_org_block_ids(&self) -> BTreeSet<EntityUri>;
 
     /// CRDT-level convergence: do the two instances' documents reach the same

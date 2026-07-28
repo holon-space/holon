@@ -84,8 +84,8 @@ fn is_org_relevant(path: &Path, gitignore: &Gitignore) -> bool {
 /// acts on, or `None` when it is filtered (non-`.org`, gitignored). This is the
 /// single source of truth for the bridge's kind→event routing — exposed so a
 /// test can drive SYNTHETIC notify-shaped changes through the SAME routing the
-/// production bridge uses (the ENVIRONMENT-parity rung for the pairing fallback,
-/// see docs/Testing/BugFunnel.md 2026-07-27).
+/// production bridge uses (the ENVIRONMENT-parity rung for the pairing
+/// fallback, see docs/Testing/BugFunnel.md 2026-07-27).
 ///
 /// `is_relevant` decides whether a path is one the org side tracks; the bridge
 /// passes a gitignore-aware predicate, a focused test may pass an extension
@@ -98,7 +98,11 @@ pub fn classify_change_to_event(
         FileChangeKind::Rename { from } => {
             let to = change.path;
             if is_relevant(&to) {
-                debug!("File rename detected: {} -> {}", from.display(), to.display());
+                debug!(
+                    "File rename detected: {} -> {}",
+                    from.display(),
+                    to.display()
+                );
                 Some(FileEvent::Renamed { from, to })
             } else if is_relevant(&from) {
                 // Renamed OUT of org-space (`.org` -> `.txt`): the org side sees
@@ -130,10 +134,10 @@ pub fn classify_change_to_event(
 ///
 /// The channel carries `(Option<FileEvent>, seq)`: `Some(event)` for
 /// org-relevant changes the sync loop must ingest, `None` for filtered ones
-/// (non-`.org`, gitignored). Filtered events still flow through the SAME channel
-/// so the consumer can advance its processed-seq watermark strictly in delivery
-/// order — advancing for a filtered event from the bridge directly could
-/// overtake an unprocessed earlier forwarded event.
+/// (non-`.org`, gitignored). Filtered events still flow through the SAME
+/// channel so the consumer can advance its processed-seq watermark strictly in
+/// delivery order — advancing for a filtered event from the bridge directly
+/// could overtake an unprocessed earlier forwarded event.
 pub struct OrgFileWatcher {
     change_rx: mpsc::UnboundedReceiver<(Option<FileEvent>, u64)>,
 }
@@ -155,9 +159,8 @@ impl OrgFileWatcher {
                 match source_rx.recv().await {
                     Ok(change) => {
                         let seq = change.seq;
-                        let msg = classify_change_to_event(change, &|p| {
-                            is_org_relevant(p, &gitignore)
-                        });
+                        let msg =
+                            classify_change_to_event(change, &|p| is_org_relevant(p, &gitignore));
                         if change_tx.send((msg, seq)).is_err() {
                             // Receiver dropped — sync loop is gone.
                             return;

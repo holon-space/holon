@@ -18,10 +18,10 @@
 //!         (mtime, content) changes — the user fixing the file un-quarantines
 //!         it, and a clean re-ingest clears the quarantine loudly.
 //!
-//! `InMemoryFileSystem` is used deliberately: its `scan_directory` returns files
-//! in sorted (`BTreeMap`) order, so the poison (`a_poison.org`) is GUARANTEED to
-//! be iterated before the healthy file (`z_healthy.org`) — the exact ordering
-//! that made the old `?`-abort starve the healthy file.
+//! `InMemoryFileSystem` is used deliberately: its `scan_directory` returns
+//! files in sorted (`BTreeMap`) order, so the poison (`a_poison.org`) is
+//! GUARANTEED to be iterated before the healthy file (`z_healthy.org`) — the
+//! exact ordering that made the old `?`-abort starve the healthy file.
 
 #![cfg(feature = "di")]
 
@@ -179,7 +179,10 @@ impl DocumentManager for FaultDocManager {
             .cloned())
     }
     async fn create(&self, doc: Block) -> anyhow::Result<Block> {
-        self.by_id.lock().unwrap().insert(doc.id.clone(), doc.clone());
+        self.by_id
+            .lock()
+            .unwrap()
+            .insert(doc.id.clone(), doc.clone());
         Ok(doc)
     }
     async fn create_forcing_id(&self, doc: Block) -> anyhow::Result<Block> {
@@ -193,11 +196,20 @@ impl DocumentManager for FaultDocManager {
                 );
             }
         }
-        self.by_id.lock().unwrap().insert(doc.id.clone(), doc.clone());
+        self.by_id
+            .lock()
+            .unwrap()
+            .insert(doc.id.clone(), doc.clone());
         Ok(doc)
     }
     async fn get_by_id(&self, id: &EntityUri) -> anyhow::Result<Option<Block>> {
-        Ok(self.by_id.lock().unwrap().get(id).filter(|b| b.is_page()).cloned())
+        Ok(self
+            .by_id
+            .lock()
+            .unwrap()
+            .get(id)
+            .filter(|b| b.is_page())
+            .cloned())
     }
     async fn update_metadata(&self, _: &Block) -> anyhow::Result<()> {
         Ok(())
@@ -211,10 +223,7 @@ async fn write_file(fs: &InMemoryFileSystem, rel: &str, content: &str) {
     fs.write(&path, content.as_bytes()).await.unwrap();
 }
 
-fn build(
-    fs: Arc<InMemoryFileSystem>,
-    dm: FaultDocManager,
-) -> holon_filesystem::FileSyncController {
+fn build(fs: Arc<InMemoryFileSystem>, dm: FaultDocManager) -> holon_filesystem::FileSyncController {
     new_org_sync_controller(
         Arc::new(EmptyReader),
         Arc::new(dm),
@@ -232,11 +241,11 @@ fn poison_containment_errors(errs: &[String]) -> Vec<&String> {
 
 // ── Tests. ─────────────────────────────────────────────────────────────────
 
-/// THE BUG (red-for-the-right-reason before Inc 3b): the poison (`a_poison.org`,
-/// iterated first) aborts `poll_new_files`, so the healthy file (`z_healthy.org`)
-/// is NEVER ingested. After containment: `poll_new_files` returns `Ok`, the
-/// healthy page is created, and the poison is disclosed by exactly one loud
-/// ERROR carrying its path + error chain.
+/// THE BUG (red-for-the-right-reason before Inc 3b): the poison
+/// (`a_poison.org`, iterated first) aborts `poll_new_files`, so the healthy
+/// file (`z_healthy.org`) is NEVER ingested. After containment:
+/// `poll_new_files` returns `Ok`, the healthy page is created, and the poison
+/// is disclosed by exactly one loud ERROR carrying its path + error chain.
 #[tokio::test]
 async fn one_poison_does_not_starve_healthy_files() {
     let cap = ErrorCapture::default();
@@ -264,7 +273,10 @@ async fn one_poison_does_not_starve_healthy_files() {
         "the healthy file discovered AFTER the poison must still ingest — one poisoned \
          file must not starve the rest of the walk"
     );
-    assert!(ingested >= 1, "at least the healthy file must count as ingested");
+    assert!(
+        ingested >= 1,
+        "at least the healthy file must count as ingested"
+    );
 
     // The poison itself created no page (its ingest genuinely failed).
     assert!(
@@ -287,10 +299,10 @@ async fn one_poison_does_not_starve_healthy_files() {
     );
 }
 
-/// The quarantine storm-gate + un-quarantine trigger: a poisoned new file is not
-/// re-attempted (nor re-logged) on subsequent discovery ticks while its bytes
-/// are unchanged, and IS re-attempted — clearing the quarantine — once its
-/// content changes (the user fixing the file).
+/// The quarantine storm-gate + un-quarantine trigger: a poisoned new file is
+/// not re-attempted (nor re-logged) on subsequent discovery ticks while its
+/// bytes are unchanged, and IS re-attempted — clearing the quarantine — once
+/// its content changes (the user fixing the file).
 #[tokio::test]
 async fn quarantined_file_reattempted_only_after_it_changes() {
     let cap = ErrorCapture::default();
@@ -304,13 +316,19 @@ async fn quarantined_file_reattempted_only_after_it_changes() {
     let mut controller = build(fs.clone(), dm.clone());
 
     // Tick 1: poison fails, is contained + quarantined. One create attempt.
-    controller.poll_new_files().await.expect("tick 1 must contain, not abort");
+    controller
+        .poll_new_files()
+        .await
+        .expect("tick 1 must contain, not abort");
     assert_eq!(dm.poison_attempts.load(Ordering::SeqCst), 1);
     assert_eq!(poison_containment_errors(&cap.errors()).len(), 1);
 
     // Tick 2: file UNCHANGED — quarantine must skip it. No new attempt, no new
     // loud error (no per-tick storm).
-    controller.poll_new_files().await.expect("tick 2 must not abort");
+    controller
+        .poll_new_files()
+        .await
+        .expect("tick 2 must not abort");
     assert_eq!(
         dm.poison_attempts.load(Ordering::SeqCst),
         1,
@@ -325,10 +343,18 @@ async fn quarantined_file_reattempted_only_after_it_changes() {
     // The user fixes the file: lift the fault AND rewrite the file (bumps mtime
     // + size → signature changes → quarantine re-attempts it).
     dm.poison_active.store(false, Ordering::SeqCst);
-    write_file(&fs, "a_poison.org", "#+TITLE: A Poison now fixed and longer\n").await;
+    write_file(
+        &fs,
+        "a_poison.org",
+        "#+TITLE: A Poison now fixed and longer\n",
+    )
+    .await;
 
     // Tick 3: signature changed → re-attempted → succeeds → quarantine cleared.
-    let ingested = controller.poll_new_files().await.expect("tick 3 must not abort");
+    let ingested = controller
+        .poll_new_files()
+        .await
+        .expect("tick 3 must not abort");
     assert_eq!(
         dm.poison_attempts.load(Ordering::SeqCst),
         2,

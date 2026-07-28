@@ -34,11 +34,11 @@ pub enum Recognition {
     /// re-ingest case, not a fault).
     AlreadySatisfied,
     /// The derived id is held by an entity whose normalized title DIFFERS from
-    /// the requested one — the state a rename leaves behind (content changed, id
-    /// preserved). Minting here would clobber a DIFFERENT entity; the caller
-    /// must refuse (interim fail-loud policy, ADR 0029 D1b). Carries the typed
-    /// [`IdentityCollision`] so the caller can surface or skip on it (its
-    /// `Display` embeds the stable collision marker).
+    /// the requested one — the state a rename leaves behind (content changed,
+    /// id preserved). Minting here would clobber a DIFFERENT entity; the
+    /// caller must refuse (interim fail-loud policy, ADR 0029 D1b). Carries
+    /// the typed [`IdentityCollision`] so the caller can surface or skip on
+    /// it (its `Display` embeds the stable collision marker).
     Collision(IdentityCollision),
 }
 
@@ -49,9 +49,10 @@ pub enum Recognition {
 /// comparison is under [`normalize_for_hash`] — the SAME normalization
 /// [`PageId::for_path`](crate::link_parser::PageId::for_path) hashes — so
 /// recognition keys on TITLE/PATH, never on `(content, parent)`: content drifts
-/// over time, whereas the normalized title is precisely what the derived id is a
-/// function of. A rename changes the title while preserving the id, so a title
-/// mismatch at a held derived id is exactly — and only — the collision case.
+/// over time, whereas the normalized title is precisely what the derived id is
+/// a function of. A rename changes the title while preserving the id, so a
+/// title mismatch at a held derived id is exactly — and only — the collision
+/// case.
 pub fn recognize_derived_id(
     derived_id: &EntityUri,
     holder_title: Option<&str>,
@@ -72,17 +73,18 @@ pub fn recognize_derived_id(
 
 /// Sanitize a raw block-content string into the canonical page TITLE it maps to
 /// (parse-don't-validate). Trim, then strip any TRAILING `/` (the slash-menu
-/// trigger still trailing at plan time, or a stray separator) — `trim_end` after
-/// each strip. Interior `/` is namespace-meaningful and preserved. `None` when
-/// nothing survives (empty content — the caller decides whether that is an
+/// trigger still trailing at plan time, or a stray separator) — `trim_end`
+/// after each strip. Interior `/` is namespace-meaningful and preserved. `None`
+/// when nothing survives (empty content — the caller decides whether that is an
 /// error).
 ///
-/// A page's TITLE, its deterministic id ([`PageId::for_path`](crate::link_parser::PageId::for_path)),
+/// A page's TITLE, its deterministic id
+/// ([`PageId::for_path`](crate::link_parser::PageId::for_path)),
 /// and its on-disk filename must all agree on THIS value — and so must the
-/// [`recognize_derived_id`] step that compares a create's title against the id's
-/// current holder. `normalize_for_hash` keeps `/`, so a raw trailing-slash title
-/// recognized on one side and a sanitized one on the other would DIVERGE. This
-/// is the single source the convert planner, the reference model, and the
+/// [`recognize_derived_id`] step that compares a create's title against the
+/// id's current holder. `normalize_for_hash` keeps `/`, so a raw trailing-slash
+/// title recognized on one side and a sanitized one on the other would DIVERGE.
+/// This is the single source the convert planner, the reference model, and the
 /// recognition step all funnel through, so no such split can open.
 pub fn sanitize_page_title(content: &str) -> Option<String> {
     let mut leaf = content.trim();

@@ -483,9 +483,9 @@ pub fn split_content_marks(
 // headless keystone. `style_fingerprint` is the SINGLE oracle both the renderer
 // (whose `merge_marks` layers theme colors on top of these booleans) and the
 // GPUI-tier composed PBT (`inv-paint-text-styling`) agree on: the
-// theme-independent PAINT signature — weight / slant / decoration / background —
-// per byte-range run. Exact colors are the frontend's concern and deliberately
-// NOT part of the fingerprint.
+// theme-independent PAINT signature — weight / slant / decoration / background
+// — per byte-range run. Exact colors are the frontend's concern and
+// deliberately NOT part of the fingerprint.
 
 /// The theme-independent paint attributes covering one styled run. `false`
 /// everywhere = plain text (no mark contributes a visible attribute, e.g. a
@@ -523,8 +523,8 @@ impl StyleFlags {
 /// The paint attributes a single mark kind contributes. SINGLE SOURCE for the
 /// read-mode renderer's boolean styling and the PBT oracle alike. `Link`
 /// underlines (its distinguishing color is not a fingerprint attribute);
-/// `Code`/`Verbatim` fill a background; `Sub`/`Super` have no paint attribute in
-/// the current `HighlightStyle` model (no baseline-shift field).
+/// `Code`/`Verbatim` fill a background; `Sub`/`Super` have no paint attribute
+/// in the current `HighlightStyle` model (no baseline-shift field).
 pub fn mark_style_flags(mark: &InlineMark) -> StyleFlags {
     let mut f = StyleFlags::default();
     match mark {
@@ -556,8 +556,8 @@ pub struct StyledRun {
 /// (clamped into the content's scalar length), only segments covered by at
 /// least one mark are emitted (unstyled gaps are omitted), and offsets are
 /// converted scalar -> byte at the segment level. A segment whose only active
-/// marks are attribute-less (`Sub`/`Super`) is still emitted, with plain flags —
-/// matching the renderer, which emits a default highlight for it.
+/// marks are attribute-less (`Sub`/`Super`) is still emitted, with plain flags
+/// — matching the renderer, which emits a default highlight for it.
 pub fn style_fingerprint(content: &str, marks: &[MarkSpan]) -> Vec<StyledRun> {
     let mut char_to_byte: Vec<usize> = content.char_indices().map(|(i, _)| i).collect();
     char_to_byte.push(content.len());

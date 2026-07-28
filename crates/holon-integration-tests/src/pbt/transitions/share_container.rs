@@ -30,10 +30,9 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
+use crate::pbt::sharing_state::RECEIVER_PRINCIPAL;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
-
-use crate::pbt::sharing_state::RECEIVER_PRINCIPAL;
 
 /// The container selector a whole-vault share names — the root container id the
 /// registry advertises the global doc under
@@ -81,7 +80,6 @@ impl<R: RefSharedView + RefSharedViewMut> TransitionRef<R> for ShareContainer {
     }
 }
 
-
 crate::cap_transition! {
     ShareContainer: SutTwoInstance,
     where R: [ RefSharedView + RefSharedViewMut ],
@@ -98,4 +96,3 @@ crate::cap_transition! {
         }
     }
 }
-

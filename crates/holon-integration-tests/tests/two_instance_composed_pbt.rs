@@ -292,7 +292,11 @@ fn post_boot_create_reaches_the_receiver_on_the_next_round() {
         .await;
         let after = recv.owner_block_ids().await;
         let created: Vec<_> = after.difference(&before).cloned().collect();
-        assert_eq!(created.len(), 1, "expected exactly one new owner block, got {created:?}");
+        assert_eq!(
+            created.len(),
+            1,
+            "expected exactly one new owner block, got {created:?}"
+        );
         let created = created[0].clone();
 
         assert!(

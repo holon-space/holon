@@ -14,13 +14,14 @@
 //! ## Identity, not parentage
 //!
 //! A journal date-page is identified by its CANONICAL page identity —
-//! `PageId::for_path("Journals/{date}")` — NOT by a `parent_id = block:journals`
-//! scan. The rule emits `place: page(journals)`, so a fired journal is a
-//! self-documenting doc-root that MATERIALISES its own `Journals/{date}.org`
-//! file; in the SUT's `block_raw` its `parent_id` is therefore the document-root
-//! sentinel, not `block:journals` (the block-comparison invariants only agree
-//! because `normalize_block` reparents both sides' doc-roots to
-//! `__document_root__`). A parent scan misses it; the deterministic id does not.
+//! `PageId::for_path("Journals/{date}")` — NOT by a `parent_id =
+//! block:journals` scan. The rule emits `place: page(journals)`, so a fired
+//! journal is a self-documenting doc-root that MATERIALISES its own
+//! `Journals/{date}.org` file; in the SUT's `block_raw` its `parent_id` is
+//! therefore the document-root sentinel, not `block:journals` (the
+//! block-comparison invariants only agree because `normalize_block` reparents
+//! both sides' doc-roots to `__document_root__`). A parent scan misses it; the
+//! deterministic id does not.
 //!
 //! Asserts every date whose canonical journal page exists in the SUT is a day
 //! the reference clock actually VISITED (`SUT journal dates ⊆ visited_days`) —
@@ -208,9 +209,9 @@ mod tests {
 
     /// MUTATION-CHECK: perturb the reference visited-day set so it no longer
     /// contains a day the SUT has a journal for (drop `2026-01-16`). The SUT's
-    /// journal for that now-unvisited day is spurious ⇒ the invariant MUST Fail.
-    /// Proves the oracle is non-vacuous: it detects a journal minted for a day
-    /// the clock never visited (a wrong-date rollover).
+    /// journal for that now-unvisited day is spurious ⇒ the invariant MUST
+    /// Fail. Proves the oracle is non-vacuous: it detects a journal minted
+    /// for a day the clock never visited (a wrong-date rollover).
     #[tokio::test]
     async fn fail_when_sut_journal_for_unvisited_day() {
         let clock = ClockStub {
@@ -221,8 +222,14 @@ mod tests {
         let sut = SqlStub::for_dates(&["2026-01-15", "2026-01-16"]);
         match InvJournalOnePerDay.check(&clock, &sut).await {
             InvariantResult::Fail(msg) => {
-                assert!(msg.contains("2026-01-16"), "must name the spurious day: {msg}");
-                assert!(msg.contains("never visited"), "must explain the defect: {msg}");
+                assert!(
+                    msg.contains("2026-01-16"),
+                    "must name the spurious day: {msg}"
+                );
+                assert!(
+                    msg.contains("never visited"),
+                    "must explain the defect: {msg}"
+                );
             }
             other => panic!("mutation must RED, got {other:?}"),
         }

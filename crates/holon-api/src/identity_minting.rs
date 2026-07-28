@@ -17,8 +17,9 @@
 //! Derivation classes (D1), encoded by [`IdentityInput`]:
 //! - (a) convergent-by-path — [`PageId::for_path`] / [`PageId::for_page_under`]
 //!   ([`IdentityInput::convergent`]). Same inputs → same id on every peer.
-//! - (b) unique-random — [`EntityUri::block_random`] ([`IdentityInput::UniqueRandom`]).
-//!   Uniqueness by construction; cannot collide.
+//! - (b) unique-random — [`EntityUri::block_random`]
+//!   ([`IdentityInput::UniqueRandom`]). Uniqueness by construction; cannot
+//!   collide.
 //! - (c) deterministic-by-typed-inputs — `effect_id.rs`
 //!   ([`IdentityInput::deterministic`]).
 //!
@@ -32,14 +33,16 @@
 //!   [`CarriedId::from_stored`] (a stored/param id, not freshly minted).
 //! - [`CreateId`] — what a witness-typed `create` accepts: `Minted | Carried`.
 //!   A bare `String`/`EntityUri` no longer typechecks into a create.
-//! - [`ResolvedAddress`] — the read-side result of [`IdentityMinting::address_of`];
-//!   usable for lookup / link resolution but with NO path into a [`CreateId`],
-//!   so `let a = address_of(p); create(a)` does not compile.
+//! - [`ResolvedAddress`] — the read-side result of
+//!   [`IdentityMinting::address_of`]; usable for lookup / link resolution but
+//!   with NO path into a [`CreateId`], so `let a = address_of(p); create(a)`
+//!   does not compile.
 
 use async_trait::async_trait;
 
 use crate::entity_uri::EntityUri;
-use crate::identity_recognition::{recognize_derived_id, Recognition};
+use crate::identity_recognition::Recognition;
+use crate::identity_recognition::recognize_derived_id;
 use crate::link_parser::PageId;
 use crate::storage_error::IdentityCollision;
 
@@ -78,7 +81,10 @@ impl MintedId {
     /// families it does not govern. For `entity_name == "block"` it is
     /// identical to [`MintedId::random`]. Minter-impl use only.
     pub fn random_for_entity(entity_name: &str) -> Self {
-        MintedId(EntityUri::new(entity_name, &uuid::Uuid::new_v4().to_string()))
+        MintedId(EntityUri::new(
+            entity_name,
+            &uuid::Uuid::new_v4().to_string(),
+        ))
     }
 
     /// Borrow the underlying id.
@@ -91,7 +97,8 @@ impl MintedId {
         self.0.as_str()
     }
 
-    /// Consume into the owned id (the write boundary hands this to persistence).
+    /// Consume into the owned id (the write boundary hands this to
+    /// persistence).
     pub fn into_entity_uri(self) -> EntityUri {
         self.0
     }
@@ -99,8 +106,8 @@ impl MintedId {
 
 /// An id that entered at a parse/dispatch boundary already carrying a value — a
 /// stored row id, a `create` `id` param, a split's returned id. Distinct from
-/// [`MintedId`] so `create` can record *how* the id arrived (`Minted | Carried`)
-/// while still refusing a bare string.
+/// [`MintedId`] so `create` can record *how* the id arrived (`Minted |
+/// Carried`) while still refusing a bare string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CarriedId(EntityUri);
 
@@ -159,8 +166,9 @@ impl CreateId {
 
 /// The READ-side address of a name-addressable (convergent) entity: the id it
 /// WOULD have, for lookup and link resolution, WITHOUT creating anything.
-/// Deliberately has NO conversion into [`CreateId`] / [`MintedId`], so a derived
-/// address cannot be laundered into a create — the flow a textual lint can't see.
+/// Deliberately has NO conversion into [`CreateId`] / [`MintedId`], so a
+/// derived address cannot be laundered into a create — the flow a textual lint
+/// can't see.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedAddress(EntityUri);
 
@@ -187,9 +195,10 @@ pub enum IdentityInput {
     /// A caller-DERIVED id carried into a create, to be recognized against its
     /// current holder before it is blessed. Covers classes (a) convergent and
     /// (c) deterministic — the DERIVATION already happened at the caller
-    /// boundary ([`PageId`] / `effect_id`) and produced the id carried here; the
-    /// RECOGNITION step ([`recognize_derived_id`], D1b) is identical for both.
-    /// `title` is the create's content, compared against the id's holder title.
+    /// boundary ([`PageId`] / `effect_id`) and produced the id carried here;
+    /// the RECOGNITION step ([`recognize_derived_id`], D1b) is identical
+    /// for both. `title` is the create's content, compared against the id's
+    /// holder title.
     Carried {
         /// The already-derived id.
         id: EntityUri,
@@ -265,10 +274,11 @@ pub trait IdentityMinting: Send + Sync {
     /// the create arm's former inline pre-SELECT collision guard.
     async fn mint(&self, input: IdentityInput) -> Result<MintedId, BoxError>;
 
-    /// Pure read-side address of a convergent (name-addressable) entity — the id
-    /// it WOULD have, for link resolution, WITHOUT creating anything. Returns a
-    /// [`ResolvedAddress`], which has no path into a [`CreateId`]. Mode- and
-    /// self-independent (derivation is mode-independent), so a default suffices.
+    /// Pure read-side address of a convergent (name-addressable) entity — the
+    /// id it WOULD have, for link resolution, WITHOUT creating anything.
+    /// Returns a [`ResolvedAddress`], which has no path into a
+    /// [`CreateId`]. Mode- and self-independent (derivation is
+    /// mode-independent), so a default suffices.
     fn address_of(&self, page: &PageId) -> ResolvedAddress {
         ResolvedAddress(page.as_entity_uri().clone())
     }

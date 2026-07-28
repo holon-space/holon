@@ -41,9 +41,9 @@ pub struct LoroDocumentStore {
     /// (see `save_all`). `Arc` so clones share one schedule (the struct is
     /// `Clone`; a per-clone counter would compact on every clone's first save).
     save_counter: Arc<std::sync::atomic::AtomicU64>,
-    /// Peer id to mint the global doc under. `None` = the env/random fallback in
-    /// `LoroDocument::new`. Two instances in ONE process must each inject their
-    /// own — the env var is process-global and would collide.
+    /// Peer id to mint the global doc under. `None` = the env/random fallback
+    /// in `LoroDocument::new`. Two instances in ONE process must each
+    /// inject their own — the env var is process-global and would collide.
     peer_id: Option<u64>,
 }
 
@@ -120,7 +120,10 @@ impl LoroDocumentStore {
                                 e
                             );
                             let _ = std::fs::remove_file(&snapshot_path);
-                            let fresh = Arc::new(LoroDocument::new_with_peer_id(GLOBAL_DOC_ID.to_string(), self.peer_id)?);
+                            let fresh = Arc::new(LoroDocument::new_with_peer_id(
+                                GLOBAL_DOC_ID.to_string(),
+                                self.peer_id,
+                            )?);
                             LoroBackend::initialize_schema(&fresh)
                                 .await
                                 .map_err(|e| anyhow::anyhow!("Failed to init schema: {}", e))?;
@@ -132,7 +135,10 @@ impl LoroDocumentStore {
                 }
             } else {
                 info!("Creating new global LoroTree document");
-                let fresh = Arc::new(LoroDocument::new_with_peer_id(GLOBAL_DOC_ID.to_string(), self.peer_id)?);
+                let fresh = Arc::new(LoroDocument::new_with_peer_id(
+                    GLOBAL_DOC_ID.to_string(),
+                    self.peer_id,
+                )?);
                 LoroBackend::initialize_schema(&fresh)
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to init schema: {}", e))?;
@@ -143,7 +149,10 @@ impl LoroDocumentStore {
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         let doc = {
             info!("Creating in-memory global LoroTree (wasm32 demo, no persistence)");
-            let fresh = Arc::new(LoroDocument::new_with_peer_id(GLOBAL_DOC_ID.to_string(), self.peer_id)?);
+            let fresh = Arc::new(LoroDocument::new_with_peer_id(
+                GLOBAL_DOC_ID.to_string(),
+                self.peer_id,
+            )?);
             LoroBackend::initialize_schema(&fresh)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to init schema: {}", e))?;

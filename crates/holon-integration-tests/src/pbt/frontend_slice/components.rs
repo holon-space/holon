@@ -411,10 +411,10 @@ impl HeadlessFrontendComponent {
         Self::new_impl(org_files, settle, loro_enabled, Some(clock), None).await
     }
 
-    /// [`Self::new_with_clock`] with the session's Loro peer id pinned. Required
-    /// when two components live in ONE process (the two-instance sharing
-    /// slice): `HOLON_LORO_PEER_ID` is process-global, so both would author
-    /// under the same peer id and never converge.
+    /// [`Self::new_with_clock`] with the session's Loro peer id pinned.
+    /// Required when two components live in ONE process (the two-instance
+    /// sharing slice): `HOLON_LORO_PEER_ID` is process-global, so both
+    /// would author under the same peer id and never converge.
     pub async fn new_with_clock_and_peer_id(
         org_files: &[(&str, &str)],
         settle: Duration,

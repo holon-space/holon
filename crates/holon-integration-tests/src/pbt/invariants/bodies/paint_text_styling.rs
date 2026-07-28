@@ -13,11 +13,11 @@
 //! The GPUI-tier composed PBT is where paint-level observation belongs. Each
 //! `rendered_text` / `text` widget records the styled runs it actually hands to
 //! `StyledText::with_highlights` (`RenderedElement::styled_runs`, byte-range +
-//! theme-independent `StyleFlags`, read from the REAL painted `HighlightStyle`).
-//! This invariant compares that painted fingerprint against the one the block's
-//! convergent write-side `(content, marks)` demand
-//! ([`holon_api::style_fingerprint`], the SINGLE source the read-mode renderer's
-//! `merge_marks` also layers its theme colors on top of).
+//! theme-independent `StyleFlags`, read from the REAL painted
+//! `HighlightStyle`). This invariant compares that painted fingerprint against
+//! the one the block's convergent write-side `(content, marks)` demand
+//! ([`holon_api::style_fingerprint`], the SINGLE source the read-mode
+//! renderer's `merge_marks` also layers its theme colors on top of).
 //!
 //! Needs `SutLayout` (paint) AND `SutBackend` (intended marks); the headless
 //! slice supplies no `SutLayout`, so an empty snapshot is `Skipped`, exactly
@@ -35,10 +35,7 @@ use holon_pbt_core::invariant::InvariantResult;
 /// directly). For every painted `rendered_text` / `text` element bound to a
 /// block, the styled-run fingerprint it painted must equal the fingerprint the
 /// block's `(content, marks)` demand. Returns one detail string per mismatch.
-pub(crate) fn compare_styling(
-    els: &[RenderedElement],
-    blocks: &[holon_api::Block],
-) -> Vec<String> {
+pub(crate) fn compare_styling(els: &[RenderedElement], blocks: &[holon_api::Block]) -> Vec<String> {
     let by_id: std::collections::HashMap<&str, &holon_api::Block> =
         blocks.iter().map(|b| (b.id.as_str(), b)).collect();
 
@@ -144,11 +141,8 @@ mod tests {
     }
 
     fn text_block(id: &str, content: &str, marks: Option<Vec<MarkSpan>>) -> holon_api::Block {
-        let mut b = holon_api::Block::new_text(
-            EntityUri::block(id),
-            EntityUri::no_parent(),
-            content,
-        );
+        let mut b =
+            holon_api::Block::new_text(EntityUri::block(id), EntityUri::no_parent(), content);
         b.marks = marks;
         b
     }
@@ -168,7 +162,11 @@ mod tests {
     #[test]
     fn aligned_bold_block_passes() {
         // "hello" bold over 0..5 (ASCII → byte == scalar).
-        let block = text_block("b", "hello", Some(vec![MarkSpan::new(0, 5, InlineMark::Bold)]));
+        let block = text_block(
+            "b",
+            "hello",
+            Some(vec![MarkSpan::new(0, 5, InlineMark::Bold)]),
+        );
         let el = rendered_text("b", Some(vec![bold_run(0, 5)]));
         let out = compare_styling(&[el], &[block]);
         assert!(out.is_empty(), "aligned styling must pass, got {out:?}");
@@ -178,18 +176,26 @@ mod tests {
     /// (`styled_runs = None`). The paint diverges from the marks → mismatch.
     #[test]
     fn marked_block_painted_plain_is_caught() {
-        let block = text_block("b", "hello", Some(vec![MarkSpan::new(0, 5, InlineMark::Bold)]));
+        let block = text_block(
+            "b",
+            "hello",
+            Some(vec![MarkSpan::new(0, 5, InlineMark::Bold)]),
+        );
         let el = rendered_text("b", None);
         let out = compare_styling(&[el], &[block]);
         assert_eq!(out.len(), 1, "a marked block painted plain must be caught");
     }
 
-    /// Mutation-check: perturb the painted styled-run extraction (bold → italic)
-    /// and the honest comparison must go RED — proof the invariant cannot
-    /// silently no-op.
+    /// Mutation-check: perturb the painted styled-run extraction (bold →
+    /// italic) and the honest comparison must go RED — proof the invariant
+    /// cannot silently no-op.
     #[test]
     fn perturbed_styled_run_goes_red() {
-        let block = text_block("b", "hello", Some(vec![MarkSpan::new(0, 5, InlineMark::Bold)]));
+        let block = text_block(
+            "b",
+            "hello",
+            Some(vec![MarkSpan::new(0, 5, InlineMark::Bold)]),
+        );
         let mutated = StyledRun {
             start: 0,
             end: 5,

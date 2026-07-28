@@ -71,7 +71,6 @@ impl<R: RefSharedView + RefSharedViewMut> TransitionRef<R> for SyncNow {
     }
 }
 
-
 crate::cap_transition! {
     SyncNow: SutTwoInstance,
     where R: [ RefSharedView + RefSharedViewMut ],
@@ -88,4 +87,3 @@ crate::cap_transition! {
         }
     }
 }
-

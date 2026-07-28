@@ -291,9 +291,9 @@ async fn readonly_writeback_logs_once_then_skips_no_per_cdc_retry() {
 /// RESUME regression (coverage for the LANDED clear path, not red-first): after
 /// the EROFS storm marks a path, a successful re-ingest of the file — the SOLE
 /// resume trigger, `ingest_file` (reached via `on_file_changed`) — lifts the
-/// mark, so the NEXT CDC edit issues a REAL write to disk again. Mutation-check:
-/// removing the clear in `ingest_file` leaves the mark set and this test goes
-/// red (assert (4) fails — the resumed edit never reaches disk).
+/// mark, so the NEXT CDC edit issues a REAL write to disk again.
+/// Mutation-check: removing the clear in `ingest_file` leaves the mark set and
+/// this test goes red (assert (4) fails — the resumed edit never reaches disk).
 #[tokio::test]
 async fn readonly_writeback_resumes_after_reingest_clears_the_mark() {
     let (doc, blocks) = make_doc_and_blocks();

@@ -2911,8 +2911,7 @@ mod atomic_rename_tests {
         fx.ensure_parent_dirs().await;
         let baseline = vec![child.clone()];
         fx.seed_blocks(&baseline);
-        let org_children =
-            OrgRenderer::render_entitys(&baseline, &fx.file_path(), &fx.doc_id);
+        let org_children = OrgRenderer::render_entitys(&baseline, &fx.file_path(), &fx.doc_id);
         let org = format!("#+ID: {}\n{}", fx.doc_id.id(), org_children);
         tokio::fs::write(&fx.file_path(), org.as_bytes())
             .await
@@ -2973,8 +2972,9 @@ mod atomic_rename_tests {
     }
 
     /// The atomic port: the SAME `mv`, one `on_file_renamed` call, keeps the
-    /// child intact (NO cascade), and retitles the doc-root to the new file stem
-    /// (file-move spec D2). A poll tick after the rename must NOT cascade-delete.
+    /// child intact (NO cascade), and retitles the doc-root to the new file
+    /// stem (file-move spec D2). A poll tick after the rename must NOT
+    /// cascade-delete.
     #[tokio::test]
     async fn atomic_rename_keeps_blocks_alive_and_retitles() {
         let temp = tempfile::tempdir().unwrap();
@@ -3025,10 +3025,11 @@ mod atomic_rename_tests {
     /// the watcher's pairing degrades to a bare `Remove` + `Create` (a
     /// byte-syncer / lock-file interposed between the two rename halves, or the
     /// pair timed out), the stray `Remove` reaches `on_file_deleted` for a path
-    /// whose `#+ID` NOW LIVES at the moved file. The title-based D3 guard cannot
-    /// fire (the title has not followed the rename), so today the live doc is
-    /// cascade-deleted. The id-based reunification safety net must re-home
-    /// instead: NO cascade (delete_count == 0), child + doc survive, retitled.
+    /// whose `#+ID` NOW LIVES at the moved file. The title-based D3 guard
+    /// cannot fire (the title has not followed the rename), so today the
+    /// live doc is cascade-deleted. The id-based reunification safety net
+    /// must re-home instead: NO cascade (delete_count == 0), child + doc
+    /// survive, retitled.
     #[tokio::test]
     async fn rename_fallback_remove_does_not_cascade_a_live_doc() {
         let temp = tempfile::tempdir().unwrap();
@@ -3075,18 +3076,19 @@ mod atomic_rename_tests {
     }
 
     /// ENVIRONMENT-PARITY RUNG (BugFunnel 2026-07-27). The composed keystone
-    /// enters BELOW `NotifyWatcher` (on `InMemoryFileSystem`), so `RenamePairing`
-    /// and the bridge's kind->`FileEvent` routing are structurally UNTRAVERSED —
-    /// the prod-only layer where the adversarial verifier found the
-    /// cascade-delete-on-interposition defect. This rung closes that parity gap:
-    /// it drives SYNTHETIC notify-shaped signals through the REAL
-    /// `RenamePairing::classify` -> the REAL bridge routing
-    /// (`classify_change_to_event`, the same fn the production `OrgFileWatcher`
-    /// uses) -> `FileEvent` -> the controller. Sequence: From -> interposing
-    /// byte-syncer write -> To. With the relevance-gate + timeout-only flush the
-    /// interposer does not disturb the pending, so the pair collapses to a
-    /// SINGLE atomic `Rename` — no `Remove`, no cascade. (Full composed-keystone
-    /// integration of a notify-shaped source remains open parity work.)
+    /// enters BELOW `NotifyWatcher` (on `InMemoryFileSystem`), so
+    /// `RenamePairing` and the bridge's kind->`FileEvent` routing are
+    /// structurally UNTRAVERSED — the prod-only layer where the adversarial
+    /// verifier found the cascade-delete-on-interposition defect. This rung
+    /// closes that parity gap: it drives SYNTHETIC notify-shaped signals
+    /// through the REAL `RenamePairing::classify` -> the REAL bridge
+    /// routing (`classify_change_to_event`, the same fn the production
+    /// `OrgFileWatcher` uses) -> `FileEvent` -> the controller. Sequence:
+    /// From -> interposing byte-syncer write -> To. With the relevance-gate
+    /// + timeout-only flush the interposer does not disturb the pending, so
+    /// the pair collapses to a SINGLE atomic `Rename` — no `Remove`, no
+    /// cascade. (Full composed-keystone integration of a notify-shaped
+    /// source remains open parity work.)
     #[tokio::test]
     async fn notify_shaped_interposed_rename_traverses_pairing_and_routing_no_cascade() {
         use std::path::Path;
@@ -3137,9 +3139,7 @@ mod atomic_rename_tests {
                 Some(FileEvent::Renamed { from, to }) => {
                     fx.controller.on_file_renamed(&from, &to).await.unwrap()
                 }
-                Some(FileEvent::Changed(p)) => {
-                    fx.controller.on_file_changed(&p).await.unwrap()
-                }
+                Some(FileEvent::Changed(p)) => fx.controller.on_file_changed(&p).await.unwrap(),
                 None => {}
             }
         }

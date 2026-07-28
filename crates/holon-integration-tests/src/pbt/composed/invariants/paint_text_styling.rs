@@ -23,10 +23,7 @@ pub fn wire() -> Box<dyn CapInvariant> {
         InvPaintTextStyling,
         RunMode::Strict,
         Needs {
-            sut_present: vec![
-                CapId::of::<dyn SutLayout>(),
-                CapId::of::<dyn SutBackend>(),
-            ],
+            sut_present: vec![CapId::of::<dyn SutLayout>(), CapId::of::<dyn SutBackend>()],
             sut_absent: Vec::new(),
             ref_present: Vec::new(),
         },

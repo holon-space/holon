@@ -115,11 +115,11 @@ pub trait OperationProvider: Send + Sync {
     /// The identity minter for this provider, present **only** when this
     /// provider is the Turso block-identity authority (ADR 0029 D1c: the active
     /// consolidator selects the mint EXECUTOR, never the id VALUE). Mirrors
-    /// `order_key_minter`: default `None`; the SqlOperationProvider overrides to
-    /// `Some(self)`. A `create` that omits an id (mint a fresh unique-random
-    /// one) or supplies a derived one (recognize it against its holder, D1b)
-    /// reaches minting through this seam — fail-loud when the mode that should
-    /// own it returns `None`.
+    /// `order_key_minter`: default `None`; the SqlOperationProvider overrides
+    /// to `Some(self)`. A `create` that omits an id (mint a fresh
+    /// unique-random one) or supplies a derived one (recognize it against
+    /// its holder, D1b) reaches minting through this seam — fail-loud when
+    /// the mode that should own it returns `None`.
     fn identity_minter(&self) -> Option<&dyn holon_api::identity_minting::IdentityMinting> {
         None
     }

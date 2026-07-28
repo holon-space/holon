@@ -37,7 +37,9 @@ pub enum FileChangeKind {
     Remove,
     /// Atomic rename. `FileChange::path` is the destination (new) path; `from`
     /// is the source (old) path.
-    Rename { from: PathBuf },
+    Rename {
+        from: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -86,9 +88,10 @@ const RENAME_PAIR_WINDOW: Duration = Duration::from_millis(500);
 /// repaired by `FileSyncController::poll_tracked_files` / `poll_new_files`.
 /// A backend-agnostic raw filesystem signal — ONE per path. `notify::Event`s
 /// map to a sequence of these ([`notify_event_to_signals`]); the pairing state
-/// machine ([`RenamePairing::classify`]) consumes them. Decoupling from `notify`
-/// lets the pairing be exercised deterministically (no fsevents) AND across
-/// crates (the org-side sync tests drive the fallback through the controller).
+/// machine ([`RenamePairing::classify`]) consumes them. Decoupling from
+/// `notify` lets the pairing be exercised deterministically (no fsevents) AND
+/// across crates (the org-side sync tests drive the fallback through the
+/// controller).
 ///
 /// macOS `Any` (which side is unknown) is resolved to `RenameFrom`/`RenameTo`
 /// at mapping time via on-disk existence, so `classify` never needs the fs.
@@ -102,7 +105,10 @@ pub enum RawFsSignal {
     /// Rename target side (the path is present).
     RenameTo(PathBuf),
     /// Both sides in one event, in `(from, to)` order.
-    RenameBoth { from: PathBuf, to: PathBuf },
+    RenameBoth {
+        from: PathBuf,
+        to: PathBuf,
+    },
 }
 
 /// Map one raw `notify::Event` into zero or more [`RawFsSignal`]s, resolving a
@@ -125,15 +131,26 @@ fn notify_event_to_signals(
                     paths = ?event.paths,
                     "[NotifyWatcher] RenameMode::Both without exactly two paths — treating each                      as a plain Modify."
                 );
-                event.paths.iter().cloned().map(RawFsSignal::Modify).collect()
+                event
+                    .paths
+                    .iter()
+                    .cloned()
+                    .map(RawFsSignal::Modify)
+                    .collect()
             }
         }
-        EK::Modify(ModifyKind::Name(RenameMode::From)) => {
-            event.paths.iter().cloned().map(RawFsSignal::RenameFrom).collect()
-        }
-        EK::Modify(ModifyKind::Name(RenameMode::To)) => {
-            event.paths.iter().cloned().map(RawFsSignal::RenameTo).collect()
-        }
+        EK::Modify(ModifyKind::Name(RenameMode::From)) => event
+            .paths
+            .iter()
+            .cloned()
+            .map(RawFsSignal::RenameFrom)
+            .collect(),
+        EK::Modify(ModifyKind::Name(RenameMode::To)) => event
+            .paths
+            .iter()
+            .cloned()
+            .map(RawFsSignal::RenameTo)
+            .collect(),
         EK::Modify(ModifyKind::Name(RenameMode::Any)) => event
             .paths
             .iter()
@@ -146,9 +163,24 @@ fn notify_event_to_signals(
                 }
             })
             .collect(),
-        EK::Modify(_) => event.paths.iter().cloned().map(RawFsSignal::Modify).collect(),
-        EK::Create(_) => event.paths.iter().cloned().map(RawFsSignal::Create).collect(),
-        EK::Remove(_) => event.paths.iter().cloned().map(RawFsSignal::Remove).collect(),
+        EK::Modify(_) => event
+            .paths
+            .iter()
+            .cloned()
+            .map(RawFsSignal::Modify)
+            .collect(),
+        EK::Create(_) => event
+            .paths
+            .iter()
+            .cloned()
+            .map(RawFsSignal::Create)
+            .collect(),
+        EK::Remove(_) => event
+            .paths
+            .iter()
+            .cloned()
+            .map(RawFsSignal::Remove)
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -227,8 +259,8 @@ impl RenamePairing {
     /// Classify one [`RawFsSignal`] into zero or more `(path, kind)` emissions,
     /// updating the pairing buffer. `now` is the signal's arrival instant
     /// (injected so the timeout is deterministically testable); `is_relevant`
-    /// decides whether a path is one the org side tracks (`.org`, not ignored) —
-    /// irrelevant signals never disturb a pending rename `From`.
+    /// decides whether a path is one the org side tracks (`.org`, not ignored)
+    /// — irrelevant signals never disturb a pending rename `From`.
     pub fn classify(
         &mut self,
         signal: &RawFsSignal,
@@ -259,9 +291,7 @@ impl RenamePairing {
                     match pending.take() {
                         // Pair at ANY age — the window bounds only the unpaired
                         // case, never a real pair whose `To` arrives late.
-                        Some((from, _)) => {
-                            out.push((p.clone(), FileChangeKind::Rename { from }))
-                        }
+                        Some((from, _)) => out.push((p.clone(), FileChangeKind::Rename { from })),
                         None => out.push((p.clone(), FileChangeKind::Create)),
                     }
                 }
@@ -330,9 +360,8 @@ impl NotifyWatcher {
                         // rename `From`.
                         let emissions = pairing.classify(signal, now, &is_org_ext);
                         for (path, kind) in emissions {
-                            let seq = NOTIFY_SEQ
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                                + 1;
+                            let seq =
+                                NOTIFY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                             // send only errors with no subscribers — fine.
                             let _ = event_tx.send(FileChange { path, kind, seq });
                         }
@@ -434,7 +463,10 @@ mod tests {
         let gone = "/vault/a.org";
         let present = "/vault/b.org";
         let s0 = notify_event_to_signals(
-            &ev(EventKind::Modify(ModifyKind::Name(RenameMode::Any)), &[gone]),
+            &ev(
+                EventKind::Modify(ModifyKind::Name(RenameMode::Any)),
+                &[gone],
+            ),
             &|p| p != Path::new(gone),
         );
         assert_eq!(s0, vec![RawFsSignal::RenameFrom(PathBuf::from(gone))]);

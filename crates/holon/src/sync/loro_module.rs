@@ -74,7 +74,9 @@ impl Module for LoroModule {
         // Register LoroDocumentStore
         injector.provide::<LoroDocumentStore>(Provider::root(|resolver| {
             let config = resolver.resolve::<LoroConfig>();
-            Shared::new(LoroDocumentStore::new(config.storage_dir.clone()).with_peer_id(config.peer_id))
+            Shared::new(
+                LoroDocumentStore::new(config.storage_dir.clone()).with_peer_id(config.peer_id),
+            )
         }));
 
         // Register LoroBlocksDataSource

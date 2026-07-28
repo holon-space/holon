@@ -409,7 +409,11 @@ impl UserDriver for SimUserDriver {
     /// `ReactiveEngineDriver::cycle_state_toggle` does (the `StateToggle` NODE
     /// carries the block `entity_id`). Then pump so the projection the caller's
     /// landing-poll reads reflects the write.
-    async fn cycle_state_toggle(&self, entity_id: &EntityUri, region: &str) -> Result<(), anyhow::Error> {
+    async fn cycle_state_toggle(
+        &self,
+        entity_id: &EntityUri,
+        region: &str,
+    ) -> Result<(), anyhow::Error> {
         let root = holon_api::root_layout_block_uri();
         let resolved = self.engine.snapshot_resolved(&root);
         let intent =

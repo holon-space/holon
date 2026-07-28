@@ -347,10 +347,10 @@ async fn fire_emit(
     // mode-correct `block_raw` read — the SAME source `already_present` uses — so
     // it is correct whether Turso or Loro is the block-write authority):
     //   - Collision (id held by a DIFFERENT normalized title = the renamed page):
-    //     refuse — skip idempotently, do NOT dispatch the create, so both the
-    //     Turso and Loro block-CRUD authorities take the same no-clobber path. A
-    //     guard on the SQL write alone can never reach this in Loro mode, where
-    //     the create lands in the Loro doc and only projects to `block_raw`.
+    //     refuse — skip idempotently, do NOT dispatch the create, so both the Turso
+    //     and Loro block-CRUD authorities take the same no-clobber path. A guard on
+    //     the SQL write alone can never reach this in Loro mode, where the create
+    //     lands in the Loro doc and only projects to `block_raw`.
     //   - AlreadySatisfied: the id already holds this exact name — nothing to do.
     //   - Free: fall through and mint/create below.
     let holder_title = match current_title_of(engine, &id).await {

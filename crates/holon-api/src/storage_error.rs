@@ -43,10 +43,10 @@ pub struct ProjectionInvariantViolated {
 /// disclosed seam, checked, never parsed.
 pub const IDENTITY_COLLISION_MARKER: &str = "holon-identity-collision";
 
-/// A deterministically-derived entity id (e.g. a `PageId::for_path` page id) was
-/// requested for a `create`, but that id is ALREADY held by a DIFFERENT entity
-/// (its current canonical title differs from the requested one — the state a
-/// page rename leaves behind: content changed, id preserved).
+/// A deterministically-derived entity id (e.g. a `PageId::for_path` page id)
+/// was requested for a `create`, but that id is ALREADY held by a DIFFERENT
+/// entity (its current canonical title differs from the requested one — the
+/// state a page rename leaves behind: content changed, id preserved).
 ///
 /// The interim identity policy (identity plan §5) refuses such a create
 /// FAIL-LOUD rather than letting an `INSERT … ON CONFLICT(id) DO UPDATE`

@@ -116,7 +116,6 @@ fn distinct_rows_rendered(registry: &BoundsRegistry) -> HashSet<String> {
         .collect()
 }
 
-
 #[gpui::test]
 fn main_outline_renders_o_viewport_rows_per_frame(cx: &mut TestAppContext) {
     cx.update(|cx| {

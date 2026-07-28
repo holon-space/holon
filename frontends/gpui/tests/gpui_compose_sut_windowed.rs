@@ -285,8 +285,14 @@ fn overlay_windowed_caps_composes_layout_backend_and_driver_over_a_live_window()
         .frontend
         .clone()
         .expect("full_headless → booted HeadlessFrontendComponent");
-    let overlaid =
-        overlay_windowed_caps(composed.caps, frontend, geometry, engine.clone(), driver, resolver.clone());
+    let overlaid = overlay_windowed_caps(
+        composed.caps,
+        frontend,
+        geometry,
+        engine.clone(),
+        driver,
+        resolver.clone(),
+    );
 
     // (1) The overlay INSERTED the window driver rung (absent in the deferred
     // base).
@@ -456,8 +462,9 @@ fn windowed_composed_sut_replays_a_fixture_via_replay_steps_green() {
 // ═══════════════════════════════════════════════════════════════════
 #[test]
 fn windowed_split_then_clickblock_resolves_minted_id() {
-    use holon_integration_tests::pbt::transitions::SplitBlock;
     use std::collections::BTreeSet;
+
+    use holon_integration_tests::pbt::transitions::SplitBlock;
 
     with_windowed_wide_sut(|mut sut, oracle0| {
         ComposedSut::<WideE2E>::check_invariants(&sut, oracle0);
@@ -487,7 +494,11 @@ fn windowed_split_then_clickblock_resolves_minted_id() {
             sut = ComposedSut::<WideE2E>::apply(sut, &oracle, split);
             ComposedSut::<WideE2E>::check_invariants(&sut, &oracle);
             let minted: Vec<EntityUri> = after.difference(&before).cloned().collect();
-            assert_eq!(minted.len(), 1, "iter {i}: expected 1 minted split id, got {minted:?}");
+            assert_eq!(
+                minted.len(),
+                1,
+                "iter {i}: expected 1 minted split id, got {minted:?}"
+            );
             let new_id = minted[0].clone();
             // The regression probe: ClickBlock's FIRST act is `require_bounds` on the
             // minted (synthetic) id — the exact precheck that false-failed pre-fix.
@@ -506,8 +517,13 @@ fn windowed_split_then_clickblock_resolves_minted_id() {
             eprintln!("[split-reg] iter {i}: minted {new_id}, ClickBlock bounds precheck GREEN");
             target = new_id;
         }
-        assert!(landed >= 1, "regression vacuous: no split→click iteration ran");
-        eprintln!("[split-reg] PASS — {landed} split→ClickBlock iteration(s) resolved the minted id and found registered bounds");
+        assert!(
+            landed >= 1,
+            "regression vacuous: no split→click iteration ran"
+        );
+        eprintln!(
+            "[split-reg] PASS — {landed} split→ClickBlock iteration(s) resolved the minted id and found registered bounds"
+        );
         Some(sut)
     });
 }

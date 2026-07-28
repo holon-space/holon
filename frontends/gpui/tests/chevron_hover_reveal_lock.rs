@@ -39,7 +39,10 @@ fn chevron_row(hovered: bool) -> Arc<ReactiveViewModel> {
     let mut props = HashMap::new();
     props.insert("depth".to_string(), Value::Float(0.0));
     props.insert("has_children".to_string(), Value::Boolean(true));
-    props.insert("target_id".to_string(), Value::String("lock-row".to_string()));
+    props.insert(
+        "target_id".to_string(),
+        Value::String("lock-row".to_string()),
+    );
 
     let content = ReactiveViewModel::text("Row content that must not reflow");
     let mut vm = ReactiveViewModel::from_widget("tree_item", props).with_children(vec![content]);

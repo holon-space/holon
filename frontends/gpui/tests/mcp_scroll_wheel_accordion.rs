@@ -20,12 +20,13 @@
 //!      `ScrollList` event) reports not-scrolled (`Ok(false)`) — never a fake
 //!      success — for the accordion, because the accordion body is not a
 //!      `ReactiveShell` `ListState`;
-//!   2. the tool's fixed emission (a `MouseMove` then a `ScrollWheel`, the exact
-//!      pair `GpuiUserDriver::scroll_at` dispatches) scrolls the capped
+//!   2. the tool's fixed emission (a `MouseMove` then a `ScrollWheel`, the
+//!      exact pair `GpuiUserDriver::scroll_at` dispatches) scrolls the capped
 //!      accordion body and reveals a below-fold backlink row;
-//!   3. the MCP-layer conversion (`interaction_event_to_platform_inputs`) lowers
-//!      those two `InteractionEvent`s to exactly that `MouseMove` + `ScrollWheel`
-//!      `PlatformInput` pair, wiring the windowed proof to the real pump path.
+//!   3. the MCP-layer conversion (`interaction_event_to_platform_inputs`)
+//!      lowers those two `InteractionEvent`s to exactly that `MouseMove` +
+//!      `ScrollWheel` `PlatformInput` pair, wiring the windowed proof to the
+//!      real pump path.
 //!
 //! NOTE: because the capability already landed (PR #85), this is a GREEN
 //! regression lock, not a red-first feature test. It closes a coverage gap
@@ -156,8 +157,9 @@ fn mcp_scroll_reveals_below_fold_backlink_in_accordion(cx: &mut TestAppContext) 
     // killed). An empty cache is the same fail-loud signal the eager-panel test
     // pins: no panel shell => no ListState reachable.
     let cache = EntityCache::default();
-    let scrolled = vcx
-        .update(|_, cx| holon_gpui::scroll_list_by("block:default-main-panel", -1600.0, &cache, cx));
+    let scrolled = vcx.update(|_, cx| {
+        holon_gpui::scroll_list_by("block:default-main-panel", -1600.0, &cache, cx)
+    });
     assert_eq!(
         scrolled,
         Ok(false),

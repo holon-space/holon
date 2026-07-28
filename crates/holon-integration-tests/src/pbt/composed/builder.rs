@@ -353,29 +353,27 @@ async fn compose_sut_seeded_impl(
         // `SutClockAdvance` is registered below (after `register_non_gesture`)
         // ONLY under `HOLON_PBT_ADVANCE_DAY`; when off, `AdvanceDay` stays out
         // of the alphabet and the clock never advances past boot (default).
-        let comp = Arc::new(
-            match peer_id {
-                Some(peer_id) => {
-                    HeadlessFrontendComponent::new_with_clock_and_peer_id(
-                        frontend_seed_org,
-                        Duration::from_millis(300),
-                        has_editor,
-                        crate::pbt::frontend_slice::components::keystone_boot_clock(),
-                        peer_id,
-                    )
-                    .await
-                }
-                None => {
-                    HeadlessFrontendComponent::new_with_clock(
-                        frontend_seed_org,
-                        Duration::from_millis(300),
-                        has_editor,
-                        crate::pbt::frontend_slice::components::keystone_boot_clock(),
-                    )
-                    .await
-                }
-            },
-        );
+        let comp = Arc::new(match peer_id {
+            Some(peer_id) => {
+                HeadlessFrontendComponent::new_with_clock_and_peer_id(
+                    frontend_seed_org,
+                    Duration::from_millis(300),
+                    has_editor,
+                    crate::pbt::frontend_slice::components::keystone_boot_clock(),
+                    peer_id,
+                )
+                .await
+            }
+            None => {
+                HeadlessFrontendComponent::new_with_clock(
+                    frontend_seed_org,
+                    Duration::from_millis(300),
+                    has_editor,
+                    crate::pbt::frontend_slice::components::keystone_boot_clock(),
+                )
+                .await
+            }
+        });
         let eng = comp.engine();
         // Share the reconcile resolver so the component's id-taking nav/focus caps
         // (pin_block/navigate_focus/focus_editable_text) translate oracle synthetic

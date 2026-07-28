@@ -46,7 +46,8 @@ pub struct ElementInfo {
     /// this block, if any (only `rendered_text` / `text` builders that took the
     /// mark-styling path set it). `None` means the widget painted plain text —
     /// which for a block that HAS marks is the read-mode styling-drop bug the
-    /// `inv-paint-text-styling` PBT catches. Byte-range runs, theme-independent.
+    /// `inv-paint-text-styling` PBT catches. Byte-range runs,
+    /// theme-independent.
     pub styled_runs: Option<std::sync::Arc<[holon_api::StyledRun]>>,
     /// Algebraic declaration of the widget's expected min/max size. The
     /// PBT layout invariant evaluates this against `(width, height)` and

@@ -101,8 +101,8 @@ pub struct SyncReport {
     /// Logs the transport holds that this side has no container mounted for.
     pub unmounted: Vec<ContainerLogId>,
     /// Containers NOT published because the publisher holds no membership proof
-    /// to attach. A typed, reported skip — the relay is untrusted, so state must
-    /// never leave this device under an unproven claim.
+    /// to attach. A typed, reported skip — the relay is untrusted, so state
+    /// must never leave this device under an unproven claim.
     pub unauthorized: Vec<ContainerLogId>,
 }
 

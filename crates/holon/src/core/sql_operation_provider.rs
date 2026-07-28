@@ -1632,10 +1632,11 @@ impl SqlOperationProvider {
     }
 
     /// Read the current holder `content`/title of `id` from THIS authority's
-    /// block table — the mode-specific half of D1b recognition. `Ok(None)` = the
-    /// id is unheld. This is the single-row PK lookup that formerly lived inline
-    /// in the create arm as the pre-SELECT collision guard; it now rides the
-    /// minter trait's `mint` (single-source predicate via `recognize_derived_id`).
+    /// block table — the mode-specific half of D1b recognition. `Ok(None)` =
+    /// the id is unheld. This is the single-row PK lookup that formerly
+    /// lived inline in the create arm as the pre-SELECT collision guard; it
+    /// now rides the minter trait's `mint` (single-source predicate via
+    /// `recognize_derived_id`).
     async fn read_holder_title(
         &self,
         id: &EntityUri,
@@ -1649,7 +1650,12 @@ impl SqlOperationProvider {
             .db_handle
             .query(&sql, HashMap::new())
             .await
-            .map_err(|e| format!("identity recognition: SELECT content for id {}: {e}", id.as_str()))?;
+            .map_err(|e| {
+                format!(
+                    "identity recognition: SELECT content for id {}: {e}",
+                    id.as_str()
+                )
+            })?;
         Ok(rows
             .first()
             .and_then(|r| r.get("content"))
@@ -2335,8 +2341,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                             let carried = holon_api::identity_minting::CarriedId::from_stored(
                                 EntityUri::from_raw(existing),
                             );
-                            if let Some(content) =
-                                params.get("content").and_then(|v| v.as_string())
+                            if let Some(content) = params.get("content").and_then(|v| v.as_string())
                             {
                                 // Recognize the carried id against its store
                                 // holder; Err(IdentityCollision) on a rename
