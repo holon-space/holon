@@ -333,7 +333,7 @@ pub fn type_profiles_from_registry(type_registry: &TypeRegistry) -> Vec<EntityPr
         .filter_map(|td| {
             crate::profile_from_type_def(td).map(|mut p| {
                 p.virtual_child = type_registry.virtual_child_config(&td.name);
-                p
+                p.with_widened_virtual_child()
             })
         })
         .collect()

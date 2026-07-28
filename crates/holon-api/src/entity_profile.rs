@@ -79,6 +79,23 @@ pub struct VirtualChildConfig {
     pub defaults: std::collections::HashMap<String, Value>,
 }
 
+impl VirtualChildConfig {
+    /// Widen the defaults to the entity's DECLARED schema: every declared
+    /// column the `virtual_child:` YAML block does not set is seeded `Null` —
+    /// the same value a projected row carries for an unset column.
+    ///
+    /// Without this the synthetic slot row is a NARROWER projection than any
+    /// real row of the entity, so every computed field / variant condition over
+    /// an unset declared column reports a projection gap the in-process row
+    /// cannot possibly have.
+    pub fn widened_to_declared(mut self, declared_columns: &BTreeSet<String>) -> Self {
+        for col in declared_columns {
+            self.defaults.entry(col.clone()).or_insert(Value::Null);
+        }
+        self
+    }
+}
+
 /// Complete profile for one entity type.
 /// Computed field expressions are pre-compiled at parse time.
 #[derive(Debug, Clone)]
@@ -108,6 +125,17 @@ pub struct EntityProfile {
 // ---------------------------------------------------------------------------
 
 impl EntityProfile {
+    /// Normalize the creation-slot config against this profile's declared
+    /// schema (see [`VirtualChildConfig::widened_to_declared`]). Idempotent —
+    /// widening only fills columns the config does not already carry.
+    pub fn with_widened_virtual_child(mut self) -> Self {
+        self.virtual_child = self
+            .virtual_child
+            .take()
+            .map(|c| c.widened_to_declared(&self.declared_columns));
+        self
+    }
+
     /// Resolve a single row to its RenderProfile.
     pub fn resolve(
         &self,
@@ -497,7 +525,16 @@ impl ProfileCache {
 
     /// Cache over a pre-built profile map (used by `ProfileResolver`'s
     /// rebuild path).
+    ///
+    /// Every profile is normalized on the way in, so a cached profile can
+    /// never hand out a creation-slot config narrower than its declared
+    /// schema — this is the one funnel every profile source (type-defined,
+    /// org-sourced, merged) passes through.
     pub fn new(profiles: HashMap<EntityName, EntityProfile>) -> Self {
+        let profiles = profiles
+            .into_iter()
+            .map(|(name, profile)| (name, profile.with_widened_virtual_child()))
+            .collect();
         Self { profiles }
     }
 

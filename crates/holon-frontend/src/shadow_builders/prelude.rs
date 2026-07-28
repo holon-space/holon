@@ -75,16 +75,15 @@ pub(crate) fn virtual_child_row(
     defaults: &std::collections::HashMap<String, holon_api::Value>,
 ) -> Arc<holon_api::widget_spec::DataRow> {
     let virtual_key = crate::row_origin::RowOrigin::creation_placeholder_id(parent);
-    let mut row = std::collections::HashMap::new();
+    // Defaults FIRST — see `creation_slot_keyed_row`: they carry the declared
+    // schema, the structural columns below must win.
+    let mut row: std::collections::HashMap<String, Value> = defaults.clone();
     row.insert("id".to_string(), Value::String(virtual_key));
     row.insert(
         "parent_id".to_string(),
         Value::String(parent.as_str().to_string()),
     );
     row.insert("sort_key".to_string(), Value::Float(f64::MAX));
-    for (k, v) in defaults {
-        row.insert(k.clone(), v.clone());
-    }
     Arc::new(row)
 }
 

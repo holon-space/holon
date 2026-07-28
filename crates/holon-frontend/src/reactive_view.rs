@@ -146,7 +146,10 @@ fn creation_slot_keyed_row(
 ) -> (holon_api::RowKey, Arc<holon_api::widget_spec::DataRow>) {
     use holon_api::Value;
     let virtual_id = crate::row_origin::RowOrigin::creation_placeholder_id(parent);
-    let mut row = std::collections::HashMap::new();
+    // Defaults FIRST: they carry the entity's declared schema (Null-seeded for
+    // columns the profile does not set), so the structural columns below must
+    // overwrite them, never the other way round.
+    let mut row: std::collections::HashMap<String, holon_api::Value> = defaults.clone();
     row.insert("id".to_string(), Value::String(virtual_id));
     row.insert(
         "parent_id".to_string(),
@@ -157,9 +160,6 @@ fn creation_slot_keyed_row(
         "sort_key".to_string(),
         Value::String("\u{10FFFF}".to_string()),
     );
-    for (k, v) in defaults {
-        row.insert(k.clone(), v.clone());
-    }
     let key =
         holon_api::data_row_entity_uri(&row).expect("creation-slot row carries an 'id' column");
     ((key, holon_api::Occurrence::Canonical), Arc::new(row))
@@ -2386,6 +2386,33 @@ mod tests {
         let inner_len = inner.len();
         let provider = AppendedRowsProvider::creation_slot(Arc::new(FixedRows(inner)), slot);
         provider.rows_snapshot().len() - inner_len
+    }
+
+    /// The declared-schema defaults (Null-seeded, incl. `id`/`parent_id`/
+    /// `sort_key`) must never overwrite the slot's structural identity.
+    #[test]
+    fn creation_slot_structural_columns_win_over_declared_defaults() {
+        let parent = holon_api::EntityUri::block("journals");
+        let defaults = HashMap::from([
+            ("id".to_string(), holon_api::Value::Null),
+            ("parent_id".to_string(), holon_api::Value::Null),
+            ("sort_key".to_string(), holon_api::Value::Null),
+            ("source_language".to_string(), holon_api::Value::Null),
+        ]);
+        let (_key, row) = creation_slot_keyed_row(&parent, &defaults);
+        assert_eq!(
+            row.get("id").and_then(|v| v.as_string()),
+            Some("block:__virtual:journals")
+        );
+        assert_eq!(
+            row.get("parent_id").and_then(|v| v.as_string()),
+            Some("block:journals")
+        );
+        assert_eq!(
+            row.get("sort_key").and_then(|v| v.as_string()),
+            Some("\u{10FFFF}")
+        );
+        assert!(row.contains_key("source_language"));
     }
 
     /// BugFunnel #61: the Pages sidebar is a read-only navigation list — a flat

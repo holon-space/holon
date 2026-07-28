@@ -1944,6 +1944,80 @@ variants:
         assert!(required("is_legacy_rule").contains("source_language"));
     }
 
+    /// The synthetic creation-slot row is a PROJECTION of the entity like any
+    /// other: it must carry the declared schema, or every computed field over a
+    /// column the YAML `virtual_child:` block happens not to set reports a
+    /// projection gap it cannot possibly have (the row is built in-process).
+    #[test]
+    fn creation_slot_defaults_cover_every_declared_column() {
+        let profile = block_profile_with_schema();
+        let declared = profile.declared_columns.clone();
+        let config = profile
+            .virtual_child
+            .expect("block declares a virtual_child creation slot");
+        let missing: Vec<&String> = declared
+            .iter()
+            .filter(|c| !config.defaults.contains_key(*c))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "creation-slot row would omit declared block columns {missing:?}"
+        );
+    }
+
+    /// The widening must not depend on WHICH source a profile came from.
+    /// `build_cache_from_source` inserts org-sourced profiles directly (no
+    /// type-registry seat on that path), so the guarantee has to hold at the
+    /// cache funnel itself.
+    #[test]
+    fn org_sourced_profile_reaching_the_cache_is_widened() {
+        let profile = EntityProfile {
+            entity_name: EntityName::new("widget"),
+            variants: vec![],
+            computed_fields: vec![],
+            virtual_child: Some(holon_api::entity_profile::VirtualChildConfig {
+                defaults: HashMap::from([(
+                    "content".to_string(),
+                    holon_api::Value::String(String::new()),
+                )]),
+            }),
+            declared_columns: ["collapsed", "source_language"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        };
+        let mut row: holon_api::entity::StorageEntity = HashMap::new();
+        row.insert(
+            "id".into(),
+            holon_api::Value::String("block:widget".to_string()),
+        );
+        let source = LiveData::new(
+            vec![row],
+            |_| Ok("widget".to_string()),
+            move |_| Ok(profile.clone()),
+        );
+
+        let cache = ProfileResolver::build_cache_from_source(
+            &source,
+            &holon_api::UiInfo::permissive(),
+            &[],
+        );
+        let defaults = cache
+            .get("widget")
+            .expect("org-sourced profile is cached")
+            .virtual_child
+            .as_ref()
+            .expect("virtual_child survives caching")
+            .defaults
+            .clone();
+        for col in ["collapsed", "source_language"] {
+            assert!(
+                defaults.contains_key(col),
+                "org-sourced creation slot omits declared column '{col}'"
+            );
+        }
+    }
+
     #[test]
     fn heterogeneous_plain_block_row_produces_no_error_and_typed_nulls() {
         // The boot-flood row shape: a plain block missing task_state AND tags.
