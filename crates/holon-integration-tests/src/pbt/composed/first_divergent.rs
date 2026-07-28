@@ -431,6 +431,11 @@ const LAYER_MAP: &[Entry] = &[
         "pbt/composed/invariants/sql_budget.rs",
     ),
     (
+        "inv-settle-budget",
+        None,
+        "pbt/composed/invariants/settle_budget.rs",
+    ),
+    (
         "inv-no-steady-reseed-leak",
         None,
         "pbt/composed/invariants/reseed_leak.rs",

@@ -610,9 +610,30 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
                 // frame). No-op for slices without a render memo.
                 S::invalidate_render_caches(handle);
                 let t_action = std::time::Instant::now();
-                S::apply_transition(&transition, ref_state, caps).await;
-                S::settle_after_apply(handle, caps).await;
+                // Bounded wait (`inv-settle-budget`): a WEDGED transition — the
+                // 2026-07-28 turso IVM regime held one navigation write for 23
+                // minutes — must become a red, not a hung suite. Slow-but-
+                // progressing transitions stay well inside this and are reported
+                // with their real measured duration by the invariant below.
+                let wedge = crate::pbt::invariants::bodies::settle_budget::wedge_deadline();
+                let progressed = tokio::time::timeout(wedge, async {
+                    S::apply_transition(&transition, ref_state, caps).await;
+                    S::settle_after_apply(handle, caps).await;
+                })
+                .await;
+                assert!(
+                    progressed.is_ok(),
+                    "[inv-settle-budget] WEDGED: '{action}' made no projection visible within \
+                     {wedge:?} (HOLON_PBT_LATENCY_WEDGE_MS). The dispatch or the 3-projection \
+                     settle is not progressing — abandoning the wait, because a transition that \
+                     never completes cannot be measured and must not hang the suite."
+                );
                 let action_us = t_action.elapsed().as_micros() as u64;
+                if let Some(l) =
+                    caps.get::<dyn crate::pbt::composed::settle_latency::SettleLatencyLifecycle>()
+                {
+                    l.note_settle(&action, std::time::Duration::from_micros(action_us));
+                }
                 // Latency (end-to-end, action->visible rows): dispatch through the
                 // real pipeline plus the CDC settle — everything except final GPU
                 // paint (headless harness). Greppable via target="holon_latency".

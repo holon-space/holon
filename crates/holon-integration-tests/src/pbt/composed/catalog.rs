@@ -219,6 +219,13 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // registers `ComposedSpanMetrics`; storage/pure slices deselect it.
         #[cfg(feature = "otel-testing")]
         invariants::sql_budget::wire(),
+        // Per-transition interaction→projection-visible latency vs the p95
+        // 200ms SLO (BugFunnel 2026-07-28: a single navigation write wedged
+        // the IVM actor for 23 minutes at vault scale and the suite would
+        // have reported GREEN). Needs the composed `SettleLatency` cap the
+        // `wide_e2e` harness fills from its own timed apply+settle window;
+        // slices that don't time their transitions deselect it.
+        invariants::settle_budget::wire(),
         // No swallowed ERROR-level event / panic escaped the transition (the
         // guard the advice `No id found` background-worker panic slipped past).
         #[cfg(feature = "otel-testing")]

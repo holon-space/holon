@@ -962,6 +962,20 @@ pub async fn boot_and_seed_wide_with_peer_id(
         }
     }
 
+    // `inv-settle-budget` coverage: the per-transition latency recorder the
+    // harness fills from its timed apply+settle window (the same window the
+    // `holon_latency` `stage=action_total` event reports). One `Arc`,
+    // registered as both the write (lifecycle) and read cap. NOT otel-gated —
+    // a wall clock needs no span collector.
+    {
+        use crate::pbt::composed::settle_latency::ComposedSettleLatency;
+        use crate::pbt::composed::settle_latency::SettleLatency;
+        use crate::pbt::composed::settle_latency::SettleLatencyLifecycle;
+        let s = std::sync::Arc::new(ComposedSettleLatency::new());
+        caps.insert(s.clone() as std::sync::Arc<dyn SettleLatency>);
+        caps.insert(s as std::sync::Arc<dyn SettleLatencyLifecycle>);
+    }
+
     // `inv-sql-budget` coverage: a span-metrics provider hosting the SAME
     // `MetricsSut` the native E2ESut uses, exposed through `ComposedBudget`
     // (the read) + `SutMetricsLifecycle` (the `ComposedSut` harness drives

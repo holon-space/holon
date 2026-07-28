@@ -435,3 +435,34 @@ impl CapProvider for FixtureBudget {
 pub fn budget_map(b: FixtureBudget) -> CapMap {
     Config::new().with(b).build()
 }
+
+/// A hand-crafted [`SettleLatency`] SUT — a canned per-transition settle
+/// duration, so the `inv-settle-budget` teeth can inject the vault-scale
+/// latency regime without booting a 25k-block vault.
+///
+/// [`SettleLatency`]: crate::pbt::composed::settle_latency::SettleLatency
+pub struct FixtureSettleLatency {
+    pub elapsed: Option<std::time::Duration>,
+}
+
+impl crate::pbt::composed::settle_latency::SettleLatency for FixtureSettleLatency {
+    fn last_settle(&self) -> Option<crate::pbt::invariants::bodies::settle_budget::SettleSample> {
+        self.elapsed.map(
+            |elapsed| crate::pbt::invariants::bodies::settle_budget::SettleSample {
+                action: "NavigateFocus".to_string(),
+                elapsed,
+            },
+        )
+    }
+}
+
+impl CapProvider for FixtureSettleLatency {
+    fn register(self: Arc<Self>, caps: &mut CapMap) {
+        caps.insert(self as Arc<dyn crate::pbt::composed::settle_latency::SettleLatency>);
+    }
+}
+
+/// Build a SUT `CapMap` exposing only `SettleLatency` over a canned duration.
+pub fn settle_map(elapsed: Option<std::time::Duration>) -> CapMap {
+    Config::new().with(FixtureSettleLatency { elapsed }).build()
+}

@@ -60,6 +60,7 @@ pub mod no_orphan;
 pub mod no_page_under_non_page;
 pub mod no_parent_cycles;
 pub mod org_render_fixed_point;
+pub mod settle_budget;
 pub mod sidebar_page_tag_preserved;
 pub mod source_language;
 /// `inv-sql-budget` — `otel-testing`-gated (the budget body + composed host

@@ -39,6 +39,7 @@ pub mod no_orphan_blocks;
 pub mod no_page_under_non_page;
 pub mod no_parent_cycles;
 pub mod org_render_fixed_point;
+pub mod settle_budget;
 pub mod sidebar_page_tag_preserved;
 pub mod source_language_iff_source;
 pub mod sql_budget;

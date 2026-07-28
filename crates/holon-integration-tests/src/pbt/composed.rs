@@ -40,6 +40,7 @@ pub mod invariants;
 /// consumed by the `wide_e2e` slice (registers it) and the `harness` (drives
 /// its lifecycle).
 #[cfg(all(feature = "otel-testing", any(test, feature = "pbt")))]
+pub mod settle_latency;
 pub mod span_metrics;
 
 /// Process-global ERROR-event + panic capture surface for

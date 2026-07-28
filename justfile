@@ -141,6 +141,41 @@ hand-authored *FLAGS:
 keystone-full cases='16':
     just pbt general {{cases}}
 
+# Vault-scale keystone lane: the ONE composed keystone over a ~25k-block
+# synthetic vault — Martin's real vault is 24,369 blocks, and the keystone's
+# scale knob defaults to 0, so no default run has ever been within three orders
+# of magnitude of the regime where the turso IVM commit cost goes
+# full-recompute (BugFunnel 2026-07-28). This lane exists so
+# `inv-settle-budget` actually ENTERS that regime.
+#
+# EXPECTED RED at 25k until the turso-side fix lands: `inv-settle-budget` fires
+# with the measured per-transition duration (seconds, not milliseconds). That
+# red IS the deliverable — do not soften it.
+#
+# HOLON_SOAK_SETTLE_MS does double duty: it raises the convergence WAIT CAP (so
+# a slow projection finishes and is MEASURED, instead of the settle giving up
+# mid-projection) AND it scales the headless boot's LoroSyncControllerHandle
+# poll budget (builder.rs). At 25k the ingest needs far more than the 120s a
+# smaller value allows — boot fails loud with "LoroSyncControllerHandle never
+# resolved" if this is too small. It deliberately does NOT move the
+# invariant's hard-fail threshold.
+keystone-scale size='25000' cases='1' settle_ms='900000' per_doc='200' *FLAGS:
+    #!/usr/bin/env bash
+    # pipefail is REQUIRED: without it the recipe's exit status is `tee`'s, so a
+    # failing suite exits 0 and every gate using this recipe is a silent false
+    # green (observed 2026-07-25).
+    set -euo pipefail
+    stamp="$(date +%Y%m%d-%H%M%S)"
+    log="/tmp/pbt-keystone-scale-${stamp}.log"
+    echo "keystone-scale: HOLON_SOAK_SEED_BLOCKS={{size}} cases={{cases}} settle={{settle_ms}}ms"
+    echo "log: $log"
+    HOLON_SOAK_SEED_BLOCKS={{size}} HOLON_SOAK_SETTLE_MS={{settle_ms}} \
+        HOLON_SOAK_BLOCKS_PER_DOC={{per_doc}} HOLON_PBT_FORCE_FULL=1 \
+        RUST_LOG="holon_latency=debug" HOLON_OTEL_FILTER=off \
+        PROPTEST_CASES={{cases}} cargo test \
+        -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
+        -- --nocapture {{FLAGS}} 2>&1 | tee "$log"
+
 # The ONE keystone driven over the LIVE MCP surface (LiveMcpE2E composition,
 # windowless — same E2ETransition alphabet + invariant catalog as headless).
 # Needs a running app serving MCP with reset enabled, e.g.:
