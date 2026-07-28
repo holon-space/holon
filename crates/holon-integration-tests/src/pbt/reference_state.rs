@@ -337,6 +337,36 @@ pub struct HarnessEnv {
     /// Shadow interpreter resolved from FluxDI — source of truth for widget
     /// names and render DSL parsing. `Arc`-shared across clones.
     pub interpreter: Arc<ShadowInterpreter>,
+
+    /// Memoized profile engine — see [`ProfileEngineCache`]. Empty in a fresh
+    /// clone, so it never carries another state's engine.
+    pub profile_engine: ProfileEngineCache,
+}
+
+/// Memo for [`ReferenceState::profile_engine`], keyed by a fingerprint of the
+/// source-block projection the entity lookups read.
+///
+/// The key is derived from the very data the engine wraps, so a stale engine is
+/// unrepresentable: mutating any source block's id, parent or language changes
+/// the fingerprint and forces a rebuild. Without the memo, `resolve_profile`
+/// rebuilt the whole engine per ROW — O(rows × blocks) per snapshot.
+///
+/// `Clone` yields an EMPTY cell rather than sharing one: proptest clones the
+/// reference per step, and two clones that then diverge would otherwise evict
+/// each other's engine on every call.
+#[derive(Default)]
+pub struct ProfileEngineCache(std::sync::Mutex<Option<(u64, Arc<rhai::Engine>)>>);
+
+impl Clone for ProfileEngineCache {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl std::fmt::Debug for ProfileEngineCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProfileEngineCache")
+    }
 }
 
 /// Reference state tracking all expected data (uses production Block struct)
@@ -479,6 +509,112 @@ impl Resolved<ReferenceState> {
 }
 
 impl ReferenceState {
+    /// The oracle's Rhai engine for evaluating the bundled `block` profile.
+    ///
+    /// The bundled profile's computed fields call entity lookups
+    /// (`query_source(id)`, `rule_sibling(id)`), which production registers on
+    /// the ProfileResolver's engine from live entities. The oracle predicts the
+    /// SAME profile, so it registers them through the SAME seat
+    /// (`holon_profiles::build_lookup_engine`) — backed by the model's own
+    /// block tree, not by prod's matviews.
+    ///
+    /// Memoized per source-block fingerprint ([`ProfileEngineCache`]): the
+    /// render path resolves a profile per row, and rebuilding the engine each
+    /// time walks the whole block map.
+    pub fn profile_engine(&self) -> Arc<rhai::Engine> {
+        let fingerprint = self.source_block_fingerprint();
+        let mut slot = self.harness.profile_engine.0.lock().unwrap();
+        if let Some((cached, engine)) = slot.as_ref()
+            && *cached == fingerprint
+        {
+            return Arc::clone(engine);
+        }
+        let engine = Arc::new(self.build_profile_engine());
+        *slot = Some((fingerprint, Arc::clone(&engine)));
+        engine
+    }
+
+    /// Hash of exactly what the lookups read: every source block's id, parent
+    /// and language. Two states agreeing here cannot disagree on any lookup.
+    fn source_block_fingerprint(&self) -> u64 {
+        use std::hash::Hash;
+        use std::hash::Hasher;
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for block in self.domain.block_state.blocks.values() {
+            if block.content_type != ContentType::Source {
+                continue;
+            }
+            let Some(lang) = block.source_language.as_ref() else {
+                continue;
+            };
+            block.id.as_str().hash(&mut hasher);
+            block.parent_id.as_str().hash(&mut hasher);
+            lang.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    fn build_profile_engine(&self) -> rhai::Engine {
+        let mut entities = holon_profiles::LiveEntities::new();
+        entities.insert(
+            EntityName::new("query_source"),
+            self.source_blocks_by_parent(|lang| lang.as_query().is_some()),
+        );
+        entities.insert(
+            EntityName::new("rule_sibling"),
+            self.source_blocks_by_parent(|lang| {
+                matches!(
+                    lang,
+                    holon_api::SourceLanguage::HolonRule | holon_api::SourceLanguage::LegacyAction
+                )
+            }),
+        );
+        holon_profiles::build_lookup_engine(&entities)
+    }
+
+    /// The model's answer to production's `query_source_blocks_sql` /
+    /// `rule_head_blocks_sql`: source blocks whose language matches, projected
+    /// to the same columns and keyed by `parent_id`.
+    fn source_blocks_by_parent(
+        &self,
+        language_matches: impl Fn(&holon_api::SourceLanguage) -> bool,
+    ) -> Arc<holon_api::live_data::LiveData<holon_api::StorageEntity>> {
+        let rows: Vec<holon_api::StorageEntity> = self
+            .domain
+            .block_state
+            .blocks
+            .values()
+            .filter(|b| b.content_type == ContentType::Source)
+            .filter_map(|b| b.source_language.as_ref().map(|lang| (b, lang)))
+            .filter(|(_, lang)| language_matches(lang))
+            .map(|(b, lang)| {
+                HashMap::from([
+                    (Arc::from("id"), Value::String(b.id.as_str().to_string())),
+                    (
+                        Arc::from("parent_id"),
+                        Value::String(b.parent_id.as_str().to_string()),
+                    ),
+                    (
+                        Arc::from("source_language"),
+                        Value::String(lang.to_string()),
+                    ),
+                ])
+            })
+            .collect();
+
+        holon_api::live_data::LiveData::new(
+            rows,
+            |row| {
+                row.get("parent_id")
+                    .and_then(|v| v.as_string())
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| anyhow::anyhow!("source-block row missing 'parent_id'"))
+            },
+            |row| Ok(row.clone()),
+        )
+    }
+
     /// Return a [`Resolved`] clone of this reference state with its block tree
     /// remapped into the SUT's ID space via `map` (synthetic doc URI → real
     /// UUID). Capability-bound invariant bodies run against this resolved
@@ -571,6 +707,7 @@ impl ReferenceState {
                 cap_set: None,
                 real_editor: false,
                 interpreter,
+                profile_engine: ProfileEngineCache::default(),
             },
             loro: LoroRefExt::default(),
             clock: ClockState::new(),
@@ -2501,7 +2638,7 @@ impl holon_frontend::reactive::BuilderServices for ReferenceState {
         use holon_api::render_types::RenderVariant;
 
         let profile = self.domain.seed_profile.as_ref()?;
-        let engine = rhai::Engine::new();
+        let engine = self.profile_engine();
         let (candidates, _computed) = profile.resolve_candidates(row, &engine);
         let ops = self.domain.block_operations.clone();
         let variants: Vec<RenderVariant> = candidates

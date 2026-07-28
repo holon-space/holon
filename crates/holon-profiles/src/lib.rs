@@ -604,6 +604,16 @@ fn topo_sort_computed_fields(
 // Entity lookup registration for Rhai
 // ---------------------------------------------------------------------------
 
+/// Build a Rhai engine carrying the entity-lookup functions.
+///
+/// The single seat: the production [`ProfileResolver`] and the PBT oracle both
+/// evaluate the same profile expressions, so both build their engine here.
+pub fn build_lookup_engine(live_entities: &LiveEntities) -> RhaiEngine {
+    let mut engine = RhaiEngine::new();
+    register_entity_lookups(&mut engine, live_entities);
+    engine
+}
+
 /// Register per-entity lookup functions on a Rhai engine.
 ///
 /// For each entry in `live_entities`, registers a function named after the
@@ -741,9 +751,7 @@ impl ProfileResolver {
 
     /// Build a Rhai engine with entity lookup functions pre-registered.
     fn build_rhai_engine(live_entities: &LiveEntities) -> RhaiEngine {
-        let mut engine = RhaiEngine::new();
-        register_entity_lookups(&mut engine, live_entities);
-        engine
+        build_lookup_engine(live_entities)
     }
 
     /// Replace the live entities used for Rhai lookup functions.
