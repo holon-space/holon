@@ -130,6 +130,21 @@ const LAYER_MAP: &[Entry] = &[
         Some(Layer::StoreCrdt),
         "holon-loro-testing (blocks_match/loro)",
     ),
+    // No cross-instance axis exists in this pipeline (it's single-SUT,
+    // single-edit); both two-instance invariants below read block-set
+    // membership in the receiver's store — the same substrate as the other
+    // StoreCrdt entries, just compared across two instances instead of one —
+    // so they're attributed here rather than inventing a new axis.
+    (
+        "inv-two-instance-convergence",
+        Some(Layer::StoreCrdt),
+        "pbt/invariants/bodies/two_instance_convergence.rs",
+    ),
+    (
+        "inv-boundary-respected",
+        Some(Layer::StoreCrdt),
+        "pbt/invariants/bodies/boundary_respected.rs",
+    ),
     // ── matview/SQL projection ────────────────────────────────────────────
     (
         "inv-live-children-match-ref",
