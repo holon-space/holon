@@ -352,7 +352,7 @@ async fn fire_emit(
     //     the SQL write alone can never reach this in Loro mode, where the create
     //     lands in the Loro doc and only projects to `block_raw`.
     //   - AlreadySatisfied: the id already holds this exact name — nothing to do.
-    //   - Free: fall through and mint/create below.
+    //   - Free / UnnamedPlaceholder: fall through and mint/create below.
     let holder_title = match current_title_of(engine, &id).await {
         Ok(t) => t,
         Err(e) => {
@@ -382,7 +382,10 @@ async fn fire_emit(
             return;
         }
         holon_api::Recognition::AlreadySatisfied => return,
-        holon_api::Recognition::Free => {}
+        // Free / UnnamedPlaceholder: nothing named holds the id, so fall
+        // through and create — the create COMPLETES a placeholder row rather
+        // than clobbering a rival entity.
+        holon_api::Recognition::Free | holon_api::Recognition::UnnamedPlaceholder => {}
     }
 
     let mut params = StorageEntity::new();

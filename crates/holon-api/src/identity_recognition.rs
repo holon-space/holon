@@ -33,6 +33,12 @@ pub enum Recognition {
     /// caller treats it as a benign no-op (this is the convergent re-fire /
     /// re-ingest case, not a fault).
     AlreadySatisfied,
+    /// The derived id is held by a row carrying NO title at all — a structural
+    /// placeholder stood up for THIS id (a Loro placeholder root auto-created
+    /// when a child's create reached its parent first), not a second entity.
+    /// There is no name to clobber, so the caller COMPLETES it with the
+    /// requested title; the create is an adoption, not a substitution.
+    UnnamedPlaceholder,
     /// The derived id is held by an entity whose normalized title DIFFERS from
     /// the requested one — the state a rename leaves behind (content changed,
     /// id preserved). Minting here would clobber a DIFFERENT entity; the
@@ -60,6 +66,10 @@ pub fn recognize_derived_id(
 ) -> Recognition {
     match holder_title {
         None => Recognition::Free,
+        // Checked BEFORE the title comparison: a blank holder is not a rival
+        // name, so it can never be the collision case. Same "an empty-content
+        // Page is never legal" predicate the title-less doc-root heal uses.
+        Some(held) if held.trim().is_empty() => Recognition::UnnamedPlaceholder,
         Some(held) if normalize_for_hash(held) == normalize_for_hash(requested_title) => {
             Recognition::AlreadySatisfied
         }
@@ -122,6 +132,20 @@ mod tests {
             recognize_derived_id(&id(), Some("2026-01-15"), "2026-01-15"),
             Recognition::AlreadySatisfied
         );
+    }
+
+    #[test]
+    fn blank_holder_is_an_unnamed_placeholder_not_a_collision() {
+        // The dogfood 2026-07-28 shape: a Loro placeholder root projected an
+        // empty-content row over a page's id. No name is held, so the create
+        // must ADOPT the id rather than be refused as a rival-entity clobber.
+        for held in ["", "   ", "\n"] {
+            assert_eq!(
+                recognize_derived_id(&id(), Some(held), "Music"),
+                Recognition::UnnamedPlaceholder,
+                "held {held:?}"
+            );
+        }
     }
 
     #[test]

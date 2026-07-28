@@ -2081,6 +2081,48 @@ impl LoroBackend {
         Ok(())
     }
 
+    /// Write `content` onto a node the caller has established is content-less
+    /// — an auto-created
+    /// [`create_placeholder_root`](Self::create_placeholder_root)
+    /// standing in for a parent reached before its own create.
+    ///
+    /// Goes through the same `write_content_to_meta` the create path uses, so
+    /// every `BlockContent` variant (source language, image path, inline marks)
+    /// lands exactly as it would have on a first-class create. Nothing is
+    /// clobbered: the node held no content to lose.
+    pub async fn complete_placeholder_content(
+        &self,
+        id: &str,
+        content: &BlockContent,
+    ) -> Result<(), ApiError> {
+        let target = self.resolve_write_target_checked(id).await?;
+        let (write_doc, tree_id) = self.target_doc(&target);
+
+        write_doc
+            .with_write(|doc| {
+                let tree = doc.get_tree(TREE_NAME);
+                let meta = tree.get_meta(tree_id)?;
+                write_content_to_meta(&meta, content)?;
+                meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
+                doc.commit();
+                Ok(())
+            })
+            .map_err(|e| ApiError::InternalError {
+                message: format!("Failed to complete placeholder content: {}", e),
+            })?;
+
+        let block = self.get_block(id).await?;
+        self.emit_change(Change::Updated {
+            id: id.to_string(),
+            data: block,
+            origin: ChangeOrigin::Local {
+                operation_id: None,
+                trace_id: None,
+            },
+        });
+        Ok(())
+    }
+
     /// Update a block's text AND its inline marks together.
     ///
     /// Replaces the `LoroText` content via `update_text_field` (same as

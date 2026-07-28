@@ -610,6 +610,39 @@ fn sql_scalar_backing<T: LoroScalarField>(
     Arc::new(LwwScalarBacking::<T>::new(read, write, signal_factory)) as Arc<dyn CellBacking<T>>
 }
 
+/// Resolve `parent_id` to a node that exists in the Loro tree, standing up a
+/// placeholder root for it when it does not — a child reached before its own
+/// parent's create, which the org scan does routinely.
+///
+/// The placeholder carries NO content and NO tags, so its outbound projection
+/// writes an empty, untagged row over whatever the parent already had in SQL.
+/// That is why it is disclosed here and why the create path COMPLETES such a
+/// node (content + home) the moment the real create for it arrives.
+async fn resolve_parent_or_placeholder(
+    backend: &Arc<LoroBackend>,
+    parent_id: &EntityUri,
+    child_id: &EntityUri,
+) -> Result<EntityUri> {
+    if parent_id.is_no_parent()
+        || parent_id.is_sentinel()
+        || backend.resolve_to_tree_id(parent_id.id()).await.is_some()
+    {
+        return Ok(parent_id.clone());
+    }
+    tracing::warn!(
+        child = %child_id,
+        parent = %parent_id,
+        "standing up an EMPTY placeholder root for a parent not yet in the Loro tree"
+    );
+    let placeholder = backend
+        .create_placeholder_root(parent_id.id())
+        .await
+        .map_err(|e| anyhow!("create_placeholder_root({parent_id}): {e:#}"))?;
+    // ALLOW(entity_uri_from_raw): placeholder id String from
+    // backend.create_placeholder_root() (Loro adapter output)
+    Ok(EntityUri::from_raw(&placeholder))
+}
+
 #[async_trait::async_trait]
 impl EntityCellRegistry for BlockCellRegistry {
     fn live_field_any(
@@ -824,17 +857,40 @@ impl EntityCellRegistry for BlockCellRegistry {
             // the matview tag row. Comparing against the Loro tree (the authority,
             // fully loaded before the seed runs) makes the skip deterministic,
             // unlike diffing the lagging SQL projection during boot.
-            let current =
-                if !tags.is_empty() || !requires.is_empty() || !advice_suppressed.is_empty() {
-                    Some(
-                        backend.get_block(new_id.id()).await.map_err(|e| {
-                            anyhow!("get_block({new_id}) for edge reconcile: {e:#}")
-                        })?,
-                    )
-                } else {
-                    None
-                };
-            if !tags.is_empty() && current.as_ref().is_none_or(|b| b.tags != *tags) {
+            let current = backend
+                .get_block(new_id.id())
+                .await
+                .map_err(|e| anyhow!("get_block({new_id}) for edge reconcile: {e:#}"))?;
+            // Content half of the same placeholder reconcile. A placeholder root
+            // is created with NO content, and its outbound projection writes that
+            // "" over the parent's real SQL row — permanently, because no later
+            // call ever gave the node its content. Completing it here is
+            // clobber-free by construction (an empty node has nothing to lose)
+            // and re-homes it off the tree root, where it was parked. The
+            // re-home resolves its own parent through the SAME
+            // placeholder-standing-up path, so a whole ancestor chain reached
+            // bottom-up (the folder-companion vault shape) still lands homed
+            // instead of stranding pages at the root — where write-back would
+            // RELOCATE their org files out of their folders.
+            let requested_is_empty = matches!(
+                &content, holon_api::BlockContent::Text { raw } if raw.trim().is_empty()
+            );
+            if !requested_is_empty && current.content.trim().is_empty() {
+                tracing::warn!(
+                    id = %new_id,
+                    "completing an empty placeholder root with this create's content"
+                );
+                backend
+                    .complete_placeholder_content(new_id.id(), &content)
+                    .await
+                    .map_err(|e| anyhow!("complete_placeholder_content({new_id}): {e:#}"))?;
+                let home = resolve_parent_or_placeholder(&backend, parent_id, new_id).await?;
+                backend
+                    .update_block_position(new_id.id(), home.as_str(), after_id.map(|a| a.id()))
+                    .await
+                    .map_err(|e| anyhow!("update_block_position({new_id}) placeholder: {e:#}"))?;
+            }
+            if !tags.is_empty() && current.tags != *tags {
                 backend
                     .set_block_tags(new_id.id(), &tags.to_vec())
                     .await
@@ -842,20 +898,14 @@ impl EntityCellRegistry for BlockCellRegistry {
             }
             // Skipped when empty to avoid clobbering deps set elsewhere with an
             // empty list; otherwise written only when the request differs.
-            if !requires.is_empty()
-                && current
-                    .as_ref()
-                    .is_none_or(|b| b.requires.as_slice() != requires)
-            {
+            if !requires.is_empty() && current.requires.as_slice() != requires {
                 backend
                     .set_block_requires(new_id.id(), requires)
                     .await
                     .map_err(|e| anyhow!("set_block_requires({new_id}): {e:#}"))?;
             }
             if !advice_suppressed.is_empty()
-                && current
-                    .as_ref()
-                    .is_none_or(|b| b.advice_suppressed.as_slice() != advice_suppressed)
+                && current.advice_suppressed.as_slice() != advice_suppressed
             {
                 backend
                     .set_block_advice_suppressed(new_id.id(), advice_suppressed)
@@ -864,25 +914,7 @@ impl EntityCellRegistry for BlockCellRegistry {
             }
             return Ok(true);
         }
-        // Resolve the parent in the tree; if it's a real block not yet
-        // present (a child reached before its parent during the org scan),
-        // stand up a placeholder root — mirrors `apply_create` so the create
-        // is order-independent. The placeholder reconciles when the real
-        // parent arrives.
-        let resolved_parent = if parent_id.is_no_parent()
-            || parent_id.is_sentinel()
-            || backend.resolve_to_tree_id(parent_id.id()).await.is_some()
-        {
-            parent_id.clone()
-        } else {
-            let placeholder = backend
-                .create_placeholder_root(parent_id.id())
-                .await
-                .map_err(|e| anyhow!("create_placeholder_root({parent_id}): {e:#}"))?;
-            // ALLOW(entity_uri_from_raw): placeholder id String from
-            // backend.create_placeholder_root() (Loro adapter output)
-            EntityUri::from_raw(&placeholder)
-        };
+        let resolved_parent = resolve_parent_or_placeholder(&backend, parent_id, new_id).await?;
         backend
             .create_block_with_properties(
                 resolved_parent,

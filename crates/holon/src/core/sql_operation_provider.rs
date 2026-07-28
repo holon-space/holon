@@ -1680,6 +1680,24 @@ impl holon_api::identity_minting::IdentityMinting for SqlOperationProvider {
                 // Mode-specific store read of the derived id's current holder,
                 // then the mode-INDEPENDENT single-source decision.
                 let holder = self.read_holder_title(&id).await?;
+                if matches!(
+                    holon_api::identity_recognition::recognize_derived_id(
+                        &id,
+                        holder.as_deref(),
+                        &title
+                    ),
+                    holon_api::identity_recognition::Recognition::UnnamedPlaceholder
+                ) {
+                    // Disclosed adoption, not a silent substitution: the holder
+                    // carries no title, so this create names a placeholder that
+                    // was standing in for this very id.
+                    tracing::warn!(
+                        id = %id,
+                        requested_title = %title,
+                        "adopting an UNNAMED placeholder row at a derived id — the create \
+                         completes it with the requested title; no named holder is clobbered"
+                    );
+                }
                 holon_api::identity_minting::bless_carried(id, holder.as_deref(), &title)
                     .map_err(|c| Box::new(c) as holon_api::identity_minting::BoxError)
             }

@@ -241,15 +241,18 @@ impl IdentityInput {
 /// Complete the mint for a CARRIED (caller-derived) id given its current
 /// holder's title, as read from the active store — the mode-INDEPENDENT half of
 /// recognition. [`recognize_derived_id`] is the single-source predicate:
-/// `Free`/`AlreadySatisfied` → the id is blessed for create; `Collision` →
-/// refused (D1b interim fail-loud). `holder_title == None` ⇒ the id is unheld.
+/// `Free`/`AlreadySatisfied`/`UnnamedPlaceholder` → the id is blessed for
+/// create; `Collision` → refused (D1b interim fail-loud). `holder_title ==
+/// None` ⇒ the id is unheld.
 pub fn bless_carried(
     id: EntityUri,
     holder_title: Option<&str>,
     requested_title: &str,
 ) -> Result<MintedId, IdentityCollision> {
     match recognize_derived_id(&id, holder_title, requested_title) {
-        Recognition::Free | Recognition::AlreadySatisfied => Ok(MintedId(id)),
+        Recognition::Free | Recognition::AlreadySatisfied | Recognition::UnnamedPlaceholder => {
+            Ok(MintedId(id))
+        }
         Recognition::Collision(c) => Err(c),
     }
 }
@@ -326,6 +329,12 @@ mod tests {
         // of the SAME entity (AlreadySatisfied) must bless, not collide.
         let out = bless_carried(id(), Some("2026-01-15"), " 2026-01-15 ")
             .expect("already-satisfied must bless");
+        assert_eq!(out.as_entity_uri(), &id());
+    }
+
+    #[test]
+    fn bless_carried_blank_holder_adopts_the_id() {
+        let out = bless_carried(id(), Some(""), "Music").expect("unnamed placeholder must bless");
         assert_eq!(out.as_entity_uri(), &id());
     }
 
