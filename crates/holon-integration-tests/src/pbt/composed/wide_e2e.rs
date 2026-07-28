@@ -753,6 +753,14 @@ const WIDE_HEADLESS_ABSENT_CAPS: &[(&str, &str)] = &[
          frontend engine; the headless ReactiveEngine returns honest-empty and deselects rather \
          than faking",
     ),
+    (
+        "SutClockAdvance",
+        "env-gated, not absent: composed/builder.rs registers it ONLY under \
+         HOLON_PBT_ADVANCE_DAY, deliberately dormant until the co-landed ref model + \
+         inv-journal-one-per-day prove green under the full catalog. Flip the env on and the \
+         cap — and inv-journal-one-per-day with it — is present. Same gate the non-vacuity \
+         guard's ENV_GATED_ALLOWLIST cites for AdvanceDay",
+    ),
 ];
 
 /// The wide working tree (`page_root` → `parent`/`c1`/`c2` siblings) as a
@@ -2167,8 +2175,13 @@ mod tests {
             }
         }
 
-        let excluded: BTreeSet<&'static str> =
+        let mut excluded: BTreeSet<&'static str> =
             WIDE_HEADLESS_ABSENT_CAPS.iter().map(|(c, _)| *c).collect();
+        // `SutClockAdvance` is excluded only while its env gate is OFF; with the
+        // flag on the builder registers it, and the exclusion would read stale.
+        if std::env::var("HOLON_PBT_ADVANCE_DAY").is_ok() {
+            excluded.remove("SutClockAdvance");
+        }
 
         // Every excluded cap must ACTUALLY be missing — a stale exclusion (a cap that
         // is now present) is itself a smell to prune, so fail loud on it too.

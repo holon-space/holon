@@ -453,7 +453,31 @@ pub async fn boot_two_instances(
 
     owner_caps.insert(handle.clone() as Arc<dyn SutTwoInstance>);
     owner_caps.insert(handle.clone() as Arc<dyn SutReceiverBackend>);
+    // The non-vacuity guard reads `two_instance_cap_ids` as this slice's cap
+    // evidence; a claim this composition does not back would let a genuinely
+    // dead sharing transition read as drawable.
+    let provided = owner_caps.cap_set();
+    for cap in two_instance_cap_ids() {
+        assert!(
+            provided.contains(&cap),
+            "two_instance_cap_ids claims {} but the composed owner map does not provide it",
+            cap.name(),
+        );
+    }
     (owner_caps, handle, scaffold)
+}
+
+/// The caps this slice adds ON TOP of the wide owner map it boots through the
+/// same production builder. Read by the non-vacuity guard as cap evidence that
+/// the sharing transitions have a shipped home — the two-instance analog of
+/// [`live_mcp_cap_ids`](super::live_mcp::live_mcp_cap_ids). Checked against the
+/// real inserts by [`compose_two_instance`] itself, so it cannot over-claim.
+pub fn two_instance_cap_ids() -> Vec<holon_pbt_core::composition::CapId> {
+    use holon_pbt_core::composition::CapId;
+    vec![
+        CapId::of::<dyn SutTwoInstance>(),
+        CapId::of::<dyn SutReceiverBackend>(),
+    ]
 }
 
 /// Reference machine over the SAME `E2ETransition` enum, restricted to the

@@ -661,15 +661,17 @@ mod non_vacuity_guard {
     }
 
     /// Is `(req_wiring, req_caps)` satisfiable by at least one shipped
-    /// composition — a blessed manifest's `compose_sut`, OR the live-MCP
-    /// slice's compose path? The live-MCP home checks `req_caps` against
-    /// the ACTUAL `register_live_caps` surface (cap evidence, not a name),
-    /// over the `full_headless` wiring the slice mirrors. Pure predicate so
-    /// the teeth of the guard are unit-testable directly.
+    /// composition — a blessed manifest's `compose_sut`, the live-MCP slice's
+    /// compose path, or the two-instance slice? Every home checks `req_caps`
+    /// as cap EVIDENCE, never a name. The two-instance slice boots a blessed
+    /// owner map through the same builder and then inserts its sharing caps, so
+    /// it is a blessed composition widened by `two_instance_caps`. Pure
+    /// predicate so the teeth of the guard are unit-testable directly.
     fn gate_covered(
         blessed: &[(Wiring, CapSet)],
         live_mcp_wiring: &Wiring,
         live_mcp_caps: &[CapId],
+        two_instance_caps: &[CapId],
         req_wiring: &RequiredWiring,
         req_caps: &[CapId],
     ) -> bool {
@@ -678,7 +680,13 @@ mod non_vacuity_guard {
             .any(|(w, cs)| req_wiring.satisfied_by(w) && req_caps.iter().all(|c| cs.contains(c)));
         let in_live_mcp = req_wiring.satisfied_by(live_mcp_wiring)
             && req_caps.iter().all(|c| live_mcp_caps.contains(c));
-        in_blessed || in_live_mcp
+        let in_two_instance = blessed.iter().any(|(w, cs)| {
+            req_wiring.satisfied_by(w)
+                && req_caps
+                    .iter()
+                    .all(|c| cs.contains(c) || two_instance_caps.contains(c))
+        });
+        in_blessed || in_live_mcp || in_two_instance
     }
 
     #[test]
@@ -690,6 +698,7 @@ mod non_vacuity_guard {
         );
         let live_mcp_wiring = holon_pbt_core::component_set::ComponentSet::full_headless().wiring;
         let live_mcp_caps = live_mcp_cap_ids();
+        let two_instance_caps = crate::pbt::composed::two_instance::two_instance_cap_ids();
 
         let dead: Vec<&'static str> = super::all_transition_gates()
             .into_iter()
@@ -699,6 +708,7 @@ mod non_vacuity_guard {
                     &blessed,
                     &live_mcp_wiring,
                     &live_mcp_caps,
+                    &two_instance_caps,
                     req_wiring,
                     req_caps,
                 )
@@ -709,7 +719,8 @@ mod non_vacuity_guard {
         assert!(
             dead.is_empty(),
             "DEAD E2ETransition(s): registered in the alphabet but NO shipped composition \
-             (blessed manifest OR the live-MCP slice) satisfies both required_wiring AND \
+             (blessed manifest, the live-MCP slice, or the two-instance slice) satisfies both \
+             required_wiring AND \
              required_caps, so they can never be drawn — silent vacuity (the \
              InstantiateTemplate class, BugFunnel 2026-07-27): {dead:?}.\nEither register \
              the missing cap in a shipped composition \
@@ -732,6 +743,7 @@ mod non_vacuity_guard {
             &[], // no blessed homes
             &holon_pbt_core::component_set::ComponentSet::full_headless().wiring,
             &[],                  // live-MCP provides nothing
+            &[],                  // the two-instance slice provides nothing
             &RequiredWiring::Any, // wiring trivially met
             &[orphan],
         );
