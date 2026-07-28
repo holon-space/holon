@@ -1229,6 +1229,7 @@ impl ReactiveView {
             let row_map = row_map.clone();
             let interpret_row = interpret_row.clone();
             let get_sort_key = get_sort_key.clone();
+            let ds_probe = data_source.clone();
             data_source.keyed_rows_signal_vec().for_each(move |diff| {
                 let mut tree = tree.lock().unwrap();
                 let mut key_index = key_index.lock().unwrap();
@@ -1324,6 +1325,25 @@ impl ReactiveView {
                             let (aw, aov) = interpret_row(arow, adepth, aid.1.clone());
                             tree.update(&aid, aparent, ask, aw, aov);
                         }
+                    }
+                };
+                let diff_label = match &diff {
+                    VecDiff::Replace { values } => format!("Replace({} rows)", values.len()),
+                    VecDiff::InsertAt { index, value } => {
+                        format!("InsertAt({index}, {})", value.0.0)
+                    }
+                    VecDiff::UpdateAt { index, value } => {
+                        format!("UpdateAt({index}, {})", value.0.0)
+                    }
+                    VecDiff::RemoveAt { index } => format!("RemoveAt({index})"),
+                    VecDiff::Push { value } => format!("Push({})", value.0.0),
+                    VecDiff::Pop {} => "Pop".to_string(),
+                    VecDiff::Clear {} => "Clear".to_string(),
+                    VecDiff::Move {
+                        old_index,
+                        new_index,
+                    } => {
+                        format!("Move({old_index} -> {new_index})")
                     }
                 };
                 match diff {
@@ -1425,6 +1445,44 @@ impl ReactiveView {
                         tree.rebuild(vec![]);
                     }
                     VecDiff::Move { .. } => {}
+                }
+                // The tree renders exactly the rows the driver holds: both are
+                // maintained under this one lock scope, so they must agree at
+                // every diff boundary. A divergence is the dropped-row bug —
+                // a row the panel was given that renders no node — and
+                // recording it here names the diff that caused it.
+                if crate::reactive::tree_desync::enabled() {
+                    let tree_ids: std::collections::HashSet<EntityUri> =
+                        tree.flat_ids().into_iter().map(|k| k.0).collect();
+                    let row_ids: std::collections::HashSet<EntityUri> =
+                        row_map.keys().map(|k| k.0.clone()).collect();
+                    if tree_ids != row_ids {
+                        crate::reactive::tree_desync::record(
+                            &diff_label,
+                            "row_map",
+                            "tree",
+                            &row_ids,
+                            &tree_ids,
+                        );
+                    }
+                    // The provider is the driver's only source of rows, so a
+                    // row it holds that never reached `row_map` is a delivery
+                    // gap in the signal-vec subscription — a different culprit
+                    // from a tree that lost a row it was given.
+                    let provider_ids: std::collections::HashSet<EntityUri> = ds_probe
+                        .rows_snapshot()
+                        .iter()
+                        .filter_map(|r| holon_api::data_row_entity_uri(r))
+                        .collect();
+                    if provider_ids != row_ids {
+                        crate::reactive::tree_desync::record(
+                            &diff_label,
+                            "provider",
+                            "row_map",
+                            &provider_ids,
+                            &row_ids,
+                        );
+                    }
                 }
                 async {}
             })

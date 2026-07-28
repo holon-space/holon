@@ -3,9 +3,17 @@
 //! @pbt oracle correspondence
 //! @pbt covers stale-rows-on-nav — ref-known main-panel rows must ⊆ Main's
 //!   current focus-root subtree (ref.expected_visible_content_ids)
+//! @pbt covers dropped-rows-on-rebuild — every ref-editable row of Main's
+//!   focus subtree (ref.main_editable_descendants) must ⊆ the rendered panel
 //! @pbt slips-if-removed a CDC delete that fails to propagate through the
 //!   focus_roots→main-panel chained matview leaves the previous root's rows
-//!   in the panel after navigation (dioxus w4-web-05, GPUI stale sidebar)
+//!   in the panel after navigation (dioxus w4-web-05, GPUI stale sidebar);
+//!   or a panel rebuild loses one row's update and the block renders nothing
+//!   while its siblings render fine (2026-07-27 refocus-after-split drop)
+//!
+//! The check is a SET EQUALITY over the main panel, asserted in both
+//! directions. The subset half alone was blind to a dropped row: it passed
+//! 15/15 on a run where `block:parent` rendered no node at all.
 //!
 //! **No stale rows after navigation**: every reference-known block rendered
 //! inside the MAIN PANEL widget subtree must belong to the Main region's
@@ -161,10 +169,15 @@ where
         let mut last_fail = String::new();
         loop {
             if Instant::now() >= deadline {
-                let drops = holon_frontend::reactive::generation_drops::report();
+                let drops = format!(
+                    "{}\n{}\n{}",
+                    holon_frontend::reactive::generation_drops::report(),
+                    holon_frontend::reactive::tree_desync::report(),
+                    holon_frontend::reactive::row_lifecycle::report()
+                );
                 return InvariantResult::Fail(format!(
                     "[inv-main-panel-rows-match-focus] violation PERSISTED for {budget:?} — not a \
-                     transient focus_descendants prune-delta frame but a real stale \
+                     transient focus_descendants prune-delta frame but a real stale or dropped \
                      row.\n{last_fail}\n{drops}"
                 ));
             }
@@ -242,7 +255,7 @@ impl InvMainPanelRowsMatchFocus {
             .collect();
 
         if stale.is_empty() {
-            return InvariantResult::Ok;
+            return Self::evaluate_missing(ref_, panel, &panel_ids);
         }
 
         let focus_roots: Vec<(String, Vec<String>)> = ref_.expected_focus_root_rows();
@@ -310,6 +323,155 @@ impl InvMainPanelRowsMatchFocus {
                 .join("\n"),
             allowed.len(),
             panel_ids.len(),
+        ))
+    }
+
+    /// The CONVERSE of the stale-row check: every block the reference says is
+    /// an editable row of Main's focus subtree must actually RENDER a node in
+    /// the panel. The subset direction alone is blind to a DROPPED row — the
+    /// panel can be fully materialised, its rows all legitimate, and still omit
+    /// one block (2026-07-27 `main-panel-drops-refocused-split-block`: after an
+    /// away-and-back refocus around Split/BlockToPage, `block:parent` renders
+    /// no node while its siblings do).
+    ///
+    /// The required set is `main_editable_descendants` — the same
+    /// text / non-page / non-layout / under-a-Main-focus-root predicate that
+    /// gates ToggleState, SplitBlock and the other "edit any visible row"
+    /// transitions. Those transitions already ASSERT these rows are clickable,
+    /// so anything in that set that renders nothing is a prod render drop, not
+    /// an oracle over-reach.
+    /// True iff a PAGE block sits strictly between `id` and the nearest Main
+    /// focus root — i.e. `id` lives inside an embedded page card rather than
+    /// directly in the focused outline.
+    fn under_embedded_page<R>(ref_: &R, id: &EntityUri, focus_roots: &BTreeSet<EntityUri>) -> bool
+    where
+        R: RefBlockTree,
+    {
+        let mut cursor = id.clone();
+        for _ in 0..10_000 {
+            let Some(parent) = ref_.parent_of(&cursor) else {
+                return false;
+            };
+            if focus_roots.contains(&parent) {
+                return false;
+            }
+            if ref_.is_page_block(&parent) {
+                return true;
+            }
+            cursor = parent;
+        }
+        panic!(
+            "[inv-main-panel-rows-match-focus] ref `parent_of` chain above {id} did not terminate \
+             within 10000 hops — cycle in the reference block tree"
+        );
+    }
+
+    fn evaluate_missing<R>(
+        ref_: &R,
+        panel: &WidgetSnapshot,
+        panel_ids: &BTreeSet<String>,
+    ) -> InvariantResult
+    where
+        R: RefFocus + RefBlockTree,
+    {
+        // Rows nested inside an EMBEDDED PAGE are excluded: such a page renders
+        // as a lazily-expanded card, so its children legitimately render
+        // nothing until it is opened. That gate is
+        // `inv-embedded-page-collapsed-lazy`'s subject, not this one — the
+        // required set stops at the first page boundary below the focus root.
+        let focus_roots = ref_.focus_root_ids(CapRegion::Main);
+        let required: Vec<EntityUri> = ref_
+            .main_editable_descendants()
+            .into_iter()
+            .filter(|id| !Self::under_embedded_page(ref_, id, &focus_roots))
+            .collect();
+        let missing: Vec<&EntityUri> = required
+            .iter()
+            .filter(|id| !panel_ids.contains(id.as_str()))
+            .collect();
+        if missing.is_empty() {
+            return InvariantResult::Ok;
+        }
+
+        let chains: Vec<String> = missing
+            .iter()
+            .map(|id| {
+                let mut chain = vec![id.as_str().to_string()];
+                let mut cursor = (*id).clone();
+                for _ in 0..required.len() + panel_ids.len() + 1 {
+                    match ref_.parent_of(&cursor) {
+                        Some(parent) => {
+                            chain.push(parent.as_str().to_string());
+                            cursor = parent;
+                        }
+                        None => return chain.join(" < "),
+                    }
+                }
+                panic!(
+                    "[inv-main-panel-rows-match-focus] ref `parent_of` chain for {id} did not \
+                     terminate — cycle in the reference block tree: {chain:?}"
+                );
+            })
+            .collect();
+
+        // Which siblings DID render tells a dropped row apart from a whole
+        // subtree that never arrived: the former is the panel-rebuild lost
+        // update, the latter an upstream watch/projection gap.
+        let siblings: Vec<String> = missing
+            .iter()
+            .map(|id| match ref_.parent_of(id) {
+                Some(parent) => {
+                    let rendered: Vec<String> = ref_
+                        .sorted_children(&parent)
+                        .iter()
+                        .map(|s| {
+                            format!(
+                                "{}{}",
+                                s.as_str(),
+                                if panel_ids.contains(s.as_str()) {
+                                    "=rendered"
+                                } else {
+                                    "=MISSING"
+                                }
+                            )
+                        })
+                        .collect();
+                    format!("{id}: siblings under {parent} -> [{}]", rendered.join(", "))
+                }
+                None => format!("{id}: no ref parent (focus root or sentinel-parented)"),
+            })
+            .collect();
+
+        let focus_roots: Vec<(String, Vec<String>)> = ref_.expected_focus_root_rows();
+        InvariantResult::Fail(format!(
+            "[inv-main-panel-rows-match-focus] DROPPED ROW(S) IN MAIN PANEL — blocks the \
+             reference model counts as editable rows of Main's focus subtree \
+             (`main_editable_descendants`) that render NO node inside the main-panel subtree, \
+             while the panel is otherwise materialised. The rows exist in storage; the RENDER \
+             omits them (lost update on panel rebuild).\n  missing ids: {:?}\n  missing REF \
+             ancestor chains (child < parent < …):\n{}\n  sibling render status:\n{}\n  expected \
+             focus roots (per region): {focus_roots:?}\n  required rows ({}), panel rendered ids \
+             ({}): {panel_ids:?}\n  panel widget kinds: {:?}",
+            missing.iter().map(|u| u.as_str()).collect::<Vec<_>>(),
+            chains
+                .iter()
+                .map(|c| format!("    {c}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            siblings
+                .iter()
+                .map(|c| format!("    {c}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            required.len(),
+            panel_ids.len(),
+            panel
+                .walk()
+                .map(|n| match &n.entity_id {
+                    Some(e) => format!("{}[{e}]", n.kind),
+                    None => n.kind.clone(),
+                })
+                .collect::<Vec<_>>(),
         ))
     }
 }

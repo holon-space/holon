@@ -592,6 +592,136 @@ pub mod generation_drops {
     }
 }
 
+/// Divergences between a tree driver's `row_map` (the rows it was told to
+/// render) and the `MutableTree` it renders them into.
+///
+/// The two sets are maintained under one lock per `VecDiff`, so they must be
+/// equal at every diff boundary. A divergence means a row the panel was given
+/// renders no node — the dropped-row bug — and recording it AT the diff names
+/// the culprit diff, which a later snapshot no longer can.
+pub mod tree_desync {
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
+
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    static RECORDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    const MAX_RECORDS: usize = 32;
+
+    /// Whether the per-diff consistency probe runs. It walks the whole tree on
+    /// every `VecDiff`, so a release build pays nothing unless asked; debug
+    /// builds (tests, dev) always probe.
+    pub fn enabled() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| {
+            cfg!(debug_assertions) || std::env::var_os("HOLON_PROBE_TREE_DESYNC").is_some()
+        })
+    }
+
+    pub fn record(
+        diff: &str,
+        upstream_name: &str,
+        downstream_name: &str,
+        upstream: &std::collections::HashSet<crate::EntityUri>,
+        downstream: &std::collections::HashSet<crate::EntityUri>,
+    ) {
+        COUNT.fetch_add(1, Ordering::Relaxed);
+        let fmt = |s: &std::collections::HashSet<crate::EntityUri>| {
+            let mut v: Vec<String> = s.iter().map(|u| u.as_str().to_string()).collect();
+            v.sort();
+            v
+        };
+        let dropped: std::collections::HashSet<crate::EntityUri> =
+            upstream.difference(downstream).cloned().collect();
+        let extra: std::collections::HashSet<crate::EntityUri> =
+            downstream.difference(upstream).cloned().collect();
+        let line = format!(
+            "after {diff}: in {upstream_name} but not {downstream_name} {:?}; in \
+             {downstream_name} but not {upstream_name} {:?}",
+            fmt(&dropped),
+            fmt(&extra)
+        );
+        tracing::error!("[tree-desync] {line}");
+        let mut records = RECORDS.lock().unwrap();
+        if records.len() < MAX_RECORDS {
+            records.push(line);
+        }
+    }
+
+    /// Human-readable report for embedding in a failure message.
+    pub fn report() -> String {
+        let records = RECORDS.lock().unwrap();
+        let n = COUNT.load(Ordering::Relaxed);
+        if n == 0 {
+            return "[tree-desync] no tree/row_map divergence recorded".to_string();
+        }
+        format!(
+            "[tree-desync] {n} divergence(s) between a tree driver's rows and its rendered nodes \
+             (first {} shown):\n  {}",
+            records.len(),
+            records.join("\n  ")
+        )
+    }
+
+    pub fn reset() {
+        COUNT.store(0, Ordering::Relaxed);
+        RECORDS.lock().unwrap().clear();
+    }
+}
+
+/// Every row that LEAVES a `ReactiveRowSet`, with the reason.
+///
+/// A row that vanishes from a panel either never arrived or was evicted; the
+/// two have completely different culprits (upstream watch vs. the row set's
+/// own generation/retain bookkeeping) and no later snapshot can tell them
+/// apart. Recording every departure at its source does.
+pub mod row_lifecycle {
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
+
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    static RECORDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    const MAX_RECORDS: usize = 2000;
+
+    pub fn record(reason: &str, label: &str, id: &crate::EntityUri) {
+        note(format!("{reason} label={label} id={id}"));
+    }
+
+    /// Append a free-form lifecycle line (generation snapshots, evictions).
+    pub fn note(text: String) {
+        let n = COUNT.fetch_add(1, Ordering::Relaxed);
+        let line = format!("#{n} {text}");
+        tracing::debug!("[row-evict] {line}");
+        // Keep the MOST RECENT evictions: a dropped row is diagnosed from what
+        // happened just before the check, and the run's early history is noise.
+        let mut records = RECORDS.lock().unwrap();
+        records.push(line);
+        if records.len() > MAX_RECORDS {
+            records.remove(0);
+        }
+    }
+
+    /// Human-readable report for embedding in a failure message.
+    pub fn report() -> String {
+        let records = RECORDS.lock().unwrap();
+        let n = COUNT.load(Ordering::Relaxed);
+        if n == 0 {
+            return "[row-evict] no rows evicted from any reactive row set".to_string();
+        }
+        format!(
+            "[row-evict] {n} row(s) left a reactive row set (last {} shown):\n  {}",
+            records.len(),
+            records.join("\n  ")
+        )
+    }
+
+    pub fn reset() {
+        COUNT.store(0, Ordering::Relaxed);
+        RECORDS.lock().unwrap().clear();
+    }
+}
+
 // ── ReactiveRowSet ──────────────────────────────────────────────────────
 
 /// Reactive accumulator for CDC row changes.
@@ -656,6 +786,22 @@ impl ReactiveRowSet {
     /// This prevents accidentally feeding raw storage data into the reactive
     /// pipeline.
     pub fn apply_change(&self, change: holon_api::Change<EnrichedRow>, generation: u64) {
+        if std::env::var_os("HOLON_TRACE_ROW_LIFECYCLE").is_some() {
+            let kind = match &change {
+                holon_api::Change::Created { data, .. } => format!(
+                    "Created {}",
+                    data.get("id")
+                        .and_then(|v| v.as_string())
+                        .unwrap_or("<none>")
+                ),
+                holon_api::Change::Updated { id, .. } => format!("Updated {id}"),
+                holon_api::Change::Deleted { id, .. } => format!("Deleted {id}"),
+                holon_api::Change::FieldsChanged { entity_id, .. } => {
+                    format!("FieldsChanged {entity_id}")
+                }
+            };
+            row_lifecycle::note(format!("CDC {kind} label={}", self.label));
+        }
         let current = self.generation.get();
         if generation != current {
             let detail = match &change {
@@ -715,9 +861,10 @@ impl ReactiveRowSet {
                 }
             }
             holon_api::Change::Deleted { id, .. } => {
-                self.data
-                    .lock_mut()
-                    .remove(&holon_api::entity_uri_from_id_str(&id));
+                let key = holon_api::entity_uri_from_id_str(&id);
+                if self.data.lock_mut().remove(&key).is_some() {
+                    row_lifecycle::record("CDC Deleted", &self.label, &key);
+                }
             }
             holon_api::Change::FieldsChanged {
                 entity_id, fields, ..
@@ -747,6 +894,7 @@ impl ReactiveRowSet {
         if !stale.is_empty() {
             let mut lock = self.data.lock_mut();
             for key in stale {
+                row_lifecycle::record("generation-snapshot retain_keys", &self.label, &key);
                 lock.remove(&key);
             }
         }
@@ -979,6 +1127,12 @@ impl ReactiveRenderedRows {
                     self.rows.apply_change(enriched, generation);
                 }
                 if is_first_batch_of_generation {
+                    row_lifecycle::note(format!(
+                        "generation {generation} snapshot for {}: {} rows {:?}",
+                        self.rows.label,
+                        snapshot_keys.len(),
+                        snapshot_keys.iter().map(|k| k.as_str()).collect::<Vec<_>>()
+                    ));
                     self.rows.retain_keys(&snapshot_keys);
                 }
             }
