@@ -28,9 +28,8 @@ use holon_api::InlineMark;
 use holon_api::MarkSpan;
 use holon_api::Value;
 use holon_core::OperationProvider;
+use holon_turso::schema_modules::CoreSchemaModule;
 use holon_turso::schema_modules::LinkSchemaModule;
-use holon_turso::schema_modules::block_raw_schema_sql;
-use holon_turso::sql_utils::sql_statements;
 
 const ENTITY: &str = "block";
 const TABLE: &str = "block_raw";
@@ -46,12 +45,13 @@ fn tags_descriptor() -> EdgeFieldDescriptor {
 }
 
 async fn setup_schema(handle: &holon::storage::turso::DbHandle) {
-    // Bind the PRODUCTION block_raw DDL. A hand-listed subset silently rots
-    // behind the real schema and only surfaces when a matview over the missing
-    // columns is queried (misleading "incompatible DBSP version" at read time).
-    for stmt in sql_statements(block_raw_schema_sql()) {
-        handle.execute_ddl(stmt).await.expect("block_raw schema");
-    }
+    // Bind the PRODUCTION core schema module, not a hand-listed subset: it
+    // silently rots behind the real schema, and re-running only its DDL drops
+    // the `sentinel:no_parent` FK-anchor seed that every root block needs.
+    CoreSchemaModule
+        .ensure_schema(handle)
+        .await
+        .expect("CoreSchemaModule schema");
     handle
         .execute_ddl(
             "CREATE TABLE block_tags (

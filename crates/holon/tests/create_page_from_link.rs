@@ -22,9 +22,8 @@ use holon_api::InlineMark;
 use holon_api::MarkSpan;
 use holon_api::Value;
 use holon_core::OperationProvider;
+use holon_turso::schema_modules::CoreSchemaModule;
 use holon_turso::schema_modules::LinkSchemaModule;
-use holon_turso::schema_modules::block_raw_schema_sql;
-use holon_turso::sql_utils::sql_statements;
 use proptest::prelude::*;
 
 const ENTITY: &str = "block";
@@ -41,12 +40,13 @@ fn tags_descriptor() -> EdgeFieldDescriptor {
 }
 
 async fn setup_schema(handle: &holon::storage::turso::DbHandle) {
-    // Bind the PRODUCTION block_raw DDL. A hand-listed subset silently rots
-    // behind the real schema and only surfaces when a matview over the missing
-    // columns is queried (misleading "incompatible DBSP version" at read time).
-    for stmt in sql_statements(block_raw_schema_sql()) {
-        handle.execute_ddl(stmt).await.expect("block_raw schema");
-    }
+    // Bind the PRODUCTION core schema module, not a hand-listed subset: it
+    // silently rots behind the real schema, and re-running only its DDL drops
+    // the `sentinel:no_parent` FK-anchor seed that every root block needs.
+    CoreSchemaModule
+        .ensure_schema(handle)
+        .await
+        .expect("CoreSchemaModule schema");
     handle
         .execute_ddl(
             "CREATE TABLE block_tags (
@@ -472,6 +472,33 @@ proptest! {
 //
 // The assertions state what §5.3 PROMISES: step 3 yields a DIFFERENT entity
 // than step 1, and two distinct pages ("B" and "A") coexist.
+//
+// RED, and expected to stay red until ADR 0029 D1b's END-STATE lands: the
+// shipped INTERIM policy refuses step 3 with `IdentityCollision` (held "B",
+// requested "A"). The end-state mints unique-random on a recreate-at-a-collided
+// path and binds the name through `resolve_page_name`; only then can this pass.
+
+/// Create a `Page`-tagged block with an explicit id/content/parent.
+async fn create_page(
+    provider: &SqlOperationProvider,
+    entity: &EntityName,
+    id: &str,
+    content: &str,
+    parent: &str,
+) {
+    let mut p: holon_api::StorageEntity = HashMap::new();
+    p.insert("id".into(), Value::String(id.to_string()));
+    p.insert("content".into(), Value::String(content.to_string()));
+    p.insert("parent_id".into(), Value::String(parent.to_string()));
+    p.insert(
+        "tags".into(),
+        Value::Array(vec![Value::String("Page".to_string())]),
+    );
+    provider
+        .execute_operation(entity, "create", p)
+        .await
+        .expect("create page");
+}
 
 /// Rename a page: an ordinary content edit on the existing entity (§5.3).
 async fn rename_page(
@@ -548,7 +575,10 @@ async fn recreating_a_renamed_pages_old_name_yields_a_distinct_page() {
     let id_a2 = match provider
         .execute_operation(&entity, "create_page_from_link", op2)
         .await
-        .expect("create page A the second time")
+        .expect(
+            "recreating page A must succeed (§5.3). Interim ADR 0029 D1b refuses it with \
+             IdentityCollision instead; the end-state unique-random recreate is not implemented",
+        )
         .response
     {
         Some(Value::String(s)) => s,
