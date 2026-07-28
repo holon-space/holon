@@ -129,10 +129,7 @@ hand-authored *FLAGS:
     # failing suite exited 0 and every weave/land gate using this recipe was a
     # silent false green (observed 2026-07-25).
     set -euo pipefail
-    # quarantined: turso IVM retract-race under concurrent CDC — BugFunnel row 2026-07-27; un-quarantine when the turso-side fix lands (delete this line)
-    # quarantined: main panel drops a block from the RENDER after an away-and-back refocus
-    # (rows correct, ViewModel omits it) — un-quarantine when that render drop is fixed
-    export HOLON_HAND_AUTHORED_SKIP=${HOLON_HAND_AUTHORED_SKIP-watch-matview-retains-outdent-intermediate-row,main-panel-drops-refocused-split-block}
+    export HOLON_HAND_AUTHORED_SKIP=${HOLON_HAND_AUTHORED_SKIP-}
     cargo test \
         -p holon-integration-tests --features pbt --test hand_authored_regressions \
         -- --nocapture {{FLAGS}} 2>&1 | tee /tmp/pbt-hand-authored.log
