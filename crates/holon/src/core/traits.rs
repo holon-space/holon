@@ -74,9 +74,9 @@ mod tests {
 
         let sql = td.to_create_table_sql();
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"tasks\""));
-        assert!(sql.contains("id TEXT PRIMARY KEY"));
-        assert!(sql.contains("title TEXT NOT NULL"));
-        assert!(sql.contains("priority INTEGER"));
+        assert!(sql.contains("\"id\" TEXT PRIMARY KEY"));
+        assert!(sql.contains("\"title\" TEXT NOT NULL"));
+        assert!(sql.contains("\"priority\" INTEGER"));
 
         let indexes = td.to_index_sql();
         assert_eq!(indexes.len(), 1);

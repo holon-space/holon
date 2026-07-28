@@ -1680,12 +1680,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gallery_expr_has_six_sections() {
+    fn gallery_expr_has_seven_sections() {
         let expr = widget_gallery_render_expr();
         match &expr {
             RenderExpr::FunctionCall { name, args } => {
                 assert_eq!(name, "column");
-                assert_eq!(args.len(), 6, "expected 6 sections in gallery");
+                assert_eq!(args.len(), 7, "expected 7 sections in gallery");
                 for arg in args {
                     match &arg.value {
                         RenderExpr::FunctionCall { name, .. } => {

@@ -3305,10 +3305,34 @@ impl FileSyncController {
         // written. The authoritative re-check + registry-free materialization below
         // closes that gap generally (rule-minted journal dates,
         // `convert_block_to_page` on a childless block). Idempotent (see the method).
+        // Failures here are the SAME R11 class the doc-resolution guard below
+        // absorbs (a prohibited topology fails loud inside the name chain): log
+        // and fall through so this pre-flight cannot re-propagate what the guard
+        // exists to bound.
         if let BlockDelta::Upsert(b) = delta {
-            if let Some(auth) = self.block_reader.get_block_authoritative(&b.id).await? {
-                if auth.is_page() {
-                    self.materialize_page_identity_file(&auth.id).await?;
+            match self.block_reader.get_block_authoritative(&b.id).await {
+                Ok(Some(auth)) if auth.is_page() => {
+                    if let Err(e) = self.materialize_page_identity_file(&auth.id).await {
+                        tracing::error!(
+                            doc_id = %doc_id,
+                            block_id = %auth.id,
+                            error = %format!("{e:#}"),
+                            "[FileSyncController] on_block_changed: page identity-file \
+                             pre-flight failed — continuing with this document's normal \
+                             write-back path.",
+                        );
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::error!(
+                        doc_id = %doc_id,
+                        block_id = %b.id,
+                        error = %format!("{e:#}"),
+                        "[FileSyncController] on_block_changed: authoritative read for the \
+                         page identity-file pre-flight failed — continuing with this \
+                         document's normal write-back path.",
+                    );
                 }
             }
         }

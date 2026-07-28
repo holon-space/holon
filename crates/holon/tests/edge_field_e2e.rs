@@ -24,9 +24,12 @@ use holon_api::EntityName;
 use holon_api::Value;
 use holon_core::OperationProvider;
 use holon_turso::schema_modules::BlockSchemaModule;
+use holon_turso::schema_modules::CoreSchemaModule;
 
 const ENTITY: &str = "block";
 const TABLE: &str = "block_raw";
+/// FK anchor seeded by `CoreSchemaModule` — the parent every root block needs.
+const ROOT_PARENT: &str = "sentinel:no_parent";
 
 fn descriptor() -> EdgeFieldDescriptor {
     EdgeFieldDescriptor {
@@ -43,21 +46,13 @@ async fn setup_schema(handle: &holon::storage::turso::DbHandle) {
         .execute_ddl("PRAGMA foreign_keys = ON")
         .await
         .expect("enable FKs");
-    handle
-        .execute_ddl(
-            "CREATE TABLE block_raw (
-                id TEXT PRIMARY KEY,
-                parent_id TEXT,
-                tags TEXT,
-                content TEXT NOT NULL DEFAULT '',
-                content_type TEXT NOT NULL DEFAULT 'text',
-                properties TEXT,
-                created_at INTEGER NOT NULL DEFAULT 0,
-                updated_at INTEGER NOT NULL DEFAULT 0
-            )",
-        )
+    // Bind the PRODUCTION core schema module, not a hand-listed subset: it
+    // silently rots behind the real schema, and re-running only its DDL drops
+    // the `sentinel:no_parent` FK-anchor seed that every root block needs.
+    CoreSchemaModule
+        .ensure_schema(handle)
         .await
-        .expect("block_raw table");
+        .expect("CoreSchemaModule schema");
     handle
         .execute_ddl(
             "CREATE TABLE block_requires (
@@ -144,6 +139,7 @@ fn create_params(id: &str, content: &str, requires: &[&str]) -> holon_api::Stora
     let mut p: holon_api::StorageEntity = HashMap::new();
     p.insert("id".into(), Value::String(id.to_string()));
     p.insert("content".into(), Value::String(content.to_string()));
+    p.insert("parent_id".into(), Value::String(ROOT_PARENT.to_string()));
     if !requires.is_empty() {
         p.insert(
             "requires".into(),
@@ -169,10 +165,11 @@ async fn edge_field_routes_through_junction_on_create_update_and_delete() {
     let entity_name: EntityName = ENTITY.to_string().into();
 
     // --- pre-create the blocker rows so the FK is satisfied -------------
-    for id in ["B", "C", "D"] {
+    for id in ["block:B", "block:C", "block:D"] {
         let mut p: holon_api::StorageEntity = HashMap::new();
         p.insert("id".into(), Value::String(id.to_string()));
         p.insert("content".into(), Value::String(id.to_string()));
+        p.insert("parent_id".into(), Value::String(ROOT_PARENT.to_string()));
         provider
             .execute_operation(&entity_name, "create", p)
             .await
@@ -180,20 +177,22 @@ async fn edge_field_routes_through_junction_on_create_update_and_delete() {
     }
 
     // --- create A with requires = [B, C] --------------------------------
-    let create = create_params("A", "task A", &["B", "C"]);
+    let create = create_params("block:A", "task A", &["block:B", "block:C"]);
     provider
         .execute_operation(&entity_name, "create", create)
         .await
         .expect("create A");
 
-    let requires = read_requires(&handle, "A").await;
+    let requires = read_requires(&handle, "block:A").await;
     assert_eq!(
         requires,
-        vec!["B".to_string(), "C".to_string()],
+        vec!["block:B".to_string(), "block:C".to_string()],
         "junction must hold the requires edges after create"
     );
 
-    let props = read_properties(&handle, "A").await.unwrap_or_default();
+    let props = read_properties(&handle, "block:A")
+        .await
+        .unwrap_or_default();
     assert!(
         !props.contains("requires"),
         "edge field MUST NOT leak into properties JSON; got: {props}"
@@ -201,12 +200,12 @@ async fn edge_field_routes_through_junction_on_create_update_and_delete() {
 
     // --- update A: requires = [C, D] (drop B, add D) --------------------
     let mut update: holon_api::StorageEntity = HashMap::new();
-    update.insert("id".into(), Value::String("A".to_string()));
+    update.insert("id".into(), Value::String("block:A".to_string()));
     update.insert(
         "requires".into(),
         Value::Array(vec![
-            Value::String("C".to_string()),
-            Value::String("D".to_string()),
+            Value::String("block:C".to_string()),
+            Value::String("block:D".to_string()),
         ]),
     );
     provider
@@ -214,16 +213,16 @@ async fn edge_field_routes_through_junction_on_create_update_and_delete() {
         .await
         .expect("update A");
 
-    let requires = read_requires(&handle, "A").await;
+    let requires = read_requires(&handle, "block:A").await;
     assert_eq!(
         requires,
-        vec!["C".to_string(), "D".to_string()],
+        vec!["block:C".to_string(), "block:D".to_string()],
         "update must replace the junction rows"
     );
 
     // --- set_field with empty Array clears the edges -------------------
     let mut clear: holon_api::StorageEntity = HashMap::new();
-    clear.insert("id".into(), Value::String("A".to_string()));
+    clear.insert("id".into(), Value::String("block:A".to_string()));
     clear.insert("field".into(), Value::String("requires".to_string()));
     clear.insert("value".into(), Value::Array(Vec::new()));
     provider
@@ -231,7 +230,7 @@ async fn edge_field_routes_through_junction_on_create_update_and_delete() {
         .await
         .expect("set_field clear");
 
-    let requires = read_requires(&handle, "A").await;
+    let requires = read_requires(&handle, "block:A").await;
     assert!(
         requires.is_empty(),
         "set_field with empty Array must clear junction rows; got {requires:?}"
@@ -239,29 +238,29 @@ async fn edge_field_routes_through_junction_on_create_update_and_delete() {
 
     // --- set_field with a non-empty Array re-installs them -------------
     let mut reset: holon_api::StorageEntity = HashMap::new();
-    reset.insert("id".into(), Value::String("A".to_string()));
+    reset.insert("id".into(), Value::String("block:A".to_string()));
     reset.insert("field".into(), Value::String("requires".to_string()));
     reset.insert(
         "value".into(),
-        Value::Array(vec![Value::String("B".to_string())]),
+        Value::Array(vec![Value::String("block:B".to_string())]),
     );
     provider
         .execute_operation(&entity_name, "set_field", reset)
         .await
         .expect("set_field reset");
 
-    let requires = read_requires(&handle, "A").await;
-    assert_eq!(requires, vec!["B".to_string()]);
+    let requires = read_requires(&handle, "block:A").await;
+    assert_eq!(requires, vec!["block:B".to_string()]);
 
     // --- FK CASCADE: deleting block B drops the junction row -----------
     let mut delete_b: holon_api::StorageEntity = HashMap::new();
-    delete_b.insert("id".into(), Value::String("B".to_string()));
+    delete_b.insert("id".into(), Value::String("block:B".to_string()));
     provider
         .execute_operation(&entity_name, "delete", delete_b)
         .await
         .expect("delete B");
 
-    let requires = read_requires(&handle, "A").await;
+    let requires = read_requires(&handle, "block:A").await;
     assert!(
         requires.is_empty(),
         "FK ON DELETE CASCADE should drop A→B from the junction; got {requires:?}"
@@ -289,8 +288,9 @@ async fn non_edge_array_param_still_panics_at_partition() {
     let entity_name: EntityName = ENTITY.to_string().into();
 
     let mut create: holon_api::StorageEntity = HashMap::new();
-    create.insert("id".into(), Value::String("Z".to_string()));
+    create.insert("id".into(), Value::String("block:Z".to_string()));
     create.insert("content".into(), Value::String("Z".into()));
+    create.insert("parent_id".into(), Value::String(ROOT_PARENT.to_string()));
     create.insert(
         "labels".into(),
         Value::Array(vec![
@@ -311,7 +311,7 @@ async fn non_edge_array_param_still_panics_at_partition() {
     // JSON array which Turso decodes into Value::Object{labels: Array(..)}.
     let row = handle
         .query(
-            "SELECT properties FROM block_raw WHERE id = 'Z'",
+            "SELECT properties FROM block_raw WHERE id = 'block:Z'",
             HashMap::new(),
         )
         .await
@@ -352,38 +352,18 @@ async fn non_edge_array_param_still_panics_at_partition() {
     assert_eq!(strings, vec!["alpha", "beta"]);
 }
 
-/// Setup using the production `BlockSchemaModule` (not inline DDL).
-/// Creates the minimal `block_raw` table and then delegates to
+/// Setup using the production schema modules (not inline DDL):
+/// `CoreSchemaModule` for `block_raw` + the FK-anchor sentinel, then
 /// `BlockSchemaModule::ensure_schema()` for the junction tables.
 async fn setup_production_schema(handle: &holon::storage::turso::DbHandle) {
     handle
         .execute_ddl("PRAGMA foreign_keys = ON")
         .await
         .expect("enable FKs");
-    handle
-        .execute_ddl(
-            "CREATE TABLE block_raw (
-                id TEXT PRIMARY KEY,
-                parent_id TEXT,
-                depth INTEGER NOT NULL DEFAULT 0,
-                sort_key TEXT NOT NULL DEFAULT 'A0',
-                content TEXT NOT NULL DEFAULT '',
-                content_type TEXT NOT NULL DEFAULT 'text',
-                source_language TEXT,
-                source_name TEXT,
-                tags TEXT,
-                properties TEXT,
-                marks TEXT,
-                collapsed INTEGER NOT NULL DEFAULT 0,
-                completed INTEGER NOT NULL DEFAULT 0,
-                block_type TEXT NOT NULL DEFAULT 'text',
-                created_at INTEGER NOT NULL DEFAULT 0,
-                updated_at INTEGER NOT NULL DEFAULT 0,
-                _change_origin TEXT
-            )",
-        )
+    CoreSchemaModule
+        .ensure_schema(handle)
         .await
-        .expect("block_raw table");
+        .expect("CoreSchemaModule schema");
     BlockSchemaModule
         .ensure_schema(handle)
         .await
@@ -450,10 +430,11 @@ async fn block_schema_module_creates_junction_tables_and_wires_edge_fields() {
     let entity_name: EntityName = "block".to_string().into();
 
     // pre-create the required blocks
-    for id in ["X", "Y"] {
+    for id in ["block:X", "block:Y"] {
         let mut p: holon_api::StorageEntity = HashMap::new();
         p.insert("id".into(), Value::String(id.to_string()));
         p.insert("content".into(), Value::String(id.to_string()));
+        p.insert("parent_id".into(), Value::String(ROOT_PARENT.to_string()));
         provider
             .execute_operation(&entity_name, "create", p)
             .await
@@ -462,13 +443,14 @@ async fn block_schema_module_creates_junction_tables_and_wires_edge_fields() {
 
     // create task A with requires = [X, Y] and tags = [work, urgent]
     let mut create: holon_api::StorageEntity = HashMap::new();
-    create.insert("id".into(), Value::String("A".to_string()));
+    create.insert("id".into(), Value::String("block:A".to_string()));
     create.insert("content".into(), Value::String("task A".to_string()));
+    create.insert("parent_id".into(), Value::String(ROOT_PARENT.to_string()));
     create.insert(
         "requires".into(),
         Value::Array(vec![
-            Value::String("X".to_string()),
-            Value::String("Y".to_string()),
+            Value::String("block:X".to_string()),
+            Value::String("block:Y".to_string()),
         ]),
     );
     create.insert(
@@ -483,14 +465,14 @@ async fn block_schema_module_creates_junction_tables_and_wires_edge_fields() {
         .await
         .expect("create A");
 
-    let requires = read_block_requires(&handle, "A").await;
+    let requires = read_block_requires(&handle, "block:A").await;
     assert_eq!(
         requires,
-        vec!["X".to_string(), "Y".to_string()],
+        vec!["block:X".to_string(), "block:Y".to_string()],
         "requires must land in block_requires"
     );
 
-    let tags = read_block_tags(&handle, "A").await;
+    let tags = read_block_tags(&handle, "block:A").await;
     assert_eq!(
         tags,
         vec!["urgent".to_string(), "work".to_string()],
@@ -498,7 +480,9 @@ async fn block_schema_module_creates_junction_tables_and_wires_edge_fields() {
     );
 
     // verify neither leaked into properties JSON
-    let props = read_properties(&handle, "A").await.unwrap_or_default();
+    let props = read_properties(&handle, "block:A")
+        .await
+        .unwrap_or_default();
     assert!(
         !props.contains("requires"),
         "requires must not bleed into properties; got: {props}"
@@ -522,17 +506,20 @@ async fn edge_field_create_with_empty_array_writes_no_junction_rows() {
     let entity_name: EntityName = ENTITY.to_string().into();
 
     let mut create: holon_api::StorageEntity = HashMap::new();
-    create.insert("id".into(), Value::String("X".to_string()));
+    create.insert("id".into(), Value::String("block:X".to_string()));
     create.insert("content".into(), Value::String("X".into()));
+    create.insert("parent_id".into(), Value::String(ROOT_PARENT.to_string()));
     create.insert("requires".into(), Value::Array(Vec::new()));
     provider
         .execute_operation(&entity_name, "create", create)
         .await
         .expect("create X");
 
-    let requires = read_requires(&handle, "X").await;
+    let requires = read_requires(&handle, "block:X").await;
     assert!(requires.is_empty());
-    let props = read_properties(&handle, "X").await.unwrap_or_default();
+    let props = read_properties(&handle, "block:X")
+        .await
+        .unwrap_or_default();
     assert!(
         !props.contains("requires"),
         "empty edge field must not bleed into properties JSON; got: {props}"
