@@ -123,34 +123,33 @@ impl AdviceReconcilerState {
                 Ok(rule) => {
                     let slug = rule.name.clone();
                     // Slug collision: a *different* live block already owns this slug.
-                    if let Some(owner) = self.slug_to_block.get(slug.as_str()) {
-                        if owner != &block_id {
-                            let owner = owner.clone();
-                            // The newcomer is refused; if it was renaming out of a slug
-                            // it owned, that old view is now orphaned — drop it.
-                            let dropped = self.release(&block_id);
-                            return ReconcilePlan {
-                                drops: dropped.into_iter().collect(),
-                                reconcile: None,
-                                status: StatusOutcome::Set {
-                                    block_id,
-                                    status: AdviceRuleStatus::SlugCollision {
-                                        slug: slug.as_str().to_string(),
-                                        owner,
-                                    },
+                    if let Some(owner) = self.slug_to_block.get(slug.as_str())
+                        && owner != &block_id
+                    {
+                        let owner = owner.clone();
+                        // The newcomer is refused; if it was renaming out of a slug
+                        // it owned, that old view is now orphaned — drop it.
+                        let dropped = self.release(&block_id);
+                        return ReconcilePlan {
+                            drops: dropped.into_iter().collect(),
+                            reconcile: None,
+                            status: StatusOutcome::Set {
+                                block_id,
+                                status: AdviceRuleStatus::SlugCollision {
+                                    slug: slug.as_str().to_string(),
+                                    owner,
                                 },
-                            };
-                        }
+                            },
+                        };
                     }
                     // Slug free or already ours. If we owned a *different* slug before,
                     // this is a rename — drop the old view first.
                     let mut drops = Vec::new();
-                    if let Some(prev) = self.block_to_slug.get(&block_id) {
-                        if prev.as_str() != slug.as_str() {
-                            if let Some(old) = self.release(&block_id) {
-                                drops.push(old);
-                            }
-                        }
+                    if let Some(prev) = self.block_to_slug.get(&block_id)
+                        && prev.as_str() != slug.as_str()
+                        && let Some(old) = self.release(&block_id)
+                    {
+                        drops.push(old);
                     }
                     self.block_to_slug.insert(block_id.clone(), slug.clone());
                     self.slug_to_block

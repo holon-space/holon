@@ -384,6 +384,7 @@ pub async fn build_mcp_integration(
 
 /// Attempt OAuth connection: use stored tokens if available, otherwise return
 /// NeedsAuth.
+#[allow(clippy::too_many_arguments)] // each arg is a distinct subsystem
 async fn build_oauth_integration(
     uri: String,
     credential_store: Arc<TursoCredentialStore>,
@@ -469,6 +470,13 @@ async fn build_oauth_integration(
     })
 }
 
+/// Strategies that built successfully, paired with the per-entity failures
+/// that were disclosed rather than fatal.
+type EntityStrategyBuild = (
+    HashMap<String, Box<dyn SyncStrategy>>,
+    Vec<(String, anyhow::Error)>,
+);
+
 /// Common integration finalization: build caches, discover resources, build
 /// strategies, subscribe.
 /// Build a sync strategy for every entity that declares a `SyncConfig`,
@@ -478,12 +486,7 @@ async fn build_oauth_integration(
 /// sync, but the rest of the integration is unaffected — this is the
 /// disclosed-degradation contract that keeps a single bad (often
 /// auto-discovered) entity from taking down the whole integration.
-fn build_entity_strategies(
-    entities: &HashMap<String, EntityConfig>,
-) -> (
-    HashMap<String, Box<dyn SyncStrategy>>,
-    Vec<(String, anyhow::Error)>,
-) {
+fn build_entity_strategies(entities: &HashMap<String, EntityConfig>) -> EntityStrategyBuild {
     let mut strategies: HashMap<String, Box<dyn SyncStrategy>> = HashMap::new();
     let mut failures: Vec<(String, anyhow::Error)> = Vec::new();
     for (entity_name, entity_config) in entities {
@@ -500,6 +503,7 @@ fn build_entity_strategies(
     (strategies, failures)
 }
 
+#[allow(clippy::too_many_arguments)] // each arg is a distinct subsystem
 async fn finish_integration(
     peer: rmcp::service::Peer<rmcp::RoleClient>,
     service: McpRunningService,

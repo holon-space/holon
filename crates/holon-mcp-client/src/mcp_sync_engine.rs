@@ -963,7 +963,7 @@ mod mirror_cutover_tests {
                 2 => records(&[("b", "B"), ("c", "C"), ("d", "D")]),
                 _ => records(&[("a", "A"), ("b", "B")]),
             };
-            last_ids = recs.iter().map(|r| key_of_json(r)).collect();
+            last_ids = recs.iter().map(key_of_json).collect();
             last_ids.sort();
             full_sync(&recs, &mirror, &cache).await;
             assert_mirror_matches_cache(&mirror, &cache);

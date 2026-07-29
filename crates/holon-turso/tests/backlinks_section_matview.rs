@@ -125,7 +125,7 @@ async fn section_matview_delivers_the_columns_the_block_profile_declares() {
     let row = &rows[0];
     let id = row.get("id").and_then(|v| v.as_string());
     assert_eq!(
-        id.as_deref(),
+        id,
         Some("block:src"),
         "row identity is the LINKING block: {row:?}"
     );
@@ -137,7 +137,7 @@ async fn section_matview_delivers_the_columns_the_block_profile_declares() {
     }
     let language = row.get("source_language").and_then(|v| v.as_string());
     assert_eq!(
-        language.as_deref(),
+        language,
         Some("holon_rule"),
         "source_language must survive the two joins: {row:?}"
     );

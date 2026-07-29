@@ -22,6 +22,7 @@
 //! oauth2 contract) stays in focused per-provider tests; this suite is only the
 //! structural floor every sidecar must clear.
 
+use std::path::Path;
 use std::path::PathBuf;
 
 use holon_mcp_client::IntegrationFileConfig;
@@ -59,7 +60,7 @@ fn read(path: &PathBuf) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
-fn name_of(path: &PathBuf) -> String {
+fn name_of(path: &Path) -> String {
     path.file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("?")

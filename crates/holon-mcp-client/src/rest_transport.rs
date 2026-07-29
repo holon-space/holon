@@ -547,7 +547,7 @@ fn render_now_token(key: &str) -> anyhow::Result<Option<String>> {
                 "malformed now-token '{{{key}}}': unknown unit '{other}' (expected d/h/m/s)"
             ),
         };
-        magnitude * sign as i32
+        magnitude * sign
     } else {
         return Ok(None);
     };

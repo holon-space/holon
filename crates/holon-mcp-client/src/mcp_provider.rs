@@ -741,19 +741,19 @@ impl OperationProvider for McpOperationProvider {
 
         // `keyed` retry bookkeeping (strictly local; the remote is the dedup
         // authority — ADR 0024 P4).
-        if effect == ToolEffect::Keyed {
-            if let Some(key) = intent_key.as_deref() {
-                let dispatch = {
-                    let mut ledger = self.sent_intents.lock().unwrap();
-                    let c = ledger.entry(key.to_string()).or_insert(0);
-                    *c += 1;
-                    *c
-                };
-                tracing::debug!(
-                    tool = %original_name, key = %key, dispatch,
-                    "keyed connector write: minted idempotency key (retry bookkeeping)"
-                );
-            }
+        if effect == ToolEffect::Keyed
+            && let Some(key) = intent_key.as_deref()
+        {
+            let dispatch = {
+                let mut ledger = self.sent_intents.lock().unwrap();
+                let c = ledger.entry(key.to_string()).or_insert(0);
+                *c += 1;
+                *c
+            };
+            tracing::debug!(
+                tool = %original_name, key = %key, dispatch,
+                "keyed connector write: minted idempotency key (retry bookkeeping)"
+            );
         }
 
         // Inject the key into the outgoing call args when the tool declares a

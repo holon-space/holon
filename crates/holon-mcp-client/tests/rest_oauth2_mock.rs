@@ -103,8 +103,9 @@ async fn start_mock() -> Mock {
                 let mut parts = request_line.split_whitespace();
                 let method = parts.next().unwrap_or("").to_string();
                 let target = parts.next().unwrap_or("/").to_string();
-                let path = target.split('?').next().unwrap_or("/").to_string();
-                let query = target.splitn(2, '?').nth(1).unwrap_or("").to_string();
+                let (path, query) = target.split_once('?').unwrap_or((target.as_str(), ""));
+                let path = path.to_string();
+                let query = query.to_string();
 
                 let response = {
                     let mut s = state_bg.lock().unwrap();
