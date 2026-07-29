@@ -1420,6 +1420,72 @@ impl FileSyncController {
         }
     }
 
+    /// Split-doc-root guard. A mint is only sound when the anchor the ID-less
+    /// reconcile reads candidates from is the subtree the mint will land in.
+    /// When a file's declared `#+ID:` anchor is DISJOINT from where its own
+    /// authored `:ID:` blocks live in the store, that read is blind to the real
+    /// siblings — `tiered_match` sees an empty candidate set, mints a fresh
+    /// uuid, and the create lands under the authored parent in the OTHER
+    /// subtree. Nothing prunes it, so every ingest adds another copy.
+    ///
+    /// So: refuse. The `Err` quarantines the file from write-back, disclosing
+    /// the split root instead of compounding it. Scoped to the parent each
+    /// ID-less headline would actually be created under, so an unrelated stale
+    /// cross-doc copy elsewhere in the file (which the cross-doc-membership
+    /// guard already prunes) does not block ingest.
+    async fn assert_mint_parents_inside_doc_anchor(
+        &self,
+        document_uri: &EntityUri,
+        parsed_doc_id: &EntityUri,
+        incoming: &[Block],
+        minted: &HashSet<&str>,
+    ) -> Result<()> {
+        let parse_parent: HashMap<&EntityUri, &EntityUri> =
+            incoming.iter().map(|b| (&b.id, &b.parent_id)).collect();
+
+        for idless in incoming.iter().filter(|b| minted.contains(b.id.id())) {
+            // Nearest authored ancestor: the block the mint is parented by.
+            let mut mint_parent = &idless.parent_id;
+            for _ in 0..100 {
+                if !minted.contains(mint_parent.id()) {
+                    break;
+                }
+                let Some(up) = parse_parent.get(mint_parent) else {
+                    break;
+                };
+                mint_parent = up;
+            }
+            if mint_parent == document_uri || mint_parent == parsed_doc_id {
+                continue;
+            }
+            let Some(stored) = self
+                .block_reader
+                .get_block_authoritative(mint_parent)
+                .await
+                .with_context(|| format!("point-read mint parent {mint_parent}"))?
+            else {
+                continue; // Not in the store yet — created by this same ingest.
+            };
+            let Some(owner) = self.resolve_authoritative_doc(&stored.parent_id).await? else {
+                continue; // Unrooted chain — not evidence of a split anchor.
+            };
+            if owner == *document_uri || owner == *parsed_doc_id {
+                continue;
+            }
+            anyhow::bail!(
+                "split doc root: this file declares anchor {document_uri}, but \
+                 the block its ID-less headlines would be created under, {}, \
+                 is owned by {owner} — outside that anchor's subtree. The \
+                 candidate read is blind there, so each of the {} ID-less \
+                 headline(s) would mint a fresh id on EVERY ingest. Refusing \
+                 to mint; repair the split root.",
+                mint_parent,
+                minted.len(),
+            );
+        }
+        Ok(())
+    }
+
     /// The bare `#+ID` (document identity) declared by the folder-companion
     /// file for a directory `rel_dir`, if one exists on disk. The companion for
     /// a directory `Areas/` is the sibling file `Areas.<ext>` next to it. Read
@@ -1909,7 +1975,12 @@ impl FileSyncController {
                     self.block_reader
                         .get_blocks(&document_uri)
                         .await
-                        .unwrap_or_default()
+                        .with_context(|| {
+                            format!(
+                                "seed the diff base from the store (doc {document_uri}, file {})",
+                                path.display()
+                            )
+                        })?
                         .into_iter()
                         .map(|b| (b.id.clone(), b))
                         .collect()
@@ -2015,6 +2086,16 @@ impl FileSyncController {
                 .iter()
                 .map(String::as_str)
                 .collect();
+
+            // Before ANY mint decision below: the anchor these candidates were
+            // read from must be the subtree the mints will land in.
+            self.assert_mint_parents_inside_doc_anchor(
+                &document_uri,
+                &new_parse.document.id,
+                &new_blocks_vec,
+                &minted,
+            )
+            .await?;
 
             // `seq` is the block's DOCUMENT-ORDER position within its parent —
             // the tier tiered_match's T1 (content-at-same-position) keys on.
