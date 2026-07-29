@@ -891,10 +891,10 @@ mod tests {
     #[test]
     fn tryfrom_value_conversions_are_exact() {
         // bool: Boolean arm and the `!= 0` truthiness of the Integer arm.
-        assert_eq!(bool::try_from(Value::Boolean(true)).unwrap(), true);
-        assert_eq!(bool::try_from(Value::Boolean(false)).unwrap(), false);
-        assert_eq!(bool::try_from(Value::Integer(0)).unwrap(), false);
-        assert_eq!(bool::try_from(Value::Integer(5)).unwrap(), true);
+        assert!(bool::try_from(Value::Boolean(true)).unwrap());
+        assert!(!bool::try_from(Value::Boolean(false)).unwrap());
+        assert!(!bool::try_from(Value::Integer(0)).unwrap());
+        assert!(bool::try_from(Value::Integer(5)).unwrap());
         assert!(bool::try_from(Value::String("x".into())).is_err());
 
         // i32: real value, not Default.

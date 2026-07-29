@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+# `workspace-hack` is the cargo-hakari feature-unification crate: every
+# member depends on it and no member references it in source, by design.
+[package.metadata.cargo-machete]
+# Enabled by the `test-helpers` feature (`dep:proptest-state-machine`).
+ignored = ["proptest-state-machine", "workspace-hack"]
+
 [features]
 default = ["iroh-sync"]
 iroh-sync = ["dep:iroh", "dep:base64"]

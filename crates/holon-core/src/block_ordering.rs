@@ -121,6 +121,9 @@ pub trait BlockOrdering: Send + Sync {
     /// tree as `BlockContent::Source`, else the outbound projector writes
     /// `content_type = text` back over the parser's `source` and every source
     /// block silently degrades to text.
+    // Grouping these into a params struct is a public trait-API change across
+    // every implementor and call site — out of proportion to the lint.
+    #[allow(clippy::too_many_arguments)]
     async fn create_in_tree(
         &self,
         _: &EntityUri,

@@ -449,15 +449,11 @@ fn is_block_ref_link(mark: &InlineMark) -> bool {
         InlineMark::Link {
             target: EntityRef::Internal { id },
             label,
-        } => {
-            if label.starts_with("((") && label.ends_with("))") && label.len() > 4 {
-                let inner = &label[2..label.len() - 2];
-                id.as_str()
-                    .strip_prefix("block:")
-                    .is_some_and(|uuid| inner.trim() == uuid)
-            } else {
-                false
-            }
+        } if label.starts_with("((") && label.ends_with("))") && label.len() > 4 => {
+            let inner = &label[2..label.len() - 2];
+            id.as_str()
+                .strip_prefix("block:")
+                .is_some_and(|uuid| inner.trim() == uuid)
         }
         _ => false,
     }

@@ -80,6 +80,9 @@ pub trait EntityCellRegistry: Send + Sync {
     ///
     /// Default impl returns `Ok(false)` so registries that don't support
     /// authoritative creates opt out for free.
+    // Grouping these into a params struct is a public trait-API change across
+    // every implementor and call site — out of proportion to the lint.
+    #[allow(clippy::too_many_arguments)]
     async fn create_entity(
         &self,
         _: &EntityUri,

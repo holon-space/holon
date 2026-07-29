@@ -41,7 +41,10 @@ fn t0() -> DateTime<Utc> {
     "2026-01-01T00:00:00Z".parse().unwrap()
 }
 
-fn marking(tokens: Vec<(&str, &str, Vec<(&str, Value)>)>) -> YamlMarking {
+/// One token fixture: `(id, token_type, [(field, value)])`.
+type TokenSpec<'a> = (&'a str, &'a str, Vec<(&'a str, Value)>);
+
+fn marking(tokens: Vec<TokenSpec<'_>>) -> YamlMarking {
     YamlMarking {
         clock: t0(),
         tokens: tokens

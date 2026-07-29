@@ -42,7 +42,9 @@ pub use change_source::FileChangeKind;
 pub use change_source::FileChangeSource;
 #[cfg(not(target_arch = "wasm32"))]
 pub use change_source::NotifyWatcher;
+#[cfg(not(target_arch = "wasm32"))]
 pub use change_source::RawFsSignal;
+#[cfg(not(target_arch = "wasm32"))]
 pub use change_source::RenamePairing;
 pub use error::FilesystemError;
 pub use file::ChangesWithMetadata;
@@ -53,6 +55,7 @@ pub use file_sync_controller::BlockDelta;
 pub use file_sync_controller::FileSyncController;
 #[cfg(not(target_arch = "wasm32"))]
 pub use file_sync_controller::RENDERER_VERSION;
+#[cfg(not(target_arch = "wasm32"))]
 pub use file_sync_controller::tiered_match;
 #[cfg(not(target_arch = "wasm32"))]
 pub use fs_port::FileMeta;

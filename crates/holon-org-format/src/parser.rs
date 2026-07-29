@@ -668,13 +668,18 @@ fn process_headlines(
                 // exclusion set (ADR 0021): identical bare-ID grammar to
                 // REQUIRES, pulled into block.advice_suppressed so the SQL edge
                 // partition routes it to the advice_suppressed junction.
-                block.advice_suppressed = value
-                    .split(|c: char| c == ',' || c.is_whitespace())
-                    .filter(|s| !s.is_empty())
-                    // ALLOW(entity_uri_from_raw): org drawer ADVICE_SUPPRESSED bare slug at parse
-                    // boundary
-                    .map(|s| EntityUri::from_raw(s))
-                    .collect();
+                // Closure kept deliberately: archlint's rule matches the call
+                // form, so point-free would drop this boundary from the ledger.
+                #[allow(clippy::redundant_closure)]
+                {
+                    block.advice_suppressed = value
+                        .split(|c: char| c == ',' || c.is_whitespace())
+                        .filter(|s| !s.is_empty())
+                        // ALLOW(entity_uri_from_raw): org drawer ADVICE_SUPPRESSED bare slug at
+                        // parse boundary
+                        .map(|s| EntityUri::from_raw(s))
+                        .collect();
+                }
             } else if key.eq_ignore_ascii_case("COLLAPSED") {
                 // Outline fold state is document state (Martin ruling
                 // 2026-07-11), so it round-trips through org the same as any

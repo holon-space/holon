@@ -12,8 +12,9 @@
 //! app via `holon_app::new_from_config_with_di` and then registers that ONE app
 //! under many `Sut*`/`Ref*` capability trait-objects here. `CapMap` never
 //! re-implements the wiring and prod never boots through `CapMap`. Do NOT try
-//! to unify the two containers: `CapMap` is insert-only / fail-loud (selection
-//! + honesty), `fluxdi` is a permissive async runtime container — opposite
+//! to unify the two containers: `CapMap` is insert-only / fail-loud
+//! (selection and honesty), `fluxdi` is a permissive async runtime container
+//! — opposite
 //! optimization targets. The shared boot→cap adapter lives in ONE place:
 //! `install_headless_render_interpreter` / `publish_reactive_builder_services`
 //! in `holon-integration-tests::test_environment`.

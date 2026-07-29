@@ -61,6 +61,13 @@ use holon_pbt_core::observables::ref_non_seed_blocks;
 
 /// Collect every wired `CapInvariant` this crate contributes, in the order the
 /// static footprint enumerates them (the anti-rot test holds them in lockstep).
+/// Boxed future returned by the `CapMap` extraction helpers below.
+type ExtractionFuture<'a, T> = Pin<Box<dyn Future<Output = Extraction<T>> + 'a>>;
+/// Per-block-id string extraction (content, rendered text, ...).
+type IdStringFuture<'a> = ExtractionFuture<'a, BTreeMap<EntityUri, String>>;
+/// Per-block-id optional-parent extraction.
+type IdParentFuture<'a> = ExtractionFuture<'a, BTreeMap<EntityUri, Option<EntityUri>>>;
+
 pub fn wire_all() -> Vec<Box<dyn CapInvariant>> {
     let mut wired: Vec<Box<dyn CapInvariant>> = Vec::new();
     wired.extend(non_seed_blocks().wire());
@@ -163,12 +170,20 @@ fn extract_matview<'a>(
     })
 }
 
+// `NamedCompare<T>` fixes the comparator shape to `fn(&T, &T)` with `T =
+// Vec<_>`, so the owned-vec reference is the framework contract, not a
+// stylistic choice.
+#[allow(clippy::ptr_arg)]
 fn compare_matview_fields(sut: &Vec<Block>, ref_: &Vec<Block>) -> Result<(), String> {
     let label = "inv-blocks-match-ref/matview";
     check_block_id_set(label, sut, ref_)?;
     compare_block_fields(label, sut, ref_)
 }
 
+// `NamedCompare<T>` fixes the comparator shape to `fn(&T, &T)` with `T =
+// Vec<_>`, so the owned-vec reference is the framework contract, not a
+// stylistic choice.
+#[allow(clippy::ptr_arg)]
 fn compare_block_raw_subset(sut: &Vec<Block>, ref_: &Vec<Block>) -> Result<(), String> {
     let label = "inv-blocks-match-ref/block_raw";
     check_block_id_set(label, sut, ref_)?;
@@ -359,10 +374,7 @@ fn ref_block_content(refs: &CapMap) -> Extraction<BTreeMap<EntityUri, String>> {
     Extraction::Value(out)
 }
 
-fn extract_block_content_backend<'a>(
-    sut: &'a CapMap,
-    _: &'a CapMap,
-) -> Pin<Box<dyn Future<Output = Extraction<BTreeMap<EntityUri, String>>> + 'a>> {
+fn extract_block_content_backend<'a>(sut: &'a CapMap, _: &'a CapMap) -> IdStringFuture<'a> {
     Box::pin(async move {
         Extraction::Value(
             sut.block_raw_snapshot()
@@ -374,10 +386,7 @@ fn extract_block_content_backend<'a>(
     })
 }
 
-fn extract_block_content_sql<'a>(
-    sut: &'a CapMap,
-    refs: &'a CapMap,
-) -> Pin<Box<dyn Future<Output = Extraction<BTreeMap<EntityUri, String>>> + 'a>> {
+fn extract_block_content_sql<'a>(sut: &'a CapMap, refs: &'a CapMap) -> IdStringFuture<'a> {
     // `SutSqlProjection` has no bulk content snapshot; probe per id over the
     // reference's non-synthetic non-seed id space (comparability context only —
     // the expected value comes from `ref_block_content`). A `None` probe drops
@@ -494,10 +503,7 @@ fn ref_block_parent(refs: &CapMap) -> Extraction<BTreeMap<EntityUri, Option<Enti
     Extraction::Value(out)
 }
 
-fn extract_block_parent_backend<'a>(
-    sut: &'a CapMap,
-    _: &'a CapMap,
-) -> Pin<Box<dyn Future<Output = Extraction<BTreeMap<EntityUri, Option<EntityUri>>>> + 'a>> {
+fn extract_block_parent_backend<'a>(sut: &'a CapMap, _: &'a CapMap) -> IdParentFuture<'a> {
     // SUT parent per id, normalized: a root / sentinel parent reads as `None`,
     // mirroring `RefBlockTree::parent_of`'s contract.
     Box::pin(async move {
@@ -606,6 +612,10 @@ fn sorted_rows(mut rows: Vec<(String, String, u32)>) -> Vec<(String, String, u32
     rows
 }
 
+// `NamedCompare<T>` fixes the comparator shape to `fn(&T, &T)` with `T =
+// Vec<_>`, so the owned-vec reference is the framework contract, not a
+// stylistic choice.
+#[allow(clippy::ptr_arg)]
 fn compare_advice_matviews(
     sut: &Vec<AdviceMatview>,
     ref_: &Vec<AdviceMatview>,

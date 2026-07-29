@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+# `workspace-hack` is the cargo-hakari feature-unification crate: every
+# member depends on it and no member references it in source, by design.
+[package.metadata.cargo-machete]
+ignored = ["workspace-hack"]
+
 [dependencies]
 # `internals` exposes `AST::walk` / `Expr` / `ASTNode` so `CompiledExpr` can
 # derive the free-variable (required-column) set from the compiled AST at

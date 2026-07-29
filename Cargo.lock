@@ -5047,34 +5047,24 @@ dependencies = [
  "iroh",
  "loro",
  "loro_fractional_index 1.6.0",
- "once_cell",
- "opentelemetry",
- "opentelemetry_sdk",
  "proptest 1.11.0",
  "proptest-state-machine",
  "prqlc",
- "prqlc-parser",
  "rand 0.9.5",
  "reqwest 0.13.4",
  "rhai",
  "serde",
  "serde_json",
- "serde_yaml",
  "serial_test",
- "similar",
  "similar-asserts",
- "sqlparser 0.61.0",
  "tempfile",
- "thiserror 2.0.19",
  "tokio",
  "tokio-stream",
  "tracing",
- "tracing-opentelemetry",
  "tracing-subscriber",
  "turso",
  "turso_core",
  "turso_sdk_kit",
- "ulid",
  "uuid",
  "wasm-bindgen-futures",
  "web-time",
@@ -5094,7 +5084,6 @@ dependencies = [
  "serde_yaml",
  "thiserror 2.0.19",
  "tokio",
- "tracing",
  "turso",
  "workspace-hack 0.1.0",
 ]
@@ -5206,7 +5195,6 @@ dependencies = [
  "serde",
  "serde_yaml",
  "tempfile",
- "thiserror 2.0.19",
  "workspace-hack 0.1.0",
 ]
 
@@ -5225,7 +5213,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "futures",
  "hex",
  "holon-api",
  "holon-core",
@@ -5239,7 +5226,6 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "tokio",
- "tokio-stream",
  "tracing",
  "tracing-subscriber",
  "workspace-hack 0.1.0",
@@ -5331,7 +5317,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-stream",
- "toml 0.8.23",
  "tracing",
  "tracing-oslog",
  "tracing-subscriber",
@@ -5383,7 +5368,6 @@ dependencies = [
  "nonempty-collections",
  "opentelemetry",
  "opentelemetry_sdk",
- "paste",
  "proptest 1.11.0",
  "proptest-state-machine",
  "regex",
@@ -5410,8 +5394,6 @@ dependencies = [
 name = "holon-layout-testing"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "async-trait",
  "futures",
  "futures-signals",
  "holon-api",
@@ -5500,7 +5482,6 @@ dependencies = [
  "holon-api",
  "holon-core",
  "holon-macros",
- "tokio",
  "workspace-hack 0.1.0",
 ]
 
@@ -5512,10 +5493,7 @@ dependencies = [
  "holon-api",
  "holon-core",
  "holon-org-format",
- "regex",
- "serde_json",
  "tempfile",
- "tracing",
  "workspace-hack 0.1.0",
 ]
 
@@ -5586,7 +5564,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
- "turso",
  "turso_core",
  "turso_ext",
  "workspace-hack 0.1.0",
@@ -5608,7 +5585,6 @@ dependencies = [
  "serde_yaml",
  "tempfile",
  "tokio",
- "tracing",
  "workspace-hack 0.1.0",
 ]
 
@@ -5630,12 +5606,8 @@ name = "holon-org-format"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "chrono",
  "hex",
  "holon-api",
- "holon-core",
- "holon-macros",
- "once_cell",
  "orgize",
  "proptest 1.11.0",
  "serde",
@@ -5655,26 +5627,19 @@ dependencies = [
  "chrono",
  "fluxdi",
  "futures",
- "futures-signals",
- "hex",
  "holon-api",
  "holon-block-roundtrip-testing",
  "holon-core",
  "holon-filesystem",
- "holon-macros",
  "holon-org-format",
  "ignore",
- "percent-encoding",
  "proptest 1.11.0",
  "proptest-state-machine",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "tempfile",
  "tokio",
- "tokio-stream",
  "tracing",
- "tracing-opentelemetry",
  "tracing-subscriber",
  "uuid",
  "workspace-hack 0.1.0",
@@ -5717,12 +5682,9 @@ name = "holon-profiles"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "futures",
  "futures-signals",
  "holon-api",
  "holon-core",
- "holon-engine",
- "holon-macros",
  "rhai",
  "serde",
  "serde_json",
@@ -5765,10 +5727,8 @@ dependencies = [
  "holon-filesystem",
  "holon-org-format",
  "regex",
- "serde_json",
  "tempfile",
  "tokio",
- "tracing-subscriber",
  "turso",
  "turso_core",
 ]
@@ -5791,13 +5751,11 @@ dependencies = [
  "async-trait",
  "fluxdi",
  "futures",
- "futures-signals",
  "holon",
  "holon-api",
  "holon-app",
  "holon-frontend",
  "holon-integration-tests",
- "holon-macros",
  "holon-mcp",
  "holon-pbt-core",
  "miette",
@@ -5805,7 +5763,6 @@ dependencies = [
  "proptest-state-machine",
  "r3bl_tui",
  "serde",
- "serde_json",
  "serde_yaml",
  "tokio",
  "tracing",
@@ -5826,9 +5783,7 @@ dependencies = [
  "gql-transform",
  "holon-api",
  "holon-core",
- "serde",
  "serde_json",
- "similar",
  "sqlparser 0.61.0",
  "tempfile",
  "thiserror 2.0.19",
@@ -5847,17 +5802,8 @@ dependencies = [
 name = "holon-turso-testing"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "async-trait",
- "holon",
  "holon-api",
  "holon-pbt-core",
- "holon-turso",
- "proptest 1.11.0",
- "serde",
- "tokio",
- "tracing",
- "validated",
  "workspace-hack 0.1.0",
 ]
 
@@ -13943,16 +13889,6 @@ dependencies = [
  "memoffset 0.9.1",
  "tempfile",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "ulid"
-version = "1.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "470dbf6591da1b39d43c14523b2b469c86879a53e8b758c8e090a470fe7b1fbe"
-dependencies = [
- "rand 0.9.5",
- "web-time",
 ]
 
 [[package]]

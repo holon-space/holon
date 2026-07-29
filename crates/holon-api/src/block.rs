@@ -1289,7 +1289,6 @@ mod tests {
 #[cfg(test)]
 mod mutation_gap_tests {
     use super::*;
-    use crate::types::Tags;
 
     fn uri(s: &str) -> EntityUri {
         EntityUri::parse_owned(s.to_string()).unwrap()

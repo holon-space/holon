@@ -854,7 +854,7 @@ mod tests {
         ]);
         let mut bindings = std::collections::HashMap::new();
         bindings.insert("int_val".to_string(), Value::Integer(42));
-        bindings.insert("float_val".to_string(), Value::Float(3.14));
+        bindings.insert("float_val".to_string(), Value::Float(2.75));
         bindings.insert("bool_val".to_string(), Value::Boolean(true));
         bindings.insert(
             "dt_val".to_string(),
@@ -864,7 +864,7 @@ mod tests {
 
         let req = InstantiateRequest::from_params(&p).unwrap();
         assert_eq!(req.bindings.get("int_val").unwrap(), "42");
-        assert_eq!(req.bindings.get("float_val").unwrap(), "3.14");
+        assert_eq!(req.bindings.get("float_val").unwrap(), "2.75");
         assert_eq!(req.bindings.get("bool_val").unwrap(), "true");
         assert_eq!(req.bindings.get("dt_val").unwrap(), "2026-07-12T00:00:00Z");
     }

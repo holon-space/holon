@@ -31,6 +31,7 @@
 //!   * **small integral values** in the context — exact ops, and `switch`
 //!     scrutinees land on case labels often enough to exercise both hit and
 //!     `_`-default arms.
+//!
 //! The rendered source is fully parenthesised, so Rhai re-parses the exact tree
 //! the generator built — evaluation order is identical, not merely equivalent.
 

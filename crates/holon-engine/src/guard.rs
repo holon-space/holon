@@ -11,6 +11,10 @@ use crate::arc::PostcondExpr;
 use crate::arc::PrecondSpec;
 use crate::value::Value;
 
+/// One candidate binding: the matched token's id and the placeholders its
+/// precondition captured.
+pub type TokenMatch = (String, BTreeMap<String, Value>);
+
 pub struct RhaiEvaluator {
     engine: Engine,
 }
@@ -168,7 +172,7 @@ impl RhaiEvaluator {
         arc: &InputArc,
         already_bound: &[String],
         existing_placeholders: &BTreeMap<String, Value>,
-    ) -> Result<Vec<(String, BTreeMap<String, Value>)>, String> {
+    ) -> Result<Vec<TokenMatch>, String> {
         let mut matches = Vec::new();
         for token in marking.tokens_of_type(&arc.token_type) {
             if already_bound.contains(&token.id().to_string()) {

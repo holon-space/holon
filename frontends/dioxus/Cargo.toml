@@ -27,7 +27,6 @@ holon-macros.workspace = true
 fluxdi.workspace = true
 
 # Serialization
-serde_json.workspace = true
 
 # Async runtime
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }

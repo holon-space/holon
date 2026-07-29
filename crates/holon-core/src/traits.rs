@@ -1682,6 +1682,9 @@ where
     /// `OrderKeyMinting` order owner otherwise (SqlOnly / synthetic stores),
     /// which for a deterministic minter reproduces the original `sort_key`
     /// byte-for-byte between the same neighbours.
+    // Undo of a block split has to restore both sides plus their positions;
+    // a params struct here is a public trait-API change for one lint.
+    #[allow(clippy::too_many_arguments)]
     #[holon_macros::affects("content", "parent_id", "sort_key")]
     #[holon_macros::boundary_behavior(private_only)]
     async fn restore_split(
@@ -2051,7 +2054,7 @@ where
         let mut descendants: Vec<T> = self.get_descendants(id).await?;
         // Deepest-first: a node is deleted only after all of its descendants,
         // so each `self.delete` operates on a leaf.
-        descendants.sort_by(|a, b| b.depth().cmp(&a.depth()));
+        descendants.sort_by_key(|d| std::cmp::Reverse(d.depth()));
         for d in &descendants {
             self.delete(d.id().as_str()).await?;
         }

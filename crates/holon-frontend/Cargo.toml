@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+# `workspace-hack` is the cargo-hakari feature-unification crate: every
+# member depends on it and no member references it in source, by design.
+[package.metadata.cargo-machete]
+# `opentelemetry-stdout` is switched on by the `otel` feature, not named in source.
+ignored = ["opentelemetry-stdout", "workspace-hack"]
+
 [features]
 default = []
 # PBT SUT capability traits hosted here per the cap home-rule (a cap lives in the

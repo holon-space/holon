@@ -174,6 +174,8 @@ fn content_survives_move() {
 }
 
 #[test]
+// replacement changes CRDT child-creation semantics — pending Martin ruling
+#[allow(deprecated)]
 fn get_or_create_container_for_reuse() {
     let (_doc, tree) = setup();
     let node = tree.create(None).unwrap();

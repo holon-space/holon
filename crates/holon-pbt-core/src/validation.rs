@@ -235,7 +235,7 @@ pub fn print_rejection_histogram() {
     }
     eprintln!("\n=== PBT transition rejection histogram ===");
     for (transition, mut rs) in by_transition {
-        rs.sort_by(|a, b| b.1.cmp(&a.1));
+        rs.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
         let total: u64 = rs.iter().map(|(_, c)| c).sum();
         eprintln!("{transition}: {total} rejections");
         for (r, count) in rs {

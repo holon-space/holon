@@ -148,7 +148,7 @@ mod tests {
             is_source: false,
             source_language: Some("holon_prql".into()),
         };
-        assert!(find_source_language_violations(&[ok.clone()]).is_empty());
+        assert!(find_source_language_violations(std::slice::from_ref(&ok)).is_empty());
         assert_eq!(find_source_language_violations(&[ok, bad]).len(), 1);
     }
 }

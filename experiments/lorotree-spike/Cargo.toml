@@ -5,6 +5,10 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false
 
+# Same deliberate `= 1.6.0` pin as crates/holon. TODO verify with Martin.
+[package.metadata.cargo-machete]
+ignored = ["loro_fractional_index"]
+
 [dependencies]
 loro = "1.0"
 loro_fractional_index = "1.0"

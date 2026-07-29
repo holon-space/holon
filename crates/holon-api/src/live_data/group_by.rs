@@ -247,8 +247,8 @@ mod tests {
     }
 
     /// Deterministic async key fn: the group is right there in the value.
-    fn key_of(v: Arc<Item>) -> impl Future<Output = Result<u8>> {
-        async move { Ok(v.group) }
+    async fn key_of(v: Arc<Item>) -> Result<u8> {
+        Ok(v.group)
     }
 
     /// Drain a stream to quiescence with a no-op waker. Our synthetic `key_fn`
@@ -260,11 +260,8 @@ mod tests {
         let waker = futures::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
         let mut out = Vec::new();
-        loop {
-            match s.poll_next_unpin(&mut cx) {
-                Poll::Ready(Some(x)) => out.push(x),
-                Poll::Ready(None) | Poll::Pending => break,
-            }
+        while let Poll::Ready(Some(x)) = s.poll_next_unpin(&mut cx) {
+            out.push(x);
         }
         out
     }

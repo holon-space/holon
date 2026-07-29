@@ -2175,7 +2175,7 @@ pub trait RefDocumentsMut: RefDocuments {
     /// insert the empty page block. Advances the synthetic-doc counter.
     fn insert_document(&mut self, file_name: &str);
     /// `DeleteDocument`: remove the document and cascade-delete its page block
-    /// + all descendants, re-canonicalizing sibling order and clearing
+    /// and all descendants, re-canonicalizing sibling order and clearing
     /// dangling focus.
     fn remove_document(&mut self, file_name: &str);
     /// `RenameDocument`: retitle the document tracked as `old_file_name` to

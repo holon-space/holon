@@ -933,6 +933,9 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
 
         // Generated operations module
         #[doc(hidden)]
+        // Descriptor/dispatch fns mirror the widest trait method, so their arity
+        // is the trait's — not something a caller can restructure here.
+        #[allow(clippy::too_many_arguments)]
         pub mod #operations_module_name {
             use super::*;
             use holon_api::StorageEntity;
