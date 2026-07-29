@@ -24,10 +24,14 @@ pub struct PeerBlock {
     pub content: String,
 }
 
-/// Read the stable ID from a tree node's metadata.
+/// Read the stable ID from a tree node's metadata. `None` means the node
+/// carries no `STABLE_ID` key; a node whose metadata cannot be read at all is a
+/// defect (both callers pre-filter deleted nodes), so that fails loud.
 pub fn read_node_stable_id(doc: &LoroDoc, node: TreeID) -> Option<String> {
     let tree = doc.get_tree(multi_peer::TREE_NAME);
-    let meta = tree.get_meta(node).ok()?;
+    let meta = tree
+        .get_meta(node)
+        .unwrap_or_else(|e| panic!("read_node_stable_id: metadata of live node {node:?}: {e}"));
     meta.get(STABLE_ID).and_then(|v| match v {
         loro::ValueOrContainer::Value(val) => val.as_string().map(|s| s.to_string()),
         _ => None,
@@ -53,15 +57,37 @@ pub fn find_node_by_stable_id(doc: &LoroDoc, stable_id: &str) -> Option<TreeID> 
     None
 }
 
+/// Every alive node's stable id — the candidate set a failed lookup reports.
+fn alive_stable_ids(doc: &LoroDoc) -> Vec<String> {
+    peer_alive_blocks(doc)
+        .into_iter()
+        .map(|b| b.stable_id)
+        .collect()
+}
+
 /// Create a block on a peer with a specific stable ID.
 /// Returns the stable ID.
+///
+/// `None` means a genuine root create. A `Some(parent)` that does not resolve
+/// is a harness defect (an unresolved oracle-only label, or a peer fork missing
+/// the node) and panics: silently demoting it to a root create would place the
+/// block under the WRONG parent and diverge the SUT from the oracle without any
+/// test going red.
 pub fn peer_create_block(
     doc: &LoroDoc,
     parent_stable_id: Option<&str>,
     content: &str,
     stable_id: &str,
 ) -> String {
-    let parent = parent_stable_id.and_then(|pid| find_node_by_stable_id(doc, pid));
+    let parent = parent_stable_id.map(|pid| {
+        find_node_by_stable_id(doc, pid).unwrap_or_else(|| {
+            panic!(
+                "peer_create_block: parent {pid} not found on this peer (creating {stable_id}); \
+                 alive stable ids: {:?}",
+                alive_stable_ids(doc)
+            )
+        })
+    });
     multi_peer::create_block_with_id(doc, parent, content, stable_id);
     stable_id.to_string()
 }

@@ -2,6 +2,7 @@
 //! companion `*-testing` crates and SUT adapters can name them without
 //! depending on `holon-integration-tests`.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -9,10 +10,35 @@ use std::sync::Mutex;
 use holon_api::Value;
 use holon_api::entity_uri::EntityUri;
 
-/// Maps a document's stable block-id key to its live doc URI, shared across a
-/// SUT adapter and the composed builder. (Moved verbatim from
-/// `holon-integration-tests::pbt::types`.)
-pub type DocUriMap = Arc<Mutex<HashMap<EntityUri, EntityUri>>>;
+/// The oracle-synthetic → SUT-real id map: every id the oracle labels itself
+/// (`block::split-N`, `block:ref-doc-N`, …) paired with the id the SUT actually
+/// minted for it. ONE type for the whole harness — the composed runner's
+/// `IdResolver` and a SUT adapter's `doc_uri_map` are the same map, so an
+/// adapter cannot be wired with a private empty copy and silently drive
+/// oracle-only labels into production.
+pub type DocUriMap = Arc<Mutex<BTreeMap<EntityUri, EntityUri>>>;
+
+/// THE resolution step for every SUT-facing id in the harness. Unmapped ids
+/// pass through (born-equal ids the oracle and SUT agree on need no pairing),
+/// EXCEPT `block::split-N`: that label is minted by the oracle alone and never
+/// names a real block, so dispatching it hands production a ghost id and
+/// surfaces far downstream as a mangled-looking id (`target_parent
+/// 'block::split-2' does not exist`, `peer_update_block: block :split-2 not
+/// found`). Fail loud here, where the missing pairing is still diagnosable.
+pub fn resolve_sut_id(map: &DocUriMap, id: &EntityUri) -> EntityUri {
+    let map = map.lock().expect("resolver lock");
+    if let Some(real) = map.get(id) {
+        return real.clone();
+    }
+    assert!(
+        !crate::observables::is_synthetic_ref_id(id),
+        "resolve_sut_id: oracle-only id {id} has no SUT pairing — either the per-tick reconcile \
+         never mapped it, or this adapter was wired with a resolver that is not the composed \
+         runner's shared one. Mapped: {:?}",
+        map.keys().collect::<Vec<_>>()
+    );
+    id.clone()
+}
 
 // ── Block-mutation intent (relocated from holon-integration-tests, Phase 1a
 // Step 2 / B1) ────────────────────────────────────────────────────────────
@@ -243,4 +269,57 @@ pub enum LoroCorruptionType {
     Truncated,
     /// File with invalid magic bytes
     InvalidHeader,
+}
+
+/// Pins [`resolve_sut_id`]'s split-label guard. Without these, a refactor could
+/// widen the pass-through and silently restore the split-id family (oracle-only
+/// `block::split-N` labels reaching production).
+#[cfg(test)]
+mod resolve_sut_id_tests {
+    use super::*;
+
+    /// Pairs of BARE block-local ids, built with the same `EntityUri::block`
+    /// constructor the oracle mints with — a split tail's local part is
+    /// `":split-N"`, which is what makes its URI `block::split-N`.
+    fn map_of(pairs: &[(&str, &str)]) -> DocUriMap {
+        Arc::new(Mutex::new(
+            pairs
+                .iter()
+                .map(|(k, v)| (EntityUri::block(k), EntityUri::block(v)))
+                .collect(),
+        ))
+    }
+
+    #[test]
+    fn unmapped_split_label_panics_naming_the_map() {
+        let map = map_of(&[(":split-9", "real-9")]);
+        let err = std::panic::catch_unwind(|| resolve_sut_id(&map, &EntityUri::block(":split-0")))
+            .expect_err("an unmapped split label must not resolve silently");
+        let msg = err
+            .downcast_ref::<String>()
+            .expect("panic payload is a String");
+        assert!(msg.contains("block::split-0"), "names the id: {msg}");
+        // The map contents are the diagnostic that makes the failure actionable.
+        assert!(msg.contains("block::split-9"), "names the map: {msg}");
+    }
+
+    #[test]
+    fn born_equal_and_decoy_ids_pass_through_unchanged() {
+        let map = map_of(&[]);
+        // `split-target-block` is the DECOY: it contains "split-" but is a real,
+        // born-equal id (single colon), not an oracle-only `block::split-N`.
+        for id in ["gen-1", "bulk-1-2", "split-target-block"] {
+            let uri = EntityUri::block(id);
+            assert_eq!(resolve_sut_id(&map, &uri), uri, "{id} must pass through");
+        }
+    }
+
+    #[test]
+    fn mapped_split_label_resolves_to_the_real_id() {
+        let map = map_of(&[(":split-0", "9f2c")]);
+        assert_eq!(
+            resolve_sut_id(&map, &EntityUri::block(":split-0")),
+            EntityUri::block("9f2c")
+        );
+    }
 }

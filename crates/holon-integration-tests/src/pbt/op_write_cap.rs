@@ -40,11 +40,11 @@ use holon_frontend::user_driver::UserDriver;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
 use holon_pbt_core::capabilities::SutEdgeFieldWrite;
 
-/// Shared oracle-synthetic → SUT-real id map (the `doc_uri_map` analog). The
-/// composed runner accumulates split reconciliations into it; the writer
-/// resolves every incoming id through it before dispatching — exactly
-/// `E2ESut::resolve_uri`.
-pub type IdResolver = Arc<Mutex<BTreeMap<EntityUri, EntityUri>>>;
+/// Shared oracle-synthetic → SUT-real id map. The composed runner accumulates
+/// split reconciliations into it; the writer resolves every incoming id through
+/// it before dispatching — exactly `E2ESut::resolve_uri`. A re-export, not a
+/// parallel alias: a SUT adapter's `doc_uri_map` IS this map.
+pub type IdResolver = holon_pbt_core::types::DocUriMap;
 
 /// A `SutBlockTreeWrite` realization that dispatches the production `block`
 /// structural operations through a real [`BackendEngine`]. `&self` (the engine
@@ -77,14 +77,9 @@ impl OpDispatchWriter {
         Self { engine, resolver }
     }
 
-    /// Resolve an oracle-space id to its SUT-space id (identity if unmapped).
+    /// Resolve an oracle-space id to its SUT-space id.
     fn resolve(&self, id: &EntityUri) -> EntityUri {
-        self.resolver
-            .lock()
-            .expect("resolver lock")
-            .get(id)
-            .cloned()
-            .unwrap_or_else(|| id.clone())
+        holon_pbt_core::types::resolve_sut_id(&self.resolver, id)
     }
 
     async fn execute(&self, op: &str, params: StorageEntity) {
@@ -383,12 +378,7 @@ impl EdgeFieldWriter {
     }
 
     fn resolve(&self, id: &EntityUri) -> EntityUri {
-        self.resolver
-            .lock()
-            .expect("resolver lock")
-            .get(id)
-            .cloned()
-            .unwrap_or_else(|| id.clone())
+        holon_pbt_core::types::resolve_sut_id(&self.resolver, id)
     }
 
     /// Edge targets travel as a `Value::Array` of id strings — the shape the

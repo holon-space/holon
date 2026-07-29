@@ -69,19 +69,21 @@ impl LoroSut {
     }
 
     /// Resolve a reference-model stable_id to the actual stable_id used in the
-    /// Loro tree. The reference model uses `b.id.id()` (e.g. "ref-doc-2"); the
-    /// Loro tree uses the resolved UUID. Consults the shared `doc_uri_map`.
+    /// Loro tree. The reference model stores a peer block's BARE local id
+    /// (`b.id.id()` — "ref-doc-2", or a split tail's ":split-0"); the Loro tree
+    /// uses the id the SUT minted. Consults the shared `doc_uri_map`.
     fn resolve_stable_id(&self, stable_id: &str) -> String {
-        let map = self.doc_uri_map.lock().unwrap();
-        let block_uri = EntityUri::block(stable_id);
-        if let Some(resolved) = map.get(&block_uri) {
+        if let Some(resolved) = self
+            .doc_uri_map
+            .lock()
+            .unwrap()
+            .get(&EntityUri::file(stable_id))
+        {
             return resolved.id().to_string();
         }
-        let file_uri = EntityUri::file(stable_id);
-        if let Some(resolved) = map.get(&file_uri) {
-            return resolved.id().to_string();
-        }
-        stable_id.to_string()
+        holon_pbt_core::types::resolve_sut_id(&self.doc_uri_map, &EntityUri::block(stable_id))
+            .id()
+            .to_string()
     }
 
     /// Wait for the controller to import + reconcile peer changes into SQL.
@@ -254,9 +256,17 @@ impl SutLoro for LoroSut {
                 content,
                 stable_id,
             } => {
+                // The parent is drawn from the peer's REFERENCE mirror, which keys by
+                // bare oracle-local id — so a split tail arrives as `:split-0` and needs
+                // the same resolution Update/Delete get. The block's OWN `stable_id` is
+                // minted by the generator and agreed by both sides, so it is not
+                // resolved. A genuine `None` is a legal root create.
+                let resolved_parent = parent_stable_id
+                    .as_deref()
+                    .map(|pid| self.resolve_stable_id(pid));
                 crate::peer_ops::peer_create_block(
                     &peer.doc,
-                    parent_stable_id.as_deref(),
+                    resolved_parent.as_deref(),
                     content,
                     stable_id,
                 );

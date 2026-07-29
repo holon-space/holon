@@ -65,12 +65,7 @@ impl DirectUserDriver {
     }
 
     fn resolve(&self, id: &EntityUri) -> EntityUri {
-        self.resolver
-            .lock()
-            .expect("resolver lock")
-            .get(id)
-            .cloned()
-            .unwrap_or_else(|| id.clone())
+        holon_pbt_core::types::resolve_sut_id(&self.resolver, id)
     }
 
     /// Dispatch a `block` op directly to the engine — the floor below

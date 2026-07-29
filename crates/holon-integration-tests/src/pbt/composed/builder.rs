@@ -680,12 +680,15 @@ async fn compose_sut_seeded_impl(
         // `!has_turso || frontend_sync_handle.is_some()` correctly skips it and the
         // peer transitions AUTO-NARROW out (honest cap-presence).
         //
-        // `doc_uri_map` stays empty/identity: peer blocks carry a stable deterministic
-        // `peer-…` id agreed by both oracle and SUT (no UUID minted), so
-        // `resolve_stable_id`'s identity fallback resolves them.
+        // The peer mesh gets the SHARED reconcile map, not a private empty one. A
+        // peer's reference mirror is a snapshot of the ORACLE's blocks keyed by
+        // their bare local ids, so a split tail enters it as `:split-N` while
+        // the SUT's peer fork (a snapshot of the real doc) holds the minted
+        // uuid; only the shared map bridges the two. Peer-BORN blocks carry a
+        // deterministic `peer-…` id both sides agree on and still resolve
+        // through the same map's identity fallback.
         if !has_turso || frontend_sync_handle.is_some() {
-            let doc_uri_map: DocUriMap =
-                Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+            let doc_uri_map: DocUriMap = resolver.clone();
             Arc::new(LoroSut::new(
                 doc_store,
                 frontend_sync_handle.clone(),
