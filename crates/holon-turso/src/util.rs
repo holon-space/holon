@@ -62,10 +62,8 @@ fn find_top_level_trailing_clause(sql: &str) -> Option<usize> {
             }
             b'(' => depth += 1,
             b')' => depth -= 1,
-            _ if depth == 0 => {
-                if KEYWORDS.iter().any(|kw| keyword_at(bytes, i, kw)) {
-                    return Some(i);
-                }
+            _ if depth == 0 && KEYWORDS.iter().any(|kw| keyword_at(bytes, i, kw)) => {
+                return Some(i);
             }
             _ => {}
         }

@@ -16,7 +16,6 @@ use std::sync::atomic::Ordering;
 
 use anyhow::Context;
 use anyhow::Result;
-use async_trait::async_trait;
 use holon_api::BatchWithMetadata;
 use holon_api::Value;
 use holon_core::storage::Resource;
@@ -219,6 +218,7 @@ async fn drop_dependent_views(db_handle: &DbHandle, view_name: &str) -> Result<(
 ///     of (re)creation (see turso `translate_create_materialized_view`), so no
 ///     `already exists` collision survives the create;
 ///   - `DROP VIEW` cleans it when the matview row still exists.
+///
 /// A table matched here is therefore either about to be reclaimed by the
 /// following CREATE, or an **older**-epoch residue whose name carries a
 /// different circuit version so the current CREATE never collides with it.

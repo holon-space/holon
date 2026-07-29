@@ -1240,11 +1240,11 @@ mod tests {
         let mut updates = 0usize;
         while let Ok(batch) = cdc_rx.try_recv() {
             for rc in batch.inner.items {
-                if rc.relation_name == "clock_mirror" {
-                    if let Change::Updated { data, .. } = &rc.change {
-                        assert_eq!(data.get("today").unwrap().as_string(), Some("2026-07-10"));
-                        updates += 1;
-                    }
+                if rc.relation_name == "clock_mirror"
+                    && let Change::Updated { data, .. } = &rc.change
+                {
+                    assert_eq!(data.get("today").unwrap().as_string(), Some("2026-07-10"));
+                    updates += 1;
                 }
             }
         }

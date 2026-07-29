@@ -251,10 +251,10 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
             }
 
             // --- Standalone comment `%% ... %%` → opaque
-            if trimmed.starts_with("%%") {
+            if let Some(after_open) = trimmed.strip_prefix("%%") {
                 let mut src = vec![line.to_string()];
                 let mut j = i;
-                if !trimmed[2..].trim_end().ends_with("%%") {
+                if !after_open.trim_end().ends_with("%%") {
                     j += 1;
                     while j < body.len() {
                         src.push(body[j].to_string());
@@ -409,7 +409,7 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
 
 fn heading_level(trimmed: &str) -> Option<usize> {
     let hashes = trimmed.chars().take_while(|&c| c == '#').count();
-    if hashes >= 1 && hashes <= 6 && trimmed.chars().nth(hashes) == Some(' ') {
+    if (1..=6).contains(&hashes) && trimmed.chars().nth(hashes) == Some(' ') {
         Some(hashes)
     } else {
         None

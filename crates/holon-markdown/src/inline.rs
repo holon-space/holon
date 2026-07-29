@@ -86,7 +86,10 @@ impl Scanner {
 
 /// Delimiter pairs for symmetric inline emphasis, longest-first so `**` wins
 /// over `*` and `~~` over a lone `~`.
-const EMPHASIS: &[(&str, fn() -> InlineMark)] = &[
+/// One symmetric emphasis delimiter and the mark it opens.
+type EmphasisPair = (&'static str, fn() -> InlineMark);
+
+const EMPHASIS: &[EmphasisPair] = &[
     ("**", || InlineMark::Bold),
     ("__", || InlineMark::Bold),
     ("~~", || InlineMark::Strike),

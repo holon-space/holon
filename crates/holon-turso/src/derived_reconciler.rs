@@ -255,10 +255,10 @@ pub async fn spawn_derived_field_reconciler(
     let drainer = tokio::spawn(async move {
         while let Some(batch) = stream.next().await {
             for row_change in batch.inner.items {
-                if let Some(event) = change_to_event(row_change.change) {
-                    if event_tx.send(event).await.is_err() {
-                        return;
-                    }
+                if let Some(event) = change_to_event(row_change.change)
+                    && event_tx.send(event).await.is_err()
+                {
+                    return;
                 }
             }
         }
