@@ -5241,6 +5241,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "tracing-subscriber",
  "workspace-hack 0.1.0",
 ]
 

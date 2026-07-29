@@ -24,6 +24,8 @@ pub mod file_sync_controller;
 pub mod fs_port;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod in_memory;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod ingest_progress;
 pub mod sync_base_store;
 pub mod sync_conflict;
 pub mod sync_ports;

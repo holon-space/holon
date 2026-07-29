@@ -39,6 +39,22 @@
 //! python3 scripts/measure_latency.py /tmp/boot.log
 //! ```
 //!
+//! ## One-file cold boot + boot budget
+//! `HOLON_SOAK_ONE_FILE_BLOCKS=N` seeds a SINGLE org file of N blocks nested
+//! `HOLON_SOAK_ONE_FILE_BRANCHING` (default 8) wide — the shape of a real
+//! vault's dominant file, and the only one whose boot is dominated by
+//! INTRA-file work. Two opt-in budgets fail the run when exceeded (both `0` =
+//! off, so a plain diagnostic run is never a timing gate):
+//! `HOLON_SOAK_BOOT_BUDGET_MS` on wall time, and
+//! `HOLON_SOAK_MAX_CHILDREN_READS` on the ingest's per-parent ordering reads
+//! (`holon_filesystem::ingest_progress`) — a load-independent observable.
+//!
+//! ```text
+//! HOLON_SOAK_ONE_FILE_BLOCKS=16000 HOLON_SOAK_BOOT_BUDGET_MS=60000 \
+//!   cargo run --release --example diag_harness -p holon-integration-tests \
+//!   --features boot-bench 2>&1 | tee /tmp/onefile.log
+//! ```
+//!
 //! ## Async-stall profiling (tokio-console)
 //! Enabling `tokio-console` (and building with `--cfg tokio_unstable`) starts a
 //! `console_subscriber` gRPC aggregator so the `tokio-console` CLI can attach
@@ -86,6 +102,25 @@ fn build_org_file(file_idx: usize, blocks: usize) -> String {
         s.push_str(&format!(
             "* Block {file_idx}-{j}: headline with a [[link]] and *emphasis*\n:PROPERTIES:\n:ID: \
              p{file_idx}_{j}\n:END:\nBody paragraph {file_idx}-{j}.\n\n"
+        ));
+    }
+    s
+}
+
+/// ONE file of `blocks` headlines nested `branching`-wide: every block gets a
+/// parent that is a real headline, so the file has ~`blocks / branching`
+/// DISTINCT parents. The flat [`build_org_file`] shape has exactly one parent
+/// and therefore cannot exercise the per-parent ingest reads at all — the real
+/// vault's dominant file is nested, and that is what the boot budget is about.
+fn build_one_file_nested(blocks: usize, branching: usize) -> String {
+    let mut s = String::from("#+ID: one-file\n#+TITLE: One Big Page\n\n");
+    for i in 0..blocks {
+        // Level 1 opens a new parent every `branching` blocks; the rest are its
+        // level-2 children.
+        let stars = if i % branching == 0 { "*" } else { "**" };
+        s.push_str(&format!(
+            "{stars} Block {i}: headline with a [[link]] and *emphasis*\n:PROPERTIES:\n:ID: \
+             one{i}\n:END:\nBody paragraph {i}.\n\n"
         ));
     }
     s
@@ -201,6 +236,14 @@ fn main() -> anyhow::Result<()> {
     // run loop never sees the scan's commits and the per-op cadence is absent.
     let prod_boot = env_usize("HOLON_SOAK_PROD_BOOT", 0) != 0;
     let wait_secs = env_usize("HOLON_SOAK_WAIT_SECS", 180) as u64;
+    // ONE file × N blocks — the shape a real vault's dominant file has, and the
+    // only one whose cold boot is dominated by INTRA-file work.
+    let one_file_blocks = env_usize("HOLON_SOAK_ONE_FILE_BLOCKS", 0);
+    let one_file_branching = env_usize("HOLON_SOAK_ONE_FILE_BRANCHING", 8);
+    // Boot budget + ingest-read budget. Both opt-in (0 = off) so a CI run that
+    // just wants the harness output is never made flaky by a timing gate.
+    let budget_ms = env_usize("HOLON_SOAK_BOOT_BUDGET_MS", 0) as u128;
+    let max_children_reads = env_usize("HOLON_SOAK_MAX_CHILDREN_READS", 0) as u64;
 
     let rt2 = rt.clone();
     rt.block_on(async move {
@@ -209,7 +252,18 @@ fn main() -> anyhow::Result<()> {
         // Set for the vault-shaped corpus: scan order is not file order, so
         // completion is a COUNT watermark, not one nominated block.
         let mut expect_blocks = 0usize;
-        if vault_files > 1 {
+        if one_file_blocks > 0 {
+            eprintln!(
+                "[diag] ONE-file cold boot: {one_file_blocks} blocks, branching \
+                 {one_file_branching}, prod_boot={prod_boot}…"
+            );
+            builder = builder.with_org_file(
+                "big/OneFile.org".to_string(),
+                build_one_file_nested(one_file_blocks, one_file_branching),
+            );
+            expect_blocks = one_file_blocks;
+            last_block = String::new();
+        } else if vault_files > 1 {
             eprintln!(
                 "[diag] vault-shaped cold boot: {vault_files} files, dominant file \
                  {vault_big} blocks, prod_boot={prod_boot}…"
@@ -320,6 +374,33 @@ fn main() -> anyhow::Result<()> {
                 seed
             },
         );
+
+        // Ingest read counters + the two opt-in budgets. `children_reads` is
+        // the load-independent half of the boot budget: it counts the ingest's
+        // per-parent ordering reads, so a regression that re-introduces
+        // per-block reads fails here on any machine, not just a slow one.
+        let ingest = holon_filesystem::ingest_progress::snapshot();
+        let boot_ms = t_boot.elapsed().as_millis();
+        eprintln!(
+            "[diag] INGEST READS: files={} blocks={} children_reads={} doc_walks={}",
+            ingest.files, ingest.blocks, ingest.children_reads, ingest.doc_walks,
+        );
+        if max_children_reads > 0 {
+            anyhow::ensure!(
+                ingest.children_reads <= max_children_reads,
+                "ingest issued {} children read(s) for {} block(s) over {} file(s) — budget is \
+                 {max_children_reads}; the per-parent reads are scaling with block count",
+                ingest.children_reads,
+                ingest.blocks,
+                ingest.files,
+            );
+        }
+        if budget_ms > 0 {
+            anyhow::ensure!(
+                boot_ms <= budget_ms,
+                "boot took {boot_ms}ms, over the {budget_ms}ms budget"
+            );
+        }
 
         // Cold-boot CADENCE — the parity metric. Prod (real vault, 2026-07-28)
         // ran 16,333 passes for 25,139 ops, 87.2 % of them single-op, because

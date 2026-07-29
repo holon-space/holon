@@ -45,6 +45,7 @@ use crate::BaseKey;
 use crate::BaseStore;
 use crate::FileSystem;
 use crate::SyncBaseStore;
+use crate::ingest_progress;
 use crate::sync_ports::AliasRegistrar;
 use crate::sync_ports::BlockMatchStrategy;
 use crate::sync_ports::BlockReader;
@@ -73,6 +74,11 @@ pub const RENDERER_VERSION: &str = "1";
 /// — the controller refreshes the block's authoritative content via
 /// [`BlockReader::get_block_authoritative`] before writing, so seed and refresh
 /// share one authority (`block_raw`).
+// The size difference IS the payload: `Upsert` carries the block the re-render
+// needs and `Remove` only its id. The delta is built once per feed event and
+// then passed by reference, so boxing would buy an allocation per event
+// without removing a single copy.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum BlockDelta {
     /// A block was inserted or updated.
@@ -434,7 +440,7 @@ impl FileSyncController {
         // auto-create a seed file we have no evidence the user changed).
         self.seed_pristine
             .get(canonical)
-            .map_or(true, |pristine| pristine == rendered)
+            .is_none_or(|pristine| pristine == rendered)
     }
 
     /// Whether the controller is currently in initial-scan (feed-barrier
@@ -2243,6 +2249,17 @@ impl FileSyncController {
             .map(|b| (b.id.clone(), b.clone()))
             .collect();
 
+        // Intra-file liveness. Everything below is per-block work on ONE file;
+        // for a vault's dominant file that is tens of thousands of blocks, and
+        // without this the whole span is silent and a wedge inside it is
+        // indistinguishable from slowness (the scan-level watchdog in
+        // `finish_initial_scan` only sees the per-FILE loop).
+        let progress = ingest_progress::IngestProgress::start(
+            path,
+            new_blocks_vec.len(),
+            ingest_progress::INTRA_FILE_STALL,
+        );
+
         // Check for duplicate block IDs owned by other documents
         let new_block_ids: Vec<EntityUri> = new_blocks_vec
             .iter()
@@ -2505,7 +2522,9 @@ impl FileSyncController {
         // written by the downstream flush at site B, not by the `operations`
         // batch — so they are excluded from the site-A feed catch-up set below.
         let mut consolidator_create_ids: Vec<String> = Vec::new();
+        progress.begin_phase();
         for block in &new_blocks_vec {
+            progress.advance("creates");
             // Foreign page subtree: owned by another page-file, inlined here as
             // headings. Never create/re-seed/re-parent it (root: that is the
             // demote; descendants: that is the steal).
@@ -2653,7 +2672,9 @@ impl FileSyncController {
         // arrived in HashMap order, a later sibling could be moved after its
         // predecessor *before* the predecessor itself had been moved,
         // scrambling the children list.
+        progress.begin_phase();
         for new_block in &new_blocks_vec {
+            progress.advance("updates");
             let id = &new_block.id;
             // Foreign page subtree inlined as headings: the owning page-file is
             // authoritative — never emit an update that would strip the root's
@@ -2855,6 +2876,7 @@ impl FileSyncController {
             // synchronously by the ops above, so it is the real intra-file
             // write-success gate independent of the (async, sidebar-facing) feed.
             let caught_up = self.feed_barrier(&expected_present_ids, "updates").await;
+            ingest_progress::record_doc_walk();
             let cached_blocks = self.block_reader.get_blocks(&document_uri).await?;
             if cached_blocks.len() < expected_block_count {
                 let present: HashSet<&str> = cached_blocks.iter().map(|b| b.id.as_str()).collect();
@@ -2925,6 +2947,7 @@ impl FileSyncController {
                 tokio::time::Instant::now() + tokio::time::Duration::from_millis(2000);
             for (parent_key, expected_ids) in &expected_per_parent {
                 loop {
+                    ingest_progress::record_children_read();
                     let kids: Vec<String> = self
                         .ordering
                         .children(parent_key)
@@ -2964,6 +2987,7 @@ impl FileSyncController {
                 #[allow(clippy::map_entry)]
                 // async fetch between check + insert, entry API doesn't fit
                 if !live_children.contains_key(&parent_key) {
+                    ingest_progress::record_children_read();
                     let kids: Vec<String> = self
                         .ordering
                         .children(&parent_key)
@@ -2981,7 +3005,9 @@ impl FileSyncController {
                 // predecessor. `update_block_position` reads the LIVE tree and
                 // no-ops cheaply when already positioned, so doc-order placement
                 // is order-correct regardless of the initial layout.
+                progress.begin_phase();
                 for new_block in &new_blocks_vec {
+                    progress.advance("place");
                     // Foreign page subtree: it lives in its OWN page-file's tree,
                     // not this companion's — never place it here.
                     if foreign_subtree_ids.contains(&new_block.id) {
@@ -3081,7 +3107,9 @@ impl FileSyncController {
                     });
                     per_parent[slot].1.push(new_block.id.clone());
                 }
+                progress.begin_phase();
                 for (parent_key, ordered_ids) in &per_parent {
+                    progress.advance("place_all (per parent)");
                     self.ordering
                         .place_all(parent_key, ordered_ids)
                         .await
@@ -4660,6 +4688,7 @@ impl FileSyncController {
     ///   id is spent, the shrink reappears on a later state-driven render;
     /// - matview-lag races between store truth and the delta that triggered the
     ///   render.
+    ///
     /// So this tripwire fires ONLY on the row-28 loss SIGNATURE — a MASS
     /// truncation, where an FK-rollback aborted a large contiguous chunk (~20
     /// blocks) at once. It vetoes+quarantines when the ungrounded-drop count

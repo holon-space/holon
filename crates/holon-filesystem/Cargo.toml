@@ -27,9 +27,11 @@ workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 # tokio refuses fs/process on wasm targets; the wasm surface of this crate is
 # the port traits + sync base store only (see lib.rs cfg gates).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { workspace = true, features = ["fs", "process", "sync"] }
+tokio = { workspace = true, features = ["fs", "process", "rt", "sync", "time"] }
 ignore.workspace = true
 notify = "8.0"
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
+tracing-subscriber.workspace = true

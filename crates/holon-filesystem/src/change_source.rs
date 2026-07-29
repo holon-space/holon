@@ -90,7 +90,7 @@ const RENAME_PAIR_WINDOW: Duration = Duration::from_millis(500);
 /// map to a sequence of these ([`notify_event_to_signals`]); the pairing state
 /// machine ([`RenamePairing::classify`]) consumes them. Decoupling from
 /// `notify` lets the pairing be exercised deterministically (no fsevents) AND
-/// across crates (the org-side sync tests drive the fallback through the
+/// across crates (the org-side sync tests drive the pairing through the
 /// controller).
 ///
 /// macOS `Any` (which side is unknown) is resolved to `RenameFrom`/`RenameTo`
@@ -212,6 +212,7 @@ fn notify_event_to_signals(
 ///     legitimately interleave with a rename pair on fsevents.
 ///   * **Pair at any age** — a `To` always pairs with a pending `From`
 ///     regardless of age; the window only bounds the *unpaired* case.
+///
 /// The flushed `Remove` is additionally safety-netted at the controller
 /// (`on_file_deleted` id-based reunification), and any swallowed side is
 /// repaired by `poll_tracked_files` / `poll_new_files`.
