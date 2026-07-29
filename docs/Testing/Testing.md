@@ -418,7 +418,7 @@ A single Rust-native PBT test validates that all frontends (Flutter, GPUI, Blinc
     ▼        ▼                ▼
 FfiDriver  GeometryDriver   (future: PeekabooDriver)
 (100% FFI) (bounds query     (VLM-based, any app)
-            + enigo input)
+            + FFI fallback)
                 │
                 ▼ GeometryProvider trait
     ┌───────┬───────┬────────┐
@@ -475,7 +475,8 @@ Each frontend implements `GeometryProvider` (`crates/holon-frontend/src/geometry
 
 1. Add a match arm in `GeometryDriver::try_ui_interaction()` for the operation
 2. Use `self.geometry.element_bounds(id)` to locate the element
-3. Simulate input with `enigo` at the element's center
+3. Dispatch the frontend-internal event at those bounds — NOT OS-level input
+   (see "Windowed PBT input contract" below)
 4. Return `true` if handled, `false` for FFI fallback
 
 ---
@@ -573,6 +574,28 @@ backend-coupled, nor generation-vs-replay settle timing. GPUI captures are
 additionally **runner-coupled** — they reproduce only on the real window, never
 headless. When in doubt, treat a no-signature replay panic as "could not
 replay," not "reproduced."
+
+---
+
+# Windowed PBT input contract
+
+**GPUI-internal events ARE the input contract.** The windowed PBT drives the
+real widget path by dispatching the events GPUI itself would deliver (live
+`InputState`, focus handoff, geometry-resolved clicks) — that is the boundary
+the harness owns and the boundary its invariants speak about.
+
+**Real OS input is deliberately out of scope.** Synthesizing actual
+mouse/keyboard events at the OS layer (the removed `enigo` rung) only ever
+worked while the window held foreground focus, so it fought the user for the
+pointer on the machine running it and could not survive a background or
+parallel run. It bought no coverage the internal-event path lacks: everything
+below the event boundary is the OS and GPUI's own input stack, neither of which
+is ours to assert on.
+
+**Coverage of the OS input layer is dogfooding's job.** Whether a real
+keystroke reaches Holon at all is exercised by `dogfood-explorer` driving the
+live app, not by a PBT. A defect found there is triaged with `bug-gap-triage`
+like any other escape.
 
 ---
 

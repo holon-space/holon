@@ -213,12 +213,14 @@ impl UiDriver for FfiDriver {
 /// checker.
 pub type VisualState = std::sync::Arc<std::sync::Mutex<Option<ScreenshotEmptiness>>>;
 
-/// Geometry-based driver — queries element bounds and simulates input via
-/// enigo.
+/// Geometry-based driver — reads element bounds from the frontend's
+/// `GeometryProvider` (and captures screenshots), then falls back to FFI for
+/// the interaction itself.
 ///
-/// For supported operations (e.g. clicking on an element, typing text),
-/// uses the `GeometryProvider` to find the element's position and simulates
-/// mouse/keyboard input. Falls back to FFI for unsupported operations.
+/// There is no OS-level input rung: real mouse/keyboard synthesis only worked
+/// with foreground window focus and fought the user for the pointer, so the
+/// windowed PBT drives GPUI-internal events instead (see
+/// docs/Testing/Testing.md, "Windowed PBT input contract").
 pub struct GeometryDriver {
     geometry: Box<dyn GeometryProvider>,
     screenshots: Option<ScreenshotConfig>,
@@ -660,94 +662,6 @@ pub(crate) fn save_screenshot(
     img.save(path).expect("failed to save screenshot PNG");
 }
 
-// ──── Input simulation (enigo) ────
-
-#[cfg(feature = "enigo")]
-impl GeometryDriver {
-    /// Create an enigo instance. Panics on failure.
-    fn enigo() -> enigo::Enigo {
-        enigo::Enigo::new(&enigo::Settings::default()).expect("failed to create Enigo")
-    }
-
-    /// Click at absolute screen coordinates via enigo.
-    fn click_at(enigo: &mut enigo::Enigo, x: f32, y: f32) {
-        use enigo::Button;
-        use enigo::Coordinate;
-        use enigo::Direction;
-        use enigo::Mouse;
-        enigo
-            .move_mouse(x as i32, y as i32, Coordinate::Abs)
-            .expect("enigo move_mouse failed");
-        enigo
-            .button(Button::Left, Direction::Click)
-            .expect("enigo click failed");
-    }
-
-    /// Click on an element's center. Panics if element not in BoundsRegistry.
-    fn enigo_click_element(&self, id: &str) {
-        let info = self.geometry.element_info(id).unwrap_or_else(|| {
-            panic!("[GeometryDriver] element {id} not found in BoundsRegistry — stale geometry")
-        });
-        let (cx, cy) = info.center();
-        let mut enigo = Self::enigo();
-        Self::click_at(&mut enigo, cx, cy);
-        eprintln!("[GeometryDriver] clicked element {id} at ({cx:.0}, {cy:.0})");
-    }
-
-    /// Send an arrow key via enigo.
-    fn enigo_send_arrow(&self, direction: NavDirection) {
-        use enigo::Direction as Dir;
-        use enigo::Key;
-        use enigo::Keyboard;
-        let key = match direction {
-            NavDirection::Up => Key::UpArrow,
-            NavDirection::Down => Key::DownArrow,
-            NavDirection::Left => Key::LeftArrow,
-            NavDirection::Right => Key::RightArrow,
-        };
-        let mut enigo = Self::enigo();
-        enigo.key(key, Dir::Click).expect("enigo arrow key failed");
-    }
-
-    fn simulate_set_content(&self, id: &str, new_value: &str) -> bool {
-        let info = match self.geometry.element_info(id) {
-            Some(i) => i,
-            None => return false,
-        };
-
-        let (cx, cy) = info.center();
-
-        use enigo::Direction;
-        use enigo::Key;
-        use enigo::Keyboard;
-
-        let mut enigo = Self::enigo();
-
-        // Click to focus the element
-        Self::click_at(&mut enigo, cx, cy);
-
-        std::thread::sleep(std::time::Duration::from_millis(50));
-
-        // Select all + type replacement text
-        #[cfg(target_os = "macos")]
-        let select_all_modifier = Key::Meta;
-        #[cfg(not(target_os = "macos"))]
-        let select_all_modifier = Key::Control;
-
-        let _ = enigo.key(select_all_modifier, Direction::Press);
-        let _ = enigo.key(Key::Unicode('a'), Direction::Click);
-        let _ = enigo.key(select_all_modifier, Direction::Release);
-
-        if let Err(e) = enigo.text(new_value) {
-            eprintln!("[GeometryDriver] text input failed: {e}");
-            return false;
-        }
-
-        eprintln!("[GeometryDriver] simulated set_content at ({cx:.0}, {cy:.0}) for element {id}");
-        true
-    }
-}
-
 // ──── UiDriver impl ────
 
 #[async_trait::async_trait]
@@ -777,33 +691,21 @@ impl UiDriver for GeometryDriver {
                     return false;
                 }
 
-                #[cfg(feature = "enigo")]
-                {
-                    let new_value = params
-                        .get("value")
-                        .and_then(|v| v.as_string())
-                        .unwrap_or_default();
-                    return self.simulate_set_content(&element_id, &new_value);
-                }
-
-                #[cfg(not(feature = "enigo"))]
-                {
-                    match self.geometry.element_info(element_id) {
-                        Some(info) => {
-                            let (cx, cy) = info.center();
-                            eprintln!(
-                                "[GeometryDriver] element {element_id} at ({cx:.0}, {cy:.0}) — \
-                                 enigo feature disabled, falling back to FFI",
-                            );
-                        }
-                        None => {
-                            eprintln!(
-                                "[GeometryDriver] element {element_id} not found for {entity}.{op}"
-                            );
-                        }
+                match self.geometry.element_info(element_id) {
+                    Some(info) => {
+                        let (cx, cy) = info.center();
+                        eprintln!(
+                            "[GeometryDriver] element {element_id} at ({cx:.0}, {cy:.0}) — no OS \
+                             input layer, falling back to FFI",
+                        );
                     }
-                    return false;
+                    None => {
+                        eprintln!(
+                            "[GeometryDriver] element {element_id} not found for {entity}.{op}"
+                        );
+                    }
                 }
+                false
             }
             _ => false,
         }
@@ -831,16 +733,5 @@ impl UiDriver for GeometryDriver {
         overlay: &Overlay,
     ) {
         self.capture_screenshot_with_overlay(label, phase, highlight_element, overlay);
-    }
-
-    #[cfg(feature = "enigo")]
-    async fn click_element(&mut self, id: &str) -> bool {
-        self.enigo_click_element(id);
-        true
-    }
-
-    #[cfg(feature = "enigo")]
-    async fn send_arrow(&mut self, direction: NavDirection) {
-        self.enigo_send_arrow(direction);
     }
 }

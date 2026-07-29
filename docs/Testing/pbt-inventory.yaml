@@ -2514,10 +2514,9 @@ components:
 - file: crates/holon-integration-tests/src/ui_driver.rs
   kind: driver
   feature_gates:
-  - enigo
   - pbt
   covers:
-  - window-slice — geometry/input driver-ladder rungs (FFI fallback ⊏ geometry+input) for driving a real
+  - window-slice — geometry driver-ladder rungs (FFI fallback ⊏ geometry-resolved) for driving a real
     frontend during windowed PBT.
 - file: crates/holon-integration-tests/tests/advice_live_mcp_gate.rs
   kind: harness

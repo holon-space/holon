@@ -1,8 +1,9 @@
 //! Geometry provider trait for cross-frontend UI testing.
 //!
 //! Each frontend implements `GeometryProvider` to expose element metadata
-//! by element ID. The `GeometryDriver` (in holon-integration-tests) uses
-//! these bounds to simulate mouse clicks via `enigo`.
+//! by element ID. The `GeometryDriver` (in holon-integration-tests) resolves
+//! interactions to these bounds; the interaction itself is dispatched as a
+//! frontend-internal event, never as OS-level input.
 
 use std::collections::HashMap;
 use std::sync::Arc;

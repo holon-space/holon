@@ -911,12 +911,28 @@ impl FileSyncController {
                 )
             })?;
         let mut healed = 0usize;
+        let mut mounts_skipped = 0usize;
         for file in scanned.files {
             if file.extension().and_then(|e| e.to_str()) != Some("org") {
                 continue;
             }
+            let Some(disk_content) = self.read_if_present(&file).await? else {
+                continue; // vanished between scan and heal
+            };
+            // Model.md invariant 11: a registered mount's doc-root is owned by
+            // the shared Loro doc, so re-deriving its title from this file's
+            // NAME would let the projection sink write back into the store.
+            // Counted, then disclosed once — a vault of mounts must not emit a
+            // warn per file per boot.
+            if matches!(
+                self.probe_share_file(&file, &disk_content).await?,
+                ShareProbe::RegisteredMount(_)
+            ) {
+                mounts_skipped += 1;
+                continue;
+            }
             if self
-                .heal_title_less_doc_root(&file)
+                .heal_title_less_doc_root(&file, &disk_content)
                 .await
                 .with_context(|| {
                     format!(
@@ -930,6 +946,13 @@ impl FileSyncController {
         }
         if healed > 0 {
             info!("[FileSyncController] store-health sweep healed {healed} title-less doc-root(s)");
+        }
+        if mounts_skipped > 0 {
+            info!(
+                "[FileSyncController] store-health sweep skipped {mounts_skipped} registered \
+                 shared-subtree mount file(s) (Model.md invariant 11: their truth is the shared \
+                 Loro doc, not their file name)"
+            );
         }
         Ok(())
     }
@@ -949,17 +972,8 @@ impl FileSyncController {
     /// ([`heal_title_less_doc_roots`]) and the runtime file-watch reingest —
     /// never from the ingest fast-path, which certifies byte-identity only.
     /// Returns whether a heal was written.
-    async fn heal_title_less_doc_root(&mut self, path: &Path) -> Result<bool> {
-        let disk_content = match self.fs.read_to_string(path).await {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(e) => {
-                return Err(e).with_context(|| {
-                    format!("[FileSyncController] heal: cannot read {}", path.display())
-                });
-            }
-        };
-        let Some(bare) = self.format.doc_id_from_content(&disk_content) else {
+    async fn heal_title_less_doc_root(&mut self, path: &Path, disk_content: &str) -> Result<bool> {
+        let Some(bare) = self.format.doc_id_from_content(disk_content) else {
             return Ok(false);
         };
         let id = EntityUri::block(&bare);
@@ -1448,14 +1462,38 @@ impl FileSyncController {
     /// banner / survival logic is unchanged.
     pub async fn on_file_changed(&mut self, path: &Path) -> Result<()> {
         let canonical = CanonicalPath::new(path);
-        // Store-health seam (BugFunnel row 295): a runtime file-watch reingest of
-        // a title-less doc-root heals it through the SAME single implementation
-        // the boot sweep uses. Gated to post-boot edits — during the initial scan
-        // the one-shot `heal_title_less_doc_roots` sweep runs once after the scan
-        // instead, so per-file healing here would be redundant. Never in the
-        // ingest fast-path, which certifies byte-identity only.
+        // Post-boot pre-ingest steps, in INVARIANT ORDER. A vanished file reads
+        // as `None` — that is an external deletion, which `ingest_file` handles.
+        // During the initial scan neither step applies: the one-shot
+        // `heal_title_less_doc_roots` sweep runs once after the scan instead,
+        // and `ingest_file` carries the same mount guard for that path.
         if !self.in_initial_scan() {
-            self.heal_title_less_doc_root(path).await?;
+            if let Some(disk_content) = self.read_if_present(path).await? {
+                // An ECHO — the watcher re-reporting bytes we ourselves just
+                // projected — changes nothing on disk, so neither step below has
+                // anything to decide: deciding anyway re-discloses the mount skip
+                // on every echo and re-parses content that by definition did not
+                // change. `ingest_file` short-circuits the echo itself (and
+                // clears any write-back quarantine), so this only skips the
+                // pre-ingest steps.
+                let is_echo = self.last_projection.get(&canonical) == Some(&disk_content);
+                if !is_echo {
+                    // Model.md invariant 11 BEFORE the heal: a registered mount's
+                    // truth is the shared Loro doc, so the file must trigger
+                    // NEITHER the heal nor ingest — healing re-derives the
+                    // doc-root's content from the file PATH, i.e. from the
+                    // projection sink, exactly the direction the invariant
+                    // forbids.
+                    if self.skip_registered_mount(path, &disk_content).await? {
+                        return Ok(());
+                    }
+                    // Store-health seam (BugFunnel row 295): a runtime file-watch
+                    // reingest of a title-less doc-root heals it through the SAME
+                    // single implementation the boot sweep uses. Never in the
+                    // ingest fast-path, which certifies byte-identity only.
+                    self.heal_title_less_doc_root(path, &disk_content).await?;
+                }
+            }
         }
         match self.ingest_file(path).await {
             Ok(()) => {
@@ -1730,6 +1768,92 @@ impl FileSyncController {
         Ok(None)
     }
 
+    /// Read `path`, or `Ok(None)` when it has vanished (an external deletion —
+    /// the ingest path resolves that, not the pre-ingest steps).
+    async fn read_if_present(&self, path: &Path) -> Result<Option<String>> {
+        match self.fs.read_to_string(path).await {
+            Ok(content) => Ok(Some(content)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e)
+                .with_context(|| format!("[FileSyncController] Cannot read {}", path.display())),
+        }
+    }
+
+    /// Inc 3 (Model.md invariant 11): a shared-subtree org file is a one-way
+    /// PROJECTION SINK, rendered FROM the shared Loro doc (which converges
+    /// across devices over iroh). Re-ingesting it as fresh global intent would
+    /// duplicate the shared blocks into the GLOBAL doc — colliding with the
+    /// shared-doc→SQL projection (`first_local_collision` would then refuse the
+    /// honest projection). `true` ⇒ the caller must touch neither the store nor
+    /// the file.
+    ///
+    /// The decision keys on AUTHORITATIVE state (a real mount node in the
+    /// global Loro tree, via `mount_registry`), NOT on parsed drawer content:
+    /// `:share-role: mount:` / `:shared-tree-id:` round-trip verbatim from ANY
+    /// user file, so skipping on content alone would let a hand-authored file
+    /// be silently dropped (a page that never loads). Content is only a cheap
+    /// substring PRE-FILTER that keeps normal files off the parse path — it
+    /// matches EITHER marker (`share-role` on the mount, `shared-tree-id`
+    /// stamped on descendants), since a page share's mount drawer does not
+    /// always round-trip while its descendants' `shared-tree-id` always does.
+    /// No registry (SqlOnly / tests) ⇒ never skip.
+    /// Decision only — the DISCLOSURE belongs to the caller, which alone knows
+    /// what it is about to refuse and how loudly that deserves saying (the
+    /// per-file ingest routes disclose per file; the boot sweep would flood, so
+    /// it counts and discloses once).
+    async fn probe_share_file(&self, path: &Path, disk_content: &str) -> Result<ShareProbe> {
+        let lc = disk_content.to_ascii_lowercase();
+        if !lc.contains("share-role") && !lc.contains("shared-tree-id") {
+            return Ok(ShareProbe::Ordinary);
+        }
+        let parsed =
+            self.format
+                .parse(path, disk_content, &EntityUri::no_parent(), &self.root_dir)?;
+        if !is_shared_subtree_projection(&parsed.document, &parsed.blocks) {
+            return Ok(ShareProbe::Ordinary);
+        }
+        match &self.mount_registry {
+            Some(reg) if reg.is_registered_mount(&parsed.document.id).await? => {
+                Ok(ShareProbe::RegisteredMount(parsed.document.id))
+            }
+            _ => Ok(ShareProbe::UnregisteredDrawer(parsed.document.id)),
+        }
+    }
+
+    async fn skip_registered_mount(&mut self, path: &Path, disk_content: &str) -> Result<bool> {
+        match self.probe_share_file(path, disk_content).await? {
+            ShareProbe::Ordinary => Ok(false),
+            ShareProbe::UnregisteredDrawer(page_id) => {
+                // Content looks like a mount but the page id is NOT a registered
+                // mount — a hand-authored / imported / templated `share-role`
+                // drawer. Disclosed, then ingested as a normal file (never
+                // silently dropped).
+                tracing::warn!(
+                    path = %path.display(),
+                    page_id = %page_id,
+                    "[FileSyncController] a `share-role` drawer property was found on a page that \
+                     is NOT a registered shared-subtree mount — ingesting it as a normal file."
+                );
+                Ok(false)
+            }
+            ShareProbe::RegisteredMount(page_id) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    page_id = %page_id,
+                    "[FileSyncController] Model.md invariant 11: registered shared-subtree \
+                     projection file — SKIPPING ingest. Its truth is the shared Loro doc \
+                     (converges over iroh); the org file is a one-way projection sink, so \
+                     re-ingesting it would duplicate the shared blocks into the global doc."
+                );
+                // Stamp last_projection so in-session echo-suppression treats the
+                // file as up to date (it IS our own projection output).
+                self.last_projection
+                    .insert(CanonicalPath::new(path), disk_content.to_string());
+                Ok(true)
+            }
+        }
+    }
+
     /// Echo suppression: if disk content matches last_projection, skip.
     /// Otherwise, diff against last_projection to compute create/update/delete
     /// ops.
@@ -1765,25 +1889,19 @@ impl FileSyncController {
             }
         };
 
-        let last = self
-            .last_projection
-            .get(&canonical)
-            .map(|s| s.as_str())
-            .unwrap_or("");
-
         tracing::debug!(
             "[ORGSYNC_ENTER] {} disk_len={} last_len={} has_key={} equal={}",
             path.display(),
             disk_content.len(),
-            last.len(),
+            self.last_projection.get(&canonical).map_or(0, String::len),
             self.last_projection.contains_key(&canonical),
-            disk_content == last,
+            self.last_projection.get(&canonical) == Some(&disk_content),
         );
 
         // Echo suppression: skip if we have a prior projection and content matches.
         // An absent entry means "first time seeing this file" — always process it
         // to create the document entity (needed for block→file sync).
-        if self.last_projection.contains_key(&canonical) && disk_content == last {
+        if self.last_projection.get(&canonical) == Some(&disk_content) {
             debug!(
                 "[FileSyncController] Skipping {} — matches last_projection",
                 path.display()
@@ -1791,61 +1909,18 @@ impl FileSyncController {
             return Ok(());
         }
 
-        // Inc 3 (Model.md invariant 11): a shared-subtree org file is a one-way
-        // PROJECTION SINK, rendered FROM the shared Loro doc (which converges
-        // across devices over iroh). Re-ingesting it as fresh global intent
-        // would duplicate the shared blocks into the GLOBAL doc — colliding
-        // with the shared-doc→SQL projection (`first_local_collision` would then
-        // refuse the honest projection).
-        //
-        // The skip decision keys on AUTHORITATIVE state (a real mount node in
-        // the global Loro tree, via `mount_registry`), NOT on parsed drawer
-        // content: `:share-role: mount:` / `:shared-tree-id:` round-trip
-        // verbatim from ANY user file, so skipping on content alone would let a
-        // hand-authored file be silently dropped (a page that never loads).
-        // Content is only a cheap PRE-FILTER; the registry is the authority. No
-        // registry (SqlOnly / tests) ⇒ never skip. A cheap substring pre-filter
-        // keeps normal files off the parse path — it matches EITHER marker
-        // (`share-role` on the mount, `shared-tree-id` stamped on descendants),
-        // since a page share's mount drawer does not always round-trip while its
-        // descendants' `shared-tree-id` always does.
-        let lc = disk_content.to_ascii_lowercase();
-        if lc.contains("share-role") || lc.contains("shared-tree-id") {
-            let probe =
-                self.format
-                    .parse(path, &disk_content, &EntityUri::no_parent(), &self.root_dir)?;
-            if is_shared_subtree_projection(&probe.document, &probe.blocks) {
-                let registered = match &self.mount_registry {
-                    Some(reg) => reg.is_registered_mount(&probe.document.id).await?,
-                    None => false,
-                };
-                if registered {
-                    tracing::warn!(
-                        path = %path.display(),
-                        page_id = %probe.document.id,
-                        "[FileSyncController] Model.md invariant 11: registered shared-subtree \
-                         projection file — SKIPPING ingest. Its truth is the shared Loro doc \
-                         (converges over iroh); the org file is a one-way projection sink, so \
-                         re-ingesting it would duplicate the shared blocks into the global doc."
-                    );
-                    // Stamp last_projection so in-session echo-suppression treats
-                    // the file as up to date (it IS our own projection output).
-                    self.last_projection
-                        .insert(canonical.clone(), disk_content.clone());
-                    return Ok(());
-                }
-                // Content looks like a mount but the page id is NOT a registered
-                // mount — a hand-authored / imported / templated `share-role`
-                // drawer. Disclosed, then ingested as a normal file (never
-                // silently dropped).
-                tracing::warn!(
-                    path = %path.display(),
-                    page_id = %probe.document.id,
-                    "[FileSyncController] a `share-role` drawer property was found on a page that \
-                     is NOT a registered shared-subtree mount — ingesting it as a normal file."
-                );
-            }
+        // Model.md invariant 11 (see `skip_registered_mount`). Reached on the
+        // paths that do not run the pre-ingest steps — the initial scan, and
+        // `ingest_file`'s other callers.
+        if self.skip_registered_mount(path, &disk_content).await? {
+            return Ok(());
         }
+
+        let last = self
+            .last_projection
+            .get(&canonical)
+            .map(|s| s.as_str())
+            .unwrap_or("");
 
         // Phase 1 cold-boot fast-path: when `last_projection` has no entry
         // (first time we see this file this session) but `last_projection_hash`
@@ -4985,6 +5060,22 @@ async fn read_disk_or_empty(fs: &Arc<dyn FileSystem>, path: &Path) -> Result<Str
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
         Err(e) => Err(e).with_context(|| format!("reading {} for org sync", path.display())),
     }
+}
+
+/// What an org file's content says it is under Model.md invariant 11 — the
+/// answer every route that touches a file needs before it writes anything
+/// derived from that file's PATH.
+enum ShareProbe {
+    /// Not a shared-subtree projection: the overwhelmingly common case, and the
+    /// only one the ingest/heal routes may treat as ordinary vault content.
+    Ordinary,
+    /// Carries the share markers but its page id is NOT a registered mount — a
+    /// hand-authored / imported / templated drawer. Ordinary content that
+    /// deserves saying out loud, never a silent skip.
+    UnregisteredDrawer(EntityUri),
+    /// A real mount: this file is a one-way projection sink whose truth is the
+    /// shared Loro doc.
+    RegisteredMount(EntityUri),
 }
 
 /// Inc 3: whether a parsed org file is a shared-subtree PROJECTION (a mount

@@ -168,7 +168,7 @@ jobs:
 
       # (2) Execute the `di`-gated suites (not reached by the default workspace run).
       - name: Run di-gated holon-orgmode suites
-        run: cargo nextest run -p holon-orgmode --features di -E 'not test(registered_mount_file_is_skipped)'  # excluded pending test-observable redesign (triage 2026-07-29): guard verified correct, test instrument degenerate
+        run: cargo nextest run -p holon-orgmode --features di
 
   # Rust code quality (dependency audit, unused deps, duplication)
   rust-quality:
