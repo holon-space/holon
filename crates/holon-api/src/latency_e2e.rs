@@ -213,7 +213,7 @@ pub fn rows_delivered<'a>(
         // NOT at GPU frame-present (see the module-level "SLO endpoint"
         // disclosure). This is the stage the latency-slo oracle judges. Prod
         // counterpart of the harness-only `action_total` stage.
-        tracing::debug!(
+        tracing::info!(
             target: "holon_latency",
             stage = "e2e",
             action = %c.action,

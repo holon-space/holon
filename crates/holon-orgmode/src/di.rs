@@ -907,7 +907,7 @@ pub async fn run_file_sync_controller(
         for (file_path, _content) in preloaded {
             let t_file = std::time::Instant::now();
             let result = controller.on_file_changed(&file_path).await;
-            tracing::debug!(
+            tracing::info!(
                 target: "holon_latency",
                 stage = "boot_file",
                 ms = t_file.elapsed().as_millis() as u64,
@@ -950,7 +950,7 @@ pub async fn run_file_sync_controller(
         // copy-on-write seed doc (e.g. `block:__default__`) materializes its
         // vault file (copy-on-write); every boot re-seed write stayed virtual.
         controller.finish_boot_seeding();
-        tracing::debug!(
+        tracing::info!(
             target: "holon_latency",
             stage = "boot_ingest_total",
             ms = t_scan.elapsed().as_millis() as u64,

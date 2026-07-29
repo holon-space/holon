@@ -16,12 +16,13 @@ mod telemetry;
 use holon_mcp::server::DebugServices;
 use holon_mcp::server::HolonMcpServer;
 
-/// Create a default EnvFilter that suppresses noisy HTTP client and
-/// OpenTelemetry logs
+/// The subscriber filter: `RUST_LOG` when set, else a default that suppresses
+/// noisy HTTP client and OpenTelemetry logs. Built by the shared
+/// `env_filter_with_default`, which also applies the `holon_latency` directive.
 fn default_env_filter() -> EnvFilter {
     // Some crates use dashes in target names, others use underscores - filter both
     // variants
-    EnvFilter::new(
+    holon_frontend::logging::env_filter_with_default(
         "info,reqwest=warn,hyper=warn,hyper_util=warn,h2=warn,tower=warn,opentelemetry=warn,\
          opentelemetry_sdk=warn,opentelemetry_http=warn,opentelemetry_otlp=warn,\
          opentelemetry-sdk=warn,opentelemetry-http=warn,opentelemetry-otlp=warn,holon=debug",
@@ -242,8 +243,7 @@ async fn main() -> Result<()> {
                 })?;
 
             // Configure log level - use default filter if RUST_LOG not set
-            let log_level =
-                EnvFilter::try_from_default_env().unwrap_or_else(|_| default_env_filter());
+            let log_level = default_env_filter();
 
             // Build subscriber with all layers
             let registry = tracing_subscriber::registry();
@@ -310,8 +310,7 @@ async fn main() -> Result<()> {
         }
         TransportMode::Http { .. } => {
             // In HTTP mode, normal stderr logging is fine
-            let log_level =
-                EnvFilter::try_from_default_env().unwrap_or_else(|_| default_env_filter());
+            let log_level = default_env_filter();
 
             // Build subscriber with all layers
             let registry = tracing_subscriber::registry();

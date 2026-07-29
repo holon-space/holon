@@ -367,8 +367,7 @@ pub extern "C" fn gpui_ios_register_app() {
     // `SIMCTL_CHILD_RUST_LOG`).
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let filter = holon_frontend::logging::env_filter_with_default("info");
     let _ = tracing_subscriber::registry()
         .with(filter)
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))

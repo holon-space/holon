@@ -450,7 +450,7 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                 // projected change becomes visible to the view model / widgets
                 // (final GPU paint excluded). Greppable via target="holon_latency".
                 if change_count > 0 {
-                    tracing::debug!(
+                    tracing::info!(
                         target: "holon_latency",
                         stage = "rows",
                         source = source_name,

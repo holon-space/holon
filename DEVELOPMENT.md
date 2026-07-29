@@ -195,6 +195,16 @@ split / ...) — from the moment the action is dispatched until its result becom
 VISIBLE (the reactive row batch is applied). Instrumentation lives under the
 `holon_latency` tracing target and is zero-cost unless that target is enabled.
 
+The stage events are emitted at **INFO** and the target is held at `warn` by
+default, so a normal run logs none of them (its fail-loud `warn!` disclosures,
+such as `stage=e2e_expired`, still show). Turn them on with
+`HOLON_LATENCY_SLO=1` (which also installs the latency-SLO oracle in release
+builds) or with an explicit `RUST_LOG=holon_latency=info` directive, which
+always wins over the default. INFO is load-bearing: the turso fork's
+`workspace-hack` enables `tracing/release_max_level_info`, so a `debug!`
+callsite does not exist at all in a release binary — a `debug!` latency event
+would be unreachable in exactly the build that gets dogfooded.
+
 ```bash
 just measure-latency            # 16 random cases (default)
 just measure-latency 40         # more cases -> tighter p95/max
@@ -230,7 +240,7 @@ boot (empty Turso + existing org vault). Under Option 1 the per-file
 the barrier hit its ceiling. `measure_latency.py` prints a `BOOT INGEST` table
 for these and flags any ceiling hits.
 
-To run against a custom log (e.g. the live app with `RUST_LOG=holon_latency=debug`):
+To run against a custom log (e.g. the live app with `HOLON_LATENCY_SLO=1`):
 
 ```bash
 python3 scripts/measure_latency.py /path/to/log

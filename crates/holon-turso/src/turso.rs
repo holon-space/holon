@@ -2046,7 +2046,7 @@ impl TursoBackend {
             })?;
         }
 
-        tracing::debug!(
+        tracing::info!(
             target: "holon_latency",
             stage = "matview_ddl",
             view = ddl_target_name(sql),

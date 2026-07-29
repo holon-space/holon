@@ -112,10 +112,9 @@ impl InitState {
 #[macroquad::main("Holon")]
 async fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "holon_ply=info,holon=info".into()),
-        )
+        .with_env_filter(holon_frontend::logging::env_filter_with_default(
+            "holon_ply=info,holon=info",
+        ))
         .init();
 
     let widgets: std::collections::HashSet<String> = render::builders::builder_names()

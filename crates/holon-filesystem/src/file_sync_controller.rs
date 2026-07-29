@@ -463,7 +463,7 @@ impl FileSyncController {
         } else {
             self.wait_for_feed_progress(&ids, stall_ms).await
         };
-        tracing::debug!(
+        tracing::info!(
             target: "holon_latency",
             stage = "boot_feed_converge",
             ms = t.elapsed().as_millis() as u64,
@@ -522,7 +522,7 @@ impl FileSyncController {
             if now <= present {
                 return false;
             }
-            tracing::debug!(
+            tracing::info!(
                 target: "holon_latency",
                 stage = "boot_feed_progress",
                 present = now as u64,
@@ -544,7 +544,7 @@ impl FileSyncController {
     async fn feed_barrier(&mut self, ids: &[String], site: &'static str) -> bool {
         if let Some(buf) = self.scan_feed_ids.as_mut() {
             buf.extend(ids.iter().cloned());
-            tracing::debug!(
+            tracing::info!(
                 target: "holon_latency",
                 stage = "boot_feed_wait",
                 ms = 0u64,
@@ -561,7 +561,7 @@ impl FileSyncController {
         debug_assert!(self.scan_feed_ids.is_none());
         let t = std::time::Instant::now();
         let caught_up = self.wait_for_feed_progress(ids, 2000).await;
-        tracing::debug!(
+        tracing::info!(
             target: "holon_latency",
             stage = "boot_feed_wait",
             ms = t.elapsed().as_millis() as u64,
@@ -2790,7 +2790,7 @@ impl FileSyncController {
             .filter(|b| !gate_excluded_ids.contains(&b.id))
             .filter(|b| !consolidator_create_ids.contains(&b.id.to_string()))
             .count();
-        tracing::debug!(
+        tracing::info!(
             target: "holon_latency",
             stage = "boot_parse",
             ms = t_ingest.elapsed().as_millis() as u64,
@@ -2823,7 +2823,7 @@ impl FileSyncController {
                 .apply_ingest_batch(operations)
                 .await
                 .map_err(|e| anyhow::anyhow!("apply_ingest_batch for {}: {e:#}", path.display()))?;
-            tracing::debug!(
+            tracing::info!(
                 target: "holon_latency",
                 stage = "boot_write",
                 ms = t_write.elapsed().as_millis() as u64,
@@ -3089,7 +3089,7 @@ impl FileSyncController {
                 }
             }
         }
-        tracing::debug!(
+        tracing::info!(
             target: "holon_latency",
             stage = "boot_place_wait",
             ms = t_place.elapsed().as_millis() as u64,

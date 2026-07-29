@@ -67,10 +67,10 @@ use crate::loro_backend::snapshot_blocks_from_doc_settled;
 pub const SIDECAR_FILENAME: &str = "holon_tree.loro.sync";
 
 /// Process-global tally of `LoroProjection::project` passes that actually
-/// emitted ops. The per-pass `holon_latency` events are `debug!`, which the
-/// workspace's `release_max_level_info` compiles OUT of release builds — so
-/// boot cadence (how many projection passes a cold scan costs, and how many
-/// ops each carries) is unmeasurable from logs at the only scale that matters.
+/// emitted ops. The per-pass `holon_latency` events are opt-in
+/// (`HOLON_LATENCY_SLO=1`), so an ordinary boot log carries none of them — boot
+/// cadence (how many projection passes a cold scan costs, and how many ops each
+/// carries) must stay measurable without re-running under the opt-in.
 /// Three relaxed atomics per pass; read via [`projection_stats::snapshot`].
 pub mod projection_stats {
     use std::sync::atomic::AtomicU64;
@@ -1082,7 +1082,7 @@ impl LoroProjection {
                 before_len,
                 mode,
             );
-            tracing::debug!(
+            tracing::info!(
                 target: "holon_latency",
                 stage = "projection",
                 ops = op_count,

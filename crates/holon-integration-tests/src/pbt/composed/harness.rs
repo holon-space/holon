@@ -637,7 +637,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
                 // Latency (end-to-end, action->visible rows): dispatch through the
                 // real pipeline plus the CDC settle — everything except final GPU
                 // paint (headless harness). Greppable via target="holon_latency".
-                tracing::debug!(
+                tracing::info!(
                     target: "holon_latency",
                     stage = "action_total",
                     action = %action,

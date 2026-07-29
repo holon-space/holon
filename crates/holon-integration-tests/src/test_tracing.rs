@@ -474,6 +474,9 @@ impl SpanCollector {
                         "holon_frontend=debug",
                         "holon_gpui=debug",
                         "holon_integration_tests=info",
+                        // The INFO `holon_latency` stage events are per-batch,
+                        // not spans — hundreds of zero-width trace entries.
+                        "holon_latency=warn",
                     ]
                     .join(",")
                 });

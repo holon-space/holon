@@ -397,7 +397,7 @@ impl Invariant<CapMap, CapMap> for InvNoSteadyReseedLeak {
 
     async fn check(&self, _: &CapMap, sut: &CapMap) -> InvariantResult {
         let summary = sut.reseed_summary();
-        tracing::debug!(
+        tracing::info!(
             target: "holon_latency",
             stage = "reseed_oracle",
             steady_leaks = summary.steady_leak_total as u64,

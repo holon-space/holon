@@ -2969,7 +2969,7 @@ impl BuilderServices for ReactiveEngine {
                         intent.entity_name, intent.op_name
                     )
                 })?;
-            tracing::debug!(
+            tracing::info!(
                 target: "holon_latency",
                 stage = "dispatch",
                 action = %intent.op_name,

@@ -2,7 +2,7 @@
 //! `holon_latency` instrumentation.
 //!
 //! The pipeline already emits per-stage timing events
-//! `tracing::debug!(target: "holon_latency", stage = "...", ms = ...)`:
+//! `tracing::info!(target: "holon_latency", stage = "...", ms = ...)`:
 //!
 //! - `dispatch` (holon-frontend `reactive.rs`) — user action enters the op
 //!   pipeline. Fires in every configuration.
@@ -23,6 +23,12 @@
 //!
 //! Zero new instrumentation, zero hot-path cost beyond reading an already-
 //! emitted event's fields. Threshold tunable via `HOLON_ORACLES_SLO_MS`.
+//!
+//! The events must stay at INFO or above: the turso fork's `workspace-hack`
+//! enables `tracing/release_max_level_info`, which compiles every `debug!`
+//! callsite out of release builds — the layer would then see nothing in the
+//! build that is actually dogfooded. Guarded by
+//! `latency_events_are_emitted_above_the_release_level_ceiling`.
 
 use std::time::SystemTime;
 
@@ -123,6 +129,12 @@ impl<S: Subscriber> Layer<S> for LatencySloLayer {
         metadata.target() == LATENCY_TARGET
     }
 
+    /// The layer accepts any level, so it must never let a sibling layer's
+    /// filter lower the subscriber's global max level below its interest.
+    fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+        Some(tracing::level_filters::LevelFilter::TRACE)
+    }
+
     fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
         if event.metadata().target() != LATENCY_TARGET {
             return;
@@ -194,7 +206,7 @@ mod tests {
         let layer = LatencySloLayer::new(200);
         let subscriber = tracing_subscriber::registry().with(layer);
         tracing::subscriber::with_default(subscriber, || {
-            tracing::debug!(
+            tracing::info!(
                 target: "holon_latency",
                 stage = stage,
                 action = "navigate",

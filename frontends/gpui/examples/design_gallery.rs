@@ -20,10 +20,9 @@ const DESIGN_GALLERY_MCP_PORT: u16 = 8523;
 
 fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,holon_mcp=info".into()),
-        )
+        .with_env_filter(holon_frontend::logging::env_filter_with_default(
+            "info,holon_mcp=info",
+        ))
         .init();
 
     let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
