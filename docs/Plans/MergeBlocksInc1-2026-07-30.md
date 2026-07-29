@@ -116,16 +116,25 @@ survivor was deleted. It does not PREVENT it. Inc 2 owes a real answer —
 either refusing to delete a block that redirects resolve to, or re-pointing its
 redirects at its own successor.
 
-**Seam coverage (Inc 2).** The redirect consult is wired on the block-lookup
-MISS path of `CacheBlockReader::get_block_authoritative` (the Turso-authority
-`BlockReader`), so an unmerged lookup pays nothing extra. `LoroBlockReader` —
-the Loro-authority `BlockReader`, which is what the default app wiring and the
-test environment resolve — is NOT yet wired: it holds only a `LoroBackend` and
-the redirect index is SQL, so it needs a `DbHandle` plumbed to it. Until that
-lands, a merged-away id does not resolve under Loro authority. The two
-`DocumentManager::get_by_id` seams (`LiveDocumentManager`, `LoroDocumentManager`)
-are likewise unwired; documents are a narrower case since a doc root with a live
-file binding is refused as a merge duplicate outright.
+**Seam coverage.** The redirect consult is wired on the block-lookup MISS path
+of `CacheBlockReader::get_block_authoritative`, so an unmerged lookup pays
+nothing extra. `CacheBlockReader` IS the `dyn BlockReader` the app and the test
+environment resolve: `turso_seams.rs` registers it and no other registration
+exists, Loro-enabled or not. Property (g) asserts this through the DI-resolved
+reader rather than through the concrete type.
+
+`LoroBlockReader` is registered ONLY by `build_no_turso_container`
+(`StorageSelector::LoroMemory`, test_environment.rs). That container registers
+no `DbHandleProvider` and has no `block_redirects` table, and `merge_blocks_plan`
+is on the SQL-provider allowlist, so `merge_blocks` cannot run there at all.
+There is consequently no `DbHandle` to plumb into `LoroBlockReader` and nothing
+for it to redirect to — wiring it is not an Inc 2 debt, it is a non-operation
+under that storage selector.
+
+The remaining unwired seam is `DocumentManager::get_by_id`
+(`LiveDocumentManager`, which does hold a `DbHandle`). Documents are the
+narrower case since a doc root with a live file binding is refused as a merge
+duplicate outright, so this is left for Inc 2 with the delete hole.
 
 ## Trash
 
@@ -139,7 +148,7 @@ op-level PBT over generated husk / both-non-empty shapes whose children are
 drawn from a small alphabet with whitespace decoration, so
 normalization-equal duplicates arise across BOTH sides. It drives the real
 `execute_operation("block", "merge_blocks", …)` dispatch, which is also the
-MCP path. Six properties:
+MCP path. Properties:
 
 (a) resolving the duplicate's id yields the canonical;
 (b) the normalized non-husk content multiset survives up to dedupe collapse,
@@ -150,6 +159,30 @@ MCP path. Six properties:
     resolutions, and retracts the redirect;
 (e) every inbound link that resolved to the duplicate resolves to the canonical;
 (f) merging an already-merged pair fails loud.
+
+Two further properties:
+
+(g) the DI-resolved PRODUCTION `BlockReader` resolves the merged-away id to the
+    canonical block — asserted through the container, so a future re-wiring of
+    `dyn BlockReader` to a reader without the redirect consult goes red;
+(h) tags union with the canonical winning conflicts, properties adopted only
+    for keys the canonical lacks, and the duplicate's authored `ID` never
+    adopted.
+
+The generator draws children WITH grandchildren (so a dedupe loser carries a
+subtree and the orphan re-homing loop actually runs) and tags/properties on both
+sides, the duplicate always carrying an authored `ID`. The underscore-prefixed
+half of the ID rule is NOT independently observable: every dispatched write
+stamps `_provenance`, so the canonical always already holds it.
+
+That coverage immediately caught a defect in Inc 1 as landed: the planner read
+the `properties` column as JSON TEXT (`Value::as_string`), but the SQL read
+boundary (`normalize_known_json_columns`) parses that column into a
+`Value::Object` before any provider sees it. `properties_absent_from`,
+`property_from_blob` and `properties_carry_authored_id` therefore all returned
+"empty" unconditionally — property adoption never happened, chained merges lost
+their prior `merged_from`, and the dedupe's authored-`:ID:`-wins keeper rule
+never fired. They now read the object shape and fail loud on anything else.
 
 `merge_blocks_undo_restores_order_after_identical_child_collapse` pins the
 shrunk shape that caught the move-inverse anchor defect (two children with

@@ -15,7 +15,12 @@
 //!   (d) undo restores the exact pre-merge state (one gesture);
 //!   (e) every inbound link that resolved to the duplicate resolves to the
 //!       canonical afterwards;
-//!   (f) merging the same pair twice fails loud.
+//!   (f) merging the same pair twice fails loud;
+//!   (g) the DI-resolved PRODUCTION `BlockReader` resolves the merged-away id
+//!       to the canonical block;
+//!   (h) tags union with the canonical winning conflicts, properties adopted
+//!       only for keys the canonical lacks, and the duplicate's authored `ID`
+//!       never adopted.
 //!
 //! Design: docs/Plans/MergeBlocksInc1-2026-07-30.md
 //!
@@ -26,6 +31,7 @@
 
 #![cfg(feature = "pbt")]
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,6 +52,10 @@ const CANON: &str = "11111111-0000-0000-0000-000000000002";
 const DUP: &str = "11111111-0000-0000-0000-000000000003";
 /// Carries the inbound link that property (e) follows.
 const LINKER: &str = "11111111-0000-0000-0000-000000000004";
+/// The duplicate's org-authored `:ID:`. Adopting it onto the survivor would
+/// make write-back render `:ID: <merged-away id>` — the split-root shape this
+/// operation exists to repair — so property (h) forbids it.
+const AUTHORED_DUPLICATE_ID: &str = "authored-duplicate-identity";
 
 const SYNC_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(25);
@@ -70,8 +80,21 @@ fn runtime() -> Arc<tokio::runtime::Runtime> {
 struct MergeCase {
     canonical_content: String,
     duplicate_content: String,
-    canonical_children: Vec<String>,
-    duplicate_children: Vec<String>,
+    canonical_children: Vec<ChildSpec>,
+    duplicate_children: Vec<ChildSpec>,
+    canonical_tags: Vec<String>,
+    duplicate_tags: Vec<String>,
+    canonical_properties: Vec<(String, String)>,
+    duplicate_properties: Vec<(String, String)>,
+}
+
+/// A generated child. `grandchildren` is what makes a dedupe LOSER carry a
+/// subtree: without it the orphan re-homing loop and its inverse bucket never
+/// execute in a green run, so their correctness would be asserted by nothing.
+#[derive(Debug, Clone)]
+struct ChildSpec {
+    content: String,
+    grandchildren: Vec<String>,
 }
 
 /// Two words joined by at least one space, optionally lead-padded — so
@@ -86,21 +109,90 @@ fn child_content() -> impl Strategy<Value = String> {
         .prop_map(|(a, b, lead, mid)| format!("{lead}{a}{mid}{b}"))
 }
 
+fn child_spec() -> impl Strategy<Value = ChildSpec> {
+    (
+        child_content(),
+        prop::collection::vec(child_content(), 0..2),
+    )
+        .prop_map(|(content, grandchildren)| ChildSpec {
+            content,
+            grandchildren,
+        })
+}
+
+fn tag_set() -> impl Strategy<Value = Vec<String>> {
+    // Deliberately NOT `Page`: a Page tag would make the block a document root
+    // and change which operation is under test.
+    prop::collection::vec(prop::sample::select(vec!["Alpha", "Beta"]), 0..3)
+        .prop_map(|tags| dedup_preserving_order(tags.into_iter().map(str::to_string)))
+}
+
+/// A property map drawn from `keys`. Deduped by key so the seed writes each
+/// key once and the expected value is unambiguous.
+fn property_set(keys: Vec<&'static str>) -> impl Strategy<Value = Vec<(String, String)>> {
+    prop::collection::vec(
+        (
+            prop::sample::select(keys),
+            prop::sample::select(vec!["one", "two"]),
+        ),
+        0..3,
+    )
+    .prop_map(|pairs| {
+        let mut out: Vec<(String, String)> = Vec::new();
+        for (k, v) in pairs {
+            if !out.iter().any(|(seen, _)| seen == k) {
+                out.push((k.to_string(), v.to_string()));
+            }
+        }
+        out
+    })
+}
+
+fn dedup_preserving_order(items: impl Iterator<Item = String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for item in items {
+        if !out.contains(&item) {
+            out.push(item);
+        }
+    }
+    out
+}
+
 fn merge_case() -> impl Strategy<Value = MergeCase> {
     (
         prop::sample::select(vec!["", "canonical body"]),
         prop::sample::select(vec!["", "duplicate body"]),
-        prop::collection::vec(child_content(), 0..3),
-        prop::collection::vec(child_content(), 0..4),
+        prop::collection::vec(child_spec(), 0..3),
+        prop::collection::vec(child_spec(), 0..4),
+        tag_set(),
+        tag_set(),
+        // The canonical's pool deliberately excludes `ID`, so the duplicate's
+        // authored one is always a key the canonical LACKS — i.e. exactly the
+        // shape the adoption rule has to refuse. The sibling underscore rule
+        // is NOT independently observable here: every dispatched write stamps
+        // `_provenance`, so the canonical always already holds it.
+        property_set(vec!["author", "status"]),
+        property_set(vec!["author", "status", "priority"]),
     )
         .prop_map(
-            |(canonical_content, duplicate_content, canonical_children, duplicate_children)| {
-                MergeCase {
-                    canonical_content: canonical_content.to_string(),
-                    duplicate_content: duplicate_content.to_string(),
-                    canonical_children,
-                    duplicate_children,
-                }
+            |(
+                canonical_content,
+                duplicate_content,
+                canonical_children,
+                duplicate_children,
+                canonical_tags,
+                duplicate_tags,
+                canonical_properties,
+                duplicate_properties,
+            )| MergeCase {
+                canonical_content: canonical_content.to_string(),
+                duplicate_content: duplicate_content.to_string(),
+                canonical_children,
+                duplicate_children,
+                canonical_tags,
+                duplicate_tags,
+                canonical_properties,
+                duplicate_properties,
             },
         )
 }
@@ -111,6 +203,14 @@ fn canon_child_id(i: usize) -> String {
 
 fn dup_child_id(i: usize) -> String {
     format!("11111111-0000-0000-0002-{i:012}")
+}
+
+fn canon_grandchild_id(i: usize, j: usize) -> String {
+    format!("11111111-0000-0000-0003-{i:06}{j:06}")
+}
+
+fn dup_grandchild_id(i: usize, j: usize) -> String {
+    format!("11111111-0000-0000-0004-{i:06}{j:06}")
 }
 
 /// The dedupe key: trim, then collapse every whitespace run to one space.
@@ -170,6 +270,81 @@ async fn ordered_children(env: &TestEnvironment, parent: &str) -> Vec<(String, S
         .collect()
 }
 
+/// `id`'s tags, sorted.
+async fn block_tags(env: &TestEnvironment, id: &str) -> Vec<String> {
+    let rows = env
+        .query_sql(&format!(
+            "SELECT tag FROM block_tags WHERE block_id = '{}' ORDER BY tag",
+            uri(id)
+        ))
+        .await
+        .expect("tag query failed");
+    rows.iter()
+        .filter_map(|r| r.get("tag").and_then(|v| v.as_string()).map(str::to_string))
+        .collect()
+}
+
+/// `id`'s `properties` blob as a key → rendered-value map. The query layer
+/// hands the column back already parsed (`Value::Object`), so values are
+/// rendered with `{:?}` — a string and a number can never compare equal.
+///
+/// `_provenance` is dropped: every dispatched write re-stamps it, so the
+/// merge's own constituent ops and the undo's inverses both change it. Keeping
+/// it would make every before/after comparison fail for a reason that has
+/// nothing to do with the merge.
+async fn block_properties(env: &TestEnvironment, id: &str) -> BTreeMap<String, String> {
+    let rows = env
+        .query_sql(&format!(
+            "SELECT properties FROM block_raw WHERE id = '{}'",
+            uri(id)
+        ))
+        .await
+        .expect("properties query failed");
+    let Some(value) = rows.first().and_then(|r| r.get("properties")) else {
+        return BTreeMap::new();
+    };
+    let map = match value {
+        Value::Object(map) => map.clone(),
+        Value::Null => return BTreeMap::new(),
+        other => panic!("properties of {id} must be an object, got {other:?}"),
+    };
+    map.into_iter()
+        .filter(|(k, _)| k != "_provenance")
+        .map(|(k, v)| {
+            let text = match v {
+                Value::String(s) => s,
+                other => format!("{other:?}"),
+            };
+            (k, text)
+        })
+        .collect()
+}
+
+/// Write one `properties` key through the ordinary dispatched `set_field` —
+/// the same op the merge itself uses to adopt a property.
+async fn set_property(env: &TestEnvironment, id: &str, key: &str, value: &str) {
+    let mut params: HashMap<String, Value> = HashMap::new();
+    params.insert("id".into(), Value::String(uri(id)));
+    params.insert("field".into(), Value::String(key.to_string()));
+    params.insert("value".into(), Value::String(value.to_string()));
+    env.execute_operation("block", "set_field", params)
+        .await
+        .unwrap_or_else(|e| panic!("set property {key} on {id}: {e}"));
+}
+
+async fn set_tags(env: &TestEnvironment, id: &str, tags: &[String]) {
+    let mut params: HashMap<String, Value> = HashMap::new();
+    params.insert("id".into(), Value::String(uri(id)));
+    params.insert("field".into(), Value::String("tags".into()));
+    params.insert(
+        "value".into(),
+        Value::Array(tags.iter().map(|t| Value::String(t.clone())).collect()),
+    );
+    env.execute_operation("block", "set_field", params)
+        .await
+        .unwrap_or_else(|e| panic!("set tags on {id}: {e}"));
+}
+
 /// The `resolved_id` of every inbound link, keyed by source block.
 async fn link_resolutions(env: &TestEnvironment) -> Vec<(String, String)> {
     let rows = env
@@ -185,26 +360,48 @@ async fn link_resolutions(env: &TestEnvironment) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Build the pre-merge tree: canonical + its children, duplicate + its
-/// children, and a linker block whose only mark is an internal link to the
-/// duplicate (so `block_links.resolved_id` starts at the duplicate).
+/// Build the pre-merge tree: canonical + its children (each possibly carrying
+/// grandchildren), duplicate + its children, tags and properties on both sides,
+/// and a linker block whose only mark is an internal link to the duplicate (so
+/// `block_links.resolved_id` starts at the duplicate).
 async fn seed_tree(env: &TestEnvironment, case: &MergeCase) {
     env.create_block(CANON, ROOT, &case.canonical_content)
         .await
         .expect("create canonical");
-    for (i, content) in case.canonical_children.iter().enumerate() {
-        env.create_block(&canon_child_id(i), CANON, content)
+    for (i, child) in case.canonical_children.iter().enumerate() {
+        env.create_block(&canon_child_id(i), CANON, &child.content)
             .await
             .expect("create canonical child");
+        for (j, content) in child.grandchildren.iter().enumerate() {
+            env.create_block(&canon_grandchild_id(i, j), &canon_child_id(i), content)
+                .await
+                .expect("create canonical grandchild");
+        }
     }
     env.create_block(DUP, ROOT, &case.duplicate_content)
         .await
         .expect("create duplicate");
-    for (i, content) in case.duplicate_children.iter().enumerate() {
-        env.create_block(&dup_child_id(i), DUP, content)
+    for (i, child) in case.duplicate_children.iter().enumerate() {
+        env.create_block(&dup_child_id(i), DUP, &child.content)
             .await
             .expect("create duplicate child");
+        for (j, content) in child.grandchildren.iter().enumerate() {
+            env.create_block(&dup_grandchild_id(i, j), &dup_child_id(i), content)
+                .await
+                .expect("create duplicate grandchild");
+        }
     }
+
+    set_tags(env, CANON, &case.canonical_tags).await;
+    set_tags(env, DUP, &case.duplicate_tags).await;
+    for (key, value) in &case.canonical_properties {
+        set_property(env, CANON, key, value).await;
+    }
+    for (key, value) in &case.duplicate_properties {
+        set_property(env, DUP, key, value).await;
+    }
+    // The org-authored `:ID:` the merge must never copy onto the survivor.
+    set_property(env, DUP, "ID", AUTHORED_DUPLICATE_ID).await;
 
     let label = "see the duplicate";
     env.create_block(LINKER, ROOT, label)
@@ -239,14 +436,59 @@ async fn seed_tree(env: &TestEnvironment, case: &MergeCase) {
                 .find(|(rid, _, _)| rid == &uri(id))
                 .map(|(_, _, c)| c.clone())
         };
+        let grandchildren_present = |children: &[ChildSpec], id_of: fn(usize, usize) -> String| {
+            children.iter().enumerate().all(|(i, child)| {
+                (0..child.grandchildren.len()).all(|j| {
+                    let gid = uri(&id_of(i, j));
+                    rows.iter().any(|(rid, _, _)| rid == &gid)
+                })
+            })
+        };
         content_of(CANON).as_deref() == Some(case.canonical_content.trim_end())
             && content_of(DUP).as_deref() == Some(case.duplicate_content.trim_end())
             && rows.iter().filter(|(_, p, _)| p == &uri(CANON)).count()
                 == case.canonical_children.len()
             && rows.iter().filter(|(_, p, _)| p == &uri(DUP)).count()
                 == case.duplicate_children.len()
+            && grandchildren_present(&case.canonical_children, canon_grandchild_id)
+            && grandchildren_present(&case.duplicate_children, dup_grandchild_id)
     })
     .await;
+
+    // Tags and properties land in their own projections; the merge PLANNER
+    // reads them, so a merge fired before they projected would test nothing.
+    let deadline = tokio::time::Instant::now() + SYNC_TIMEOUT;
+    loop {
+        let dup_props = block_properties(env, DUP).await;
+        let canon_props = block_properties(env, CANON).await;
+        let dup_tags = block_tags(env, DUP).await;
+        let canon_tags = block_tags(env, CANON).await;
+        let seeded = dup_props.get("ID").map(String::as_str) == Some(AUTHORED_DUPLICATE_ID)
+            && case
+                .duplicate_properties
+                .iter()
+                .all(|(k, v)| dup_props.get(k).map(String::as_str) == Some(v.as_str()))
+            && case
+                .canonical_properties
+                .iter()
+                .all(|(k, v)| canon_props.get(k).map(String::as_str) == Some(v.as_str()))
+            && case.duplicate_tags.iter().all(|t| dup_tags.contains(t))
+            && case.canonical_tags.iter().all(|t| canon_tags.contains(t));
+        if seeded {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let raw = env
+                .query_sql("SELECT id, properties FROM block_raw ORDER BY id")
+                .await
+                .expect("raw properties query");
+            panic!(
+                "tags/properties never projected; canonical {canon_tags:?} {canon_props:?}, \
+                 duplicate {dup_tags:?} {dup_props:?}; raw {raw:?}"
+            );
+        }
+        tokio::time::sleep(POLL).await;
+    }
 }
 
 /// Poll the block projection until `done` holds. Fails loud on timeout — a
@@ -288,6 +530,8 @@ async fn run_case(rt: Arc<tokio::runtime::Runtime>, case: MergeCase) {
     let canonical_order_before = ordered_children(&env, CANON).await;
     let duplicate_order_before = ordered_children(&env, DUP).await;
     let links_before = link_resolutions(&env).await;
+    let canonical_tags_before = block_tags(&env, CANON).await;
+    let canonical_props_before = block_properties(&env, CANON).await;
     let inbound_at_duplicate: Vec<String> = links_before
         .iter()
         .filter(|(_, resolved)| resolved == &uri(DUP))
@@ -304,7 +548,7 @@ async fn run_case(rt: Arc<tokio::runtime::Runtime>, case: MergeCase) {
         .canonical_children
         .iter()
         .chain(case.duplicate_children.iter())
-        .map(|c| normalize(c))
+        .map(|c| normalize(&c.content))
         .filter(|c| !c.is_empty())
         .collect();
     expected_normalized.sort();
@@ -326,6 +570,28 @@ async fn run_case(rt: Arc<tokio::runtime::Runtime>, case: MergeCase) {
         uri(CANON),
         "(a) the duplicate's id must resolve to the canonical after the merge"
     );
+
+    // (g) the PRODUCTION `BlockReader` — the DI-resolved seam org write-back
+    // and the file-sync controller read every block through — resolves the
+    // merged-away id to the canonical block, not to "absent".
+    {
+        use holon_filesystem::BlockReader;
+        let reader = env
+            .injector()
+            .expect("(g) the environment must expose its container")
+            .resolve_async::<dyn BlockReader>()
+            .await;
+        let block = reader
+            .get_block_authoritative(&holon_api::EntityUri::block(DUP))
+            .await
+            .expect("(g) the BlockReader lookup of a merged-away id must not error")
+            .expect("(g) the merged-away id must still resolve through the production BlockReader");
+        assert_eq!(
+            block.id.to_string(),
+            uri(CANON),
+            "(g) the production BlockReader must resolve the merged-away id to the canonical block"
+        );
+    }
 
     let after_children = ordered_children(&env, CANON).await;
     let after_normalized: Vec<String> = after_children
@@ -414,6 +680,94 @@ async fn run_case(rt: Arc<tokio::runtime::Runtime>, case: MergeCase) {
         );
     }
 
+    // (b, subtrees) a dedupe loser is deleted only AFTER its children are
+    // re-homed under the keeper, so no generated grandchild is ever orphaned.
+    let after_rows = snapshot(&env).await;
+    let surviving_parent = |id: &str| {
+        after_rows
+            .iter()
+            .find(|(rid, _, _)| rid == &uri(id))
+            .map(|(_, parent, _)| parent.clone())
+    };
+    for (children, gid) in [
+        (
+            &case.canonical_children,
+            canon_grandchild_id as fn(usize, usize) -> String,
+        ),
+        (&case.duplicate_children, dup_grandchild_id),
+    ] {
+        for (i, child) in children.iter().enumerate() {
+            for j in 0..child.grandchildren.len() {
+                let parent = surviving_parent(&gid(i, j)).unwrap_or_else(|| {
+                    panic!(
+                        "(b) grandchild {} was orphaned by the merge; rows {after_rows:?}",
+                        gid(i, j)
+                    )
+                });
+                assert!(
+                    after_rows.iter().any(|(rid, _, _)| rid == &parent),
+                    "(b) grandchild {} survived under a parent the merge deleted ({parent})",
+                    gid(i, j)
+                );
+            }
+        }
+    }
+
+    // (h) tags union with the canonical winning conflicts; properties adopted
+    // only for keys the canonical LACKS — and never the duplicate's identity.
+    //
+    // `merged_from` is written AFTER the tag/property adoption and always, so
+    // waiting for it synchronizes on the whole of step 5 without presupposing
+    // anything the assertions below are testing.
+    let deadline = tokio::time::Instant::now() + SYNC_TIMEOUT;
+    loop {
+        let props = block_properties(&env, CANON).await;
+        if props.contains_key("merged_from") {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the merge's provenance never projected onto the canonical; properties {props:?}"
+        );
+        tokio::time::sleep(POLL).await;
+    }
+    let canonical_tags_after = block_tags(&env, CANON).await;
+    for tag in case.canonical_tags.iter().chain(case.duplicate_tags.iter()) {
+        assert!(
+            canonical_tags_after.contains(tag),
+            "(h) tag {tag:?} must survive the union; canonical now has {canonical_tags_after:?}"
+        );
+    }
+    let canonical_props_after = block_properties(&env, CANON).await;
+    assert!(
+        !canonical_props_after.contains_key("ID"),
+        "(h) the merge must NEVER adopt the duplicate's authored ID — write-back would then \
+         render `:ID: {AUTHORED_DUPLICATE_ID}` on the survivor and re-create the split-root \
+         shape; canonical properties {canonical_props_after:?}"
+    );
+    for (key, value) in &case.canonical_properties {
+        assert_eq!(
+            canonical_props_after.get(key).map(String::as_str),
+            Some(value.as_str()),
+            "(h) the canonical must win the conflict on {key:?}"
+        );
+    }
+    for (key, value) in &case.duplicate_properties {
+        if canonical_props_before.contains_key(key) {
+            assert_eq!(
+                canonical_props_after.get(key),
+                canonical_props_before.get(key),
+                "(h) the duplicate must not overwrite {key:?} on the canonical"
+            );
+        } else {
+            assert_eq!(
+                canonical_props_after.get(key).map(String::as_str),
+                Some(value.as_str()),
+                "(h) the canonical must adopt {key:?}, a key it lacked"
+            );
+        }
+    }
+
     // (f) the pair is already merged — a second merge must fail loud.
     let second = merge(&env).await;
     assert!(
@@ -455,6 +809,16 @@ async fn run_case(rt: Arc<tokio::runtime::Runtime>, case: MergeCase) {
         restored_links, links_before,
         "(d) undo must restore the exact pre-merge link resolutions"
     );
+    assert_eq!(
+        block_tags(&env, CANON).await,
+        canonical_tags_before,
+        "(d) undo must retract the tags the merge unioned onto the canonical"
+    );
+    assert_eq!(
+        block_properties(&env, CANON).await,
+        canonical_props_before,
+        "(d) undo must retract the properties the merge adopted onto the canonical"
+    );
     let redirects = env
         .query_sql("SELECT from_id FROM block_redirects")
         .await
@@ -465,10 +829,19 @@ async fn run_case(rt: Arc<tokio::runtime::Runtime>, case: MergeCase) {
     );
 }
 
+fn leaf(content: &str) -> ChildSpec {
+    ChildSpec {
+        content: content.to_string(),
+        grandchildren: vec![],
+    }
+}
+
 /// The shrunk shape that caught the dedupe-collapse undo defect: two children
 /// whose normalized content is IDENTICAL, so the merge collapses one and undo
-/// must both re-create it and put the pair back in their original order.
-/// Deterministic, so the regression cannot hide behind generator luck.
+/// must both re-create it and put the pair back in their original order. The
+/// loser carries a child, so the orphan re-homing loop and its inverse bucket
+/// run here too. Deterministic, so the regression cannot hide behind
+/// generator luck.
 #[test]
 fn merge_blocks_undo_restores_order_after_identical_child_collapse() {
     let rt = runtime();
@@ -478,7 +851,20 @@ fn merge_blocks_undo_restores_order_after_identical_child_collapse() {
             canonical_content: String::new(),
             duplicate_content: String::new(),
             canonical_children: vec![],
-            duplicate_children: vec!["alpha one".to_string(), "alpha one".to_string()],
+            duplicate_children: vec![
+                leaf("alpha one"),
+                ChildSpec {
+                    content: "alpha one".to_string(),
+                    grandchildren: vec!["beta two".to_string()],
+                },
+            ],
+            canonical_tags: vec!["Alpha".to_string()],
+            duplicate_tags: vec!["Beta".to_string()],
+            canonical_properties: vec![("author".to_string(), "one".to_string())],
+            duplicate_properties: vec![
+                ("author".to_string(), "two".to_string()),
+                ("status".to_string(), "two".to_string()),
+            ],
         },
     ));
 }
@@ -493,8 +879,9 @@ proptest! {
         .. ProptestConfig::default()
     })]
 
-    /// The six ratified merge properties over generated husk / both-non-empty
-    /// shapes with normalization-colliding children on both sides.
+    /// The ratified merge properties over generated husk / both-non-empty
+    /// shapes with normalization-colliding children (some carrying subtrees)
+    /// and tags/properties on both sides.
     #[test]
     fn merge_blocks_preserves_identity_content_and_order(case in merge_case()) {
         let rt = runtime();

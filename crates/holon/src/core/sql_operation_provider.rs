@@ -1453,48 +1453,43 @@ impl SqlOperationProvider {
         Ok(children)
     }
 
-    /// Whether a `properties` JSON blob carries an org-authored `:ID:`.
-    fn properties_carry_authored_id(properties: Option<&Value>) -> Result<bool> {
-        let Some(raw) = properties.and_then(|v| v.as_string()) else {
-            return Ok(false);
-        };
-        if raw.is_empty() {
-            return Ok(false);
+    /// A block's `properties` column as a map. The SQL read boundary
+    /// (`normalize_known_json_columns`) has already parsed the JSON column into
+    /// a [`Value::Object`] before any provider sees it, so that — not JSON text
+    /// — is the shape to read. Absent/Null is an empty map; any other shape is
+    /// a boundary violation and fails loud.
+    fn properties_map(properties: Option<&Value>) -> Result<HashMap<String, Value>> {
+        match properties {
+            None | Some(Value::Null) => Ok(HashMap::new()),
+            Some(Value::Object(map)) => Ok(map.clone()),
+            Some(other) => Err(format!(
+                "block properties must reach the merge planner as an object, got {other:?}"
+            )
+            .into()),
         }
-        let parsed: serde_json::Value = serde_json::from_str(raw)
-            .map_err(|e| format!("block properties hold invalid JSON {raw:?}: {e}"))?;
-        Ok(parsed.get("ID").is_some_and(serde_json::Value::is_string))
     }
 
-    /// Read one key out of a `properties` JSON blob, as `Value::Null` when the
-    /// blob or the key is absent.
+    /// Whether a block's properties carry an org-authored `:ID:`.
+    fn properties_carry_authored_id(properties: Option<&Value>) -> Result<bool> {
+        Ok(matches!(
+            Self::properties_map(properties)?.get("ID"),
+            Some(Value::String(_))
+        ))
+    }
+
+    /// Read one key out of a block's properties, as `Value::Null` when the
+    /// properties or the key are absent.
     fn property_from_blob(properties: &Value, key: &str) -> Result<Value> {
-        let Some(raw) = properties.as_string().filter(|s| !s.is_empty()) else {
-            return Ok(Value::Null);
-        };
-        let parsed: serde_json::Value = serde_json::from_str(raw)
-            .map_err(|e| format!("block properties hold invalid JSON {raw:?}: {e}"))?;
-        match parsed.get(key) {
-            Some(serde_json::Value::String(s)) => Ok(Value::String(s.clone())),
-            Some(serde_json::Value::Number(n)) if n.is_i64() => {
-                Ok(Value::Integer(n.as_i64().expect("checked is_i64")))
-            }
-            Some(serde_json::Value::Null) | None => Ok(Value::Null),
-            Some(other) => Ok(Value::String(other.to_string())),
-        }
+        Ok(Self::properties_map(Some(properties))?
+            .get(key)
+            .cloned()
+            .unwrap_or(Value::Null))
     }
 
     /// The `donor` properties whose keys `holder` does not already carry —
     /// the merge adopts only these, so the canonical wins every conflict.
     fn properties_absent_from(donor: &Value, holder: &Value) -> Result<Vec<(String, Value)>> {
-        let Some(raw) = donor.as_string().filter(|s| !s.is_empty()) else {
-            return Ok(Vec::new());
-        };
-        let parsed: serde_json::Value = serde_json::from_str(raw)
-            .map_err(|e| format!("block properties hold invalid JSON {raw:?}: {e}"))?;
-        let serde_json::Value::Object(map) = parsed else {
-            return Err(format!("block properties must be a JSON object, got {raw:?}").into());
-        };
+        let map = Self::properties_map(Some(donor))?;
         let mut out = Vec::new();
         for key in map.keys() {
             // The donor's own merge provenance is NOT adopted: it names ids that
