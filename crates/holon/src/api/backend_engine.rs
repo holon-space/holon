@@ -807,6 +807,74 @@ impl BackendEngine {
         Ok(())
     }
 
+    /// Follow `id` through the merge redirects to the identity that currently
+    /// holds it. An id nobody merged away resolves to itself, so every caller
+    /// can route through this unconditionally.
+    ///
+    /// This is the ONE resolution seam: a lookup that misses consults
+    /// `block_redirects` here rather than each reader re-implementing the
+    /// chain walk. Fails loud on a cycle instead of spinning — `merge_blocks`
+    /// refuses to create one, so reaching it means the table was corrupted.
+    pub async fn resolve_block_id(
+        &self,
+        id: &holon_api::EntityUri,
+    ) -> Result<holon_api::EntityUri> {
+        let mut current = id.to_string();
+        let mut chain = vec![current.clone()];
+        loop {
+            let mut params = std::collections::HashMap::new();
+            params.insert("from_id".to_string(), Value::String(current.clone()));
+            let rows = self
+                .db_handle
+                .query(
+                    "SELECT to_id FROM block_redirects WHERE from_id = $from_id",
+                    params,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("resolve_block_id({id}): {e}"))?;
+            let Some(next) = rows
+                .first()
+                .and_then(|r| r.get("to_id"))
+                .and_then(|v| v.as_string())
+                .map(str::to_string)
+            else {
+                break;
+            };
+            if chain.contains(&next) {
+                anyhow::bail!(
+                    "block_redirects holds a cycle reached from {id}: {} -> {next}",
+                    chain.join(" -> ")
+                );
+            }
+            chain.push(next.clone());
+            current = next;
+        }
+
+        // A redirect whose terminal no longer exists (the survivor was deleted
+        // after the merge) must NOT come back as if it named a live block —
+        // that is the silent-wrong-answer case. Disclose the whole chain so the
+        // stranding is obvious. Only checked when a redirect was actually
+        // followed; an unmerged id missing is the caller's own lookup to miss.
+        if chain.len() > 1 {
+            let mut params = std::collections::HashMap::new();
+            params.insert("id".to_string(), Value::String(current.clone()));
+            let rows = self
+                .db_handle
+                .query("SELECT id FROM block_raw WHERE id = $id", params)
+                .await
+                .map_err(|e| anyhow::anyhow!("resolve_block_id({id}) terminal check: {e}"))?;
+            if rows.is_empty() {
+                anyhow::bail!(
+                    "merge redirect {} ends at '{current}', which no longer exists — the merge \
+                     survivor was deleted, stranding every id merged into it",
+                    chain.join(" -> ")
+                );
+            }
+        }
+        // ALLOW(entity_uri_from_raw): id read back from a block_redirects row
+        Ok(holon_api::EntityUri::from_raw(&current))
+    }
+
     /// Undo the last operation.
     ///
     /// Delegates to the shared op engine. Returns true if an operation was

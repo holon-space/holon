@@ -71,6 +71,51 @@ impl CacheBlockReader {
         }
     }
 
+    /// The identity `id` was merged into, following redirect chains, or `None`
+    /// when nobody merged it away. Consulted only when a block lookup MISSES.
+    /// Fails loud on a cycle — `merge_blocks` refuses to create one, so
+    /// reaching it means the table was corrupted.
+    async fn follow_merge_redirect(&self, id: &EntityUri) -> anyhow::Result<Option<EntityUri>> {
+        let mut current = id.to_string();
+        let mut chain = vec![current.clone()];
+        loop {
+            let mut params = std::collections::HashMap::new();
+            params.insert(
+                "from_id".to_string(),
+                holon_api::Value::String(current.clone()),
+            );
+            let rows = self
+                .cache
+                .db_handle()
+                .query(
+                    "SELECT to_id FROM block_redirects WHERE from_id = $from_id",
+                    params,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("[CacheBlockReader] redirect lookup for {id}: {e}"))?;
+            let Some(next) = rows.into_iter().next().and_then(|r| {
+                r.get("to_id")
+                    .and_then(|v| v.as_string())
+                    .map(str::to_string)
+            }) else {
+                break;
+            };
+            if chain.contains(&next) {
+                anyhow::bail!(
+                    "block_redirects holds a cycle reached from {id}: {} -> {next}",
+                    chain.join(" -> ")
+                );
+            }
+            chain.push(next.clone());
+            current = next;
+        }
+        if chain.len() == 1 {
+            return Ok(None);
+        }
+        // ALLOW(entity_uri_from_raw): id read back from a block_redirects row
+        Ok(Some(EntityUri::from_raw(&current)))
+    }
+
     /// Phase 5 keystone: wire the convergent `LiveData<Block>` feed so
     /// `wait_for_blocks_in_feed` can prove the positional catch-up condition.
     pub fn with_block_feed(mut self, block_feed: Arc<holon::sync::LiveData<Block>>) -> Self {
@@ -201,9 +246,8 @@ impl CacheBlockReader {
                 if let InlineMark::Link { target, .. } = &mut span.mark {
                     if let EntityRef::Name { name } = &*target {
                         if let Some(rid) = resolved.get(&(bid.clone(), name.clone())) {
-                            // ALLOW(entity_uri_from_raw): block_links.resolved_id is a schemed id
-                            // written by us
                             *target = EntityRef::Internal {
+                                // ALLOW(entity_uri_from_raw): a block_links row
                                 id: EntityUri::from_raw(rid),
                             };
                         }
@@ -319,7 +363,25 @@ impl BlockReader for CacheBlockReader {
                 let [block] = one;
                 Ok(Some(block))
             }
-            None => Ok(None),
+            // MISS: the id may have been merged away by `merge_blocks`. Consult
+            // the redirects and retry at the surviving identity. Deliberately on
+            // the miss path only — a hit never pays for this.
+            None => match self.follow_merge_redirect(id).await? {
+                Some(surviving) => {
+                    let block = Box::pin(self.get_block_authoritative(&surviving)).await?;
+                    // The redirect named a block that no longer exists: the merge
+                    // survivor was deleted, stranding every id merged into it.
+                    // Fail loud rather than report the id as simply absent.
+                    match block {
+                        Some(block) => Ok(Some(block)),
+                        None => anyhow::bail!(
+                            "merge redirect {id} -> {surviving} ends at a block that no longer \
+                             exists — the merge survivor was deleted"
+                        ),
+                    }
+                }
+                None => Ok(None),
+            },
         }
     }
 
@@ -509,8 +571,7 @@ impl LiveDocumentManager {
                 existing_id,
                 doc.id,
             );
-            // ALLOW(entity_uri_from_raw): existing_id from command_bus execute_operation
-            // response (SQL Value::String)
+            // ALLOW(entity_uri_from_raw): existing_id from a command_bus SQL response
             let existing_uri = EntityUri::from_raw(&existing_id);
             if let Some(existing) = self.get_by_id(&existing_uri).await? {
                 return Ok(existing);
@@ -931,6 +992,7 @@ impl Module for OrgModeModule {
                         "rewrite_link_resolution",
                         "restore_link_resolution",
                         "block_to_page_plan",
+                        "merge_blocks_plan",
                     ]
                 } else {
                     &[]

@@ -24,6 +24,7 @@ use holon_core::OriginTaggedWrites;
 use holon_core::Result;
 use holon_core::storage::types::StorageEntity;
 
+use crate::core::merge_blocks_plan;
 use crate::storage::schema_module::EdgeFieldDescriptor;
 use crate::storage::sql_utils::value_to_sql_literal;
 use crate::storage::turso::DbHandle;
@@ -1332,6 +1333,273 @@ impl SqlOperationProvider {
         Ok(stmts)
     }
 
+    // ─── block_redirects junction (merge_blocks) ─────────────────────────
+
+    /// Statement set re-deriving `to_id`'s redirect rows from its
+    /// `merged_from` property — the same replace-from-the-authoritative-field
+    /// shape as [`Self::block_link_statements`]. A `Null` value (the undo of a
+    /// merge, which `json_remove`s the property) yields just the DELETE, so
+    /// undoing a merge retracts its redirect.
+    fn block_redirect_statements(to_id: &str, merged_from: &Value) -> Result<Vec<String>> {
+        let entries = merge_blocks_plan::parse_merged_from(merged_from)?;
+        let toq = to_id.replace('\'', "''");
+        let mut stmts = vec![format!("DELETE FROM block_redirects WHERE to_id = '{toq}'")];
+        for (from_id, at) in entries {
+            // A plain INSERT, not INSERT OR REPLACE: an id can only ever be
+            // merged away once, the planner already refuses a second merge, and
+            // the PRIMARY KEY is the last line of that promise. Silently
+            // overwriting would let a re-derivation retarget a live redirect.
+            stmts.push(format!(
+                "INSERT INTO block_redirects (from_id, to_id, merged_at) VALUES ('{f}', \
+                 '{toq}', {at})",
+                f = from_id.replace('\'', "''"),
+            ));
+        }
+        Ok(stmts)
+    }
+
+    /// The id `id` currently resolves to, following merge redirect chains. An
+    /// id nobody merged away resolves to itself, so a caller can route a lookup
+    /// MISS through this unconditionally. Fails loud on a cycle rather than
+    /// looping — `merge_blocks` refuses to create one, so reaching it means the
+    /// table was corrupted.
+    pub async fn follow_redirects(&self, id: &str) -> Result<String> {
+        let mut current = id.to_string();
+        let mut seen = vec![current.clone()];
+        loop {
+            let sql = format!(
+                "SELECT to_id FROM block_redirects WHERE from_id = '{}'",
+                current.replace('\'', "''")
+            );
+            let rows = self
+                .db_handle
+                .query(&sql, HashMap::new())
+                .await
+                .map_err(|e| format!("follow_redirects({id}): {e}"))?;
+            let next = match rows
+                .first()
+                .and_then(|r| r.get("to_id"))
+                .and_then(|v| v.as_string())
+            {
+                Some(next) => next.to_string(),
+                None => return Ok(current),
+            };
+            if seen.contains(&next) {
+                return Err(format!(
+                    "block_redirects holds a cycle reached from {id}: {seen:?} -> {next}"
+                )
+                .into());
+            }
+            seen.push(next.clone());
+            current = next;
+        }
+    }
+
+    /// Read one block's plan-relevant columns. `None` when the row is absent.
+    async fn read_merge_side(&self, id: &str) -> Result<Option<(String, Value, i64)>> {
+        let sql = format!(
+            "SELECT content, properties, created_at FROM {} WHERE id = '{}'",
+            self.table_name,
+            id.replace('\'', "''")
+        );
+        let rows = self
+            .db_handle
+            .query(&sql, HashMap::new())
+            .await
+            .map_err(|e| format!("merge_blocks_plan: reading {id}: {e}"))?;
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+        let content = row
+            .get("content")
+            .and_then(|v| v.as_string())
+            .unwrap_or_default()
+            .to_string();
+        let properties = row.get("properties").cloned().unwrap_or(Value::Null);
+        let created_at = row.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
+        Ok(Some((content, properties, created_at)))
+    }
+
+    /// `parent`'s direct children in sibling order, as plan children. A child
+    /// whose `properties` carry an `ID` was authored in an org file, which wins
+    /// a dedupe collapse over a minted id.
+    async fn read_merge_children(&self, parent: &str) -> Result<Vec<merge_blocks_plan::PlanChild>> {
+        let sql = format!(
+            "SELECT id, content, properties, created_at FROM {} WHERE parent_id = '{}' ORDER BY \
+             sort_key",
+            self.table_name,
+            parent.replace('\'', "''")
+        );
+        let rows = self
+            .db_handle
+            .query(&sql, HashMap::new())
+            .await
+            .map_err(|e| format!("merge_blocks_plan: reading children of {parent}: {e}"))?;
+        let mut children = Vec::with_capacity(rows.len());
+        for row in rows {
+            let field = |name: &str| {
+                row.get(name)
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            children.push(merge_blocks_plan::PlanChild {
+                id: field("id"),
+                content: field("content"),
+                authored: Self::properties_carry_authored_id(row.get("properties"))?,
+                created_at: row.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0),
+            });
+        }
+        Ok(children)
+    }
+
+    /// Whether a `properties` JSON blob carries an org-authored `:ID:`.
+    fn properties_carry_authored_id(properties: Option<&Value>) -> Result<bool> {
+        let Some(raw) = properties.and_then(|v| v.as_string()) else {
+            return Ok(false);
+        };
+        if raw.is_empty() {
+            return Ok(false);
+        }
+        let parsed: serde_json::Value = serde_json::from_str(raw)
+            .map_err(|e| format!("block properties hold invalid JSON {raw:?}: {e}"))?;
+        Ok(parsed.get("ID").is_some_and(serde_json::Value::is_string))
+    }
+
+    /// Read one key out of a `properties` JSON blob, as `Value::Null` when the
+    /// blob or the key is absent.
+    fn property_from_blob(properties: &Value, key: &str) -> Result<Value> {
+        let Some(raw) = properties.as_string().filter(|s| !s.is_empty()) else {
+            return Ok(Value::Null);
+        };
+        let parsed: serde_json::Value = serde_json::from_str(raw)
+            .map_err(|e| format!("block properties hold invalid JSON {raw:?}: {e}"))?;
+        match parsed.get(key) {
+            Some(serde_json::Value::String(s)) => Ok(Value::String(s.clone())),
+            Some(serde_json::Value::Number(n)) if n.is_i64() => {
+                Ok(Value::Integer(n.as_i64().expect("checked is_i64")))
+            }
+            Some(serde_json::Value::Null) | None => Ok(Value::Null),
+            Some(other) => Ok(Value::String(other.to_string())),
+        }
+    }
+
+    /// The `donor` properties whose keys `holder` does not already carry —
+    /// the merge adopts only these, so the canonical wins every conflict.
+    fn properties_absent_from(donor: &Value, holder: &Value) -> Result<Vec<(String, Value)>> {
+        let Some(raw) = donor.as_string().filter(|s| !s.is_empty()) else {
+            return Ok(Vec::new());
+        };
+        let parsed: serde_json::Value = serde_json::from_str(raw)
+            .map_err(|e| format!("block properties hold invalid JSON {raw:?}: {e}"))?;
+        let serde_json::Value::Object(map) = parsed else {
+            return Err(format!("block properties must be a JSON object, got {raw:?}").into());
+        };
+        let mut out = Vec::new();
+        for key in map.keys() {
+            // The donor's own merge provenance is NOT adopted: it names ids that
+            // redirect to the DONOR, and the merge re-points them by chain.
+            if key == merge_blocks_plan::MERGED_FROM_FIELD {
+                continue;
+            }
+            // NEVER adopt the donor's identity. Copying its authored `:ID:` onto
+            // the survivor makes write-back render `:ID: <merged-away id>` — which
+            // re-creates the very split-root shape this operation exists to
+            // repair. Internal underscore-prefixed keys (`_provenance`) are the
+            // writer's own bookkeeping and are equally not the donor's to give.
+            if key == "ID" || key.starts_with('_') {
+                continue;
+            }
+            if !matches!(Self::property_from_blob(holder, key)?, Value::Null) {
+                continue;
+            }
+            let value = Self::property_from_blob(donor, key)?;
+            if !matches!(value, Value::Null) {
+                out.push((key.clone(), value));
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
+
+    /// Every tag on `id`.
+    async fn read_block_tags(&self, id: &str) -> Result<Vec<String>> {
+        let sql = format!(
+            "SELECT tag FROM block_tags WHERE block_id = '{}' ORDER BY tag",
+            id.replace('\'', "''")
+        );
+        let rows = self
+            .db_handle
+            .query(&sql, HashMap::new())
+            .await
+            .map_err(|e| format!("merge_blocks_plan: reading tags of {id}: {e}"))?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| r.get("tag").and_then(|v| v.as_string()).map(str::to_string))
+            .collect())
+    }
+
+    /// Whether `ancestor` sits on `descendant`'s parent chain. Walked one hop
+    /// at a time rather than as a recursive CTE: the self-parented
+    /// `sentinel:no_parent` root makes the CTE form fragile, and the chain is
+    /// short. Fails loud on a parent cycle instead of spinning.
+    async fn is_ancestor_of(&self, ancestor: &str, descendant: &str) -> Result<bool> {
+        let mut current = descendant.to_string();
+        let mut seen = vec![current.clone()];
+        loop {
+            let sql = format!(
+                "SELECT parent_id FROM {} WHERE id = '{}'",
+                self.table_name,
+                current.replace('\'', "''")
+            );
+            let rows = self
+                .db_handle
+                .query(&sql, HashMap::new())
+                .await
+                .map_err(|e| {
+                    format!("merge_blocks_plan: ancestor walk {ancestor}/{descendant}: {e}")
+                })?;
+            let Some(parent) = rows
+                .first()
+                .and_then(|r| r.get("parent_id"))
+                .and_then(|v| v.as_string())
+                .map(str::to_string)
+            else {
+                return Ok(false);
+            };
+            if parent == ancestor {
+                return Ok(true);
+            }
+            // The root sentinel is its own parent, which terminates the walk.
+            if parent == current {
+                return Ok(false);
+            }
+            if seen.contains(&parent) {
+                return Err(format!(
+                    "block parent chain from {descendant} holds a cycle: {seen:?} -> {parent}"
+                )
+                .into());
+            }
+            seen.push(parent.clone());
+            current = parent;
+        }
+    }
+
+    /// Whether a document file is bound to `id` — merging such a block away
+    /// would strand its file, which Inc 1 refuses rather than guesses at.
+    async fn has_file_binding(&self, id: &str) -> Result<bool> {
+        let sql = format!(
+            "SELECT id FROM file WHERE document_id = '{}'",
+            id.replace('\'', "''")
+        );
+        let rows = self
+            .db_handle
+            .query(&sql, HashMap::new())
+            .await
+            .map_err(|e| format!("merge_blocks_plan: file binding of {id}: {e}"))?;
+        Ok(!rows.is_empty())
+    }
+
     /// True when a block-write param set tags the block as a Page.
     fn params_tag_page(params: &StorageEntity) -> bool {
         matches!(params.get("tags"), Some(Value::Array(tags))
@@ -1946,6 +2214,36 @@ impl OperationProvider for SqlOperationProvider {
                 bound_params: Default::default(),
                 precondition: None,
             },
+            OperationDescriptor {
+                entity_name: self.entity_name.clone().into(),
+                entity_short_name: self.entity_short_name.clone(),
+                name: "merge_blocks_plan".to_string(),
+                display_name: "Merge Blocks Plan".to_string(),
+                description: "Read-only planner for the merge_blocks compound".to_string(),
+                required_params: vec![
+                    OperationParam {
+                        name: "canonical".to_string(),
+                        type_hint: TypeHint::String,
+                        description: "The surviving block id".to_string(),
+                    },
+                    OperationParam {
+                        name: "duplicate".to_string(),
+                        type_hint: TypeHint::String,
+                        description: "The block id folded away".to_string(),
+                    },
+                ],
+                id_column: "id".to_string(),
+                affected_fields: vec![],
+                param_mappings: vec![],
+                target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Internal,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
+            },
         ];
 
         // `dismiss_advice` (ADR 0021/0022) is the SqlOnly-authority twin of the
@@ -2257,6 +2555,21 @@ impl OriginTaggedWrites for SqlOperationProvider {
                         .map_err(|e| format!("set_field(marks) block_links update failed: {e}"))?;
                 }
 
+                // block_redirects junction (merge_blocks): `merged_from` is the
+                // replicated record of which ids this block absorbed, so its
+                // redirect rows are re-derived here — including the undo, whose
+                // property removal writes Null and clears them.
+                if field == merge_blocks_plan::MERGED_FROM_FIELD && self.entity_name == "block" {
+                    let stmts: Vec<(String, Vec<turso::Value>)> =
+                        Self::block_redirect_statements(id, &value)?
+                            .into_iter()
+                            .map(|s| (s, vec![]))
+                            .collect();
+                    self.db_handle.transaction(stmts).await.map_err(|e| {
+                        format!("set_field(merged_from) block_redirects update failed: {e}")
+                    })?;
+                }
+
                 if field == "content" {
                     let verify_sql = format!(
                         "SELECT content FROM {} WHERE id = '{}'",
@@ -2355,8 +2668,8 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 let create_id: holon_api::identity_minting::CreateId =
                     match params.get("id").and_then(|v| v.as_string()) {
                         Some(existing) => {
-                            // ALLOW(entity_uri_from_raw): id is a validated create param
                             let carried = holon_api::identity_minting::CarriedId::from_stored(
+                                // ALLOW(entity_uri_from_raw): id is a validated create param
                                 EntityUri::from_raw(existing),
                             );
                             if let Some(content) = params.get("content").and_then(|v| v.as_string())
@@ -2397,6 +2710,9 @@ impl OriginTaggedWrites for SqlOperationProvider {
                         if let Some(content) = params.get("content").and_then(|v| v.as_string()) {
                             link_statements.extend(Self::page_reresolve_statements(&id, content));
                         }
+                    }
+                    if let Some(merged_from) = params.get(merge_blocks_plan::MERGED_FROM_FIELD) {
+                        link_statements.extend(Self::block_redirect_statements(&id, merged_from)?);
                     }
                 }
                 // Run the create atomically in one transaction. The block parent
@@ -2555,6 +2871,9 @@ impl OriginTaggedWrites for SqlOperationProvider {
                         if let Some(content) = params.get("content").and_then(|v| v.as_string()) {
                             link_statements.extend(Self::page_reresolve_statements(id, content));
                         }
+                    }
+                    if let Some(merged_from) = params.get(merge_blocks_plan::MERGED_FROM_FIELD) {
+                        link_statements.extend(Self::block_redirect_statements(id, merged_from)?);
                     }
                     if !link_statements.is_empty() {
                         let mut p = prepared.unwrap_or(PreparedOp {
@@ -2866,6 +3185,146 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     Vec::new(),
                     "restore_link_resolution — internal inverse of rewrite_link_resolution",
                 ))
+            }
+            "merge_blocks_plan" => {
+                // READ-ONLY planner for the engine-level `merge_blocks` compound.
+                // Every precondition is checked HERE, before the engine dispatches
+                // any constituent, so a refused merge leaves no partial state.
+                use merge_blocks_plan::MergeBlocksPlan;
+
+                let side = |name: &str| -> Result<String> {
+                    Ok(params
+                        .get(name)
+                        .and_then(|v| v.as_string())
+                        .ok_or_else(|| format!("merge_blocks_plan: missing '{name}' parameter"))?
+                        .to_string())
+                };
+                let canonical_id = side("canonical")?;
+                let duplicate_id = side("duplicate")?;
+
+                if canonical_id == duplicate_id {
+                    return Err(format!(
+                        "merge_blocks: canonical and duplicate are the same block '{canonical_id}'"
+                    )
+                    .into());
+                }
+                let (canonical_content, canonical_properties, _) = self
+                    .read_merge_side(&canonical_id)
+                    .await?
+                    .ok_or_else(|| format!("merge_blocks: canonical '{canonical_id}' not found"))?;
+                let (duplicate_content, duplicate_properties, _) = self
+                    .read_merge_side(&duplicate_id)
+                    .await?
+                    .ok_or_else(|| format!("merge_blocks: duplicate '{duplicate_id}' not found"))?;
+
+                // Already merged away: the pair is settled, and re-merging would
+                // append a second provenance entry for an id that no longer names
+                // a live block.
+                let already = self.follow_redirects(&duplicate_id).await?;
+                if already != duplicate_id {
+                    return Err(format!(
+                        "merge_blocks: '{duplicate_id}' was already merged into '{already}'"
+                    )
+                    .into());
+                }
+                // Folding an ancestor into its own descendant would detach the
+                // subtree between them.
+                if self.is_ancestor_of(&duplicate_id, &canonical_id).await? {
+                    return Err(format!(
+                        "merge_blocks: '{duplicate_id}' is an ancestor of '{canonical_id}'; \
+                         merging it away would detach the blocks between them"
+                    )
+                    .into());
+                }
+                if self.has_file_binding(&duplicate_id).await? {
+                    return Err(format!(
+                        "merge_blocks: '{duplicate_id}' is a document root with a live file \
+                         binding; merging it away would strand that file (out of Inc 1 scope)"
+                    )
+                    .into());
+                }
+
+                // Deterministic post-merge order: the canonical's own children,
+                // then the duplicate's, each keeping its relative order.
+                let mut merged_children = self.read_merge_children(&canonical_id).await?;
+                let canonical_child_count = merged_children.len() as i64;
+                merged_children.extend(self.read_merge_children(&duplicate_id).await?);
+
+                // Enrich each collapse with the reads the engine would otherwise
+                // have to make mid-merge, when the tree is already half-moved.
+                let mut dedupe_groups = Vec::new();
+                for (keeper, loser_ids) in merge_blocks_plan::plan_dedupe(&merged_children) {
+                    let keeper_last_child = self
+                        .read_merge_children(&keeper)
+                        .await?
+                        .last()
+                        .map(|c| c.id.clone());
+                    let keeper_merged_from = {
+                        let (_, props, _) =
+                            self.read_merge_side(&keeper).await?.ok_or_else(|| {
+                                format!("merge_blocks_plan: dedupe keeper '{keeper}' vanished")
+                            })?;
+                        let raw =
+                            Self::property_from_blob(&props, merge_blocks_plan::MERGED_FROM_FIELD)?;
+                        merge_blocks_plan::parse_merged_from(&raw)?
+                    };
+                    let mut losers = Vec::with_capacity(loser_ids.len());
+                    for id in loser_ids {
+                        let children = self
+                            .read_merge_children(&id)
+                            .await?
+                            .into_iter()
+                            .map(|c| c.id)
+                            .collect();
+                        losers.push(merge_blocks_plan::DedupeLoser { id, children });
+                    }
+                    dedupe_groups.push(merge_blocks_plan::DedupeGroup {
+                        keeper,
+                        keeper_last_child,
+                        keeper_merged_from,
+                        losers,
+                    });
+                }
+
+                let existing_merged_from = {
+                    let raw = Self::property_from_blob(
+                        &canonical_properties,
+                        merge_blocks_plan::MERGED_FROM_FIELD,
+                    )?;
+                    merge_blocks_plan::parse_merged_from(&raw)?
+                };
+
+                // Tags union, canonical first so a Page tag on EITHER side lands.
+                let mut union_tags = self.read_block_tags(&canonical_id).await?;
+                for tag in self.read_block_tags(&duplicate_id).await? {
+                    if !union_tags.contains(&tag) {
+                        union_tags.push(tag);
+                    }
+                }
+
+                // Properties: canonical wins every conflict, so only the keys it
+                // lacks are adopted from the duplicate.
+                let adopted_properties =
+                    Self::properties_absent_from(&duplicate_properties, &canonical_properties)?;
+
+                let plan = MergeBlocksPlan {
+                    canonical_id,
+                    duplicate_id,
+                    canonical_content,
+                    duplicate_content,
+                    merged_children,
+                    canonical_child_count,
+                    dedupe_groups,
+                    existing_merged_from,
+                    union_tags,
+                    adopted_properties,
+                    merged_at: self.clock.now_millis(),
+                };
+                Ok(OperationResult::declared_irreversible(
+                    Vec::new(),
+                    "merge_blocks_plan — read-only planner",
+                )
+                .with_response(plan.to_value()))
             }
             "block_to_page_plan" => {
                 // READ-ONLY planner for the engine-level `convert_block_to_page`
@@ -3238,6 +3697,12 @@ impl OriginTaggedWrites for SqlOperationProvider {
                         if let Some(content) = params.get("content").and_then(|v| v.as_string()) {
                             edge_sql.extend(Self::page_reresolve_statements(id, content));
                         }
+                    }
+                    // Same reasoning for block_redirects: under Loro authority
+                    // `merged_from` reaches SQL as a flattened property on this
+                    // batch row, never through the single-op `set_field` seam.
+                    if let Some(merged_from) = params.get(merge_blocks_plan::MERGED_FROM_FIELD) {
+                        edge_sql.extend(Self::block_redirect_statements(id, merged_from)?);
                     }
                 }
             }

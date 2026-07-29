@@ -144,6 +144,21 @@ use holon_api::INSTANTIATE_TEMPLATE_OP;
 /// ops so the whole thing is ONE reversible [`UndoEntry`].
 const CONVERT_BLOCK_TO_PAGE_OP: &str = "convert_block_to_page";
 
+/// The engine-level compound that folds a duplicate identity into a canonical
+/// one (`docs/Plans/MergeBlocksInc1-2026-07-30.md`): move the duplicate's
+/// children over, collapse normalization-equal siblings, union tags/props, and
+/// leave a REPLICATED redirect so the duplicate's id keeps resolving. Composed
+/// from ordinary invertible ops so the whole merge is ONE reversible
+/// [`UndoEntry`].
+const MERGE_BLOCKS_OP: &str = "merge_blocks";
+
+/// The id of the child that parks a merged-away block's body when BOTH sides
+/// carried content. Derived from the duplicate's id so a merge is idempotent
+/// in the id it mints and the block is greppable back to its origin.
+fn merged_body_child_id(duplicate_id: &str) -> String {
+    format!("{duplicate_id}-merged-body")
+}
+
 /// Re-parse a plan's `page_id` string into an `EntityUri` for the `[[P]]` link
 /// mark. The id crosses the dispatch boundary as a plan `Value` string (the
 /// planner minted it via `PageId::for_path`), so this is a genuine boundary.
@@ -835,6 +850,388 @@ impl DispatchingOperationEngine {
         Ok(Some(Value::String(plan.page_id)))
     }
 
+    /// Execute the duplicate-identity merge. See [`MERGE_BLOCKS_OP`]. Params:
+    /// `canonical` and `duplicate` (block ids). Returns the canonical id.
+    async fn run_merge_blocks(
+        &self,
+        params: &StorageEntity,
+        origin: &OpOrigin,
+    ) -> Result<Option<Value>> {
+        use crate::core::merge_blocks_plan::MergeBlocksPlan;
+        use crate::core::merge_blocks_plan::normalize_content;
+
+        let block = EntityName::new("block");
+
+        // 1. Plan (read-only). Every precondition is enforced here, so a refusal
+        //    happens before the first write.
+        let plan_result = self
+            .dispatcher
+            .execute_operation(&block, "merge_blocks_plan", params.clone())
+            .await
+            .map_err(|e| anyhow::anyhow!("merge_blocks: {e}"))?;
+        let plan_value = plan_result
+            .response
+            .ok_or_else(|| anyhow::anyhow!("merge_blocks: planner returned no plan payload"))?;
+        let plan = MergeBlocksPlan::from_value(&plan_value)
+            .map_err(|e| anyhow::anyhow!("merge_blocks: {e}"))?;
+
+        // Inverses are bucketed per STEP so undo can replay the steps in reverse,
+        // each bucket in strict LIFO of its own forward ops (see the assembly).
+        let mut forwards: Vec<Operation> = Vec::new();
+        let mut move_invs: Vec<Operation> = Vec::new();
+        let mut dedupe_move_invs: Vec<Operation> = Vec::new();
+        let mut dedupe_field_invs: Vec<Operation> = Vec::new();
+        let mut dedupe_delete_invs: Vec<Operation> = Vec::new();
+        let mut field_invs: Vec<Operation> = Vec::new();
+        let mut all_changes: Vec<FieldDelta> = Vec::new();
+        // Rows this merge REMOVES. Their deltas must stay out of the staleness
+        // fingerprint: the guard reads the field back from `block_raw`, and a
+        // deleted row answers nothing, so fingerprinting it would make every
+        // merge's undo read as stale.
+        let mut removed: Vec<String> = vec![plan.duplicate_id.clone()];
+
+        // 2. Content: the canonical wins. An empty canonical adopts the duplicate's
+        //    body; two differing bodies park the duplicate's as the canonical's FIRST
+        //    CHILD rather than dropping it.
+        //
+        // Ordered BEFORE the moves and the dedupe so the parked body is an
+        // ordinary child by the time collapsing runs — otherwise a parked body
+        // equal to an existing child would leave a normalized-equal pair behind.
+        // When its content ALREADY appears among the merged children, parking it
+        // would BE that duplicate, so it is not created: the content survives in
+        // the child that already carries it.
+        let canonical_norm = normalize_content(&plan.canonical_content);
+        let duplicate_norm = normalize_content(&plan.duplicate_content);
+        let body_already_present = plan
+            .merged_children
+            .iter()
+            .any(|c| normalize_content(&c.content) == duplicate_norm);
+        if canonical_norm.is_empty() && !duplicate_norm.is_empty() {
+            let mut sf = StorageEntity::new();
+            sf.insert("id".into(), Value::String(plan.canonical_id.clone()));
+            sf.insert("field".into(), Value::String("content".into()));
+            sf.insert(
+                "value".into(),
+                Value::String(plan.duplicate_content.clone()),
+            );
+            let (fwd, inv, ch) = self.dispatch_merge_constituent("set_field", sf).await?;
+            forwards.push(fwd);
+            field_invs.push(inv);
+            all_changes.extend(ch);
+        } else if !duplicate_norm.is_empty()
+            && duplicate_norm != canonical_norm
+            && !body_already_present
+        {
+            let mut cp = StorageEntity::new();
+            cp.insert(
+                "id".into(),
+                Value::String(merged_body_child_id(&plan.duplicate_id)),
+            );
+            cp.insert(
+                "content".into(),
+                Value::String(plan.duplicate_content.clone()),
+            );
+            cp.insert("parent_id".into(), Value::String(plan.canonical_id.clone()));
+            cp.insert("after_block_id".into(), Value::Null);
+            let cp = self.stamp_provenance("create", cp, origin);
+            let (fwd, inv, ch) = self.dispatch_merge_constituent("create", cp).await?;
+            forwards.push(fwd);
+            field_invs.push(inv);
+            all_changes.extend(ch);
+        }
+
+        // 3. Move the duplicate's children under the canonical, appended after its last
+        //    existing child, order preserved.
+        //
+        // The children are moved in REVERSE document order, each anchored on the
+        // SAME `tail` — which lands them in their original order all the same,
+        // because each one is inserted just after the tail and thus ahead of the
+        // ones already moved. The reason to do it this way is the INVERSE:
+        // `move_block` captures the block's predecessor as it runs, so moving
+        // front-to-back strips each child's predecessor out of the source parent
+        // before the next one is captured, and every inverse degrades to "become
+        // the first child" — replaying them then reverses the siblings. Going
+        // back-to-front leaves each child's predecessor in place at capture time.
+        let own = plan.canonical_child_count as usize;
+        let tail: Option<String> = plan
+            .merged_children
+            .get(own.wrapping_sub(1))
+            .map(|c| c.id.clone());
+        for child in plan.merged_children.iter().skip(own).rev() {
+            let mut mp = StorageEntity::new();
+            mp.insert("id".into(), Value::String(child.id.clone()));
+            mp.insert("parent_id".into(), Value::String(plan.canonical_id.clone()));
+            mp.insert(
+                "after_block_id".into(),
+                match &tail {
+                    Some(t) => Value::String(t.clone()),
+                    None => Value::Null,
+                },
+            );
+            let (fwd, inv, ch) = self.dispatch_merge_constituent("move_block", mp).await?;
+            forwards.push(fwd);
+            move_invs.push(inv);
+            all_changes.extend(ch);
+        }
+
+        // 4. One-level dedupe: each loser's children are re-homed under the keeper
+        //    BEFORE the loser is deleted behind its own redirect, so no subtree is ever
+        //    orphaned.
+        for group in &plan.dedupe_groups {
+            let mut anchor: Option<String> = group.keeper_last_child.clone();
+            let mut absorbed = group.keeper_merged_from.clone();
+            for loser in &group.losers {
+                // Back-to-front against a fixed anchor, for the same reason as
+                // the child moves above: it preserves each orphan's predecessor
+                // in the loser until `move_block` has captured it.
+                for orphan in loser.children.iter().rev() {
+                    let mut mp = StorageEntity::new();
+                    mp.insert("id".into(), Value::String(orphan.clone()));
+                    mp.insert("parent_id".into(), Value::String(group.keeper.clone()));
+                    mp.insert(
+                        "after_block_id".into(),
+                        match &anchor {
+                            Some(a) => Value::String(a.clone()),
+                            None => Value::Null,
+                        },
+                    );
+                    let (fwd, inv, ch) = self.dispatch_merge_constituent("move_block", mp).await?;
+                    forwards.push(fwd);
+                    dedupe_move_invs.push(inv);
+                    all_changes.extend(ch);
+                }
+                // The next loser's orphans append after this loser's, which now
+                // sit at the keeper's tail.
+                if let Some(last) = loser.children.last() {
+                    anchor = Some(last.clone());
+                }
+                // The loser's id keeps resolving, to the keeper.
+                absorbed.push((loser.id.clone(), plan.merged_at));
+                let (fwd, inv, ch) = self.write_merged_from(&group.keeper, &absorbed).await?;
+                forwards.push(fwd);
+                dedupe_field_invs.push(inv);
+                all_changes.extend(ch);
+
+                let mut dp = StorageEntity::new();
+                dp.insert("id".into(), Value::String(loser.id.clone()));
+                let (fwd, inv, ch) = self.dispatch_merge_constituent("delete", dp).await?;
+                forwards.push(fwd);
+                dedupe_delete_invs.push(inv);
+                all_changes.extend(ch);
+                removed.push(loser.id.clone());
+            }
+        }
+
+        // 5. Tags union (a Page tag on either side survives) and the properties the
+        //    canonical lacks.
+        let mut tp = StorageEntity::new();
+        tp.insert("id".into(), Value::String(plan.canonical_id.clone()));
+        tp.insert("field".into(), Value::String("tags".into()));
+        tp.insert(
+            "value".into(),
+            Value::Array(
+                plan.union_tags
+                    .iter()
+                    .map(|t| Value::String(t.clone()))
+                    .collect(),
+            ),
+        );
+        let (fwd, inv, ch) = self.dispatch_merge_constituent("set_field", tp).await?;
+        forwards.push(fwd);
+        field_invs.push(inv);
+        all_changes.extend(ch);
+
+        for (key, value) in &plan.adopted_properties {
+            let mut pp = StorageEntity::new();
+            pp.insert("id".into(), Value::String(plan.canonical_id.clone()));
+            pp.insert("field".into(), Value::String(key.clone()));
+            pp.insert("value".into(), value.clone());
+            let (fwd, inv, ch) = self.dispatch_merge_constituent("set_field", pp).await?;
+            forwards.push(fwd);
+            field_invs.push(inv);
+            all_changes.extend(ch);
+        }
+
+        // 6. Provenance + redirect in ONE write: `merged_from` is the replicated fact,
+        //    and `block_redirects` is re-derived from it at the SQL write boundary (so
+        //    undo's property removal retracts the redirect too).
+        let mut absorbed = plan.existing_merged_from.clone();
+        absorbed.push((plan.duplicate_id.clone(), plan.merged_at));
+        let (fwd, redirect_inv, ch) = self
+            .write_merged_from(&plan.canonical_id, &absorbed)
+            .await?;
+        forwards.push(fwd);
+        all_changes.extend(ch);
+
+        // 7. Re-point inbound links duplicate → canonical (exact capture-based
+        //    inverse).
+        let mut rw = StorageEntity::new();
+        rw.insert("from".into(), Value::String(plan.duplicate_id.clone()));
+        rw.insert("to".into(), Value::String(plan.canonical_id.clone()));
+        let (fwd, rewrite_inv, ch) = self
+            .dispatch_merge_constituent("rewrite_link_resolution", rw)
+            .await?;
+        forwards.push(fwd);
+        all_changes.extend(ch);
+
+        // 8. The duplicate is now childless and its id redirects; delete it.
+        let mut dp = StorageEntity::new();
+        dp.insert("id".into(), Value::String(plan.duplicate_id.clone()));
+        let (fwd, delete_inv, ch) = self.dispatch_merge_constituent("delete", dp).await?;
+        forwards.push(fwd);
+        all_changes.extend(ch);
+
+        // Undo replays the steps in reverse: re-create the duplicate → restore
+        // inbound links → drop the redirect → restore fields → undo the dedupe
+        // → move the children back (each bucket in FORWARD order so
+        // predecessors land before their followers).
+        if origin.is_user() {
+            let mut inverse_ops: Vec<Operation> = vec![delete_inv, rewrite_inv, redirect_inv];
+            field_invs.reverse();
+            inverse_ops.extend(field_invs);
+            // Every bucket replays in strict LIFO of its forward ops: an inverse
+            // anchors on the tree as it stood just before its own op, so the ops
+            // after it must already have been undone. For the move buckets that
+            // means each move-back finds its predecessor restored, since the
+            // forward moves ran back-to-front.
+            dedupe_delete_invs.reverse();
+            inverse_ops.extend(dedupe_delete_invs);
+            dedupe_field_invs.reverse();
+            inverse_ops.extend(dedupe_field_invs);
+            dedupe_move_invs.reverse();
+            inverse_ops.extend(dedupe_move_invs);
+            move_invs.reverse();
+            inverse_ops.extend(move_invs);
+            // Same rule as the block→page transform: fingerprint the literally
+            // restored fields, never the positional columns structural ops
+            // recompute from the live tree — and never a row this merge removes.
+            let fp_changes: Vec<FieldDelta> = all_changes
+                .iter()
+                .filter(|d| d.field != "depth" && d.field != "sort_key")
+                .filter(|d| !removed.contains(&d.entity_id))
+                .cloned()
+                .collect();
+            let entry = UndoEntry {
+                ops: forwards,
+                inverse_ops,
+                origin: OpOrigin::User,
+                group_id: 0,
+                precondition: Precondition::forward(&fp_changes),
+                redo_precondition: Precondition::inverse(&fp_changes),
+            };
+            self.undo_stack.write().await.push(entry);
+            self.persist().await?;
+        }
+
+        if let Some(history) = &self.history {
+            self.record_history(
+                history.as_ref(),
+                "block",
+                MERGE_BLOCKS_OP,
+                origin,
+                &all_changes,
+            )
+            .await?;
+        }
+
+        Ok(Some(Value::String(plan.canonical_id)))
+    }
+
+    /// Dispatch ONE constituent of the merge, returning the forward op (for
+    /// redo), its exact inverse (for undo) and its deltas. A constituent that
+    /// cannot describe an inverse aborts the merge — a half-undoable merge is
+    /// worse than a refused one.
+    async fn dispatch_merge_constituent(
+        &self,
+        op_name: &str,
+        params: StorageEntity,
+    ) -> Result<(Operation, Operation, Vec<FieldDelta>)> {
+        let block = EntityName::new("block");
+        let forward = Operation::new(
+            block.clone(),
+            op_name,
+            op_name,
+            params
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+        );
+        let result = self
+            .dispatcher
+            .execute_operation(&block, op_name, params)
+            .await
+            .map_err(|e| anyhow::anyhow!("merge_blocks: constituent '{op_name}' failed: {e}"))?;
+        let inverse = match result.undo {
+            UndoAction::Undo(inv) => inv,
+            UndoAction::DeclaredIrreversible(reason) => bail!(
+                "merge_blocks: constituent '{op_name}' is irreversible ({reason}) — refusing to \
+                 ship a partial-undo merge"
+            ),
+            UndoAction::Undeclared => bail!(
+                "merge_blocks: constituent '{op_name}' returned an Undeclared undo classification"
+            ),
+        };
+        Ok((forward, inverse, result.changes))
+    }
+
+    /// Write `absorbed` as `to_id`'s merge provenance. This ONE property write
+    /// is both the replicated redirect record and the `:merged-from:` the org
+    /// round-trip carries; the `block_redirects` index is re-derived from it at
+    /// the SQL write boundary, so the `set_field` inverse retracts both.
+    async fn write_merged_from(
+        &self,
+        to_id: &str,
+        absorbed: &[(String, i64)],
+    ) -> Result<(Operation, Operation, Vec<FieldDelta>)> {
+        use crate::core::merge_blocks_plan::MERGED_FROM_FIELD;
+        use crate::core::merge_blocks_plan::render_merged_from;
+
+        let mut p = StorageEntity::new();
+        p.insert("id".into(), Value::String(to_id.to_string()));
+        p.insert("field".into(), Value::String(MERGED_FROM_FIELD.into()));
+        p.insert("value".into(), Value::String(render_merged_from(absorbed)));
+        self.dispatch_merge_constituent("set_field", p).await
+    }
+
+    /// The synthetic descriptor advertising the engine-level `merge_blocks` op
+    /// so MCP discovers it like any provider op.
+    pub(crate) fn merge_blocks_descriptor() -> OperationDescriptor {
+        use holon_api::render_types::TypeHint;
+        let param = |name: &str, description: &str| holon_api::OperationParam {
+            name: name.to_string(),
+            type_hint: TypeHint::String,
+            description: description.to_string(),
+        };
+        OperationDescriptor {
+            entity_name: EntityName::new("block"),
+            entity_short_name: "block".to_string(),
+            id_column: "id".to_string(),
+            name: MERGE_BLOCKS_OP.to_string(),
+            display_name: "Merge duplicate".to_string(),
+            description: "Fold a duplicate block into the canonical one: move its children and \
+                          content over, and keep its id resolving via a redirect."
+                .to_string(),
+            required_params: vec![
+                param("canonical", "The surviving block id"),
+                param("duplicate", "The block id folded away"),
+            ],
+            param_mappings: vec![],
+            target_scope: holon_api::TargetScope::Block,
+            // Repair surface, not an authoring gesture: reached through MCP and
+            // the identity tooling, never the slash menu.
+            menu_exposure: holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::Internal,
+            },
+            // Both blocks already share an identity and thus an audience; the
+            // merge moves nothing across a replication boundary.
+            boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
+            trigger: None,
+            bound_params: Default::default(),
+            affected_fields: vec![],
+            precondition: None,
+        }
+    }
+
     /// The synthetic descriptor advertising the engine-level
     /// `convert_block_to_page` op so MCP / the slash menu discover it like any
     /// provider op.
@@ -949,6 +1346,7 @@ impl DispatchingOperationEngine {
             ops.push(Self::instantiate_template_descriptor());
         }
         ops.push(Self::convert_block_to_page_descriptor());
+        ops.push(Self::merge_blocks_descriptor());
         ops
     }
 
@@ -1267,6 +1665,13 @@ impl OperationEngine for DispatchingOperationEngine {
             return self.run_convert_block_to_page(&params, &origin).await;
         }
 
+        // Engine-level compound: duplicate-identity merge. Same shape as the
+        // block→page transform — invertible constituents assembled into ONE
+        // composite `UndoEntry`.
+        if op_name == MERGE_BLOCKS_OP && entity_name.as_str() == "block" {
+            return self.run_merge_blocks(&params, &origin).await;
+        }
+
         // Provenance stamping (ADR 0024 P8 / C2a): the dispatcher drops `origin`
         // before the write, so this is the last place holding it. For authoring
         // ops we inject a `_provenance` property into the params; it travels as
@@ -1385,7 +1790,9 @@ impl OperationEngine for DispatchingOperationEngine {
         {
             return true;
         }
-        if entity_name == "block" && op_name == CONVERT_BLOCK_TO_PAGE_OP {
+        if entity_name == "block"
+            && (op_name == CONVERT_BLOCK_TO_PAGE_OP || op_name == MERGE_BLOCKS_OP)
+        {
             return true;
         }
         self.dispatcher

@@ -943,6 +943,7 @@ impl SchemaModule for LinkSchemaModule {
     fn provides(&self) -> Vec<Resource> {
         vec![
             Resource::schema("block_links"),
+            Resource::schema("block_redirects"),
             Resource::schema("backlinks"),
         ]
     }
@@ -962,10 +963,19 @@ impl SchemaModule for LinkSchemaModule {
         for stmt in sql_statements(include_str!("../sql/schema/block_links.sql")) {
             db_handle.execute_ddl(stmt).await?;
         }
+        // Merge redirects live here rather than in their own module: they are
+        // the other half of id resolution and are re-derived at the same SQL
+        // write boundary (from the survivor's `merged_from` property, as
+        // `block_links` is from `marks`). They are read on the block-lookup MISS
+        // path, NOT by the `resolved_id` rewrite — `merge_blocks` re-points
+        // inbound links eagerly, so a resolved link never needs the redirect.
+        for stmt in sql_statements(include_str!("../sql/schema/block_redirects.sql")) {
+            db_handle.execute_ddl(stmt).await?;
+        }
         reconcile_named_view(db_handle, "backlinks", &backlinks_view_select())
             .await
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-        tracing::info!("[LinkSchemaModule] block_links + backlinks ready");
+        tracing::info!("[LinkSchemaModule] block_links + block_redirects + backlinks ready");
         Ok(())
     }
 
