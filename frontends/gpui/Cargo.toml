@@ -78,7 +78,7 @@ heap-profile = ["holon-frontend/heap-profile"]
 # RUSTFLAGS="--cfg tokio_unstable" cargo run -p holon-gpui --features tokio-console
 tokio-console = ["holon-frontend/tokio-console", "tokio/tracing"]
 hot-reload = ["dep:subsecond", "dep:dioxus-devtools"]
-pbt = ["dep:holon-integration-tests", "dep:enigo"]
+pbt = ["dep:holon-integration-tests"]
 
 [dependencies]
 # GPUI framework — pinned to same rev as gpui-mobile to ensure single gpui version
@@ -106,14 +106,12 @@ holon-macros.workspace = true
 holon-mcp = { path = "../mcp" }
 holon-oracles.workspace = true
 holon-integration-tests = { path = "../../crates/holon-integration-tests", optional = true }
-enigo = { version = "0.6", optional = true }
 
 # DI
 fluxdi.workspace = true
 
 # Async
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
-tokio-util = "0.7"
 futures.workspace = true
 futures-signals.workspace = true
 async-trait.workspace = true

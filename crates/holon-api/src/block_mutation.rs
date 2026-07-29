@@ -92,6 +92,9 @@ pub enum BlockMutation {
 impl BlockMutation {
     /// Check the ADR 0005 precondition table against `tree`. Returns the first
     /// violation found, or `Ok(())` if the mutation is legal.
+    // `InvalidMove` carries two `EntityUri`s by value; boxing it would thread
+    // `Box<..>` through every caller to save a 160-byte move.
+    #[allow(clippy::result_large_err)]
     pub fn validate(&self, tree: &impl BlockTreeView) -> Result<(), InvalidMove> {
         match self {
             BlockMutation::Create { id, parent, after } => {
@@ -138,6 +141,7 @@ impl BlockMutation {
 
 /// `after` precondition: not a self-reference, and (when `Some`) a current
 /// child of `parent`.
+#[allow(clippy::result_large_err)] // see `BlockMutation::validate`
 fn check_after(
     after: Option<&EntityUri>,
     subject: &EntityUri,

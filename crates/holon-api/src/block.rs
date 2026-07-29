@@ -1112,7 +1112,7 @@ impl From<&Block> for BlockWire {
             id: b.id.clone(),
             parent_id: b.parent_id.clone(),
             content: b.content.clone(),
-            content_type: b.content_type.clone(),
+            content_type: b.content_type,
             source_language: b.source_language.clone(),
             source_name: b.source_name.clone(),
             properties: b.properties.clone(),

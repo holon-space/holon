@@ -74,6 +74,13 @@ holon-frontend = { path = "../../crates/holon-frontend", default-features = fals
 [patch.crates-io]
 symlink = { path = "patches/symlink" }
 
+# Mirror of the root workspace's loro fork patch. `[patch]` is only read from the
+# workspace root of the build in progress, and this worker is its own workspace,
+# so without this line it resolves registry `loro` — whose loro-internal wants
+# loro_fractional_index ^1.13.0 and collides with the deliberate `= 1.6.0` pin
+# that crates/holon carries. Keep the rev equal to the root's.
+loro = { git = "https://github.com/nightscape/loro.git", rev = "4d179c68" }
+
 # Point the turso git dependency at the pushed cherry-pick branch (was: a
 # local-only file:// checkout — non-reproducible, 404s on CI). Pinned to
 # rev 84bb233a = e2737c65 (the wasm-buildable line this worker already pinned:

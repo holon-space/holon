@@ -206,9 +206,16 @@ pub fn capability_pair_impl(mut decl: ItemTrait) -> TokenStream {
                 let layer = opts
                     .layer
                     .expect("`#[compare(layer = ..)]` presence is enforced in `extract_role`");
-                compare_invariants.push(build_compare_invariant(
-                    &stem, &sut_ident, &ref_ident, &sut_name, &ref_name, opts.with, opts.id, &layer,
-                ));
+                compare_invariants.push(build_compare_invariant(CompareSpec {
+                    stem: &stem,
+                    sut_method: &sut_ident,
+                    ref_method: &ref_ident,
+                    sut_name: &sut_name,
+                    ref_name: &ref_name,
+                    with: opts.with,
+                    id_override: opts.id,
+                    layer: &layer,
+                }));
             }
             Role::RefOnly => {
                 let mut rf = f.clone();
@@ -354,6 +361,19 @@ fn make_trait(
     t
 }
 
+/// Inputs to [`build_compare_invariant`]. Five of them are `&Ident`, so they
+/// travel by name rather than as a positional argument list.
+struct CompareSpec<'a> {
+    stem: &'a Ident,
+    sut_method: &'a Ident,
+    ref_method: &'a Ident,
+    sut_name: &'a Ident,
+    ref_name: &'a Ident,
+    with: Option<syn::Path>,
+    id_override: Option<LitStr>,
+    layer: &'a Ident,
+}
+
 /// Emit the auto-derived comparison invariant for one `#[compare]` method:
 /// a unit-struct `Invariant` body + a `BridgedInvariant` constructor whose
 /// `Needs` requires both the SUT and reference caps to be present.
@@ -382,16 +402,18 @@ fn make_trait(
 ///
 /// When `with` is `None`, the two values are compared with plain `==` and the
 /// macro synthesizes the divergence message.
-fn build_compare_invariant(
-    stem: &Ident,
-    sut_method: &Ident,
-    ref_method: &Ident,
-    sut_name: &Ident,
-    ref_name: &Ident,
-    with: Option<syn::Path>,
-    id_override: Option<LitStr>,
-    layer: &Ident,
-) -> TokenStream {
+fn build_compare_invariant(spec: CompareSpec<'_>) -> TokenStream {
+    let CompareSpec {
+        stem,
+        sut_method,
+        ref_method,
+        sut_name,
+        ref_name,
+        with,
+        id_override,
+        layer,
+    } = spec;
+
     let stem_snake = pascal_to_snake(&stem.to_string());
     let method_snake = sut_method.to_string();
     let id_str = match &id_override {

@@ -244,6 +244,9 @@ impl IdentityInput {
 /// `Free`/`AlreadySatisfied`/`UnnamedPlaceholder` → the id is blessed for
 /// create; `Collision` → refused (D1b interim fail-loud). `holder_title ==
 /// None` ⇒ the id is unheld.
+// `IdentityCollision` is the D1b fail-loud payload and is returned by value on
+// purpose; boxing it would ripple through every mint call site.
+#[allow(clippy::result_large_err)]
 pub fn bless_carried(
     id: EntityUri,
     holder_title: Option<&str>,

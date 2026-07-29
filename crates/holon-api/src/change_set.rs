@@ -254,6 +254,10 @@ fn decode_create(params: &StorageEntity) -> ChangeOp {
         }
     };
     // Positional intent: a predecessor block id, never a sort_key.
+    // The closure is redundant to clippy but load-bearing to archlint, whose
+    // `entity_uri_from_raw` rule matches the call form — point-free would drop
+    // this boundary from the ledger.
+    #[allow(clippy::redundant_closure)]
     let after_sibling = params
         .get(POSITION_AFTER_BLOCK_ID_PARAM)
         .and_then(Value::as_string)
@@ -288,6 +292,8 @@ fn decode_update(params: &StorageEntity, out: &mut Vec<ChangeOp>) {
     let order_changed =
         params.contains_key(POSITION_AFTER_BLOCK_ID_PARAM) || params.contains_key("sort_key");
     if parent_changed || order_changed {
+        // Closure kept for archlint's call-form rule — see `after_sibling` above.
+        #[allow(clippy::redundant_closure)]
         out.push(ChangeOp::Relocate {
             id: id.clone(),
             parent: params.get("parent_id").map(|v| match v {
