@@ -198,9 +198,12 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
+      # `--force` is load-bearing: rust-cache restores cargo's install metadata
+      # (`.crates2.json`) but not necessarily the binary, so a plain binstall
+      # reports "already installed" and skips, leaving `cargo machete` missing.
       - name: Install cargo-machete
         uses: cargo-bins/cargo-binstall@main
-      - run: cargo binstall --no-confirm cargo-machete
+      - run: cargo binstall --no-confirm --force cargo-machete
 
       - name: Check for unused dependencies
         run: cargo machete

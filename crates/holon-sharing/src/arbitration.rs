@@ -237,7 +237,7 @@ pub fn arbitrate(entries: &[LogEntry]) -> Arbitration {
             c.supersedes.as_ref().map(|sid| (&c.crossing_id, sid))
         })
         .collect();
-    for (start, _) in &edge {
+    for start in edge.keys() {
         mark_cycles_from(start, &edge, &mut malformed);
     }
 

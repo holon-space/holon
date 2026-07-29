@@ -19,7 +19,7 @@
 //! ## What lands here (Inc 6 — [`alias_ledger`])
 //! - [`alias_ledger::AliasLedger`] — owner-private,
 //!   [`alias_ledger::NonReplicated`] (OQ3) `old-id → new-id` chains; re-encode
-//!   + owner-signed [`alias_ledger::SuccessionPointer`] baseline. Owner
+//!   and owner-signed [`alias_ledger::SuccessionPointer`] baseline. Owner
 //!   backlinks rewrite through the SQL `block_links` junction; recipients get
 //!   fresh public ids with no correlation handle and their dangling refs render
 //!   loud (fail-loud).
