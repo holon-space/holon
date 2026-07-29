@@ -195,6 +195,17 @@ pub trait BlockQuerySource: Send + Sync {
     /// Settle (await CDC quiescence where applicable) and capture a consistent
     /// point-in-time [`BlockSnapshot`].
     async fn snapshot(&self) -> Result<BlockSnapshot>;
+
+    /// A cheap monotone version of the underlying substrate, for pollers that
+    /// want to skip a full [`snapshot`](Self::snapshot) while nothing has
+    /// changed. Two calls returning the same `Some(v)` promise an unchanged
+    /// snapshot.
+    ///
+    /// `None` — the default — means "no cheap signal here"; a caller must
+    /// snapshot every time rather than assume anything.
+    fn change_version(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// Adapt any synchronous capture closure into a [`BlockQuerySource`].

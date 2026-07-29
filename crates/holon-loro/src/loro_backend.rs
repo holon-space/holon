@@ -1776,6 +1776,21 @@ impl LoroBackend {
         self.collab_doc.doc_id()
     }
 
+    /// A cheap monotone version of this backend's tree: [`doc_lamport_height`]
+    /// of the underlying doc, which advances on every applied op (local or
+    /// imported). Pollers use it to skip a full tree walk while nothing has
+    /// changed.
+    ///
+    /// `None` once a shared-tree store is attached: mounted subtrees carry
+    /// their own oplogs, so this doc's height cannot see a change inside one
+    /// and a caller must re-read instead of trusting it.
+    pub fn change_version(&self) -> Option<u32> {
+        if self.shared_trees.is_some() {
+            return None;
+        }
+        Some(doc_lamport_height(&self.collab_doc.doc()))
+    }
+
     pub fn collab_for_test(&self) -> Arc<LoroDocument> {
         self.collab_doc.clone()
     }

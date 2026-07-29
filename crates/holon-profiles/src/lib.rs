@@ -81,6 +81,106 @@ const UI_STATE_VARIABLES: &[&str] = &[
 /// Map of entity name → live collection for Rhai lookup functions.
 pub type LiveEntities = HashMap<EntityName, Arc<LiveData<StorageEntity>>>;
 
+/// A live entity backing the bundled `block` profile's lookup-dependent
+/// computed fields (`has_query_source`, `is_program`): source blocks of a
+/// fixed language set, keyed by `parent_id`.
+///
+/// The single seat for both storage arms — a Turso session feeds it from a CDC
+/// matview over [`sql_predicate`](Self::sql_predicate), a Loro-only session
+/// from a block snapshot via
+/// [`live_data_from_blocks`](Self::live_data_from_blocks), and the PBT oracle
+/// mirrors it the same way — so a language added here reaches every one of
+/// them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveEntitySpec {
+    /// `query_source(id)` — "does block `id` own a query-source child?"
+    QuerySource,
+    /// `rule_sibling(parent_id)` — "does that block own a rule-head child?"
+    /// The retired `action` language counts: its trigger must stay hidden
+    /// while it surfaces its deprecation.
+    RuleSibling,
+}
+
+impl LiveEntitySpec {
+    pub const ALL: &'static [LiveEntitySpec] = &[Self::QuerySource, Self::RuleSibling];
+
+    /// The Rhai lookup function's name.
+    pub fn entity_name(self) -> EntityName {
+        match self {
+            Self::QuerySource => EntityName::new("query_source"),
+            Self::RuleSibling => EntityName::new("rule_sibling"),
+        }
+    }
+
+    /// The source languages whose blocks populate this entity — the one
+    /// definition both the SQL predicate and [`matches`](Self::matches) derive
+    /// from.
+    pub fn languages(self) -> Vec<holon_api::SourceLanguage> {
+        use holon_api::SourceLanguage;
+        match self {
+            Self::QuerySource => holon_api::QueryLanguage::ALL
+                .iter()
+                .copied()
+                .map(SourceLanguage::Query)
+                .collect(),
+            Self::RuleSibling => vec![SourceLanguage::HolonRule, SourceLanguage::LegacyAction],
+        }
+    }
+
+    pub fn matches(self, language: &holon_api::SourceLanguage) -> bool {
+        self.languages().contains(language)
+    }
+
+    /// The `WHERE` clause selecting this entity's rows out of a block table —
+    /// a plain filtered read, no self-join and no chained matview.
+    pub fn sql_predicate(self) -> String {
+        let langs: Vec<String> = self.languages().iter().map(|l| format!("'{l}'")).collect();
+        format!(
+            "content_type = 'source' AND source_language IN ({})",
+            langs.join(", ")
+        )
+    }
+
+    /// Build this entity's collection from an in-memory block set — the
+    /// CDC-free counterpart of the matview, projected to the same three
+    /// columns and keyed by `parent_id`.
+    pub fn live_data_from_blocks<'a>(
+        self,
+        blocks: impl IntoIterator<Item = &'a holon_api::block::Block>,
+    ) -> Arc<LiveData<StorageEntity>> {
+        let rows: Vec<StorageEntity> = blocks
+            .into_iter()
+            .filter(|b| b.content_type == holon_api::ContentType::Source)
+            .filter_map(|b| b.source_language.as_ref().map(|lang| (b, lang)))
+            .filter(|(_, lang)| self.matches(lang))
+            .map(|(b, lang)| {
+                HashMap::from([
+                    (Arc::from("id"), Value::String(b.id.as_str().to_string())),
+                    (
+                        Arc::from("parent_id"),
+                        Value::String(b.parent_id.as_str().to_string()),
+                    ),
+                    (
+                        Arc::from("source_language"),
+                        Value::String(lang.to_string()),
+                    ),
+                ])
+            })
+            .collect();
+
+        LiveData::new(
+            rows,
+            |row| {
+                row.get("parent_id")
+                    .and_then(|v| v.as_string())
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| anyhow::anyhow!("source-block row missing 'parent_id'"))
+            },
+            |row| Ok(row.clone()),
+        )
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Core types — moved to holon-api (storage de-leak Stage 10); re-exported so
 // `holon::entity_profile::*` paths keep working. holon keeps the profile

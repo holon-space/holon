@@ -555,64 +555,20 @@ impl ReferenceState {
         hasher.finish()
     }
 
+    /// The model's answer to production's live entities: the SAME
+    /// [`holon_profiles::LiveEntitySpec`] the Turso DI wiring and the Loro
+    /// session build theirs from, applied to the model's block map.
     fn build_profile_engine(&self) -> rhai::Engine {
-        let mut entities = holon_profiles::LiveEntities::new();
-        entities.insert(
-            EntityName::new("query_source"),
-            self.source_blocks_by_parent(|lang| lang.as_query().is_some()),
-        );
-        entities.insert(
-            EntityName::new("rule_sibling"),
-            self.source_blocks_by_parent(|lang| {
-                matches!(
-                    lang,
-                    holon_api::SourceLanguage::HolonRule | holon_api::SourceLanguage::LegacyAction
+        let entities: holon_profiles::LiveEntities = holon_profiles::LiveEntitySpec::ALL
+            .iter()
+            .map(|spec| {
+                (
+                    spec.entity_name(),
+                    spec.live_data_from_blocks(self.domain.block_state.blocks.values()),
                 )
-            }),
-        );
-        holon_profiles::build_lookup_engine(&entities)
-    }
-
-    /// The model's answer to production's `query_source_blocks_sql` /
-    /// `rule_head_blocks_sql`: source blocks whose language matches, projected
-    /// to the same columns and keyed by `parent_id`.
-    fn source_blocks_by_parent(
-        &self,
-        language_matches: impl Fn(&holon_api::SourceLanguage) -> bool,
-    ) -> Arc<holon_api::live_data::LiveData<holon_api::StorageEntity>> {
-        let rows: Vec<holon_api::StorageEntity> = self
-            .domain
-            .block_state
-            .blocks
-            .values()
-            .filter(|b| b.content_type == ContentType::Source)
-            .filter_map(|b| b.source_language.as_ref().map(|lang| (b, lang)))
-            .filter(|(_, lang)| language_matches(lang))
-            .map(|(b, lang)| {
-                HashMap::from([
-                    (Arc::from("id"), Value::String(b.id.as_str().to_string())),
-                    (
-                        Arc::from("parent_id"),
-                        Value::String(b.parent_id.as_str().to_string()),
-                    ),
-                    (
-                        Arc::from("source_language"),
-                        Value::String(lang.to_string()),
-                    ),
-                ])
             })
             .collect();
-
-        holon_api::live_data::LiveData::new(
-            rows,
-            |row| {
-                row.get("parent_id")
-                    .and_then(|v| v.as_string())
-                    .map(|s| s.to_string())
-                    .ok_or_else(|| anyhow::anyhow!("source-block row missing 'parent_id'"))
-            },
-            |row| Ok(row.clone()),
-        )
+        holon_profiles::build_lookup_engine(&entities)
     }
 
     /// Return a [`Resolved`] clone of this reference state with its block tree

@@ -55,10 +55,17 @@ use crate::entity_profile::ProfileResolving;
 /// `collection` variants (tree/table/board) so `collection_render_from_profile`
 /// resolves a real `view_mode_switcher`, minus user-defined profile overrides.
 ///
+/// Its entity lookups (`query_source`, `rule_sibling`) come from `source`
+/// instead of the Turso CDC matviews — without them every lookup-dependent
+/// computed field (`has_query_source`, `is_program`) would sit at `Null` in a
+/// Loro-only session.
+///
 /// Must be called from within a Tokio runtime:
 /// `ProfileResolver::with_type_profiles` spawns a background actor that watches
-/// the (empty) profile source.
-pub fn build_turso_free_profile_resolver() -> Arc<dyn ProfileResolving> {
+/// the (empty) profile source, and the entity refresh below spawns its own.
+pub fn build_turso_free_profile_resolver(
+    source: Arc<dyn BlockQuerySource>,
+) -> Arc<dyn ProfileResolving> {
     let type_registry = holon_profiles::create_default_registry().expect("default TypeRegistry");
     let type_profiles = holon_profiles::type_profiles_from_registry(&type_registry);
 
@@ -68,13 +75,92 @@ pub fn build_turso_free_profile_resolver() -> Arc<dyn ProfileResolving> {
         |_| anyhow::bail!("no-Turso session has no user profile source"),
     );
 
-    Arc::new(ProfileResolver::with_type_profiles(
+    let resolver = Arc::new(ProfileResolver::with_type_profiles(
         empty_profiles,
         holon_api::UiInfo::default(),
         LiveEntities::new(),
         HashMap::new(),
         type_profiles,
-    ))
+    ));
+    spawn_live_entity_refresh(source, Arc::downgrade(&resolver));
+    resolver
+}
+
+/// Keep a Turso-free resolver's entity lookups in step with the Loro tree.
+///
+/// The Turso arm keeps these live off CDC; a no-Turso session has no CDC, so
+/// liveness is poll-based exactly like [`loro_watch_ui`] itself — a session
+/// boots before its content is loaded, so a one-shot read would answer "no
+/// query source" forever. The task holds only a `Weak`, so it ends when the
+/// session drops its resolver.
+fn spawn_live_entity_refresh(
+    source: Arc<dyn BlockQuerySource>,
+    resolver: std::sync::Weak<ProfileResolver>,
+) {
+    tokio::spawn(async move {
+        let mut previous: Option<SourceBlockKey> = None;
+        let mut polled_version: Option<u64> = None;
+        loop {
+            let Some(resolver) = resolver.upgrade() else {
+                return;
+            };
+            // Two gates, cheapest first: the substrate's own version skips the
+            // whole tree walk while the doc is idle, the key skips the engine
+            // rebuild when the walk found nothing the lookups read.
+            let version = source.change_version();
+            if version.is_none() || version != polled_version {
+                match source.snapshot().await {
+                    Ok(snapshot) => {
+                        let current = source_block_key(&snapshot);
+                        if previous.as_ref() != Some(&current) {
+                            let entities = holon_profiles::LiveEntitySpec::ALL
+                                .iter()
+                                .map(|spec| {
+                                    (
+                                        spec.entity_name(),
+                                        spec.live_data_from_blocks(snapshot.iter_blocks()),
+                                    )
+                                })
+                                .collect();
+                            resolver.set_live_entities(entities);
+                            previous = Some(current);
+                        }
+                        polled_version = version;
+                    }
+                    Err(e) => tracing::error!(
+                        "[LoroLiveEntities] snapshot failed; entity lookups are stale: {e:#}"
+                    ),
+                }
+            }
+            drop(resolver);
+            tokio::time::sleep(LORO_WATCH_POLL).await;
+        }
+    });
+}
+
+/// Every source block's id, parent, content type and language — sorted.
+type SourceBlockKey = Vec<(String, String, String, String)>;
+
+/// Exactly what the lookups read:
+/// [`LiveEntitySpec`](holon_profiles::LiveEntitySpec) selects on `content_type`
+/// AND `source_language`, and keys on `parent_id`, so two snapshots agreeing
+/// here cannot disagree on any lookup. The refresh above rebuilds only when
+/// this changes.
+fn source_block_key(snapshot: &holon_core::storage::BlockSnapshot) -> SourceBlockKey {
+    let mut key: SourceBlockKey = snapshot
+        .iter_blocks()
+        .filter_map(|b| b.source_language.as_ref().map(|lang| (b, lang)))
+        .map(|(b, lang)| {
+            (
+                b.id.as_str().to_string(),
+                b.parent_id.as_str().to_string(),
+                b.content_type.to_string(),
+                lang.to_string(),
+            )
+        })
+        .collect();
+    key.sort();
+    key
 }
 
 /// How often the Loro watcher re-snapshots to detect tree changes. The
@@ -702,7 +788,13 @@ mod tests {
     /// rather than degrading to bare `table()`.
     #[tokio::test]
     async fn turso_free_resolver_has_collection_variants() {
-        let resolver = build_turso_free_profile_resolver();
+        let source = Arc::new(holon_core::storage::from_sync(|| {
+            Ok(holon_core::storage::BlockSnapshot::from_ordered(
+                Vec::new(),
+                Vec::new(),
+            ))
+        })) as Arc<dyn BlockQuerySource>;
+        let resolver = build_turso_free_profile_resolver(source);
         let variants = resolver.resolve_collection_variants();
         assert!(
             !variants.is_empty(),

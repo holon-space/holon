@@ -86,6 +86,10 @@ impl BlockQuerySource for LoroBlockQuerySource {
         // this slice — see plan task V3. An in-memory nav source is deferred.
         Ok(BlockSnapshot::from_ordered(ordered, Vec::new()))
     }
+
+    fn change_version(&self) -> Option<u64> {
+        self.backend.change_version().map(u64::from)
+    }
 }
 
 /// Register `Arc<dyn BlockQuerySource>` resolving to a [`LoroBlockQuerySource`]

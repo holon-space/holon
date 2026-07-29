@@ -257,7 +257,9 @@ async fn create_initialized_engine(
         .await
         .context("Failed to preload startup views")?;
 
-    let live_entities = create_live_entities(&matview_mgr).await;
+    let live_entities = create_live_entities(&matview_mgr)
+        .await
+        .context("Failed to build the profile resolver's live entities")?;
     profile_resolver.set_live_entities(live_entities);
 
     Ok(engine)
@@ -321,27 +323,14 @@ pub fn register_core_services_no_turso(injector: &Injector, db_path: PathBuf) ->
 }
 
 const PROFILE_SQL: &str = include_str!("../../sql/profiles/get_profiles.sql");
-fn query_source_blocks_sql() -> String {
-    format!(
-        "SELECT id, parent_id, source_language FROM {table} WHERE content_type = 'source' AND \
-         source_language IN {langs}",
-        table = crate::storage::BLOCK_READ_TABLE,
-        langs = holon_api::QueryLanguage::sql_in_list(),
-    )
-}
 
-/// Rule-head blocks, keyed by `parent_id`, backing the
-/// `rule_sibling(parent_id)` Rhai lookup used by the `is_program` computed
-/// field (ADR 0024 WP3 clause b): "does my parent have a rule-head child?" → I
-/// am the trigger sibling of a rule. Both the current `holon_rule` language and
-/// the retired `action` language count (the latter still needs its trigger
-/// hidden while it surfaces its deprecation). A plain filtered read of
-/// `block_raw` — no self-join, no chained matview.
-fn rule_head_blocks_sql() -> String {
+/// The CDC read backing one live entity: the three columns the Rhai lookups
+/// project, filtered by the spec's own predicate.
+fn live_entity_sql(spec: holon_profiles::LiveEntitySpec) -> String {
     format!(
-        "SELECT id, parent_id, source_language FROM {table} WHERE content_type = 'source' AND \
-         (source_language = 'holon_rule' OR source_language = 'action')",
+        "SELECT id, parent_id, source_language FROM {table} WHERE {predicate}",
         table = crate::storage::BLOCK_READ_TABLE,
+        predicate = spec.sql_predicate(),
     )
 }
 
@@ -351,45 +340,52 @@ async fn create_live_data_keyed_by(
     matview_manager: &crate::sync::MatviewManager,
     sql: &str,
     key_column: &'static str,
-) -> Option<Arc<LiveData<holon_core::storage::types::StorageEntity>>> {
-    match matview_manager.watch(sql).await {
-        Ok(result) => {
-            let live = LiveData::new(
-                result.initial_rows,
-                move |row| {
-                    let id = row
-                        .get(key_column)
-                        .and_then(|v| v.as_string())
-                        .map(|s| s.to_string())
-                        .ok_or_else(|| anyhow::anyhow!("entity row missing '{key_column}'"))?;
-                    Ok(id)
-                },
-                |row| Ok(row.clone()),
-            );
-            live.subscribe("entity_keyed", result.stream);
-            Some(live)
-        }
-        Err(e) => {
-            tracing::warn!("[DI] Failed to create live data for '{sql}': {e}");
-            None
-        }
-    }
+) -> Result<Arc<LiveData<holon_core::storage::types::StorageEntity>>> {
+    let result = matview_manager
+        .watch(sql)
+        .await
+        .with_context(|| format!("[DI] failed to watch live-entity query '{sql}'"))?;
+    let live = LiveData::new(
+        result.initial_rows,
+        move |row| {
+            let id = row
+                .get(key_column)
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_string())
+                .ok_or_else(|| anyhow::anyhow!("entity row missing '{key_column}'"))?;
+            Ok(id)
+        },
+        |row| Ok(row.clone()),
+    );
+    live.subscribe("entity_keyed", result.stream);
+    Ok(live)
 }
 
 /// Build the `live_entities` map for ProfileResolver's Rhai entity lookups.
+///
+/// Every spec must land: a missing entity leaves its lookup unregistered, so
+/// every computed field calling it evaluates to `Null` and the routing it
+/// drives (query pages, rule machinery) silently disappears — hence the loud
+/// error instead of a skipped entry.
 async fn create_live_entities(
     matview_manager: &crate::sync::MatviewManager,
-) -> crate::entity_profile::LiveEntities {
+) -> Result<crate::entity_profile::LiveEntities> {
     let mut live_entities = std::collections::HashMap::new();
-    let qs_sql = query_source_blocks_sql();
-    if let Some(qs) = create_live_data_keyed_by(matview_manager, &qs_sql, "parent_id").await {
-        live_entities.insert(holon_api::EntityName::new("query_source"), qs);
+    for spec in holon_profiles::LiveEntitySpec::ALL.iter().copied() {
+        let name = spec.entity_name();
+        let live = create_live_data_keyed_by(matview_manager, &live_entity_sql(spec), "parent_id")
+            .await
+            .with_context(|| {
+                format!(
+                    "[DI] live entity '{}' could not be registered — the `{}` Rhai lookup would \
+                     be missing and every computed field using it would resolve to Null",
+                    name.as_str(),
+                    name.as_str(),
+                )
+            })?;
+        live_entities.insert(name, live);
     }
-    let rh_sql = rule_head_blocks_sql();
-    if let Some(rh) = create_live_data_keyed_by(matview_manager, &rh_sql, "parent_id").await {
-        live_entities.insert(holon_api::EntityName::new("rule_sibling"), rh);
-    }
-    live_entities
+    Ok(live_entities)
 }
 
 /// Create a CDC-driven ProfileResolver via MatviewManager + LiveData.
