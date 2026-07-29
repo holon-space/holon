@@ -992,6 +992,90 @@ fn resolve_parent_tree_id_for_create(
     }
 }
 
+/// One block create with its full authority payload — everything that must
+/// land in the SAME Loro commit as the node itself, so the outbound projector
+/// never sees a half-born block (a dropped `Page` tag orphans a document).
+#[derive(Debug, Clone)]
+pub struct NewBlockWithProperties {
+    /// Where the node is created. Already resolved to a live parent (or the
+    /// placeholder standing in for one) by the caller.
+    pub parent_id: EntityUri,
+    /// The block's stable identity.
+    pub id: EntityUri,
+    pub content: BlockContent,
+    pub properties: HashMap<String, Value>,
+    pub tags: Tags,
+    pub requires: Vec<EntityUri>,
+    pub advice_suppressed: Vec<EntityUri>,
+}
+
+/// Write ONE new node (node + STABLE_ID + content + properties + edge fields +
+/// timestamps) into `tree`, returning the domain block and its `TreeID`.
+///
+/// Deliberately does NOT commit: the caller owns the commit boundary, which is
+/// what lets a batch create N nodes in one commit while the single-block path
+/// keeps its own. Sole writer of a new node's meta, so the two paths cannot
+/// drift.
+fn write_new_node(
+    tree: &loro::LoroTree,
+    id_cache: &Arc<Mutex<HashMap<String, loro::TreeID>>>,
+    request: &NewBlockWithProperties,
+    now: i64,
+) -> anyhow::Result<(Block, loro::TreeID)> {
+    let stable_id = request.id.id().to_string();
+    let parent_tree_id =
+        resolve_parent_tree_id_for_create(tree, id_cache, &request.parent_id, &request.id)?;
+
+    let node = tree.create(parent_tree_id)?;
+    let meta = tree.get_meta(node)?;
+    meta.insert(STABLE_ID, loro::LoroValue::from(stable_id.as_str()))?;
+    write_content_to_meta(&meta, &request.content)?;
+    replace_properties_in_meta(&meta, &request.properties)?;
+    // Tags are edge fields (block_tags), stored in Loro meta as a JSON list
+    // under "tags" (mirrors `set_block_tags`). Carrying them in the create
+    // commit is essential: the downstream projection reads them via
+    // `read_block_from_tree` and writes `block_tags`. The `Page` tag in
+    // particular makes a document resolvable — dropping it here orphans
+    // every doc. `requires` and `advice_suppressed` (ADR 0021) mirror it.
+    if !request.tags.is_empty() {
+        let serialized = serde_json::to_string(&request.tags)
+            .map_err(|e| anyhow::anyhow!("serialize tags: {e}"))?;
+        meta.insert("tags", loro::LoroValue::from(serialized.as_str()))?;
+    }
+    if !request.requires.is_empty() {
+        let serialized = serde_json::to_string(&request.requires)
+            .map_err(|e| anyhow::anyhow!("serialize requires: {e}"))?;
+        meta.insert("requires", loro::LoroValue::from(serialized.as_str()))?;
+    }
+    if !request.advice_suppressed.is_empty() {
+        let serialized = serde_json::to_string(&request.advice_suppressed)
+            .map_err(|e| anyhow::anyhow!("serialize advice_suppressed: {e}"))?;
+        meta.insert(
+            "advice_suppressed",
+            loro::LoroValue::from(serialized.as_str()),
+        )?;
+    }
+    meta.insert("created_at", loro::LoroValue::from(now))?;
+    meta.insert("updated_at", loro::LoroValue::from(now))?;
+
+    let parent_uri = match parent_tree_id {
+        Some(pid) => block_uri_from_meta(&tree.get_meta(pid)?, pid),
+        None => EntityUri::no_parent(),
+    };
+    let mut block = Block::from_block_content(
+        EntityUri::block(&stable_id),
+        parent_uri,
+        request.content.clone(),
+    );
+    block.set_properties_map(request.properties.clone());
+    block.tags = request.tags.clone();
+    block.requires = request.requires.clone();
+    block.advice_suppressed = request.advice_suppressed.clone();
+    block.created_at = now;
+    block.updated_at = now;
+    Ok((block, node))
+}
+
 /// Get the parent TreeID of a node.
 fn get_node_parent(tree: &loro::LoroTree, node: loro::TreeID) -> Option<loro::TreeID> {
     match tree.parent(node)? {
@@ -2515,67 +2599,20 @@ impl LoroBackend {
         // The child's URI drives the typed `ParentNotFound` if the parent is
         // absent: use the caller-supplied id, else the freshly-minted stable id.
         let child_uri = id.clone().unwrap_or_else(|| EntityUri::block(&stable_id));
+        let request = NewBlockWithProperties {
+            parent_id: parent_id.clone(),
+            id: child_uri.clone(),
+            content: content.clone(),
+            properties: properties.clone(),
+            tags: tags.clone(),
+            requires: requires.to_vec(),
+            advice_suppressed: advice_suppressed.to_vec(),
+        };
         let (created_block, tree_id) = write_doc
             .with_write(|doc| {
                 let tree = doc.get_tree(TREE_NAME);
-                let parent_tree_id =
-                    resolve_parent_tree_id_for_create(&tree, &id_cache, &parent_id, &child_uri)?;
-
-                let node = tree.create(parent_tree_id)?;
-                let meta = tree.get_meta(node)?;
-                meta.insert(STABLE_ID, loro::LoroValue::from(stable_id.as_str()))?;
-                write_content_to_meta(&meta, &content)?;
-                replace_properties_in_meta(&meta, properties)?;
-                // Tags are edge fields (block_tags), stored in Loro meta as a
-                // JSON list under "tags" (mirrors `set_block_tags`). Carrying
-                // them in the create commit is essential: the downstream
-                // projection reads them via `read_block_from_tree` and writes
-                // `block_tags`. The `Page` tag in particular makes a document
-                // resolvable — dropping it here orphans every doc.
-                if !tags.is_empty() {
-                    let serialized = serde_json::to_string(tags)
-                        .map_err(|e| anyhow::anyhow!("serialize tags: {e}"))?;
-                    meta.insert("tags", loro::LoroValue::from(serialized.as_str()))?;
-                }
-                // `requires` mirrors `tags`: an edge field carried in the create
-                // commit under its own meta key, so the downstream projection
-                // reads it via `read_block_from_tree` and writes `block_requires`.
-                // Dropping it here loses every org-edna dependency in Loro mode.
-                if !requires.is_empty() {
-                    let serialized = serde_json::to_string(requires)
-                        .map_err(|e| anyhow::anyhow!("serialize requires: {e}"))?;
-                    meta.insert("requires", loro::LoroValue::from(serialized.as_str()))?;
-                }
-                // `advice_suppressed` mirrors `requires`: an edge field carried
-                // in the create commit under its own meta key (ADR 0021).
-                if !advice_suppressed.is_empty() {
-                    let serialized = serde_json::to_string(advice_suppressed)
-                        .map_err(|e| anyhow::anyhow!("serialize advice_suppressed: {e}"))?;
-                    meta.insert(
-                        "advice_suppressed",
-                        loro::LoroValue::from(serialized.as_str()),
-                    )?;
-                }
-                meta.insert("created_at", loro::LoroValue::from(now))?;
-                meta.insert("updated_at", loro::LoroValue::from(now))?;
+                let (block, node) = write_new_node(&tree, &id_cache, &request, now)?;
                 doc.commit();
-
-                let block_id = EntityUri::block(&stable_id);
-                let parent_uri = match parent_tree_id {
-                    Some(pid) => {
-                        let parent_meta = tree.get_meta(pid)?;
-                        Ok::<_, anyhow::Error>(block_uri_from_meta(&parent_meta, pid))
-                    }
-                    None => Ok(EntityUri::no_parent()),
-                }?;
-
-                let mut block = Block::from_block_content(block_id, parent_uri, content);
-                block.set_properties_map(properties.clone());
-                block.tags = tags.clone();
-                block.requires = requires.to_vec();
-                block.advice_suppressed = advice_suppressed.to_vec();
-                block.created_at = now;
-                block.updated_at = now;
                 Ok((block, node))
             })
             .map_err(|e| ApiError::InternalError {
@@ -2595,6 +2632,123 @@ impl LoroBackend {
         });
 
         Ok(created_block)
+    }
+
+    /// [`create_block_with_properties`](Self::create_block_with_properties) for
+    /// MANY blocks: one Loro commit per destination doc instead of one per
+    /// block. Each node is written by the same
+    /// [`write_new_node`] the single-block path uses, so the resulting meta is
+    /// byte-identical; only the commit boundary and the id-cache timing differ.
+    ///
+    /// The id cache is populated INSIDE the loop, so a block whose parent was
+    /// created earlier in the same batch resolves through the cache instead of
+    /// the O(nodes) tree walk — without that, an intra-batch parent chain would
+    /// re-introduce per-block quadratic resolution.
+    ///
+    /// Requests are grouped by destination doc (a Loro commit cannot span
+    /// docs), preserving each group's request order. Returns the created blocks
+    /// in REQUEST order.
+    pub async fn create_blocks_with_properties(
+        &self,
+        requests: Vec<NewBlockWithProperties>,
+    ) -> Result<Vec<Block>, ApiError> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        let now = self.now_millis();
+        // Group by destination doc, keeping each request's index so the caller
+        // gets its blocks back in request order.
+        let mut groups: Vec<(ParentWriteTarget, Vec<(usize, NewBlockWithProperties)>)> = Vec::new();
+        // A request whose parent is created by THIS batch lands in the same doc
+        // as that parent, by construction — so inherit its group. Resolving such
+        // a parent against the tree would MISS (it does not exist yet) and pay a
+        // full node walk per request: the very quadratic this batch removes.
+        let mut group_of_id: HashMap<String, usize> = HashMap::new();
+        for (idx, request) in requests.into_iter().enumerate() {
+            if let Some(slot) = group_of_id.get(request.parent_id.id()).copied() {
+                group_of_id.insert(request.id.id().to_string(), slot);
+                groups[slot].1.push((idx, request));
+                continue;
+            }
+            let target = self
+                .resolve_write_target_for_parent(&request.parent_id)
+                .await?;
+            let slot = match groups
+                .iter()
+                .position(|(t, _)| t.doc_key() == target.doc_key())
+            {
+                Some(slot) => slot,
+                None => {
+                    groups.push((target, Vec::new()));
+                    groups.len() - 1
+                }
+            };
+            group_of_id.insert(request.id.id().to_string(), slot);
+            groups[slot].1.push((idx, request));
+        }
+
+        let mut placed: Vec<Option<Block>> = Vec::new();
+        let mut created_global: Vec<(String, loro::TreeID)> = Vec::new();
+        for (target, members) in groups {
+            let write_doc = self.parent_doc(&target);
+            let is_global = matches!(target, ParentWriteTarget::Global);
+            // Shared arm gets a throwaway cache: a shared TreeID must never
+            // enter the global `id_cache` (its keys index the global tree).
+            let id_cache = if is_global {
+                self.id_cache.clone()
+            } else {
+                Arc::new(Mutex::new(HashMap::new()))
+            };
+            let written = write_doc
+                .with_write(|doc| {
+                    let tree = doc.get_tree(TREE_NAME);
+                    let mut out: Vec<(usize, Block, loro::TreeID)> = Vec::new();
+                    for (idx, request) in &members {
+                        let (block, node) = write_new_node(&tree, &id_cache, request, now)?;
+                        id_cache
+                            .lock()
+                            .unwrap()
+                            .insert(block.id.id().to_string(), node);
+                        out.push((*idx, block, node));
+                    }
+                    doc.commit();
+                    Ok(out)
+                })
+                .map_err(|e| ApiError::InternalError {
+                    message: format!("Failed to create {} block(s): {e:#}", members.len()),
+                })?;
+            for (idx, block, node) in written {
+                if is_global {
+                    created_global.push((block.id.id().to_string(), node));
+                }
+                if placed.len() <= idx {
+                    placed.resize(idx + 1, None);
+                }
+                placed[idx] = Some(block);
+            }
+        }
+        for (stable_id, node) in created_global {
+            self.cache_stable_id(&stable_id, node);
+        }
+
+        let created: Vec<Block> = placed
+            .into_iter()
+            .map(|b| {
+                b.ok_or_else(|| ApiError::InternalError {
+                    message: "create_blocks_with_properties: a request produced no block".into(),
+                })
+            })
+            .collect::<Result<_, ApiError>>()?;
+        for block in &created {
+            self.emit_change(Change::Created {
+                data: block.clone(),
+                origin: ChangeOrigin::Local {
+                    operation_id: None,
+                    trace_id: None,
+                },
+            });
+        }
+        Ok(created)
     }
 
     pub async fn update_block_properties(
@@ -3050,10 +3204,15 @@ impl LoroBackend {
         self.id_cache.lock().unwrap().get(stable_id).copied()
     }
 
-    /// Test-only: peek the stable-id cache WITHOUT the tree-walk that
-    /// `find_tree_id_by_stable_id` performs on a miss. Used to assert that a
-    /// shared child's id never leaks into the global `id_cache`.
-    #[cfg(test)]
+    /// Peek the stable-id cache WITHOUT the O(nodes) tree walk
+    /// `find_tree_id_by_stable_id` performs on a miss.
+    ///
+    /// A miss here means "not cached", NOT "not in the tree" — only sound as an
+    /// existence test right after
+    /// [`warm_stable_id_cache`](Self::warm_stable_id_cache)
+    /// with no concurrent writer, which is exactly the batched ingest's
+    /// situation. Also asserts in tests that a shared child's id never leaks
+    /// into the global `id_cache`.
     pub fn peek_id_cache(&self, stable_id: &str) -> Option<loro::TreeID> {
         self.resolve_stable_id_cached(stable_id)
     }

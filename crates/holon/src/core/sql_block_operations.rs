@@ -579,6 +579,19 @@ impl BlockOrdering for SqlBlockOperations {
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })
     }
 
+    /// One warm + one commit for the whole chunk (see
+    /// `BlockCellRegistry::create_entities`) instead of the default's
+    /// per-block create — the cold-boot ingest's dominant term.
+    async fn create_in_tree_batch(
+        &self,
+        requests: &[holon_core::block_ordering::BlockCreateRequest],
+    ) -> Result<Vec<bool>> {
+        self.cell_registry
+            .create_entities(requests)
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })
+    }
+
     async fn in_tree(&self, id: &EntityUri) -> Result<Option<bool>> {
         self.cell_registry
             .live_in_tree(id.as_str())

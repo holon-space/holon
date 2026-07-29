@@ -19,6 +19,21 @@ use holon_api::capability::Consolidator;
 
 use crate::traits::Result;
 
+/// One block-create intent for [`BlockOrdering::create_in_tree_batch`] — the
+/// same payload [`BlockOrdering::create_in_tree`] takes, minus the positional
+/// anchor: a batch creates its blocks in request order and the caller's place
+/// pass owns their final positions.
+#[derive(Debug, Clone)]
+pub struct BlockCreateRequest {
+    pub parent_id: EntityUri,
+    pub id: EntityUri,
+    pub content: BlockContent,
+    pub properties: std::collections::HashMap<String, holon_api::Value>,
+    pub tags: Tags,
+    pub requires: Vec<EntityUri>,
+    pub advice_suppressed: Vec<EntityUri>,
+}
+
 /// Provider of positional-intent writes for block aggregates.
 ///
 /// Implementations:
@@ -118,6 +133,35 @@ pub trait BlockOrdering: Send + Sync {
         _: &[EntityUri],
     ) -> Result<bool> {
         Ok(false)
+    }
+
+    /// [`create_in_tree`](Self::create_in_tree) for a CHUNK of creates, in
+    /// request (document) order — one flag per request, same meaning.
+    ///
+    /// The org ingest calls this instead of one create per block because a
+    /// tree-backed authority can then answer "does this id exist yet" once for
+    /// the chunk and commit it once, turning per-block O(nodes) existence
+    /// walks + per-block commits into one of each. Default: the per-block
+    /// seam, so an implementation without a batched authority behaves
+    /// identically (positional anchor `None`, exactly as the ingest passes it).
+    async fn create_in_tree_batch(&self, requests: &[BlockCreateRequest]) -> Result<Vec<bool>> {
+        let mut out = Vec::with_capacity(requests.len());
+        for r in requests {
+            out.push(
+                self.create_in_tree(
+                    &r.parent_id,
+                    None,
+                    &r.id,
+                    r.content.clone(),
+                    &r.properties,
+                    &r.tags,
+                    &r.requires,
+                    &r.advice_suppressed,
+                )
+                .await?,
+            );
+        }
+        Ok(out)
     }
 
     /// Whether `id` has a node in the separate authoritative tree.

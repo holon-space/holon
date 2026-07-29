@@ -244,6 +244,7 @@ fn main() -> anyhow::Result<()> {
     // just wants the harness output is never made flaky by a timing gate.
     let budget_ms = env_usize("HOLON_SOAK_BOOT_BUDGET_MS", 0) as u128;
     let max_children_reads = env_usize("HOLON_SOAK_MAX_CHILDREN_READS", 0) as u64;
+    let max_create_commits = env_usize("HOLON_SOAK_MAX_CREATE_COMMITS", 0) as u64;
 
     let rt2 = rt.clone();
     rt.block_on(async move {
@@ -382,9 +383,23 @@ fn main() -> anyhow::Result<()> {
         let ingest = holon_filesystem::ingest_progress::snapshot();
         let boot_ms = t_boot.elapsed().as_millis();
         eprintln!(
-            "[diag] INGEST READS: files={} blocks={} children_reads={} doc_walks={}",
-            ingest.files, ingest.blocks, ingest.children_reads, ingest.doc_walks,
+            "[diag] INGEST READS: files={} blocks={} children_reads={} doc_walks={} \
+             create_commits={}",
+            ingest.files,
+            ingest.blocks,
+            ingest.children_reads,
+            ingest.doc_walks,
+            ingest.create_commits,
         );
+        if max_create_commits > 0 {
+            anyhow::ensure!(
+                ingest.create_commits <= max_create_commits,
+                "ingest issued {} create commit(s) for {} block(s) — budget is \
+                 {max_create_commits}; creates are committing per block",
+                ingest.create_commits,
+                ingest.blocks,
+            );
+        }
         if max_children_reads > 0 {
             anyhow::ensure!(
                 ingest.children_reads <= max_children_reads,

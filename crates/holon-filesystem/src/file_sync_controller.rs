@@ -88,6 +88,110 @@ pub enum BlockDelta {
     Remove(EntityUri),
 }
 
+/// How many creates the ingest hands the authority per batch. Matches the
+/// progress-line granularity so every chunk boundary is also a liveness tick.
+const CREATE_CHUNK_BLOCKS: usize = ingest_progress::PROGRESS_EVERY_BLOCKS;
+
+/// What the creates pass must do with one buffered create once the authority
+/// reports whether it persisted it.
+enum PendingCreateKind {
+    /// A block new to this document. On `persisted == false` the SQL store is
+    /// itself the consolidator, so the create goes out as a command-bus op.
+    Fresh(holon_api::StorageEntity),
+    /// A pre-Loro row the tree never adopted (upgrade path).
+    Reseed,
+}
+
+struct PendingCreate {
+    request: holon_core::block_ordering::BlockCreateRequest,
+    kind: PendingCreateKind,
+}
+
+/// The typed create intent for `block` under `parent_uri`. `to_block_content`
+/// preserves source-vs-text, so a `#+BEGIN_SRC` block is not degraded to text
+/// by the downstream projection.
+fn block_create_request(
+    block: &Block,
+    parent_uri: &EntityUri,
+) -> holon_core::block_ordering::BlockCreateRequest {
+    holon_core::block_ordering::BlockCreateRequest {
+        parent_id: parent_uri.clone(),
+        id: block.id.clone(),
+        content: block.to_block_content(),
+        properties: block.properties.clone(),
+        tags: block.tags.clone(),
+        requires: block.requires.clone(),
+        advice_suppressed: block.advice_suppressed.clone(),
+    }
+}
+
+/// Hand one buffered chunk of creates to the ordering authority and apply the
+/// per-block bookkeeping its `persisted` flags dictate — the same bookkeeping
+/// the per-block call sites did, in the same (document) order.
+async fn flush_pending_creates(
+    ordering: &dyn BlockOrdering,
+    pending: &mut Vec<PendingCreate>,
+    operations: &mut Vec<(String, holon_api::StorageEntity)>,
+    created_ids: &mut Vec<String>,
+    consolidator_creates: &mut usize,
+    consolidator_create_ids: &mut Vec<String>,
+    has_structural_changes: &mut bool,
+) -> Result<()> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let requests: Vec<holon_core::block_ordering::BlockCreateRequest> =
+        pending.iter().map(|p| p.request.clone()).collect();
+    ingest_progress::record_create_commit();
+    let persisted = ordering
+        .create_in_tree_batch(&requests)
+        .await
+        .map_err(|e| anyhow::anyhow!("create_in_tree_batch({} block(s)): {e:#}", requests.len()))?;
+    anyhow::ensure!(
+        persisted.len() == requests.len(),
+        "create_in_tree_batch returned {} flag(s) for {} request(s)",
+        persisted.len(),
+        requests.len()
+    );
+    for (entry, persisted) in pending.drain(..).zip(persisted) {
+        let id = entry.request.id;
+        match entry.kind {
+            PendingCreateKind::Fresh(params) => {
+                if persisted {
+                    *consolidator_creates += 1;
+                    consolidator_create_ids.push(id.to_string());
+                } else {
+                    operations.push(("create".to_string(), params));
+                }
+            }
+            PendingCreateKind::Reseed => {
+                if persisted {
+                    *has_structural_changes = true;
+                    created_ids.push(id.to_string());
+                    *consolidator_creates += 1;
+                    consolidator_create_ids.push(id.to_string());
+                    tracing::info!(
+                        block_id = %id,
+                        parent = %entry.request.parent_id,
+                        "re-seeded pre-Loro vault block into the Loro tree"
+                    );
+                } else {
+                    // The authority declined (e.g. its unseeded-vault guard:
+                    // parent still missing). Order stays SQL-owned for this
+                    // block — ALLOW(fallback): disclosed via warn, the place
+                    // loop's pre-existing-block guard then skips it.
+                    tracing::warn!(
+                        block_id = %id,
+                        parent = %entry.request.parent_id,
+                        "re-seed declined by the tree backing — order stays SQL-owned"
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Mass-truncation tripwire (Fork B B1' / ADR 0025): the block-driven
 /// write-back path vetoes only when the ungrounded-drop count exceeds
 /// `max(TRIPWIRE_MIN_DROP_BLOCKS, block_count / TRIPWIRE_DROP_FRACTION_DENOM)`.
@@ -2522,9 +2626,27 @@ impl FileSyncController {
         // written by the downstream flush at site B, not by the `operations`
         // batch — so they are excluded from the site-A feed catch-up set below.
         let mut consolidator_create_ids: Vec<String> = Vec::new();
+        // Creates are buffered and handed to the authority a chunk at a time.
+        // Per-block creates cost one existence walk + one commit EACH, which is
+        // what made a 16k-block file's creates pass quadratic; one chunk is one
+        // of each. Chunked (not whole-file) so the progress line and the
+        // intra-file watchdog still tick, and peak buffer stays bounded.
+        let mut pending_creates: Vec<PendingCreate> = Vec::new();
         progress.begin_phase();
         for block in &new_blocks_vec {
             progress.advance("creates");
+            if pending_creates.len() >= CREATE_CHUNK_BLOCKS {
+                flush_pending_creates(
+                    self.ordering.as_ref(),
+                    &mut pending_creates,
+                    &mut operations,
+                    &mut created_ids,
+                    &mut consolidator_creates,
+                    &mut consolidator_create_ids,
+                    &mut has_structural_changes,
+                )
+                .await?;
+            }
             // Foreign page subtree: owned by another page-file, inlined here as
             // headings. Never create/re-seed/re-parent it (root: that is the
             // demote; descendants: that is the steal).
@@ -2552,41 +2674,10 @@ impl FileSyncController {
                 } else {
                     block.parent_id.clone()
                 };
-                let persisted = self
-                    .ordering
-                    .create_in_tree(
-                        &parent_uri,
-                        None,
-                        &block.id,
-                        block.to_block_content(),
-                        &block.properties,
-                        &block.tags,
-                        &block.requires,
-                        &block.advice_suppressed,
-                    )
-                    .await
-                    .map_err(|e| anyhow::anyhow!("re-seed create_in_tree({}): {e:#}", block.id))?;
-                if persisted {
-                    has_structural_changes = true;
-                    created_ids.push(block.id.to_string());
-                    consolidator_creates += 1;
-                    consolidator_create_ids.push(block.id.to_string());
-                    tracing::info!(
-                        block_id = %block.id,
-                        parent = %parent_uri,
-                        "re-seeded pre-Loro vault block into the Loro tree"
-                    );
-                } else {
-                    // The cell registry declined (e.g. its own unseeded-vault
-                    // guard: parent still missing). Order stays SQL-owned for
-                    // this block — ALLOW(fallback): disclosed via warn, the
-                    // place loop's pre-existing-block guard then skips it.
-                    tracing::warn!(
-                        block_id = %block.id,
-                        parent = %parent_uri,
-                        "re-seed declined by the tree backing — order stays SQL-owned"
-                    );
-                }
+                pending_creates.push(PendingCreate {
+                    request: block_create_request(block, &parent_uri),
+                    kind: PendingCreateKind::Reseed,
+                });
                 continue;
             }
             if !old_blocks.contains_key(&block.id) {
@@ -2617,36 +2708,29 @@ impl FileSyncController {
                     } else {
                         block.parent_id.clone()
                     };
-                    let block_uri = block.id.clone();
                     // Full typed content (`to_block_content` preserves source vs
                     // text + language) so a `#+BEGIN_SRC` block isn't degraded
                     // to text by the downstream projection.
-                    let persisted = self
-                        .ordering
-                        .create_in_tree(
-                            &parent_uri,
-                            None,
-                            &block_uri,
-                            block.to_block_content(),
-                            &block.properties,
-                            &block.tags,
-                            &block.requires,
-                            &block.advice_suppressed,
-                        )
-                        .await
-                        .map_err(|e| anyhow::anyhow!("create_in_tree({}): {e:#}", block.id))?;
-                    if persisted {
-                        consolidator_creates += 1;
-                        consolidator_create_ids.push(block.id.to_string());
-                    } else {
-                        operations.push((op.to_string(), params));
-                    }
+                    pending_creates.push(PendingCreate {
+                        request: block_create_request(block, &parent_uri),
+                        kind: PendingCreateKind::Fresh(params),
+                    });
                 } else {
                     updated_via_conflict_ids.push(block.id.to_string());
                     operations.push((op.to_string(), params));
                 }
             }
         }
+        flush_pending_creates(
+            self.ordering.as_ref(),
+            &mut pending_creates,
+            &mut operations,
+            &mut created_ids,
+            &mut consolidator_creates,
+            &mut consolidator_create_ids,
+            &mut has_structural_changes,
+        )
+        .await?;
         tracing::debug!(
             "[ORGSYNC_DIFF] {} old={} new={} creates={} conflict_updates={} creates_ids={:?}",
             path.display(),

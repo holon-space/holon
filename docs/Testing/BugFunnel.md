@@ -6,7 +6,7 @@ distribution steers QA investment.
 
 **Running distribution** (totals = archived baseline + sum of the increment log):
 
-- ENVIRONMENT: 116
+- ENVIRONMENT: 117
 - COVERAGE: 59
 - PERCEPTION: 47
 - ORACLE: 33
@@ -21,6 +21,7 @@ header against the log.
 Increment log (append-only, NEWEST FIRST — each counted bug adds exactly one line here;
 merge conflicts resolve by keeping both sides' lines and re-summing the totals ON TOP OF
 the archived baseline):
+- (+1 ENV 2026-07-29: cold boot of a vault whose ONE dominant file holds ~24k blocks took ~47 minutes with ZERO output, blowing every latency budget in silence. Two independent halves, one escape. Cost: the ingest creates pass calls `create_in_tree` per block, and its first step — `LoroBackend::resolve_to_tree_id` — MISSES for every genuinely-new id and then walks all live tree nodes (`find_tree_id_by_stable_id`, `tree.get_nodes(false)` + per-node meta read), so one file's creates pass is O(blocks × nodes); each create also took its own `doc.commit()`. Measured with the new one-file harness knob (release, Loro, branching 8): 4k blocks = 2.5s, 16k = 37.3s (14.8× for 4× the blocks), per-2k-block slices inside ONE file climbing 1.0s → 8.0s. Silence: every progress line and the 30s no-progress watchdog sat at the per-FILE scan loop, so inside one file 'slow' and 'wedged' were indistinguishable — the 47 minutes could not be attributed until the intra-file lines existed. ENVIRONMENT primary: no test environment had ever contained a single huge file. Every fixture and the vault-shaped corpus knob were many-small-files, and the cost regime is a function of ONE file's node count, so the quadratic term could not appear at test scale however many cases ran — the missing piece is a scale rung (one-file × N-blocks), now `HOLON_SOAK_ONE_FILE_BLOCKS` in `diag_harness`. ORACLE secondary and independent of the rung: nothing bounded ingest work, so even at vault scale no invariant would have gone red — now three opt-in budgets (`HOLON_SOAK_BOOT_BUDGET_MS` wall time, `HOLON_SOAK_MAX_CHILDREN_READS`, `HOLON_SOAK_MAX_CREATE_COMMITS`), the two count budgets being load-independent observables. Remedy landed: intra-file progress lines every 2,000 blocks + an intra-file no-progress watchdog that fires DURING a wedge, and a chunked batch create (`create_in_tree_batch` → one stable-id-cache warm + one Loro commit per 2,000-block chunk) — 16k blocks: ingest 37,325ms → 9,690ms, create commits 16,000 → 8. Still open, fork-side: the turso recursive-CTE cursor O(N²) that makes the doc-scoped `get_blocks` walk expensive on a huge doc is a Turso-fork item, untouched here.)
 - (+1 ORACLE 2026-07-29: `build_turso_free_profile_resolver` passed `LiveEntities::new()`, so every
   `StorageSelector::LoroMemory` session evaluated the bundled block profile's `has_query_source` /
   `is_program` against a Rhai engine carrying NO `query_source` / `rule_sibling` lookup — both fields

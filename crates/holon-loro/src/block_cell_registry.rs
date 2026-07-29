@@ -29,6 +29,7 @@ use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::live_data::LiveData;
 use holon_api::repository::CoreOperations;
+use holon_core::block_ordering::BlockCreateRequest;
 use holon_core::cell::CellBacking;
 use holon_core::cell::LwwScalarBacking;
 use holon_core::cell::LwwTextCellBacking;
@@ -40,6 +41,7 @@ use loro::LoroText;
 
 use crate::loro_backend::CONTENT_RAW;
 use crate::loro_backend::LoroBackend;
+use crate::loro_backend::NewBlockWithProperties;
 use crate::loro_backend::STABLE_ID;
 use crate::loro_backend::TREE_NAME;
 use crate::loro_document::LoroDocument;
@@ -964,6 +966,95 @@ impl EntityCellRegistry for BlockCellRegistry {
 }
 
 impl BlockCellRegistry {
+    /// [`create_entity`](EntityCellRegistry::create_entity) for a whole chunk
+    /// of creates, in ONE Loro commit — the cold-boot ingest's dominant cost.
+    ///
+    /// Per-block `create_entity` pays an existence probe
+    /// (`resolve_to_tree_id`) that MISSES for every genuinely-new block and
+    /// therefore walks all live nodes: O(nodes) per create, i.e. quadratic in
+    /// one file's block count. Here the id cache is warmed ONCE per chunk, so
+    /// the same existence question is answered from the cache and only the
+    /// blocks that really do exist take the per-block reconcile path (which is
+    /// `create_entity` verbatim — no second implementation of it).
+    ///
+    /// Returns one `persisted` flag per request, in request order, with the
+    /// same meaning as `create_entity`: `false` = the caller owns the create
+    /// (SqlOnly mode).
+    pub async fn create_entities(&self, requests: &[BlockCreateRequest]) -> Result<Vec<bool>> {
+        let backend = match &self.backing_source {
+            BackingSource::Loro { backend, .. } => backend.clone(),
+            BackingSource::SqlOnly { .. } => return Ok(vec![false; requests.len()]),
+        };
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        // One tree walk for the whole chunk instead of one per block: after
+        // this, a cache miss IS absence (the ingest is the sole writer while it
+        // runs), so the batched arm below never re-walks.
+        backend.warm_stable_id_cache().await;
+
+        let mut out = vec![false; requests.len()];
+        let mut fresh: Vec<(usize, NewBlockWithProperties)> = Vec::new();
+        // Ids this chunk is about to create. A parent in here is NOT absent —
+        // it is created earlier in this same batch (requests arrive in document
+        // order, parents first) and the write loop resolves it from the cache
+        // it populates as it goes. Standing up a placeholder root for one would
+        // mint a SECOND node for the same stable id, which is how a batched
+        // ingest lost blocks.
+        let will_create: std::collections::HashSet<&str> =
+            requests.iter().map(|r| r.id.id()).collect();
+        for (idx, request) in requests.iter().enumerate() {
+            if backend.peek_id_cache(request.id.id()).is_some() {
+                // Already in the tree: the idempotent reconcile path (placeholder
+                // completion, edge-field reconcile) is subtle and rare on a cold
+                // boot — run the single-block seam unchanged.
+                out[idx] = self
+                    .create_entity(
+                        &request.parent_id,
+                        None,
+                        &request.id,
+                        request.content.clone(),
+                        &request.properties,
+                        &request.tags,
+                        &request.requires,
+                        &request.advice_suppressed,
+                    )
+                    .await?;
+                continue;
+            }
+            let resolved_parent = if will_create.contains(request.parent_id.id()) {
+                request.parent_id.clone()
+            } else {
+                resolve_parent_or_placeholder(&backend, &request.parent_id, &request.id).await?
+            };
+            fresh.push((
+                idx,
+                NewBlockWithProperties {
+                    parent_id: resolved_parent,
+                    id: request.id.clone(),
+                    content: request.content.clone(),
+                    properties: request.properties.clone(),
+                    tags: request.tags.clone(),
+                    requires: request.requires.clone(),
+                    advice_suppressed: request.advice_suppressed.clone(),
+                },
+            ));
+        }
+        if !fresh.is_empty() {
+            let payload: Vec<NewBlockWithProperties> =
+                fresh.iter().map(|(_, r)| r.clone()).collect();
+            let n = payload.len();
+            backend
+                .create_blocks_with_properties(payload)
+                .await
+                .map_err(|e| anyhow!("create_blocks_with_properties({n} block(s)): {e:#}"))?;
+            for (idx, _) in fresh {
+                out[idx] = true;
+            }
+        }
+        Ok(out)
+    }
+
     /// True when this registry is backed by a Loro doc (the outbound projector
     /// owns the SQL `block_raw` row). This is the concrete capability-detection
     /// boundary: the composition root feeds it to
@@ -1302,6 +1393,81 @@ mod tests {
             after_noop,
             doc.oplog_frontiers(),
             "a changed tag set must still be written through"
+        );
+        Ok(())
+    }
+
+    /// A batch whose blocks parent EACH OTHER (the org shape: a headline and
+    /// its children ingested together) must land as ONE node per stable id,
+    /// homed under the real parent.
+    ///
+    /// Resolving a parent that the same batch is about to create reports it
+    /// absent — it does not exist yet — and the placeholder-root path then
+    /// mints a SECOND node for that id. The keystone caught it as INGEST DATA
+    /// LOSS (blocks parsed from disk missing from the projection), so the
+    /// observable asserted here is the placeholder count and the child's home,
+    /// not just "the call returned true".
+    #[tokio::test]
+    async fn create_entities_batch_homes_children_under_a_parent_from_the_same_batch() -> Result<()>
+    {
+        use std::collections::HashMap;
+
+        let doc = make_loro_doc_with_block("root");
+        let registry = BlockCellRegistry::with_loro_doc(doc.clone());
+        let root = EntityUri::block("root");
+        let parent = EntityUri::block("headline");
+        let child = EntityUri::block("child");
+        let request = |id: &EntityUri, parent_id: &EntityUri| BlockCreateRequest {
+            parent_id: parent_id.clone(),
+            id: id.clone(),
+            content: holon_api::BlockContent::text(id.id()),
+            properties: HashMap::new(),
+            tags: Tags::default(),
+            requires: Vec::new(),
+            advice_suppressed: Vec::new(),
+        };
+
+        let flags = registry
+            .create_entities(&[request(&parent, &root), request(&child, &parent)])
+            .await?;
+        assert_eq!(flags, vec![true, true], "both creates must persist");
+
+        // ONE tree node per stable id. A placeholder stood up for `headline`
+        // and the batch's own create of `headline` are two live nodes carrying
+        // the same STABLE_ID: reads resolve to one of them and the blocks under
+        // the other vanish from the doc walk — the data loss the keystone saw.
+        use crate::loro_backend::LoroMapExt;
+        let tree = doc.get_tree(TREE_NAME);
+        let mut nodes_per_id: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for node in tree.get_nodes(false) {
+            if matches!(
+                node.parent,
+                loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
+            ) {
+                continue;
+            }
+            if let Ok(meta) = tree.get_meta(node.id)
+                && let Some(sid) =
+                    meta.get_typed(STABLE_ID, |v| v.as_string().map(|s| s.to_string()))
+            {
+                *nodes_per_id.entry(sid).or_default() += 1;
+            }
+        }
+        assert_eq!(
+            nodes_per_id.get(parent.id()).copied(),
+            Some(1),
+            "one node per stable id; got {nodes_per_id:?}"
+        );
+
+        let backend = match &registry.backing_source {
+            BackingSource::Loro { backend, .. } => backend.clone(),
+            BackingSource::SqlOnly { .. } => unreachable!("built with_loro_doc"),
+        };
+        let stored_parent = backend.get_block(parent.id()).await?;
+        assert_eq!(
+            stored_parent.content, "headline",
+            "the parent node must carry its own content — a placeholder stood up for it is empty"
         );
         Ok(())
     }

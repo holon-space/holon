@@ -32,6 +32,7 @@ static FILES: AtomicU64 = AtomicU64::new(0);
 static BLOCKS: AtomicU64 = AtomicU64::new(0);
 static CHILDREN_READS: AtomicU64 = AtomicU64::new(0);
 static DOC_WALKS: AtomicU64 = AtomicU64::new(0);
+static CREATE_COMMITS: AtomicU64 = AtomicU64::new(0);
 
 /// Process-wide ingest read counters. The boot-budget harness asserts on
 /// `children_reads` because a read COUNT is a sturdier regression observable
@@ -46,6 +47,9 @@ pub struct IngestStats {
     pub children_reads: u64,
     /// Doc-scoped `BlockReader::get_blocks` walks issued by the ingest.
     pub doc_walks: u64,
+    /// Create handoffs to the ordering authority — one per BATCH, which is one
+    /// authority commit. Per-block creates make this equal the block count.
+    pub create_commits: u64,
 }
 
 /// Snapshot of the process-wide ingest counters.
@@ -55,6 +59,7 @@ pub fn snapshot() -> IngestStats {
         blocks: BLOCKS.load(Ordering::Relaxed),
         children_reads: CHILDREN_READS.load(Ordering::Relaxed),
         doc_walks: DOC_WALKS.load(Ordering::Relaxed),
+        create_commits: CREATE_COMMITS.load(Ordering::Relaxed),
     }
 }
 
@@ -64,6 +69,7 @@ pub fn reset() {
     BLOCKS.store(0, Ordering::Relaxed);
     CHILDREN_READS.store(0, Ordering::Relaxed);
     DOC_WALKS.store(0, Ordering::Relaxed);
+    CREATE_COMMITS.store(0, Ordering::Relaxed);
 }
 
 /// Count one `BlockOrdering::children` read from the ingest replay loop.
@@ -74,6 +80,11 @@ pub(crate) fn record_children_read() {
 /// Count one doc-scoped `get_blocks` walk from the ingest.
 pub(crate) fn record_doc_walk() {
     DOC_WALKS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Count one create handoff to the ordering authority (one authority commit).
+pub(crate) fn record_create_commit() {
+    CREATE_COMMITS.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Liveness reporter for ONE file's ingest: `advance` emits the periodic INFO
