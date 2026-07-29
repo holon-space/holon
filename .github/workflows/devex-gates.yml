@@ -29,10 +29,9 @@ on:
   workflow_dispatch:
 
 env:
-  # rust-toolchain.toml pins nightly; every cargo invocation in this repo
-  # auto-overrides to it regardless of what's installed here — match it
-  # (see ci.yml for the same fix and full rationale).
-  RUST_VERSION: nightly
+  # MUST equal rust-toolchain.toml's `channel` — see ci.yml for the full
+  # rationale (components/targets land on a toolchain cargo never runs).
+  RUST_VERSION: nightly-2026-07-17
   # GPUI links libfontconfig on Linux; dlopen it at runtime instead of static-linking
   # so no -dev headers are strictly required at build time (mirrors the justfile).
   RUST_FONTCONFIG_DLOPEN: "on"

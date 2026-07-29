@@ -15,12 +15,6 @@ ignore = [
     "RUSTSEC-2023-0089",  # atomic-polyfill unmaintained (transitive)
     "RUSTSEC-2025-0052",  # bincode unmaintained (transitive)
     "RUSTSEC-2025-0141",  # async-std discontinued (transitive)
-    # rand custom-logger unsoundness — affects rand 0.8/0.9, no fixed release yet.
-    # We don't install a custom rand logger anywhere, so the unsound path is unreachable.
-    "RUSTSEC-2026-0097",
-    # core2 unmaintained + yanked — pulled in via image → ravif → rav1e → bitstream-io.
-    # No upstream replacement yet; we don't call into core2 directly.
-    "RUSTSEC-2026-0105",
     # hickory-proto 0.25 DNSSEC vulns — pulled in via iroh@0.96 → hickory-resolver@0.25.
     # Upstream moved DnssecDnsHandle to hickory-net 0.26.x; iroh has not bumped yet.
     # We don't enable DNSSEC validation through iroh, so the vulnerable paths are unreachable.
@@ -42,6 +36,10 @@ ignore = [
     # (usvg/cosmic-text/fontdb). No safe upgrade available upstream yet.
     "RUSTSEC-2026-0206",
     "RUSTSEC-2026-0192",
+    # 2026-07-29: smallstr unmaintained, transitive via r3bl_tui → holon-tui.
+    # Upstream recommends compact_str/smol_str — an r3bl_tui migration, not ours;
+    # no safe upgrade exists.
+    "RUSTSEC-2026-0215",
 ]
 
 [licenses]

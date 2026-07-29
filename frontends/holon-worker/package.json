@@ -14,7 +14,7 @@
   },
   "devDependencies": {
     "@emnapi/core": "^1.11.1",
-    "@napi-rs/cli": "^3.1.5"
+    "@napi-rs/cli": "~3.7.4"
   },
   "napi": {
     "binaryName": "holon_worker",
