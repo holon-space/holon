@@ -880,7 +880,6 @@ enum TextMutation {
 #[derive(Debug, Clone)]
 struct HeadlineSection {
     start_line: usize,
-    end_line: usize,
     level: usize,
     id: Option<String>,
 }
@@ -914,7 +913,6 @@ fn find_headline_sections(org_text: &str) -> Vec<HeadlineSection> {
 
                 sections.push(HeadlineSection {
                     start_line: i,
-                    end_line: end,
                     level,
                     id,
                 });
@@ -928,8 +926,8 @@ fn find_headline_sections(org_text: &str) -> Vec<HeadlineSection> {
 fn extract_id_from_section_lines(lines: &[&str]) -> Option<String> {
     for line in lines {
         let trimmed = line.trim();
-        if trimmed.starts_with(":ID:") {
-            return Some(trimmed[4..].trim().to_string());
+        if let Some(rest) = trimmed.strip_prefix(":ID:") {
+            return Some(rest.trim().to_string());
         }
     }
     None
@@ -1172,7 +1170,7 @@ fn remove_priority_from_headline(line: &str) -> String {
 /// Apply the equivalent semantic mutation to blocks that corresponds to a
 /// TextMutation.
 fn apply_equivalent_block_mutation(
-    blocks: &mut Vec<Block>,
+    blocks: &mut [Block],
     mutation: &TextMutation,
     sections: &[HeadlineSection],
 ) {
@@ -1240,42 +1238,6 @@ fn apply_equivalent_block_mutation(
             }
         }
     }
-}
-
-fn text_mutation_strategy(max_sections: usize) -> impl Strategy<Value = TextMutation> {
-    // Generate a section index and mutation type
-    let idx = 0..max_sections;
-    prop_oneof![
-        (idx.clone(), valid_title()).prop_map(|(i, t)| TextMutation::ReplaceTitle {
-            section_idx: i,
-            new_title: t
-        }),
-        (
-            idx.clone(),
-            prop_oneof![
-                Just("TODO".to_string()),
-                Just("DOING".to_string()),
-                Just("DONE".to_string()),
-            ]
-        )
-            .prop_map(|(i, kw)| TextMutation::AddTodoKeyword {
-                section_idx: i,
-                keyword: kw
-            }),
-        idx.clone()
-            .prop_map(|i| TextMutation::RemoveTodoKeyword { section_idx: i }),
-        (idx.clone(), valid_tag()).prop_map(|(i, t)| TextMutation::AddTag {
-            section_idx: i,
-            tag: t
-        }),
-        (idx.clone(), prop_oneof![Just('A'), Just('B'), Just('C')]).prop_map(|(i, l)| {
-            TextMutation::SetPriority {
-                section_idx: i,
-                letter: l,
-            }
-        }),
-        idx.prop_map(|i| TextMutation::RemovePriority { section_idx: i }),
-    ]
 }
 
 // -- Mutation PBT: in-memory mutations ---------------------------------------

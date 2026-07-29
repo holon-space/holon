@@ -97,9 +97,7 @@ impl OperationIntent {
         let mut params = HashMap::new();
         params.insert("id".to_string(), Value::String(row_id.to_string()));
         Self {
-            entity_name: entity_name_override
-                .unwrap_or_else(|| &op.entity_name)
-                .clone(),
+            entity_name: entity_name_override.unwrap_or(&op.entity_name).clone(),
             op_name: op.name.clone(),
             params,
         }

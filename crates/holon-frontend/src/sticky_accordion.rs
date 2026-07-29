@@ -146,7 +146,7 @@ pub fn check_no_footer_overlap(obs: &[ObservedRect]) -> Result<(), String> {
 
 /// The px-cap holds under sticky: footer height ≤ `fraction × container_height
 /// + TOL`. (Shrink-to-content — footer height < cap for small content — is
-/// covered by driving the same checker with a short section.)
+///   covered by driving the same checker with a short section.)
 pub fn check_cap_under_sticky(obs: &[ObservedRect], fraction: f32) -> Result<(), String> {
     let footer = by_type(obs, STICKY_FOOTER_WIDGET)
         .first()

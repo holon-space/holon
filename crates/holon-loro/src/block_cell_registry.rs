@@ -212,6 +212,8 @@ impl BlockCellRegistry {
             }
             _ => CONTENT_RAW,
         };
+        // replacement changes CRDT child-creation semantics — pending Martin ruling
+        #[allow(deprecated)]
         let text = meta
             .get_or_create_container(content_key, LoroText::new())
             .map_err(|e| anyhow!("get_or_create_container({content_key}) for {block_id}: {e:?}"))?;
@@ -823,15 +825,15 @@ impl EntityCellRegistry for BlockCellRegistry {
         // exceeds content length 0"). Mirrors the resolve-first guard in
         // `write_position`. ALLOW(fallback): disclosed degraded mode — the
         // new block stays in the same (SQL-only) store as its anchor.
-        if let Some(after) = after_id {
-            if backend.resolve_to_tree_id(after.id()).await.is_none() {
-                tracing::warn!(
-                    "create_entity({new_id}): after-block {after} has no Loro tree node — falling \
-                     back to the SQL create path (Loro authority missing or unseeded for this \
-                     block family)"
-                );
-                return Ok(false);
-            }
+        if let Some(after) = after_id
+            && backend.resolve_to_tree_id(after.id()).await.is_none()
+        {
+            tracing::warn!(
+                "create_entity({new_id}): after-block {after} has no Loro tree node — falling \
+                 back to the SQL create path (Loro authority missing or unseeded for this \
+                 block family)"
+            );
+            return Ok(false);
         }
         // Idempotent: if the node already exists in the tree (e.g. the org
         // initial scan calls this for a block a prior scan/seed already

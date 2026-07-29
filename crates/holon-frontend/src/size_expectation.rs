@@ -396,23 +396,13 @@ mod tests {
     use super::*;
 
     /// Test EvalCtx with hand-picked observations.
+    #[derive(Default)]
     struct TestCtx {
         self_w: Option<f32>,
         self_h: Option<f32>,
         children_h: Vec<f32>,
         child_count: usize,
         viewport_y: Option<f32>,
-    }
-    impl Default for TestCtx {
-        fn default() -> Self {
-            Self {
-                self_w: None,
-                self_h: None,
-                children_h: vec![],
-                child_count: 0,
-                viewport_y: None,
-            }
-        }
     }
     impl EvalCtx for TestCtx {
         fn self_observed(&self, a: Axis) -> Option<f32> {

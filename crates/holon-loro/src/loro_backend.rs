@@ -632,6 +632,8 @@ fn diff_blocks_changed(a: &SnapshotBlock, b: &SnapshotBlock) -> bool {
 // -- Writing block data to tree node metadata --
 
 fn update_text_field(meta: &loro::LoroMap, key: &str, new_text: &str) -> anyhow::Result<()> {
+    // replacement changes CRDT child-creation semantics — pending Martin ruling
+    #[allow(deprecated)]
     let text = meta.get_or_create_container(key, loro::LoroText::new())?;
     text.update(new_text, Default::default())
         .map_err(|e| anyhow::anyhow!("LoroText update failed: {:?}", e))?;
@@ -661,6 +663,8 @@ fn write_content_to_meta(meta: &loro::LoroMap, content: &BlockContent) -> anyhow
                 loro::LoroValue::from(ContentType::Text.to_string().as_str()),
             )?;
             update_text_field(meta, CONTENT_RAW, text)?;
+            // replacement changes CRDT child-creation semantics — pending Martin ruling
+            #[allow(deprecated)]
             let loro_text = meta.get_or_create_container(CONTENT_RAW, loro::LoroText::new())?;
             // Clear every known mark key over the full range first so a re-write
             // with fewer marks drops the stale ones, then set the current spans.
@@ -708,6 +712,8 @@ fn write_content_to_meta(meta: &loro::LoroMap, content: &BlockContent) -> anyhow
 /// Open (creating if absent) the nested per-property `LoroMap` (H3,
 /// [`PROPERTIES_MAP`]).
 pub(crate) fn properties_map_container(meta: &loro::LoroMap) -> anyhow::Result<loro::LoroMap> {
+    // replacement changes CRDT child-creation semantics — pending Martin ruling
+    #[allow(deprecated)]
     Ok(meta.get_or_create_container(PROPERTIES_MAP, loro::LoroMap::new())?)
 }
 
@@ -1090,10 +1096,7 @@ fn get_node_parent(tree: &loro::LoroTree, node: loro::TreeID) -> Option<loro::Tr
 /// ordering-invariant violation on a live node. `Err` from `is_node_deleted`
 /// means the tree no longer knows the node at all: the same torn shape.
 fn node_deleted_now(tree: &loro::LoroTree, node: loro::TreeID) -> bool {
-    match tree.is_node_deleted(&node) {
-        Ok(deleted) => deleted,
-        Err(_) => true,
-    }
+    tree.is_node_deleted(&node).unwrap_or(true)
 }
 
 /// A [`BlockTreeView`] over a Loro tree, built by scanning live nodes once.
@@ -2267,6 +2270,8 @@ impl LoroBackend {
                 // Re-apply marks. First clear every known mark key over the
                 // full text range so removed marks disappear; then set the
                 // new ones. `mark` is idempotent for the same key+range.
+                // replacement changes CRDT child-creation semantics — pending Martin ruling
+                #[allow(deprecated)]
                 let text = meta.get_or_create_container(CONTENT_RAW, loro::LoroText::new())?;
                 let len_chars = text.len_unicode();
                 if len_chars > 0 {
@@ -2338,6 +2343,8 @@ impl LoroBackend {
                     ));
                 }
 
+                // replacement changes CRDT child-creation semantics — pending Martin ruling
+                #[allow(deprecated)]
                 let text = meta.get_or_create_container(CONTENT_RAW, loro::LoroText::new())?;
                 let key = mark_owned.loro_key();
                 let value: loro::LoroValue = mark_to_loro_value(&mark_owned);
@@ -2385,6 +2392,8 @@ impl LoroBackend {
                 let tree = doc.get_tree(TREE_NAME);
                 let meta = tree.get_meta(tree_id)?;
 
+                // replacement changes CRDT child-creation semantics — pending Martin ruling
+                #[allow(deprecated)]
                 let text = meta.get_or_create_container(CONTENT_RAW, loro::LoroText::new())?;
                 text.unmark(range.clone(), &key_owned)
                     .map_err(|e| anyhow::anyhow!("LoroText unmark {key_owned}: {:?}", e))?;
@@ -2428,6 +2437,8 @@ impl LoroBackend {
             .with_read(|doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let meta = tree.get_meta(tree_id)?;
+                // replacement changes CRDT child-creation semantics — pending Martin ruling
+                #[allow(deprecated)]
                 let text = meta.get_or_create_container(CONTENT_RAW, loro::LoroText::new())?;
                 Ok(text.get_cursor(pos, side))
             })
@@ -2489,6 +2500,8 @@ impl LoroBackend {
                     ));
                 }
 
+                // replacement changes CRDT child-creation semantics — pending Martin ruling
+                #[allow(deprecated)]
                 let text = meta.get_or_create_container(CONTENT_RAW, loro::LoroText::new())?;
                 text.insert(pos, &s_owned)
                     .map_err(|e| anyhow::anyhow!("LoroText insert at {pos}: {:?}", e))?;
@@ -2537,6 +2550,8 @@ impl LoroBackend {
                     ));
                 }
 
+                // replacement changes CRDT child-creation semantics — pending Martin ruling
+                #[allow(deprecated)]
                 let text = meta.get_or_create_container(CONTENT_RAW, loro::LoroText::new())?;
                 text.delete(pos, len)
                     .map_err(|e| anyhow::anyhow!("LoroText delete {len} at {pos}: {:?}", e))?;
@@ -2568,6 +2583,9 @@ impl LoroBackend {
     /// empty `properties` over the row the create wrote (the `props_check` /
     /// "Value::Object serialization" divergence). The trait `create_block`
     /// delegates here with an empty map.
+    // Grouping these into a params struct would ripple across the 13 call
+    // sites in 4 other crates that construct this argument list positionally.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_block_with_properties(
         &self,
         parent_id: EntityUri,
@@ -4890,6 +4908,8 @@ mod incremental_tests {
         let cid = {
             let tree = doc.get_tree(TREE_NAME);
             let meta = tree.get_meta(a).unwrap();
+            // replacement changes CRDT child-creation semantics — pending Martin ruling
+            #[allow(deprecated)]
             let text = meta
                 .get_or_create_container(CONTENT_RAW, loro::LoroText::new())
                 .unwrap();

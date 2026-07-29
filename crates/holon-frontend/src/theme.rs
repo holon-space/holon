@@ -60,10 +60,7 @@ impl ThemeRegistry {
                 if let Ok(entries) = std::fs::read_dir(dir) {
                     for entry in entries.flatten() {
                         let path = entry.path();
-                        if path
-                            .extension()
-                            .map_or(false, |e| e == "yaml" || e == "yml")
-                        {
+                        if path.extension().is_some_and(|e| e == "yaml" || e == "yml") {
                             if let Ok(content) = std::fs::read_to_string(&path) {
                                 if let Err(e) = parse_theme_yaml(&content, &mut themes) {
                                     tracing::error!(

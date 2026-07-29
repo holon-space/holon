@@ -610,7 +610,6 @@ impl ReactiveViewModel {
                             interpret_fn: old_child.interpret_fn.clone(),
                             subscriptions: Vec::new(),
                             occurrence: old_child.occurrence.clone(),
-                            ..ReactiveViewModel::empty()
                         }));
                     } else {
                         // Children unchanged structurally — keep original Arc.
@@ -991,7 +990,7 @@ impl ReactiveViewModel {
             },
             "expand_toggle" => {
                 let target_id = self.prop_str("target_id").unwrap_or_default();
-                let is_expanded = self.expanded.as_ref().map_or(false, |m| m.get());
+                let is_expanded = self.expanded.as_ref().is_some_and(|m| m.get());
                 let header_children = snap_children();
                 // Gated lazy content. `materialize_if_gated()` fires the thunk
                 // exactly once (cache lives on the lazy_slot for the VM

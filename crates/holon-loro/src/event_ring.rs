@@ -93,11 +93,11 @@ impl<T: Clone> EventRing<T> {
 /// losing all future changes). Now a full channel blocks this delivery task
 /// (never the mutator — callers run this in a spawned task) up to a timeout;
 /// only on timeout is the subscriber dropped, with an error log.
-pub async fn deliver_to_subscribers<T: Send + 'static>(
+pub async fn deliver_to_subscribers<T>(
     subscribers: &mut Vec<tokio::sync::mpsc::Sender<Result<Vec<T>, holon_api::ApiError>>>,
     batch: Vec<T>,
 ) where
-    T: Clone,
+    T: Send + Clone + 'static,
 {
     use tokio::sync::mpsc::error::TrySendError;
     let mut kept = Vec::with_capacity(subscribers.len());

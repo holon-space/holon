@@ -162,8 +162,7 @@ fn parse_single_dest(s: &str) -> LogDest {
     let s = s.trim();
 
     // Handle file:// destinations — the :json suffix comes after the path
-    if s.starts_with("file://") {
-        let rest = &s["file://".len()..];
+    if let Some(rest) = s.strip_prefix("file://") {
         return if let Some(path) = rest.strip_suffix(":json") {
             LogDest::File(path.to_string(), LogFormat::Json)
         } else {

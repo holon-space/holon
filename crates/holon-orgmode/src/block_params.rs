@@ -375,7 +375,7 @@ mod tests {
         let parent = EntityUri::block("parent-1");
         let params = build_block_params(&block, &parent, &parent);
         assert!(
-            params.get("source_header_args").is_none(),
+            !params.contains_key("source_header_args"),
             "empty header args must not emit source_header_args, got {:?}",
             params.get("source_header_args")
         );

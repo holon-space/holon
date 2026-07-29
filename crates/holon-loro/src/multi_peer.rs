@@ -342,6 +342,8 @@ pub fn update_block(doc: &LoroDoc, node: TreeID, new_content: &str) {
     // Writing to the wrong field would leave the production reader returning
     // the original content even after `MergeFromPeer` imports the delta.
     let field = content_field_for(&meta);
+    // replacement changes CRDT child-creation semantics — pending Martin ruling
+    #[allow(deprecated)]
     let text: LoroText = meta
         .get_or_create_container(field, LoroText::new())
         .unwrap();

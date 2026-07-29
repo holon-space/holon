@@ -594,7 +594,9 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                                     match group {
                                         DocGroup::Resolved(doc) => OrgRerender::Block {
                                             doc,
-                                            delta: BlockDelta::Upsert((*value).clone()),
+                                            delta: Box::new(BlockDelta::Upsert(
+                                                (*value).clone(),
+                                            )),
                                         },
                                         // Unresolved (block/parent absent, or point-read
                                         // fault) → full re-render via the authoritative
@@ -624,7 +626,7 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                                     DocGroup::Resolved(doc) => match EntityUri::parse(&key) {
                                         Ok(id) => OrgRerender::Block {
                                             doc,
-                                            delta: BlockDelta::Remove(id),
+                                            delta: Box::new(BlockDelta::Remove(id)),
                                         },
                                         Err(e) => {
                                             tracing::error!(
@@ -694,7 +696,7 @@ pub enum OrgRerender {
     /// its per-doc cache instead of re-reading the whole document.
     Block {
         doc: EntityUri,
-        delta: holon_filesystem::BlockDelta,
+        delta: Box<holon_filesystem::BlockDelta>,
     },
     /// Document could not be resolved (matview lag, bulk feed reset, etc.) —
     /// reseed via a debounced re-render of every tracked file.

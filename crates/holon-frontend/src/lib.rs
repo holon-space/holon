@@ -691,7 +691,7 @@ impl<T> FrontendSession<T> {
     pub fn is_ready(&self) -> bool {
         self.ready_signal
             .as_ref()
-            .map_or(true, |rx| rx.borrow().is_some())
+            .is_none_or(|rx| rx.borrow().is_some())
     }
 
     // =========================================================================

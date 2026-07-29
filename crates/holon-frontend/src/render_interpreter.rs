@@ -161,6 +161,12 @@ impl<W> std::fmt::Debug for RenderInterpreter<W> {
     }
 }
 
+impl<W> Default for RenderInterpreter<W> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<W> RenderInterpreter<W> {
     pub fn new() -> Self {
         Self {
@@ -279,7 +285,7 @@ impl<W> RenderInterpreter<W> {
                 self.dispatch("column", &args, ctx, services, &interpret_fn)
             }
             RenderExpr::Object { fields } => {
-                let exprs: Vec<_> = fields.iter().map(|(_, e)| e.clone()).collect();
+                let exprs: Vec<_> = fields.values().cloned().collect();
                 let args = ResolvedArgs::from_positional_exprs(exprs);
                 self.dispatch("column", &args, ctx, services, &interpret_fn)
             }
@@ -749,6 +755,9 @@ fn pick_active_variant(
     }
 
     // Get block ID for UI state lookup
+    // Point-free form would drop the archlint baseline entry for this
+    // `EntityUri::from_raw` call site.
+    #[allow(clippy::redundant_closure)]
     let block_id = ctx
         .row()
         .get("id")

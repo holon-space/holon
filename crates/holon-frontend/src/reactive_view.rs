@@ -485,6 +485,20 @@ pub struct CollectionConfig {
 /// signal-cascade model stays acyclic.
 pub type ChildSpaceFn = dyn Fn(AvailableSpace, usize) -> AvailableSpace + Send + Sync;
 
+/// Interprets one row at a known tree depth + display occurrence into a
+/// view model and its resolved props map.
+type InterpretRowFn = dyn Fn(
+        Arc<holon_api::widget_spec::DataRow>,
+        usize,
+        holon_api::Occurrence,
+    ) -> (Arc<ReactiveViewModel>, HashMap<String, holon_api::Value>)
+    + Send
+    + Sync;
+
+/// Shared, lock-guarded snapshot of the rows currently backing a flat
+/// driver, keyed for stable-identity lookups on the next diff.
+type RowEntries = Arc<Mutex<Vec<(holon_api::RowKey, Arc<holon_api::widget_spec::DataRow>)>>>;
+
 enum ReactiveViewInner {
     /// A block with its own watcher and child management.
     Block {
@@ -1073,9 +1087,9 @@ impl ReactiveView {
             };
             Arc::new(move |expr, data| {
                 let parent_space = space.get_cloned();
-                if fast_widget.is_some() {
+                if let Some(fast_widget) = fast_widget.as_ref() {
                     return crate::render_interpreter::resolve_props(
-                        fast_widget.as_ref().unwrap(),
+                        fast_widget,
                         expr,
                         data,
                         svc.as_ref(),
@@ -1100,15 +1114,7 @@ impl ReactiveView {
         // id string — it is the display coordinate the row's identity key
         // carries, stamped onto the node so GPUI can suffix its per-row keys.
         // `Canonical` for every real row.
-        let interpret_row: Arc<
-            dyn Fn(
-                    Arc<holon_api::widget_spec::DataRow>,
-                    usize,
-                    holon_api::Occurrence,
-                ) -> (Arc<ReactiveViewModel>, HashMap<String, holon_api::Value>)
-                + Send
-                + Sync,
-        > = {
+        let interpret_row: Arc<InterpretRowFn> = {
             let svc = services.clone();
             let space = space_handle.clone();
             let nif = node_interpret_fn;
@@ -1247,14 +1253,7 @@ impl ReactiveView {
                     Arc<holon_api::widget_spec::DataRow>,
                 >,
                                            adopted: Vec<holon_api::RowKey>,
-                                           interpret_row: &dyn Fn(
-                    Arc<holon_api::widget_spec::DataRow>,
-                    usize,
-                    holon_api::Occurrence,
-                ) -> (
-                    Arc<ReactiveViewModel>,
-                    HashMap<String, holon_api::Value>,
-                ),
+                                           interpret_row: &InterpretRowFn,
                                            get_sort_key: &dyn Fn(
                     &holon_api::widget_spec::DataRow,
                 ) -> String| {
@@ -1282,14 +1281,7 @@ impl ReactiveView {
                     Arc<holon_api::widget_spec::DataRow>,
                 >,
                                          evicted: Vec<holon_api::RowKey>,
-                                         interpret_row: &dyn Fn(
-                    Arc<holon_api::widget_spec::DataRow>,
-                    usize,
-                    holon_api::Occurrence,
-                ) -> (
-                    Arc<ReactiveViewModel>,
-                    HashMap<String, holon_api::Value>,
-                ),
+                                         interpret_row: &InterpretRowFn,
                                          get_sort_key: &dyn Fn(
                     &holon_api::widget_spec::DataRow,
                 ) -> String| {
@@ -1519,12 +1511,13 @@ impl ReactiveView {
                             // increment (Increment C widens it), so it flips
                             // only the CANONICAL occurrence of a block.
                             let mut affected: Vec<holon_api::RowKey> = Vec::new();
-                            for opt in [last_focus.as_ref(), new_focus.as_ref()] {
-                                if let Some(uri) = opt {
-                                    let key = (uri.clone(), holon_api::Occurrence::Canonical);
-                                    if !affected.contains(&key) {
-                                        affected.push(key);
-                                    }
+                            for uri in [last_focus.as_ref(), new_focus.as_ref()]
+                                .into_iter()
+                                .flatten()
+                            {
+                                let key = (uri.clone(), holon_api::Occurrence::Canonical);
+                                if !affected.contains(&key) {
+                                    affected.push(key);
                                 }
                             }
                             // Snapshot rows under the row_map lock, then
@@ -1533,13 +1526,7 @@ impl ReactiveView {
                             // driver (which takes tree → key_index →
                             // row_map; we take row_map then tree, but the
                             // row_map lock is released first).
-                            let updates: Vec<(
-                                holon_api::RowKey,
-                                Option<holon_api::RowKey>,
-                                String,
-                                Arc<ReactiveViewModel>,
-                                HashMap<String, holon_api::Value>,
-                            )> = {
+                            let updates: Vec<crate::mutable_tree::TreeEntry> = {
                                 let rm = row_map.lock().unwrap();
                                 affected
                                     .iter()
@@ -1611,8 +1598,7 @@ impl ReactiveView {
         // `RowKey`; the tie-break in `full_rebuild` compares the whole key. The
         // flat driver renders canonical rows only (display placement targets the
         // tree path first), so nodes keep the default `Canonical` occurrence.
-        let entries: Arc<Mutex<Vec<(holon_api::RowKey, Arc<holon_api::widget_spec::DataRow>)>>> =
-            Arc::new(Mutex::new(Vec::new()));
+        let entries: RowEntries = Arc::new(Mutex::new(Vec::new()));
 
         // Self-interpretation closure: captures services + space, recomputes
         // props from (expr, data) without creating a fresh ReactiveViewModel.
@@ -1634,9 +1620,9 @@ impl ReactiveView {
             };
             Arc::new(move |expr, data| {
                 let parent_space = space.get_cloned();
-                if fast_widget.is_some() {
+                if let Some(fast_widget) = fast_widget.as_ref() {
                     return crate::render_interpreter::resolve_props(
-                        fast_widget.as_ref().unwrap(),
+                        fast_widget,
                         expr,
                         data,
                         svc.as_ref(),
@@ -1971,8 +1957,7 @@ impl ReactiveView {
 
         // Per-row entry tracking. Mirrors flat_driver's `entries` shape so
         // we can rebuild lanes deterministically on every event.
-        let entries: Arc<Mutex<Vec<(holon_api::RowKey, Arc<holon_api::widget_spec::DataRow>)>>> =
-            Arc::new(Mutex::new(Vec::new()));
+        let entries: RowEntries = Arc::new(Mutex::new(Vec::new()));
 
         let lane_field_for_partition = lane_field.clone();
         let label_default_for_partition = lane_label_default.clone();
@@ -2168,10 +2153,7 @@ impl ReactiveView {
 
                     let flow_count = hints
                         .iter()
-                        .filter(|h| match h {
-                            LayoutHint::Fixed { px } if *px == 0.0 => false,
-                            _ => true,
-                        })
+                        .filter(|h| !matches!(h, LayoutHint::Fixed { px } if *px == 0.0))
                         .count();
                     let gap_total = gap * flow_count.saturating_sub(1) as f32;
 

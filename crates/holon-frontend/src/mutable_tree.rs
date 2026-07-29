@@ -18,6 +18,16 @@ use holon_api::Value;
 
 use crate::reactive_view_model::ReactiveViewModel;
 
+/// One flat row entry as passed to [`MutableTree::rebuild`]: (id, parent_id,
+/// sort_key, view model, props).
+pub(crate) type TreeEntry = (
+    RowKey,
+    Option<RowKey>,
+    String,
+    Arc<ReactiveViewModel>,
+    HashMap<String, Value>,
+);
+
 /// A node in the sort order. `Ord` sorts by (sort_key, id) so siblings
 /// appear in the right order. `sort_key` is a string whose lexicographic
 /// byte order matches the desired sort order (FractionalIndex hex strings
@@ -112,7 +122,7 @@ impl MutableTree {
                 let has_children = self
                     .children
                     .get(&Some(id.clone()))
-                    .map_or(false, |c| !c.is_empty());
+                    .is_some_and(|c| !c.is_empty());
                 (id.clone(), node.depth, has_children)
             })
             .collect()
@@ -167,14 +177,14 @@ impl MutableTree {
         let parent_had_children_before = self
             .children
             .get(&effective_parent)
-            .map_or(false, |c| c.len() > 1);
+            .is_some_and(|c| c.len() > 1);
 
         let pos = self.compute_dfs_position(&id, &effective_parent);
 
         let has_children = self
             .children
             .get(&Some(id.clone()))
-            .map_or(false, |c| !c.is_empty());
+            .is_some_and(|c| !c.is_empty());
         let wrapped = wrap_tree_item(&widget, depth, has_children, &overrides);
 
         self.flat_insert(pos, id.clone());
@@ -268,7 +278,7 @@ impl MutableTree {
                 let has_children = self
                     .children
                     .get(&Some(id.clone()))
-                    .map_or(false, |c| !c.is_empty());
+                    .is_some_and(|c| !c.is_empty());
                 Arc::new(wrap_tree_item(
                     &node.widget,
                     node.depth,
@@ -345,7 +355,7 @@ impl MutableTree {
             let has_children = self
                 .children
                 .get(&Some(id.clone()))
-                .map_or(false, |c| !c.is_empty());
+                .is_some_and(|c| !c.is_empty());
             let wrapped = wrap_tree_item(&node.widget, node.depth, has_children, &node.overrides);
             self.flat.lock_mut().set_cloned(pos, Arc::new(wrapped));
         }
@@ -394,7 +404,7 @@ impl MutableTree {
             if !self
                 .children
                 .get(&Some(pid.clone()))
-                .map_or(false, |c| !c.is_empty())
+                .is_some_and(|c| !c.is_empty())
             {
                 self.update_has_children(pid);
             }
@@ -404,16 +414,7 @@ impl MutableTree {
     }
 
     /// Rebuild from scratch. Emits a single `VecDiff::Replace`.
-    pub fn rebuild(
-        &mut self,
-        entries: Vec<(
-            RowKey,
-            Option<RowKey>,
-            String,
-            Arc<ReactiveViewModel>,
-            HashMap<String, Value>,
-        )>,
-    ) {
+    pub fn rebuild(&mut self, entries: Vec<TreeEntry>) {
         self.nodes.clear();
         self.children.clear();
         self.flat_order.clear();
@@ -533,7 +534,7 @@ impl MutableTree {
     fn flat_insert(&mut self, pos: usize, id: RowKey) {
         self.flat_order.insert(pos, id.clone());
         // Shift all indices >= pos
-        for (_, idx) in self.flat_index.iter_mut() {
+        for idx in self.flat_index.values_mut() {
             if *idx >= pos {
                 *idx += 1;
             }
@@ -615,7 +616,7 @@ impl MutableTree {
         let has_children = self
             .children
             .get(&Some(id.clone()))
-            .map_or(false, |c| !c.is_empty());
+            .is_some_and(|c| !c.is_empty());
         let wrapped = wrap_tree_item(&node.widget, node.depth, has_children, &node.overrides);
         self.flat.lock_mut().set_cloned(pos, Arc::new(wrapped));
     }

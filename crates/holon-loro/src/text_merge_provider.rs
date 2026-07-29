@@ -222,6 +222,8 @@ mod tests {
             let doc = doc.clone();
             Arc::new(move |block_id: &str| {
                 let map = doc.get_map("text_by_block");
+                // replacement changes CRDT child-creation semantics — pending Martin ruling
+                #[allow(deprecated)]
                 let text = map.get_or_create_container(block_id, LoroText::new())?;
                 Ok(text)
             })

@@ -451,7 +451,7 @@ pub fn bubble_input_oneshot(
     input: &WidgetInput,
 ) -> Option<InputAction> {
     match dfs_and_bubble(root, entity_id, input) {
-        DfsResult::Handled(action) => Some(action),
+        DfsResult::Handled(action) => Some(*action),
         _ => None,
     }
 }
@@ -462,7 +462,7 @@ enum DfsResult {
     /// Entity found but no ancestor handled the input.
     Found,
     /// Entity found and input was handled.
-    Handled(InputAction),
+    Handled(Box<InputAction>),
 }
 
 /// Recursive DFS that bubbles on the way back up.
@@ -476,7 +476,7 @@ fn dfs_and_bubble(
 ) -> DfsResult {
     if resolve_entity_id(node).as_ref() == Some(entity_id) {
         if let Some(action) = try_handle_node(node, entity_id, input) {
-            return DfsResult::Handled(action);
+            return DfsResult::Handled(Box::new(action));
         }
         return DfsResult::Found;
     }
@@ -486,7 +486,7 @@ fn dfs_and_bubble(
             DfsResult::Handled(action) => return DfsResult::Handled(action),
             DfsResult::Found => {
                 if let Some(action) = try_handle_node(node, entity_id, input) {
-                    return DfsResult::Handled(action);
+                    return DfsResult::Handled(Box::new(action));
                 }
                 return DfsResult::Found;
             }
@@ -579,6 +579,12 @@ pub struct InputRouter {
 struct CachedFocusPath {
     entity_id: EntityUri,
     focus_path: FocusPath,
+}
+
+impl Default for InputRouter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl InputRouter {
@@ -1090,7 +1096,7 @@ fn collect_tree_structure(
             None => continue,
         };
 
-        while stack.last().map_or(false, |(d, _)| *d >= depth) {
+        while stack.last().is_some_and(|(d, _)| *d >= depth) {
             stack.pop();
         }
 

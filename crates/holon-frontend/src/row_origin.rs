@@ -440,7 +440,7 @@ mod tests {
         };
         // The canonical_id IS the real block's id — a genuine EntityUri, not a
         // synthetic string. No `:__virtual:` infix, no `block.create` trigger.
-        assert_eq!(origin.is_display_placed(), true);
+        assert!(origin.is_display_placed());
         match origin {
             RowOrigin::DisplayPlaced { canonical_id, .. } => {
                 assert_eq!(canonical_id, canonical);

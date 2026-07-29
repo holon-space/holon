@@ -224,7 +224,7 @@ fn make_doc_and_n_blocks(n: usize) -> (Block, Vec<Block>) {
             Block::new_text(
                 EntityUri::block(&format!("b{i}")),
                 doc_id.clone(),
-                &format!("heading {i}"),
+                format!("heading {i}"),
             )
         })
         .collect();

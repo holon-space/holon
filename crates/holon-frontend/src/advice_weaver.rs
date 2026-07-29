@@ -274,7 +274,7 @@ pub async fn recompute_sidecar(query_engine: &dyn holon_api::QueryEngine, sideca
     let content_of = |lesson: &EntityUri| content_map.get(lesson).cloned();
     let mut map: HashMap<EntityUri, Vec<Arc<DataRow>>> = HashMap::new();
     for (anchor, lessons) in &per_anchor {
-        let synthesized = synthesize_advice_rows(&[(anchor.clone(), lessons.clone())], &content_of);
+        let synthesized = synthesize_advice_rows(&[(anchor.clone(), lessons.clone())], content_of);
         map.insert(
             anchor.clone(),
             synthesized.into_iter().map(|(_, row)| row).collect(),
@@ -453,8 +453,8 @@ mod tests {
         assert!(advice_sort_key(0) < advice_sort_key(1));
         assert!(advice_sort_key(1) < advice_sort_key(2));
         // Sorts AFTER a real fractional-index hex key (leading '2'..'F' < sentinel).
-        assert!(advice_sort_key(0) > "A0".to_string());
-        assert!(advice_sort_key(9) > "ZZZZ".to_string());
+        assert!(advice_sort_key(0).as_str() > "A0");
+        assert!(advice_sort_key(9).as_str() > "ZZZZ");
     }
 
     #[test]

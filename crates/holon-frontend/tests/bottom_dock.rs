@@ -212,7 +212,7 @@ fn root_layout_mobile_viewport_has_bottom_dock() {
     // slot's streaming collection has 0 items — but it's still a collection
     // view with Columns layout (not, say, a snapshot fallback).
     let dock_slot = &dock.children[1];
-    let is_streaming_columns = dock_slot.collection.as_ref().map_or(false, |view| {
+    let is_streaming_columns = dock_slot.collection.as_ref().is_some_and(|view| {
         view.layout()
             .as_ref()
             .map(|l| l.name() == "columns")

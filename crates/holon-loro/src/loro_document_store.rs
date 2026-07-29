@@ -213,7 +213,7 @@ impl LoroDocumentStore {
             let compaction_enabled = std::env::var("HOLON_LORO_COMPACT")
                 .map(|v| v != "off")
                 .unwrap_or(true);
-            if compaction_enabled && n % COMPACT_EVERY == 0 {
+            if compaction_enabled && n.is_multiple_of(COMPACT_EVERY) {
                 d.save_compact_to_file(&path)?;
             } else {
                 d.save_to_file(&path)?;

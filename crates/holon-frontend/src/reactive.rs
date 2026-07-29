@@ -46,6 +46,19 @@ use crate::render_context::RenderContext;
 use crate::render_interpreter::RenderInterpreter;
 use crate::view_model::ViewModel;
 
+/// Shared signature for `structural_signal`/`reactive_signal` interpret
+/// callbacks.
+type InterpretFn = Arc<dyn Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync>;
+
+/// Callback invoked when a dispatched operation fails, with the error message.
+type OpFailureSink = Arc<dyn Fn(String) + Send + Sync>;
+
+/// Cloned `Mutable` handles for the focus signal + pending caret seed.
+type FocusHandles = (
+    Mutable<Option<EntityUri>>,
+    Mutable<Option<(EntityUri, usize)>>,
+);
+
 // ── BuilderServices trait ───────────────────────────────────────────────
 
 /// Narrow capabilities available to builders during interpretation.
@@ -421,7 +434,7 @@ pub trait BuilderServices: Send + Sync {
     /// Default implementation composes `get_block_data` +
     /// `interpret_with_source`
     /// + `snapshot_resolved`. Implementors with an optimized watcher path (e.g.
-    /// `ReactiveEngine::ensure_watching`) can override.
+    ///   `ReactiveEngine::ensure_watching`) can override.
     fn snapshot_resolved(&self, block_id: &EntityUri) -> crate::view_model::ViewModel {
         let (expr, rows) = self.get_block_data(block_id);
         let ctx = RenderContext {
@@ -756,6 +769,12 @@ pub struct ReactiveRowSet {
     label: String,
 }
 
+impl Default for ReactiveRowSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ReactiveRowSet {
     pub fn new() -> Self {
         Self::labeled("<unlabeled>".to_string())
@@ -913,8 +932,8 @@ impl ReactiveRowSet {
     pub fn snapshot_rows(&self) -> Vec<Arc<DataRow>> {
         self.data
             .lock_ref()
-            .iter()
-            .map(|(_, cell)| cell.get_cloned())
+            .values()
+            .map(|cell| cell.get_cloned())
             .collect()
     }
 
@@ -1010,6 +1029,12 @@ pub struct ReactiveRenderedRows {
     /// underlying query (e.g. an org-file swap replacing the layout) leaves
     /// ghost rows from the old query in the set forever.
     data_generation: std::sync::atomic::AtomicU64,
+}
+
+impl Default for ReactiveRenderedRows {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ReactiveRenderedRows {
@@ -1175,12 +1200,9 @@ impl ReactiveRenderedRows {
     /// **Note**: This re-interprets the ENTIRE tree on every change (structural
     /// OR data). For per-row collection updates, use `structural_signal()`
     /// + `ReactiveCollection`.
-    pub fn reactive_signal<F: ?Sized>(
-        &self,
-        interpret_fn: Arc<F>,
-    ) -> impl Signal<Item = ReactiveViewModel>
+    pub fn reactive_signal<F>(&self, interpret_fn: Arc<F>) -> impl Signal<Item = ReactiveViewModel>
     where
-        F: Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync + 'static,
+        F: ?Sized + Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync + 'static,
     {
         self.reactive_signal_with_ui_gen(interpret_fn, futures_signals::signal::always(0u64))
     }
@@ -1190,13 +1212,13 @@ impl ReactiveRenderedRows {
     ///
     /// Used by `ReactiveEngine` to include `UiState.ui_generation` in the
     /// signal graph so that focus/view-mode changes trigger re-interpretation.
-    pub fn reactive_signal_with_ui_gen<F: ?Sized>(
+    pub fn reactive_signal_with_ui_gen<F>(
         &self,
         interpret_fn: Arc<F>,
         ui_gen_signal: impl Signal<Item = u64> + Send + 'static,
     ) -> impl Signal<Item = ReactiveViewModel>
     where
-        F: Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync + 'static,
+        F: ?Sized + Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync + 'static,
     {
         let expr_signal = self.render_expr.signal_cloned();
         let data_signal = self.rows.data_signal();
@@ -1220,20 +1242,20 @@ impl ReactiveRenderedRows {
     ///
     /// The current data snapshot is read at interpretation time, so the initial
     /// tree is correct. Subsequent data changes are handled by the collection.
-    pub fn structural_signal<F: ?Sized>(
+    pub fn structural_signal<F>(
         &self,
         interpret_fn: Arc<F>,
     ) -> impl Signal<Item = ReactiveViewModel>
     where
-        F: Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync + 'static,
+        F: ?Sized + Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync + 'static,
     {
         let rows = &self.rows;
         let data = rows.data.clone();
         self.render_expr.signal_cloned().map(move |expr| {
             let rows: Vec<Arc<DataRow>> = data
                 .lock_ref()
-                .iter()
-                .map(|(_, cell)| cell.get_cloned())
+                .values()
+                .map(|cell| cell.get_cloned())
                 .collect();
             interpret_fn(&expr, &rows)
         })
@@ -1245,13 +1267,13 @@ impl ReactiveRenderedRows {
     /// Fires on render_expr change OR ui_state change (focus, view mode).
     /// Data-only changes do NOT trigger — those are handled by ReactiveView
     /// drivers.
-    pub fn structural_signal_with_ui_gen<F: ?Sized>(
+    pub fn structural_signal_with_ui_gen<F>(
         &self,
         interpret_fn: Arc<F>,
         ui_gen_signal: impl Signal<Item = u64> + Send + 'static,
     ) -> impl Signal<Item = ReactiveViewModel>
     where
-        F: Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync + 'static,
+        F: ?Sized + Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync + 'static,
     {
         let expr_signal = self.render_expr.signal_cloned();
         let data = self.rows.data.clone();
@@ -1262,8 +1284,8 @@ impl ReactiveRenderedRows {
             => {
                 let rows: Vec<Arc<DataRow>> = data
                     .lock_ref()
-                    .iter()
-                    .map(|(_, cell)| cell.get_cloned())
+                    .values()
+                    .map(|cell| cell.get_cloned())
                     .collect();
                 interpret_fn(expr, &rows)
             }
@@ -1466,7 +1488,7 @@ pub struct UiState {
     /// op error reads as success — this is the fail-loud seam that turns it
     /// into a visible toast. Additive to `error_tracker` +
     /// `tracing::error!`, never a replacement.
-    op_failure_sink: Mutex<Option<Arc<dyn Fn(String) + Send + Sync>>>,
+    op_failure_sink: Mutex<Option<OpFailureSink>>,
 }
 
 impl UiState {
@@ -1617,12 +1639,7 @@ impl UiState {
     /// Cloned `Mutable` handles for the focus signal + pending caret seed.
     /// Used by the dispatch result-hook, which runs in a spawned task and
     /// can't borrow `&self`. `Mutable` clones share state.
-    fn focus_handles(
-        &self,
-    ) -> (
-        Mutable<Option<EntityUri>>,
-        Mutable<Option<(EntityUri, usize)>>,
-    ) {
+    fn focus_handles(&self) -> FocusHandles {
         (self.focused_block.clone(), self.pending_caret_seed.clone())
     }
 
@@ -1717,11 +1734,7 @@ impl UiState {
     pub fn context_for(&self, block_id: &EntityUri) -> HashMap<String, holon_api::Value> {
         let mut ctx = HashMap::new();
 
-        let is_focused = self
-            .focused_block
-            .get_cloned()
-            .as_ref()
-            .map_or(false, |f| f == block_id);
+        let is_focused = self.focused_block.get_cloned().as_ref() == Some(block_id);
         ctx.insert(
             "is_focused".to_string(),
             holon_api::Value::Boolean(is_focused),
@@ -1777,7 +1790,7 @@ pub struct ReactiveEngine {
     registry: ReactiveRegistry,
     session: Arc<FrontendSession>,
     pub runtime_handle: tokio::runtime::Handle,
-    interpret_fn: Arc<dyn Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync>,
+    interpret_fn: InterpretFn,
     /// The shared shadow interpreter, built once by
     /// `HolonFrontendModule::configure()` and injected here via DI. Used by
     /// `BuilderServices::interpret`.
@@ -2114,7 +2127,7 @@ impl ReactiveEngine {
             // Ordered call-stack alongside VISITED so we can log the full
             // resolution chain on cycle detection.
             static STACK: std::cell::RefCell<Vec<EntityUri>> =
-                std::cell::RefCell::new(Vec::new());
+                const { std::cell::RefCell::new(Vec::new()) };
         }
 
         // Try to enter: fail if already visiting this block_id (cycle detected).
@@ -2581,12 +2594,14 @@ impl ReactiveEngine {
 
     /// Send a variant switch command to a block's watcher.
     pub async fn set_variant(&self, block_id: &EntityUri, variant: String) -> anyhow::Result<()> {
-        let watchers = self.watchers.lock().unwrap();
-        let state = watchers
-            .get(block_id)
-            .ok_or_else(|| anyhow::anyhow!("No active watcher for {block_id}"))?;
-        state
-            .command_tx
+        let command_tx = {
+            let watchers = self.watchers.lock().unwrap();
+            let state = watchers
+                .get(block_id)
+                .ok_or_else(|| anyhow::anyhow!("No active watcher for {block_id}"))?;
+            state.command_tx.clone()
+        };
+        command_tx
             .send(holon_api::WatcherCommand::SetVariant(variant))
             .await
             .map_err(|_| anyhow::anyhow!("Watcher channel closed"))
@@ -2801,7 +2816,7 @@ impl BuilderServices for ReactiveEngine {
                 intent.params.get("key").and_then(|v| v.as_string()),
                 intent.params.get("value"),
             ) {
-                let pref_key = crate::preferences::PrefKey::new(&key);
+                let pref_key = crate::preferences::PrefKey::new(key);
                 let toml_value = crate::preferences::value_to_toml(value);
                 // Fail-loud, not fatal: a failed preference persist (e.g. a
                 // read-only config dir on Android) must be disclosed, never
@@ -2918,7 +2933,7 @@ impl BuilderServices for ReactiveEngine {
                 intent.params.get("key").and_then(|v| v.as_string()),
                 intent.params.get("value"),
             ) {
-                let pref_key = crate::preferences::PrefKey::new(&key);
+                let pref_key = crate::preferences::PrefKey::new(key);
                 let toml_value = crate::preferences::value_to_toml(value);
                 // Surface a persist failure to the sync caller instead of
                 // aborting — this path awaits the result (MCP/tests/driver).
@@ -3166,7 +3181,6 @@ impl BuilderServices for ReactiveEngine {
     }
 
     fn list_templates(&self) -> Vec<crate::template_placement::TemplateChoice> {
-        use crate::template_placement::TemplateChoice;
         let session = self.session.clone();
         let rt = self.runtime_handle.clone();
         // Bridge the async snapshot from a fresh thread — same pattern as
@@ -3418,9 +3432,7 @@ pub struct BuilderServicesSlot(pub Arc<std::sync::OnceLock<Arc<dyn BuilderServic
 ///
 /// Registered via `set_render_interpreter()`. Resolved by the ReactiveEngine
 /// factory.
-pub struct RenderInterpreterFn(
-    pub Arc<dyn Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync>,
-);
+pub struct RenderInterpreterFn(pub InterpretFn);
 
 /// Extension trait for registering the render interpreter in DI.
 ///
@@ -3441,8 +3453,7 @@ impl RenderInterpreterInjectorExt for Injector {
         &self,
         interpret_fn: impl Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync + 'static,
     ) {
-        let f: Arc<dyn Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync> =
-            Arc::new(interpret_fn);
+        let f: InterpretFn = Arc::new(interpret_fn);
         let shared = Shared::new(RenderInterpreterFn(f));
         self.provide::<RenderInterpreterFn>(Provider::root(move |_| shared.clone()));
     }
@@ -3452,9 +3463,9 @@ impl RenderInterpreterInjectorExt for Injector {
 ///
 /// The backend `NavigationProvider::focus` op writes `navigation_cursor`
 /// + `navigation_history` in SQL, but there is no CDC path back into the
-/// frontend's `UiState` — so value-fn providers like `focus_chain()`
-/// would stay empty even after navigation. This side-channel keeps them
-/// in sync. Called from both `dispatch_intent` and `dispatch_intent_sync`.
+///   frontend's `UiState` — so value-fn providers like `focus_chain()` would
+///   stay empty even after navigation. This side-channel keeps them in sync.
+///   Called from both `dispatch_intent` and `dispatch_intent_sync`.
 fn maybe_mirror_navigation_focus(ui_state: &UiState, intent: &crate::operations::OperationIntent) {
     if intent.entity_name != "navigation" {
         return;
@@ -3618,7 +3629,7 @@ fn structural_focus_target(
         .unwrap_or(0);
     // ALLOW(entity_uri_from_raw): block_id from a structural op response
     // (operation-result ingest boundary)
-    Some((EntityUri::from_raw(&block_id), offset.max(0) as usize))
+    Some((EntityUri::from_raw(block_id), offset.max(0) as usize))
 }
 
 /// Apply a structural op's focus result to the in-memory authority + caret

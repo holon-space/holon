@@ -521,6 +521,9 @@ impl LoroShareBackend {
     /// Construct with an explicit SQL operation provider. The DI-wired path
     /// uses this so mount-node projection can write Block rows; tests that
     /// don't need UI visibility use [`new`] with `sql_ops = None`.
+    // Grouping these into a params struct would ripple into the caller in
+    // `crates/holon/src/sync/loro_module.rs`, outside this crate.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_sql(
         store: Arc<RwLock<LoroDocumentStore>>,
         snapshot_store: Arc<SharedSnapshotStore>,

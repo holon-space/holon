@@ -117,6 +117,12 @@ pub struct PopupMenu {
     _cancel: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
+impl Default for PopupMenu {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PopupMenu {
     pub fn new() -> Self {
         Self {

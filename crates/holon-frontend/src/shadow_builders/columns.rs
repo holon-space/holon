@@ -4,30 +4,30 @@ use crate::reactive_view_model::CollectionVariant;
 use crate::render_context::AvailableSpace;
 use crate::render_context::LayoutHint;
 
-/// Horizontal list layout — the primary layout of the application.
-///
-/// **Partitioning container**: `columns` is the first (and in v1, only)
-/// builder that refines `available_space` as it cascades from a parent to
-/// its children. Each child receives an equal slice of the parent's
-/// `width_px` (minus the gaps between children), so profile variants
-/// gating on `available_width_px` select correctly per child slot —
-/// e.g. a card inside a narrow sidebar picks its phone variant even on a
-/// wide desktop, because the sidebar columns only gave it ~300 px to work
-/// with. This is the container-query primitive.
-///
-/// Three call shapes are supported:
-///
-/// 1. **Positional children** `columns(a, b, c)` — each child expression is
-///    interpreted lazily with a partitioned `RenderContext` so that `if_space`
-///    / `pick_active_variant` inside a child sees the slot width, not the
-///    parent width.
-///
-/// 2. **Streaming** `columns(item_template: expr, from: live_query)` — the
-///    existing flat-driver path; partitioning is handled by the driver via
-///    `child_space_fn` (unchanged).
-///
-/// 3. **Snapshot** `columns(item_template: expr)` over `ctx.data_rows` — same
-///    partitioning as (1), applied per-row at interpretation time.
+// Horizontal list layout — the primary layout of the application.
+//
+// **Partitioning container**: `columns` is the first (and in v1, only)
+// builder that refines `available_space` as it cascades from a parent to
+// its children. Each child receives an equal slice of the parent's
+// `width_px` (minus the gaps between children), so profile variants
+// gating on `available_width_px` select correctly per child slot —
+// e.g. a card inside a narrow sidebar picks its phone variant even on a
+// wide desktop, because the sidebar columns only gave it ~300 px to work
+// with. This is the container-query primitive.
+//
+// Three call shapes are supported:
+//
+// 1. **Positional children** `columns(a, b, c)` — each child expression is
+//    interpreted lazily with a partitioned `RenderContext` so that `if_space` /
+//    `pick_active_variant` inside a child sees the slot width, not the parent
+//    width.
+//
+// 2. **Streaming** `columns(item_template: expr, from: live_query)` — the
+//    existing flat-driver path; partitioning is handled by the driver via
+//    `child_space_fn` (unchanged).
+//
+// 3. **Snapshot** `columns(item_template: expr)` over `ctx.data_rows` — same
+//    partitioning as (1), applied per-row at interpretation time.
 holon_macros::widget_builder! {
     raw fn columns(ba: BA<'_>) -> ViewModel {
         let gap = ba.args.get_f64("gap").map(|v| v as f32).unwrap_or(16.0);

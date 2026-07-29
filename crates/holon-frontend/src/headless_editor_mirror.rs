@@ -366,7 +366,7 @@ impl HeadlessEditorMirror {
             }
         };
 
-        let has_shift = modifiers.iter().any(|m| *m == "shift");
+        let has_shift = modifiers.contains(&"shift");
         let has_ctrl_alt_cmd = modifiers
             .iter()
             .any(|m| matches!(*m, "ctrl" | "alt" | "cmd"));

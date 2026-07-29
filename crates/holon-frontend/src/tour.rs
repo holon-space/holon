@@ -371,9 +371,11 @@ mod tests {
     }
 
     fn step_block(id: &str, content: &str, anchor: &str, advance: &str) -> Block {
-        let mut b = Block::default();
-        b.id = EntityUri::from_raw(id);
-        b.content = content.to_string();
+        let mut b = Block {
+            id: EntityUri::from_raw(id),
+            content: content.to_string(),
+            ..Default::default()
+        };
         b.set_property("TOUR_ANCHOR", Value::String(anchor.to_string()));
         b.set_property("TOUR_ADVANCE", Value::String(advance.to_string()));
         b
@@ -381,8 +383,10 @@ mod tests {
 
     #[test]
     fn parses_a_three_step_tour() {
-        let mut root = Block::default();
-        root.id = EntityUri::from_raw("tour-welcome");
+        let root = Block {
+            id: EntityUri::from_raw("tour-welcome"),
+            ..Default::default()
+        };
         let steps = vec![
             step_block("s1", "sidebar", "panel:sidebar", "next"),
             step_block("s2", "main", "panel:main", "next"),
@@ -410,8 +414,10 @@ mod tests {
 
     #[test]
     fn malformed_advance_fails_loudly() {
-        let mut root = Block::default();
-        root.id = EntityUri::from_raw("t");
+        let root = Block {
+            id: EntityUri::from_raw("t"),
+            ..Default::default()
+        };
         let steps = vec![step_block(
             "s1",
             "x",
@@ -465,8 +471,10 @@ mod tests {
 
     #[test]
     fn view_model_projects_and_advances_with_gating() {
-        let mut root = Block::default();
-        root.id = EntityUri::from_raw("t");
+        let root = Block {
+            id: EntityUri::from_raw("t"),
+            ..Default::default()
+        };
         let steps = vec![
             step_block("s1", "sidebar", "panel:sidebar", "next"),
             step_block(

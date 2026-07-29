@@ -1005,6 +1005,12 @@ impl LoroProjection {
 
     /// Apply the diff ops through the consolidator and advance the watermark.
     /// Shared by the incremental fast path and the full reseed path.
+    // This is an internal batch-emission helper called from exactly two
+    // orchestration sites in this file with the diagnostic fields
+    // (t0/snapshot_ms/after_len/before_len/mode/reason) already at hand
+    // there; a params struct would just move the same positional list one
+    // level out without reducing call-site complexity.
+    #[allow(clippy::too_many_arguments)]
     async fn emit_ops(
         &self,
         ops: Vec<(String, holon_api::StorageEntity)>,

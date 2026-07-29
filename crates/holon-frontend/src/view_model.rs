@@ -71,6 +71,11 @@ pub enum DrawerMode {
 }
 
 impl DrawerMode {
+    /// Infallible parse from a render-spec/prop string, defaulting to
+    /// `Shrink` for anything but `"overlay"` — not `std::str::FromStr`
+    /// (which is fallible). Renaming would break call sites in
+    /// `frontends/gpui`, so the shadowing name is kept.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "overlay" => Self::Overlay,
@@ -1489,15 +1494,10 @@ impl ViewModel {
     /// Find the first `EditableText` descendant whose entity `id` matches
     /// `entity_id`.
     pub fn find_editable_text(&self, entity_id: &str) -> Option<&ViewModel> {
-        if matches!(&self.kind, ViewKind::EditableText { .. }) {
-            if self
-                .entity
-                .get("id")
-                .and_then(|v| v.as_string())
-                .map_or(false, |id| id == entity_id)
-            {
-                return Some(self);
-            }
+        if matches!(&self.kind, ViewKind::EditableText { .. })
+            && self.entity.get("id").and_then(|v| v.as_string()) == Some(entity_id)
+        {
+            return Some(self);
         }
         self.children()
             .iter()

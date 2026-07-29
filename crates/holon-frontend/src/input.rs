@@ -38,7 +38,12 @@ impl WidgetInput {
 }
 
 /// What happened when a widget tried to handle an input.
+///
+/// `ExecuteOperation` is intentionally unboxed — it is constructed and
+/// matched at dozens of call sites across the frontend, so boxing it would
+/// ripple far beyond this file for a rare, non-hot-path variant.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum InputAction {
     /// Input was consumed. Stop bubbling.
     Handled,
