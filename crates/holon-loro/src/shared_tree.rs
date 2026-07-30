@@ -246,14 +246,16 @@ fn collect_subtree_ids(tree: &LoroTree, root: TreeID) -> HashSet<TreeID> {
     result
 }
 
-/// Collect descendants of `node` that are NOT in `keep`, adding them to
-/// `to_delete`. Iterative to avoid stack overflow.
 /// Clear every container hanging off a tree node's `meta` map, and drop the map
 /// entries that point at them.
 ///
 /// Mergeable children live at deterministic ROOT container ids rather than
 /// under their logical parent, so nothing about deleting the tree node reaches
 /// them.
+///
+/// Deleting a text's characters keeps them out of the exported bytes; its style
+/// spans are NOT covered — see
+/// [`tests::none_retention_leaks_sibling_mark_payloads_at_byte_level`].
 fn empty_child_containers(meta: &loro::LoroMap) -> Result<()> {
     let keys: Vec<String> = match meta.get_value() {
         LoroValue::Map(m) => m.keys().cloned().collect(),
@@ -261,6 +263,8 @@ fn empty_child_containers(meta: &loro::LoroMap) -> Result<()> {
     };
 
     for key in keys {
+        // Plain values need no clearing: they live IN the meta map, which dies
+        // with the tree node. Only containers outlive it.
         let Some(ValueOrContainer::Container(container)) = meta.get(&key) else {
             continue;
         };
@@ -289,6 +293,8 @@ fn empty_child_containers(meta: &loro::LoroMap) -> Result<()> {
     Ok(())
 }
 
+/// Collect descendants of `node` that are NOT in `keep`, adding them to
+/// `to_delete`. Iterative to avoid stack overflow.
 fn collect_non_subtree_descendants(
     tree: &LoroTree,
     node: TreeID,
@@ -714,6 +720,69 @@ mod tests {
         assert!(
             String::from_utf8_lossy(&full_bytes).contains(SECRET),
             "expected the Full-retention snapshot to leak the sibling — test is vacuous otherwise"
+        );
+    }
+
+    /// The same guarantee for a link mark's payload (its url and label), which
+    /// does NOT hold — this test fails, and is ignored to say so out loud.
+    ///
+    /// Deleting a pruned node's characters keeps them out of the exported bytes
+    /// (the test above). Style spans have no such lever: the payload is
+    /// unreachable through every loro API on the shared doc — the node is
+    /// deleted, so its meta, richtext value and deep value are all empty — yet
+    /// the original style op stays in the shallow snapshot's retained segment.
+    /// `unmark`ing the full range before the delete does not remove it, and
+    /// neither does re-importing and re-exporting the snapshot.
+    ///
+    /// Closing it needs either a loro-fork change or an `extract_subtree` that
+    /// copies the kept subtree into a fresh doc instead of forking and pruning.
+    ///
+    /// Byte-substring is a noisy oracle here (`mark_to_loro_value` builds a
+    /// `std::collections::HashMap`, so field order — and thus which of
+    /// url/label survives compression contiguously — varies per process);
+    /// a hit is nonetheless proof the plaintext is present.
+    #[test]
+    #[ignore = "known gap: loro retains style-op payloads in shallow snapshots; needs a loro-fork fix or a copy-based extract_subtree"]
+    fn none_retention_leaks_sibling_mark_payloads_at_byte_level() {
+        const URL: &str = "https://secret.example.invalid/PROD-LINK-SECRET-7f31";
+        const LABEL: &str = "PROD-LINK-LABEL-SECRET-7f31";
+
+        let doc = LoroDoc::new();
+        crate::loro_backend::configure_text_styles(&doc);
+        doc.set_peer_id(1).unwrap();
+        let tree = doc.get_tree(TREE_NAME);
+        tree.enable_fractional_index(0);
+
+        let doc_root = tree.create(None).unwrap();
+        let secret_sibling = tree.create(doc_root).unwrap();
+        set_text(&tree, secret_sibling, "click here for the private doc");
+        let mark = holon_api::InlineMark::Link {
+            target: holon_api::EntityRef::External {
+                url: URL.to_string(),
+            },
+            label: LABEL.to_string(),
+        };
+        {
+            let meta = tree.get_meta(secret_sibling).unwrap();
+            let text: LoroText = meta.ensure_mergeable_text("content_raw").unwrap();
+            text.mark(
+                0..5,
+                mark.loro_key(),
+                crate::loro_backend::mark_to_loro_value(&mark),
+            )
+            .unwrap();
+        }
+        let shared_root = tree.create(doc_root).unwrap();
+        set_text(&tree, shared_root, "Shared heading");
+        doc.commit();
+
+        let none = extract_subtree(&doc, shared_root, HistoryRetention::None).unwrap();
+        let bytes = none.shared_doc.export(ExportMode::Snapshot).unwrap();
+        let rendered = String::from_utf8_lossy(&bytes);
+
+        assert!(
+            !rendered.contains(URL) && !rendered.contains(LABEL),
+            "none-retention share leaked the pruned sibling's link payload into the raw bytes"
         );
     }
 
