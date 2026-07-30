@@ -69,6 +69,10 @@ impl QueryEngine for BackendEngine {
         ))
     }
 
+    fn ordering_spec(&self, query: &str, language: QueryLanguage) -> Result<Option<String>> {
+        BackendEngine::query_ordering_spec(self, query, language)
+    }
+
     async fn search_link_candidates(&self, filter: &str) -> Result<Vec<LinkCandidate>> {
         use crate::storage::BLOCK_READ_TABLE;
         let escaped = filter.replace('\'', "''");

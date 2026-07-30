@@ -117,6 +117,12 @@ impl ReactiveRowProvider for LaneFilteredProvider {
         // provider regardless of which lane it currently sits in.
         self.upstream.row_mutable(id)
     }
+
+    fn ordering_spec(&self) -> Option<String> {
+        // Filtering a relation preserves its order, so the lane inherits the
+        // upstream query's declared order.
+        self.upstream.ordering_spec()
+    }
 }
 
 #[cfg(test)]

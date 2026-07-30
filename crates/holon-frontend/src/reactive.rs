@@ -1044,6 +1044,11 @@ pub struct ReactiveRenderedRows {
     /// a legal generation, so "still zero" does not mean "nothing arrived".
     first_data_seen: std::sync::atomic::AtomicBool,
     data_ready: tokio::sync::Notify,
+    /// Sort-key spec (`col` / `-col`) derived from the watched query's
+    /// `ORDER BY`. Set by [`ReactiveEngine::ensure_query_watching`] before the
+    /// watcher spawns; a block watcher (`watch_ui`) leaves it `None` so
+    /// outline children keep their fractional-index order.
+    ordering_spec: std::sync::RwLock<Option<String>>,
 }
 
 impl Default for ReactiveRenderedRows {
@@ -1065,7 +1070,15 @@ impl ReactiveRenderedRows {
             data_generation: std::sync::atomic::AtomicU64::new(0),
             first_data_seen: std::sync::atomic::AtomicBool::new(false),
             data_ready: tokio::sync::Notify::new(),
+            ordering_spec: std::sync::RwLock::new(None),
         }
+    }
+
+    /// Declare the row order this query's `ORDER BY` asks for. Collections
+    /// rendering these rows adopt it unless the template names its own
+    /// `sortkey:`.
+    pub fn set_ordering_spec(&self, spec: Option<String>) {
+        *self.ordering_spec.write().unwrap() = spec;
     }
 
     /// Set the render expression directly.
@@ -1381,6 +1394,9 @@ impl ReactiveRowProvider for ReactiveRenderedRows {
         // the same rows would share identity, which is what the cache
         // wants.
         ptr_identity(&self.rows)
+    }
+    fn ordering_spec(&self) -> Option<String> {
+        self.ordering_spec.read().unwrap().clone()
     }
 }
 
@@ -2654,6 +2670,7 @@ impl ReactiveEngine {
         let results = self.registry.get_or_create(&key);
         results.set_render_expr(render_expr);
         results.set_generation(1);
+        results.set_ordering_spec(self.query_ordering_spec(&query, lang));
 
         let mut watchers = self.watchers.lock().unwrap();
         if let Some(state) = watchers.get_mut(&key) {
@@ -2706,6 +2723,29 @@ impl ReactiveEngine {
         }
 
         (key, results)
+    }
+
+    /// The row order this query declares, for the collection rendering it to
+    /// adopt. `None` in a no-Turso session (no compiler, hence no clause to
+    /// read) and on a query that names no `ORDER BY`.
+    ///
+    /// A compile failure is disclosed here and reported again — as the actual
+    /// error — by the watcher task, which fails on the same compile moments
+    /// later. Sinking it into a `Result` this method's callers cannot return
+    /// would only duplicate that report.
+    fn query_ordering_spec(&self, query: &str, lang: QueryLanguage) -> Option<String> {
+        let engine = self.session.query_engine()?;
+        match engine.ordering_spec(query, lang) {
+            Ok(spec) => spec,
+            Err(e) => {
+                tracing::error!(
+                    query_prefix = query.chars().take(120).collect::<String>(),
+                    "query does not compile, so its declared row order is unknown; the collection \
+                     renders in its default order: {e}"
+                );
+                None
+            }
+        }
     }
 
     /// Send a variant switch command to a block's watcher.

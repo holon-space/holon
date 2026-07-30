@@ -48,6 +48,76 @@ pub fn trailing_order_by(sql: &str) -> Option<String> {
     Some(sql[start..end].trim().to_string())
 }
 
+/// Translate an `ORDER BY` clause into the render layer's sort-key spec —
+/// `col` for ascending, `-col` for descending — so a watched query's declared
+/// order can drive the rendered collection's sort.
+///
+/// Only a single plain column is expressible in that form. A multi-column
+/// clause keeps its FIRST column and discloses the truncation; an
+/// expression, collation, or `NULLS` ordering is not expressible at all and
+/// yields `None` with a warning rather than a wrong order.
+///
+/// Panics if `order_by` is not an `ORDER BY` clause — the only producer is
+/// [`trailing_order_by`], so anything else is a programming error.
+pub fn order_by_sort_spec(order_by: &str) -> Option<String> {
+    let trimmed = order_by.trim();
+    let list = match trimmed.get(..8) {
+        Some(kw) if kw.eq_ignore_ascii_case("ORDER BY") => trimmed[8..].trim(),
+        _ => panic!("order_by_sort_spec expects an ORDER BY clause, got {order_by:?}"),
+    };
+
+    let mut terms = list.split(',');
+    let first = terms.next().expect("split always yields one term").trim();
+    let extra = terms.count();
+    if extra > 0 {
+        tracing::warn!(
+            clause = %trimmed,
+            "multi-column ORDER BY: the rendered sort key holds ONE column, so the {extra} \
+             trailing column(s) are dropped and rows tying on the first column render in \
+             row-key order"
+        );
+    }
+
+    let tokens: Vec<&str> = first.split_whitespace().collect();
+    let (column, descending) = match tokens.as_slice() {
+        [col] => (*col, false),
+        [col, dir] if dir.eq_ignore_ascii_case("ASC") => (*col, false),
+        [col, dir] if dir.eq_ignore_ascii_case("DESC") => (*col, true),
+        _ => {
+            tracing::warn!(
+                term = %first,
+                "ORDER BY term is not `column [ASC|DESC]`; the rendered collection cannot honour \
+                 it and falls back to its default row order"
+            );
+            return None;
+        }
+    };
+
+    let column = column
+        .trim_matches('"')
+        .trim_matches('`')
+        .trim_matches('\'');
+    if column.is_empty()
+        || column.starts_with(|c: char| c.is_ascii_digit())
+        || !column
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        tracing::warn!(
+            term = %first,
+            "ORDER BY sorts on an expression, not a plain column; the rendered collection cannot \
+             honour it and falls back to its default row order"
+        );
+        return None;
+    }
+
+    Some(if descending {
+        format!("-{column}")
+    } else {
+        column.to_string()
+    })
+}
+
 /// Byte index of the earliest top-level (depth 0, outside quotes) occurrence
 /// of ORDER BY / LIMIT / OFFSET as a standalone keyword, if any.
 fn find_top_level_trailing_clause(sql: &str) -> Option<usize> {
@@ -104,7 +174,69 @@ fn keyword_at(bytes: &[u8], idx: usize, keyword: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::order_by_sort_spec;
     use super::strip_order_by;
+
+    #[test]
+    fn sort_spec_single_column_defaults_to_ascending() {
+        assert_eq!(order_by_sort_spec("ORDER BY name").as_deref(), Some("name"));
+    }
+
+    #[test]
+    fn sort_spec_explicit_asc() {
+        assert_eq!(
+            order_by_sort_spec("ORDER BY name ASC").as_deref(),
+            Some("name")
+        );
+    }
+
+    #[test]
+    fn sort_spec_desc_becomes_a_minus_prefix() {
+        assert_eq!(
+            order_by_sort_spec("ORDER BY last_activity DESC").as_deref(),
+            Some("-last_activity")
+        );
+    }
+
+    #[test]
+    fn sort_spec_keyword_case_is_irrelevant() {
+        assert_eq!(
+            order_by_sort_spec("order by last_activity desc").as_deref(),
+            Some("-last_activity")
+        );
+    }
+
+    #[test]
+    fn sort_spec_unquotes_a_quoted_column() {
+        assert_eq!(
+            order_by_sort_spec("ORDER BY \"last_activity\" DESC").as_deref(),
+            Some("-last_activity")
+        );
+    }
+
+    // Disclosed truncation: the sort-key spec holds one column, so the
+    // secondary keys are dropped — loudly, never silently.
+    #[test]
+    fn sort_spec_multi_column_keeps_the_first_column() {
+        assert_eq!(
+            order_by_sort_spec("ORDER BY last_activity DESC, name ASC").as_deref(),
+            Some("-last_activity")
+        );
+    }
+
+    #[test]
+    fn sort_spec_expression_is_not_expressible() {
+        assert_eq!(order_by_sort_spec("ORDER BY lower(name)"), None);
+        assert_eq!(order_by_sort_spec("ORDER BY name COLLATE NOCASE"), None);
+        assert_eq!(order_by_sort_spec("ORDER BY name DESC NULLS LAST"), None);
+        assert_eq!(order_by_sort_spec("ORDER BY 1"), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "expects an ORDER BY clause")]
+    fn sort_spec_rejects_a_non_order_by_clause() {
+        order_by_sort_spec("LIMIT 10");
+    }
 
     #[test]
     fn strip_order_by_removes_clause() {

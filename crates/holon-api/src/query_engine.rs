@@ -46,6 +46,21 @@ pub trait QueryEngine: Send + Sync {
         context: Option<QueryContext>,
     ) -> Result<EnrichedChangeStream>;
 
+    /// Sort-key spec (`col` for ascending, `-col` for descending) implied by
+    /// the query's trailing `ORDER BY`, for the collection that renders its
+    /// rows to sort by.
+    ///
+    /// Lives on the engine because compilation does: the frontend only ever
+    /// holds the source query, and the clause is stripped from the matview
+    /// body before it reaches storage.
+    ///
+    /// Default `None` — an engine with no SQL compiler declares no order, and
+    /// its collections keep their own row order.
+    // ALLOW(unused_param): trait default; overriding impls bind both
+    fn ordering_spec(&self, _: &str, _: QueryLanguage) -> Result<Option<String>> {
+        Ok(None)
+    }
+
     /// Search blocks/pages matching `filter` for the `[[` link-autocomplete
     /// popup. Replaces the raw-SQL `popup_query` capability: the search SQL
     /// lives behind the impl, the frontend only sees typed candidates.

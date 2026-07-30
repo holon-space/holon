@@ -26,5 +26,7 @@ pub use holon_turso::matview_manager;
 pub use holon_turso::matview_manager::MatviewManager;
 pub use holon_turso::matview_manager::WatchResult;
 pub use holon_turso::matview_manager::reconcile_named_view;
+pub use holon_turso::util::order_by_sort_spec;
+pub use holon_turso::util::trailing_order_by;
 pub use loro_module::LoroConfig;
 pub use loro_module::LoroModule;

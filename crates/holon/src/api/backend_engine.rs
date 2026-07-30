@@ -311,6 +311,24 @@ impl BackendEngine {
         Ok(self.apply_sql_transforms(&raw_sql))
     }
 
+    /// The rendered sort-key spec (`col` / `-col`) implied by the query's
+    /// trailing `ORDER BY`, or `None` when it declares no order.
+    ///
+    /// Only derivable here: the matview body cannot carry the clause (Turso
+    /// IVM rejects a Sort node) and the frontend never sees compiled SQL.
+    /// Context/parameter binding is irrelevant — an `ORDER BY` term is a
+    /// column, never a placeholder.
+    pub fn query_ordering_spec(
+        &self,
+        query: &str,
+        language: QueryLanguage,
+    ) -> Result<Option<String>> {
+        let sql = self.compile_to_sql(query, language)?;
+        Ok(crate::sync::trailing_order_by(&sql)
+            .as_deref()
+            .and_then(crate::sync::order_by_sort_spec))
+    }
+
     /// Compile a PRQL query to raw SQL (no transforms applied).
     fn compile_prql_to_raw_sql(&self, prql: &str) -> Result<String> {
         let full_prql = format!("{}\n{}", PRQL_STDLIB, prql);
@@ -609,9 +627,17 @@ impl BackendEngine {
         let view_name = self.matview_manager.ensure_view(&sql_with_params).await?;
         let cdc_stream = self.matview_manager.subscribe_cdc(&view_name).await?;
 
+        // `ensure_view` stripped the trailing ORDER BY (IVM rejects a Sort
+        // node), so the snapshot read has to re-apply it or watched and
+        // one-shot reads of the same query disagree on order.
+        let order_by = crate::sync::trailing_order_by(&sql_with_params);
         let mut data = None;
         for attempt in 0..10 {
-            match self.matview_manager.query_view(&view_name).await {
+            match self
+                .matview_manager
+                .query_view_ordered(&view_name, order_by.as_deref())
+                .await
+            {
                 Ok(results) => {
                     data = Some(results);
                     break;
@@ -1071,6 +1097,44 @@ mod tests {
         let sql = result.unwrap();
         assert!(sql.to_uppercase().contains("SELECT"));
         assert!(sql.to_uppercase().contains("FROM"));
+    }
+
+    /// The frontend never sees compiled SQL, so a `sort {-x}` sidecar's order
+    /// can only reach the rendered collection through this derivation.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ordering_spec_carries_a_prql_sort_to_the_render_layer() {
+        let engine = create_test_engine().await.unwrap();
+
+        assert_eq!(
+            engine
+                .query_ordering_spec(
+                    "from block | select {id, content} | sort {-content}",
+                    QueryLanguage::HolonPrql
+                )
+                .expect("PRQL compile")
+                .as_deref(),
+            Some("-content")
+        );
+        assert_eq!(
+            engine
+                .query_ordering_spec(
+                    "from block | select {id, content} | sort content",
+                    QueryLanguage::HolonPrql
+                )
+                .expect("PRQL compile")
+                .as_deref(),
+            Some("content")
+        );
+        assert_eq!(
+            engine
+                .query_ordering_spec(
+                    "from block | select {id, content}",
+                    QueryLanguage::HolonPrql
+                )
+                .expect("PRQL compile"),
+            None,
+            "a query that declares no order must not impose one"
+        );
     }
 
     /// Validates the H1 hypothesis from HANDOFF_DATA_CDC_SCOPE_LEAK.md:
