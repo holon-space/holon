@@ -1234,14 +1234,15 @@ mod teeth {
             "the `:Page:`-tagged child's name AND body must survive the first boot — they were \
              pruned from the parent and written to no file; disk = {contents:#?}",
         );
-        // DISCLOSED GAP (Loro wiring only): the SECONDARY root-body loss is not
-        // asserted here. Under Turso the doc-root's own content reaches disk —
-        // the sibling test above asserts exactly that — but under Loro the
-        // synced doc-root content never reaches the render, so the PARENT files
-        // still lose `Root body.` and their true `#+TITLE:`. That is a separate
-        // storage-seam divergence, reported as a follow-up. The PRIMARY loss
-        // this test exists for — the `:Page:`-tagged child — is asserted above
-        // and is fixed on BOTH wirings.
+        // DISCLOSED HARNESS GAP: the secondary root-body loss is not asserted
+        // on this wiring. The real Loro-backed app DOES keep the root body (the
+        // clean-room repro against `holon-gpui` writes `#+TITLE: Tagged Root` +
+        // `Root body.` back), and the Turso rung above asserts it — but this
+        // headless Loro component reads its doc-root through a seam that never
+        // sees the synced content, so asserting here would fail on a harness
+        // divergence rather than a product defect. Tracked as a fidelity
+        // follow-up; the PRIMARY loss this test exists for — the `:Page:`-tagged
+        // child — is asserted above and fixed on both wirings.
         let disk_ids = comp.disk_org_file_ids().await;
         assert!(
             disk_ids.iter().any(|id| id == "tagged-child"),
