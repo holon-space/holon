@@ -129,9 +129,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
-      - name: Run clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
+      # Tests and the worker rot-guard run BEFORE clippy on purpose: lint debt
+      # must never mask test or build signal. Formatting stays first only
+      # because it is seconds, not minutes.
       - name: Run Rust tests
         run: cargo test --workspace --exclude rust_lib_holon
 
@@ -144,6 +144,9 @@ jobs:
         run: |
           rustup target add wasm32-wasip1-threads
           EMNAPI_LINK_DIR="$(mktemp -d)" cargo check --manifest-path frontends/holon-worker/Cargo.toml --target wasm32-wasip1-threads --features browser
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   # Feature-gated test suites that the default `cargo test --workspace` does NOT
   # reach. BugFunnel row 78: `holon-orgmode/tests/sync_controller_mutation_pbt.rs`
