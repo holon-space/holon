@@ -94,6 +94,16 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
+      # `--workspace --all-targets` reaches holon-gpui, which links GPUI's native
+      # stack (wayland-sys, fontconfig). Same block as gated-suites/latency-gate.
+      - name: Install GPUI Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake pkg-config \
+            libfontconfig1-dev libwayland-dev libxkbcommon-dev \
+            libxcb1-dev libx11-dev libasound2-dev libudev-dev libssl-dev
+
       - name: Check formatting
         run: cargo fmt --check
 
