@@ -32,6 +32,14 @@ computed:
   # query path (C-revised ruling); the same `rule_sibling` live entity already
   # backs `is_program`, so no new lookup is introduced.
   has_query_source: 'query_source(id) != () && rule_sibling(id) == ()'
+  # Opt-OUT of the headline. A query-source block draws its own text by default
+  # — a user-authored heading like `** Projects` must never render blank — so
+  # only the seeded layout regions, whose heading is a container name nobody
+  # wants drawn, set `:WIDGET_ONLY: t`. Written `== true || == 1` rather than
+  # `!= ()`: the column arrives as Boolean from a Loro row and Integer from SQL,
+  # and Rhai's cross-type `!=` is TRUE for `false != 0`, which would invert the
+  # default for every un-flagged block.
+  is_widget_only: 'widget_only == true || widget_only == 1'
   # A rule head: the `holon_rule` language or the retired `action` language
   # (ADR 0024). Pure-row check — no DB lookup.
   is_rule_head: 'is_source && (source_language == "holon_rule" || source_language == "action")'
@@ -129,8 +137,15 @@ variants:
     render: 'spacer(0)'
   - name: query_block
     priority: -1
-    condition: 'has_query_source'
+    condition: 'has_query_source && is_widget_only'
     render: 'live_block()'
+  # The DEFAULT for a query-source block: its own headline, then its widget.
+  # Same row as the `default` variant so a query page's title, bullet, task
+  # toggle and drag affordance behave identically to any other block.
+  - name: query_block_titled
+    priority: -1
+    condition: 'has_query_source && !is_widget_only'
+    render: 'column(row(#{gap: 2, align: "start"}, selectable(draggable(icon(col("bullet_shape"), #{size: 12, color: "primary", mt: 12})), #{shift_action: focus_pin(#{region: "right", block_id: col("id")})}), state_toggle(col("task_state"), #{states: col("todo_states"), mt: 10}), rendered_text(col("content"))), live_block(), drop_zone())'
   - name: image_block
     priority: -1
     condition: 'is_image'
