@@ -95,30 +95,26 @@ async fn facet(session: &holon_frontend::FrontendSession, id: &str) -> BlockFace
     }
 }
 
-async fn pick_target(session: &holon_frontend::FrontendSession) -> (String, String) {
-    let snap = session
-        .block_query()
-        .snapshot()
+/// Author the block these assertions edit, instead of fishing one out of the
+/// seed. `iter_blocks()` yields no defined order, so a picked target varied per
+/// run; when it landed on `block:__default__` the content assertion compared a
+/// string the org write-back round trip rewrites (`__x__` is emphasis markup,
+/// and re-ingest returns `x`).
+async fn create_target(session: &holon_frontend::FrontendSession) -> (String, String) {
+    let id = "block:undo-cycle-target".to_string();
+    let content = "undo cycle target".to_string();
+    let mut params = std::collections::HashMap::new();
+    params.insert("id".to_string(), Value::String(id.clone()));
+    params.insert(
+        "parent_id".to_string(),
+        Value::String("block:journals".to_string()),
+    );
+    params.insert("content".to_string(), Value::String(content.clone()));
+    session
+        .execute_operation(&EntityName::new("block"), "create", params)
         .await
-        .expect("block snapshot");
-    let target = snap
-        .iter_blocks()
-        .find(|b| {
-            let id = b.id.as_str();
-            id.starts_with("block:")
-                && !id.contains("::src::")
-                && !id.contains("::render::")
-                && !b.content.is_empty()
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "no editable seeded content block found; snapshot ids: {:?}",
-                snap.iter_blocks()
-                    .map(|b| b.id.as_str())
-                    .collect::<Vec<_>>()
-            )
-        });
-    (target.id.as_str().to_string(), target.content.clone())
+        .expect("create the undo target block");
+    (id, content)
 }
 
 #[test]
@@ -135,7 +131,7 @@ fn cycle_task_state_undo_reverts_the_cycle_not_the_previous_op() {
             "fresh prod session must start with an empty undo stack"
         );
 
-        let (target_id, original_content) = pick_target(&session).await;
+        let (target_id, original_content) = create_target(&session).await;
         let original_task_state = task_state(&session, &target_id).await;
         let edited = format!("{original_content} edited-first-op");
 
@@ -245,7 +241,7 @@ fn metamorphic_property_ops_round_trip_through_undo() {
         let env = TestEnvironment::new(runtime.clone()).unwrap();
         env.start_app(true).await.expect("start_app");
         let session = env.session_arc();
-        let (target_id, _) = pick_target(&session).await;
+        let (target_id, _) = create_target(&session).await;
 
         // (op-name, params-builder). Each is a distinct User-undoable authoring
         // op whose provider MUST return `UndoAction::Undo`.
