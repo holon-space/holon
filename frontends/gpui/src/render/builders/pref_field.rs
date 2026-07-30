@@ -35,6 +35,7 @@ fn set_preference_or_toast(
                 kind: crate::share_ui::DegradedKind::PreferenceSaveFailed,
                 shared_tree_id: format!("preference:{key}"),
                 detail: format!("Couldn't save '{key}': {e:#}"),
+                condition: None,
             },
             cx,
         );

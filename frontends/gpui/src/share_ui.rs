@@ -36,6 +36,8 @@ use gpui::Stateful;
 use gpui::div;
 use gpui::prelude::*;
 use gpui::px;
+use holon::sync::DegradedChange;
+use holon::sync::DegradedConditionKey;
 use holon::sync::ShareDegraded;
 use holon::sync::ShareDegradedReason;
 use holon_api::EntityName;
@@ -103,6 +105,9 @@ pub struct DegradedToast {
     pub kind: DegradedKind,
     pub shared_tree_id: String,
     pub detail: String,
+    /// Set when this toast reflects an ongoing degraded CONDITION rather than a
+    /// transient failure — it is upserted on re-raise and removed on clear.
+    pub condition: Option<DegradedConditionKey>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -226,12 +231,14 @@ impl ShareUiState {
 
     /// Route a broadcast event from the degraded bus into the right field.
     pub fn apply_degraded(&mut self, event: ShareDegraded) {
+        let condition = event.condition_key();
         match event.reason {
             ShareDegradedReason::SnapshotSaveFailed(detail) => {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::SnapshotSaveFailed,
                     shared_tree_id: event.shared_tree_id,
                     detail,
+                    condition: condition.clone(),
                 });
             }
             ShareDegradedReason::RehydrationFailed(detail) => {
@@ -239,6 +246,7 @@ impl ShareUiState {
                     kind: DegradedKind::RehydrationFailed,
                     shared_tree_id: event.shared_tree_id,
                     detail,
+                    condition: condition.clone(),
                 });
             }
             ShareDegradedReason::SqlProjectionFailed(detail) => {
@@ -246,6 +254,7 @@ impl ShareUiState {
                     kind: DegradedKind::SqlProjectionFailed,
                     shared_tree_id: event.shared_tree_id,
                     detail,
+                    condition: condition.clone(),
                 });
             }
             ShareDegradedReason::ForeignIdCollision(block_id) => {
@@ -253,6 +262,7 @@ impl ShareUiState {
                     kind: DegradedKind::ForeignIdCollision,
                     shared_tree_id: event.shared_tree_id,
                     detail: block_id,
+                    condition: condition.clone(),
                 });
             }
             ShareDegradedReason::SnapshotLoadFailed(path) => {
@@ -266,6 +276,7 @@ impl ShareUiState {
                     kind: DegradedKind::OrgIngestFailed,
                     shared_tree_id: event.shared_tree_id,
                     detail: summary,
+                    condition: condition.clone(),
                 });
             }
             ShareDegradedReason::SharedSubtreeNotMaterialized(detail) => {
@@ -273,6 +284,7 @@ impl ShareUiState {
                     kind: DegradedKind::SharedSubtreeNotMaterialized,
                     shared_tree_id: event.shared_tree_id,
                     detail,
+                    condition: condition.clone(),
                 });
             }
             // The toast body truncates `detail` at 80 chars, so both of these
@@ -282,6 +294,7 @@ impl ShareUiState {
                     kind: DegradedKind::IntegrationConnectFailed,
                     shared_tree_id: event.shared_tree_id,
                     detail: format!("{integration}: {error}"),
+                    condition: condition.clone(),
                 });
             }
             ShareDegradedReason::IntegrationNeedsAuth {
@@ -292,13 +305,31 @@ impl ShareUiState {
                     kind: DegradedKind::IntegrationNeedsAuth,
                     shared_tree_id: event.shared_tree_id,
                     detail: format!("{integration}: authorize at {auth_url}"),
+                    condition: condition.clone(),
                 });
             }
         }
     }
 
+    /// Drop the toast for a condition the bus reports as no longer in effect.
+    pub fn apply_degraded_cleared(&mut self, key: &DegradedConditionKey) {
+        self.toasts.retain(|t| t.condition.as_ref() != Some(key));
+    }
+
     pub fn push_toast(&mut self, toast: DegradedToast) {
         const MAX_TOASTS: usize = 5;
+        // A condition can arrive twice — once in a subscription's replayed
+        // `current`, once as a live `Raised` — so it upserts rather than stacks.
+        if let Some(key) = toast.condition.clone() {
+            if let Some(existing) = self
+                .toasts
+                .iter_mut()
+                .find(|t| t.condition.as_ref() == Some(&key))
+            {
+                *existing = toast;
+                return;
+            }
+        }
         if self.toasts.len() >= MAX_TOASTS {
             self.toasts.remove(0);
         }
@@ -385,15 +416,23 @@ pub fn spawn_degraded_bus_bridge(
     window_handle: AnyWindowHandle,
     async_cx: &AsyncApp,
 ) {
-    let (tx, mut rx) = futures::channel::mpsc::unbounded::<ShareDegraded>();
+    let (tx, mut rx) = futures::channel::mpsc::unbounded::<DegradedChange>();
 
-    // Tokio side: recv from broadcast, forward to mpsc.
+    // Tokio side: replay the conditions already in effect (they may have been
+    // raised during boot DI, long before this window existed), then pump live
+    // changes.
     rt_handle.spawn(async move {
-        let mut bus_rx = backend.degraded_bus().subscribe();
+        let subscription = backend.degraded_bus().subscribe();
+        let mut bus_rx = subscription.changes;
+        for event in subscription.current {
+            if tx.unbounded_send(DegradedChange::Raised(event)).is_err() {
+                return;
+            }
+        }
         loop {
             match bus_rx.recv().await {
-                Ok(event) => {
-                    if tx.unbounded_send(event).is_err() {
+                Ok(change) => {
+                    if tx.unbounded_send(change).is_err() {
                         return; // pump gone, exit
                     }
                 }
@@ -412,10 +451,13 @@ pub fn spawn_degraded_bus_bridge(
     async_cx
         .spawn(async move |cx| {
             use futures::StreamExt;
-            while let Some(event) = rx.next().await {
+            while let Some(change) = rx.next().await {
                 let _ = cx.update_window(window_handle, |_, _window, cx| {
                     share_state.update(cx, |s, cx| {
-                        s.apply_degraded(event.clone());
+                        match change.clone() {
+                            DegradedChange::Raised(event) => s.apply_degraded(event),
+                            DegradedChange::Cleared(key) => s.apply_degraded_cleared(&key),
+                        }
                         cx.emit(NotifyShareUi);
                         cx.notify();
                     });
@@ -452,6 +494,7 @@ pub fn spawn_op_failure_toast_bridge(
                             kind: DegradedKind::CommandFailed,
                             shared_tree_id: "command".into(),
                             detail,
+                            condition: None,
                         });
                         cx.emit(NotifyShareUi);
                         cx.notify();
@@ -539,6 +582,7 @@ fn pending_event_toast(event: &PendingWriteEvent) -> DegradedToast {
                 "{} ({}) — approve in the pending panel",
                 event.display, event.tool
             ),
+            condition: None,
         },
         PendingWriteEventKind::OutcomeUnknown => DegradedToast {
             kind: DegradedKind::ConnectorWriteOutcomeUnknown,
@@ -547,6 +591,7 @@ fn pending_event_toast(event: &PendingWriteEvent) -> DegradedToast {
                 "{} ({}) — {}; verify on the remote",
                 event.display, event.tool, event.detail
             ),
+            condition: None,
         },
     }
 }
@@ -606,6 +651,7 @@ pub fn dispatch_approve(
                             kind: DegradedKind::ConnectorWriteOutcomeUnknown,
                             shared_tree_id: "connector-write".into(),
                             detail: format!("approve failed: {e}"),
+                            condition: None,
                         });
                     }
                     // Success is silent here; the panel re-reads store state
@@ -775,6 +821,7 @@ fn dispatch_undo_redo(
                                 kind: DegradedKind::UndoFailed,
                                 shared_tree_id: "undo".into(),
                                 detail: format!("{label}: entry made no change (no-op)"),
+                                condition: None,
                             });
                             cx.emit(NotifyShareUi);
                             cx.notify();
@@ -791,6 +838,7 @@ fn dispatch_undo_redo(
                                 detail: format!(
                                     "{label}: history entry stale — dropped ({reason})"
                                 ),
+                                condition: None,
                             });
                             cx.emit(NotifyShareUi);
                             cx.notify();
@@ -805,6 +853,7 @@ fn dispatch_undo_redo(
                                 kind: DegradedKind::UndoFailed,
                                 shared_tree_id: "undo".into(),
                                 detail: format!("{label}: {e}"),
+                                condition: None,
                             });
                             cx.emit(NotifyShareUi);
                             cx.notify();
@@ -819,6 +868,7 @@ fn dispatch_undo_redo(
                                 kind: DegradedKind::UndoFailed,
                                 shared_tree_id: "undo".into(),
                                 detail: format!("{label}: task dropped before responding"),
+                                condition: None,
                             });
                             cx.emit(NotifyShareUi);
                             cx.notify();
@@ -1219,6 +1269,7 @@ fn render_share_modal(
                                             kind: DegradedKind::Info,
                                             shared_tree_id: "ui".into(),
                                             detail: "Ticket copied to clipboard".into(),
+                                            condition: None,
                                         });
                                         cx.emit(NotifyShareUi);
                                         cx.notify();
@@ -1716,6 +1767,7 @@ mod tests {
             detail: "undo: this operation requires an operation engine, which is not wired in \
                      this (no-Turso) session"
                 .into(),
+            condition: None,
         });
         assert_eq!(s.toasts.len(), 1);
         assert_eq!(s.toasts[0].kind, DegradedKind::UndoFailed);
@@ -1745,6 +1797,72 @@ mod tests {
             s.toasts[0].detail
         );
         assert!(s.quarantines.is_empty());
+    }
+
+    /// The boot seam: the bus raises integration conditions during boot DI, so
+    /// the window's bridge learns them from the subscription's replayed
+    /// `current` — that replay must render a toast just like a live event.
+    #[test]
+    fn replayed_boot_condition_renders_a_toast() {
+        let bus = holon::sync::DegradedSignalBus::new();
+        bus.emit(ShareDegraded {
+            shared_tree_id: "todoist".into(),
+            reason: ShareDegradedReason::IntegrationConnectFailed {
+                integration: "todoist".into(),
+                error: "No such file or directory (os error 2)".into(),
+            },
+        });
+
+        let mut s = ShareUiState::new();
+        for event in bus.subscribe().current {
+            s.apply_degraded(event);
+        }
+
+        assert_eq!(s.toasts.len(), 1);
+        assert_eq!(s.toasts[0].kind, DegradedKind::IntegrationConnectFailed);
+        assert!(s.toasts[0].detail.contains("todoist"));
+    }
+
+    /// `subscribe` may deliver a condition twice (replayed `current` + a live
+    /// `Raised` racing it). That must upsert, not stack two banners.
+    #[test]
+    fn replayed_then_live_duplicate_yields_one_toast() {
+        let event = ShareDegraded {
+            shared_tree_id: "todoist".into(),
+            reason: ShareDegradedReason::IntegrationConnectFailed {
+                integration: "todoist".into(),
+                error: "os error 2".into(),
+            },
+        };
+        let mut s = ShareUiState::new();
+        s.apply_degraded(event.clone());
+        s.apply_degraded(event);
+        assert_eq!(s.toasts.len(), 1);
+    }
+
+    #[test]
+    fn cleared_condition_removes_its_toast() {
+        let mut s = ShareUiState::new();
+        s.apply_degraded(ShareDegraded {
+            shared_tree_id: "todoist".into(),
+            reason: ShareDegradedReason::IntegrationConnectFailed {
+                integration: "todoist".into(),
+                error: "os error 2".into(),
+            },
+        });
+        // A transient toast alongside it must survive the clear.
+        s.apply_degraded(ShareDegraded {
+            shared_tree_id: "share".into(),
+            reason: ShareDegradedReason::SnapshotSaveFailed("disk full".into()),
+        });
+        assert_eq!(s.toasts.len(), 2);
+
+        s.apply_degraded_cleared(&DegradedConditionKey {
+            subject: "todoist".into(),
+            kind: "integration-connect-failed",
+        });
+        assert_eq!(s.toasts.len(), 1);
+        assert_eq!(s.toasts[0].kind, DegradedKind::SnapshotSaveFailed);
     }
 
     /// The toast body truncates `detail` at 80 chars, so the integration name

@@ -3684,7 +3684,7 @@ mod tests {
         let orig_perm = std::fs::metadata(&shares_dir).unwrap().permissions();
         std::fs::set_permissions(&shares_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
 
-        let mut rx = bus.subscribe();
+        let mut rx = bus.subscribe().changes;
         let _worker = spawn_save_worker(
             snapshot_store.clone(),
             bus.clone(),
@@ -3704,7 +3704,7 @@ mod tests {
         // so the save attempt should fire within ~200ms.
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
         let ev = match tokio::time::timeout_at(deadline, rx.recv()).await {
-            Ok(Ok(ev)) => ev,
+            Ok(Ok(change)) => change.raised().expect("expected Raised"),
             Ok(Err(_)) => panic!("bus closed unexpectedly"),
             Err(_) => panic!("no ShareDegraded event within 1s"),
         };
@@ -3889,7 +3889,7 @@ mod tests {
         let bus = Arc::new(DegradedSignalBus::new());
         let failing: Arc<dyn OriginTaggedWrites> = Arc::new(FailingSqlOps);
         let doc = Arc::new(LoroDoc::new());
-        let mut rx = bus.subscribe();
+        let mut rx = bus.subscribe().changes;
 
         // Empty global doc — `proj-child` is not a local block, so the
         // collision guard passes and the op reaches the failing sink.
@@ -3920,7 +3920,7 @@ mod tests {
 
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
         let ev = match tokio::time::timeout_at(deadline, rx.recv()).await {
-            Ok(Ok(ev)) => ev,
+            Ok(Ok(change)) => change.raised().expect("expected Raised"),
             Ok(Err(_)) => panic!("bus closed unexpectedly"),
             Err(_) => panic!("no ShareDegraded event within 2s"),
         };
@@ -3943,7 +3943,7 @@ mod tests {
 
         let bus = Arc::new(DegradedSignalBus::new());
         let sql = Arc::new(RecordingSqlOps::default());
-        let mut rx = bus.subscribe();
+        let mut rx = bus.subscribe().changes;
 
         // The recipient already owns a local `block:journals` row (the UI reads
         // this). A hostile share must not be able to overwrite it.
@@ -3993,7 +3993,7 @@ mod tests {
 
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
         let ev = match tokio::time::timeout_at(deadline, rx.recv()).await {
-            Ok(Ok(ev)) => ev,
+            Ok(Ok(change)) => change.raised().expect("expected Raised"),
             Ok(Err(_)) => panic!("bus closed unexpectedly"),
             Err(_) => panic!("no ShareDegraded event within 2s"),
         };

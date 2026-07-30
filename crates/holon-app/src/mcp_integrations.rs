@@ -390,11 +390,14 @@ mod tests {
             panic!("spawning a nonexistent sidecar binary must fail");
         };
 
+        // Disclose BEFORE subscribing — the registry factory runs in boot DI,
+        // the only consumer subscribes at window launch.
         let bus = DegradedSignalBus::new();
-        let mut rx = bus.subscribe();
         disclose_connect_failure("todoist", &err, &bus);
 
-        let ev = rx.recv().await.unwrap();
+        let mut current = bus.subscribe().current;
+        assert_eq!(current.len(), 1);
+        let ev = current.remove(0);
         assert_eq!(ev.shared_tree_id, "todoist");
         let ShareDegradedReason::IntegrationConnectFailed { integration, error } = ev.reason else {
             panic!("expected IntegrationConnectFailed, got {:?}", ev.reason);
@@ -409,10 +412,11 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn pending_oauth_is_disclosed_on_the_degraded_bus() {
         let bus = DegradedSignalBus::new();
-        let mut rx = bus.subscribe();
         disclose_needs_auth("linear", "https://linear.app/oauth/authorize", &bus);
 
-        let ev = rx.recv().await.unwrap();
+        let mut current = bus.subscribe().current;
+        assert_eq!(current.len(), 1);
+        let ev = current.remove(0);
         assert_eq!(ev.shared_tree_id, "linear");
         let ShareDegradedReason::IntegrationNeedsAuth {
             integration,

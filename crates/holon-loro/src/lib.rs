@@ -113,7 +113,22 @@ pub use container_registry::SubtreeIndex;
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))
 ))]
+pub use degraded_signal_bus::DegradedChange;
+#[cfg(all(
+    feature = "iroh-sync",
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+pub use degraded_signal_bus::DegradedConditionKey;
+#[cfg(all(
+    feature = "iroh-sync",
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
 pub use degraded_signal_bus::DegradedSignalBus;
+#[cfg(all(
+    feature = "iroh-sync",
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+pub use degraded_signal_bus::DegradedSubscription;
 #[cfg(all(
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))

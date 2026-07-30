@@ -191,6 +191,7 @@ impl EditorView {
                                         kind: crate::share_ui::DegradedKind::Info,
                                         shared_tree_id: bare_for_copy.clone(),
                                         detail: format!("Copied block ID {bare_for_copy}"),
+                                        condition: None,
                                     },
                                     cx,
                                 );
@@ -1185,6 +1186,7 @@ impl Render for EditorView {
                                                 kind: crate::share_ui::DegradedKind::CommandFailed,
                                                 shared_tree_id: "command".into(),
                                                 detail,
+                                                condition: None,
                                             },
                                             cx,
                                         );
@@ -1234,6 +1236,7 @@ impl Render for EditorView {
                                     kind: crate::share_ui::DegradedKind::CommandFailed,
                                     shared_tree_id: "command".into(),
                                     detail: message,
+                                    condition: None,
                                 },
                                 cx,
                             );
@@ -1441,6 +1444,7 @@ impl Render for EditorView {
                                             kind: crate::share_ui::DegradedKind::CommandFailed,
                                             shared_tree_id: "command".into(),
                                             detail,
+                                            condition: None,
                                         },
                                         cx,
                                     );

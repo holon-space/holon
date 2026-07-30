@@ -188,6 +188,7 @@ mod tests {
         use std::path::Path;
         use std::sync::Arc;
 
+        use holon::sync::degraded_signal_bus::DegradedChange;
         use holon::sync::degraded_signal_bus::DegradedSignalBus;
         use holon::sync::degraded_signal_bus::ShareDegraded;
         use holon::sync::degraded_signal_bus::ShareDegradedReason;
@@ -505,10 +506,12 @@ mod tests {
         /// Drain any queued `ShareDegraded` events from a receiver
         /// without blocking. Used between actions to observe which
         /// degraded signals fired.
-        fn drain_bus(rx: &mut broadcast::Receiver<ShareDegraded>) -> Vec<ShareDegraded> {
+        fn drain_bus(rx: &mut broadcast::Receiver<DegradedChange>) -> Vec<ShareDegraded> {
             let mut out = Vec::new();
-            while let Ok(ev) = rx.try_recv() {
-                out.push(ev);
+            while let Ok(change) = rx.try_recv() {
+                if let Some(ev) = change.raised() {
+                    out.push(ev);
+                }
             }
             out
         }
@@ -713,8 +716,8 @@ mod tests {
             // catch any degraded events during the scenario. Slow
             // subscribers would lag; broadcast channel has capacity 64
             // which is plenty for our invariants.
-            let mut rx_a = bus_a.subscribe();
-            let _rx_b = bus_b.subscribe();
+            let mut rx_a = bus_a.subscribe().changes;
+            let _rx_b = bus_b.subscribe().changes;
 
             seed(&a, "root-a", None, "root-a").await;
             seed(&a, "shared-parent", Some("root-a"), "Shared heading").await;
