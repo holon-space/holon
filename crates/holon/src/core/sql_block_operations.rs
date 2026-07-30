@@ -1031,19 +1031,20 @@ impl CrudOperations<Block> for SqlBlockOperations {
         // the same column — the exact keyspace-mixing bug class invariant 10
         // warns about.
         let mut fields = fields;
-        if !fields.contains_key("sort_key") && matches!(self.consolidator(), Consolidator::Store) {
-            if let Some(parent_id) = fields.get("parent_id").and_then(|v| v.as_string()) {
-                let siblings = self.sibling_keys(parent_id).await?;
-                let last_key = siblings.last().map(|(_, sk)| sk.clone());
-                // ALLOW(order_minting): sanctioned SqlOnly order-owner mint site
-                // (Replication.md §5), same file/gate as `new_child_anchor`.
-                let minted = gen_key_between(last_key.as_deref(), None).map_err(
-                    |e| -> Box<dyn std::error::Error + Send + Sync> {
-                        format!("SqlBlockOperations::create: mint sort_key: {e:#}").into()
-                    },
-                )?;
-                fields.insert("sort_key".into(), Value::String(minted));
-            }
+        if !fields.contains_key("sort_key")
+            && matches!(self.consolidator(), Consolidator::Store)
+            && let Some(parent_id) = fields.get("parent_id").and_then(|v| v.as_string())
+        {
+            let siblings = self.sibling_keys(parent_id).await?;
+            let last_key = siblings.last().map(|(_, sk)| sk.clone());
+            // ALLOW(order_minting): sanctioned SqlOnly order-owner mint site
+            // (Replication.md §5), same file/gate as `new_child_anchor`.
+            let minted = gen_key_between(last_key.as_deref(), None).map_err(
+                |e| -> Box<dyn std::error::Error + Send + Sync> {
+                    format!("SqlBlockOperations::create: mint sort_key: {e:#}").into()
+                },
+            )?;
+            fields.insert("sort_key".into(), Value::String(minted));
         }
 
         let result = self

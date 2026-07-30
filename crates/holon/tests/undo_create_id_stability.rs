@@ -29,16 +29,19 @@ use holon_core::UndoStore;
 use holon_core::storage::types::StorageEntity;
 use holon_core::traits::FieldDelta;
 
+/// Dispatched-op log: (op name, id param), shared with the test for assertions.
+type OpLog = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
 /// A `block` provider that mints a fresh, DISTINCT id on every id-less `create`
 /// (so a re-mint is observable). Records the `id` param of each dispatched
 /// `create`/`delete` so the test can assert redo reused the original id.
 struct MintingProvider {
     next: AtomicUsize,
-    log: Arc<Mutex<Vec<(String, Option<String>)>>>,
+    log: OpLog,
 }
 
 impl MintingProvider {
-    fn new() -> (Self, Arc<Mutex<Vec<(String, Option<String>)>>>) {
+    fn new() -> (Self, OpLog) {
         let log = Arc::new(Mutex::new(Vec::new()));
         (
             Self {

@@ -900,6 +900,11 @@ impl OperationProvider for OperationDispatcher {
                                         }
                                         _ => Vec::new(),
                                     };
+                                // Two independent skip-reasons (mark set unchanged; blur
+                                // re-commit with no marks and unchanged label) that both
+                                // resolve to `None` — kept separate, not merged, so each
+                                // guard stays legible against the comment above.
+                                #[allow(clippy::if_same_then_else)]
                                 if extracted == stored_marks {
                                     None
                                 } else if extracted.is_empty() && label == stored_content {

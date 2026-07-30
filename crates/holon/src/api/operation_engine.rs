@@ -515,10 +515,10 @@ impl DispatchingOperationEngine {
         // Verify the block-to-replace exists BEFORE any create, so an empty→
         // in-place instantiation against a stale id fails loud without leaving
         // a half-instantiated orphan subtree behind.
-        if let Some(replace_id) = &request.replace_block {
-            if !source.exists(replace_id).await? {
-                bail!("instantiate_template: replace_block '{replace_id}' does not exist");
-            }
+        if let Some(replace_id) = &request.replace_block
+            && !source.exists(replace_id).await?
+        {
+            bail!("instantiate_template: replace_block '{replace_id}' does not exist");
         }
         let nodes = source.load_subtree(&request.template_id).await?;
         let plan = plan_instantiation(&nodes, &request)?;
@@ -718,10 +718,11 @@ impl DispatchingOperationEngine {
         );
         pc.insert("depth".into(), Value::Integer(plan.page_depth));
         pc.insert("tags".into(), page_tag());
-        if let Value::String(marks) = &plan.origin_marks {
-            if !marks.is_empty() && marks != "[]" {
-                pc.insert("marks".into(), Value::String(marks.clone()));
-            }
+        if let Value::String(marks) = &plan.origin_marks
+            && !marks.is_empty()
+            && marks != "[]"
+        {
+            pc.insert("marks".into(), Value::String(marks.clone()));
         }
         let pc = self.stamp_provenance("create", pc, origin);
         let (fwd, p_inv, ch) = self.dispatch_constituent("create", pc).await?;
@@ -1719,34 +1720,36 @@ impl OperationEngine for DispatchingOperationEngine {
         // complement — any provider that reports a vacuous change is not
         // journaled. (An empty delta set is NOT vacuous here — property/edge
         // writes report no column deltas but are real; they still journal.)
-        if origin.is_user() && !Self::changes_are_vacuous(&result.changes) {
-            if let UndoAction::Undo(inverse_op) = &result.undo {
-                // Redo identity-stability: a `create` whose caller omitted `id`
-                // has one MINTED by the provider (interactive block creation,
-                // Rhai `block.create`). The stored forward (redo) op is built
-                // from the ORIGINAL params, which lack that id — so a redo would
-                // re-mint a fresh uuid, dangling every ref/link/junction that
-                // targeted the original (BugFunnel dogfood #4). The create's
-                // inverse is `delete{id: <minted>}`, so the minted id is
-                // authoritative there; graft it onto the redo op so redo
-                // recreates the SAME block.
-                let mut forward_op = forward_op;
-                if op_name == "create" && !forward_op.params.contains_key("id") {
-                    if let Some(minted) = inverse_op.params.get("id") {
-                        forward_op.params.insert("id".to_string(), minted.clone());
-                    }
-                }
-                let entry = UndoEntry {
-                    ops: vec![forward_op],
-                    inverse_ops: vec![inverse_op.clone()],
-                    origin: OpOrigin::User,
-                    group_id: 0,
-                    precondition: Precondition::forward(&result.changes),
-                    redo_precondition: Precondition::inverse(&result.changes),
-                };
-                self.undo_stack.write().await.push(entry);
-                self.persist().await?;
+        if origin.is_user()
+            && !Self::changes_are_vacuous(&result.changes)
+            && let UndoAction::Undo(inverse_op) = &result.undo
+        {
+            // Redo identity-stability: a `create` whose caller omitted `id`
+            // has one MINTED by the provider (interactive block creation,
+            // Rhai `block.create`). The stored forward (redo) op is built
+            // from the ORIGINAL params, which lack that id — so a redo would
+            // re-mint a fresh uuid, dangling every ref/link/junction that
+            // targeted the original (BugFunnel dogfood #4). The create's
+            // inverse is `delete{id: <minted>}`, so the minted id is
+            // authoritative there; graft it onto the redo op so redo
+            // recreates the SAME block.
+            let mut forward_op = forward_op;
+            if op_name == "create"
+                && !forward_op.params.contains_key("id")
+                && let Some(minted) = inverse_op.params.get("id")
+            {
+                forward_op.params.insert("id".to_string(), minted.clone());
             }
+            let entry = UndoEntry {
+                ops: vec![forward_op],
+                inverse_ops: vec![inverse_op.clone()],
+                origin: OpOrigin::User,
+                group_id: 0,
+                precondition: Precondition::forward(&result.changes),
+                redo_precondition: Precondition::inverse(&result.changes),
+            };
+            self.undo_stack.write().await.push(entry);
+            self.persist().await?;
         }
 
         // History relation (ADR 0024 P8 / C2b): append the op's field deltas to

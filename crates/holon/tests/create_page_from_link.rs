@@ -439,18 +439,17 @@ proptest! {
         if let holon_api::link_parser::LinkTarget::CreationIntent {
             scheme, target_id, ..
         } = holon_api::link_parser::classify_link(&name)
+            && scheme == "block"
         {
-            if scheme == "block" {
-                prop_assert_eq!(
-                    target_id.as_str(),
-                    id_a.as_str(),
-                    "parser/writer page-id divergence for target {:?}: parser optimistic id {} != \
-                     writer-minted id {}",
-                    name,
-                    target_id.as_str(),
-                    id_a
-                );
-            }
+            prop_assert_eq!(
+                target_id.as_str(),
+                id_a.as_str(),
+                "parser/writer page-id divergence for target {:?}: parser optimistic id {} != \
+                 writer-minted id {}",
+                name,
+                target_id.as_str(),
+                id_a
+            );
         }
     }
 }

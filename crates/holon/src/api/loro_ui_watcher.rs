@@ -483,10 +483,10 @@ fn derive_root_slot_expr(
         };
 
     let mut blocks = vec![root_block];
-    if let Some(persp) = snapshot.block_by_id(&active) {
-        if active != *root_id {
-            blocks.push(persp);
-        }
+    if let Some(persp) = snapshot.block_by_id(&active)
+        && active != *root_id
+    {
+        blocks.push(persp);
     }
     blocks.extend(snapshot.descendants_ordered(&active));
 

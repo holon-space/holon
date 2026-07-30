@@ -41,10 +41,12 @@ use holon_profiles::trust::TrustPolicy;
 /// the `properties` object (the prod unknown-fields path).
 const COLUMNS: &[&str] = &["id", "parent_id", "content"];
 
+/// id → (columns, properties-object)
+type BlockTable = HashMap<String, (HashMap<String, Value>, HashMap<String, Value>)>;
+
 #[derive(Default)]
 struct BlockStore {
-    /// id → (columns, properties-object)
-    blocks: Mutex<HashMap<String, (HashMap<String, Value>, HashMap<String, Value>)>>,
+    blocks: Mutex<BlockTable>,
     /// Every (op_name, id) the provider executed, in order.
     log: Mutex<Vec<(String, String)>>,
 }
@@ -192,10 +194,7 @@ struct StoreReader {
 impl UndoStateReader for StoreReader {
     async fn field_value(&self, entity_id: &str, field: &str) -> anyhow::Result<Option<Value>> {
         if field == "properties" {
-            return Ok(self
-                .store
-                .properties(entity_id)
-                .map(|props| Value::Object(props)));
+            return Ok(self.store.properties(entity_id).map(Value::Object));
         }
         Ok(self.store.column(entity_id, field))
     }

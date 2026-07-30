@@ -163,10 +163,10 @@ pub async fn spawn_advice_reconciler(
     // Feed initial rows through the SAME channel first (ordering before the
     // stream).
     for row in watch.initial_rows {
-        if let Some(event) = row_to_event(row) {
-            if event_tx.send(event).await.is_err() {
-                return Ok(AdviceReconcilerHandle { _aborts: aborts });
-            }
+        if let Some(event) = row_to_event(row)
+            && event_tx.send(event).await.is_err()
+        {
+            return Ok(AdviceReconcilerHandle { _aborts: aborts });
         }
     }
 
@@ -175,10 +175,10 @@ pub async fn spawn_advice_reconciler(
     let drainer = tokio::spawn(async move {
         while let Some(batch) = stream.next().await {
             for row_change in batch.inner.items {
-                if let Some(event) = change_to_event(row_change.change) {
-                    if event_tx.send(event).await.is_err() {
-                        return;
-                    }
+                if let Some(event) = change_to_event(row_change.change)
+                    && event_tx.send(event).await.is_err()
+                {
+                    return;
                 }
             }
         }

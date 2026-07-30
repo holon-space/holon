@@ -2349,10 +2349,10 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 // replay of a rich inverse; restores the exact (content, marks)
                 // pair atomically. Interactive content edits arrive as Strings
                 // and fall through to the split content + derived-marks path.
-                if field == "content" {
-                    if let Value::Object(obj) = raw_value {
-                        return self.set_field_content_rich(id, obj).await;
-                    }
+                if field == "content"
+                    && let Value::Object(obj) = raw_value
+                {
+                    return self.set_field_content_rich(id, obj).await;
                 }
 
                 let value = if field == "content" {
@@ -2701,10 +2701,10 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     if let Some(marks) = params.get("marks") {
                         link_statements.extend(self.block_link_statements(&id, marks).await?);
                     }
-                    if Self::params_tag_page(&params) {
-                        if let Some(content) = params.get("content").and_then(|v| v.as_string()) {
-                            link_statements.extend(Self::page_reresolve_statements(&id, content));
-                        }
+                    if Self::params_tag_page(&params)
+                        && let Some(content) = params.get("content").and_then(|v| v.as_string())
+                    {
+                        link_statements.extend(Self::page_reresolve_statements(&id, content));
                     }
                     if let Some(merged_from) = params.get(merge_blocks_plan::MERGED_FROM_FIELD) {
                         link_statements.extend(Self::block_redirect_statements(&id, merged_from)?);
@@ -2862,10 +2862,10 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     if let Some(marks) = params.get("marks") {
                         link_statements.extend(self.block_link_statements(id, marks).await?);
                     }
-                    if Self::params_tag_page(&params) {
-                        if let Some(content) = params.get("content").and_then(|v| v.as_string()) {
-                            link_statements.extend(Self::page_reresolve_statements(id, content));
-                        }
+                    if Self::params_tag_page(&params)
+                        && let Some(content) = params.get("content").and_then(|v| v.as_string())
+                    {
+                        link_statements.extend(Self::page_reresolve_statements(id, content));
                     }
                     if let Some(merged_from) = params.get(merge_blocks_plan::MERGED_FROM_FIELD) {
                         link_statements.extend(Self::block_redirect_statements(id, merged_from)?);
@@ -3683,22 +3683,23 @@ impl OriginTaggedWrites for SqlOperationProvider {
             // `block_raw.marks` written but `block_links` EMPTY, so wiki-links
             // render as literal text and backlinks are impossible. Derive it
             // here for the same block create/update ops the single-op paths do.
-            if self.entity_name == "block" && matches!(op_name.as_str(), "create" | "update") {
-                if let Some(id) = params.get("id").and_then(|v| v.as_string()) {
-                    if let Some(marks) = params.get("marks") {
-                        edge_sql.extend(self.block_link_statements(id, marks).await?);
-                    }
-                    if Self::params_tag_page(params) {
-                        if let Some(content) = params.get("content").and_then(|v| v.as_string()) {
-                            edge_sql.extend(Self::page_reresolve_statements(id, content));
-                        }
-                    }
-                    // Same reasoning for block_redirects: under Loro authority
-                    // `merged_from` reaches SQL as a flattened property on this
-                    // batch row, never through the single-op `set_field` seam.
-                    if let Some(merged_from) = params.get(merge_blocks_plan::MERGED_FROM_FIELD) {
-                        edge_sql.extend(Self::block_redirect_statements(id, merged_from)?);
-                    }
+            if self.entity_name == "block"
+                && matches!(op_name.as_str(), "create" | "update")
+                && let Some(id) = params.get("id").and_then(|v| v.as_string())
+            {
+                if let Some(marks) = params.get("marks") {
+                    edge_sql.extend(self.block_link_statements(id, marks).await?);
+                }
+                if Self::params_tag_page(params)
+                    && let Some(content) = params.get("content").and_then(|v| v.as_string())
+                {
+                    edge_sql.extend(Self::page_reresolve_statements(id, content));
+                }
+                // Same reasoning for block_redirects: under Loro authority
+                // `merged_from` reaches SQL as a flattened property on this
+                // batch row, never through the single-op `set_field` seam.
+                if let Some(merged_from) = params.get(merge_blocks_plan::MERGED_FROM_FIELD) {
+                    edge_sql.extend(Self::block_redirect_statements(id, merged_from)?);
                 }
             }
         }

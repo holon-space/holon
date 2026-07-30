@@ -362,11 +362,11 @@ mod tests {
         let mut updates = 0usize;
         while let Ok(batch) = cdc_rx.try_recv() {
             for rc in batch.inner.items {
-                if rc.relation_name == "clock_mirror" {
-                    if let Change::Updated { data, .. } = &rc.change {
-                        assert_eq!(data.get("today").unwrap().as_string(), Some("2026-07-11"));
-                        updates += 1;
-                    }
+                if rc.relation_name == "clock_mirror"
+                    && let Change::Updated { data, .. } = &rc.change
+                {
+                    assert_eq!(data.get("today").unwrap().as_string(), Some("2026-07-11"));
+                    updates += 1;
                 }
             }
         }
@@ -420,17 +420,15 @@ mod tests {
 
     // --- C6: fine grains + recurrence -----------------------------------------
 
-    fn hour_rows_query(handle: &DbHandle) -> impl std::future::Future<Output = usize> + '_ {
-        async move {
-            handle
-                .query_positional(
-                    "SELECT epoch_day FROM clock WHERE grain = ?",
-                    vec![turso::Value::Text("hour".to_string())],
-                )
-                .await
-                .unwrap()
-                .len()
-        }
+    async fn hour_rows_query(handle: &DbHandle) -> usize {
+        handle
+            .query_positional(
+                "SELECT epoch_day FROM clock WHERE grain = ?",
+                vec![turso::Value::Text("hour".to_string())],
+            )
+            .await
+            .unwrap()
+            .len()
     }
 
     /// The write-amplification gate, at the logic level: `active()` never

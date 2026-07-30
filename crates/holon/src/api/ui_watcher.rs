@@ -250,17 +250,17 @@ async fn render_and_forward(
     // by the error surface, so parse errors and async DDL failures are visible
     // in place (v1 replaces, like the existing render-failure path; over-cap
     // banner comes later).
-    if let Some(status) = engine.advice_status().get(block_id.as_str()) {
-        if !status.is_active() {
-            let _ = tx
-                .send(UiEvent::Structure {
-                    render_expr: error_render_expr(&format!("advice rule: {status}")),
-                    candidates: Vec::new(),
-                    generation,
-                })
-                .await;
-            return;
-        }
+    if let Some(status) = engine.advice_status().get(block_id.as_str())
+        && !status.is_active()
+    {
+        let _ = tx
+            .send(UiEvent::Structure {
+                render_expr: error_render_expr(&format!("advice rule: {status}")),
+                candidates: Vec::new(),
+                generation,
+            })
+            .await;
+        return;
     }
 
     match engine.blocks().render_entity(block_id, variant).await {

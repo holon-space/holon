@@ -30,18 +30,20 @@ const FIELD: &str = "content";
 const OLD: &str = "old";
 const NEW: &str = "new";
 
+/// (op_name, value-param) log of every dispatched execution.
+type OpLog = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
 /// Stub provider on entity "block":
 /// - `edit`: reversible OLD→NEW content edit (inverse = `set_field` back to
 ///   OLD)
 /// - `set_field`: replay target, irreversible (replays never re-push)
 /// - `noundo`: returns an `Undeclared` classification (must be a loud error)
 struct StubProvider {
-    /// (op_name, value-param) log of every dispatched execution.
-    log: Arc<Mutex<Vec<(String, Option<String>)>>>,
+    log: OpLog,
 }
 
 impl StubProvider {
-    fn new() -> (Self, Arc<Mutex<Vec<(String, Option<String>)>>>) {
+    fn new() -> (Self, OpLog) {
         let log = Arc::new(Mutex::new(Vec::new()));
         (Self { log: log.clone() }, log)
     }
@@ -243,7 +245,7 @@ struct Fixture {
     dispatcher: Arc<OperationDispatcher>,
     reader: Arc<FakeReader>,
     store: Arc<FakeStore>,
-    log: Arc<Mutex<Vec<(String, Option<String>)>>>,
+    log: OpLog,
 }
 
 async fn fixture() -> Fixture {
