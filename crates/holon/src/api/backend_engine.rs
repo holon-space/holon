@@ -627,17 +627,17 @@ impl BackendEngine {
         let view_name = self.matview_manager.ensure_view(&sql_with_params).await?;
         let cdc_stream = self.matview_manager.subscribe_cdc(&view_name).await?;
 
-        // `ensure_view` stripped the trailing ORDER BY (IVM rejects a Sort
-        // node), so the snapshot read has to re-apply it or watched and
-        // one-shot reads of the same query disagree on order.
-        let order_by = crate::sync::trailing_order_by(&sql_with_params);
+        // The snapshot read deliberately does NOT re-apply the ORDER BY that
+        // `ensure_view` stripped. Its row order becomes the order of the
+        // initial `Created` events on the CDC stream, and that arrival order is
+        // load-bearing downstream: re-applying the clause here breaks the left
+        // sidebar's nested live_block watch, which then never streams its
+        // selectable (keystone `inv` SutFocusWrite::apply_navigate_focus).
+        // Honouring a query's declared order is the render layer's job, over a
+        // flat collection, not the stream's.
         let mut data = None;
         for attempt in 0..10 {
-            match self
-                .matview_manager
-                .query_view_ordered(&view_name, order_by.as_deref())
-                .await
-            {
+            match self.matview_manager.query_view(&view_name).await {
                 Ok(results) => {
                     data = Some(results);
                     break;

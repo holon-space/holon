@@ -597,17 +597,6 @@ enum ReactiveViewInner {
     },
 }
 
-/// The sort-key spec a collection actually sorts by: the template's own
-/// `sortkey:` when the author named one, otherwise the order the data source
-/// declares (a watched query's `ORDER BY`, which the matview body cannot
-/// carry). An explicit `sortkey:` is a deliberate override and always wins.
-fn effective_sort_key(
-    template_sort_key: Option<String>,
-    data_source: &dyn ReactiveRowProvider,
-) -> Option<String> {
-    template_sort_key.or_else(|| data_source.ordering_spec())
-}
-
 impl ReactiveView {
     /// Create a view for a block (owns its watcher).
     pub fn new_block(
@@ -636,7 +625,7 @@ impl ReactiveView {
         child_space_fn: Option<Arc<ChildSpaceFn>>,
     ) -> Self {
         let template_mutable = Mutable::new(config.item_template.clone());
-        let sort_key = effective_sort_key(config.sort_key, data_source.as_ref());
+        let sort_key = config.sort_key;
         Self {
             inner: ReactiveViewInner::Collection {
                 layout: config.layout,
@@ -743,7 +732,6 @@ impl ReactiveView {
         initial_space: Option<AvailableSpace>,
         rules: Vec<holon_api::render_types::RuleSpec>,
     ) -> Self {
-        let sort_key = effective_sort_key(sort_key, data_source.as_ref());
         Self {
             inner: ReactiveViewInner::Grouped {
                 layout,
@@ -2835,158 +2823,6 @@ mod tests {
             ],
             "streaming `list` must sort NEWEST-FIRST for sort_key=\"-content\" (DESC by content); \
              got {order:?}"
-        );
-    }
-
-    // ── watched-query ORDER BY → rendered row order ──────────────────────
-
-    /// One row of a `sort {-last_activity}` sidecar query.
-    fn session_row(id: &str, last_activity: &str) -> DataRow {
-        let mut row = make_row(id, id);
-        row.insert(
-            "last_activity".to_string(),
-            Value::String(last_activity.to_string()),
-        );
-        row
-    }
-
-    /// A watched query's provider, carrying the ordering its `ORDER BY`
-    /// declares and the rows in the arrival order CDC produces.
-    fn watched_query_rows(
-        ordering_spec: Option<&str>,
-        rows: &[(&str, &str)],
-    ) -> Arc<crate::reactive::ReactiveRenderedRows> {
-        let watched = crate::reactive::ReactiveRenderedRows::new();
-        watched.set_ordering_spec(ordering_spec.map(str::to_string));
-        watched.set_generation(1);
-        for (id, last_activity) in rows {
-            watched.apply_change(
-                holon_api::Change::Created {
-                    data: enriched(session_row(id, last_activity)),
-                    origin: remote_origin(),
-                },
-                1,
-            );
-        }
-        Arc::new(watched)
-    }
-
-    fn started_collection(
-        data_source: Arc<dyn holon_api::ReactiveRowProvider>,
-        sort_key: Option<&str>,
-    ) -> ReactiveView {
-        crate::shadow_builders::register_render_dsl_widget_names();
-        let item_template = holon_api::render_dsl::parse_render_dsl(r#"text(col("content"))"#)
-            .expect("item_template parses");
-        let view = ReactiveView::new_collection(
-            CollectionConfig {
-                layout: CollectionVariant::from_name("list", 0.0).expect("`list` layout"),
-                item_template,
-                sort_key: sort_key.map(str::to_string),
-                virtual_child: None,
-                rules: Vec::new(),
-            },
-            data_source,
-            None,
-            None,
-        );
-        let services: Arc<dyn crate::reactive::BuilderServices> =
-            Arc::new(StubBuilderServices::new());
-        view.start(services, &tokio::runtime::Handle::current());
-        view
-    }
-
-    fn rendered_order(view: &ReactiveView) -> Vec<String> {
-        view.items
-            .lock_ref()
-            .iter()
-            .filter_map(|n| n.prop_str("content"))
-            .collect()
-    }
-
-    /// A watched query's `ORDER BY` must reach the RENDERED row order. The
-    /// clause never survives into the matview body (Turso IVM rejects a Sort
-    /// node), and query rows carry neither a `sort_key` nor a `sequence`
-    /// column — so without the provider's ordering spec every key ties and the
-    /// collection renders in arrival order.
-    #[tokio::test]
-    async fn collection_adopts_the_watched_querys_ordering_spec() {
-        let watched = watched_query_rows(
-            Some("-last_activity"),
-            &[
-                ("s-mid", "2026-07-20T00:00:00Z"),
-                ("s-old", "2026-01-01T00:00:00Z"),
-                ("s-new", "2026-07-30T00:00:00Z"),
-            ],
-        );
-        let view = started_collection(watched, None);
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        let order = rendered_order(&view);
-        view.stop();
-        assert_eq!(
-            order,
-            vec!["s-new", "s-mid", "s-old"],
-            "a collection over a `sort {{-last_activity}}` query must render newest-first; got \
-             {order:?}"
-        );
-    }
-
-    /// A CDC insert after the snapshot must land at its ORDERED position, not
-    /// at the end: the query declares the order, so a row whose sort column
-    /// falls between two rendered rows belongs between them.
-    #[tokio::test]
-    async fn cdc_insert_lands_at_its_ordered_position() {
-        let watched = watched_query_rows(
-            Some("-last_activity"),
-            &[
-                ("s-new", "2026-07-30T00:00:00Z"),
-                ("s-old", "2026-01-01T00:00:00Z"),
-            ],
-        );
-        let view = started_collection(watched.clone(), None);
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        watched.apply_change(
-            holon_api::Change::Created {
-                data: enriched(session_row("s-mid", "2026-07-20T00:00:00Z")),
-                origin: remote_origin(),
-            },
-            1,
-        );
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        let order = rendered_order(&view);
-        view.stop();
-        assert_eq!(
-            order,
-            vec!["s-new", "s-mid", "s-old"],
-            "a later CDC insert must land in the query's declared order, not be appended; got \
-             {order:?}"
-        );
-    }
-
-    /// The template's own `sortkey:` is a deliberate author override — it wins
-    /// over the query's `ORDER BY`.
-    #[tokio::test]
-    async fn explicit_template_sort_key_overrides_the_querys_ordering_spec() {
-        let watched = watched_query_rows(
-            Some("-last_activity"),
-            &[
-                ("s-mid", "2026-07-20T00:00:00Z"),
-                ("s-old", "2026-01-01T00:00:00Z"),
-                ("s-new", "2026-07-30T00:00:00Z"),
-            ],
-        );
-        let view = started_collection(watched, Some("last_activity"));
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        let order = rendered_order(&view);
-        view.stop();
-        assert_eq!(
-            order,
-            vec!["s-old", "s-mid", "s-new"],
-            "an explicit ascending `sortkey:` must override the query's DESC order; got {order:?}"
         );
     }
 
