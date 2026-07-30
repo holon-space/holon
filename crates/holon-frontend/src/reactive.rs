@@ -15,6 +15,7 @@ use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -1033,6 +1034,11 @@ pub struct ReactiveRenderedRows {
     /// `render_expr` as an `error(message:)` sentinel so it is visible in the
     /// UI instead of an eternal spinner.
     error: Mutable<Option<String>>,
+    /// The render expression the error sentinel displaced, so a recovering
+    /// watcher can restore it. A query watcher never re-delivers a Structure
+    /// event, so without this the block would keep rendering `error(...)`
+    /// after its rows arrive.
+    expr_before_error: std::sync::Mutex<Option<RenderExpr>>,
     rows: ReactiveRowSet,
     structure_ready: tokio::sync::Notify,
     /// Generation whose data currently populates `rows`. Each re-render
@@ -1070,6 +1076,7 @@ impl ReactiveRenderedRows {
         Self {
             render_expr: Mutable::new(loading_expr()),
             error: Mutable::new(None),
+            expr_before_error: std::sync::Mutex::new(None),
             rows: ReactiveRowSet::labeled(label),
             structure_ready: tokio::sync::Notify::new(),
             data_generation: std::sync::atomic::AtomicU64::new(0),
@@ -1101,8 +1108,28 @@ impl ReactiveRenderedRows {
     /// of spinning forever.
     pub fn set_error(&self, msg: impl Into<String>) {
         let msg = msg.into();
+        let mut displaced = self.expr_before_error.lock().unwrap();
+        if displaced.is_none() {
+            *displaced = Some(self.render_expr.get_cloned());
+        }
+        drop(displaced);
         self.render_expr.set(error_expr(&msg));
         self.error.set(Some(msg));
+        self.structure_ready.notify_waiters();
+    }
+
+    /// Leave the disclosed error state: the watcher that failed has since
+    /// succeeded, so the block renders its real expression again. Only legal
+    /// after a [`Self::set_error`].
+    pub fn clear_error(&self) {
+        let expr = self
+            .expr_before_error
+            .lock()
+            .unwrap()
+            .take()
+            .expect("clear_error without a preceding set_error");
+        self.render_expr.set(expr);
+        self.error.set(None);
         self.structure_ready.notify_waiters();
     }
 
@@ -2714,25 +2741,38 @@ impl ReactiveEngine {
             let reactive = results.clone();
             let apply_epoch = self.apply_epoch.clone();
             let task = self.runtime_handle.spawn(async move {
-                match session
-                    .watch_query(&query, lang, HashMap::new(), query_context)
-                    .await
-                {
-                    Ok(stream) => {
-                        let mut rx = stream.into_inner();
-                        while let Some(batch) = rx.recv().await {
-                            for enriched_change in batch.inner.items {
-                                reactive.apply_change(enriched_change, 1);
-                                // Publish consumer progress so a settle can wait
-                                // for this async drain to catch the emitted CDC
-                                // (see `apply_epoch` field docs).
-                                apply_epoch.fetch_add(1, std::sync::atomic::Ordering::Release);
+                // A watch target can be missing merely because it has not been
+                // BUILT yet — an MCP integration creating its tables takes
+                // minutes — so a failure is disclosed and then retried forever,
+                // never given up on. `unwatch` aborts this task at either await.
+                let mut backoff = Duration::from_millis(250);
+                loop {
+                    match session
+                        .watch_query(&query, lang, HashMap::new(), query_context.clone())
+                        .await
+                    {
+                        Ok(stream) => {
+                            if reactive.error().is_some() {
+                                reactive.clear_error();
                             }
+                            let mut rx = stream.into_inner();
+                            while let Some(batch) = rx.recv().await {
+                                for enriched_change in batch.inner.items {
+                                    reactive.apply_change(enriched_change, 1);
+                                    // Publish consumer progress so a settle can
+                                    // wait for this async drain to catch the
+                                    // emitted CDC (see `apply_epoch` field docs).
+                                    apply_epoch.fetch_add(1, std::sync::atomic::Ordering::Release);
+                                }
+                            }
+                            return;
                         }
-                    }
-                    Err(e) => {
-                        tracing::warn!("watch_query failed: {e}");
-                        reactive.set_error(format!("query failed: {e}"));
+                        Err(e) => {
+                            tracing::warn!("watch_query failed, retrying in {backoff:?}: {e}");
+                            reactive.set_error(format!("query failed: {e}"));
+                            tokio::time::sleep(backoff).await;
+                            backoff = (backoff * 2).min(Duration::from_secs(5));
+                        }
                     }
                 }
             });
@@ -4685,6 +4725,24 @@ mod tests {
             RenderExpr::Literal {
                 value: Value::String("query failed: no such table: blocks_with_paths".to_string())
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn clearing_a_failure_restores_the_displaced_render_expression() {
+        let rq = ReactiveRenderedRows::new();
+        rq.set_render_expr(table_expr());
+
+        rq.set_error("query failed: no such table: cc_sessions");
+        rq.set_error("query failed: no such table: cc_sessions");
+
+        rq.clear_error();
+
+        assert_eq!(rq.error(), None);
+        assert_eq!(
+            rq.get_render_expr(),
+            table_expr(),
+            "recovery must restore the block's own expression, not a second error sentinel"
         );
     }
 
