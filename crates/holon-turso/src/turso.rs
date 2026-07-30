@@ -2097,7 +2097,10 @@ impl TursoBackend {
             }
 
             DbCommand::TransitionToReady { response } => {
+                // Ready first: parking is legitimate while SchemaInit is open,
+                // so the sweep is a no-op until the phase has flipped.
                 state.phase = DatabasePhase::Ready;
+                Self::sweep_unpromised_pending_ddl(state);
                 tracing::info!("[TursoBackend::Actor] Transitioned to Ready phase");
                 let _ = response.send(Ok(()));
             }
@@ -2516,6 +2519,47 @@ impl TursoBackend {
         (!unpromised.is_empty()).then_some(unpromised)
     }
 
+    /// Answer `op`'s waiter with `MissingDependencies` instead of letting it
+    /// wait out the dependency timeout.
+    fn fail_unpromised_ddl(state: &mut ActorState, op: PendingDdl, unpromised: Vec<String>) {
+        let sql_preview: String = op.sql.chars().take(120).collect();
+        tracing::warn!(
+            missing = ?unpromised,
+            sql = %sql_preview,
+            "[TursoBackend::Actor] DDL requires resources no schema provider registers — failing \
+             it instead of waiting"
+        );
+        let err = StorageError::MissingDependencies {
+            sql_preview,
+            missing: unpromised,
+        };
+        match op.completion {
+            DdlCompletion::Caller(response) => {
+                let _ = response.send(Err(err));
+            }
+            DdlCompletion::ViewCreate { view_name } => {
+                Self::finish_view_creation(state, &view_name, Err(err));
+            }
+        }
+    }
+
+    /// Fail every parked op whose requirements nobody will ever satisfy.
+    ///
+    /// Called once registration has closed. Failing one op can strip the last
+    /// promise from another, so this runs to a fixpoint.
+    fn sweep_unpromised_pending_ddl(state: &mut ActorState) {
+        while let Some(index) = state
+            .pending_ddl
+            .iter()
+            .position(|op| Self::unpromised_requirements(state, op).is_some())
+        {
+            let op = state.pending_ddl.remove(index).expect("index just found");
+            let unpromised =
+                Self::unpromised_requirements(state, &op).expect("op selected as unpromised");
+            Self::fail_unpromised_ddl(state, op, unpromised);
+        }
+    }
+
     /// Handle DDL with dependency tracking
     async fn handle_ddl_with_deps_internal(
         conn: &turso::Connection,
@@ -2546,25 +2590,7 @@ impl TursoBackend {
                 Self::process_pending_ddl(conn, state).await;
             }
         } else if let Some(unpromised) = Self::unpromised_requirements(state, &op) {
-            let sql_preview: String = op.sql.chars().take(120).collect();
-            tracing::warn!(
-                missing = ?unpromised,
-                sql = %sql_preview,
-                "[TursoBackend::Actor] DDL requires resources no schema provider registers — \
-                 failing fast instead of parking"
-            );
-            let err = StorageError::MissingDependencies {
-                sql_preview,
-                missing: unpromised,
-            };
-            match op.completion {
-                DdlCompletion::Caller(response) => {
-                    let _ = response.send(Err(err));
-                }
-                DdlCompletion::ViewCreate { view_name } => {
-                    Self::finish_view_creation(state, &view_name, Err(err));
-                }
-            }
+            Self::fail_unpromised_ddl(state, op, unpromised);
         } else {
             tracing::debug!(
                 "[TursoBackend::Actor] DDL op {} queued, waiting for: {:?}",
