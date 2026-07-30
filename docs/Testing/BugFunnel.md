@@ -8,7 +8,7 @@ distribution steers QA investment.
 
 - ENVIRONMENT: 120
 - COVERAGE: 63
-- PERCEPTION: 48
+- PERCEPTION: 49
 - ORACLE: 37
 
 Archived baseline (ENVIRONMENT 87 · COVERAGE 37 · PERCEPTION 35 · ORACLE 18 as of
@@ -21,6 +21,26 @@ header against the log.
 Increment log (append-only, NEWEST FIRST — each counted bug adds exactly one line here;
 merge conflicts resolve by keeping both sides' lines and re-summing the totals ON TOP OF
 the archived baseline):
+- (+1 PERCEPTION 2026-07-30, secondary ORACLE: the ClaudeCode page rendered its section HEADLINES
+  but ZERO rows under every query section, and re-navigating never recovered — the original
+  "blank page" bug (yesterday's `query_block` variant had the same defect, minus the headline).
+  Live diagnosis: the ViewModel held every row (`describe_ui` full) while a real-window screenshot
+  showed constant-height blank bands whose height did not vary with row count. Root cause:
+  `ReactiveShell`'s block-mode arms unconditionally render `div().size_full().overflow_y_scroll()`
+  (`frontends/gpui/src/views/reactive_shell.rs`), a shape valid ONLY for a PANEL-parented shell
+  living inside `columns::panel_wrap`'s absolute `size_full`. A query block embedded as an outline
+  ROW via the `query_block_titled` profile variant (`assets/default/types/block_profile.yaml`)
+  creates a NESTED shell whose parent height is indefinite, so `height: 100%` collapsed to a fixed
+  empty band and no row was ever laid out. PERCEPTION: every model-layer oracle was satisfied —
+  the rows were in the ViewModel, the query returned them, the data was correct; only the painted
+  geometry was empty, and nothing in the suite looked at the height of a nested live_block's band.
+  Secondary ORACLE: the windowed harness could already read `BoundsRegistry`, so the invariant was
+  expressible — it just did not exist. Closed by `ReactiveShell`'s typed `ShellPlacement`
+  (`Panel` keeps today's `size_full` + scroll viewport; `Nested` is content-sized with no
+  independent scroll) plus a red-first windowed geometry PBT,
+  `frontends/gpui/tests/gpui_window_slice.rs::nested_live_block_paints_the_rows_its_model_holds`,
+  which asserts the MODEL holds the rows and THEN that at least one is painted at a hit-testable
+  height — so a model regression and a height regression stay distinguishable.)
 - (+1 ORACLE 2026-07-30, secondary PERCEPTION: a sidebar tree row's leading chrome sits BELOW its
   first text line — measured chevron center-y 18.0px and leaf-bullet center-y 16.0px against a
   first-line center of 13.0px (`text_line_height` 26). On a WRAPPED row the error is structural,

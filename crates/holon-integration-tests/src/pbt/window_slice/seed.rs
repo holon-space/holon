@@ -19,6 +19,8 @@
 
 use anyhow::Context;
 use anyhow::Result;
+use holon_api::QueryLanguage;
+use holon_api::SourceLanguage;
 use holon_api::Value;
 
 use crate::pbt::composed::seed_primitives::C1;
@@ -67,5 +69,74 @@ pub async fn graft_displayed_text_tree(env: &TestEnvironment) -> Result<()> {
     env.create_block(ids.c2.as_str(), ids.parent.as_str(), C2)
         .await
         .context("graft c2 under parent")?;
+    Ok(())
+}
+
+/// Block id of the ClaudeCode-shaped query headline grafted by
+/// [`graft_nested_query_block`].
+pub const NESTED_QUERY_HEAD_ID: &str = "nq-head";
+/// Parent of the three rows the grafted query selects.
+pub const NESTED_QUERY_DATA_ID: &str = "nq-data";
+/// Content prefix of the rows the grafted query returns. The data blocks are
+/// SOURCE-typed, so the outline filters them out of its own rows — anything on
+/// screen carrying this prefix was painted by the nested widget and nothing
+/// else.
+pub const NESTED_QUERY_ROW_MARKER: &str = "QROW-";
+/// Number of rows the grafted query returns.
+pub const NESTED_QUERY_ROW_COUNT: usize = 3;
+
+/// Graft a ClaudeCode-shaped query headline under the Main focus root: a plain
+/// text headline owning a `holon_sql` source child and a `render` child, so the
+/// block profile resolves it to the `query_block_titled` variant
+/// (`column(row(headline…), live_block(), drop_zone())`) — i.e. its widget
+/// renders through a NESTED `ReactiveShell`, embedded as one row of the main
+/// outline rather than parented by a panel.
+///
+/// The query selects the three `nq-row-*` blocks by exact `parent_id`
+/// (equality, not `LIKE`, so the watcher's matview stays inside the supported
+/// IVM subset), so counting [`NESTED_QUERY_ROW_MARKER`] on screen counts widget
+/// rows and nothing else.
+///
+/// The caller must re-settle the window afterwards.
+pub async fn graft_nested_query_block(env: &TestEnvironment) -> Result<()> {
+    let root = main_focus_root(env).await?;
+
+    env.create_block(NESTED_QUERY_DATA_ID, &root, "NQ Data")
+        .await
+        .context("graft the query's data parent under Main focus root")?;
+    for i in 1..=NESTED_QUERY_ROW_COUNT {
+        // Source-typed so the outline skips them: the ONLY place their content
+        // can appear on screen is inside the nested widget under test. The
+        // language is deliberately neither a query nor a rule language, so these
+        // rows do not turn `nq-data` into a query owner of its own.
+        env.create_source_block(
+            &format!("nq-row-{i}"),
+            NESTED_QUERY_DATA_ID,
+            SourceLanguage::Other("qdata".to_string()),
+            &format!("{NESTED_QUERY_ROW_MARKER}{i}"),
+        )
+        .await
+        .with_context(|| format!("graft query data row {i}"))?;
+    }
+
+    env.create_block(NESTED_QUERY_HEAD_ID, &root, "Nested Query Head")
+        .await
+        .context("graft the query headline under Main focus root")?;
+    env.create_source_block(
+        &format!("{NESTED_QUERY_HEAD_ID}::src::0"),
+        NESTED_QUERY_HEAD_ID,
+        SourceLanguage::Query(QueryLanguage::HolonSql),
+        "SELECT id, content FROM block_raw WHERE parent_id = 'block:nq-data' ORDER BY content",
+    )
+    .await
+    .context("graft the headline's holon_sql source child")?;
+    env.create_source_block(
+        &format!("{NESTED_QUERY_HEAD_ID}::render::0"),
+        NESTED_QUERY_HEAD_ID,
+        SourceLanguage::Render,
+        r#"list(#{sortkey: "content", item_template: rendered_text(col("content"))})"#,
+    )
+    .await
+    .context("graft the headline's render child")?;
     Ok(())
 }

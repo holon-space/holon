@@ -60,10 +60,15 @@ use holon_integration_tests::pbt::window_slice::builders::window_ref_caps;
 use holon_integration_tests::pbt::window_slice::builders::window_ref_caps_planted;
 use holon_integration_tests::pbt::window_slice::builders::window_ref_caps_seeded;
 use holon_integration_tests::pbt::window_slice::builders::window_wide;
+use holon_integration_tests::pbt::window_slice::seed::NESTED_QUERY_ROW_COUNT;
+use holon_integration_tests::pbt::window_slice::seed::NESTED_QUERY_ROW_MARKER;
 use holon_integration_tests::pbt::window_slice::seed::graft_displayed_text_tree;
+use holon_integration_tests::pbt::window_slice::seed::graft_nested_query_block;
 use holon_integration_tests::test_environment::TestEnvironment;
+use holon_pbt_core::capabilities::EngineFocus;
+use holon_pbt_core::capabilities::SutLayout;
 // `SutLayout` must be in scope to read geometry through the `CapMap`.
-use holon_pbt_core::capabilities::{EngineFocus, SutLayout};
+use holon_pbt_core::capabilities::SutRenderer;
 use holon_pbt_core::composition::run_selected;
 use holon_pbt_core::invariant::InvariantResult;
 
@@ -478,6 +483,183 @@ fn capmap_hosts_windowed_sutlayout_over_real_geometry() {
     );
 
     // Leak the !Send TestApp (gpui leak detector); process exits after the test.
+    drop(_rebind);
+    app.update(|cx| cx.shutdown());
+    app.run_until_parked();
+    std::mem::forget(app);
+    std::mem::forget(env);
+}
+
+/// Minimum painted height (px) that counts as "a real row". A text row in the
+/// outline is ~14-20px; anything at or under this is a collapsed/degenerate
+/// box, not something a user can read or click.
+const MIN_ROW_HEIGHT_PX: f32 = 8.0;
+
+/// A nested `live_block` — a query block embedded as one ROW of the main
+/// outline via the `query_block_titled` profile variant — must PAINT the rows
+/// its ViewModel holds.
+///
+/// This is the geometry half of the ClaudeCode blank-page bug (BugFunnel,
+/// Martin dogfood 2026-07-30): the page rendered its section headlines but zero
+/// rows under each one. The ViewModel carried every row; only the paint was
+/// empty, because `ReactiveShell`'s block-mode arm unconditionally renders
+/// `size_full().overflow_y_scroll()` — a shape that is correct only when the
+/// shell is parented by `columns::panel_wrap`'s definite-height `absolute
+/// size_full` div. Embedded as an outline row the parent height is indefinite,
+/// `height: 100%` resolves to a fixed empty band, and no row is laid out.
+///
+/// The test therefore asserts the MODEL first (the rows are in the ViewModel)
+/// and the GEOMETRY second (at least one row is painted at a hit-testable
+/// height). A failure of the second assert with the first passing is the
+/// height defect; a failure of the first would be a data/model defect and a
+/// different bug.
+///
+/// Deliberately a SEPARATE test from
+/// `capmap_hosts_windowed_sutlayout_over_real_geometry` (a known pre-existing
+/// red — phantom ids + ghost row after the pre-warm timeout) so this invariant
+/// can be green independently.
+#[test]
+fn nested_live_block_paints_the_rows_its_model_holds() {
+    let text_system = real_text_system();
+    let assets: Arc<dyn AssetSource> = Arc::new(());
+    let mut app = TestApp::with_text_system_and_assets(text_system, assets);
+
+    let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
+    let env = runtime
+        .block_on(async { TestEnvironment::new(runtime.clone()) })
+        .expect("test environment");
+    runtime.block_on(async { env.start_app(true).await.expect("start_app") });
+
+    // Graft BEFORE the window opens, the way a real vault's page already exists
+    // at boot: the block profile's `has_query_source` lookup is fed by a CDC
+    // live entity that the first profile resolution reads, so the headline must
+    // already own its query source when the outline first renders.
+    runtime
+        .block_on(graft_nested_query_block(&env))
+        .expect("graft the ClaudeCode-shaped query headline under the Main focus root");
+
+    let session = env.session_arc();
+    let engine = env
+        .reactive_engine
+        .get()
+        .cloned()
+        .expect("reactive engine after start_app");
+    let debug_services = env.debug_services().cloned().expect("debug services");
+
+    let bounds = BoundsRegistry::new();
+    let nav = NavigationState::new();
+
+    let _rebind = app
+        .update(|cx| {
+            launch_holon_window_rebindable(
+                session.clone(),
+                engine.clone(),
+                runtime.handle().clone(),
+                nav,
+                bounds.clone(),
+                Some(debug_services.clone()),
+                "Holon-Nested-LiveBlock-Slice",
+                cx,
+            )
+        })
+        .expect("window opened");
+
+    let sut = window_wide(Box::new(bounds.clone()), engine.clone());
+    let marker_rows_in_vm = |sut: &_, runtime: &tokio::runtime::Runtime| -> usize {
+        let vm = runtime.block_on(async { SutRenderer::widget_tree_snapshot(sut).await });
+        vm.walk()
+            .filter(|n| {
+                n.props
+                    .values()
+                    .any(|v| v.contains(NESTED_QUERY_ROW_MARKER))
+            })
+            .count()
+    };
+
+    // (1) MODEL: pump until the recursive ViewModel snapshot descends through the
+    // nested `live_block` and carries one marker-bearing node per query row.
+    let model_deadline = Instant::now() + Duration::from_secs(60);
+    let mut vm_rows = 0usize;
+    while Instant::now() < model_deadline {
+        settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+        vm_rows = marker_rows_in_vm(&sut, &runtime);
+        if vm_rows >= NESTED_QUERY_ROW_COUNT {
+            break;
+        }
+    }
+    // Then keep pumping (bounded) until the widget's rows are on screen, so the
+    // judgement below reads a settled frame rather than an in-flight one. On the
+    // defective build this simply runs to its deadline.
+    let paint_deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < paint_deadline {
+        settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+        let painted_now = bounds.all_elements().iter().any(|(_, i)| {
+            i.displayed_text
+                .as_deref()
+                .is_some_and(|t| t.contains(NESTED_QUERY_ROW_MARKER))
+        });
+        if painted_now {
+            break;
+        }
+    }
+
+    let seeded_rows = runtime
+        .block_on(env.query_sql(
+            "SELECT id, content FROM block_raw WHERE parent_id = 'block:nq-data' ORDER BY content",
+        ))
+        .expect("read back the grafted query rows");
+    eprintln!(
+        "[nested-live-block] after model settle: vm_rows={vm_rows} seeded_rows={} \
+         elements={}",
+        seeded_rows.len(),
+        bounds.all_elements().len(),
+    );
+    assert!(
+        vm_rows >= NESTED_QUERY_ROW_COUNT,
+        "model precondition: the ViewModel must hold all {NESTED_QUERY_ROW_COUNT} query rows \
+         before geometry can be judged, got {vm_rows} (the backend holds {} matching block rows) \
+         — this is a DATA failure, not the height defect this test exists for",
+        seeded_rows.len(),
+    );
+
+    // (2) GEOMETRY: those rows must actually be painted at a readable height.
+    let geo = runtime.block_on(async { sut.rendered_elements().await });
+    let painted: Vec<_> = geo
+        .iter()
+        .filter(|e| {
+            e.displayed_text
+                .as_deref()
+                .is_some_and(|t| t.contains(NESTED_QUERY_ROW_MARKER))
+        })
+        .collect();
+    let heights: Vec<f32> = painted.iter().map(|e| e.height).collect();
+    let hit_testable = painted
+        .iter()
+        .filter(|e| e.width > 1.0 && e.height >= MIN_ROW_HEIGHT_PX)
+        .count();
+
+    eprintln!(
+        "[nested-live-block] vm_rows={vm_rows} painted={} heights={heights:?} \
+         hit_testable={hit_testable} total_elements={}",
+        painted.len(),
+        geo.len(),
+    );
+    assert!(
+        hit_testable >= 1,
+        "the nested live_block's widget band painted NO row at a hit-testable HEIGHT: the \
+         ViewModel holds {vm_rows} query rows, but BoundsRegistry has {} element(s) carrying the \
+         row marker and {hit_testable} of them reach {MIN_ROW_HEIGHT_PX}px (heights={heights:?}). \
+         The shell's `height: 100%` resolved against an indefinite outline-row parent, so the \
+         band is a fixed empty box and no row was laid out.",
+        painted.len(),
+    );
+
+    eprintln!(
+        "[nested-live-block] PASS — {hit_testable}/{} query rows painted at >= \
+         {MIN_ROW_HEIGHT_PX}px inside the nested live_block",
+        painted.len(),
+    );
+
     drop(_rebind);
     app.update(|cx| cx.shutdown());
     app.run_until_parked();
