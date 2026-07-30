@@ -1281,8 +1281,7 @@ fn ensure_shared_with_me_root_node(doc: &LoroDoc) -> Result<TreeID> {
         .map_err(|e| err(format!("get 'Shared with me' root meta: {e:#}")))?;
     meta.insert(STABLE_ID, SHARED_WITH_ME_ROOT_ID)
         .map_err(|e| err(format!("set 'Shared with me' stable_id: {e:#}")))?;
-    let text: loro::LoroText = meta
-        .ensure_mergeable_text("content_raw")
+    let text = crate::mergeable_child::ensure_text(&meta, "content_raw")
         .map_err(|e| err(format!("insert 'Shared with me' content: {e:#}")))?;
     text.insert(0, SHARED_WITH_ME_TITLE)
         .map_err(|e| err(format!("write 'Shared with me' title: {e:#}")))?;

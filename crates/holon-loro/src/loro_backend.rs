@@ -632,7 +632,7 @@ fn diff_blocks_changed(a: &SnapshotBlock, b: &SnapshotBlock) -> bool {
 // -- Writing block data to tree node metadata --
 
 fn update_text_field(meta: &loro::LoroMap, key: &str, new_text: &str) -> anyhow::Result<()> {
-    let text = meta.ensure_mergeable_text(key)?;
+    let text = crate::mergeable_child::ensure_text(meta, key)?;
     text.update(new_text, Default::default())
         .map_err(|e| anyhow::anyhow!("LoroText update failed: {:?}", e))?;
     Ok(())
@@ -661,7 +661,7 @@ fn write_content_to_meta(meta: &loro::LoroMap, content: &BlockContent) -> anyhow
                 loro::LoroValue::from(ContentType::Text.to_string().as_str()),
             )?;
             update_text_field(meta, CONTENT_RAW, text)?;
-            let loro_text = meta.ensure_mergeable_text(CONTENT_RAW)?;
+            let loro_text = crate::mergeable_child::ensure_text(meta, CONTENT_RAW)?;
             // Clear every known mark key over the full range first so a re-write
             // with fewer marks drops the stale ones, then set the current spans.
             let len_chars = loro_text.len_unicode();
@@ -708,7 +708,7 @@ fn write_content_to_meta(meta: &loro::LoroMap, content: &BlockContent) -> anyhow
 /// Open (creating if absent) the nested per-property `LoroMap` (H3,
 /// [`PROPERTIES_MAP`]).
 pub(crate) fn properties_map_container(meta: &loro::LoroMap) -> anyhow::Result<loro::LoroMap> {
-    Ok(meta.ensure_mergeable_map(PROPERTIES_MAP)?)
+    crate::mergeable_child::ensure_map(meta, PROPERTIES_MAP)
 }
 
 /// Read one scalar block field's [`Value`] straight from a tree node's `meta`
@@ -2264,7 +2264,7 @@ impl LoroBackend {
                 // Re-apply marks. First clear every known mark key over the
                 // full text range so removed marks disappear; then set the
                 // new ones. `mark` is idempotent for the same key+range.
-                let text = meta.ensure_mergeable_text(CONTENT_RAW)?;
+                let text = crate::mergeable_child::ensure_text(&meta, CONTENT_RAW)?;
                 let len_chars = text.len_unicode();
                 if len_chars > 0 {
                     for key in holon_api::InlineMark::all_loro_keys() {
@@ -2335,7 +2335,7 @@ impl LoroBackend {
                     ));
                 }
 
-                let text = meta.ensure_mergeable_text(CONTENT_RAW)?;
+                let text = crate::mergeable_child::ensure_text(&meta, CONTENT_RAW)?;
                 let key = mark_owned.loro_key();
                 let value: loro::LoroValue = mark_to_loro_value(&mark_owned);
                 text.mark(range.clone(), key, value)
@@ -2382,7 +2382,7 @@ impl LoroBackend {
                 let tree = doc.get_tree(TREE_NAME);
                 let meta = tree.get_meta(tree_id)?;
 
-                let text = meta.ensure_mergeable_text(CONTENT_RAW)?;
+                let text = crate::mergeable_child::ensure_text(&meta, CONTENT_RAW)?;
                 text.unmark(range.clone(), &key_owned)
                     .map_err(|e| anyhow::anyhow!("LoroText unmark {key_owned}: {:?}", e))?;
 
@@ -2425,7 +2425,7 @@ impl LoroBackend {
             .with_read(|doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let meta = tree.get_meta(tree_id)?;
-                let text = meta.ensure_mergeable_text(CONTENT_RAW)?;
+                let text = crate::mergeable_child::ensure_text(&meta, CONTENT_RAW)?;
                 Ok(text.get_cursor(pos, side))
             })
             .map_err(|e| ApiError::InternalError {
@@ -2486,7 +2486,7 @@ impl LoroBackend {
                     ));
                 }
 
-                let text = meta.ensure_mergeable_text(CONTENT_RAW)?;
+                let text = crate::mergeable_child::ensure_text(&meta, CONTENT_RAW)?;
                 text.insert(pos, &s_owned)
                     .map_err(|e| anyhow::anyhow!("LoroText insert at {pos}: {:?}", e))?;
                 meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
@@ -2534,7 +2534,7 @@ impl LoroBackend {
                     ));
                 }
 
-                let text = meta.ensure_mergeable_text(CONTENT_RAW)?;
+                let text = crate::mergeable_child::ensure_text(&meta, CONTENT_RAW)?;
                 text.delete(pos, len)
                     .map_err(|e| anyhow::anyhow!("LoroText delete {len} at {pos}: {:?}", e))?;
                 meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
@@ -5161,6 +5161,30 @@ mod concurrent_child_creation_semantics {
                 .into_iter()
                 .collect(),
             "both peers write into one mergeable child map; the keys union"
+        );
+    }
+
+    /// A doc written before the migration holds a legacy op-id child at the
+    /// key. The prod write path refuses it rather than clobbering it or
+    /// silently falling back to the losing LWW shape — fresh start is the
+    /// only migration.
+    #[test]
+    fn a_prod_write_onto_pre_migration_state_fails_loud() {
+        let (a, _b, node) = forked_pair_on_shared_node();
+        let meta = meta_of(&a, node);
+        #[allow(deprecated)]
+        let legacy: loro::LoroText = meta
+            .get_or_create_container(CONTENT_RAW, loro::LoroText::new())
+            .unwrap();
+        legacy.insert(0, "written before the migration").unwrap();
+        a.commit();
+
+        let err = update_text_field(&meta, CONTENT_RAW, "new")
+            .expect_err("prod must not write through a legacy op-id child");
+
+        assert!(
+            err.to_string().contains("predates the mergeable migration"),
+            "the refusal must name the migration; got: {err}"
         );
     }
 }
