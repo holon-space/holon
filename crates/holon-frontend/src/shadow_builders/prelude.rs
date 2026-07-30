@@ -161,3 +161,20 @@ fn weave_advice_into_item(ba: &BA<'_>, mut item: ViewModel) -> ViewModel {
     }
     item
 }
+
+/// Re-derive a leaf widget's `content` prop from one column of a CDC row.
+///
+/// `None` means the row does not carry `field` at all — a pre-first-batch
+/// empty row, or a `col()` name outside the projection. The caller keeps its
+/// build-time snapshot instead of blanking the widget.
+///
+/// A present value is stringified deliberately (`to_display_string`), the same
+/// coercion the build-time snapshot applies via
+/// `ResolvedArgs::get_positional_string`: an INTEGER column renders its digits
+/// and only SQL NULL renders empty.
+pub(crate) fn content_from_row(
+    row: &holon_api::widget_spec::DataRow,
+    field: &str,
+) -> Option<String> {
+    row.get(field).map(|v| v.to_display_string())
+}

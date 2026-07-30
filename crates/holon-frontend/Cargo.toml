@@ -82,3 +82,4 @@ clap = { version = "4", features = ["derive"] }
 [dev-dependencies]
 tempfile.workspace = true
 proptest.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
