@@ -71,12 +71,39 @@ const LIST_OVERDRAW_PX: f32 = 1000.0;
 /// BugFunnel.
 const LIST_SCROLL_PAST_END_PX: f32 = 280.0;
 
+/// Where a block-mode [`ReactiveShell`] sits in the layout tree — the single
+/// fact that decides whether it may claim its parent's full height and own a
+/// scroll viewport.
+///
+/// Parsed once, at the shell's construction site, from the render context that
+/// placed it; the render path then reasons in the type instead of re-deriving
+/// the answer from block-id spellings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellPlacement {
+    /// Parented by a definite-height panel slot — the root layout's live_blocks
+    /// and everything `columns::panel_wrap` wraps in its `absolute size_full`
+    /// div. `size_full` + `overflow_y_scroll` is the proven shape here: it lets
+    /// an overflowing outline scroll and gives relative-height descendants
+    /// (live_query `relative(1.0)`, the accordion cap, virtualized
+    /// `gpui::list`) something definite to resolve against.
+    Panel,
+    /// Embedded in CONTENT — a `live_block()` rendered as one row of a
+    /// collection (the `query_block_titled` profile variant), or anything below
+    /// such a row. The parent height is indefinite, so `size_full` resolves to
+    /// a fixed empty band and no row is ever laid out; the shell must be
+    /// content-sized and leave scrolling to the enclosing outline.
+    Nested,
+}
+
 /// Unified GPUI shell for reactive views (blocks and collections).
 ///
 /// Subscribes to a `ReactiveView`'s `MutableVec` via `signal_vec_cloned()`.
 /// Handles VecDiff application, entity caching, and GPUI rendering.
 pub struct ReactiveShell {
     block_id: Option<String>,
+    /// Block-mode only: the layout slot this shell was placed in. Collection
+    /// mode never reaches the block-render arms that read it.
+    placement: ShellPlacement,
     /// `Some` only in collection mode — the `ReactiveView` whose `MutableVec`
     /// drives `apply_diff`. Block-mode shells iterate `current_tree` instead.
     reactive_view: Option<Arc<ReactiveView>>,
@@ -169,6 +196,9 @@ impl ReactiveShell {
     /// verbatim and re-emits it (extended with `block_id`) into every
     /// render frame's `GpuiRenderContext`. Top-level callers pass
     /// [`LiveBlockAncestors::new`].
+    /// `placement` is the layout slot the caller is putting this shell into —
+    /// see [`ShellPlacement`]. Callers that render from a `GpuiRenderContext`
+    /// pass `ctx.placement`; the root layout passes [`ShellPlacement::Panel`].
     pub fn new_for_block(
         block_id: String,
         ctx: RenderContext,
@@ -177,6 +207,7 @@ impl ReactiveShell {
         nav: NavigationState,
         bounds_registry: BoundsRegistry,
         live_block_ancestors: LiveBlockAncestors,
+        placement: ShellPlacement,
         cx: &mut Context<Self>,
     ) -> Self {
         let holon_frontend::LiveBlock {
@@ -231,6 +262,7 @@ impl ReactiveShell {
 
         let mut view = Self {
             block_id: Some(block_id),
+            placement,
             reactive_view: None,
             items: vec![],
             current_tree: Some(tree),
@@ -297,6 +329,9 @@ impl ReactiveShell {
 
         Self {
             block_id: None,
+            // Collection mode returns before the block-render arms, so this is
+            // never read; the conservative value is the content-sized one.
+            placement: ShellPlacement::Nested,
             reactive_view: Some(reactive_view),
             items,
             current_tree: None,
@@ -696,7 +731,8 @@ impl Render for ReactiveShell {
                 window,
                 cx,
             )
-            .with_live_block_ancestors(frame_ancestors.clone());
+            .with_live_block_ancestors(frame_ancestors.clone())
+            .with_shell_placement(self.placement);
             // Eager (non-virtualized) collection rendering: every row is
             // built every frame regardless of viewport. Kept behind
             // `HOLON_EAGER_PANEL_RENDER=1` as a one-release rollback for the
@@ -735,35 +771,27 @@ impl Render for ReactiveShell {
                         .child(div().w_full().pb(gap_px).child(render_row(item, &gpui_ctx)));
                 }
                 let scroll_id = self.block_id.as_deref().unwrap_or("block-tree-collection");
-                return div()
-                    .id(SharedString::from(scroll_id.to_string()))
-                    .size_full()
-                    .overflow_y_scroll()
-                    .child(container)
-                    .into_any_element();
+                let wrapper = div().id(SharedString::from(scroll_id.to_string()));
+                return match self.placement {
+                    ShellPlacement::Panel => wrapper.size_full().overflow_y_scroll(),
+                    ShellPlacement::Nested => wrapper.w_full(),
+                }
+                .child(container)
+                .into_any_element();
             }
-            // Block-mode non-eager arm: MIRROR the eager arm above (id +
-            // overflow_y_scroll on the size_full div). Without the scroll
-            // viewport a content-height column (an outline that overflows) is
-            // clipped to the panel with no way to reach below-fold rows — the
-            // plain-path (non-accordion) main panel stopped scrolling (Martin
-            // dogfood): the outer columns.rs wrapper cannot scroll because this
-            // size_full shell exactly fills it. Keeping size_full (NOT switching
-            // to content-height) preserves the DEFINITE-height context that
-            // relative-height descendants (live_query `relative(1.0)`, the
-            // accordion cap) and virtualized `gpui::list` sidebars require, so
-            // this is the eager arm's proven shape — not a new percentage trap.
             let scroll_id = self.block_id.as_deref().unwrap_or("block-content-scroll");
             // Accordion-bearing column: fire the flow-panel split HERE — the real
             // production seam. Production wraps the main panel in a `live_block`,
             // so `columns::render`'s flow child is a live_block and its split
             // never fires; the split must fire wherever the column-with-accordion
-            // is actually rendered — this block-mode shell arm. The `size_full`
-            // div is the definite-height wrapper the accordion cap resolves
-            // against (same role as `columns::panel_wrap`'s absolute size_full).
+            // is actually rendered — this block-mode shell arm. The split's
+            // `flex_1 min_h_0` main region only resolves inside a DEFINITE-height
+            // wrapper, which is what a `Panel` placement guarantees (same role as
+            // `columns::panel_wrap`'s absolute size_full); a `Nested` shell has no
+            // such height, so it falls through to the content-height arm below.
             // Shell-less compositions still split at `columns::render` — ONE
             // implementation (`render_accordion_split`), two call sites.
-            if builders::has_accordion_child(tree) {
+            if self.placement == ShellPlacement::Panel && builders::has_accordion_child(tree) {
                 let sid = gpui::ElementId::from(SharedString::from(format!("{scroll_id}-main")));
                 return builders::render_accordion_split(
                     div().size_full(),
@@ -773,24 +801,30 @@ impl Render for ReactiveShell {
                     &gpui_ctx,
                 );
             }
-            // Plain (non-accordion) block tree: MIRROR the eager arm above (id +
-            // overflow_y_scroll on the size_full div). Without the scroll viewport
-            // a content-height column (an outline that overflows) is clipped to
-            // the panel with no way to reach below-fold rows — the plain-path main
-            // panel stopped scrolling (Martin dogfood): the outer columns.rs
-            // wrapper cannot scroll because this size_full shell exactly fills it.
-            // Keeping size_full (NOT content-height) preserves the DEFINITE-height
-            // context that relative-height descendants (live_query `relative(1.0)`,
-            // virtualized `gpui::list` sidebars) require — the eager arm's proven
-            // shape, not a new percentage trap.
-            return div()
+            // Plain block tree. A PANEL-placed shell mirrors the eager arm above
+            // (id + overflow_y_scroll on the size_full div): without the scroll
+            // viewport a content-height column that overflows is clipped to the
+            // panel with no way to reach below-fold rows (the plain-path main
+            // panel stopped scrolling, Martin dogfood — the outer columns.rs
+            // wrapper cannot scroll because this size_full shell exactly fills
+            // it), and `size_full` is also the DEFINITE-height context that
+            // relative-height descendants (live_query `relative(1.0)`, virtualized
+            // `gpui::list` sidebars) resolve against.
+            //
+            // A NESTED shell must NOT take that shape: its parent is one row of an
+            // outline and has no definite height, so `height: 100%` collapses to a
+            // fixed empty band and no row is laid out (the ClaudeCode blank-page
+            // bug). It is content-sized, and the enclosing outline owns the scroll.
+            let wrapper = div()
                 .id(SharedString::from(scroll_id.to_string()))
                 .flex()
-                .flex_col()
-                .size_full()
-                .overflow_y_scroll()
-                .child(builders::render(tree, &gpui_ctx))
-                .into_any_element();
+                .flex_col();
+            return match self.placement {
+                ShellPlacement::Panel => wrapper.size_full().overflow_y_scroll(),
+                ShellPlacement::Nested => wrapper.w_full(),
+            }
+            .child(builders::render(tree, &gpui_ctx))
+            .into_any_element();
         }
 
         // Recompute visible indices (tree/outline collapse filtering). When
@@ -898,7 +932,10 @@ impl Render for ReactiveShell {
                 window,
                 cx,
             )
-            .with_live_block_ancestors(row_ancestors.clone());
+            .with_live_block_ancestors(row_ancestors.clone())
+            // One ROW of the virtualized list: the row's height is what the
+            // list measures, so nothing built here may claim a parent height.
+            .with_shell_placement(ShellPlacement::Nested);
 
             let i = visible_indices[ix];
             let item = &items[i];

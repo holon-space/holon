@@ -424,7 +424,17 @@ impl AppModel {
                 let ancestors = entity_view_registry::LiveBlockAncestors::new();
                 let entity = cx.new(|cx| {
                     views::ReactiveShell::new_for_block(
-                        bid, render_ctx, services, live_block, nav, b, ancestors, cx,
+                        bid,
+                        render_ctx,
+                        services,
+                        live_block,
+                        nav,
+                        b,
+                        ancestors,
+                        // Root-layout live_blocks ARE the panels — `columns`
+                        // hands each one a definite-height slot.
+                        views::reactive_shell::ShellPlacement::Panel,
+                        cx,
                     )
                 });
                 self.root_live_blocks.insert(block_id.clone(), entity);
@@ -505,6 +515,7 @@ fn interpret_and_render(
             window,
             cx,
         )
+        .with_shell_placement(gpui_ctx.placement)
     });
     render::builders::render(&rvm, &inner_ctx)
 }

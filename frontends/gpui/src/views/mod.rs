@@ -5,5 +5,6 @@ pub mod rich_text_editor;
 
 pub use editor_view::EditorView;
 pub use reactive_shell::ReactiveShell;
+pub use reactive_shell::ShellPlacement;
 pub use render_entity_view::RenderEntityView;
 pub use rich_text_editor::RichTextEditor;

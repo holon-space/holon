@@ -108,7 +108,10 @@ impl Render for RenderEntityView {
             window,
             cx,
         )
-        .with_live_block_ancestors(self.live_block_ancestors.clone());
+        .with_live_block_ancestors(self.live_block_ancestors.clone())
+        // A `render_entity` IS one row of a collection: its parent has no
+        // definite height, so anything it builds must be content-sized.
+        .with_shell_placement(crate::views::ShellPlacement::Nested);
 
         let Some(ref slot) = self.current.slot else {
             return builders::render(&self.current, &gpui_ctx);

@@ -32,6 +32,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
             let nav = ctx.nav.clone();
             let bounds = ctx.bounds_registry.clone();
             let ancestors = ctx.live_block_ancestors.clone();
+            let placement = ctx.placement;
 
             let entity = ctx.local.get_or_create_typed(cache_key, || {
                 let query_context = query_context_id.as_ref().map(|id| {
@@ -60,6 +61,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
                             nav,
                             bounds,
                             ancestors,
+                            placement,
                             cx,
                         )
                     })
@@ -69,7 +71,13 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
             let mut s = StyleRefinement::default();
             s.flex_grow = Some(1.0);
             s.size.width = Some(gpui::relative(1.0).into());
-            s.size.height = Some(gpui::relative(1.0).into());
+            // Fill the panel only when there IS a definite panel height to fill.
+            // Under a `Nested` placement the parent is one outline row, so a
+            // relative height would re-introduce the collapsed band the shell
+            // itself now avoids.
+            if placement == crate::views::reactive_shell::ShellPlacement::Panel {
+                s.size.height = Some(gpui::relative(1.0).into());
+            }
             return AnyView::from(entity).cached(s).into_any_element();
         }
     }
