@@ -396,3 +396,11 @@ fn bare_target(target_id: &str) -> &str {
 pub fn disclosure_halo_id_for(target_id: &str) -> String {
     format!("disclosure_halo::{}", bare_target(target_id))
 }
+
+/// Canonical element-id for a leaf row's decorative tree bullet. Registered
+/// only while the bullet is drawn, and — like the chevron — carries its own
+/// box so an alignment invariant can compare the two markers' vertical centers
+/// against the row's first text line.
+pub fn tree_bullet_id_for(target_id: &str) -> String {
+    format!("tree_bullet::{}", bare_target(target_id))
+}

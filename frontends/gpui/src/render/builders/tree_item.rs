@@ -12,10 +12,19 @@ use holon_frontend::reactive_view_model::ReactiveViewModel;
 use super::prelude::*;
 use crate::geometry::TransparentTracker;
 
-/// Top offset (px) that lifts the disclosure chevron onto the first text
-/// line's center, matching the block bullet's `mt` in `block_profile.yaml`.
-/// Pixel value pending Martin's live visual pass.
-const CHEVRON_TOP_OFFSET: f32 = 8.0;
+/// A tree row is top-aligned and grows downward as its content wraps, so its
+/// leading chrome must center on the FIRST LINE BOX, never on the row. Both
+/// markers therefore occupy a slot exactly one line tall and center their glyph
+/// inside it: the glyph lands at `row.y + text_line_height / 2` whether the row
+/// is one line or five, with no hand-tuned offset to drift out of calibration.
+fn first_line_slot(ctx: &GpuiRenderContext) -> Div {
+    div()
+        .flex_shrink_0()
+        .h(px(ctx.style().text_line_height))
+        .flex()
+        .items_center()
+        .justify_center()
+}
 
 /// A parent's disclosure affordance paints at full strength — it is the thing
 /// the eye scans the sidebar for.
@@ -90,19 +99,16 @@ fn node_id(vm: &ReactiveViewModel) -> Option<String> {
 
 fn bullet_dot(ctx: &GpuiRenderContext) -> Div {
     let s = ctx.style();
-    div()
+    let (gutter, size) = (s.tree_chevron_size, s.tree_bullet_size);
+    drop(s);
+    first_line_slot(ctx)
         .opacity(LEAF_BULLET_WEIGHT)
-        .flex_shrink_0()
-        .w(px(s.tree_chevron_size))
-        .h(px(s.tree_item_min_height))
-        .flex()
-        .items_center()
-        .justify_center()
+        .w(px(gutter))
         .child(
             div()
-                .w(px(s.tree_bullet_size))
-                .h(px(s.tree_bullet_size))
-                .rounded(px(s.tree_bullet_size / 2.0))
+                .w(px(size))
+                .h(px(size))
+                .rounded(px(size / 2.0))
                 .bg(tc(ctx, |t| t.muted_foreground)),
         )
 }
@@ -162,8 +168,12 @@ fn chevron_face(
     halo_id: Option<String>,
     ctx: &GpuiRenderContext,
 ) -> gpui::AnyElement {
+    // A square box of its own (not `size_full`): the enclosing slot is one text
+    // line tall, and the collapsed halo below must round to a CIRCLE, not an
+    // oval stretched to the line height.
     let face = div()
-        .size_full()
+        .w(px(ctx.style().tree_chevron_size))
+        .h(px(ctx.style().tree_chevron_size))
         .flex()
         .items_center()
         .justify_center()
@@ -203,20 +213,10 @@ fn collapse_chevron(
 ) -> gpui::Stateful<Div> {
     let color = tc(ctx, |t| t.muted_foreground);
 
-    div()
+    first_line_slot(ctx)
         .id(hashed_id(&format!("tree-toggle-{el_id}")))
         .cursor_pointer()
-        .flex_shrink_0()
-        // Align the chevron's vertical center with the block bullet, which sits
-        // on the first text line's center (row is top-aligned). The chevron box
-        // (tree_chevron_size tall) centers its glyph at box/2; the offset lifts
-        // that onto the same line as the bullet.
-        .mt(px(CHEVRON_TOP_OFFSET))
         .w(px(ctx.style().tree_chevron_size))
-        .h(px(ctx.style().tree_chevron_size))
-        .flex()
-        .items_center()
-        .justify_center()
         .text_size(px(ctx.style().tree_chevron_font_size))
         .text_color(color)
         .on_mouse_down(gpui::MouseButton::Left, move |_, window, _cx| {
@@ -378,7 +378,18 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
             }
         }
         LeadingMarker::Bullet => {
-            row = row.child(bullet_dot(ctx));
+            let bullet = bullet_dot(ctx);
+            match id.as_deref() {
+                Some(target_id) => {
+                    row = row.child(TransparentTracker::new(
+                        holon_frontend::tree_bullet_id_for(target_id),
+                        "tree_bullet",
+                        ctx.bounds_registry.clone(),
+                        bullet.into_any_element(),
+                    ));
+                }
+                None => row = row.child(bullet),
+            }
         }
         LeadingMarker::None => {
             // Reserve the same leading-marker gutter even when this row draws

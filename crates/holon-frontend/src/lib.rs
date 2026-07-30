@@ -195,6 +195,7 @@ pub mod render_services;
 pub use geometry::disclosure_halo_id_for;
 pub use geometry::drawer_toggle_id_for;
 pub use geometry::expand_toggle_id_for;
+pub use geometry::tree_bullet_id_for;
 pub use geometry::vms_button_id_for;
 pub mod editor_caret;
 pub mod headless_editor_mirror;

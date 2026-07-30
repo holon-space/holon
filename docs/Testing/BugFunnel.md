@@ -9,7 +9,7 @@ distribution steers QA investment.
 - ENVIRONMENT: 120
 - COVERAGE: 61
 - PERCEPTION: 48
-- ORACLE: 36
+- ORACLE: 37
 
 Archived baseline (ENVIRONMENT 87 · COVERAGE 37 · PERCEPTION 35 · ORACLE 18 as of
 2026-07-22): the per-bug increment log below starts at commit e70c3a9245f2, which split
@@ -21,6 +21,18 @@ header against the log.
 Increment log (append-only, NEWEST FIRST — each counted bug adds exactly one line here;
 merge conflicts resolve by keeping both sides' lines and re-summing the totals ON TOP OF
 the archived baseline):
+- (+1 ORACLE 2026-07-30, secondary PERCEPTION: a sidebar tree row's leading chrome sits BELOW its
+  first text line — measured chevron center-y 18.0px and leaf-bullet center-y 16.0px against a
+  first-line center of 13.0px (`text_line_height` 26). On a WRAPPED row the error is structural,
+  not merely 3–5px: the bullet's box was `tree_item_min_height` and the chevron's a
+  `tree_chevron_size` box plus a hand-tuned `CHEVRON_TOP_OFFSET = 8.0` whose own comment admitted
+  the value was "pending Martin's live visual pass". ORACLE, not PERCEPTION: the harness could
+  always express this — the chevron lane added windowed geometry assertions the same day, but they
+  assert PRESENCE, GLYPH and OPACITY, never POSITION relative to the text, so a marker could drift
+  anywhere in the row and stay green. Secondary PERCEPTION only for the taste-calibrated pixel
+  offset. Closed by `frontends/gpui/tests/tree_row_first_line_alignment.rs` (red first with those
+  exact numbers, over a two-line row, incl. the production `selectable(row(icon, spacer, text))`
+  sidebar shape) plus a one-line-tall marker slot in `tree_item.rs` that deletes the magic offset.)
 - (+1 COVERAGE 2026-07-30, secondary ORACLE: the creation-slot virtual row leaked into the LEFT
   SIDEBAR tree — Martin's live vault rendered 27 rows for 26 pages, the extra one an empty
   `block:__virtual:<page>` bullet nested under its parent, which then fired a `[tree-desync]`
