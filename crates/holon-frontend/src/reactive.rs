@@ -1034,11 +1034,11 @@ pub struct ReactiveRenderedRows {
     /// `render_expr` as an `error(message:)` sentinel so it is visible in the
     /// UI instead of an eternal spinner.
     error: Mutable<Option<String>>,
-    /// The render expression the error sentinel displaced, so a recovering
-    /// watcher can restore it. A query watcher never re-delivers a Structure
-    /// event, so without this the block would keep rendering `error(...)`
-    /// after its rows arrive.
-    expr_before_error: std::sync::Mutex<Option<RenderExpr>>,
+    /// `Some` exactly while an error sentinel occupies `render_expr`: the
+    /// expression to display once the error clears. A query watcher never
+    /// re-delivers a Structure event, so without this the block would keep
+    /// rendering `error(...)` after its rows arrive.
+    expr_pending_restore: std::sync::Mutex<Option<RenderExpr>>,
     rows: ReactiveRowSet,
     structure_ready: tokio::sync::Notify,
     /// Generation whose data currently populates `rows`. Each re-render
@@ -1076,7 +1076,7 @@ impl ReactiveRenderedRows {
         Self {
             render_expr: Mutable::new(loading_expr()),
             error: Mutable::new(None),
-            expr_before_error: std::sync::Mutex::new(None),
+            expr_pending_restore: std::sync::Mutex::new(None),
             rows: ReactiveRowSet::labeled(label),
             structure_ready: tokio::sync::Notify::new(),
             data_generation: std::sync::atomic::AtomicU64::new(0),
@@ -1094,7 +1094,17 @@ impl ReactiveRenderedRows {
     }
 
     /// Set the render expression directly.
+    ///
+    /// While a failure is disclosed the error sentinel owns `render_expr` for
+    /// the whole degraded window, so a re-subscribe (a second block watching
+    /// the same query) becomes what recovery restores instead.
     pub fn set_render_expr(&self, expr: RenderExpr) {
+        let mut pending = self.expr_pending_restore.lock().unwrap();
+        if pending.is_some() {
+            *pending = Some(expr);
+            return;
+        }
+        drop(pending);
         self.render_expr.set(expr);
     }
 
@@ -1108,11 +1118,11 @@ impl ReactiveRenderedRows {
     /// of spinning forever.
     pub fn set_error(&self, msg: impl Into<String>) {
         let msg = msg.into();
-        let mut displaced = self.expr_before_error.lock().unwrap();
-        if displaced.is_none() {
-            *displaced = Some(self.render_expr.get_cloned());
+        let mut pending = self.expr_pending_restore.lock().unwrap();
+        if pending.is_none() {
+            *pending = Some(self.render_expr.get_cloned());
         }
-        drop(displaced);
+        drop(pending);
         self.render_expr.set(error_expr(&msg));
         self.error.set(Some(msg));
         self.structure_ready.notify_waiters();
@@ -1123,7 +1133,7 @@ impl ReactiveRenderedRows {
     /// after a [`Self::set_error`].
     pub fn clear_error(&self) {
         let expr = self
-            .expr_before_error
+            .expr_pending_restore
             .lock()
             .unwrap()
             .take()
@@ -4743,6 +4753,45 @@ mod tests {
             rq.get_render_expr(),
             table_expr(),
             "recovery must restore the block's own expression, not a second error sentinel"
+        );
+    }
+
+    /// Two blocks watching the SAME query share one `ReactiveRenderedRows`, so
+    /// the second block's subscribe lands mid-failure on the first block's
+    /// disclosed error.
+    #[tokio::test]
+    async fn a_resubscribe_during_a_failure_keeps_the_error_and_wins_the_restore() {
+        let rq = ReactiveRenderedRows::new();
+        rq.set_render_expr(table_expr());
+        rq.set_error("query failed: no such table: cc_sessions");
+
+        let second_subscriber_expr = RenderExpr::FunctionCall {
+            name: "list".to_string(),
+            args: vec![],
+        };
+        rq.set_render_expr(second_subscriber_expr.clone());
+
+        assert_eq!(
+            rq.error().as_deref(),
+            Some("query failed: no such table: cc_sessions"),
+            "a re-subscribe must not un-disclose a live failure"
+        );
+        let RenderExpr::FunctionCall { name, .. } = rq.get_render_expr() else {
+            panic!("degraded window must keep rendering the error sentinel");
+        };
+        assert_eq!(
+            name, "error",
+            "a re-subscribe must not clobber the visible error sentinel"
+        );
+        assert!(!rq.is_loading());
+
+        rq.clear_error();
+
+        assert_eq!(rq.error(), None);
+        assert_eq!(
+            rq.get_render_expr(),
+            second_subscriber_expr,
+            "recovery must restore the LATEST requested expression, not the pre-error one"
         );
     }
 
