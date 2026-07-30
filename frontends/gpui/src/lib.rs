@@ -1905,6 +1905,14 @@ fn launch_holon_window_impl(
     // `HolonApp::entity_cache` clones this same Arc, so both ends observe
     // the same map.
     let entity_cache: entity_view_registry::EntityCache = Default::default();
+    holon_core::memstats::register("entity_cache", {
+        // Weak: the sampler's reader must not outlive the window's cache.
+        let cache = std::sync::Arc::downgrade(&entity_cache);
+        std::sync::Arc::new(move || match cache.upgrade() {
+            Some(cache) => entity_view_registry::cache_counts(&cache).as_stats(),
+            None => Vec::new(),
+        })
+    });
     let entity_cache_for_view = entity_cache.clone();
     let window_result = cx.open_window(window_options, move |window, cx| {
         tracing::debug!("[GPUI] Inside open_window callback — building root view");

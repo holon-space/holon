@@ -1287,10 +1287,24 @@ impl ReactiveRenderedRows {
                     .values()
                     .map(|cell| cell.get_cloned())
                     .collect();
+                INTERPRETATION_PASSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 interpret_fn(expr, &rows)
             }
         }
     }
+}
+
+/// Re-interpretation passes driven by a ui-state generation bump.
+///
+/// Every navigation bumps the generation, which re-interprets the render tree
+/// of EVERY cached page shell — not just the visible one. Sampling this
+/// separates "growth from re-interpretation garbage" from "growth from the
+/// watch layer" when reading a memory profile.
+static INTERPRETATION_PASSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Diagnostic: total [`INTERPRETATION_PASSES`] so far in this process.
+pub fn interpretation_passes() -> u64 {
+    INTERPRETATION_PASSES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 impl ReactiveRowProvider for ReactiveRenderedRows {
@@ -1787,7 +1801,7 @@ impl UiState {
 /// on demand. Frontends consume via `watch()` (stream) or `snapshot()`
 /// (polling). TODO: This looks like a god-class heavily violating SRP
 pub struct ReactiveEngine {
-    registry: ReactiveRegistry,
+    registry: Arc<ReactiveRegistry>,
     session: Arc<FrontendSession>,
     pub runtime_handle: tokio::runtime::Handle,
     interpret_fn: InterpretFn,
@@ -1795,7 +1809,7 @@ pub struct ReactiveEngine {
     /// `HolonFrontendModule::configure()` and injected here via DI. Used by
     /// `BuilderServices::interpret`.
     interpreter: Arc<RenderInterpreter<ReactiveViewModel>>,
-    watchers: Mutex<HashMap<EntityUri, WatcherState>>,
+    watchers: Arc<Mutex<HashMap<EntityUri, WatcherState>>>,
     ui_state: UiState,
     /// Reactive keybinding registry: operation_name → key chord.
     /// Keybindings are joined into OperationDescriptors during ViewModel
@@ -1882,13 +1896,13 @@ impl ReactiveEngine {
             );
         }
 
-        Self {
-            registry: ReactiveRegistry::new(),
+        let engine = Self {
+            registry: Arc::new(ReactiveRegistry::new()),
             session,
             runtime_handle,
             interpret_fn: Arc::new(interpret_fn),
             interpreter,
-            watchers: Mutex::new(HashMap::new()),
+            watchers: Arc::new(Mutex::new(HashMap::new())),
             ui_state: UiState::new(),
             key_bindings,
             provider_cache: Arc::new(crate::provider_cache::ProviderCache::new()),
@@ -1897,7 +1911,41 @@ impl ReactiveEngine {
             advice_sidecar: Arc::new(Mutex::new(HashMap::new())),
             advice_weaver_started: std::sync::atomic::AtomicBool::new(false),
             apply_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        }
+        };
+        engine.register_memstats();
+        engine
+    }
+
+    /// Publish the frontend-side memory counters to the process sampler.
+    ///
+    /// Reads the live maps rather than mirroring them, so the numbers cannot
+    /// drift from the state they describe — but only through `Weak`, because a
+    /// reader parked in a process-global map must not keep watcher tasks and
+    /// reactive state alive past their engine.
+    fn register_memstats(&self) {
+        let watchers = Arc::downgrade(&self.watchers);
+        let registry = Arc::downgrade(&self.registry);
+        holon_core::memstats::register(
+            "reactive",
+            Arc::new(move || {
+                let (Some(watchers), Some(registry)) = (watchers.upgrade(), registry.upgrade())
+                else {
+                    return Vec::new();
+                };
+                let active_watchers =
+                    watchers.lock().expect("watchers mutex poisoned").len() as u64;
+                let registry_entries = registry
+                    .entries
+                    .lock()
+                    .expect("reactive registry mutex poisoned")
+                    .len() as u64;
+                vec![
+                    ("active_watchers", active_watchers),
+                    ("registry_entries", registry_entries),
+                    ("interpretation_passes", interpretation_passes()),
+                ]
+            }),
+        );
     }
 
     /// Monotonic count of CDC changes the watch consumer tasks have applied.
@@ -2257,6 +2305,13 @@ impl ReactiveEngine {
         self.watchers.lock().unwrap().len()
     }
 
+    /// Test/diagnostic introspection: `ReactiveRenderedRows` entries held by
+    /// the registry. Diverges from [`Self::active_watcher_count`] when reactive
+    /// state outlives its watcher.
+    pub fn watcher_registry_len(&self) -> usize {
+        self.registry.entries.lock().unwrap().len()
+    }
+
     /// Spawn the CDC watcher task for `block_id`, feeding `reactive`.
     /// Callers hold the `watchers` lock and insert the returned state.
     fn spawn_block_watcher(
@@ -2551,6 +2606,13 @@ impl ReactiveEngine {
             state.refcount += 1;
             return (key, results);
         }
+        // The query prefix classifies a watcher offline (sidebar-shaped vs
+        // main-panel-shaped SQL) when reading a memory profile.
+        tracing::debug!(
+            watcher_key = %key,
+            query_prefix = query.chars().take(120).collect::<String>(),
+            "spawning query watcher"
+        );
         {
             let session = self.session.clone();
             let reactive = results.clone();
@@ -4376,6 +4438,48 @@ mod tests {
             Value::String(format!("{}:{}", name, rows.len())),
         );
         ReactiveViewModel::from_widget("empty", HashMap::new()).with_entity(Arc::new(m))
+    }
+
+    /// A ui-gen bump re-interprets EVERY cached page shell, not just the
+    /// visible one — the confound the interpretation-pass counter exists to
+    /// separate from watch-layer growth. Two cached shells, one bump, +2.
+    #[tokio::test]
+    async fn ui_gen_bump_counts_one_interpretation_pass_per_cached_shell() {
+        use futures::StreamExt;
+
+        let ui_gen = Mutable::new(0u64);
+        let interpret = Arc::new(test_interpret);
+        let shells = [ReactiveRenderedRows::new(), ReactiveRenderedRows::new()];
+        let mut streams: Vec<_> = shells
+            .iter()
+            .map(|shell| {
+                Box::pin(
+                    shell
+                        .structural_signal_with_ui_gen(interpret.clone(), ui_gen.signal())
+                        .to_stream(),
+                )
+            })
+            .collect();
+
+        // Drain each shell's initial emission so the baseline is quiescent.
+        for stream in &mut streams {
+            stream.next().await.expect("initial interpretation");
+        }
+        let baseline = interpretation_passes();
+
+        ui_gen.set(1);
+        for stream in &mut streams {
+            stream
+                .next()
+                .await
+                .expect("re-interpretation after ui bump");
+        }
+
+        assert_eq!(
+            interpretation_passes() - baseline,
+            2,
+            "one ui-gen bump must re-interpret both cached shells"
+        );
     }
 
     fn remote_origin() -> holon_api::ChangeOrigin {

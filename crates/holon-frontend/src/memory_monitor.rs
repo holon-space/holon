@@ -97,6 +97,15 @@ impl MemoryMonitorHandle {
                         tracing::info!("[MemoryMonitor] Baseline RSS: {current_mb:.1}MB");
                     }
 
+                    // Attribution for the RSS number above: which of the
+                    // watch layer, the reactive registry, the entity cache,
+                    // or re-interpretation is growing alongside it.
+                    tracing::info!(
+                        target: "holon_memstats",
+                        "rss_mb={current_mb:.1} {}",
+                        holon_core::memstats::snapshot_line()
+                    );
+
                     #[cfg(feature = "heap-profile")]
                     if current_mb > rss_abort_mb {
                         tracing::error!(
