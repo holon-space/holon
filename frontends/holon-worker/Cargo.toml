@@ -39,7 +39,7 @@ tokio = { version = "1", default-features = false, features = ["rt", "time", "ma
 # NOTE: `encryption` is intentionally omitted — it pulls rustls→ring, whose C
 # crypto can't compile for wasm32-wasi without a wasi-sdk clang sysroot. The
 # worker runs an in-memory DB (`:memory:`), so at-rest encryption is moot.
-turso_core = { git = "https://github.com/nightscape/turso.git", rev = "33c4591c088c24ef2ad06b7b875bf92a36a77110", default-features = false, features = ["fs", "json", "uuid", "time", "series"] }
+turso_core = { git = "https://github.com/nightscape/turso.git", rev = "9d7394fb379d680473aa4acec8519078c1d46d39", default-features = false, features = ["fs", "json", "uuid", "time", "series"] }
 anyhow = "1"
 # fluxdi::Module trait, needed to register EventInfraModule (the block
 # OperationProvider) during engine_init. Same git source as the root
@@ -82,15 +82,6 @@ symlink = { path = "patches/symlink" }
 # loro_fractional_index ^1.13.0 and collides with the deliberate `= 1.6.0` pin
 # that crates/holon carries. Keep the rev equal to the root's.
 loro = { git = "https://github.com/nightscape/loro.git", rev = "4d179c68" }
-
-# Neutralize turso's cargo-hakari `workspace-hack`: it declares
-# `tokio = { features = ["full"] }` (plus hyper/reqwest) unconditionally, so on
-# wasm32-wasip1-threads it trips tokio's "only sync,macros,io-util,rt,time on
-# wasm" compile_error!. The crate carries no code — it exists only to unify
-# features across turso's own workspace — so an empty stand-in is behaviorally
-# free. See patches/turso-workspace-hack/Cargo.toml.
-[patch."https://github.com/nightscape/turso.git"]
-workspace-hack = { path = "patches/turso-workspace-hack" }
 
 [build-dependencies]
 napi-build = "2.3.1"

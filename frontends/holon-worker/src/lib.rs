@@ -1792,8 +1792,15 @@ pub fn open_db(path: String) -> napi::Result<()> {
     let core_opts = turso_core::DatabaseOpts::new();
     let flags = turso_core::OpenFlags::Create;
 
-    let db = turso_core::Database::open_file_with_flags(io.clone(), &path, flags, core_opts, None)
-        .map_err(|e| nerr("open_file_with_flags", e))?;
+    let db = turso_core::Database::open_file_with_flags(
+        io.clone(),
+        &path,
+        flags,
+        core_opts,
+        None,
+        Arc::new(turso_core::SqliteDialect),
+    )
+    .map_err(|e| nerr("open_file_with_flags", e))?;
 
     let conn = db.connect().map_err(|e| nerr("connect", e))?;
 
