@@ -1100,6 +1100,111 @@ mod teeth {
         );
     }
 
+    /// **Ingest-born page (BugFunnel 2026-07-30 data loss).** The sibling
+    /// `fileless_page_writeback_materializes` above uses a bare `#+ID:` file
+    /// whose heading text IS the child's id. Martin's clean-room repro differs
+    /// on three axes a real vault always has: a `#+TITLE:` line, root body
+    /// text before the first headline, and a child whose `:ID:`
+    /// (`tagged-child`) is NOT its heading text (`Tagged Child`). In that
+    /// shape the first boot PRUNES the `:Page:`-tagged child out of its
+    /// parent file and materializes NOTHING — the child's body exists in no
+    /// file on disk.
+    ///
+    /// The oracle is disk truth over the WHOLE vault (recursive scan, so a
+    /// nested `Tagged Root/Tagged Child.org` counts as materialized): the
+    /// child's body text must survive SOMEWHERE, and `tagged-child` must own
+    /// a file. The untagged control in the same vault pins the tag as the
+    /// trigger rather than the file shape.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "RED-for-the-right-reason (BugFunnel 2026-07-30 data loss). Un-ignore is the \
+                acceptance criterion for the render_document doc-root-content fix."]
+    async fn ingest_born_page_materializes_before_parent_prune() {
+        const TAGGED_ORG: &str = "#+TITLE: Tagged Root\n#+ID: tagged-root\n\nRoot body.\n\n* \
+                                  Tagged Child :Page:\n:PROPERTIES:\n:ID: \
+                                  tagged-child\n:END:\nChild body.\n";
+        const UNTAGGED_ORG: &str = "#+TITLE: Untagged Root\n#+ID: untagged-root\n\nRoot \
+                                    body.\n\n* Untagged Child\n:PROPERTIES:\n:ID: \
+                                    untagged-child\n:END:\nChild body.\n";
+
+        let (_caps, comp) =
+            boot_companion_topology(&[("Tagged.org", TAGGED_ORG), ("Untagged.org", UNTAGGED_ORG)])
+                .await;
+
+        let contents = comp.disk_org_contents().await;
+        let all_text = contents
+            .iter()
+            .map(|(_, c)| c.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Control: the untagged child is never at risk — if this fails the
+        // vault-shape itself broke, not the page promotion.
+        assert!(
+            all_text.contains("Untagged Child"),
+            "control: an UNTAGGED child heading must survive write-back; disk = {contents:#?}",
+        );
+
+        // The bug: the tagged child's body must exist in some file on disk.
+        assert!(
+            all_text.contains("Tagged Child"),
+            "the `:Page:`-tagged child heading must survive the first boot — it was pruned from \
+             its parent and materialized nowhere; disk = {contents:#?}",
+        );
+        let disk_ids = comp.disk_org_file_ids().await;
+        assert!(
+            disk_ids.iter().any(|id| id == "tagged-child"),
+            "inv-every-page-has-its-own-file: the ingest-born page `tagged-child` must own a \
+             file; on-disk file ids = {disk_ids:?}",
+        );
+    }
+
+    /// The Loro-ON twin of `ingest_born_page_materializes_before_parent_prune`.
+    /// The repro ran the real GPUI app, which boots the CRDT layer; the
+    /// Turso-only twin above passes, so this pins whether the storage axis is
+    /// what the headless harness was missing.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "RED-for-the-right-reason (BugFunnel 2026-07-30 data loss). Un-ignore is the \
+                acceptance criterion for the render_document doc-root-content fix."]
+    async fn ingest_born_page_materializes_before_parent_prune_loro() {
+        const TAGGED_ORG: &str = "#+TITLE: Tagged Root\n#+ID: tagged-root\n\nRoot body.\n\n* \
+                                  Tagged Child :Page:\n:PROPERTIES:\n:ID: \
+                                  tagged-child\n:END:\nChild body.\n";
+        const UNTAGGED_ORG: &str = "#+TITLE: Untagged Root\n#+ID: untagged-root\n\nRoot \
+                                    body.\n\n* Untagged Child\n:PROPERTIES:\n:ID: \
+                                    untagged-child\n:END:\nChild body.\n";
+
+        let comp = HeadlessFrontendComponent::new_with_loro(
+            &[("Tagged.org", TAGGED_ORG), ("Untagged.org", UNTAGGED_ORG)],
+            Duration::from_millis(600),
+            true,
+        )
+        .await;
+        tokio::time::sleep(SETTLE).await;
+
+        let contents = comp.disk_org_contents().await;
+        let all_text = contents
+            .iter()
+            .map(|(_, c)| c.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            all_text.contains("Untagged Child"),
+            "control: an UNTAGGED child heading must survive write-back; disk = {contents:#?}",
+        );
+        assert!(
+            all_text.contains("Tagged Child"),
+            "the `:Page:`-tagged child heading must survive the first boot — it was pruned from \
+             its parent and materialized nowhere; disk = {contents:#?}",
+        );
+        let disk_ids = comp.disk_org_file_ids().await;
+        assert!(
+            disk_ids.iter().any(|id| id == "tagged-child"),
+            "inv-every-page-has-its-own-file: the ingest-born page `tagged-child` must own a \
+             file; on-disk file ids = {disk_ids:?}",
+        );
+    }
+
     /// **Fork B B2 echo gate (RULED DONE criterion).** After the B2 boot sweep
     /// materializes the fileless `child-note` into `child-note.org`,
     /// re-triggering the production watcher over that own-written file must

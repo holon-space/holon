@@ -301,6 +301,27 @@ impl HeadlessFrontendComponent {
         out
     }
 
+    /// Every `.org` file on disk paired with its full text. The disk-truth
+    /// observable for content-loss oracles: a body that exists in no file's
+    /// text is gone from the user's vault, whatever the store still holds.
+    pub async fn disk_org_contents(&self) -> Vec<(PathBuf, String)> {
+        use holon_filesystem::FileSystem;
+        let scanned = FileSystem::scan_directory(self.org_fs.as_ref(), &self.org_root)
+            .await
+            .expect("disk_org_contents: scan_directory failed");
+        let mut out = Vec::new();
+        for path in scanned.files {
+            if path.extension().and_then(|e| e.to_str()) != Some("org") {
+                continue;
+            }
+            let content = FileSystem::read_to_string(self.org_fs.as_ref(), &path)
+                .await
+                .expect("disk_org_contents: read org file");
+            out.push((path, content));
+        }
+        out
+    }
+
     /// Page-files the production `FileSyncController` MATERIALIZED reactively
     /// after boot (a rule-minted journal date, `convert_block_to_page`, the B2
     /// sweep) that are NOT among `already_tracked` paths — each paired with its
