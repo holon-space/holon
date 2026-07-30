@@ -1282,7 +1282,7 @@ fn ensure_shared_with_me_root_node(doc: &LoroDoc) -> Result<TreeID> {
     meta.insert(STABLE_ID, SHARED_WITH_ME_ROOT_ID)
         .map_err(|e| err(format!("set 'Shared with me' stable_id: {e:#}")))?;
     let text: loro::LoroText = meta
-        .insert_container("content_raw", loro::LoroText::new())
+        .ensure_mergeable_text("content_raw")
         .map_err(|e| err(format!("insert 'Shared with me' content: {e:#}")))?;
     text.insert(0, SHARED_WITH_ME_TITLE)
         .map_err(|e| err(format!("write 'Shared with me' title: {e:#}")))?;
@@ -2670,9 +2670,7 @@ mod tests {
         let meta = tree.get_meta(node).unwrap();
         meta.insert(STABLE_ID, loro::LoroValue::from(stable_id))
             .unwrap();
-        let text: loro::LoroText = meta
-            .insert_container("content_raw", loro::LoroText::new())
-            .unwrap();
+        let text: loro::LoroText = meta.ensure_mergeable_text("content_raw").unwrap();
         text.insert(0, content).unwrap();
         doc.commit();
     }
@@ -3916,9 +3914,7 @@ mod tests {
             let meta = tree.get_meta(node).unwrap();
             meta.insert(STABLE_ID, loro::LoroValue::from("proj-child"))
                 .unwrap();
-            let text: loro::LoroText = meta
-                .insert_container("content_raw", loro::LoroText::new())
-                .unwrap();
+            let text: loro::LoroText = meta.ensure_mergeable_text("content_raw").unwrap();
             text.insert(0, "child content").unwrap();
             doc.commit();
         }
@@ -3991,9 +3987,7 @@ mod tests {
             let meta = tree.get_meta(node).unwrap();
             meta.insert(STABLE_ID, loro::LoroValue::from("journals"))
                 .unwrap();
-            let text: loro::LoroText = meta
-                .insert_container("content_raw", loro::LoroText::new())
-                .unwrap();
+            let text: loro::LoroText = meta.ensure_mergeable_text("content_raw").unwrap();
             text.insert(0, "PWNED").unwrap();
             doc.commit();
         }

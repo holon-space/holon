@@ -212,11 +212,8 @@ impl BlockCellRegistry {
             }
             _ => CONTENT_RAW,
         };
-        // replacement changes CRDT child-creation semantics — pending Martin ruling
-        #[allow(deprecated)]
-        let text = meta
-            .get_or_create_container(content_key, LoroText::new())
-            .map_err(|e| anyhow!("get_or_create_container({content_key}) for {block_id}: {e:?}"))?;
+        let text = crate::mergeable_child::ensure_text(&meta, content_key)
+            .map_err(|e| anyhow!("content child {content_key} for {block_id}: {e:?}"))?;
         Ok((doc, text))
     }
 
@@ -1152,7 +1149,7 @@ mod tests {
         let node = tree.create(None).unwrap();
         let meta = tree.get_meta(node).unwrap();
         meta.insert(STABLE_ID, block_id.to_string()).unwrap();
-        meta.insert_container(CONTENT_RAW, LoroText::new()).unwrap();
+        meta.ensure_mergeable_text(CONTENT_RAW).unwrap();
         doc.commit();
         doc
     }

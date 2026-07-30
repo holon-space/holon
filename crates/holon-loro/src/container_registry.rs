@@ -333,9 +333,7 @@ mod tests {
                 let node = tree.create(parent).unwrap();
                 let meta = tree.get_meta(node).unwrap();
                 meta.insert(STABLE_ID, sid).unwrap();
-                let text: LoroText = meta
-                    .insert_container("content_raw", LoroText::new())
-                    .unwrap();
+                let text: LoroText = meta.ensure_mergeable_text("content_raw").unwrap();
                 text.insert(0, "x").unwrap();
                 node
             };

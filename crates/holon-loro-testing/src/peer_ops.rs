@@ -143,9 +143,7 @@ pub fn peer_insert_text(doc: &LoroDoc, stable_id: &str, pos_codepoint: usize, te
     let tree = doc.get_tree(multi_peer::TREE_NAME);
     let meta = tree.get_meta(node).unwrap();
     let field = multi_peer::content_field_for(&meta);
-    let text_container: loro::LoroText = meta
-        .get_or_create_container(field, loro::LoroText::new())
-        .unwrap();
+    let text_container: loro::LoroText = meta.ensure_mergeable_text(field).unwrap();
     text_container.insert(pos_codepoint, text).unwrap();
     doc.commit();
 }
@@ -164,9 +162,7 @@ pub fn peer_delete_text(
     let tree = doc.get_tree(multi_peer::TREE_NAME);
     let meta = tree.get_meta(node).unwrap();
     let field = multi_peer::content_field_for(&meta);
-    let text_container: loro::LoroText = meta
-        .get_or_create_container(field, loro::LoroText::new())
-        .unwrap();
+    let text_container: loro::LoroText = meta.ensure_mergeable_text(field).unwrap();
     text_container.delete(pos_codepoint, len_codepoint).unwrap();
     doc.commit();
 }

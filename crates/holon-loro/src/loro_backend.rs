@@ -632,9 +632,7 @@ fn diff_blocks_changed(a: &SnapshotBlock, b: &SnapshotBlock) -> bool {
 // -- Writing block data to tree node metadata --
 
 fn update_text_field(meta: &loro::LoroMap, key: &str, new_text: &str) -> anyhow::Result<()> {
-    // replacement changes CRDT child-creation semantics — pending Martin ruling
-    #[allow(deprecated)]
-    let text = meta.get_or_create_container(key, loro::LoroText::new())?;
+    let text = meta.ensure_mergeable_text(key)?;
     text.update(new_text, Default::default())
         .map_err(|e| anyhow::anyhow!("LoroText update failed: {:?}", e))?;
     Ok(())
@@ -663,9 +661,7 @@ fn write_content_to_meta(meta: &loro::LoroMap, content: &BlockContent) -> anyhow
                 loro::LoroValue::from(ContentType::Text.to_string().as_str()),
             )?;
             update_text_field(meta, CONTENT_RAW, text)?;
-            // replacement changes CRDT child-creation semantics — pending Martin ruling
-            #[allow(deprecated)]
-            let loro_text = meta.get_or_create_container(CONTENT_RAW, loro::LoroText::new())?;
+            let loro_text = meta.ensure_mergeable_text(CONTENT_RAW)?;
             // Clear every known mark key over the full range first so a re-write
             // with fewer marks drops the stale ones, then set the current spans.
             let len_chars = loro_text.len_unicode();
@@ -712,9 +708,7 @@ fn write_content_to_meta(meta: &loro::LoroMap, content: &BlockContent) -> anyhow
 /// Open (creating if absent) the nested per-property `LoroMap` (H3,
 /// [`PROPERTIES_MAP`]).
 pub(crate) fn properties_map_container(meta: &loro::LoroMap) -> anyhow::Result<loro::LoroMap> {
-    // replacement changes CRDT child-creation semantics — pending Martin ruling
-    #[allow(deprecated)]
-    Ok(meta.get_or_create_container(PROPERTIES_MAP, loro::LoroMap::new())?)
+    Ok(meta.ensure_mergeable_map(PROPERTIES_MAP)?)
 }
 
 /// Read one scalar block field's [`Value`] straight from a tree node's `meta`
@@ -2270,9 +2264,7 @@ impl LoroBackend {
                 // Re-apply marks. First clear every known mark key over the
                 // full text range so removed marks disappear; then set the
                 // new ones. `mark` is idempotent for the same key+range.
-                // replacement changes CRDT child-creation semantics — pending Martin ruling
-                #[allow(deprecated)]
-                let text = meta.get_or_create_container(CONTENT_RAW, loro::LoroText::new())?;
+                let text = meta.ensure_mergeable_text(CONTENT_RAW)?;
                 let len_chars = text.len_unicode();
                 if len_chars > 0 {
                     for key in holon_api::InlineMark::all_loro_keys() {
@@ -2343,9 +2335,7 @@ impl LoroBackend {
                     ));
                 }
 
-                // replacement changes CRDT child-creation semantics — pending Martin ruling
-                #[allow(deprecated)]
-                let text = meta.get_or_create_container(CONTENT_RAW, loro::LoroText::new())?;
+                let text = meta.ensure_mergeable_text(CONTENT_RAW)?;
                 let key = mark_owned.loro_key();
                 let value: loro::LoroValue = mark_to_loro_value(&mark_owned);
                 text.mark(range.clone(), key, value)
@@ -2392,9 +2382,7 @@ impl LoroBackend {
                 let tree = doc.get_tree(TREE_NAME);
                 let meta = tree.get_meta(tree_id)?;
 
-                // replacement changes CRDT child-creation semantics — pending Martin ruling
-                #[allow(deprecated)]
-                let text = meta.get_or_create_container(CONTENT_RAW, loro::LoroText::new())?;
+                let text = meta.ensure_mergeable_text(CONTENT_RAW)?;
                 text.unmark(range.clone(), &key_owned)
                     .map_err(|e| anyhow::anyhow!("LoroText unmark {key_owned}: {:?}", e))?;
 
@@ -2437,9 +2425,7 @@ impl LoroBackend {
             .with_read(|doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let meta = tree.get_meta(tree_id)?;
-                // replacement changes CRDT child-creation semantics — pending Martin ruling
-                #[allow(deprecated)]
-                let text = meta.get_or_create_container(CONTENT_RAW, loro::LoroText::new())?;
+                let text = meta.ensure_mergeable_text(CONTENT_RAW)?;
                 Ok(text.get_cursor(pos, side))
             })
             .map_err(|e| ApiError::InternalError {
@@ -2500,9 +2486,7 @@ impl LoroBackend {
                     ));
                 }
 
-                // replacement changes CRDT child-creation semantics — pending Martin ruling
-                #[allow(deprecated)]
-                let text = meta.get_or_create_container(CONTENT_RAW, loro::LoroText::new())?;
+                let text = meta.ensure_mergeable_text(CONTENT_RAW)?;
                 text.insert(pos, &s_owned)
                     .map_err(|e| anyhow::anyhow!("LoroText insert at {pos}: {:?}", e))?;
                 meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
@@ -2550,9 +2534,7 @@ impl LoroBackend {
                     ));
                 }
 
-                // replacement changes CRDT child-creation semantics — pending Martin ruling
-                #[allow(deprecated)]
-                let text = meta.get_or_create_container(CONTENT_RAW, loro::LoroText::new())?;
+                let text = meta.ensure_mergeable_text(CONTENT_RAW)?;
                 text.delete(pos, len)
                     .map_err(|e| anyhow::anyhow!("LoroText delete {len} at {pos}: {:?}", e))?;
                 meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
@@ -4908,11 +4890,7 @@ mod incremental_tests {
         let cid = {
             let tree = doc.get_tree(TREE_NAME);
             let meta = tree.get_meta(a).unwrap();
-            // replacement changes CRDT child-creation semantics — pending Martin ruling
-            #[allow(deprecated)]
-            let text = meta
-                .get_or_create_container(CONTENT_RAW, loro::LoroText::new())
-                .unwrap();
+            let text = meta.ensure_mergeable_text(CONTENT_RAW).unwrap();
             text.insert(0, "x").unwrap();
             text.id()
         };
@@ -5077,12 +5055,13 @@ mod incremental_tests {
 /// loro API directly, so they hold the merge outcome fixed across any change to
 /// which loro API the helpers call.
 ///
-/// Both tests record data LOSS, not a desirable property. Loro's deprecation of
-/// `get_or_create_container` points at `ensure_mergeable_text`/`_map`, which
-/// merge both peers' writes instead — but that replacement rejects a key that
-/// already holds a legacy op-id child (`ArgErr`), so swapping it in breaks
-/// every block written to date. Changing these assertions therefore requires a
-/// read-legacy/convert migration alongside.
+/// The pinned outcome is that BOTH peers' first writes survive: the helpers go
+/// through [`crate::mergeable_child`], which gives concurrent creators one
+/// deterministic child container instead of two competing ones.
+///
+/// State written before this migration holds legacy op-id children, which
+/// mergeable creation refuses; [`crate::mergeable_child`] surfaces that refusal
+/// as the delete-and-restart instruction rather than converting in place.
 #[cfg(test)]
 mod concurrent_child_creation_semantics {
     use loro::LoroDoc;
@@ -5117,11 +5096,11 @@ mod concurrent_child_creation_semantics {
     }
 
     /// Both peers create the `CONTENT_RAW` text child for the first time while
-    /// partitioned, each writing its own text. Each write lands in a *distinct*
-    /// child container, so the parent map's LWW picks one and the loser's text
-    /// becomes unreachable.
+    /// partitioned, each writing its own text. Both writes land in the *same*
+    /// mergeable child container, so neither peer's text is lost — loro's RGA
+    /// orders the two concurrent inserts at position 0 by peer id.
     #[test]
-    fn concurrent_first_text_creation_keeps_only_the_higher_peer_text() {
+    fn concurrent_first_text_creation_merges_both_peers_text() {
         let (a, b, node) = forked_pair_on_shared_node();
 
         update_text_field(&meta_of(&a, node), CONTENT_RAW, "alpha").unwrap();
@@ -5139,17 +5118,16 @@ mod concurrent_child_creation_semantics {
             "peers must converge on one text after syncing both ways"
         );
         assert_eq!(
-            seen_by_a, "beta",
-            "peer 2's child wins the parent-map LWW; peer 1's \"alpha\" is dropped"
+            seen_by_a, "alphabeta",
+            "both peers write into one mergeable text child; neither insert is dropped"
         );
     }
 
     /// Both peers create the `PROPERTIES_MAP` child for the first time while
-    /// partitioned, each writing a *different* property key. The two writes
-    /// land in distinct child maps, so only the winning peer's key survives
-    /// even though the keys never collided.
+    /// partitioned, each writing a *different* property key. Both writes land
+    /// in the same mergeable child map, so the two non-colliding keys union.
     #[test]
-    fn concurrent_first_properties_map_creation_keeps_only_the_higher_peer_key() {
+    fn concurrent_first_properties_map_creation_merges_both_peers_keys() {
         let (a, b, node) = forked_pair_on_shared_node();
 
         properties_map_container(&meta_of(&a, node))
@@ -5179,8 +5157,10 @@ mod concurrent_child_creation_semantics {
                 .keys()
                 .cloned()
                 .collect::<std::collections::BTreeSet<_>>(),
-            ["from_b".to_string()].into_iter().collect(),
-            "peer 2's child map wins the parent-map LWW; peer 1's `from_a` is dropped"
+            ["from_a".to_string(), "from_b".to_string()]
+                .into_iter()
+                .collect(),
+            "both peers write into one mergeable child map; the keys union"
         );
     }
 }

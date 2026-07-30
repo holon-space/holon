@@ -156,6 +156,16 @@ pub fn extract_subtree(
         collect_non_subtree_descendants(&tree, *root, &keep, &mut to_delete);
     }
 
+    // Empty every pruned node's content BEFORE deleting any node: deleting a
+    // node also deletes its descendants' containers, and a deleted container
+    // rejects further ops. All of `to_delete` is still alive at this point.
+    for node in &to_delete {
+        let meta = tree
+            .get_meta(*node)
+            .with_context(|| format!("meta of pruned node {node:?}"))?;
+        empty_child_containers(&meta).with_context(|| format!("pruning content of {node:?}"))?;
+    }
+
     for node in &to_delete {
         // Nodes may already be hidden (descendant of a deleted parent),
         // but delete is idempotent for already-deleted nodes.
@@ -238,6 +248,47 @@ fn collect_subtree_ids(tree: &LoroTree, root: TreeID) -> HashSet<TreeID> {
 
 /// Collect descendants of `node` that are NOT in `keep`, adding them to
 /// `to_delete`. Iterative to avoid stack overflow.
+/// Clear every container hanging off a tree node's `meta` map, and drop the map
+/// entries that point at them.
+///
+/// Mergeable children live at deterministic ROOT container ids rather than
+/// under their logical parent, so nothing about deleting the tree node reaches
+/// them.
+fn empty_child_containers(meta: &loro::LoroMap) -> Result<()> {
+    let keys: Vec<String> = match meta.get_value() {
+        LoroValue::Map(m) => m.keys().cloned().collect(),
+        other => bail!("tree node meta is not a map: {other:?}"),
+    };
+
+    for key in keys {
+        let Some(ValueOrContainer::Container(container)) = meta.get(&key) else {
+            continue;
+        };
+        match container {
+            loro::Container::Text(t) => {
+                let len = t.len_unicode();
+                if len > 0 {
+                    t.delete(0, len)?;
+                }
+            }
+            loro::Container::Map(m) => empty_child_containers(&m)?,
+            loro::Container::List(l) => {
+                for i in (0..l.len()).rev() {
+                    l.delete(i, 1)?;
+                }
+            }
+            loro::Container::MovableList(l) => {
+                for i in (0..l.len()).rev() {
+                    l.delete(i, 1)?;
+                }
+            }
+            other => bail!("unexpected container kind under tree node meta {key:?}: {other:?}"),
+        }
+        meta.delete(&key)?;
+    }
+    Ok(())
+}
+
 fn collect_non_subtree_descendants(
     tree: &LoroTree,
     node: TreeID,
@@ -516,9 +567,7 @@ mod tests {
 
     fn set_text(tree: &LoroTree, node: TreeID, content: &str) {
         let meta = tree.get_meta(node).unwrap();
-        let text: LoroText = meta
-            .insert_container("content_raw", LoroText::new())
-            .unwrap();
+        let text: LoroText = meta.ensure_mergeable_text("content_raw").unwrap();
         text.insert(0, content).unwrap();
     }
 

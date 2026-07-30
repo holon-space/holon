@@ -684,9 +684,7 @@ mod adapter {
 
         fn set_text(tree: &loro::LoroTree, node: loro::TreeID, content: &str) {
             let meta = tree.get_meta(node).unwrap();
-            let text: LoroText = meta
-                .insert_container("content_raw", LoroText::new())
-                .unwrap();
+            let text: LoroText = meta.ensure_mergeable_text("content_raw").unwrap();
             text.insert(0, content).unwrap();
         }
 

@@ -64,6 +64,7 @@ pub mod loro_meta_cell_backing;
 pub mod loro_share_backend;
 pub mod loro_sync_controller;
 pub mod loro_text_cell_backing;
+pub mod mergeable_child;
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod multi_peer;
 /// Owner-identity key (ADR 0028 D1/OQ4). Ungated: the owner key signs durable

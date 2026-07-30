@@ -366,9 +366,7 @@ mod tests {
             let node = tree.create(parent_tid).unwrap();
             let meta = tree.get_meta(node).unwrap();
             meta.insert("id", loro::LoroValue::from(stable_id)).unwrap();
-            let text: LoroText = meta
-                .insert_container("content_raw", LoroText::new())
-                .unwrap();
+            let text: LoroText = meta.ensure_mergeable_text("content_raw").unwrap();
             text.insert(0, content).unwrap();
             doc.commit();
         }

@@ -307,9 +307,7 @@ pub fn create_block(doc: &LoroDoc, parent: Option<TreeID>, content: &str) -> Tre
     let tree = doc.get_tree(TREE_NAME);
     let node = tree.create(parent).unwrap();
     let meta = tree.get_meta(node).unwrap();
-    let text: LoroText = meta
-        .insert_container("content_raw", LoroText::new())
-        .unwrap();
+    let text: LoroText = meta.ensure_mergeable_text("content_raw").unwrap();
     text.insert(0, content).unwrap();
     doc.commit();
     node
@@ -327,9 +325,7 @@ pub fn create_block_with_id(
     let meta = tree.get_meta(node).unwrap();
     meta.insert(STABLE_ID, loro::LoroValue::from(stable_id))
         .unwrap();
-    let text: LoroText = meta
-        .insert_container("content_raw", LoroText::new())
-        .unwrap();
+    let text: LoroText = meta.ensure_mergeable_text("content_raw").unwrap();
     text.insert(0, content).unwrap();
     doc.commit();
     node
@@ -342,11 +338,7 @@ pub fn update_block(doc: &LoroDoc, node: TreeID, new_content: &str) {
     // Writing to the wrong field would leave the production reader returning
     // the original content even after `MergeFromPeer` imports the delta.
     let field = content_field_for(&meta);
-    // replacement changes CRDT child-creation semantics — pending Martin ruling
-    #[allow(deprecated)]
-    let text: LoroText = meta
-        .get_or_create_container(field, LoroText::new())
-        .unwrap();
+    let text: LoroText = crate::mergeable_child::ensure_text(&meta, field).unwrap();
     // Use `text.update()` (myers-diff, minimal RGA ops) to mirror the
     // production primary path (`update_text_field` in
     // `crates/holon/src/api/loro_backend.rs`). A naive
@@ -1195,7 +1187,7 @@ mod clock_parity_spike {
                 let node = tree.create(parent).unwrap();
                 let meta = tree.get_meta(node).unwrap();
                 meta.insert(STABLE_ID, loro::LoroValue::from(sid)).unwrap();
-                let text: LoroText = meta.insert_container(CONTENT_RAW, LoroText::new()).unwrap();
+                let text: LoroText = meta.ensure_mergeable_text(CONTENT_RAW).unwrap();
                 primary.commit();
                 for (i, ch) in content.chars().enumerate() {
                     text.insert(i, &ch.to_string()).unwrap();

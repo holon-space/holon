@@ -78,6 +78,14 @@ impl FrontendInjectorExt for Injector {
     ) -> Result<()> {
         let db_path = holon_config.resolve_db_path(&config_dir);
 
+        // Lets a legacy-loro-state rejection name this process's actual files.
+        holon_loro::mergeable_child::disclose_migration_paths(
+            holon_loro::mergeable_child::MigrationPaths {
+                db_path: db_path.clone(),
+                crdt_storage_dir: holon_config.resolve_crdt_storage_dir(&config_dir),
+            },
+        );
+
         // Register configs as singletons (pre-wrap in Arc for non-Clone types)
         let holon_config_arc: Shared<HolonConfig> = Shared::new(holon_config.clone());
         self.provide::<HolonConfig>(Provider::root({

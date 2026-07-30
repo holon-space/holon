@@ -248,9 +248,7 @@ mod tests {
         tree.enable_fractional_index(0);
         let node = tree.create(None).unwrap();
         let meta = tree.get_meta(node).unwrap();
-        let text: LoroText = meta
-            .insert_container("content_raw", LoroText::new())
-            .unwrap();
+        let text: LoroText = meta.ensure_mergeable_text("content_raw").unwrap();
         (doc, text)
     }
 

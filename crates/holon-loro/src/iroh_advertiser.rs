@@ -350,7 +350,7 @@ mod tests {
             tree.enable_fractional_index(0);
             let root = tree.create(None)?;
             let meta = tree.get_meta(root)?;
-            let text: LoroText = meta.insert_container("content_raw", LoroText::new())?;
+            let text: LoroText = meta.ensure_mergeable_text("content_raw")?;
             text.insert(0, "hello")?;
         }
         server_doc.commit();
@@ -416,7 +416,7 @@ mod tests {
             tree.enable_fractional_index(0);
             let root = tree.create(None)?;
             let meta = tree.get_meta(root)?;
-            let text: LoroText = meta.insert_container("content_raw", LoroText::new())?;
+            let text: LoroText = meta.ensure_mergeable_text("content_raw")?;
             text.insert(0, "secret-shared-content")?;
         }
         server_doc.commit();
@@ -534,7 +534,7 @@ mod tests {
             tree.enable_fractional_index(0);
             let root = tree.create(None)?;
             let meta = tree.get_meta(root)?;
-            let text: LoroText = meta.insert_container("content_raw", LoroText::new())?;
+            let text: LoroText = meta.ensure_mergeable_text("content_raw")?;
             text.insert(0, "expired-content")?;
         }
         exp_doc.commit();
@@ -569,7 +569,7 @@ mod tests {
             tree.enable_fractional_index(0);
             let root = tree.create(None)?;
             let meta = tree.get_meta(root)?;
-            let text: LoroText = meta.insert_container("content_raw", LoroText::new())?;
+            let text: LoroText = meta.ensure_mergeable_text("content_raw")?;
             text.insert(0, "capped-content")?;
         }
         cap_doc.commit();

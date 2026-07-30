@@ -207,7 +207,7 @@ async fn insert_root_block(
     let meta = tree.get_meta(node)?;
     meta.insert(STABLE_ID, loro::LoroValue::from(stable_id))?;
     meta.insert(CONTENT_TYPE, loro::LoroValue::from("text"))?;
-    let text = meta.get_or_create_container(CONTENT_RAW, loro::LoroText::new())?;
+    let text = meta.ensure_mergeable_text(CONTENT_RAW)?;
     text.insert(0, content)?;
     doc.commit();
     Ok(node)
