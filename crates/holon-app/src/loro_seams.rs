@@ -275,6 +275,13 @@ impl DocumentManager for LoroDocumentManager {
         self.backend
             .set_block_tags(doc.id.as_str(), &doc.tags.to_vec())
             .await?;
+        // The doc-root's own content carries its pre-first-headline body, which
+        // write-back renders above the first headline. Persisting only
+        // properties+tags here dropped it, so the Loro wiring deleted the root
+        // body from disk on every write-back while the Turso wiring kept it.
+        self.backend
+            .update_block_text(doc.id.as_str(), &doc.content)
+            .await?;
         Ok(())
     }
 

@@ -214,6 +214,17 @@ pub fn parse_org_file(
     // `#+BEGIN_SRC` under the file `#+ID:` header; `process_headlines` only
     // walks headlines, so without this pass the block is dropped on round-trip.
     let top_section = extract_section_content(doc.section());
+    // The pre-first-headline body belongs to the doc-root, stored exactly as a
+    // headline stores its own: `title\nbody`. Dropping it here is what let the
+    // renderer delete it from disk on every write-back.
+    if let Some(body) = top_section
+        .body
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+    {
+        document.content = format!("{}\n{}", document.content, body);
+    }
     emit_section_children(
         top_section.source_blocks,
         top_section.image_paths,

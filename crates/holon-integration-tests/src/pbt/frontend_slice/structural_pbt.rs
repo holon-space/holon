@@ -1083,7 +1083,11 @@ mod teeth {
     #[tokio::test(flavor = "multi_thread")]
     async fn fileless_page_writeback_materializes() {
         // Companion inlines child-note as a Page-tagged heading; NO child-note.org.
-        const COMPANION_ORG: &str = "#+ID: my-notes\n* child-note :Page:\n:PROPERTIES:\n:ID: \
+        // The heading text is DELIBERATELY distinct from the `:ID:`. When they
+        // matched (`* child-note` / `:ID: child-note`) a file containing only
+        // `#+ID: child-note` satisfied every text assertion, which masked the
+        // BugFunnel 2026-07-30 loss of the page's own title and body.
+        const COMPANION_ORG: &str = "#+ID: my-notes\n* Child Note :Page:\n:PROPERTIES:\n:ID: \
                                      child-note\n:END:\nbody text that must not vanish\n";
 
         let (_caps, comp) = boot_companion_topology(&[("my-notes.org", COMPANION_ORG)]).await;
@@ -1097,6 +1101,22 @@ mod teeth {
             disk_ids.iter().any(|id| id == "child-note"),
             "the fileless page `child-note` must be materialized into its own `child-note.org` (a \
              `#+ID: child-note` file), but no file owns it; on-disk file ids = {disk_ids:?}",
+        );
+        // Owning a file is not enough — the page's own name and body must be IN
+        // it. A header-only stub is the BugFunnel 2026-07-30 loss.
+        let contents = comp.disk_org_contents().await;
+        let all_text = contents
+            .iter()
+            .map(|(_, c)| c.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let named_on_disk = contents
+            .iter()
+            .any(|(p, _)| p.to_string_lossy().contains("Child Note"));
+        assert!(
+            named_on_disk && all_text.contains("body text that must not vanish"),
+            "the materialized page must carry its own name (in its filename) AND its body, not \
+             just an `#+ID:` header; disk = {contents:#?}",
         );
     }
 
@@ -1116,8 +1136,6 @@ mod teeth {
     /// a file. The untagged control in the same vault pins the tag as the
     /// trigger rather than the file shape.
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "RED-for-the-right-reason (BugFunnel 2026-07-30 data loss). Un-ignore is the \
-                acceptance criterion for the render_document doc-root-content fix."]
     async fn ingest_born_page_materializes_before_parent_prune() {
         const TAGGED_ORG: &str = "#+TITLE: Tagged Root\n#+ID: tagged-root\n\nRoot body.\n\n* \
                                   Tagged Child :Page:\n:PROPERTIES:\n:ID: \
@@ -1145,10 +1163,24 @@ mod teeth {
         );
 
         // The bug: the tagged child's body must exist in some file on disk.
+        // The page's NAME travels in its filename (the page path is built from
+        // the block's title, which is how every page file is named); its BODY
+        // must be inside some file. Both were destroyed before the fix.
+        let named_on_disk = contents
+            .iter()
+            .any(|(p, _)| p.to_string_lossy().contains("Tagged Child"));
         assert!(
-            all_text.contains("Tagged Child"),
-            "the `:Page:`-tagged child heading must survive the first boot — it was pruned from \
-             its parent and materialized nowhere; disk = {contents:#?}",
+            named_on_disk && all_text.contains("Child body."),
+            "the `:Page:`-tagged child's name AND body must survive the first boot — they were \
+             pruned from the parent and written to no file; disk = {contents:#?}",
+        );
+        // The pre-first-headline root body of BOTH files (the same defect one
+        // level up: a doc-root's own content was never rendered).
+        assert_eq!(
+            all_text.matches("Root body.").count(),
+            2,
+            "both files' pre-first-headline root bodies must survive write-back; disk = \
+             {contents:#?}",
         );
         let disk_ids = comp.disk_org_file_ids().await;
         assert!(
@@ -1158,13 +1190,12 @@ mod teeth {
         );
     }
 
-    /// The Loro-ON twin of `ingest_born_page_materializes_before_parent_prune`.
+    /// LORO TWIN. The Loro-ON twin of
+    /// `ingest_born_page_materializes_before_parent_prune`.
     /// The repro ran the real GPUI app, which boots the CRDT layer; the
     /// Turso-only twin above passes, so this pins whether the storage axis is
     /// what the headless harness was missing.
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "RED-for-the-right-reason (BugFunnel 2026-07-30 data loss). Un-ignore is the \
-                acceptance criterion for the render_document doc-root-content fix."]
     async fn ingest_born_page_materializes_before_parent_prune_loro() {
         const TAGGED_ORG: &str = "#+TITLE: Tagged Root\n#+ID: tagged-root\n\nRoot body.\n\n* \
                                   Tagged Child :Page:\n:PROPERTIES:\n:ID: \
@@ -1192,11 +1223,25 @@ mod teeth {
             all_text.contains("Untagged Child"),
             "control: an UNTAGGED child heading must survive write-back; disk = {contents:#?}",
         );
+        // The page's NAME travels in its filename (the page path is built from
+        // the block's title, which is how every page file is named); its BODY
+        // must be inside some file. Both were destroyed before the fix.
+        let named_on_disk = contents
+            .iter()
+            .any(|(p, _)| p.to_string_lossy().contains("Tagged Child"));
         assert!(
-            all_text.contains("Tagged Child"),
-            "the `:Page:`-tagged child heading must survive the first boot — it was pruned from \
-             its parent and materialized nowhere; disk = {contents:#?}",
+            named_on_disk && all_text.contains("Child body."),
+            "the `:Page:`-tagged child's name AND body must survive the first boot — they were \
+             pruned from the parent and written to no file; disk = {contents:#?}",
         );
+        // DISCLOSED GAP (Loro wiring only): the SECONDARY root-body loss is not
+        // asserted here. Under Turso the doc-root's own content reaches disk —
+        // the sibling test above asserts exactly that — but under Loro the
+        // synced doc-root content never reaches the render, so the PARENT files
+        // still lose `Root body.` and their true `#+TITLE:`. That is a separate
+        // storage-seam divergence, reported as a follow-up. The PRIMARY loss
+        // this test exists for — the `:Page:`-tagged child — is asserted above
+        // and is fixed on BOTH wirings.
         let disk_ids = comp.disk_org_file_ids().await;
         assert!(
             disk_ids.iter().any(|id| id == "tagged-child"),
@@ -1216,7 +1261,11 @@ mod teeth {
     /// the file in a loop — this test locks that closed.
     #[tokio::test(flavor = "multi_thread")]
     async fn fileless_page_materialization_is_echo_stable() {
-        const COMPANION_ORG: &str = "#+ID: my-notes\n* child-note :Page:\n:PROPERTIES:\n:ID: \
+        // The heading text is DELIBERATELY distinct from the `:ID:`. When they
+        // matched (`* child-note` / `:ID: child-note`) a file containing only
+        // `#+ID: child-note` satisfied every text assertion, which masked the
+        // BugFunnel 2026-07-30 loss of the page's own title and body.
+        const COMPANION_ORG: &str = "#+ID: my-notes\n* Child Note :Page:\n:PROPERTIES:\n:ID: \
                                      child-note\n:END:\nbody text that must not vanish\n";
 
         let (_caps, comp) = boot_companion_topology(&[("my-notes.org", COMPANION_ORG)]).await;

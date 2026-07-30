@@ -34,6 +34,24 @@ impl OrgRenderer {
         if !result.is_empty() && !result.ends_with('\n') {
             result.push('\n');
         }
+        // The doc-root's OWN body — the pre-first-headline text. Like a
+        // headline, a doc-root stores `title\nbody` in its content; the title
+        // went out as `#+TITLE:` above, so everything after the first line is
+        // body that belongs on disk between the `#+` directives and the first
+        // headline. Without this it is silently deleted on every write-back,
+        // and a page promoted from a `:Page:`-tagged headline loses the whole
+        // body it was carrying.
+        let preamble = doc_block
+            .content
+            .split_once('\n')
+            .map(|(_, rest)| rest)
+            .unwrap_or("")
+            .trim_matches('\n');
+        if !preamble.is_empty() {
+            result.push('\n');
+            result.push_str(preamble);
+            result.push('\n');
+        }
         result.push_str(&Self::render_entitys(blocks, file_path, file_id));
         // Every org file ends with exactly one '\n'. Strip any trailing
         // whitespace/newlines and re-add one — keeps disk content stable across

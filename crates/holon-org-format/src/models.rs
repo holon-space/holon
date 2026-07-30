@@ -407,7 +407,11 @@ pub fn render_document_header(doc_block: &Block) -> String {
         result.push_str(&format!("#+ID: {}\n", doc_block.id.id()));
     }
 
-    // File title
+    // File title. A doc-root with no `file_title` — including one PROMOTED from
+    // an inline `:Page:`-tagged headline — deliberately renders none: its name
+    // is carried by its own filename (the page path is built from
+    // `block.title()`), and emitting a synthetic `#+TITLE:` would break
+    // `parse(render(doc)) == doc` for every title-less file.
     if let Some(title) = doc_block.file_title() {
         result.push_str(&format!("#+TITLE: {}\n", title));
     }

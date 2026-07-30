@@ -100,13 +100,42 @@ impl FileFormatAdapter for OrgFormatAdapter {
     }
 
     fn sync_document_metadata(&self, parsed: &Block, persisted: &mut Block) -> bool {
+        let mut changed = false;
         let parsed_kws = parsed.todo_keywords();
         if parsed_kws != persisted.todo_keywords() {
             persisted.set_todo_keywords(parsed_kws);
-            true
-        } else {
-            false
+            changed = true;
         }
+        // The doc-root's OWN content — its title line plus the
+        // pre-first-headline body — is what write-back renders above the first
+        // headline. Left unsynced, the persisted root keeps its
+        // filename-derived name and carries no body, so every write-back
+        // deletes the user's root text and rewrites `#+TITLE:` to the file stem.
+        // Only the BODY half. A doc-root's first content line is its name, and
+        // `authoritative_name_chain` builds the file path from it — overwriting
+        // it with the `#+TITLE:` value would rename every file whose title
+        // differs from its stem. The title round-trips through `file_title`
+        // below instead.
+        let parsed_body = parsed
+            .content
+            .split_once('\n')
+            .map(|(_, b)| b)
+            .unwrap_or("");
+        let name = persisted.title();
+        let merged = if parsed_body.is_empty() {
+            name
+        } else {
+            format!("{name}\n{parsed_body}")
+        };
+        if merged != persisted.content {
+            persisted.content = merged;
+            changed = true;
+        }
+        if parsed.file_title() != persisted.file_title() {
+            persisted.set_file_title(parsed.file_title());
+            changed = true;
+        }
+        changed
     }
 
     fn check_writeback_lossless(
