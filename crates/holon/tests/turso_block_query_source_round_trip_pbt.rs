@@ -112,7 +112,11 @@ async fn write_blocks(
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 20, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig {
+        cases: 20,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     /// Blocks round-trip through `TursoBlockQuerySource::snapshot()` —
     /// fields (id-keyed) and per-parent sibling order.
@@ -210,7 +214,11 @@ async fn seed_loro_backend(
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 20, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig {
+        cases: 20,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     /// H10 (BlockEventStorm) — query-source equivalence: for the same generated
     /// store, the Turso and Loro `BlockQuerySource` arms return equal blocks.

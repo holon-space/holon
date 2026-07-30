@@ -1425,6 +1425,7 @@ fn stabilize_blocks(
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 100,
+        failure_persistence: None,
         ..ProptestConfig::default()
     })]
 
@@ -1503,6 +1504,7 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 100,
+        failure_persistence: None,
         ..ProptestConfig::default()
     })]
 
@@ -1714,6 +1716,7 @@ fn format_todo_line(states: &[TaskState]) -> String {
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 50,
+        failure_persistence: None,
         ..ProptestConfig::default()
     })]
 

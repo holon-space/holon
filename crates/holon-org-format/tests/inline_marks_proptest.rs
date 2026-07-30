@@ -137,6 +137,7 @@ fn marks_equivalent(a: &[MarkSpan], b: &[MarkSpan]) -> bool {
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 256,
+        failure_persistence: None,
         ..ProptestConfig::default()
     })]
 

@@ -206,7 +206,11 @@ fn block_strategy() -> impl Strategy<Value = &'static str> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(ProptestConfig {
+        cases: 64,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     /// P1 + P2. A vault with no committed share policy is unaffected: every op
     /// runs. And the seam was consulted anyway — the green is not the green of

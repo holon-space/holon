@@ -354,7 +354,11 @@ fn guard_strategy() -> impl Strategy<Value = Guard> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(400))]
+    #![proptest_config(ProptestConfig {
+        cases: 400,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     /// The pinned invariant: in-memory ≡ SQL, on every generated world+guard.
     #[test]

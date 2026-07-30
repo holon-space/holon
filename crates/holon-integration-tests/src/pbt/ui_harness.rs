@@ -104,33 +104,27 @@ pub fn install_rejection_histogram_panic_hook() {
 }
 
 /// The standard `ProptestConfig` for a native-mode (`proptest_config:`) slice:
-/// activates the atomic editor, installs the rejection-histogram panic hook,
-/// and pins the failure-persistence file to
-/// `tests/<slice_name>.proptest-regressions` (the default `SourceParallel` mode
-/// mislocates `lib.rs`/`main.rs` for macro-generated tests and warns). `cases`
-/// defaults to 8 — `PROPTEST_CASES` overrides at runtime;
-/// `PROPTEST_MAX_SHRINK_ITERS` overrides the shrink budget (default 50). Slices
-/// sharing one state machine pass the *same* `slice_name` to share one
-/// regressions file (e.g. `general_e2e_pbt` + its `_sql_only` peer).
-pub fn standard_pbt_config(slice_name: &str) -> proptest::test_runner::Config {
+/// activates the atomic editor and installs the rejection-histogram panic
+/// hook. `cases` defaults to 8 — `PROPTEST_CASES` overrides at runtime;
+/// `PROPTEST_MAX_SHRINK_ITERS` overrides the shrink budget (default 50).
+/// Failure persistence is disabled — a failing case's seed lives in the
+/// hand-authored `keystone.jsonl` replay corpus, not an auto-written
+/// `*.proptest-regressions` file (see the shrunk failure's printed seed).
+pub fn standard_pbt_config(
+    // ALLOW(unused_param): kept for call-site stability; persistence is now file-less
+    _slice_name: &str,
+) -> proptest::test_runner::Config {
     use proptest::test_runner::Config;
-    use proptest::test_runner::FileFailurePersistence;
 
     install_rejection_histogram_panic_hook();
     let max_shrink = std::env::var("PROPTEST_MAX_SHRINK_ITERS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(50);
-    let regressions = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join(format!("{slice_name}.proptest-regressions"));
     Config {
         cases: 8,
         max_shrink_iters: max_shrink,
-        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
-            // proptest wants a 'static str, so leak the resolved path.
-            Box::leak(regressions.to_string_lossy().into_owned().into_boxed_str()),
-        ))),
+        failure_persistence: None,
         ..Config::default()
     }
 }

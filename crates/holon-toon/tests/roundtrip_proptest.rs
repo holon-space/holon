@@ -168,7 +168,11 @@ fn forest_strategy() -> impl Strategy<Value = Forest> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(400))]
+    #![proptest_config(ProptestConfig {
+        cases: 400,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     #[test]
     fn parse_render_is_identity(forest in forest_strategy()) {

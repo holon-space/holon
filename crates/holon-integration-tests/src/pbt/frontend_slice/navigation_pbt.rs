@@ -468,6 +468,7 @@ prop_state_machine! {
         // case/step counts modest — this proves the rebind mechanic, not breadth.
         cases: 12,
         max_shrink_iters: 64,
+        failure_persistence: None,
         .. proptest::test_runner::Config::default()
     })]
     #[test]

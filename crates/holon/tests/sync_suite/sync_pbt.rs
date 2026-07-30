@@ -143,9 +143,7 @@ mod tests {
     proptest_state_machine::prop_state_machine! {
         #![proptest_config(ProptestConfig {
             cases: 30,
-            failure_persistence: Some(Box::new(
-                proptest::test_runner::FileFailurePersistence::WithSource("pbt-regressions")
-            )),
+            failure_persistence: None,
             timeout: 30000,
             verbose: 2,
             .. ProptestConfig::default()
@@ -159,9 +157,7 @@ mod tests {
     proptest_state_machine::prop_state_machine! {
         #![proptest_config(ProptestConfig {
             cases: 30,
-            failure_persistence: Some(Box::new(
-                proptest::test_runner::FileFailurePersistence::WithSource("pbt-regressions")
-            )),
+            failure_persistence: None,
             timeout: 120000,
             verbose: 2,
             .. ProptestConfig::default()
@@ -1144,9 +1140,7 @@ mod tests {
             #![proptest_config(ProptestConfig {
                 cases: 24,
                 timeout: 120000,
-                failure_persistence: Some(Box::new(
-                    proptest::test_runner::FileFailurePersistence::WithSource("pbt-regressions")
-                )),
+                failure_persistence: None,
                 .. ProptestConfig::default()
             })]
 

@@ -101,9 +101,7 @@ impl StateMachineTest for LoroSyncControllerPbt {
 prop_state_machine! {
     #![proptest_config(ProptestConfig {
         cases: 40,
-        failure_persistence: Some(Box::new(
-            proptest::test_runner::FileFailurePersistence::WithSource("pbt-regressions")
-        )),
+        failure_persistence: None,
         timeout: 60_000,
         verbose: 2,
         .. ProptestConfig::default()

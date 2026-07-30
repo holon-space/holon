@@ -397,7 +397,11 @@ async fn create_page_on_fresh_peer(name: &str) -> String {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 24, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig {
+        cases: 24,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     /// inv-page-name-unique: independent peers that each create the same-named
     /// page must converge on one page identity, so a merge yields no duplicate.

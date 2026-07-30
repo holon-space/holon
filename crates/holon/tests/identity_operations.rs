@@ -438,6 +438,7 @@ proptest! {
     #![proptest_config(ProptestConfig {
         cases: 12,
         max_shrink_iters: 32,
+        failure_persistence: None,
         .. ProptestConfig::default()
     })]
 

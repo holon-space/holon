@@ -75,6 +75,7 @@ async fn setup_production_schema(handle: &holon::storage::turso::DbHandle) {
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 30,
+        failure_persistence: None,
         ..ProptestConfig::default()
     })]
 

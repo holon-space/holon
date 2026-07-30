@@ -289,6 +289,7 @@ impl RefBlockTreeMut for EditorPureRef {
         new_id
     }
 
+    // ALLOW(unused_param): trait signature requires old_id, unreachable arm below
     fn remint_block(&mut self, _old_id: &EntityUri) -> EntityUri {
         unimplemented!(
             "remint_block: only reachable via StaleExternalRewrite, which requires the composed \
@@ -635,6 +636,7 @@ prop_state_machine! {
     #![proptest_config(proptest::test_runner::Config {
         cases: 256,
         max_shrink_iters: 200,
+        failure_persistence: None,
         .. proptest::test_runner::Config::default()
     })]
     #[test]

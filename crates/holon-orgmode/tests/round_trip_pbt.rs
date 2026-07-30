@@ -282,6 +282,7 @@ fn parse_org(org_text: &str) -> Result<holon_orgmode::parser::ParseResult, Strin
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 100,
+        failure_persistence: None,
         ..ProptestConfig::default()
     })]
 
@@ -1245,6 +1246,7 @@ fn apply_equivalent_block_mutation(
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 100,
+        failure_persistence: None,
         ..ProptestConfig::default()
     })]
 
@@ -1341,6 +1343,7 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 100,
+        failure_persistence: None,
         ..ProptestConfig::default()
     })]
 

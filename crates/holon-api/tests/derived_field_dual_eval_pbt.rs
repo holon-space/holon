@@ -369,7 +369,11 @@ fn directed_float_comparison_epsilon_divergence() {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(512))]
+    #![proptest_config(ProptestConfig {
+        cases: 512,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     #[test]
     fn subset_eval_equals_rhai(expr in arb_expr(), vals in any::<[u32; 4]>()) {

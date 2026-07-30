@@ -88,7 +88,11 @@ fn table_strategy() -> impl Strategy<Value = Table> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(600))]
+    #![proptest_config(ProptestConfig {
+        cases: 600,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     #[test]
     fn table_roundtrip_is_identity(table in table_strategy()) {

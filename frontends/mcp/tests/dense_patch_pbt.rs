@@ -573,7 +573,11 @@ fn edit_strategy() -> impl Strategy<Value = Edit> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig {
+        cases: 256,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     #[test]
     fn project_edit_patch_reproduces_edit(

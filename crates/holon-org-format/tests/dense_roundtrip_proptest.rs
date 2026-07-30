@@ -107,7 +107,11 @@ fn doc_block() -> Block {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 192, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig {
+        cases: 192,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     #[test]
     fn dense_projection_round_trips(nodes in prop::collection::vec(node(), 1..=8)) {

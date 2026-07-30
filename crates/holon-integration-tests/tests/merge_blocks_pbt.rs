@@ -876,6 +876,7 @@ proptest! {
             .and_then(|s| s.parse().ok())
             .unwrap_or(6),
         max_shrink_iters: 32,
+        failure_persistence: None,
         .. ProptestConfig::default()
     })]
 

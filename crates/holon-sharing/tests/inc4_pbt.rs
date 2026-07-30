@@ -143,6 +143,11 @@ fn merged_divergent_pair(
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig {
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
     /// Gate 1 + 2: both devices independently compute the SAME total order and
     /// the SAME winner/loser after merge; the loser is a keepable, materializable
     /// copy carrying the losing device's own content and intended target.
@@ -391,6 +396,11 @@ fn build_mixed(specs: &[(u8, u8)]) -> Vec<Crossing> {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig {
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
     /// TOTALITY + determinism over MIXED scenarios (concurrent contention,
     /// honest sequential chains, wrong-block witnesses, unknown ids). One device
     /// authors the whole set, merges to a second; both arbitrate to the SAME

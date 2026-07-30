@@ -2538,6 +2538,11 @@ mod tests {
     }
 
     proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config {
+            failure_persistence: None,
+            ..proptest::test_runner::Config::default()
+        })]
+
         /// Sort-order contract between the virtual-child creation slot and real
         /// `FractionalIndex` sibling keys.
         ///

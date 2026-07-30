@@ -223,7 +223,11 @@ fn editor_op_strategy() -> impl Strategy<Value = EditorOp> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(ProptestConfig {
+        cases: 64,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     /// Drive a random editor op sequence against the production-parity SUT
     /// editor (`InMemEditorComponent`) and the real `ReferenceState` oracle in
@@ -346,7 +350,11 @@ async fn memory_slice_editor_commit_flows_to_backend() {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(ProptestConfig {
+        cases: 64,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     /// E0 bug-finding: type/delete a random sequence, commit to the real
     /// `MemoryBackend` through the production [`InProcEditorSut`] write cap after

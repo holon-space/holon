@@ -225,7 +225,11 @@ fn arb_net_and_marking() -> impl Strategy<Value = (YamlNet, YamlMarking)> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(50))]
+    #![proptest_config(ProptestConfig {
+        cases: 50,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     #[test]
     fn determinism(

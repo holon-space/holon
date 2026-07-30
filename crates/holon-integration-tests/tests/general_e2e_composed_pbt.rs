@@ -39,6 +39,7 @@ prop_state_machine! {
     #![proptest_config(proptest::test_runner::Config {
         cases: std::env::var("PROPTEST_CASES").ok().and_then(|s| s.parse().ok()).unwrap_or(16),
         max_shrink_iters: 200,
+        failure_persistence: None,
         .. proptest::test_runner::Config::default()
     })]
     #[test]
@@ -88,6 +89,7 @@ fn general_e2e_composed_pbt_live_mcp() {
     let config = Config {
         cases,
         max_shrink_iters: 0,
+        failure_persistence: None,
         ..Config::default()
     };
     let strategy = <WideE2ELiveMcpMachine as ReferenceStateMachine>::sequential_strategy(1..40);

@@ -1141,6 +1141,11 @@ mod tests {
     }
 
     proptest! {
+        #![proptest_config(ProptestConfig {
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        })]
+
         // A proof built from the roster's own capability, for the right
         // challenge and tree id, ALWAYS authorizes a fresh peer within expiry.
         #[test]

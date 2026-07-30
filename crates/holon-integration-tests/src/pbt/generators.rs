@@ -1269,6 +1269,11 @@ mod advice_rule_tests {
     }
 
     proptest! {
+        #![proptest_config(ProptestConfig {
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        })]
+
         /// Pins the advice-rule YAML template shut: any draw over the same input
         /// space the `file_with_advice_rule` arm uses (distinct pool tags, small
         /// k, weighted-active flag) must parse back to the typed intent. This is

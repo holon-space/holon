@@ -367,7 +367,11 @@ fn apply_script(doc: &LoroDoc, script: &[(usize, usize)]) {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(ProptestConfig {
+        cases: 64,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     /// Fuzz the storm: two peers each apply a random reparent script offline,
     /// then merge. The four §C4 properties must hold for every generated storm.

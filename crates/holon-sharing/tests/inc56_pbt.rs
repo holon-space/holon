@@ -58,6 +58,11 @@ fn owner_cert(selector: &str, grantee: &str, delegation: bool, lease: Lease) -> 
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig {
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
     // P1 — a lease grants access at exactly the instants inside its half-open
     // window and NOWHERE else. The single source of correctness for "expired
     // lease → no access".

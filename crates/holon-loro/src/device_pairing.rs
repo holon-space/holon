@@ -399,6 +399,11 @@ mod pbt {
     }
 
     proptest! {
+        #![proptest_config(ProptestConfig {
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        })]
+
         /// Honest ceremony over arbitrary keys/nonces always agrees, for any
         /// distinct node keys.
         #[test]

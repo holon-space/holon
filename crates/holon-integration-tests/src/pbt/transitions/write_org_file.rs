@@ -264,6 +264,11 @@ mod keyword_set_round_trip_tests {
     use crate::pbt::generators::todo_keyword_set_strategy;
 
     proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config {
+            failure_persistence: None,
+            ..proptest::test_runner::Config::default()
+        })]
+
         /// Axis-5 parity guard: a generated keyword set serialized the way
         /// `apply_to_sut` does (`#+TODO:` header + `render_entitys`) must
         /// re-parse to the same per-block task states and the same document

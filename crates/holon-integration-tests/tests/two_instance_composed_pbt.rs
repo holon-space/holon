@@ -43,6 +43,7 @@ prop_state_machine! {
         // Bounded: each case boots TWO full_headless sessions.
         cases: std::env::var("PROPTEST_CASES").ok().and_then(|s| s.parse().ok()).unwrap_or(8),
         max_shrink_iters: 50,
+        failure_persistence: None,
         .. proptest::test_runner::Config::default()
     })]
     #[test]

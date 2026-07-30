@@ -68,6 +68,11 @@ fn merge_into(into: &LoroDoc, from: &LoroDoc) {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig {
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
     /// Deterministic id ⇒ concurrent same-key firing converges to ONE journal.
     #[test]
     fn two_replicas_same_day_converge_to_one_journal(dom in 1u32..=28) {

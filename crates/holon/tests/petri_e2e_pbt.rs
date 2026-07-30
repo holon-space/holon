@@ -1442,6 +1442,10 @@ impl StateMachineTest for PetriSUT {
 }
 
 prop_state_machine! {
+    #![proptest_config(ProptestConfig {
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
     #[test]
     fn petri_e2e_pbt(
         sequential

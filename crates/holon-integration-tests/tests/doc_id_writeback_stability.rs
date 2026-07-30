@@ -133,7 +133,11 @@ fn doc_id_stable_across_ingest_writeback() {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 12, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig {
+        cases: 12,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     /// Property: no matter how many sibling `.org` files live under the
     /// same-named `Frontends/` subdirectory (each with its own `#+ID`), booting

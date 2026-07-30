@@ -59,6 +59,7 @@ proptest! {
     // via proptest's default `FileFailurePersistence::SourceParallel`.
     #![proptest_config(ProptestConfig {
         cases: 1024,
+        failure_persistence: None,
         ..ProptestConfig::default()
     })]
 

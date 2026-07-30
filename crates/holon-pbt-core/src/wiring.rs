@@ -609,6 +609,11 @@ mod tests {
     }
 
     proptest! {
+        #![proptest_config(ProptestConfig {
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        })]
+
         /// `validate()`'s verdict agrees with the explicit rule table for
         /// every randomly drawn manifest (positive + negative coverage).
         #[test]

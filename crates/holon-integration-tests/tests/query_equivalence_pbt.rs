@@ -156,7 +156,11 @@ fn reference_ids(query: &TestQuery, blocks: &BTreeMap<EntityUri, Block>) -> BTre
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 24, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig {
+        cases: 24,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     #[test]
     fn all_blocks_matches_across_languages(forest in forest_strategy()) {

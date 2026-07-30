@@ -445,6 +445,11 @@ mod tests {
     }
 
     proptest! {
+        #![proptest_config(ProptestConfig {
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        })]
+
         /// Incremental convergence holds after every event (P1/P2/P3).
         #[test]
         fn prop_convergence(ops in prop::collection::vec(op_strategy(), 0..40)) {

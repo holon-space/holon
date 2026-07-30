@@ -61,3 +61,9 @@ specs/.current-epic
 _context/
 frontends/gpui/android/build-release/
 frontends/gpui/android/build-release-aab/
+
+# proptest auto-persisted failure seeds — disabled (failure_persistence: None)
+# repo-wide; permanent regression guards live in
+# crates/holon-integration-tests/hand-authored-regressions/keystone.jsonl instead
+*.proptest-regressions
+**/proptest-regressions/*.txt

@@ -325,6 +325,7 @@ prop_state_machine! {
     #![proptest_config(proptest::test_runner::Config {
         cases: 24,
         max_shrink_iters: 200,
+        failure_persistence: None,
         .. proptest::test_runner::Config::default()
     })]
     #[test]
