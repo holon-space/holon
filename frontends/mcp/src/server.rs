@@ -500,7 +500,6 @@ impl ServerHandler for HolonMcpServer {
                 has_more: Some(false),
                 total: Some(0),
             },
-            ..Default::default()
         })
     }
 }

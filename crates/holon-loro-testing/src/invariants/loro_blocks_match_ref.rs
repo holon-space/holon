@@ -98,6 +98,9 @@ fn extract_loro<'a>(
     })
 }
 
+// `NamedCompare<T>` fixes the comparator to `fn(&T, &T)` with `T = Vec<Block>`;
+// the owned-vec reference is the framework contract, not a stylistic choice.
+#[allow(clippy::ptr_arg)]
 fn compare_loro_fields(sut: &Vec<Block>, ref_: &Vec<Block>) -> Result<(), String> {
     compare_block_fields("inv-blocks-match-ref/loro", sut, ref_)
 }

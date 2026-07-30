@@ -585,11 +585,9 @@ mod stateful_tests {
                                                     && sut_block.parent_id.as_raw_str()
                                                         == translated_parent_id
                                                     && sut_origin == ref_origin
-                                                    && expected_sut_id
-                                                        .as_deref()
-                                                        .map_or(true, |eid| {
-                                                            sut_block.id.as_str() == eid
-                                                        })
+                                                    && expected_sut_id.as_deref().is_none_or(
+                                                        |eid| sut_block.id.as_str() == eid,
+                                                    )
                                             }
                                             _ => false,
                                         }

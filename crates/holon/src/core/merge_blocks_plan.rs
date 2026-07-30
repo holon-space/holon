@@ -31,7 +31,7 @@ pub fn parse_merged_from(value: &Value) -> Result<Vec<(String, i64)>, String> {
         }
     };
     let tokens: Vec<&str> = raw.split_whitespace().collect();
-    if tokens.len() % 2 != 0 {
+    if !tokens.len().is_multiple_of(2) {
         return Err(format!(
             "{MERGED_FROM_FIELD}: expected `<id> <millis>` pairs, got an odd token count in {raw:?}"
         ));

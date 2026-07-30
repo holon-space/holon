@@ -135,6 +135,8 @@ pub fn peer_alive_blocks(doc: &LoroDoc) -> Vec<PeerBlock> {
 }
 
 /// Insert text into a block's LoroText container on a peer.
+// legacy-convert migration pending — task #12
+#[allow(deprecated)]
 pub fn peer_insert_text(doc: &LoroDoc, stable_id: &str, pos_codepoint: usize, text: &str) {
     let node = find_node_by_stable_id(doc, stable_id)
         .unwrap_or_else(|| panic!("peer_insert_text: block {} not found", stable_id));
@@ -149,6 +151,8 @@ pub fn peer_insert_text(doc: &LoroDoc, stable_id: &str, pos_codepoint: usize, te
 }
 
 /// Delete text from a block's LoroText container on a peer.
+// legacy-convert migration pending — task #12
+#[allow(deprecated)]
 pub fn peer_delete_text(
     doc: &LoroDoc,
     stable_id: &str,

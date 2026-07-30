@@ -242,7 +242,7 @@ fn fresh_seed_places_backlinks_section_below_outline() {
             .expect("seed_default_layout must complete on a fresh file DB");
 
         let db = engine.db_handle();
-        let content = main_panel_render_content(&db)
+        let content = main_panel_render_content(db)
             .await
             .expect("main panel must have a seeded render block after fresh seed");
 
@@ -309,7 +309,7 @@ fn user_owned_layout_suppresses_accordion_reseed() {
 
         let db = engine.db_handle();
         assert!(
-            main_panel_render_content(&db).await.is_none(),
+            main_panel_render_content(db).await.is_none(),
             "a user-owned __default__.org must suppress re-seeding the default \
              main-panel layout — the edited accordion render survives reseed"
         );
@@ -373,27 +373,27 @@ fn backlinks_query_lists_incoming_links_for_focused_page() {
         create_linking_block(&engine, "ref-a", "alpha mentions", "alice", "Alice").await;
 
         let db = engine.db_handle();
-        let render = main_panel_render_content(&db)
+        let render = main_panel_render_content(db)
             .await
             .expect("main panel must have a seeded render block");
-        let sql = extract_backlinks_sql(&render);
+        let _sql = extract_backlinks_sql(&render);
 
         // Bind the executed query to the SEEDED asset, not a hand-copied const.
-        let render = main_panel_render_content(&db)
+        let render = main_panel_render_content(db)
             .await
             .expect("main panel must have a seeded render block after fresh seed");
         let section_sql = extract_backlinks_sql(&render);
 
-        focus_main(&db, "alice").await;
+        focus_main(db, "alice").await;
         assert_eq!(
-            section_result_ids(&db, &section_sql).await,
+            section_result_ids(db, &section_sql).await,
             vec!["block:ref-a".to_string(), "block:ref-b".to_string()],
             "focused on alice → its incoming links, ordered by content (alpha, beta)"
         );
 
-        focus_main(&db, "bob").await;
+        focus_main(db, "bob").await;
         assert!(
-            section_result_ids(&db, &section_sql).await.is_empty(),
+            section_result_ids(db, &section_sql).await.is_empty(),
             "focused on bob (no incoming links) → empty section, never fabricated"
         );
     });
@@ -515,7 +515,7 @@ fn section_sql_locks_ivm_equijoin_on_shape() {
             .expect("seed_default_layout");
 
         let db = engine.db_handle();
-        let render = main_panel_render_content(&db)
+        let render = main_panel_render_content(db)
             .await
             .expect("main panel must have a seeded render block");
         let sql = extract_backlinks_sql(&render);
@@ -549,7 +549,7 @@ fn backlinks_section_query_projects_whole_block_row() {
             .expect("seed_default_layout");
 
         let db = engine.db_handle();
-        let render = main_panel_render_content(&db)
+        let render = main_panel_render_content(db)
             .await
             .expect("main panel must have a seeded render block");
         let sql = extract_backlinks_sql(&render);

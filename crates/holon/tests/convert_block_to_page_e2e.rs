@@ -1,6 +1,6 @@
 //! End-to-end proof of the engine-level `convert_block_to_page` compound
 //! (BlockToPageTransform Option B): mint a new page, move the origin's content
-//! + children onto it, leave a `[[page]]` link behind, re-point inbound
+//! and children onto it, leave a `[[page]]` link behind, re-point inbound
 //! backlinks — all as ONE reversible `UndoEntry`.
 //!
 //! Uses the production SqlOnly block wiring (the CRUD authority
@@ -154,7 +154,7 @@ async fn resolved_id_of(engine: &BackendEngine, source: &str) -> Option<String> 
 }
 
 async fn is_page(engine: &BackendEngine, id: &str) -> bool {
-    engine
+    !engine
         .db_handle()
         .query(
             &format!("SELECT 1 FROM block_tags WHERE block_id = '{id}' AND tag = '{PAGE_TAG}'"),
@@ -162,8 +162,7 @@ async fn is_page(engine: &BackendEngine, id: &str) -> bool {
         )
         .await
         .expect("tag query")
-        .first()
-        .is_some()
+        .is_empty()
 }
 
 async fn convert(engine: &BackendEngine, origin: &str, destination_path: &str) -> String {

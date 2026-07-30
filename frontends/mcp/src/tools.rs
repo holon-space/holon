@@ -3082,8 +3082,6 @@ impl HolonMcpServer {
                        hardcode a shortcut."
     )]
     async fn list_keybindings(&self) -> Result<CallToolResult, rmcp::ErrorData> {
-        use holon_frontend::reactive::BuilderServices;
-
         let services = self.builder_services().ok_or_else(|| {
             rmcp::ErrorData::internal_error(
                 "list_keybindings needs a frontend, which this session does not wire",

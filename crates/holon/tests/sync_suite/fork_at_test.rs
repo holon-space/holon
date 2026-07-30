@@ -29,6 +29,8 @@ mod tests {
     }
 
     #[test]
+    // legacy-convert migration pending — task #12
+    #[allow(deprecated)]
     fn fork_at_rewinds_lorotext_after_local_update() {
         let doc = LoroDoc::new();
         doc.set_peer_id(1).unwrap();
@@ -67,6 +69,8 @@ mod tests {
     }
 
     #[test]
+    // legacy-convert migration pending — task #12
+    #[allow(deprecated)]
     fn fork_at_rewinds_lorotext_after_peer_import() {
         // Primary: create a block with content "original"
         let primary = LoroDoc::new();

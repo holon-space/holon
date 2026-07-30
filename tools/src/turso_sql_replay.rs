@@ -969,22 +969,21 @@ async fn chk_after_commit(
         } else {
             println!("{line}");
             outcome.lines.push(line);
-            if precise {
-                if let Ok(res) = check_matview_consistency(
+            if precise
+                && let Ok(res) = check_matview_consistency(
                     conn,
                     std::slice::from_ref(name),
                     &format!("commit{commit_idx}"),
                 )
                 .await
-                    && res.has_data_mismatch
-                {
-                    outcome.mismatch = true;
-                    if outcome.first_divergence.is_none() {
-                        outcome.first_divergence =
-                            Some(format!("commit#{commit_idx} view={name} multiset-drift"));
-                    }
-                    outcome.lines.extend(res.inconsistencies);
+                && res.has_data_mismatch
+            {
+                outcome.mismatch = true;
+                if outcome.first_divergence.is_none() {
+                    outcome.first_divergence =
+                        Some(format!("commit#{commit_idx} view={name} multiset-drift"));
                 }
+                outcome.lines.extend(res.inconsistencies);
             }
         }
     }
@@ -1617,6 +1616,7 @@ enum LoopControl {
 /// statements, probes id trackers, and—when `--check-after-each`—diffs
 /// matviews after each DML. Returns `Break` only when an inconsistency was
 /// found and the caller asked to stop on the first one.
+#[allow(clippy::too_many_arguments)] // each arg is a distinct replay subsystem
 async fn replay_sql_directive(
     conn: &turso::Connection,
     args: &ReplayArgs,
@@ -1715,7 +1715,7 @@ async fn replay_sql_directive(
     let is_dml = kind == StmtKind::Dml;
     let is_query = kind == StmtKind::Query;
 
-    if stmt_idx % 500 == 0 || stmt_idx >= args.check_from.saturating_sub(10) {
+    if stmt_idx.is_multiple_of(500) || stmt_idx >= args.check_from.saturating_sub(10) {
         let sql_preview: String = sql.chars().take(100).collect();
         println!(
             "[{stmt_idx}/{sql_count}] [{tag}] {sql_preview}  (CDC: {})",

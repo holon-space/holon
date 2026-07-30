@@ -133,7 +133,7 @@ fn fresh_seed_places_integrations_section_below_hierarchy() {
             .expect("seed_default_layout must complete on a fresh file DB");
 
         let db = engine.db_handle();
-        let (_, content) = left_sidebar_render_content(&db)
+        let (_, content) = left_sidebar_render_content(db)
             .await
             .expect("left sidebar must have a seeded render block after fresh seed");
 
@@ -253,7 +253,7 @@ fn deleted_integrations_section_does_not_resurrect_on_reseed() {
             .await
             .expect("first seed");
         let db = engine.db_handle();
-        let (render_id, first) = left_sidebar_render_content(&db)
+        let (render_id, first) = left_sidebar_render_content(db)
             .await
             .expect("render present after first seed");
         assert!(
@@ -276,7 +276,7 @@ fn deleted_integrations_section_does_not_resurrect_on_reseed() {
             .await
             .expect("delete render block");
         assert!(
-            left_sidebar_render_content(&db).await.is_none(),
+            left_sidebar_render_content(db).await.is_none(),
             "render block must be gone right after deletion"
         );
 
@@ -286,7 +286,7 @@ fn deleted_integrations_section_does_not_resurrect_on_reseed() {
             .expect("reseed on already-seeded DB");
 
         assert!(
-            left_sidebar_render_content(&db).await.is_none(),
+            left_sidebar_render_content(db).await.is_none(),
             "deleted Integrations section MUST stay deleted after reseed — layout is seeded \
              fresh-only, so a user deletion sticks"
         );
