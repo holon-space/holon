@@ -366,6 +366,7 @@ mod tests {
             displayed_text: None,
             focused: None,
             styled_runs: None,
+            opacity: None,
             expected_size: Default::default(),
         }
     }

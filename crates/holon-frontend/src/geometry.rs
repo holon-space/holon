@@ -50,6 +50,13 @@ pub struct ElementInfo {
     /// `inv-paint-text-styling` PBT catches. Byte-range runs,
     /// theme-independent.
     pub styled_runs: Option<std::sync::Arc<[holon_api::StyledRun]>>,
+    /// The paint alpha the widget declared for itself at record time, when it
+    /// declares one. Geometry alone cannot distinguish a fully-painted control
+    /// from one that is present in layout but invisible (`opacity(0.0)`), so
+    /// affordance invariants — "the disclosure chevron is VISIBLE, not merely
+    /// laid out" — read this. `None` means the widget declared no alpha, i.e.
+    /// it paints at the inherited one.
+    pub opacity: Option<f32>,
     /// Algebraic declaration of the widget's expected min/max size. The
     /// PBT layout invariant evaluates this against `(width, height)` and
     /// fails on out-of-bounds renders. Defaults to "unconstrained" (all
@@ -372,5 +379,20 @@ pub fn drawer_toggle_id_for(block_id: &str) -> String {
 /// `expanded` `Mutable<bool>`, exercising the same path a real user's
 /// chevron tap would.
 pub fn expand_toggle_id_for(target_id: &str) -> String {
-    format!("expand_toggle::{target_id}")
+    format!("expand_toggle::{}", bare_target(target_id))
+}
+
+/// Registry keys are built from the BARE row id. Renderers hold schemed ids
+/// (`block:foo`, straight off the row) while drivers hold whatever the
+/// ref-state gave them, so without one normalisation point the two sides key
+/// the same chevron differently and the lookup silently misses.
+fn bare_target(target_id: &str) -> &str {
+    target_id.strip_prefix("block:").unwrap_or(target_id)
+}
+
+/// Canonical element-id for the "collapsed halo" behind a collapsed parent
+/// row's chevron. Registered ONLY while the halo is painted, so an invariant
+/// reads its presence as the halo's presence.
+pub fn disclosure_halo_id_for(target_id: &str) -> String {
+    format!("disclosure_halo::{}", bare_target(target_id))
 }

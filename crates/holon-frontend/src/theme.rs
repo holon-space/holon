@@ -21,6 +21,46 @@ pub struct ThemeColors {
     pub warning: Rgba8,
 }
 
+/// Fill of the collapsed-parent disclosure halo in the tree/sidebar.
+///
+/// A non-text state indicator: it must clear a 3:1 contrast ratio against the
+/// surface it sits on ([`ThemeColors::sidebar_background`]) in EVERY theme, or
+/// it silently stops communicating "this row hides something" (dogfood F1,
+/// 2026-07-30: the previous fill measured 1.05:1 and was invisible).
+/// The GPUI builder reaches this same colour as `theme.muted_foreground`, which
+/// `apply_holon_theme` maps from `text_secondary`.
+pub fn collapsed_halo_fill(c: &ThemeColors) -> Rgba8 {
+    c.text_secondary
+}
+
+/// The disclosure glyph knocked out of the halo. Sits ON the fill, so it must
+/// clear the same floor against [`collapsed_halo_fill`], not against the page.
+pub fn collapsed_halo_glyph(c: &ThemeColors) -> Rgba8 {
+    c.background
+}
+
+/// WCAG 2.x relative-luminance contrast ratio between two colours,
+/// `1.0..=21.0`.
+///
+/// Alpha is ignored: every colour here is composited over an opaque surface
+/// before it reaches a pixel, and the ratio is judged on that result.
+pub fn contrast_ratio(a: Rgba8, b: Rgba8) -> f32 {
+    fn channel(c: u8) -> f32 {
+        let c = c as f32 / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    fn luminance(c: Rgba8) -> f32 {
+        0.2126 * channel(c[0]) + 0.7152 * channel(c[1]) + 0.0722 * channel(c[2])
+    }
+    let (la, lb) = (luminance(a), luminance(b));
+    let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
 #[derive(Clone, Debug)]
 pub struct ThemeDef {
     pub name: String,

@@ -103,6 +103,7 @@ fn to_element_info(region: &SelectableRegion) -> ElementInfo {
         displayed_text: region.displayed_text.as_deref().map(std::sync::Arc::from),
         focused: None,
         styled_runs: None,
+        opacity: None,
         expected_size: holon_frontend::size_expectation::SizeBounds::default(),
     }
 }

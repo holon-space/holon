@@ -379,6 +379,11 @@ pub struct TransparentTracker {
     /// which subtree of the rendered tree belongs to which panel (e.g.
     /// `block:default-left-sidebar`) without consulting ref-state predictions.
     entity_id: Option<Arc<str>>,
+    /// What the wrapped element paints, when it is a leaf that paints text
+    /// (the tree row's disclosure glyph, say) rather than a container.
+    displayed_text: Option<Arc<str>>,
+    /// The alpha the wrapped element declares — see [`ElementInfo::opacity`].
+    opacity: Option<f32>,
     child: Option<AnyElement>,
 }
 
@@ -395,8 +400,24 @@ impl TransparentTracker {
             registry,
             expected_size: SizeBounds::default(),
             entity_id: None,
+            displayed_text: None,
+            opacity: None,
             child: Some(child),
         }
+    }
+
+    /// Record the text the wrapped element paints, so invariants can judge
+    /// *which* glyph a control drew (e.g. a chevron's direction).
+    pub fn with_displayed_text(mut self, text: impl Into<Arc<str>>) -> Self {
+        self.displayed_text = Some(text.into());
+        self
+    }
+
+    /// Record the wrapped element's paint alpha, so invariants can tell a
+    /// visible control from one that is laid out but transparent.
+    pub fn with_opacity(mut self, opacity: f32) -> Self {
+        self.opacity = Some(opacity);
+        self
     }
 
     /// Bind an entity URI so region queries can find this subtree by
@@ -469,9 +490,10 @@ impl Element for TransparentTracker {
                 entity_id: self.entity_id.clone(),
                 has_content: false,
                 parent_id,
-                displayed_text: None,
+                displayed_text: self.displayed_text.clone(),
                 focused: None,
                 styled_runs: None,
+                opacity: self.opacity,
                 expected_size: self.expected_size.clone(),
             },
         );
@@ -555,6 +577,7 @@ impl Element for BoundsTracker {
                 displayed_text: self.displayed_text.clone(),
                 focused: self.focused,
                 styled_runs: self.styled_runs.clone(),
+                opacity: None,
                 expected_size: self.expected_size.clone(),
             },
         );
@@ -596,6 +619,7 @@ mod tests {
             displayed_text: None,
             focused: None,
             styled_runs: None,
+            opacity: None,
             expected_size: SizeBounds::default(),
         }
     }

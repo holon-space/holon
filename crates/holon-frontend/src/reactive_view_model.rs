@@ -906,11 +906,19 @@ impl ReactiveViewModel {
             "query_result" => ViewKind::QueryResult {
                 children: snap_children(),
             },
-            "tree_item" => ViewKind::TreeItem {
-                depth: self.prop_f64("depth").unwrap_or(0.0) as usize,
-                has_children: self.prop_bool("has_children").unwrap_or(false),
-                children: snap_children(),
-            },
+            "tree_item" => {
+                let has_children = self.prop_bool("has_children").unwrap_or(false);
+                // Same reading as the platform builders' `collapse_state`: a
+                // missing `expanded` handle means the row was built outside
+                // `wrap_tree_item` and renders expanded.
+                let expanded = self.expanded.as_ref().is_none_or(|m| m.get());
+                ViewKind::TreeItem {
+                    depth: self.prop_f64("depth").unwrap_or(0.0) as usize,
+                    has_children,
+                    collapsed: has_children && !expanded,
+                    children: snap_children(),
+                }
+            }
 
             // Collections — the registered layout name selects which
             // `ViewKind` variant we serialize to. Layouts whose name doesn't

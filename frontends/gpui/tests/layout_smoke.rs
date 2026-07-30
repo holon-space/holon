@@ -242,6 +242,7 @@ fn fake(
             displayed_text: None,
             focused: None,
             styled_runs: None,
+            opacity: None,
             expected_size: holon_frontend::size_expectation::SizeBounds::default(),
         },
     )

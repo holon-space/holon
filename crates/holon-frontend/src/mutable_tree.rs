@@ -656,9 +656,6 @@ fn wrap_tree_item(
         children: vec![widget.clone()],
         data: futures_signals::signal::Mutable::new(row).read_only(),
         expanded: Some(futures_signals::signal::Mutable::new(!collapsed)),
-        // Hover-reveal cell for the disclosure chevron (row-scoped hover flips
-        // it; `tree_item` reads it to gate chevron opacity — Logseq convention).
-        hovered: Some(futures_signals::signal::Mutable::new(false)),
         ..ReactiveViewModel::from_widget("tree_item", props)
     }
 }
@@ -776,6 +773,63 @@ mod tests {
             !now_folded.get(),
             "external collapsed=1 update must fold the row"
         );
+    }
+
+    /// Disclosure state must be readable from the serialized snapshot — an
+    /// MCP-driven agent reads `describe_ui`, not the pixels (BugFunnel
+    /// 2026-07-30). A leaf is never `collapsed`, whatever its row says.
+    #[test]
+    fn snapshot_exposes_collapsed_for_parent_rows_only() {
+        use crate::view_model::ViewKind;
+
+        let collapsed_of = |vm: &ReactiveViewModel| match vm.snapshot().kind {
+            ViewKind::TreeItem {
+                has_children,
+                collapsed,
+                ..
+            } => (has_children, collapsed),
+            other => panic!("expected tree_item, got {other:?}"),
+        };
+
+        let (mut tree, flat) = make_tree();
+        tree.insert(
+            eu("folded-parent"),
+            None,
+            "0.0".into(),
+            widget_with_collapsed("Folded", "folded-parent", 1),
+            HashMap::new(),
+        );
+        tree.insert(
+            eu("child"),
+            Some(eu("folded-parent")),
+            "0.0".into(),
+            widget_with_collapsed("Child", "child", 1),
+            HashMap::new(),
+        );
+        tree.insert(
+            eu("open-parent"),
+            None,
+            "1.0".into(),
+            widget_with_collapsed("Open", "open-parent", 0),
+            HashMap::new(),
+        );
+        tree.insert(
+            eu("open-child"),
+            Some(eu("open-parent")),
+            "0.0".into(),
+            widget_with_collapsed("OpenChild", "open-child", 0),
+            HashMap::new(),
+        );
+
+        let items = flat.lock_ref();
+        assert_eq!(collapsed_of(&items[0]), (true, true));
+        assert_eq!(
+            collapsed_of(&items[1]),
+            (false, false),
+            "a leaf is not collapsed even with collapsed=1 on its row"
+        );
+        assert_eq!(collapsed_of(&items[2]), (true, false));
+        assert_eq!(collapsed_of(&items[3]), (false, false));
     }
 
     #[test]

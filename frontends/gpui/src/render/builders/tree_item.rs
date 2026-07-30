@@ -4,6 +4,7 @@ use std::sync::Arc;
 use futures_signals::signal::Mutable;
 use holon_api::Value;
 use holon_frontend::OperationIntent;
+use holon_frontend::disclosure_halo_id_for;
 use holon_frontend::expand_toggle_id_for;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
@@ -15,6 +16,16 @@ use crate::geometry::TransparentTracker;
 /// line's center, matching the block bullet's `mt` in `block_profile.yaml`.
 /// Pixel value pending Martin's live visual pass.
 const CHEVRON_TOP_OFFSET: f32 = 8.0;
+
+/// A parent's disclosure affordance paints at full strength — it is the thing
+/// the eye scans the sidebar for.
+pub const DISCLOSURE_WEIGHT: f32 = 1.0;
+
+/// A leaf's tree bullet is decoration, not state, so it paints BELOW disclosure
+/// weight. At equal weight the (solid) bullet out-inks the (outline) chevron
+/// and the hierarchy reads inverted — leaves louder than their parents (dogfood
+/// F1, 2026-07-30).
+pub const LEAF_BULLET_WEIGHT: f32 = 0.55;
 
 /// The single leading chrome element a tree row draws, if any. A row draws at
 /// most ONE of these — chevron and bullet are mutually exclusive, and a row may
@@ -53,21 +64,6 @@ fn marker_gutter_px(style: &super::style::LayoutStyle) -> f32 {
     style.tree_chevron_size
 }
 
-/// The disclosure chevron's opacity, as a pure function of its marker and the
-/// row's hover state. Hover-reveal (Logseq convention): a chevron row that
-/// carries a `hovered` cell is transparent (0.0) until its row is hovered,
-/// opaque (1.0) once it is. Rows with no `hovered` cell (static gallery /
-/// shadow) and every non-chevron marker are always fully visible. The result
-/// drives `opacity` — never layout — so the chevron's bounds stay registered
-/// for hit-testing and PBT `ToggleCollapse` regardless of hover. Kept pure so
-/// the reveal contract is unit-testable without a window.
-fn chevron_reveal_opacity(marker: LeadingMarker, hovered: Option<bool>) -> f32 {
-    match (marker, hovered) {
-        (LeadingMarker::Chevron, Some(false)) => 0.0,
-        _ => 1.0,
-    }
-}
-
 /// Extract a stable ID from the first child's entity data for collapse state
 /// tracking. Walks into wrapper nodes (render_entity, live_query) to find the
 /// actual entity with an "id".
@@ -95,6 +91,7 @@ fn node_id(vm: &ReactiveViewModel) -> Option<String> {
 fn bullet_dot(ctx: &GpuiRenderContext) -> Div {
     let s = ctx.style();
     div()
+        .opacity(LEAF_BULLET_WEIGHT)
         .flex_shrink_0()
         .w(px(s.tree_chevron_size))
         .h(px(s.tree_item_min_height))
@@ -138,19 +135,72 @@ fn resolve_set_field_entity(
     Some(op.entity_name.clone())
 }
 
+/// The disclosure glyph a parent row draws: right-pointing while its subtree is
+/// hidden, down-pointing while it is shown. Pure so the direction contract is
+/// unit-testable without a window, and so the render tree can be tagged with
+/// exactly the glyph it painted.
+const CHEVRON_COLLAPSED: &str = "\u{25B6}";
+const CHEVRON_EXPANDED: &str = "\u{25BC}";
+
+fn chevron_glyph(collapsed: bool) -> &'static str {
+    if collapsed {
+        CHEVRON_COLLAPSED
+    } else {
+        CHEVRON_EXPANDED
+    }
+}
+
+/// The glyph plus, when the row is collapsed, the halo behind it: a muted
+/// filled circle that makes "this row is hiding something" scannable down the
+/// whole sidebar without reading each triangle. Fills the chevron box exactly,
+/// so it is background paint and never moves the row.
+///
+/// `halo_id` registers the halo in the bounds registry ONLY while it is
+/// painted, making its presence the observable an affordance invariant reads.
+fn chevron_face(
+    collapsed: bool,
+    halo_id: Option<String>,
+    ctx: &GpuiRenderContext,
+) -> gpui::AnyElement {
+    let face = div()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(chevron_glyph(collapsed).to_string());
+
+    if !collapsed {
+        return face.into_any_element();
+    }
+
+    // Filled chip with the glyph knocked out. `muted_foreground` IS the theme's
+    // `text_secondary` (see `apply_holon_theme`), which
+    // `theme::collapsed_halo_fill` names as the halo token and the contrast
+    // test holds to a 3:1 floor against the sidebar surface in every theme.
+    let face = face
+        .rounded_full()
+        .bg(tc(ctx, |t| t.muted_foreground))
+        .text_color(tc(ctx, |t| t.background));
+    match halo_id {
+        Some(id) => TransparentTracker::new(
+            id,
+            "disclosure_halo",
+            ctx.bounds_registry.clone(),
+            face.into_any_element(),
+        )
+        .into_any_element(),
+        None => face.into_any_element(),
+    }
+}
+
 fn collapse_chevron(
     collapsed: bool,
     el_id: String,
     expanded: Mutable<bool>,
     persist: Option<(Arc<dyn BuilderServices>, String)>,
-    opacity: f32,
+    halo_id: Option<String>,
     ctx: &GpuiRenderContext,
 ) -> gpui::Stateful<Div> {
-    let chevron = if collapsed {
-        "\u{25B6}" // right-pointing triangle
-    } else {
-        "\u{25BC}" // down-pointing triangle
-    };
     let color = tc(ctx, |t| t.muted_foreground);
 
     div()
@@ -167,14 +217,10 @@ fn collapse_chevron(
         .flex()
         .items_center()
         .justify_center()
-        // Hover-reveal (Logseq convention): the disclosure triangle is
-        // transparent until the row is hovered. Kept in layout (opacity, not
-        // conditional render) so its bounds stay registered for PBT
-        // `ToggleCollapse` and hit-testing.
-        .opacity(opacity)
         .text_size(px(ctx.style().tree_chevron_font_size))
         .text_color(color)
         .on_mouse_down(gpui::MouseButton::Left, move |_, window, _cx| {
+            let t_toggle = std::time::Instant::now();
             let new_expanded = !expanded.get();
             expanded.set(new_expanded);
             // Collapse is document state: persist through the normal op path
@@ -195,8 +241,18 @@ fn collapse_chevron(
                 }
             }
             window.refresh();
+            // Feeds the p95 interaction→projection-visible SLO: without a stage
+            // here the sidebar fold is invisible to `measure_latency`.
+            tracing::info!(
+                target: "holon_latency",
+                stage = "sidebar_toggle",
+                block = persist.as_ref().map(|(_, id)| id.as_str()).unwrap_or("<view-local>"),
+                expanded = new_expanded,
+                ms = t_toggle.elapsed().as_millis() as u64,
+                "holon_latency",
+            );
         })
-        .child(chevron.to_string())
+        .child(chevron_face(collapsed, halo_id, ctx))
 }
 
 /// Check if a tree_item node is collapsed.
@@ -272,14 +328,6 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
 
     let marker = leading_marker(show_chevron, has_children, show_bullet);
 
-    // Hover-reveal state for the disclosure chevron. `wrap_tree_item` seeds a
-    // `hovered` Mutable on production rows; when present the chevron is
-    // transparent until the whole ROW is hovered (the hover zone is the row,
-    // not the chevron box). Absent (static gallery / shadow) → always visible.
-    let hovered_handle = node.hovered.clone();
-    let chevron_opacity =
-        chevron_reveal_opacity(marker, hovered_handle.as_ref().map(|h| h.get()));
-
     let mut row = div()
         .w_full()
         .flex()
@@ -299,18 +347,32 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
             // Persist through set_field(collapsed) when the row is identifiable;
             // rows without an id (synthetic gallery items) fold view-locally.
             let persist = id.clone().map(|row_id| (ctx.services.clone(), row_id));
-            let chevron_el =
-                collapse_chevron(collapsed, el_id, mutable, persist, chevron_opacity, ctx);
-            if let Some(target_id) = explicit_target.as_deref() {
-                // Register the chevron in the bounds registry under the
-                // canonical id so layout-PBT `ToggleCollapse` transitions
-                // can click it via `expand_toggle_id_for(target_id)`.
-                row = row.child(TransparentTracker::new(
-                    expand_toggle_id_for(target_id),
-                    "expand_toggle",
-                    ctx.bounds_registry.clone(),
-                    chevron_el.into_any_element(),
-                ));
+            // Register under the row's OWN identity — the explicit `target_id`
+            // when a blueprint stamped one, otherwise the content child's entity
+            // id, which is all a production row carries. Keying this off
+            // `target_id` alone left every real sidebar row untracked: the
+            // observables existed only for synthetic fixtures, so a PBT could not
+            // see the affordance disappear from the live app (dogfood F2).
+            let halo_id = id.as_deref().map(disclosure_halo_id_for);
+            let chevron_el = collapse_chevron(collapsed, el_id, mutable, persist, halo_id, ctx);
+            if let Some(target_id) = id.as_deref() {
+                // Canonical id so layout-PBT `ToggleCollapse` and
+                // `UserDriver::set_block_expanded` can click it via
+                // `expand_toggle_id_for(target_id)`.
+                row = row.child(
+                    TransparentTracker::new(
+                        expand_toggle_id_for(target_id),
+                        "expand_toggle",
+                        ctx.bounds_registry.clone(),
+                        chevron_el.into_any_element(),
+                    )
+                    .with_displayed_text(chevron_glyph(collapsed))
+                    // The disclosure affordance is PERSISTENT: a parent row is
+                    // identifiable without hovering it (and touch has no hover
+                    // at all). Recorded so affordance invariants can tell a
+                    // painted chevron from a merely laid-out one.
+                    .with_opacity(DISCLOSURE_WEIGHT),
+                );
             } else {
                 row = row.child(chevron_el);
             }
@@ -342,28 +404,15 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
         row = row.child(div().flex_1().min_w(px(0.0)).child(node));
     }
 
-    // Scope the hover to the whole row: hovering anywhere on the row reveals
-    // the chevron. Only wired for chevron rows that carry a `hovered` cell.
-    match (marker, hovered_handle) {
-        (LeadingMarker::Chevron, Some(hovered)) => {
-            let hover_id = format!("tree-item-hover-{}", id.unwrap_or_default());
-            row.id(hashed_id(&hover_id))
-                .on_hover(move |is_over, window, _cx| {
-                    if hovered.get() != *is_over {
-                        hovered.set(*is_over);
-                        window.refresh();
-                    }
-                })
-                .into_any_element()
-        }
-        _ => row.into_any_element(),
-    }
+    row.into_any_element()
 }
 
 #[cfg(test)]
 mod marker_tests {
+    use super::CHEVRON_COLLAPSED;
+    use super::CHEVRON_EXPANDED;
     use super::LeadingMarker;
-    use super::chevron_reveal_opacity;
+    use super::chevron_glyph;
     use super::leading_marker;
     use super::marker_gutter_px;
 
@@ -409,38 +458,11 @@ mod marker_tests {
     }
 
     #[test]
-    fn chevron_hidden_until_its_row_is_hovered() {
-        // Green-from-start lock for the row-scoped hover-reveal behavior landed
-        // via the row-scoped-hover-chevron work (cb1d0e7e family). A chevron row
-        // carrying a seeded `hovered` cell is transparent (opacity 0) while the
-        // row is NOT hovered and opaque (1.0) once it is — the reveal is opacity,
-        // never layout. Proven red by reverting `chevron_reveal_opacity`'s match
-        // to a constant 1.0 (see /tmp/chevron_lock_mutation.log): the `Some(false)`
-        // assertion then reads 1.0 and fails.
-        assert_eq!(
-            chevron_reveal_opacity(LeadingMarker::Chevron, Some(false)),
-            0.0,
-            "chevron must be transparent while its row is not hovered"
-        );
-        assert_eq!(
-            chevron_reveal_opacity(LeadingMarker::Chevron, Some(true)),
-            1.0,
-            "chevron must be fully opaque once its row is hovered"
-        );
-    }
-
-    #[test]
-    fn chevron_without_a_hover_cell_is_always_visible() {
-        // Static gallery / shadow rows seed no `hovered` cell — there is no hover
-        // source to gate on, so the chevron never hides (disclosed degraded mode).
-        assert_eq!(chevron_reveal_opacity(LeadingMarker::Chevron, None), 1.0);
-    }
-
-    #[test]
-    fn non_chevron_markers_are_never_hover_gated() {
-        // Only the disclosure chevron hover-reveals. Bullets and marker-less rows
-        // stay fully visible regardless of hover state.
-        assert_eq!(chevron_reveal_opacity(LeadingMarker::Bullet, Some(false)), 1.0);
-        assert_eq!(chevron_reveal_opacity(LeadingMarker::None, Some(false)), 1.0);
+    fn chevron_direction_follows_collapse_state() {
+        // The disclosure glyph IS the collapse state: right while the subtree
+        // is hidden, down while it is shown. Persistent — no hover input can
+        // reach this function, because the affordance no longer has one.
+        assert_eq!(chevron_glyph(true), CHEVRON_COLLAPSED);
+        assert_eq!(chevron_glyph(false), CHEVRON_EXPANDED);
     }
 }

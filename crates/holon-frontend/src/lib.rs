@@ -192,6 +192,7 @@ pub mod editor_view_model;
 pub mod focus_path;
 pub mod geometry;
 pub mod render_services;
+pub use geometry::disclosure_halo_id_for;
 pub use geometry::drawer_toggle_id_for;
 pub use geometry::expand_toggle_id_for;
 pub use geometry::vms_button_id_for;

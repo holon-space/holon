@@ -422,6 +422,12 @@ pub enum ViewKind {
     TreeItem {
         depth: usize,
         has_children: bool,
+        /// Disclosure state of a parent row: `true` when it has children and
+        /// its subtree is folded away. Always `false` for a leaf. Snapshotted
+        /// from the per-instance `expanded` handle so `describe_ui` consumers
+        /// can read collapse without pixel-peeping (BugFunnel 2026-07-30).
+        #[serde(default)]
+        collapsed: bool,
         children: LazyChildren,
     },
 }
@@ -753,6 +759,7 @@ impl ViewModel {
             LayoutWidget::TreeItem => ViewKind::TreeItem {
                 depth: 0,
                 has_children: false,
+                collapsed: false,
                 children: lazy,
             },
             LayoutWidget::Card => ViewKind::Card {
