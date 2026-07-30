@@ -151,6 +151,13 @@ pub enum DegradedKind {
     /// Disclosed degrade per the share write-back track (inc 1): the edit is
     /// NOT lost, only the file projection lags.
     SharedSubtreeNotMaterialized,
+    /// Red — an MCP integration provider failed to connect at boot. Its cache
+    /// tables were never created, so dependent pages render blank; this names
+    /// the integration and the connect error so the blankness is attributable.
+    IntegrationConnectFailed,
+    /// Red — an MCP integration provider is waiting on an OAuth grant. Same
+    /// blank-page consequence, but the user can fix it via the carried URL.
+    IntegrationNeedsAuth,
     /// A plain info-style toast (used for "ticket copied").
     Info,
 }
@@ -266,6 +273,25 @@ impl ShareUiState {
                     kind: DegradedKind::SharedSubtreeNotMaterialized,
                     shared_tree_id: event.shared_tree_id,
                     detail,
+                });
+            }
+            // The toast body truncates `detail` at 80 chars, so both of these
+            // lead with the integration name.
+            ShareDegradedReason::IntegrationConnectFailed { integration, error } => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::IntegrationConnectFailed,
+                    shared_tree_id: event.shared_tree_id,
+                    detail: format!("{integration}: {error}"),
+                });
+            }
+            ShareDegradedReason::IntegrationNeedsAuth {
+                integration,
+                auth_url,
+            } => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::IntegrationNeedsAuth,
+                    shared_tree_id: event.shared_tree_id,
+                    detail: format!("{integration}: authorize at {auth_url}"),
                 });
             }
         }
@@ -1522,6 +1548,16 @@ fn render_toast_stack(
                 "⚠",
                 "Shared edit saved — org file pending",
             ),
+            DegradedKind::IntegrationConnectFailed => (
+                gpui::rgba(0xef4444ff),
+                crate::icon("⛔"),
+                "Integration unavailable",
+            ),
+            DegradedKind::IntegrationNeedsAuth => (
+                gpui::rgba(0xef4444ff),
+                crate::icon("⛔"),
+                "Integration needs authorization",
+            ),
             DegradedKind::Info => (gpui::rgba(0x60a5faff), "i", "Info"),
         };
         let close_state = share_state.clone();
@@ -1684,6 +1720,62 @@ mod tests {
         assert_eq!(s.toasts.len(), 1);
         assert_eq!(s.toasts[0].kind, DegradedKind::UndoFailed);
         assert!(s.toasts[0].detail.contains("operation engine"));
+    }
+
+    #[test]
+    fn apply_degraded_routes_integration_connect_failed_to_toast() {
+        let mut s = ShareUiState::new();
+        s.apply_degraded(ShareDegraded {
+            shared_tree_id: "todoist".into(),
+            reason: ShareDegradedReason::IntegrationConnectFailed {
+                integration: "todoist".into(),
+                error: "No such file or directory (os error 2)".into(),
+            },
+        });
+        assert_eq!(s.toasts.len(), 1);
+        assert_eq!(s.toasts[0].kind, DegradedKind::IntegrationConnectFailed);
+        assert!(
+            s.toasts[0].detail.contains("todoist"),
+            "detail must name the integration: {}",
+            s.toasts[0].detail
+        );
+        assert!(
+            s.toasts[0].detail.contains("os error 2"),
+            "detail must carry the connect error: {}",
+            s.toasts[0].detail
+        );
+        assert!(s.quarantines.is_empty());
+    }
+
+    /// The toast body truncates `detail` at 80 chars, so the integration name
+    /// must come first or a long error hides it.
+    #[test]
+    fn integration_connect_failed_detail_leads_with_the_integration_name() {
+        let mut s = ShareUiState::new();
+        s.apply_degraded(ShareDegraded {
+            shared_tree_id: "todoist".into(),
+            reason: ShareDegradedReason::IntegrationConnectFailed {
+                integration: "todoist".into(),
+                error: "x".repeat(200),
+            },
+        });
+        assert!(s.toasts[0].detail[..80].contains("todoist"));
+    }
+
+    #[test]
+    fn apply_degraded_routes_integration_needs_auth_to_toast() {
+        let mut s = ShareUiState::new();
+        s.apply_degraded(ShareDegraded {
+            shared_tree_id: "linear".into(),
+            reason: ShareDegradedReason::IntegrationNeedsAuth {
+                integration: "linear".into(),
+                auth_url: "https://linear.app/oauth/authorize?x=1".into(),
+            },
+        });
+        assert_eq!(s.toasts.len(), 1);
+        assert_eq!(s.toasts[0].kind, DegradedKind::IntegrationNeedsAuth);
+        assert!(s.toasts[0].detail.contains("linear"));
+        assert!(s.toasts[0].detail.contains("https://linear.app/oauth"));
     }
 
     #[test]

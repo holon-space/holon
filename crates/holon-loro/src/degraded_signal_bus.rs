@@ -53,6 +53,21 @@ pub enum ShareDegradedReason {
     /// visible. String carries the offending block id. `shared_tree_id` names
     /// the share.
     SharedSubtreeNotMaterialized(String),
+    /// An MCP integration provider did not come up at boot — its sidecar
+    /// command is missing/dead, or its `${VAR}` credentials are unresolved. The
+    /// integration's `cc_*` cache tables are never created, so every page that
+    /// queries them renders blank; disclosed so that blankness is attributable
+    /// instead of looking like a healthy empty result. `shared_tree_id` carries
+    /// the integration name (this is not tied to a shared doc).
+    IntegrationConnectFailed { integration: String, error: String },
+    /// An MCP integration provider needs an OAuth grant before it can connect.
+    /// Same blank-page consequence as `IntegrationConnectFailed`, but the fix
+    /// is a user action, so it carries the authorization URL.
+    /// `shared_tree_id` carries the integration name.
+    IntegrationNeedsAuth {
+        integration: String,
+        auth_url: String,
+    },
 }
 
 #[derive(Clone, Debug)]

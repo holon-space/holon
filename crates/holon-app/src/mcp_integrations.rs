@@ -6,6 +6,9 @@ use fluxdi::Injector;
 use fluxdi::Module;
 use fluxdi::Provider;
 use fluxdi::Shared;
+use holon::sync::DegradedSignalBus;
+use holon::sync::ShareDegraded;
+use holon::sync::ShareDegradedReason;
 use holon_api::EntityName;
 use holon_core::OperationProvider;
 use holon_core::SyncGate;
@@ -26,6 +29,31 @@ use tracing::warn;
 /// the setting key `todoist.api_key` both normalize to `todoist_api_key`.
 fn normalize_var_name(s: &str) -> String {
     s.to_ascii_lowercase().replace('.', "_")
+}
+
+/// Disclose that `name` could not be connected at boot. Without this the
+/// failure is log-only and every page backed by the integration's `cc_*`
+/// tables renders blank as if the remote had no data.
+fn disclose_connect_failure(name: &str, error: &anyhow::Error, bus: &DegradedSignalBus) {
+    bus.emit(ShareDegraded {
+        shared_tree_id: name.to_string(),
+        reason: ShareDegradedReason::IntegrationConnectFailed {
+            integration: name.to_string(),
+            error: format!("{error:#}"),
+        },
+    });
+}
+
+/// Disclose that `name` is connectable but waiting on an OAuth grant — same
+/// blank-page consequence as a failed connect, different remedy.
+fn disclose_needs_auth(name: &str, auth_url: &str, bus: &DegradedSignalBus) {
+    bus.emit(ShareDegraded {
+        shared_tree_id: name.to_string(),
+        reason: ShareDegradedReason::IntegrationNeedsAuth {
+            integration: name.to_string(),
+            auth_url: auth_url.to_string(),
+        },
+    });
 }
 
 /// Holds all running MCP integrations so their services stay alive.
@@ -146,6 +174,23 @@ impl Module for McpIntegrationsModule {
                 // `add_frontend`, opened by the `post_ready` scan barrier.
                 let sync_gate: SyncGate = (*resolver.resolve::<SyncGate>()).clone();
 
+                // Every non-connected integration is disclosed on this bus so
+                // the resulting blank pages are attributable. The bus is only
+                // registered by `LoroModule`, so a SqlOnly container has none —
+                // say so loudly instead of degrading invisibly.
+                let degraded_bus =
+                    match resolver.try_resolve_async::<Arc<DegradedSignalBus>>().await {
+                        Ok(bus) => Some((*bus).clone()),
+                        Err(e) => {
+                            tracing::error!(
+                                "[McpIntegrationsModule] No DegradedSignalBus in this container \
+                             ({e}) — integration connect failures will be LOG-ONLY and their \
+                             pages will render blank with no banner"
+                            );
+                            None
+                        }
+                    };
+
                 // Layered `${VAR}` resolver: environment variable wins, then a
                 // settings value whose key matches case-insensitively with `.`/`_`
                 // treated as the same separator (so `${TODOIST_API_KEY}` resolves
@@ -188,6 +233,9 @@ impl Module for McpIntegrationsModule {
                                  skipping: {e}",
                                 name
                             );
+                            if let Some(bus) = &degraded_bus {
+                                disclose_connect_failure(name, &e, bus);
+                            }
                             continue;
                         }
                         Err(e) => {
@@ -247,12 +295,18 @@ impl Module for McpIntegrationsModule {
                                 "[McpIntegrationsModule] Provider '{}' needs OAuth — auth_url: {}",
                                 provider_name, auth_url
                             );
+                            if let Some(bus) = &degraded_bus {
+                                disclose_needs_auth(&provider_name, &auth_url, bus);
+                            }
                         }
                         Err(e) => {
                             warn!(
                                 "[McpIntegrationsModule] Failed to connect provider '{}': {e}",
                                 name
                             );
+                            if let Some(bus) = &degraded_bus {
+                                disclose_connect_failure(name, &e, bus);
+                            }
                         }
                     }
                 }
@@ -293,9 +347,15 @@ impl Module for McpIntegrationsModule {
                                 name,
                             }) as Arc<dyn OperationProvider>
                         } else {
+                            // No emit here: every route by which a configured
+                            // integration can be missing from the registry
+                            // (unresolved `${VAR}`, NeedsAuth, connect error)
+                            // already disclosed itself on the degraded bus with
+                            // the actual cause, which this site does not know.
                             warn!(
                                 "[McpIntegrationsModule] Integration '{name}' unavailable (not \
-                                 configured or failed to connect) — registering inert provider"
+                                 configured or failed to connect) — registering inert provider; \
+                                 cause was disclosed on the degraded bus at boot"
                             );
                             Arc::new(EmptyOperationProvider { name }) as Arc<dyn OperationProvider>
                         }
@@ -305,6 +365,64 @@ impl Module for McpIntegrationsModule {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use holon::sync::DegradedSignalBus;
+    use holon::sync::ShareDegradedReason;
+
+    use super::*;
+
+    /// Drives the REAL sidecar-spawn failure (a `command` that is not on disk)
+    /// through the same disclosure the registry factory uses, and asserts the
+    /// degraded bus carries the integration name and the connect error.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dead_sidecar_command_is_disclosed_on_the_degraded_bus() {
+        let Err(err) = holon_mcp_client::connect_mcp_child(
+            "/nonexistent/holon-test-sidecar",
+            &[],
+            &HashMap::new(),
+        )
+        .await
+        else {
+            panic!("spawning a nonexistent sidecar binary must fail");
+        };
+
+        let bus = DegradedSignalBus::new();
+        let mut rx = bus.subscribe();
+        disclose_connect_failure("todoist", &err, &bus);
+
+        let ev = rx.recv().await.unwrap();
+        assert_eq!(ev.shared_tree_id, "todoist");
+        let ShareDegradedReason::IntegrationConnectFailed { integration, error } = ev.reason else {
+            panic!("expected IntegrationConnectFailed, got {:?}", ev.reason);
+        };
+        assert_eq!(integration, "todoist");
+        assert!(
+            error.contains("No such file") || error.contains("os error 2"),
+            "error must carry the spawn failure: {error}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pending_oauth_is_disclosed_on_the_degraded_bus() {
+        let bus = DegradedSignalBus::new();
+        let mut rx = bus.subscribe();
+        disclose_needs_auth("linear", "https://linear.app/oauth/authorize", &bus);
+
+        let ev = rx.recv().await.unwrap();
+        assert_eq!(ev.shared_tree_id, "linear");
+        let ShareDegradedReason::IntegrationNeedsAuth {
+            integration,
+            auth_url,
+        } = ev.reason
+        else {
+            panic!("expected IntegrationNeedsAuth, got {:?}", ev.reason);
+        };
+        assert_eq!(integration, "linear");
+        assert_eq!(auth_url, "https://linear.app/oauth/authorize");
     }
 }
 
