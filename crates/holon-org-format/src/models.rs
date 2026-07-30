@@ -729,6 +729,7 @@ impl OrgBlockExt for Block {
             "DEADLINE",
             "ID",
             "COLLAPSED",
+            "WIDGET_ONLY",
             "_source_header_args",
             "_source_results",
         ];
@@ -815,6 +816,12 @@ impl OrgBlockExt for Block {
         // stays exactly as before this field existed.
         if self.collapsed {
             result.insert("COLLAPSED".to_string(), "t".to_string());
+        }
+
+        // `widget_only` follows `collapsed`'s only-when-set convention so a
+        // file that never uses widget-only rendering keeps its drawer verbatim.
+        if self.widget_only {
+            result.insert("WIDGET_ONLY".to_string(), "t".to_string());
         }
 
         result

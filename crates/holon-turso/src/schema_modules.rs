@@ -226,6 +226,7 @@ const BLOCK_RAW_COLUMNS: &[&str] = &[
     "properties",
     "marks",
     "collapsed",
+    "widget_only",
     "completed",
     "block_type",
     "created_at",
@@ -1143,7 +1144,8 @@ mod tests {
         assert_eq!(
             block_matview_select(&[requires_descriptor()]),
             "SELECT b.id, b.parent_id, b.depth, b.sort_key, b.content, b.content_type, \
-             b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.completed, \
+             b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.widget_only, \
+             b.completed, \
              b.block_type, b.created_at, b.updated_at, b._change_origin, b.write_seq, \
              COALESCE(block_requires_agg.vals, '[]') AS requires FROM block_raw b \
              LEFT OUTER JOIN block_requires_agg ON block_requires_agg.source_id = b.id \

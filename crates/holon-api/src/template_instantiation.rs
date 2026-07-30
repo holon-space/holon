@@ -201,6 +201,7 @@ pub struct TemplateNode {
     pub block_type: String,
     pub sort_key: String,
     pub collapsed: bool,
+    pub widget_only: bool,
     pub completed: bool,
     pub source_language: Option<String>,
     pub source_name: Option<String>,
@@ -381,6 +382,7 @@ pub fn plan_instantiation(
         put("content_type", Value::String(node.content_type.clone()));
         put("block_type", Value::String(node.block_type.clone()));
         put("collapsed", Value::Boolean(node.collapsed));
+        put("widget_only", Value::Boolean(node.widget_only));
         put("completed", Value::Boolean(node.completed));
         if !is_root {
             // Copying the template's fractional keys preserves sibling order

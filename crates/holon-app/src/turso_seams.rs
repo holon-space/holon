@@ -142,7 +142,8 @@ impl CacheBlockReader {
     async fn load_all_blocks_with_hydration(&self) -> anyhow::Result<Vec<Block>> {
         let sql = format!(
             "SELECT b.id, b.parent_id, b.depth, b.sort_key, b.content, b.content_type, \
-             b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.completed, \
+             b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.widget_only, \
+             b.completed, \
              b.block_type, b.created_at, b.updated_at, COALESCE((SELECT json_group_array(tag) \
              FROM block_tags WHERE block_id = b.id), '[]') AS tags, COALESCE((SELECT \
              json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS \
@@ -278,7 +279,8 @@ impl BlockReader for CacheBlockReader {
              b JOIN descendants d ON b.parent_id = d.id LEFT JOIN block_tags bt ON bt.block_id = \
              b.id AND bt.tag = 'Page' WHERE bt.block_id IS NULL AND d.depth_acc < 100 ) SELECT \
              b.id, b.parent_id, b.depth, b.sort_key, b.content, b.content_type, \
-             b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.completed, \
+             b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.widget_only, \
+             b.completed, \
              b.block_type, b.created_at, b.updated_at, COALESCE((SELECT json_group_array(tag) \
              FROM block_tags WHERE block_id = b.id), '[]') AS tags, COALESCE((SELECT \
              json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS \
@@ -327,7 +329,8 @@ impl BlockReader for CacheBlockReader {
         // `block_raw` authority with the cache's `get_blocks` seed.
         let sql = format!(
             "SELECT b.id, b.parent_id, b.depth, b.sort_key, b.content, b.content_type, \
-             b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.completed, \
+             b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.widget_only, \
+             b.completed, \
              b.block_type, b.created_at, b.updated_at, COALESCE((SELECT json_group_array(tag) \
              FROM block_tags WHERE block_id = b.id), '[]') AS tags, COALESCE((SELECT \
              json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS \

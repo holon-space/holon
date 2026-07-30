@@ -68,6 +68,7 @@ Example (a claimed-block drawer, same shape as real vault data) becomes one cell
 | **`:REQUIRES:` / `:BLOCKED-BY:` edge** | `@req=id1,id2` in props | **maps cleanly** (converges to one spelling, like the org renderer) |
 | **`:ADVICE_SUPPRESSED:` edge** | `@adv=…` in props | **maps cleanly** |
 | **`:COLLAPSED:`** | `@col=t` in props | **maps cleanly** |
+| **`:WIDGET_ONLY:`** | `@wo=t` in props | **maps cleanly** |
 | **Multi-line body** (paragraph text under a headline) | `body` column, newlines escaped as `\n` | **maps with escaping cost** — TOON has **no block-scalar / folded form**; every newline becomes a literal `\n` and the whole cell is quoted. A 10-line body becomes one long quoted string. Round-trips losslessly but is far less human-legible than org's native indented text. |
 | **Source block** (`#+BEGIN_SRC lang … #+END_SRC`) | `@kind=src @lang=lang` in props; code in `body` (quoted, `\n`-escaped); `#+NAME:` → `@name` | **maps with escaping cost** — the payoff construct for the "clashing characters" question: SQL/Rhai bodies are *full* of `:` `,` `{` `}` `[` `]` and newlines, so the cell is always quoted and every line-break is `\n`. Semantically lossless (colons/brackets inside a quoted TOON string need no escaping beyond `"`/`\`/newline), but the source becomes a single unreadable line. Org's fenced block is strictly more readable here. |
 | **Image block** (`[[file:path.png]]`) | `@kind=img` in props; bare path in `body` | **maps cleanly** |

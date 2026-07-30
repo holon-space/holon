@@ -137,6 +137,7 @@ pub fn build_block_params(
     // `tags`) so an update from a file edit that REMOVED the drawer property
     // correctly clears the column back to 0.
     params.insert("collapsed".into(), Value::Boolean(block.collapsed));
+    params.insert("widget_only".into(), Value::Boolean(block.widget_only));
 
     params.insert("sequence".into(), Value::Integer(block.sequence()));
 

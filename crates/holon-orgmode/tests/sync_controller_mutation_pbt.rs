@@ -484,6 +484,7 @@ fn simulate_sql_round_trip(
         "properties",
         "marks",
         "collapsed",
+        "widget_only",
         "completed",
         "block_type",
         "created_at",

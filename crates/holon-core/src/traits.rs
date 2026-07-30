@@ -1364,6 +1364,7 @@ where
             new_block_fields.insert("created_at".into(), Value::Integer(now));
             new_block_fields.insert("updated_at".into(), Value::Integer(now));
             new_block_fields.insert("collapsed".into(), Value::Boolean(false));
+            new_block_fields.insert("widget_only".into(), Value::Boolean(false));
             new_block_fields.insert("completed".into(), Value::Boolean(false));
             new_block_fields.insert("block_type".into(), Value::String("text".to_string()));
 

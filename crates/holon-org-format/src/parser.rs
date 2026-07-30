@@ -701,6 +701,19 @@ fn process_headlines(
                 // expanded (Block::default() already sets `collapsed: false`).
                 block.collapsed =
                     value.eq_ignore_ascii_case("t") || value.eq_ignore_ascii_case("true");
+            } else if key.eq_ignore_ascii_case("WIDGET_ONLY") {
+                // Same boolean-drawer grammar as `:COLLAPSED:`, but a present
+                // value outside the accepted spellings is a hard parse error:
+                // silently defaulting a render-mode flag to false would hide
+                // the authored intent behind a correct-looking page.
+                if value.eq_ignore_ascii_case("t") || value.eq_ignore_ascii_case("true") {
+                    block.widget_only = true;
+                } else {
+                    anyhow::bail!(
+                        "block {id}: :WIDGET_ONLY: must be `t` or `true` (case-insensitive), got \
+                         {value:?}"
+                    );
+                }
             } else {
                 block.set_property(key, holon_api::Value::String(value.to_string()));
             }
@@ -1450,6 +1463,87 @@ mod tests {
             !expanded_rendered.contains("COLLAPSED"),
             "an expanded block must not gain a :COLLAPSED: drawer line, got:\n{expanded_rendered}"
         );
+    }
+
+    #[test]
+    fn test_widget_only_drawer_round_trips() {
+        // `:WIDGET_ONLY: t` is a typed Block field, so it survives the org
+        // round-trip that drops untyped non-String properties. A block without
+        // the flag must not gain the drawer key.
+        use crate::org_renderer::OrgRenderer;
+
+        let content = "* Query\n:PROPERTIES:\n:WIDGET_ONLY: t\n:ID: w1\n:END:\n";
+        let path = PathBuf::from("/test/file.org");
+        let root = PathBuf::from("/test");
+        let file_id = generate_file_id(&path, &root);
+
+        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let h = result.blocks.iter().find(|b| b.id.id() == "w1").unwrap();
+        assert!(
+            h.widget_only,
+            "WIDGET_ONLY: t must parse to block.widget_only = true"
+        );
+
+        let rendered = OrgRenderer::render_entitys(&result.blocks, &path, &file_id);
+        assert!(
+            rendered.contains(":WIDGET_ONLY: t"),
+            "renderer must emit the drawer property, got:\n{rendered}"
+        );
+
+        let result2 = parse_org_file(&path, &rendered, &EntityUri::no_parent(), &root).unwrap();
+        let h2 = result2.blocks.iter().find(|b| b.id.id() == "w1").unwrap();
+        assert!(
+            h2.widget_only,
+            "widget_only must survive render -> re-parse unchanged"
+        );
+
+        let plain = "* Query2\n:PROPERTIES:\n:ID: w2\n:END:\n";
+        let plain_result = parse_org_file(&path, plain, &EntityUri::no_parent(), &root).unwrap();
+        let p = plain_result
+            .blocks
+            .iter()
+            .find(|b| b.id.id() == "w2")
+            .unwrap();
+        assert!(!p.widget_only);
+        let plain_rendered = OrgRenderer::render_entitys(&plain_result.blocks, &path, &file_id);
+        assert!(
+            !plain_rendered.contains("WIDGET_ONLY"),
+            "a plain block must not gain a :WIDGET_ONLY: drawer line, got:\n{plain_rendered}"
+        );
+    }
+
+    #[test]
+    fn test_widget_only_rejects_unknown_spelling() {
+        // Unlike :COLLAPSED:, an unrecognised :WIDGET_ONLY: value fails loud
+        // instead of silently rendering the headline the author asked to hide.
+        let content = "* Query\n:PROPERTIES:\n:WIDGET_ONLY: banana\n:ID: w3\n:END:\n";
+        let path = PathBuf::from("/test/file.org");
+        let root = PathBuf::from("/test");
+
+        // `ParseResult` is not `Debug`, so unwrap the Err arm by hand.
+        let msg = match parse_org_file(&path, content, &EntityUri::no_parent(), &root) {
+            Ok(_) => panic!(":WIDGET_ONLY: banana must be a parse error, not a silent false"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(msg.contains("w3"), "error must name the block, got: {msg}");
+        assert!(
+            msg.contains("banana"),
+            "error must name the bad value, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_widget_only_accepts_case_insensitive_spellings() {
+        let path = PathBuf::from("/test/file.org");
+        let root = PathBuf::from("/test");
+        for spelling in ["t", "T", "true", "TRUE", "True"] {
+            let content =
+                format!("* Query\n:PROPERTIES:\n:WIDGET_ONLY: {spelling}\n:ID: w4\n:END:\n");
+            let result = parse_org_file(&path, &content, &EntityUri::no_parent(), &root)
+                .unwrap_or_else(|e| panic!("{spelling:?} must parse: {e:#}"));
+            let b = result.blocks.iter().find(|b| b.id.id() == "w4").unwrap();
+            assert!(b.widget_only, "{spelling:?} must parse as widget_only");
+        }
     }
 
     #[test]

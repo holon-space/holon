@@ -32,6 +32,7 @@ pub const K_DEADLINE: &str = "@dead";
 pub const K_REQUIRES: &str = "@req";
 pub const K_ADVICE: &str = "@adv";
 pub const K_COLLAPSED: &str = "@col";
+pub const K_WIDGET_ONLY: &str = "@wo";
 
 pub const KIND_SRC: &str = "src";
 pub const KIND_IMG: &str = "img";

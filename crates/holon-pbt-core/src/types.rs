@@ -145,6 +145,7 @@ impl Mutation {
                     "source_language",
                     "source_name",
                     "collapsed",
+                    "widget_only",
                     "completed",
                     "block_type",
                 ];

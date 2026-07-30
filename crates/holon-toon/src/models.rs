@@ -130,6 +130,7 @@ pub struct ToonBlock {
     pub requires: Vec<BlockId>,
     pub advice_suppressed: Vec<BlockId>,
     pub collapsed: bool,
+    pub widget_only: bool,
     /// Arbitrary `:PROPERTIES:` drawer keys other than `:ID:` and the fields
     /// promoted above (assigned-to, claimed-at, …). Ordered for determinism.
     pub properties: BTreeMap<String, String>,
@@ -154,6 +155,7 @@ impl ToonBlock {
             requires: Vec::new(),
             advice_suppressed: Vec::new(),
             collapsed: false,
+            widget_only: false,
             properties: BTreeMap::new(),
         }
     }

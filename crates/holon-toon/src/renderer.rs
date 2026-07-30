@@ -95,6 +95,9 @@ fn props_pairs(block: &ToonBlock) -> Vec<(String, String)> {
     if block.collapsed {
         pairs.push((schema::K_COLLAPSED.into(), "t".into()));
     }
+    if block.widget_only {
+        pairs.push((schema::K_WIDGET_ONLY.into(), "t".into()));
+    }
     for (k, v) in &block.properties {
         pairs.push((k.clone(), v.clone()));
     }

@@ -2513,6 +2513,7 @@ pub fn block_to_data_row(block: &Block) -> holon_api::widget_spec::DataRow {
     if let Some(sl) = &block.source_language {
         row.insert("source_language".into(), Value::String(sl.to_string()));
     }
+    row.insert("widget_only".into(), Value::Boolean(block.widget_only));
     row
 }
 

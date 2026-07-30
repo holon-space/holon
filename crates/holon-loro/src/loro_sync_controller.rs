@@ -1793,6 +1793,9 @@ fn block_diff_params(old: &SnapshotBlock, new: &SnapshotBlock) -> holon_api::Sto
     if old.collapsed != new.collapsed {
         params.insert("collapsed".into(), Value::Boolean(new.collapsed));
     }
+    if old.widget_only != new.widget_only {
+        params.insert("widget_only".into(), Value::Boolean(new.widget_only));
+    }
     if old_sort_key != new_sort_key {
         params.insert("sort_key".into(), Value::String(new_sort_key.clone()));
     }

@@ -202,6 +202,7 @@ const BLOCKS_KNOWN_COLUMNS: &[&str] = &[
     "properties",
     "marks",
     "collapsed",
+    "widget_only",
     "completed",
     "block_type",
     "created_at",

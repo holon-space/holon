@@ -106,6 +106,7 @@ mod tests {
                     properties TEXT,
                     marks TEXT,
                     collapsed INTEGER NOT NULL DEFAULT 0,
+                    widget_only INTEGER NOT NULL DEFAULT 0,
                     completed INTEGER NOT NULL DEFAULT 0,
                     block_type TEXT NOT NULL DEFAULT 'text',
                     created_at INTEGER NOT NULL DEFAULT 0,

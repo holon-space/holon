@@ -360,6 +360,11 @@ pub struct Block {
     /// `collapsed` column (`BLOCK_RAW_COLUMNS`).
     pub collapsed: bool,
 
+    /// Render the block's query widget WITHOUT its own headline text. Document
+    /// state like `collapsed` — shared, synced, survives restart — and backed
+    /// by the SQL `widget_only` column (`BLOCK_RAW_COLUMNS`).
+    pub widget_only: bool,
+
     // --- Timestamps (flattened from BlockMetadata) ---
     /// Unix timestamp (milliseconds) when block was created
     pub created_at: i64,
@@ -384,6 +389,7 @@ impl Default for Block {
             properties: HashMap::new(),
             marks: None,
             collapsed: false,
+            widget_only: false,
             created_at: now,
             updated_at: now,
         }
@@ -788,8 +794,9 @@ fn require_i64(row: &crate::StorageEntity, col: &str, id: &EntityUri) -> anyhow:
         .ok_or_else(|| anyhow::anyhow!("block {id}: column '{col}' must be an integer, got {v:?}"))
 }
 
-/// Read a `NOT NULL DEFAULT 0` SQLite boolean column (`collapsed`). Reads
-/// always come back as `Value::Integer` (0/1) — `turso_value_to_value` never
+/// Read a `NOT NULL DEFAULT 0` SQLite boolean column (`collapsed`,
+/// `widget_only`). Reads always come back as `Value::Integer` (0/1) —
+/// `turso_value_to_value` never
 /// produces `Value::Boolean` on the read path — but `Value::Boolean` is
 /// accepted too since some in-memory / test stores construct rows directly
 /// with it. Absent/Null defaults to `false` (matches the column's own SQL
@@ -903,6 +910,7 @@ impl TryFrom<crate::StorageEntity> for Block {
             ),
         };
         let collapsed = optional_bool(&row, "collapsed", &id)?;
+        let widget_only = optional_bool(&row, "widget_only", &id)?;
         let created_at = require_i64(&row, "created_at", &id)?;
         let updated_at = require_i64(&row, "updated_at", &id)?;
         let tags = Tags::from(require_string_array(&row, "tags", &id)?);
@@ -971,6 +979,7 @@ impl TryFrom<crate::StorageEntity> for Block {
             properties,
             marks,
             collapsed,
+            widget_only,
             created_at,
             updated_at,
         })
@@ -1092,6 +1101,10 @@ pub struct BlockWire {
     /// (written before collapse became document state) parse as expanded.
     #[serde(default)]
     pub collapsed: bool,
+    /// Widget-only render mode. `#[serde(default)]` so fixtures written
+    /// without the field parse as "render the headline too".
+    #[serde(default)]
+    pub widget_only: bool,
     pub created_at: i64,
     pub updated_at: i64,
     /// Junction-derived edge field, carried explicitly (disclosed legacy
@@ -1118,6 +1131,7 @@ impl From<&Block> for BlockWire {
             properties: b.properties.clone(),
             marks: b.marks.clone(),
             collapsed: b.collapsed,
+            widget_only: b.widget_only,
             created_at: b.created_at,
             updated_at: b.updated_at,
             tags: b.tags.to_vec(),
@@ -1142,6 +1156,7 @@ impl From<BlockWire> for Block {
             properties: w.properties,
             marks: w.marks,
             collapsed: w.collapsed,
+            widget_only: w.widget_only,
             created_at: w.created_at,
             updated_at: w.updated_at,
         }
@@ -1458,6 +1473,7 @@ mod mutation_gap_tests {
                 ("requires", Value::Array(vec![])),
                 ("advice_suppressed", Value::Array(vec![])),
                 ("collapsed", Value::Integer(0)),
+                ("widget_only", Value::Integer(0)),
             ]
             .into_iter()
             .map(|(k, v)| (std::sync::Arc::<str>::from(k), v))
@@ -1472,6 +1488,7 @@ mod mutation_gap_tests {
         assert!(ok.requires.is_empty());
         assert!(ok.advice_suppressed.is_empty());
         assert!(!ok.collapsed);
+        assert!(!ok.widget_only);
         assert!(ok.parent_id.as_block_id().is_none());
 
         // `collapsed` is stored as SQLite INTEGER 0/1 (turso_value_to_value
@@ -1493,6 +1510,27 @@ mod mutation_gap_tests {
             !Block::try_from(no_collapsed)
                 .expect("parses without collapsed")
                 .collapsed
+        );
+
+        // `widget_only` mirrors `collapsed`: INTEGER 0/1 on read, absent
+        // column defaults to false (see `optional_bool`).
+        let mut widget = base_row();
+        widget.insert(
+            std::sync::Arc::<str>::from("widget_only"),
+            Value::Integer(1),
+        );
+        assert!(
+            Block::try_from(widget)
+                .expect("widget_only row parses")
+                .widget_only
+        );
+
+        let mut no_widget = base_row();
+        no_widget.remove("widget_only");
+        assert!(
+            !Block::try_from(no_widget)
+                .expect("parses without widget_only")
+                .widget_only
         );
 
         // Absent advice_suppressed column = broken projection, must error.

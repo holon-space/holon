@@ -20,6 +20,7 @@ SELECT
     properties,
     marks,
     collapsed,
+    widget_only,
     completed,
     block_type,
     created_at,

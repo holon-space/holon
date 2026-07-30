@@ -166,6 +166,17 @@ fn apply_props(block: &mut ToonBlock, cell: &str, row: usize) -> Result<()> {
                 }
                 block.collapsed = true;
             }
+            schema::K_WIDGET_ONLY => {
+                if value != "t" {
+                    return Err(ToonError::BadReservedProp {
+                        row,
+                        key,
+                        value,
+                        reason: "expected \"t\"".into(),
+                    });
+                }
+                block.widget_only = true;
+            }
             _ => {
                 properties.insert(key, value);
             }

@@ -451,10 +451,10 @@ fn read_properties_from_meta(meta: &loro::LoroMap) -> HashMap<String, Value> {
 /// separately above. Kept as a local const (rather than a cross-crate import)
 /// to match the existing hardcoded edge strip in this module.
 ///
-/// `collapsed` is deliberately EXCLUDED: unlike the other columns it IS stored
-/// in the Loro properties map (a `set_field(collapsed)` scalar), and
-/// `read_block_from_tree` lifts it out of `properties` into the typed slot
-/// itself — stripping it here would make that lift always read the default.
+/// `collapsed` and `widget_only` are deliberately EXCLUDED: unlike the other
+/// columns they ARE stored in the Loro properties map (a `set_field` scalar),
+/// and `read_block_from_tree` lifts them out of `properties` into their typed
+/// slots — stripping them here would make that lift always read the default.
 const RESERVED_PROPERTY_KEYS: &[&str] = &[
     "id",
     "parent_id",
@@ -510,6 +510,12 @@ fn read_block_from_tree(
         Some(Value::Integer(i)) => i != 0,
         Some(other) => panic!("corrupt `collapsed` property in Loro tree: {other:?}"),
     };
+    let widget_only = match properties.remove("widget_only") {
+        None => false,
+        Some(Value::Boolean(b)) => b,
+        Some(Value::Integer(i)) => i != 0,
+        Some(other) => panic!("corrupt `widget_only` property in Loro tree: {other:?}"),
+    };
 
     let id = block_uri_from_meta(&meta, node);
     let parent_id = match parent_tree_id {
@@ -539,6 +545,7 @@ fn read_block_from_tree(
     block.requires = requires;
     block.advice_suppressed = advice_suppressed;
     block.collapsed = collapsed;
+    block.widget_only = widget_only;
     block.created_at = created_at;
     block.updated_at = updated_at;
     block
