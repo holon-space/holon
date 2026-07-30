@@ -94,15 +94,29 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
-      # `--workspace --all-targets` reaches holon-gpui, which links GPUI's native
-      # stack (wayland-sys, fontconfig). Same block as gated-suites/latency-gate.
-      - name: Install GPUI Linux build deps
+      # `--workspace --all-targets` pulls in every `-sys` crate reachable on
+      # Linux — GPUI's window stack AND xcap's screen-capture stack (via
+      # holon-mcp / holon-integration-tests dev-deps), which the narrower
+      # gated-suites target set never reaches. Enumerated from `cargo tree
+      # --target x86_64-unknown-linux-gnu -e normal,build,dev`; one comment per
+      # crate that needs the package. Crates that vendor their C (aws-lc-sys,
+      # onig_sys, zstd-sys, libmimalloc-sys, libsqlite3-sys `bundled`) need
+      # nothing beyond build-essential/cmake.
+      - name: Install Linux system libraries
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             build-essential cmake pkg-config \
             libfontconfig1-dev libwayland-dev libxkbcommon-dev \
-            libxcb1-dev libx11-dev libasound2-dev libudev-dev libssl-dev
+            libxcb1-dev libx11-dev libasound2-dev libudev-dev libssl-dev \
+            libdrm-dev \
+            libgbm-dev \
+            libpipewire-0.3-dev \
+            libclang-dev
+          # libdrm-dev          — drm-sys: build.rs does `pkg_config.probe("libdrm").unwrap()`
+          # libgbm-dev          — gbm-sys: `#[link(name = "gbm")]`, needed to LINK test binaries
+          # libpipewire-0.3-dev — libspa-sys + pipewire-sys: `system_deps` probe of `libpipewire-0.3`
+          # libclang-dev        — bindgen `runtime` feature dlopens libclang for the three above
 
       - name: Check formatting
         run: cargo fmt --check
