@@ -2140,6 +2140,63 @@ fn type_text_drop_outcome(total: usize, handled: usize) -> Result<usize, usize> 
     }
 }
 
+#[tool_router(router = tool_router_debug_ledgers, vis = "pub(crate)")]
+impl HolonMcpServer {
+    /// The three process-global ledgers that answer "a row reached the
+    /// frontend but never rendered — where did it go?".
+    ///
+    /// Each records at the site of the loss, which a later snapshot cannot
+    /// reconstruct: `generation_drops` = a CDC batch discarded by the
+    /// generation guard, `tree_desync` = rows a panel was given that render no
+    /// node, `row_lifecycle` = every row that left a row set, with the reason.
+    /// All-zero exonerates the frontend row path and points upstream.
+    #[tool(
+        description = "TEST-ONLY: report the three frontend row-drop ledgers (generation-guard \
+                       drops, tree/row_map divergences, row evictions). Use when a query returns \
+                       rows but the UI renders none. Pass reset=true to clear after reading. Note \
+                       tree_desync only probes in debug builds or under HOLON_PROBE_TREE_DESYNC."
+    )]
+    async fn debug_row_drop_ledgers(
+        &self,
+        Parameters(params): Parameters<RowDropLedgersParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        use holon_frontend::reactive::generation_drops;
+        use holon_frontend::reactive::row_lifecycle;
+        use holon_frontend::reactive::tree_desync;
+
+        let report = serde_json::json!({
+            "generation_drops": {
+                "count": generation_drops::count(),
+                "report": generation_drops::report(),
+            },
+            "tree_desync": {
+                "count": tree_desync::count(),
+                "probe_enabled": tree_desync::enabled(),
+                "report": tree_desync::report(),
+            },
+            "row_lifecycle": {
+                "count": row_lifecycle::count(),
+                "report": row_lifecycle::report(),
+            },
+        });
+
+        if params.reset {
+            generation_drops::reset();
+            tree_desync::reset();
+            row_lifecycle::reset();
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&report).map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    "serialization_failed",
+                    Some(serde_json::json!({"error": e.to_string()})),
+                )
+            })?,
+        )]))
+    }
+}
+
 #[tool_router(router = tool_router_ui, vis = "pub(crate)")]
 impl HolonMcpServer {
     #[tool(
@@ -2863,9 +2920,10 @@ impl HolonMcpServer {
             )
         })?;
 
-        // Ensure the watcher is running and wait for the first Structure event.
-        // get_block_data starts a watcher if needed; await_ready returns
-        // immediately if already loaded.
+        // Ensure the watcher is running, then wait for BOTH readiness barriers
+        // (first Structure event, and for a data-driven block the first Data
+        // batch). Stopping at Structure made a cold probe snapshot a list that
+        // had no rows yet and report it as genuinely empty.
         let block_id = block_uri.clone();
         let svc_ready = svc.clone();
         tokio::time::timeout(

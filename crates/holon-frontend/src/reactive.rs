@@ -661,6 +661,11 @@ pub mod tree_desync {
         }
     }
 
+    /// Number of events this ledger has recorded since the last reset.
+    pub fn count() -> u64 {
+        COUNT.load(Ordering::Relaxed)
+    }
+
     /// Human-readable report for embedding in a failure message.
     pub fn report() -> String {
         let records = RECORDS.lock().unwrap();
@@ -713,6 +718,11 @@ pub mod row_lifecycle {
         if records.len() > MAX_RECORDS {
             records.remove(0);
         }
+    }
+
+    /// Number of events this ledger has recorded since the last reset.
+    pub fn count() -> u64 {
+        COUNT.load(Ordering::Relaxed)
     }
 
     /// Human-readable report for embedding in a failure message.
@@ -1029,6 +1039,11 @@ pub struct ReactiveRenderedRows {
     /// underlying query (e.g. an org-file swap replacing the layout) leaves
     /// ghost rows from the old query in the set forever.
     data_generation: std::sync::atomic::AtomicU64,
+    /// Second readiness barrier: the first `UiEvent::Data` batch of any
+    /// generation. `data_generation` cannot stand in for it — generation 0 is
+    /// a legal generation, so "still zero" does not mean "nothing arrived".
+    first_data_seen: std::sync::atomic::AtomicBool,
+    data_ready: tokio::sync::Notify,
 }
 
 impl Default for ReactiveRenderedRows {
@@ -1048,6 +1063,8 @@ impl ReactiveRenderedRows {
             rows: ReactiveRowSet::labeled(label),
             structure_ready: tokio::sync::Notify::new(),
             data_generation: std::sync::atomic::AtomicU64::new(0),
+            first_data_seen: std::sync::atomic::AtomicBool::new(false),
+            data_ready: tokio::sync::Notify::new(),
         }
     }
 
@@ -1069,12 +1086,46 @@ impl ReactiveRenderedRows {
         )
     }
 
-    /// Wait until the first Structure event delivers a real render expression.
+    /// True when the render expression reads at least one data column, i.e.
+    /// there is a data stream whose first batch decides what renders.
+    fn is_data_driven(&self) -> bool {
+        !self.render_expr.lock_ref().visible_columns().is_empty()
+    }
+
+    /// Wait until this block can be rendered without fabricating an empty
+    /// result.
+    ///
+    /// Two barriers, not one: the first Structure event delivers the render
+    /// expression, and — when that expression reads any column — the first
+    /// Data batch. A cold probe that stopped at Structure saw a data-driven
+    /// list render zero rows and reported it as genuinely empty, because the
+    /// first batch lands a few hundred microseconds later. The data barrier is
+    /// bounded: `prepend_initial_data` always emits a first batch, empty
+    /// result set included. An expression reading no column has no data stream
+    /// to wait for and returns after the structure barrier.
     pub async fn wait_until_ready(&self) {
-        if !self.is_loading() {
+        // `notified()` only registers a waiter once polled, so enable it
+        // BEFORE the state check — otherwise an event landing in between is
+        // missed and the wait runs to its caller's timeout.
+        {
+            let mut structure = std::pin::pin!(self.structure_ready.notified());
+            structure.as_mut().enable();
+            if self.is_loading() {
+                structure.await;
+            }
+        }
+        if !self.is_data_driven() {
             return;
         }
-        self.structure_ready.notified().await;
+        let mut data = std::pin::pin!(self.data_ready.notified());
+        data.as_mut().enable();
+        if self
+            .first_data_seen
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
+        data.await;
     }
 
     /// Set the generation (invalidation token) on the inner row set.
@@ -1160,6 +1211,9 @@ impl ReactiveRenderedRows {
                     ));
                     self.rows.retain_keys(&snapshot_keys);
                 }
+                self.first_data_seen
+                    .store(true, std::sync::atomic::Ordering::Release);
+                self.data_ready.notify_waiters();
             }
         }
     }

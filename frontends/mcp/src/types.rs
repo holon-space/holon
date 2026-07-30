@@ -409,6 +409,14 @@ pub struct ResetVaultParams {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct RowDropLedgersParams {
+    /// Clear all three ledgers AFTER reading them, so the next read reflects
+    /// only what happened since. Defaults to false.
+    #[serde(default)]
+    pub reset: bool,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct AwaitQuiescenceParams {
     /// Upper bound on the combined-fixed-point wait, in milliseconds. When the
     /// budget is exhausted before every reachable signal is simultaneously
