@@ -5068,3 +5068,119 @@ mod incremental_tests {
         assert!(tid_index.contains_key(&x));
     }
 }
+
+/// Semantic pin for lazy child-container creation under a tree-node `meta` key.
+///
+/// [`update_text_field`] and [`properties_map_container`] are the two places
+/// prod creates a child container at a map key that a *concurrent* peer may
+/// create at the same time. These tests drive those prod helpers, never the
+/// loro API directly, so they hold the merge outcome fixed across any change to
+/// which loro API the helpers call.
+///
+/// Both tests record data LOSS, not a desirable property. Loro's deprecation of
+/// `get_or_create_container` points at `ensure_mergeable_text`/`_map`, which
+/// merge both peers' writes instead — but that replacement rejects a key that
+/// already holds a legacy op-id child (`ArgErr`), so swapping it in breaks
+/// every block written to date. Changing these assertions therefore requires a
+/// read-legacy/convert migration alongside.
+#[cfg(test)]
+mod concurrent_child_creation_semantics {
+    use loro::LoroDoc;
+
+    use super::*;
+
+    /// Two peers that both see a tree node whose child container at the key
+    /// under test does not exist yet — the fork point of a first-creation race.
+    fn forked_pair_on_shared_node() -> (LoroDoc, LoroDoc, loro::TreeID) {
+        let a = LoroDoc::new();
+        a.set_peer_id(1).unwrap();
+        let node = a.get_tree(TREE_NAME).create(None).unwrap();
+        a.commit();
+
+        let b = LoroDoc::new();
+        b.set_peer_id(2).unwrap();
+        b.import(&a.export(loro::ExportMode::Snapshot).unwrap())
+            .unwrap();
+
+        (a, b, node)
+    }
+
+    fn sync(a: &LoroDoc, b: &LoroDoc) {
+        b.import(&a.export(loro::ExportMode::updates(&b.oplog_vv())).unwrap())
+            .unwrap();
+        a.import(&b.export(loro::ExportMode::updates(&a.oplog_vv())).unwrap())
+            .unwrap();
+    }
+
+    fn meta_of(doc: &LoroDoc, node: loro::TreeID) -> loro::LoroMap {
+        doc.get_tree(TREE_NAME).get_meta(node).unwrap()
+    }
+
+    /// Both peers create the `CONTENT_RAW` text child for the first time while
+    /// partitioned, each writing its own text. Each write lands in a *distinct*
+    /// child container, so the parent map's LWW picks one and the loser's text
+    /// becomes unreachable.
+    #[test]
+    fn concurrent_first_text_creation_keeps_only_the_higher_peer_text() {
+        let (a, b, node) = forked_pair_on_shared_node();
+
+        update_text_field(&meta_of(&a, node), CONTENT_RAW, "alpha").unwrap();
+        a.commit();
+        update_text_field(&meta_of(&b, node), CONTENT_RAW, "beta").unwrap();
+        b.commit();
+
+        sync(&a, &b);
+
+        let seen_by_a = read_text_content(&meta_of(&a, node));
+        let seen_by_b = read_text_content(&meta_of(&b, node));
+
+        assert_eq!(
+            seen_by_a, seen_by_b,
+            "peers must converge on one text after syncing both ways"
+        );
+        assert_eq!(
+            seen_by_a, "beta",
+            "peer 2's child wins the parent-map LWW; peer 1's \"alpha\" is dropped"
+        );
+    }
+
+    /// Both peers create the `PROPERTIES_MAP` child for the first time while
+    /// partitioned, each writing a *different* property key. The two writes
+    /// land in distinct child maps, so only the winning peer's key survives
+    /// even though the keys never collided.
+    #[test]
+    fn concurrent_first_properties_map_creation_keeps_only_the_higher_peer_key() {
+        let (a, b, node) = forked_pair_on_shared_node();
+
+        properties_map_container(&meta_of(&a, node))
+            .unwrap()
+            .insert("from_a", encode_property_value(&Value::from(1)).unwrap())
+            .unwrap();
+        a.commit();
+        properties_map_container(&meta_of(&b, node))
+            .unwrap()
+            .insert("from_b", encode_property_value(&Value::from(2)).unwrap())
+            .unwrap();
+        b.commit();
+
+        sync(&a, &b);
+
+        let seen_by_a =
+            decode_properties_map(&properties_map_container(&meta_of(&a, node)).unwrap());
+        let seen_by_b =
+            decode_properties_map(&properties_map_container(&meta_of(&b, node)).unwrap());
+
+        assert_eq!(
+            seen_by_a, seen_by_b,
+            "peers must converge on one property map after syncing both ways"
+        );
+        assert_eq!(
+            seen_by_a
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["from_b".to_string()].into_iter().collect(),
+            "peer 2's child map wins the parent-map LWW; peer 1's `from_a` is dropped"
+        );
+    }
+}
