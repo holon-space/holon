@@ -661,50 +661,12 @@ impl MatviewManager {
             requires
         );
 
-        let mut last_error = None;
-        let mut created = false;
-        for attempt in 0..3 {
-            match self
-                .db_handle
-                .execute_ddl_with_deps(
-                    &create_view_sql,
-                    provides.clone(),
-                    requires.clone(),
-                    priority::DDL_MATVIEW,
-                )
-                .await
-            {
-                Ok(_) => {
-                    created = true;
-                    break;
-                }
-                Err(e) => {
-                    let err_str = format!("{:?}", e);
-                    let is_retryable = err_str.contains("database is locked")
-                        || err_str.contains("Database schema changed");
-                    if is_retryable && attempt < 2 {
-                        tracing::debug!(
-                            "[MatviewManager] ensure_view: retry {} for view {}: {}",
-                            attempt + 1,
-                            view_name,
-                            err_str
-                        );
-                        tokio::time::sleep(std::time::Duration::from_millis(50 * (1 << attempt)))
-                            .await;
-                        last_error = Some(e);
-                    } else {
-                        last_error = Some(e);
-                        break;
-                    }
-                }
-            }
-        }
-        if !created {
-            let e = last_error.expect("loop exits without success only after recording an error");
-            return Err(e).with_context(|| {
+        self.db_handle
+            .execute_ddl_with_deps(&create_view_sql, provides, requires, priority::DDL_MATVIEW)
+            .await
+            .with_context(|| {
                 format!("Failed to create materialized view {view_name}: {create_view_sql}")
-            });
-        }
+            })?;
 
         self.ddl_creates.fetch_add(1, Ordering::Relaxed);
         self.mark_view_known(&view_name).await;
@@ -744,43 +706,23 @@ impl MatviewManager {
             view_name, sql_for_view
         );
 
-        let mut last_error = None;
-        for attempt in 0..3 {
-            match self.db_handle.execute_ddl(&create_view_sql).await {
-                Ok(_) => {
-                    self.ddl_creates.fetch_add(1, Ordering::Relaxed);
-                    self.mark_view_known(&view_name).await;
-                    tracing::info!("[MatviewManager] preload: created view {}", view_name);
-                    return Ok(view_name);
-                }
-                Err(e) => {
-                    let err_str = format!("{:?}", e);
-                    let is_retryable = err_str.contains("database is locked")
-                        || err_str.contains("Database schema changed");
-                    if is_retryable && attempt < 2 {
-                        tracing::debug!(
-                            "[MatviewManager] preload: retry {} for view {}: {}",
-                            attempt + 1,
-                            view_name,
-                            err_str
-                        );
-                        tokio::time::sleep(std::time::Duration::from_millis(50 * (1 << attempt)))
-                            .await;
-                        last_error = Some(e);
-                    } else {
-                        last_error = Some(e);
-                        break;
-                    }
-                }
+        // A preload failure is disclosed, not fatal: `watch_query` creates the
+        // view lazily later, so the app degrades to a cold first render rather
+        // than failing to boot.
+        match self.db_handle.execute_ddl(&create_view_sql).await {
+            Ok(_) => {
+                self.ddl_creates.fetch_add(1, Ordering::Relaxed);
+                self.mark_view_known(&view_name).await;
+                tracing::info!("[MatviewManager] preload: created view {}", view_name);
             }
-        }
-        if let Some(e) = last_error {
-            tracing::warn!(
-                "[MatviewManager] preload: failed to create view {}: {}\n{}",
-                view_name,
-                e,
-                create_view_sql
-            );
+            Err(e) => {
+                tracing::warn!(
+                    "[MatviewManager] preload: failed to create view {}: {}\n{}",
+                    view_name,
+                    e,
+                    create_view_sql
+                );
+            }
         }
         Ok(view_name)
     }
