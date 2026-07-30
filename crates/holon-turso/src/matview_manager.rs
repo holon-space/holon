@@ -165,6 +165,9 @@ pub async fn reconcile_named_view(
     }
 }
 
+/// Every dynamic watch matview is named `watch_view_{hash-of-its-SELECT}`.
+pub const WATCH_VIEW_PREFIX: &str = "watch_view_";
+
 /// True when `sql` references `name` as a standalone identifier token
 /// (`block` matches `FROM block b` but not `block_raw`).
 fn sql_references_identifier(sql: &str, name: &str) -> bool {
@@ -239,6 +242,69 @@ async fn cleanup_orphaned_dbsp_state(db_handle: &DbHandle, view_name: &str) -> R
                  Turso's own CREATE/DROP MATERIALIZED VIEW path (current-epoch state is \
                  reclaimed by the following CREATE; an older-epoch residue does not collide). \
                  Base tables are untouched — no data loss."
+            );
+        }
+    }
+    Ok(())
+}
+
+// --- Connection-scoped siblings, for callers running INSIDE the database actor
+//
+// The `DbHandle` variants above enqueue a command; a caller that is *itself* a
+// command being processed would then wait for a queue it is blocking —
+// self-deadlock. These take the actor's own connection instead.
+
+/// Names of every view/matview whose definition references `view_name`,
+/// deepest dependent first, so dropping the list in order never leaves a view
+/// standing on a dropped base.
+///
+/// The actor collects rather than drops so the reap policy (refuse to reap a
+/// dependent that still holds live leases) stays where the lease state lives.
+pub(crate) async fn dependent_views_on_conn(
+    conn: &turso::Connection,
+    view_name: &str,
+) -> Result<Vec<String>> {
+    let rows = crate::turso::TursoBackend::handle_query(
+        conn,
+        "SELECT name, sql FROM sqlite_master WHERE type='view'",
+        HashMap::new(),
+    )
+    .await?;
+
+    let mut ordered = Vec::new();
+    for row in rows {
+        let (Some(Value::String(name)), Some(Value::String(sql))) =
+            (row.get("name"), row.get("sql"))
+        else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case(view_name) || !sql_references_identifier(sql, view_name) {
+            continue;
+        }
+        ordered.extend(Box::pin(dependent_views_on_conn(conn, name)).await?);
+        ordered.push(name.clone());
+    }
+    Ok(ordered)
+}
+
+/// Connection-scoped [`cleanup_orphaned_dbsp_state`] — disclose, never DROP.
+/// See that function's doc for why disposal belongs to Turso.
+pub(crate) async fn cleanup_orphaned_dbsp_state_on_conn(
+    conn: &turso::Connection,
+    view_name: &str,
+) -> Result<()> {
+    let check_sql = format!(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE \
+         '__turso_internal_dbsp_state_v%_{view_name}'"
+    );
+    let residual =
+        crate::turso::TursoBackend::handle_query(conn, &check_sql, HashMap::new()).await?;
+    for row in residual {
+        if let Some(Value::String(table_name)) = row.get("name") {
+            tracing::warn!(
+                "[Actor] Leaving Turso-internal DBSP state table '{table_name}' in place: its \
+                 reserved prefix forbids a user DROP, and disposal belongs to Turso's own \
+                 CREATE/DROP MATERIALIZED VIEW path. Base tables are untouched — no data loss."
             );
         }
     }
