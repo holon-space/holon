@@ -1029,6 +1029,10 @@ impl ReactiveRowProvider for ReactiveRowSet {
 /// `Signal<ReactiveViewModel>`.
 pub struct ReactiveRenderedRows {
     render_expr: Mutable<RenderExpr>,
+    /// Set when the query watcher failed. The failure is ALSO published into
+    /// `render_expr` as an `error(message:)` sentinel so it is visible in the
+    /// UI instead of an eternal spinner.
+    error: Mutable<Option<String>>,
     rows: ReactiveRowSet,
     structure_ready: tokio::sync::Notify,
     /// Generation whose data currently populates `rows`. Each re-render
@@ -1065,6 +1069,7 @@ impl ReactiveRenderedRows {
     pub fn labeled(label: String) -> Self {
         Self {
             render_expr: Mutable::new(loading_expr()),
+            error: Mutable::new(None),
             rows: ReactiveRowSet::labeled(label),
             structure_ready: tokio::sync::Notify::new(),
             data_generation: std::sync::atomic::AtomicU64::new(0),
@@ -1089,6 +1094,21 @@ impl ReactiveRenderedRows {
     /// Get the current render expression.
     pub fn get_render_expr(&self) -> RenderExpr {
         self.render_expr.get_cloned()
+    }
+
+    /// Publish a watcher failure: the message becomes visible state AND
+    /// replaces the loading sentinel, so the block renders the error instead
+    /// of spinning forever.
+    pub fn set_error(&self, msg: impl Into<String>) {
+        let msg = msg.into();
+        self.render_expr.set(error_expr(&msg));
+        self.error.set(Some(msg));
+        self.structure_ready.notify_waiters();
+    }
+
+    /// The watcher failure message, if this query's watcher failed.
+    pub fn error(&self) -> Option<String> {
+        self.error.get_cloned()
     }
 
     /// True if the first Structure event hasn't arrived yet.
@@ -2712,6 +2732,7 @@ impl ReactiveEngine {
                     }
                     Err(e) => {
                         tracing::warn!("watch_query failed: {e}");
+                        reactive.set_error(format!("query failed: {e}"));
                     }
                 }
             });
@@ -2812,6 +2833,20 @@ pub fn loading_expr() -> RenderExpr {
     RenderExpr::FunctionCall {
         name: "loading".to_string(),
         args: vec![],
+    }
+}
+
+/// Render expression for a block whose query watcher failed.
+pub fn error_expr(message: &str) -> RenderExpr {
+    use holon_api::render_types::Arg;
+    RenderExpr::FunctionCall {
+        name: "error".to_string(),
+        args: vec![Arg {
+            name: Some("message".to_string()),
+            value: RenderExpr::Literal {
+                value: holon_api::Value::String(message.to_string()),
+            },
+        }],
     }
 }
 
@@ -4615,6 +4650,42 @@ mod tests {
         let vm = poll_signal!(rq.reactive_signal(interpret));
         let debug = debug_tag(&vm);
         assert_eq!(debug, "loading:0");
+    }
+
+    #[tokio::test]
+    async fn watch_failure_is_visible_and_not_loading() {
+        let rq = ReactiveRenderedRows::new();
+        assert_eq!(rq.error(), None);
+
+        rq.set_error("query failed: no such table: blocks_with_paths");
+
+        assert_eq!(
+            rq.error().as_deref(),
+            Some("query failed: no such table: blocks_with_paths")
+        );
+        assert!(
+            !rq.is_loading(),
+            "a block whose watch_query failed must stop reporting as loading"
+        );
+
+        let interpret = Arc::new(test_interpret);
+        let vm = poll_signal!(rq.reactive_signal(interpret));
+        assert_eq!(debug_tag(&vm), "error:0");
+
+        let RenderExpr::FunctionCall { name, args } = rq.get_render_expr() else {
+            panic!("error state must render through an `error(message:)` call");
+        };
+        assert_eq!(name, "error");
+        let message = args
+            .iter()
+            .find(|a| a.name.as_deref() == Some("message"))
+            .expect("error expr carries a `message` arg");
+        assert_eq!(
+            message.value,
+            RenderExpr::Literal {
+                value: Value::String("query failed: no such table: blocks_with_paths".to_string())
+            }
+        );
     }
 
     #[tokio::test]

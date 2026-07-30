@@ -2118,6 +2118,14 @@ impl TursoBackend {
                 });
                 if result.is_ok() {
                     tracing::info!("[TursoBackend::Actor] Registered foreign table '{name}'");
+                    // A foreign table is a real dependency target: without this
+                    // the availability registry would call it unregistered and
+                    // fail every watch over it.
+                    Self::mark_resources_available(
+                        &mut state.available_resources,
+                        &[Resource::schema(name)],
+                    );
+                    Self::process_pending_ddl(conn, state).await;
                 }
                 let _ = response.send(result);
             }
@@ -2482,6 +2490,32 @@ impl TursoBackend {
         op.requires.iter().all(|r| available_resources.contains(r))
     }
 
+    /// Requirements of a not-yet-runnable `op` that nobody will ever satisfy,
+    /// or `None` when parking is legitimate.
+    ///
+    /// Parking is legitimate while `SchemaInit` is open — DI resolves schema
+    /// providers in parallel, so a base table can arrive after the matview that
+    /// selects from it was submitted. Once `Ready`, registration is closed: the
+    /// only outstanding promises are the `provides` of DDL already queued.
+    fn unpromised_requirements(state: &ActorState, op: &PendingDdl) -> Option<Vec<String>> {
+        if state.phase == DatabasePhase::SchemaInit {
+            return None;
+        }
+        let unpromised: Vec<String> = op
+            .requires
+            .iter()
+            .filter(|r| !state.available_resources.contains(r))
+            .filter(|r| {
+                !state
+                    .pending_ddl
+                    .iter()
+                    .any(|queued| queued.provides.contains(r))
+            })
+            .map(|r| r.name().to_string())
+            .collect();
+        (!unpromised.is_empty()).then_some(unpromised)
+    }
+
     /// Handle DDL with dependency tracking
     async fn handle_ddl_with_deps_internal(
         conn: &turso::Connection,
@@ -2510,6 +2544,26 @@ impl TursoBackend {
             // Resources this DDL provided may unblock already-queued ops.
             if had_provides {
                 Self::process_pending_ddl(conn, state).await;
+            }
+        } else if let Some(unpromised) = Self::unpromised_requirements(state, &op) {
+            let sql_preview: String = op.sql.chars().take(120).collect();
+            tracing::warn!(
+                missing = ?unpromised,
+                sql = %sql_preview,
+                "[TursoBackend::Actor] DDL requires resources no schema provider registers — \
+                 failing fast instead of parking"
+            );
+            let err = StorageError::MissingDependencies {
+                sql_preview,
+                missing: unpromised,
+            };
+            match op.completion {
+                DdlCompletion::Caller(response) => {
+                    let _ = response.send(Err(err));
+                }
+                DdlCompletion::ViewCreate { view_name } => {
+                    Self::finish_view_creation(state, &view_name, Err(err));
+                }
             }
         } else {
             tracing::debug!(

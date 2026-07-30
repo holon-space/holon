@@ -49,6 +49,17 @@ pub enum StorageError {
 
     #[error("Database error: {0}")]
     DatabaseError(String),
+
+    /// DDL naming resources that no schema provider registers. Distinct from a
+    /// dependency *timeout*: nothing is coming, so the caller must disclose it
+    /// now instead of parking.
+    #[error(
+        "missing dependencies {missing:?} — no schema provider registers them.\nSQL: {sql_preview}"
+    )]
+    MissingDependencies {
+        sql_preview: String,
+        missing: Vec<String>,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;
