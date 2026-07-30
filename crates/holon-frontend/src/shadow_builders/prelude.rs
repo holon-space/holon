@@ -8,7 +8,19 @@ pub(crate) use crate::render_interpreter::BuilderArgs;
 pub(crate) type BA<'a> = BuilderArgs<'a, crate::reactive_view_model::ReactiveViewModel>;
 
 /// Compute the `VirtualChildSlot` from a `virtual_parent` arg string or
-/// context default.
+/// context default — `None` for a collection that did not ask for a slot.
+///
+/// The trailing "type here to create" slot is OPT-IN: a collection declares it
+/// with `creation_slot: true` (the `tree_view` variant of
+/// `assets/default/types/collection_profile.yaml`). Read-only navigation trees
+/// — the left sidebar's page list, the right sidebar's outline mirror — omit
+/// the flag and get no slot AT ALL. Gating here rather than inside
+/// `resolve_creation_parent` is what makes the omission mean something: the
+/// `virtual_parent` fallbacks below derive the container FROM the rendered
+/// rows, so the flat-shape test in `resolve_creation_parent` is satisfied by
+/// construction and every later gate is unreachable (that is how a
+/// `block:__virtual:<page>` phantom row reached Martin's sidebar, desyncing the
+/// tree provider from its `row_map` on each disclosure toggle).
 ///
 /// When `virtual_parent` is an explicit string arg (resolved from the
 /// `Bool(true)` sentinel by `resolve_virtual_parent`), use it. Otherwise,
@@ -19,6 +31,13 @@ pub(crate) type BA<'a> = BuilderArgs<'a, crate::reactive_view_model::ReactiveVie
 pub(crate) fn virtual_child_slot_from_arg(
     ba: &BA<'_>,
 ) -> Option<crate::reactive_view::VirtualChildSlot> {
+    // `creation_slot: true` ALSO gates the top-level "create a new root entity"
+    // slot for a flat `no_parent` forest (BugFunnel #61 / #67), which
+    // `resolve_creation_parent` reads as `allow_root_creation`.
+    let creation_slot = ba.args.get_bool("creation_slot").unwrap_or(false);
+    if !creation_slot {
+        return None;
+    }
     let vp = ba
         .args
         .get_string("virtual_parent")
@@ -41,21 +60,14 @@ pub(crate) fn virtual_child_slot_from_arg(
                 .and_then(|v| v.as_string())
                 .map(|s| s.to_string())
         })?;
-    // ALLOW(entity_uri_from_raw): viewport arg or data row 'parent_id' field
-    // (render-spec/row boundary)
+    // ALLOW(entity_uri_from_raw): render-spec arg or data row 'parent_id'
     let uri = holon_api::EntityUri::from_raw(&vp);
     let entity_name = uri.scheme().to_string();
     let config = ba.services.virtual_child_config(&entity_name)?;
-    // `creation_slot: true` opts a widget into the top-level "create a new root
-    // entity" slot for a flat `no_parent` forest (e.g. an editable top-level
-    // page list). Read-only navigation lists (the Pages sidebar) omit it, so
-    // they render no phantom `sentinel:__virtual:no_parent` row (BugFunnel #61).
-    // The main-panel single-root slot does not depend on this flag.
-    let allow_root_creation = ba.args.get_bool("creation_slot").unwrap_or(false);
     Some(crate::reactive_view::VirtualChildSlot {
         defaults: config.defaults,
         parent_id: uri,
-        allow_root_creation,
+        allow_root_creation: creation_slot,
     })
 }
 

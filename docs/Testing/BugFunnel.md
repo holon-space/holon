@@ -7,7 +7,7 @@ distribution steers QA investment.
 **Running distribution** (totals = archived baseline + sum of the increment log):
 
 - ENVIRONMENT: 120
-- COVERAGE: 60
+- COVERAGE: 61
 - PERCEPTION: 48
 - ORACLE: 36
 
@@ -21,6 +21,21 @@ header against the log.
 Increment log (append-only, NEWEST FIRST — each counted bug adds exactly one line here;
 merge conflicts resolve by keeping both sides' lines and re-summing the totals ON TOP OF
 the archived baseline):
+- (+1 COVERAGE 2026-07-30, secondary ORACLE: the creation-slot virtual row leaked into the LEFT
+  SIDEBAR tree — Martin's live vault rendered 27 rows for 26 pages, the extra one an empty
+  `block:__virtual:<page>` bullet nested under its parent, which then fired a `[tree-desync]`
+  ERROR (`in provider but not row_map`) on all 6 disclosure toggles and a "Breadcrumb
+  unavailable: … has no path in block_with_path" banner. Root cause: `virtual_child_slot_from_arg`
+  (holon-frontend/src/shadow_builders/prelude.rs) built a slot for ANY tree, deriving the
+  container from the rendered rows when the spec named no `virtual_parent`; that made
+  `resolve_creation_parent`'s flat-shape test true by construction, so the `allow_root_creation`
+  gate the earlier BugFunnel #61/#67 fixes added was unreachable. COVERAGE: the generator's only
+  tree render-expr (`reference_state.rs::valid_render_expressions`, `generators.rs`) always sets
+  `creation_slot: true`, so the read-only sidebar SHAPE — a tree WITHOUT the flag over a
+  nested-page forest — was never generated. Secondary ORACLE: `inv-viewmodel-tree-virtual-slots`
+  asserts a slot's POSITION (last child) but never its ABSENCE on a non-opted-in collection.
+  Closed by `crates/holon-frontend/tests/sidebar_creation_slot.rs` — red first with exactly
+  `["block:__virtual:pageA"]` and 4 rows for 3 pages — plus the opt-in gate in `prelude.rs`.)
 - (+1 PERCEPTION 2026-07-30: the sidebar disclosure feature's "collapsed halo" is invisible in
   practice — measured 1.05:1 luminance contrast against the sidebar background in BOTH themes
   (holonLight: halo rgb(245,245,245) on rgb(241,240,235); holonDark: rgb(38,38,38) on
