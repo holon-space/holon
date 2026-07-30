@@ -93,10 +93,10 @@ pub fn order_by_sort_spec(order_by: &str) -> Option<String> {
         }
     };
 
-    let column = column
-        .trim_matches('"')
-        .trim_matches('`')
-        .trim_matches('\'');
+    // Only `"` and `` ` `` quote an IDENTIFIER. A single-quoted term is a string
+    // literal, so it keeps its quotes here and falls into the warn-and-decline
+    // branch below instead of being read as a column of that name.
+    let column = column.trim_matches('"').trim_matches('`');
     if column.is_empty()
         || column.starts_with(|c: char| c.is_ascii_digit())
         || !column
@@ -222,6 +222,15 @@ mod tests {
             order_by_sort_spec("ORDER BY last_activity DESC, name ASC").as_deref(),
             Some("-last_activity")
         );
+    }
+
+    /// A single-quoted term is a string LITERAL, not an identifier. Reading it
+    /// as a column of that name would render a wrong order with no signal —
+    /// the one outcome this function must never produce.
+    #[test]
+    fn sort_spec_string_literal_is_not_read_as_a_column() {
+        assert_eq!(order_by_sort_spec("ORDER BY 'last_activity'"), None);
+        assert_eq!(order_by_sort_spec("ORDER BY 'literal' DESC"), None);
     }
 
     #[test]

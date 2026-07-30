@@ -2670,13 +2670,18 @@ impl ReactiveEngine {
         let results = self.registry.get_or_create(&key);
         results.set_render_expr(render_expr);
         results.set_generation(1);
-        results.set_ordering_spec(self.query_ordering_spec(&query, lang));
 
         let mut watchers = self.watchers.lock().unwrap();
         if let Some(state) = watchers.get_mut(&key) {
             state.refcount += 1;
             return (key, results);
         }
+        // Derived only when this key gets its watcher, never on a refcount bump:
+        // it costs a full query compile, and `key` hashes (query, lang, context)
+        // so the spec is invariant for the lifetime of the entry. Must precede
+        // the return — the caller builds the collection synchronously after, and
+        // the flat driver latches `sort_key.is_some()` at construction.
+        results.set_ordering_spec(self.query_ordering_spec(&query, lang));
         // The query prefix classifies a watcher offline (sidebar-shaped vs
         // main-panel-shaped SQL) when reading a memory profile.
         tracing::debug!(
