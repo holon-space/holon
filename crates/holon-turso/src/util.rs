@@ -36,10 +36,28 @@ pub fn strip_order_by(sql: &str) -> String {
     }
 }
 
+/// The trailing top-level `ORDER BY` clause `strip_order_by` removes, so a
+/// reader of the matview can re-apply it.
+///
+/// `LIMIT` / `OFFSET` are excluded: the matview holds the unbounded relation
+/// and its CDC stream delivers changes beyond any window, so re-applying a
+/// window to the snapshot alone would disagree with the stream.
+pub fn trailing_order_by(sql: &str) -> Option<String> {
+    let start = find_top_level_keyword(sql, &["ORDER BY"], 0)?;
+    let end = find_top_level_keyword(sql, &["LIMIT", "OFFSET"], start + 1).unwrap_or(sql.len());
+    Some(sql[start..end].trim().to_string())
+}
+
 /// Byte index of the earliest top-level (depth 0, outside quotes) occurrence
 /// of ORDER BY / LIMIT / OFFSET as a standalone keyword, if any.
 fn find_top_level_trailing_clause(sql: &str) -> Option<usize> {
-    const KEYWORDS: [&str; 3] = ["ORDER BY", "LIMIT", "OFFSET"];
+    find_top_level_keyword(sql, &["ORDER BY", "LIMIT", "OFFSET"], 0)
+}
+
+/// Byte index of the earliest top-level occurrence at or after `from` of any
+/// of `keywords`. Quote- and paren-depth-aware; the scan always starts at 0 so
+/// depth and quote state are correct, `from` only filters what counts as a hit.
+fn find_top_level_keyword(sql: &str, keywords: &[&str], from: usize) -> Option<usize> {
     let bytes = sql.as_bytes();
     let mut depth: i64 = 0;
     let mut i = 0;
@@ -62,7 +80,7 @@ fn find_top_level_trailing_clause(sql: &str) -> Option<usize> {
             }
             b'(' => depth += 1,
             b')' => depth -= 1,
-            _ if depth == 0 && KEYWORDS.iter().any(|kw| keyword_at(bytes, i, kw)) => {
+            _ if depth == 0 && i >= from && keywords.iter().any(|kw| keyword_at(bytes, i, kw)) => {
                 return Some(i);
             }
             _ => {}

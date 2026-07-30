@@ -739,11 +739,30 @@ impl MatviewManager {
     /// intermediate update) would never be removed from the LiveData.
     #[tracing::instrument(skip(self))]
     pub async fn query_view(&self, view_name: &str) -> Result<Vec<StorageEntity>> {
-        let select_sql = format!("SELECT *, rowid AS _rowid FROM {}", view_name);
+        self.query_view_ordered(view_name, None).await
+    }
+
+    /// `query_view` with the definition's `ORDER BY` re-applied.
+    ///
+    /// The matview body cannot carry an `ORDER BY` (Turso IVM rejects Sort),
+    /// so `ensure_view` strips it. Re-applying it here is what keeps a watched
+    /// query's snapshot in the same order a one-shot `execute_query` of the
+    /// same SQL returns; without it the two disagree and the watched read comes
+    /// back in rowid order.
+    #[tracing::instrument(skip(self))]
+    pub async fn query_view_ordered(
+        &self,
+        view_name: &str,
+        order_by: Option<&str>,
+    ) -> Result<Vec<StorageEntity>> {
+        let select_sql = match order_by {
+            Some(clause) => format!("SELECT *, rowid AS _rowid FROM {view_name} {clause}"),
+            None => format!("SELECT *, rowid AS _rowid FROM {view_name}"),
+        };
         self.db_handle
             .query(&select_sql, HashMap::new())
             .await
-            .with_context(|| format!("Failed to query view {view_name}"))
+            .with_context(|| format!("Failed to query view {view_name}: {select_sql}"))
     }
 
     /// Subscribe to CDC for a specific view, returning a filtered stream.
@@ -779,7 +798,10 @@ impl MatviewManager {
     pub async fn watch(&self, sql: &str) -> Result<WatchResult> {
         let view_name = self.ensure_view(sql).await?;
         let stream = self.subscribe_cdc(&view_name).await?;
-        let initial_rows = self.query_view(&view_name).await?;
+        let order_by = crate::util::trailing_order_by(sql);
+        let initial_rows = self
+            .query_view_ordered(&view_name, order_by.as_deref())
+            .await?;
         Ok(WatchResult {
             initial_rows,
             stream,
