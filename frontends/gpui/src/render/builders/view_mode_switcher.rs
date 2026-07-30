@@ -187,6 +187,24 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
         return child_el;
     };
 
+    // The `size_full` + absolute slot below is sound only when the slot content
+    // OWNS ITS OWN SCROLL (a collection — `super::render` routes it through
+    // `scrollable_list_wrapper`'s `gpui::list`). Any other slot renders at
+    // CONTENT height and must overflow the enclosing `ReactiveShell` scroll
+    // viewport; under `size_full` that viewport's child is exactly
+    // viewport-tall, so scroll max is 0 (BugFunnel 2026-07-30: the left sidebar
+    // could not be scrolled at all).
+    if slot_content.collection.is_none() {
+        return div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .relative()
+            .child(child_el)
+            .child(switcher_bar)
+            .into_any_element();
+    }
+
     let slot_wrapper = div().flex_1().relative().child(
         div()
             .absolute()
@@ -245,10 +263,7 @@ pub(crate) fn render_content_height(
 /// that made virtualization collapse to 0 in the old content-sized column (the
 /// reason `render_content_height` existed). The switcher bar is overlaid
 /// (absolute), identical to the other two paths. The list owns its own scroll.
-pub(crate) fn render_virtualized(
-    node: &ReactiveViewModel,
-    ctx: &GpuiRenderContext,
-) -> AnyElement {
+pub(crate) fn render_virtualized(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     let slot = node
         .slot
         .as_ref()
@@ -259,9 +274,12 @@ pub(crate) fn render_virtualized(
     // render rather than being dropped.
     let content = super::render(&slot_content, ctx);
 
-    let mut container = div().size_full().flex().flex_col().relative().child(
-        div().flex_1().min_h_0().w_full().child(content),
-    );
+    let mut container = div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .relative()
+        .child(div().flex_1().min_h_0().w_full().child(content));
     if let Some(switcher_bar) = build_switcher_bar(node, ctx) {
         container = container.child(switcher_bar);
     }
