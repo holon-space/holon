@@ -31,7 +31,9 @@ pub fn build(args: &ResolvedArgs, ctx: &RenderContext) -> PlyWidget {
         return interpret(tmpl, ctx);
     }
 
-    let tree = OutlineTree::from_rows(rows, parent_id_col, sort_col);
+    // `None` root sort key: roots stay in `sort_col` order. Ply's render spec
+    // has no place to declare one yet.
+    let tree = OutlineTree::from_rows(rows, parent_id_col, sort_col, None);
     let elements: Vec<(PlyWidget, usize)> = tree.walk_depth_first(|row, depth| {
         let row_ctx = ctx.with_row(row.clone());
         let mut row_ctx_inner = row_ctx;

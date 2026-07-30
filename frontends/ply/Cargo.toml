@@ -41,3 +41,12 @@ anyhow = "1.0"
 # Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+
+# Mirror of the root workspace's loro fork patch. `[patch]` is only read from
+# the workspace root of the build in progress, and ply is its own workspace, so
+# without this line it resolves registry `loro` — whose loro-internal wants
+# loro_fractional_index ^1.13.0 and collides with the deliberate `= 1.6.0` pin
+# that crates/holon carries, failing resolution outright. Keep the rev equal to
+# the root's.
+[patch.crates-io]
+loro = { git = "https://github.com/nightscape/loro.git", rev = "4d179c68" }

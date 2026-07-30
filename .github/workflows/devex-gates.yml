@@ -171,6 +171,13 @@ jobs:
       - name: Install Trunk
         run: cargo install trunk --locked
 
+      # The worker and ply are their own cargo workspaces, so they hand-mirror
+      # the root's fork pins. Assert the mirrors match before spending a build
+      # on a stale one — a lagging rev otherwise shows up as an opaque
+      # API-drift compile error thousands of lines into the log.
+      - name: Assert out-of-workspace patch revs match the root
+        run: bash scripts/check-out-of-workspace-patch-revs.sh
+
       - name: Build holon-worker wasm (dev)
         working-directory: frontends/holon-worker
         run: |

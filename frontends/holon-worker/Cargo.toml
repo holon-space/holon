@@ -31,13 +31,15 @@ napi-derive = "3.5.2"
 # and ~/.claude/plans/nifty-bouncing-ladybug.md H4 for the implications.
 tokio = { version = "1", default-features = false, features = ["rt", "time", "macros", "sync"] }
 
-# Turso database — same fork/branch as holon's root workspace. Only needed
-# when the `browser` feature is on, but we pull it in unconditionally so
-# `cargo check` (native) covers the shim as well.
+# Turso database — same fork AND same rev as the root workspace's `[patch]`
+# pin (this package is its own workspace, so it cannot inherit it). The rev is
+# asserted equal to the root's by the `web-worker-smoke` CI job; bump both
+# together. Only needed when the `browser` feature is on, but we pull it in
+# unconditionally so `cargo check` (native) covers the shim as well.
 # NOTE: `encryption` is intentionally omitted — it pulls rustls→ring, whose C
 # crypto can't compile for wasm32-wasi without a wasi-sdk clang sysroot. The
 # worker runs an in-memory DB (`:memory:`), so at-rest encryption is moot.
-turso_core = { git = "https://github.com/nightscape/turso.git", branch = "holon", default-features = false, features = ["fs", "json", "uuid", "time", "series"] }
+turso_core = { git = "https://github.com/nightscape/turso.git", rev = "33c4591c088c24ef2ad06b7b875bf92a36a77110", default-features = false, features = ["fs", "json", "uuid", "time", "series"] }
 anyhow = "1"
 # fluxdi::Module trait, needed to register EventInfraModule (the block
 # OperationProvider) during engine_init. Same git source as the root
@@ -81,35 +83,14 @@ symlink = { path = "patches/symlink" }
 # that crates/holon carries. Keep the rev equal to the root's.
 loro = { git = "https://github.com/nightscape/loro.git", rev = "4d179c68" }
 
-# Point the turso git dependency at the pushed cherry-pick branch (was: a
-# local-only file:// checkout — non-reproducible, 404s on CI). Pinned to
-# rev 84bb233a = e2737c65 (the wasm-buildable line this worker already pinned:
-# `load_extension` off wasm, git-sourced so turso's workspace-hack doesn't
-# collide with holon's path-sourced one) + a SURGICAL cherry-pick of the two IVM
-# matview-reopen fixes' source files ONLY:
-#   * 8517e30647 antijoin TryAdvance ghost row + unconsolidated JoinOperator deltas
-#   * ce1504b8   deterministic MergeOperator rowids — stop matview dup after reopen
-# We cherry-pick (not bump to the fork's current `holon` tip) because that tip
-# pulls newer turso deps that re-enable tokio net/fs on wasm and break the
-# worker build; e2737c65's dep graph is proven wasm-buildable. The two fixes are
-# what the native/root build already runs (root patches turso to the working-tree
-# path). Without them, edit→reload BRICKED the browser vault: the `block` IVM
-# matview desynced from the intact `block_raw` base on reopen (rows dropped incl.
-# `block:root-layout`, others tripled — non-deterministic DBSP MergeOperator
-# rowids). BugFunnel 2026-07-13 "Edit+reload permanently loses root-layout".
-# Pushed to nightscape/turso branch `holon-worker-b1-fix`; pinned by rev (not
-# branch) so a future push to that branch can't silently change what resolves
-# here — re-create/bump the rev when the fork advances.
+# Neutralize turso's cargo-hakari `workspace-hack`: it declares
+# `tokio = { features = ["full"] }` (plus hyper/reqwest) unconditionally, so on
+# wasm32-wasip1-threads it trips tokio's "only sync,macros,io-util,rt,time on
+# wasm" compile_error!. The crate carries no code — it exists only to unify
+# features across turso's own workspace — so an empty stand-in is behaviorally
+# free. See patches/turso-workspace-hack/Cargo.toml.
 [patch."https://github.com/nightscape/turso.git"]
-turso = { git = "https://github.com/nightscape/turso-worker-wasm-fix.git", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
-turso_core = { git = "https://github.com/nightscape/turso-worker-wasm-fix.git", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
-turso_ext = { git = "https://github.com/nightscape/turso-worker-wasm-fix.git", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
-turso_macros = { git = "https://github.com/nightscape/turso-worker-wasm-fix.git", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
-turso_parser = { git = "https://github.com/nightscape/turso-worker-wasm-fix.git", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
-turso_sdk_kit = { git = "https://github.com/nightscape/turso-worker-wasm-fix.git", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
-turso_sdk_kit_macros = { git = "https://github.com/nightscape/turso-worker-wasm-fix.git", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
-turso_sync_engine = { git = "https://github.com/nightscape/turso-worker-wasm-fix.git", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
-turso_sync_sdk_kit = { git = "https://github.com/nightscape/turso-worker-wasm-fix.git", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
+workspace-hack = { path = "patches/turso-workspace-hack" }
 
 [build-dependencies]
 napi-build = "2.3.1"
