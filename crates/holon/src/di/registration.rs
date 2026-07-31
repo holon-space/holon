@@ -271,7 +271,13 @@ async fn create_initialized_engine(
 fn register_shared_services(injector: &Injector) -> Result<()> {
     let type_registry =
         create_default_registry().context("Failed to create default TypeRegistry")?;
+    // The classifier holds the registry, so it tracks entities registered later
+    // (an MCP sidecar connecting) without re-wiring.
+    let link_classifier = type_registry.link_target_classifier();
     injector.provide::<TypeRegistry>(Provider::root(move |_| type_registry.clone()));
+    injector.provide::<holon_api::link_parser::LinkTargetClassifier>(Provider::root(move |_| {
+        Shared::new(link_classifier.clone())
+    }));
 
     injector.provide_into_set::<dyn OperationObserver>(Provider::root_async(
         move |inj| async move {
@@ -317,7 +323,13 @@ pub fn register_core_services_no_turso(injector: &Injector, db_path: PathBuf) ->
 
     let type_registry =
         create_default_registry().context("Failed to create default TypeRegistry")?;
+    // The classifier holds the registry, so it tracks entities registered later
+    // (an MCP sidecar connecting) without re-wiring.
+    let link_classifier = type_registry.link_target_classifier();
     injector.provide::<TypeRegistry>(Provider::root(move |_| type_registry.clone()));
+    injector.provide::<holon_api::link_parser::LinkTargetClassifier>(Provider::root(move |_| {
+        Shared::new(link_classifier.clone())
+    }));
 
     Ok(())
 }

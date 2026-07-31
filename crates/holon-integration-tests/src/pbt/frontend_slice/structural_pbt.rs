@@ -1806,18 +1806,16 @@ mod teeth {
         let backlink_rows = engine
             .db_handle()
             .query(
-                "SELECT source_block_id FROM backlinks WHERE target_id = 'person:alice'",
+                // `backlinks` projects the SOURCE block's columns alongside
+                // `target_id`, so the source id is plain `id`.
+                "SELECT id FROM backlinks WHERE target_id = 'person:alice'",
                 std::collections::HashMap::new(),
             )
             .await
             .expect("backlinks query");
         let sources: Vec<String> = backlink_rows
             .iter()
-            .filter_map(|r| {
-                r.get("source_block_id")
-                    .and_then(|v| v.as_string())
-                    .map(str::to_string)
-            })
+            .filter_map(|r| r.get("id").and_then(|v| v.as_string()).map(str::to_string))
             .collect();
         assert_eq!(
             sources,

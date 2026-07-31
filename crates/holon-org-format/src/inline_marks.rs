@@ -29,7 +29,7 @@ use holon_api::InlineMark;
 use holon_api::MarkClass;
 use holon_api::MarkSpan;
 use holon_api::link_parser::LinkTarget;
-use holon_api::link_parser::classify_link;
+use holon_api::link_parser::LinkTargetClassifier;
 use orgize::ParseConfig;
 use orgize::SyntaxKind;
 use orgize::SyntaxNode;
@@ -51,7 +51,20 @@ use uuid::Uuid;
 /// mode is the only shape the emit path can round-trip losslessly, and it is
 /// what this module's contract has always documented.
 pub fn extract_inline_marks(text: &str) -> (String, Vec<MarkSpan>) {
-    let mut state = ExtractState::default();
+    extract_inline_marks_with(text, &LinkTargetClassifier::default())
+}
+
+/// [`extract_inline_marks`] against an explicit classifier — the form every
+/// PRODUCTION parse boundary uses, so link targets are classified against the
+/// entity schemes actually registered rather than the built-ins alone.
+pub fn extract_inline_marks_with(
+    text: &str,
+    classifier: &LinkTargetClassifier,
+) -> (String, Vec<MarkSpan>) {
+    let mut state = ExtractState {
+        classifier: classifier.clone(),
+        ..Default::default()
+    };
     walk_node(&parse_inline(text), &mut state);
     (state.out, state.marks)
 }
@@ -325,6 +338,11 @@ fn collect_markup_spans(node: &SyntaxNode, spans: &mut Vec<std::ops::Range<usize
 
 #[derive(Default)]
 struct ExtractState {
+    /// Classifies each `[[…]]` target. Owned (a cheap `Option<Arc<…>>` clone)
+    /// rather than borrowed, so this stays `Default` and picks up main's
+    /// `keep_emphasis_raw` field without a lifetime rippling through
+    /// `walk_node` / `emit_mark` / `push_with_inner_marks`.
+    classifier: LinkTargetClassifier,
     out: String,
     marks: Vec<MarkSpan>,
     char_pos: usize,
@@ -438,7 +456,7 @@ fn emit_mark(node: SyntaxNode, kind_hint: MarkKindHint, state: &mut ExtractState
 
     match kind_hint {
         MarkKindHint::Link => {
-            let (text, mark) = strip_link(&raw);
+            let (text, mark) = strip_link(&raw, &state.classifier);
             // Empty link (`[[]]` / `[[][]]`): the rendered label is empty, so
             // the mark would span zero characters (start == end). A zero-width
             // Link mark is an illegal state — it has no visible content and no
@@ -481,7 +499,7 @@ fn emit_mark(node: SyntaxNode, kind_hint: MarkKindHint, state: &mut ExtractState
             // Recurse into the inner string for nested marks. orgize re-parses
             // the substring fresh; nested mark offsets are scalar offsets
             // within `inner`, ready to be shifted by the outer start.
-            let (nested_text, nested_marks) = extract_inline_marks(&inner);
+            let (nested_text, nested_marks) = extract_inline_marks_with(&inner, &state.classifier);
             // The text from recursion may differ from `inner` if it had nested
             // marks (delimiters were stripped). Use nested_text as the actual
             // emitted content.
@@ -540,7 +558,7 @@ fn strip_prefix_suffix(s: &str, prefix_chars: usize, suffix_chars: usize) -> Str
 ///   `EntityRef`.
 /// - `[[uri]]` (bare) → rendered text is the uri itself; classified the same
 ///   way.
-fn strip_link(raw: &str) -> (String, InlineMark) {
+fn strip_link(raw: &str, classifier: &LinkTargetClassifier) -> (String, InlineMark) {
     // Strip outer `[[` and `]]`.
     let inside = raw
         .strip_prefix("[[")
@@ -559,9 +577,10 @@ fn strip_link(raw: &str) -> (String, InlineMark) {
             (t.clone(), t)
         }
     };
-    let target = match classify_link(&uri) {
+    let target = match classifier.classify(&uri) {
         LinkTarget::External(s) => EntityRef::External { url: s },
         LinkTarget::Resolved(uri) => EntityRef::Internal { id: uri },
+        LinkTarget::UnknownScheme(uri) => EntityRef::UnknownScheme { uri },
         // Links increment 2: a wiki-name target stays DANGLING (`Name`) — no
         // deterministic-id minting into the mark at parse time. Pages are
         // created lazily; the exact target string (possibly a `parent/leaf`
@@ -713,6 +732,15 @@ fn open_delim(mark: &InlineMark) -> String {
                         return "[[".into();
                     }
                     name.clone()
+                }
+                // Bytes are preserved exactly: an unknown scheme must survive
+                // an edit cycle untouched so registering its integration
+                // restores the link.
+                EntityRef::UnknownScheme { uri } => {
+                    if uri == label {
+                        return "[[".into();
+                    }
+                    uri.clone()
                 }
             };
             format!("[[{uri}][")
@@ -1489,12 +1517,18 @@ mod tests {
         );
     }
 
+    /// The bare form is legal input. Like every other id-form target it
+    /// re-renders in the explicit-label shape (`[[uri][uri]]`) and is a fixed
+    /// point from there on — the same convergence `[[block:x]]` has always had.
     #[test]
-    fn bare_registered_scheme_target_round_trips() {
-        let input = "[[person:alice]]";
-        let (text, marks) = extract_inline_marks(input);
+    fn bare_registered_scheme_target_converges() {
+        let (text, marks) = extract_inline_marks("[[person:alice]]");
         assert_eq!(text, "person:alice");
-        assert_eq!(render_inline_marks(&text, &marks), input);
+        let rendered = render_inline_marks(&text, &marks);
+        assert_eq!(rendered, "[[person:alice][person:alice]]");
+        let (text2, marks2) = extract_inline_marks(&rendered);
+        assert_eq!((text2.as_str(), &marks2), ("person:alice", &marks));
+        assert_eq!(render_inline_marks(&text2, &marks2), rendered);
     }
 
     /// `Areas:Work` is scheme-SHAPED but its scheme is not registered. The

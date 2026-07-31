@@ -442,7 +442,7 @@ proptest! {
         // where the parser trims segments to converge with the writer.
         if let holon_api::link_parser::LinkTarget::CreationIntent {
             scheme, target_id, ..
-        } = holon_api::link_parser::classify_link(&name)
+        } = holon_api::link_parser::LinkTargetClassifier::default().classify(&name)
             && scheme == "block"
         {
             prop_assert_eq!(

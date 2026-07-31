@@ -20,6 +20,8 @@ use holon_api::TypeDefinition;
 /// A compiled computed field: name + pre-compiled Rhai AST.
 /// Stored in topological order (dependencies before dependents).
 pub use holon_api::entity_profile::CompiledComputedField;
+use holon_api::link_parser::LinkSchemeRegistry;
+use holon_api::link_parser::LinkTargetClassifier;
 use holon_core::util::expr_references;
 use holon_core::util::topo_sort_kahn;
 use rhai::Engine as RhaiEngine;
@@ -48,6 +50,18 @@ pub struct TypeRegistry {
 impl Default for TypeRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The registry IS the closed set of entity schemes a `[[…]]` target may
+/// resolve to. Registered names are already URI-scheme normalized
+/// (`EntityName`'s `_`→`-`), so the scheme is looked up verbatim.
+impl LinkSchemeRegistry for TypeRegistry {
+    fn is_registered_entity_scheme(&self, scheme: &str) -> bool {
+        self.types
+            .read()
+            .expect("TypeRegistry poisoned")
+            .contains_key(scheme)
     }
 }
 
@@ -168,6 +182,13 @@ impl TypeRegistry {
             .expect("TypeRegistry poisoned")
             .get(name)
             .cloned()
+    }
+
+    /// A [`LinkTargetClassifier`] backed by this registry — the one every
+    /// production parse boundary should hold, so `[[<entity>:<id>]]` resolves
+    /// for exactly the entities that exist.
+    pub fn link_target_classifier(self: &Arc<Self>) -> LinkTargetClassifier {
+        LinkTargetClassifier::with_registry(self.clone() as Arc<dyn LinkSchemeRegistry>)
     }
 
     /// Get all registered type definitions.

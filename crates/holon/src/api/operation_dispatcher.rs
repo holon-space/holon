@@ -45,6 +45,11 @@ pub struct OperationDispatcher {
     sync_token_store: Option<Arc<dyn SyncTokenStore>>,
     matview_manager: Option<Arc<crate::sync::MatviewManager>>,
     boundary_enforcer: Option<Arc<dyn BoundaryEnforcer>>,
+    /// Classifies `[[…]]` targets in live-edit content. Built from the
+    /// `TypeRegistry` at wiring time so a UI-authored `[[<entity>:<id>]]`
+    /// resolves for exactly the entities that exist; the `Default` value knows
+    /// only the built-in schemes.
+    link_classifier: holon_api::link_parser::LinkTargetClassifier,
 }
 
 impl OperationDispatcher {
@@ -72,6 +77,15 @@ impl OperationDispatcher {
 
     pub fn set_matview_manager(&mut self, mgr: Arc<crate::sync::MatviewManager>) {
         self.matview_manager = Some(mgr);
+    }
+
+    /// Install the registry-backed link classifier used to parse inline markup
+    /// at the UI intent boundary.
+    pub fn set_link_classifier(
+        &mut self,
+        classifier: holon_api::link_parser::LinkTargetClassifier,
+    ) {
+        self.link_classifier = classifier;
     }
 
     /// Install the ADR 0028 boundary/authz seam (C3). Consulted before every
@@ -787,7 +801,10 @@ impl OperationProvider for OperationDispatcher {
                             .map(str::to_string)
                         {
                             Some(raw) => {
-                                let (label, marks) = holon_org_format::extract_inline_marks(&raw);
+                                let (label, marks) = holon_org_format::extract_inline_marks_with(
+                                    &raw,
+                                    &self.link_classifier,
+                                );
                                 let id = params
                                     .get("id")
                                     .and_then(|v| v.as_string())
@@ -1068,6 +1085,11 @@ impl Module for OperationModule {
                 dispatcher.set_sync_token_store(store);
             }
             dispatcher.set_matview_manager(matview_mgr);
+            dispatcher.set_link_classifier(
+                r.resolve_async::<holon_profiles::TypeRegistry>()
+                    .await
+                    .link_target_classifier(),
+            );
 
             // ADR 0028 C3 — install the boundary/authz seam. The overlay is
             // INERT today (no code mints or persists share policies yet), so a

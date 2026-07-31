@@ -297,12 +297,20 @@ pub async fn seed_default_org_assets(
 
 /// The container's file-format adapter, defaulting to org when none is bound.
 async fn resolve_file_format(resolver: &Injector) -> Arc<dyn holon_core::FileFormatAdapter> {
+    let classifier = resolver
+        .optional_resolve_async::<holon_api::link_parser::LinkTargetClassifier>()
+        .await
+        .map(|c| (*c).clone());
     resolver
         .optional_resolve_async::<dyn holon_core::FileFormatAdapter>()
         .await
         .unwrap_or_else(|| {
-            Arc::new(crate::file_format::OrgFormatAdapter::new())
-                as Arc<dyn holon_core::FileFormatAdapter>
+            // The container binds a registry-backed classifier; without one the
+            // adapter falls back to the built-in entity schemes.
+            let classifier = classifier.unwrap_or_default();
+            Arc::new(crate::file_format::OrgFormatAdapter::with_classifier(
+                classifier,
+            )) as Arc<dyn holon_core::FileFormatAdapter>
         })
 }
 

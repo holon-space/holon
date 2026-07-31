@@ -5,10 +5,33 @@
 Org files store IDs **without** scheme prefixes (`block:`, `sentinel:`).
 The parser adds the correct `EntityUri` scheme when reading; the renderer strips it when writing.
 
-Link targets (`[[target]]` / `[[target][text]]`) resolve to the `block:` scheme only —
-the `doc:` scheme is retired (H7, 2026-07-02). A `block:`-prefixed target is already
-resolved; any other non-URL target is a creation intent hashed to a deterministic
-`block:` UUID. Pages are ordinary blocks tagged `Page`.
+### Link targets are the documented exception: they DO carry schemes
+
+Link targets (`[[target]]` / `[[target][text]]`) are the one place the bare-ID
+rule does not apply — a target is written and read with its full scheme, and the
+renderer emits it verbatim. Targets are classified in three states:
+
+| Target | Classified as | Example |
+|---|---|---|
+| Web/mail URL | external link, unchanged | `[[https://example.com][site]]` |
+| Scheme-shaped, scheme **registered** as an entity | resolved entity URI | `[[block:abc]]`, `[[tag:rust]]`, `[[person:alice]]`, `[[cc-session:0f3a][the refactor]]` |
+| Scheme-shaped, scheme **not registered** | unknown-scheme link — disclosed, bytes preserved, never a page | `[[Areas:Work]]`, `[[doc:x]]` (retired H7, 2026-07-02) |
+| Not scheme-shaped | page-creation intent, hashed to a deterministic `block:` UUID | `[[Projects/New thing]]`, `[[Ketosis: How to lose weight]]` |
+
+"Scheme-shaped" is the RFC 3986 shape — `letter (letter|digit|+|-|.)* ':'` with
+**no space after the colon**. The no-space rule is what keeps ordinary titles
+(`Ketosis: How to lose weight`) on the page side without capitalization
+heuristics, and Windows forbids `:` in filenames anyway, so a scheme-shaped page
+file was never portable.
+
+The shape is **reserved**: page creation rejects a scheme-shaped page name
+(use `/` for hierarchy). That reservation is what makes installing or removing an
+integration safe — its links move between resolved and unknown-scheme, never
+across the page/entity boundary, so no page can have been silently minted under a
+scheme that later becomes real.
+
+The registered set is the entity registry (`TypeRegistry`): built-ins plus every
+entity a YAML sidecar declares. Pages are ordinary blocks tagged `Page`.
 
 ### Heading blocks
 

@@ -28,7 +28,7 @@ const TEMPLATE_ORG: &str = "\
 
 #[test]
 fn template_subtree_round_trips_through_org_adapter() {
-    let adapter = OrgFormatAdapter;
+    let adapter = OrgFormatAdapter::new();
     let parent_dir = EntityUri::no_parent();
     let root = Path::new("/vault");
     let path = Path::new("/vault/templates.org");
@@ -123,7 +123,7 @@ const TPL_WITH_MARKS_ORG: &str = concat!(
 
 #[test]
 fn template_with_marks_round_trips_stable() {
-    let adapter = OrgFormatAdapter;
+    let adapter = OrgFormatAdapter::new();
     let parent_dir = EntityUri::no_parent();
     let root = Path::new("/vault");
     let path = Path::new("/vault/templates.org");
@@ -220,7 +220,7 @@ const TPL_UNDERSCORE_VAR_ORG: &str = "\
 
 #[test]
 fn template_with_underscore_var_round_trips_verbatim() {
-    let adapter = OrgFormatAdapter;
+    let adapter = OrgFormatAdapter::new();
     let parent_dir = EntityUri::no_parent();
     let root = Path::new("/vault");
     let path = Path::new("/vault/templates.org");
@@ -284,7 +284,7 @@ const TPL_NO_VARS_ORG: &str = "\
 
 #[test]
 fn template_without_vars_round_trips_and_has_no_template_vars_property() {
-    let adapter = OrgFormatAdapter;
+    let adapter = OrgFormatAdapter::new();
     let parent_dir = EntityUri::no_parent();
     let root = Path::new("/vault");
     let path = Path::new("/vault/templates.org");

@@ -116,12 +116,34 @@ pub fn parse_doc_id(content: &str) -> Option<String> {
     None
 }
 
-/// Parse an org file and return Document + Block entities
+/// Parse an org file and return Document + Block entities, classifying link
+/// targets against the BUILT-IN entity schemes only.
+///
+/// Production ingest uses [`parse_org_file_with`] so links resolve against the
+/// entities that are actually registered; this form is for tests and fixtures
+/// that have no registry.
 pub fn parse_org_file(
     path: &Path,
     content: &str,
     parent_dir_id: &EntityUri,
     root: &Path,
+) -> Result<ParseResult> {
+    parse_org_file_with(
+        path,
+        content,
+        parent_dir_id,
+        root,
+        &holon_api::link_parser::LinkTargetClassifier::default(),
+    )
+}
+
+/// [`parse_org_file`] against an explicit link-target classifier.
+pub fn parse_org_file_with(
+    path: &Path,
+    content: &str,
+    parent_dir_id: &EntityUri,
+    root: &Path,
+    classifier: &holon_api::link_parser::LinkTargetClassifier,
 ) -> Result<ParseResult> {
     // Use the file stem (no extension) as the page title. The reference model
     // and PBT downstream consumers all normalize on stem.
@@ -241,6 +263,7 @@ pub fn parse_org_file(
         &mut blocks,
         &mut headlines_needing_ids,
         &done_kws,
+        classifier,
     )?;
 
     // Parse boundary (F8, dogfood 2026-07-21): a single file must project to a
@@ -510,6 +533,7 @@ fn process_headlines(
     output: &mut Vec<Block>,
     needs_id: &mut Vec<String>,
     done_keywords: &[String],
+    classifier: &holon_api::link_parser::LinkTargetClassifier,
 ) -> Result<()> {
     for headline in headlines {
         // Extract headline level (number of stars)
@@ -617,7 +641,8 @@ fn process_headlines(
         // returns empty marks and we keep the raw content byte-identical to
         // preserve today's behavior for non-rich blocks.
         let (content, marks) = {
-            let (rendered, spans) = crate::inline_marks::extract_inline_marks(&raw_content);
+            let (rendered, spans) =
+                crate::inline_marks::extract_inline_marks_with(&raw_content, classifier);
             if spans.is_empty() {
                 (raw_content, None)
             } else {
@@ -771,6 +796,7 @@ fn process_headlines(
             output,
             needs_id,
             done_keywords,
+            classifier,
         )?;
     }
 

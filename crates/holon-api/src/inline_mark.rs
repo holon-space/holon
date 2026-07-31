@@ -50,9 +50,21 @@ use crate::Value;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum EntityRef {
-    External { url: String },
-    Internal { id: EntityUri },
-    Name { name: String },
+    External {
+        url: String,
+    },
+    Internal {
+        id: EntityUri,
+    },
+    Name {
+        name: String,
+    },
+    /// Scheme-shaped target whose scheme no entity claims (`[[Areas:Work]]`,
+    /// a typo, a link outliving its integration). Distinct from `Name` because
+    /// the scheme shape is reserved: this can never become a page.
+    UnknownScheme {
+        uri: String,
+    },
 }
 
 /// One inline mark kind. The `Link` variant carries its target inline so a
@@ -309,6 +321,11 @@ pub enum LinkKind {
     Block,
     /// Tag target (`tag:` scheme).
     Tag,
+    /// Foreign-entity target (`[[cc-session:abc]]`, `[[person:alice]]`): a
+    /// registered entity scheme that is neither `block` nor `tag`. Kept
+    /// distinct from `Block` so `block` keeps meaning "the target is a block
+    /// id" and downstream consumers get a clean predicate.
+    Entity,
 }
 
 impl LinkKind {
@@ -317,6 +334,7 @@ impl LinkKind {
             LinkKind::Page => "page",
             LinkKind::Block => "block",
             LinkKind::Tag => "tag",
+            LinkKind::Entity => "entity",
         }
     }
 }
@@ -336,21 +354,21 @@ pub struct DerivedLink {
 
 /// Derive the `block_links` rows implied by a block's inline marks.
 ///
-/// External URL links are NOT block links (they never resolve to an entity)
-/// and are skipped. Duplicate `(target, kind)` pairs collapse to one row
-/// (junction PK is `(source, target, kind)`).
+/// External URL links and unknown-scheme links are NOT block links (they never
+/// resolve to an entity) and are skipped. Duplicate `(target, kind)` pairs
+/// collapse to one row (junction PK is `(source, target, kind)`).
 pub fn derive_block_links(marks: &[MarkSpan]) -> Vec<DerivedLink> {
     let mut out: Vec<DerivedLink> = Vec::new();
     for span in marks {
         let derived = match &span.mark {
             InlineMark::Link { target, .. } => match target {
-                EntityRef::External { .. } => continue,
+                EntityRef::External { .. } | EntityRef::UnknownScheme { .. } => continue,
                 EntityRef::Internal { id } => DerivedLink {
                     target: id.as_str().to_string(),
-                    kind: if id.scheme() == "tag" {
-                        LinkKind::Tag
-                    } else {
-                        LinkKind::Block
+                    kind: match id.scheme() {
+                        "tag" => LinkKind::Tag,
+                        "block" => LinkKind::Block,
+                        _ => LinkKind::Entity,
                     },
                     resolved: Some(id.clone()),
                 },

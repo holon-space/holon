@@ -4,7 +4,10 @@
 //! content. Classifies each link target and computes deterministic entity IDs
 //! for creation intents.
 
+use std::collections::BTreeSet;
 use std::collections::HashSet;
+use std::fmt;
+use std::sync::Arc;
 
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -14,7 +17,8 @@ use crate::entity_uri::EntityUri;
 /// Classification of a link target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkTarget {
-    /// Already resolved: `[[block:uuid]]`
+    /// Already resolved: `[[block:uuid]]`, `[[cc-session:abc]]` — a
+    /// scheme-shaped target whose scheme is a registered entity.
     Resolved(EntityUri),
     /// Creation intent: `[[Projects/New thing]]` → computed deterministic ID
     CreationIntent {
@@ -26,6 +30,13 @@ pub enum LinkTarget {
     },
     /// External URL: `[[https://...]]`
     External(String),
+    /// Scheme-shaped target whose scheme is not registered: `[[Areas:Work]]`,
+    /// `[[cc-sesion:abc]]` (typo), a link left behind by an uninstalled
+    /// integration. The scheme SHAPE is reserved, so this is never a
+    /// page-creation intent — it is disclosed as an unresolved entity link and
+    /// flips back to [`Resolved`](Self::Resolved) the moment its scheme is
+    /// registered.
+    UnknownScheme(String),
 }
 
 impl LinkTarget {
@@ -35,9 +46,171 @@ impl LinkTarget {
         match self {
             LinkTarget::Resolved(uri) => Some(uri),
             LinkTarget::CreationIntent { target_id, .. } => Some(target_id),
-            LinkTarget::External(_) => None,
+            LinkTarget::External(_) | LinkTarget::UnknownScheme(_) => None,
         }
     }
+}
+
+/// Entity schemes every classifier resolves, with or without a registry.
+///
+/// These are the schemes the core owns; a registry only ever ADDS to them, so
+/// a classifier built without one still classifies core links correctly and
+/// unit tests / the reference model stay IO-free.
+pub const BUILT_IN_LINK_SCHEMES: &[&str] = &["block", "tag", "person"];
+
+/// The set of entity schemes a [`LinkTargetClassifier`] resolves beyond the
+/// built-ins.
+///
+/// Implemented by the schema/profile registry, which is the ONE source of
+/// truth for which entities exist (built-ins plus every entity a YAML sidecar
+/// declares). Queried live, so installing or removing an integration moves its
+/// links between `Resolved` and `UnknownScheme` without a restart — and never
+/// across the page/entity boundary.
+pub trait LinkSchemeRegistry: Send + Sync {
+    fn is_registered_entity_scheme(&self, scheme: &str) -> bool;
+}
+
+/// A fixed scheme set — the registry a test or a fixture supplies when it has
+/// no real profile registry.
+pub struct FixedLinkSchemes(BTreeSet<String>);
+
+impl FixedLinkSchemes {
+    pub fn new(schemes: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self(schemes.into_iter().map(Into::into).collect())
+    }
+}
+
+impl LinkSchemeRegistry for FixedLinkSchemes {
+    fn is_registered_entity_scheme(&self, scheme: &str) -> bool {
+        self.0.contains(scheme)
+    }
+}
+
+/// Classifies a raw `[[…]]` target into a [`LinkTarget`].
+///
+/// Carries the registered-scheme set explicitly: every parse boundary holds
+/// one and passes it down. A [`Default`] classifier knows only
+/// [`BUILT_IN_LINK_SCHEMES`], which is what keeps pure unit tests and the
+/// reference model free of registry IO.
+#[derive(Clone, Default)]
+pub struct LinkTargetClassifier {
+    registry: Option<Arc<dyn LinkSchemeRegistry>>,
+}
+
+impl fmt::Debug for LinkTargetClassifier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LinkTargetClassifier")
+            .field("built_ins", &BUILT_IN_LINK_SCHEMES)
+            .field("registry_attached", &self.registry.is_some())
+            .finish()
+    }
+}
+
+impl LinkTargetClassifier {
+    /// A classifier that resolves the built-ins plus everything `registry`
+    /// declares.
+    pub fn with_registry(registry: Arc<dyn LinkSchemeRegistry>) -> Self {
+        Self {
+            registry: Some(registry),
+        }
+    }
+
+    /// A classifier that resolves the built-ins plus a fixed extra set.
+    pub fn with_schemes(schemes: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self::with_registry(Arc::new(FixedLinkSchemes::new(schemes)))
+    }
+
+    pub fn is_registered_entity_scheme(&self, scheme: &str) -> bool {
+        BUILT_IN_LINK_SCHEMES.contains(&scheme)
+            || self
+                .registry
+                .as_ref()
+                .is_some_and(|r| r.is_registered_entity_scheme(scheme))
+    }
+
+    /// Classify a raw link target string.
+    pub fn classify(&self, target: &str) -> LinkTarget {
+        // External URLs — checked first so a web scheme is never a candidate
+        // entity scheme.
+        if target.starts_with("http://")
+            || target.starts_with("https://")
+            || target.starts_with("mailto:")
+        {
+            return LinkTarget::External(target.to_string());
+        }
+
+        // The scheme SHAPE is reserved for entity links (org-mode's own typed
+        // links work this way). A shaped target is never a page name, whether
+        // or not its scheme happens to be registered right now.
+        if let Some(scheme) = link_scheme_shape(target) {
+            return if self.is_registered_entity_scheme(scheme) {
+                // ALLOW(entity_uri_from_raw): raw org-file wiki-link target
+                LinkTarget::Resolved(EntityUri::from_raw(target))
+            } else {
+                LinkTarget::UnknownScheme(target.to_string())
+            };
+        }
+
+        // Creation intent: wiki-style link like "Projects/New thing" or
+        // "PageName". Segments are trimmed through the SAME canonicalization
+        // the write paths use, so `[[Areas / Sub]]` and `[[Areas/Sub]]` agree
+        // on name/parent/id.
+        let segments = PageId::segments(target);
+        let name = segments.last().unwrap().to_string();
+        let parent_path = if segments.len() > 1 {
+            Some(segments[..segments.len() - 1].join("/"))
+        } else {
+            None
+        };
+
+        let scheme = segments
+            .first()
+            .and_then(|s| infer_scheme(s))
+            .unwrap_or("block");
+
+        // Route the page (block-scheme) case through the SAME `PageId`
+        // canonicalization the write paths mint with, so a `[[Areas / Sub]]`
+        // link's target id is *exactly* the id `create_page_from_link` /
+        // org name-chain ingest will assign the page. Non-page schemes (e.g.
+        // `person/Alice`) keep the generic hash. An empty-segment (malformed)
+        // target can never be written — `create_page_from_link` rejects it
+        // loudly — so its optimistic id here is moot; we still derive it from
+        // the trimmed segments rather than fabricate from the raw string.
+        let target_id = if scheme == "block" {
+            PageId::from_segments(&segments).into_entity_uri()
+        } else {
+            deterministic_entity_id(scheme, &normalize_for_hash(target))
+        };
+
+        LinkTarget::CreationIntent {
+            scheme: scheme.to_string(),
+            path: target.to_string(),
+            name,
+            parent_path,
+            target_id,
+        }
+    }
+}
+
+/// The RFC 3986 scheme of `target`, if it is scheme-shaped.
+///
+/// Shape is `letter (letter | digit | '+' | '-' | '.')* ':'` with no space
+/// after the colon — the no-space rule is what keeps ordinary titles like
+/// `Ketosis: How to lose weight` on the page side without capitalization
+/// heuristics. Returns the scheme WITHOUT the colon.
+pub fn link_scheme_shape(target: &str) -> Option<&str> {
+    let colon = target.find(':')?;
+    if target[colon + 1..].starts_with(' ') {
+        return None;
+    }
+    let scheme = &target[..colon];
+    let mut chars = scheme.chars();
+    if !chars.next()?.is_ascii_alphabetic() {
+        return None;
+    }
+    chars
+        .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
+        .then_some(scheme)
 }
 
 /// Represents a link found in org-mode content.
@@ -139,6 +312,23 @@ impl PageId {
         path.split('/').map(str::trim).collect()
     }
 
+    /// Reject a page name that is RFC 3986 scheme-shaped.
+    ///
+    /// The scheme shape is reserved for entity links, so a page can never be
+    /// minted under one — otherwise installing an integration would collide a
+    /// live page with a live entity scheme, and the classifier's guarantee
+    /// that a target never crosses the page/entity boundary would be a lie.
+    fn reject_scheme_shaped(segment: &str) -> Result<(), String> {
+        match link_scheme_shape(segment) {
+            Some(scheme) => Err(format!(
+                "page name {segment:?} is scheme-shaped ({scheme:?} followed by ':'); that shape \
+                 is reserved for entity links like [[cc-session:abc]] — use '/' for hierarchy, or \
+                 put a space after the colon for a title"
+            )),
+            None => Ok(()),
+        }
+    }
+
     /// Hash already-trimmed segments into a `block:<hash>` id.
     fn from_segments(segments: &[&str]) -> Self {
         let canonical = segments.join("/");
@@ -162,6 +352,9 @@ impl PageId {
                 "page path {path:?} has an empty segment (leading/trailing or doubled '/'); a \
                  page path must be non-empty '/'-separated segments"
             ));
+        }
+        for segment in &segments {
+            Self::reject_scheme_shaped(segment)?;
         }
         Ok(Self::from_segments(&segments))
     }
@@ -196,6 +389,9 @@ impl PageId {
             ));
         }
         segments.push(leaf);
+        for segment in &segments {
+            Self::reject_scheme_shaped(segment)?;
+        }
         Ok(Self::from_segments(&segments))
     }
 
@@ -223,67 +419,11 @@ fn infer_scheme(first_segment: &str) -> Option<&'static str> {
     }
 }
 
-/// Classify a raw link target string.
-pub fn classify_link(target: &str) -> LinkTarget {
-    // External URLs
-    if target.starts_with("http://")
-        || target.starts_with("https://")
-        || target.starts_with("mailto:")
-    {
-        return LinkTarget::External(target.to_string());
-    }
-
-    // Already resolved: starts with the entity scheme followed by ':'
-    if target.starts_with("block:") {
-        // ALLOW(entity_uri_from_raw): raw org-file wiki-link target
-        let uri = EntityUri::from_raw(target);
-        return LinkTarget::Resolved(uri);
-    }
-
-    // Creation intent: wiki-style link like "Projects/New thing" or "PageName".
-    // Segments are trimmed through the SAME canonicalization the write paths
-    // use, so `[[Areas / Sub]]` and `[[Areas/Sub]]` agree on name/parent/id.
-    let segments = PageId::segments(target);
-    let name = segments.last().unwrap().to_string();
-    let parent_path = if segments.len() > 1 {
-        Some(segments[..segments.len() - 1].join("/"))
-    } else {
-        None
-    };
-
-    let scheme = segments
-        .first()
-        .and_then(|s| infer_scheme(s))
-        .unwrap_or("block");
-
-    // Route the page (block-scheme) case through the SAME `PageId`
-    // canonicalization the write paths mint with, so a `[[Areas / Sub]]` link's
-    // target id is *exactly* the id `create_page_from_link` / org name-chain
-    // ingest will assign the page. Non-page schemes (e.g. `person:`) keep the
-    // generic hash. An empty-segment (malformed) target can never be written —
-    // `create_page_from_link` rejects it loudly — so its optimistic id here is
-    // moot; we still derive it from the trimmed segments rather than fabricate
-    // from the raw string.
-    let target_id = if scheme == "block" {
-        PageId::from_segments(&segments).into_entity_uri()
-    } else {
-        deterministic_entity_id(scheme, &normalize_for_hash(target))
-    };
-
-    LinkTarget::CreationIntent {
-        scheme: scheme.to_string(),
-        path: target.to_string(),
-        name,
-        parent_path,
-        target_id,
-    }
-}
-
 /// Extract all `[[target][text]]` and `[[target]]` links from org-mode content.
 ///
 /// For bare `[[target]]` links, `text` is set equal to `target`.
 /// Links are returned in order of appearance.
-pub fn extract_links(content: &str) -> Vec<Link> {
+pub fn extract_links(content: &str, classifier: &LinkTargetClassifier) -> Vec<Link> {
     let mut described_ranges: Vec<(usize, usize)> = Vec::new();
     let mut links = Vec::new();
 
@@ -292,7 +432,7 @@ pub fn extract_links(content: &str) -> Vec<Link> {
         let target = captures[1].to_string();
         let text = captures[2].to_string();
         described_ranges.push((mat.start(), mat.end()));
-        let classified = classify_link(&target);
+        let classified = classifier.classify(&target);
         links.push(Link {
             target,
             text,
@@ -311,7 +451,7 @@ pub fn extract_links(content: &str) -> Vec<Link> {
         }
         let captures = BARE_LINK_REGEX.captures(mat.as_str()).unwrap();
         let target = captures[1].to_string();
-        let classified = classify_link(&target);
+        let classified = classifier.classify(&target);
         links.push(Link {
             target: target.clone(),
             text: target,
@@ -328,16 +468,16 @@ pub fn extract_links(content: &str) -> Vec<Link> {
 /// Extract unique link targets from content.
 ///
 /// Returns a set of all unique target URIs found in links.
-pub fn extract_link_targets(content: &str) -> HashSet<String> {
-    extract_links(content)
+pub fn extract_link_targets(content: &str, classifier: &LinkTargetClassifier) -> HashSet<String> {
+    extract_links(content, classifier)
         .iter()
         .map(|link| link.target.clone())
         .collect()
 }
 
 /// Replace links in content with plain text (keeping the display text).
-pub fn strip_links(content: &str) -> String {
-    let links = extract_links(content);
+pub fn strip_links(content: &str, classifier: &LinkTargetClassifier) -> String {
+    let links = extract_links(content, classifier);
     let mut result = content.to_string();
 
     // Replace in reverse order to maintain correct positions
@@ -355,7 +495,7 @@ mod tests {
     #[test]
     fn test_extract_described_link() {
         let content = "This is a [[block:uuid-123][link to block]] in text.";
-        let links = extract_links(content);
+        let links = extract_links(content, &LinkTargetClassifier::default());
 
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].target, "block:uuid-123");
@@ -368,7 +508,7 @@ mod tests {
     #[test]
     fn test_extract_bare_link() {
         let content = "See [[ProjectNotes]] for details.";
-        let links = extract_links(content);
+        let links = extract_links(content, &LinkTargetClassifier::default());
 
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].target, "ProjectNotes");
@@ -381,7 +521,7 @@ mod tests {
     #[test]
     fn test_extract_mixed_links() {
         let content = "A [[PageOne]] then [[block:2][described]] then [[PageThree]].";
-        let links = extract_links(content);
+        let links = extract_links(content, &LinkTargetClassifier::default());
 
         assert_eq!(links.len(), 3);
         assert_eq!(links[0].target, "PageOne");
@@ -395,7 +535,7 @@ mod tests {
     #[test]
     fn test_bare_link_not_confused_with_described() {
         let content = "Only [[target][text]] here.";
-        let links = extract_links(content);
+        let links = extract_links(content, &LinkTargetClassifier::default());
 
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].target, "target");
@@ -405,7 +545,7 @@ mod tests {
     #[test]
     fn test_extract_multiple_described_links() {
         let content = "First [[block:1][one]] and second [[block:2][two]].";
-        let links = extract_links(content);
+        let links = extract_links(content, &LinkTargetClassifier::default());
 
         assert_eq!(links.len(), 2);
         assert_eq!(links[0].target, "block:1");
@@ -415,7 +555,7 @@ mod tests {
     #[test]
     fn test_extract_link_targets() {
         let content = "[[block:a][A]] and [[PageB]] and [[block:a][A again]].";
-        let targets = extract_link_targets(content);
+        let targets = extract_link_targets(content, &LinkTargetClassifier::default());
 
         assert_eq!(targets.len(), 2);
         assert!(targets.contains("block:a"));
@@ -425,7 +565,7 @@ mod tests {
     #[test]
     fn test_strip_links() {
         let content = "See [[block:123][this block]] and [[PageName]] for details.";
-        let stripped = strip_links(content);
+        let stripped = strip_links(content, &LinkTargetClassifier::default());
 
         assert_eq!(stripped, "See this block and PageName for details.");
     }
@@ -433,14 +573,14 @@ mod tests {
     #[test]
     fn test_no_links() {
         let content = "Plain text without any links.";
-        let links = extract_links(content);
+        let links = extract_links(content, &LinkTargetClassifier::default());
         assert!(links.is_empty());
     }
 
     #[test]
     fn test_positions_are_correct() {
         let content = "A [[Page]] B";
-        let links = extract_links(content);
+        let links = extract_links(content, &LinkTargetClassifier::default());
 
         assert_eq!(links.len(), 1);
         assert_eq!(&content[links[0].start..links[0].end], "[[Page]]");
@@ -448,39 +588,115 @@ mod tests {
 
     // --- New tests for classification + deterministic IDs ---
 
-    /// The `doc:` scheme is retired (H7, 2026-07-02): a `doc:`-prefixed target
-    /// is no longer accepted as Resolved — it falls through to the
-    /// name-hashing creation-intent path like any other page name.
+    /// The `doc:` scheme is retired (H7, 2026-07-02) and unregistered, so a
+    /// `doc:` target resolves to nothing. It is still scheme-SHAPED, so it is
+    /// an unknown-scheme link rather than a page named `doc:existing-uuid`.
     #[test]
     fn test_doc_scheme_no_longer_resolved() {
-        let target = classify_link("doc:existing-uuid");
+        let target = LinkTargetClassifier::default().classify("doc:existing-uuid");
+        assert_eq!(
+            target,
+            LinkTarget::UnknownScheme("doc:existing-uuid".into())
+        );
+    }
+
+    // --- F1a: the three-state classifier ---
+
+    #[test]
+    fn scheme_shape_follows_rfc_3986() {
+        assert_eq!(link_scheme_shape("cc-session:abc"), Some("cc-session"));
+        assert_eq!(link_scheme_shape("Areas:Work"), Some("Areas"));
+        assert_eq!(link_scheme_shape("a+b.c-d:x"), Some("a+b.c-d"));
+        // No colon, colon-space, leading non-letter, and an illegal scheme char
+        // are all NOT scheme-shaped.
+        assert_eq!(link_scheme_shape("Areas/Work"), None);
+        assert_eq!(link_scheme_shape("Ketosis: How to lose weight"), None);
+        assert_eq!(link_scheme_shape("1up:x"), None);
+        assert_eq!(link_scheme_shape("two words:x"), None);
+    }
+
+    #[test]
+    fn registered_scheme_resolves_to_the_full_uri() {
+        let classifier = LinkTargetClassifier::with_schemes(["cc-session"]);
         assert!(
-            matches!(&target, LinkTarget::CreationIntent { scheme, .. } if scheme == "block"),
-            "doc: must not classify as Resolved anymore, got {target:?}"
+            matches!(classifier.classify("cc-session:abc"), LinkTarget::Resolved(uri) if uri.as_str() == "cc-session:abc")
+        );
+        assert!(
+            matches!(classifier.classify("tag:rust"), LinkTarget::Resolved(uri) if uri.as_str() == "tag:rust")
+        );
+    }
+
+    /// The registered set only ever moves a target between `Resolved` and
+    /// `UnknownScheme`. It can never move one across the page/entity boundary,
+    /// which is what makes installing or removing an integration safe.
+    #[test]
+    fn unregistering_a_scheme_never_turns_its_links_into_pages() {
+        let target = "cc-session:abc";
+        assert!(matches!(
+            LinkTargetClassifier::with_schemes(["cc-session"]).classify(target),
+            LinkTarget::Resolved(_)
+        ));
+        assert_eq!(
+            LinkTargetClassifier::default().classify(target),
+            LinkTarget::UnknownScheme(target.into())
         );
     }
 
     #[test]
+    fn unregistered_scheme_is_never_a_creation_intent() {
+        for target in ["Areas:Work", "cc-sesion:abc", "ftp:example.com"] {
+            assert_eq!(
+                LinkTargetClassifier::default().classify(target),
+                LinkTarget::UnknownScheme(target.into()),
+                "{target} must reserve the scheme shape"
+            );
+        }
+    }
+
+    #[test]
+    fn colon_space_title_stays_a_page() {
+        let target = LinkTargetClassifier::default().classify("Ketosis: How to lose weight");
+        assert!(
+            matches!(&target, LinkTarget::CreationIntent { name, .. } if name == "Ketosis: How to lose weight"),
+            "got {target:?}"
+        );
+    }
+
+    #[test]
+    fn page_creation_rejects_a_scheme_shaped_name() {
+        let err = PageId::for_path("cc-session:abc").expect_err("must be rejected");
+        assert!(err.contains("scheme-shaped"), "{err}");
+        assert!(err.contains("use '/' for hierarchy"), "{err}");
+
+        let err = PageId::for_page_under("Areas", "cc-session:abc").expect_err("must be rejected");
+        assert!(err.contains("scheme-shaped"), "{err}");
+
+        // A nested segment is guarded too, and colon-space titles still pass.
+        assert!(PageId::for_path("Areas/doc:x/Leaf").is_err());
+        PageId::for_path("Areas/Ketosis: How to lose weight").expect("colon-space title is a page");
+    }
+
+    #[test]
     fn test_classify_resolved_block() {
-        let target = classify_link("block:some-id");
+        let target = LinkTargetClassifier::default().classify("block:some-id");
         assert!(matches!(target, LinkTarget::Resolved(uri) if uri.as_str() == "block:some-id"));
     }
 
     #[test]
     fn test_classify_external_https() {
-        let target = classify_link("https://example.com");
+        let target = LinkTargetClassifier::default().classify("https://example.com");
         assert!(matches!(target, LinkTarget::External(url) if url == "https://example.com"));
     }
 
     #[test]
     fn test_classify_external_mailto() {
-        let target = classify_link("mailto:test@example.com");
+        let target = LinkTargetClassifier::default().classify("mailto:test@example.com");
         assert!(matches!(target, LinkTarget::External(url) if url == "mailto:test@example.com"));
     }
 
     #[test]
     fn test_classify_creation_intent_simple() {
-        let target = classify_link("ProjectNotes");
+        let target = LinkTargetClassifier::default().classify("ProjectNotes");
         match &target {
             LinkTarget::CreationIntent {
                 scheme,
@@ -501,7 +717,7 @@ mod tests {
 
     #[test]
     fn test_classify_creation_intent_with_path() {
-        let target = classify_link("Projects/New thing");
+        let target = LinkTargetClassifier::default().classify("Projects/New thing");
         match &target {
             LinkTarget::CreationIntent {
                 scheme,
@@ -521,7 +737,7 @@ mod tests {
 
     #[test]
     fn test_classify_person_scheme() {
-        let target = classify_link("Person/Alice");
+        let target = LinkTargetClassifier::default().classify("Person/Alice");
         match &target {
             LinkTarget::CreationIntent { scheme, name, .. } => {
                 assert_eq!(scheme, "person");
@@ -552,8 +768,8 @@ mod tests {
 
     #[test]
     fn test_case_insensitive_convergence() {
-        let target1 = classify_link("Projects/Thing");
-        let target2 = classify_link("projects/thing");
+        let target1 = LinkTargetClassifier::default().classify("Projects/Thing");
+        let target2 = LinkTargetClassifier::default().classify("projects/thing");
 
         let id1 = target1.entity_id().unwrap();
         let id2 = target2.entity_id().unwrap();
@@ -569,7 +785,7 @@ mod tests {
     #[test]
     fn test_same_target_same_id_across_links() {
         let content = "See [[Projects/Test]] and also [[Projects/Test]].";
-        let links = extract_links(content);
+        let links = extract_links(content, &LinkTargetClassifier::default());
         assert_eq!(links.len(), 2);
 
         let id1 = links[0].classified.entity_id().unwrap();
@@ -582,8 +798,16 @@ mod tests {
         // H2: a link typed with spaces around '/' must classify to the SAME id
         // as the tight form AND as the id the write paths mint via
         // `PageId::for_path` — the parser trims each segment.
-        let spaced = classify_link("Areas / Sub").entity_id().unwrap().clone();
-        let tight = classify_link("Areas/Sub").entity_id().unwrap().clone();
+        let spaced = LinkTargetClassifier::default()
+            .classify("Areas / Sub")
+            .entity_id()
+            .unwrap()
+            .clone();
+        let tight = LinkTargetClassifier::default()
+            .classify("Areas/Sub")
+            .entity_id()
+            .unwrap()
+            .clone();
         assert_eq!(spaced, tight, "spaced vs tight parser id must agree");
 
         let minted = PageId::for_path("Areas/Sub").unwrap().into_entity_uri();
@@ -594,7 +818,7 @@ mod tests {
             "for_path must be insensitive to separator spacing"
         );
         // name/parent are trimmed too.
-        match classify_link("Areas / Sub") {
+        match LinkTargetClassifier::default().classify("Areas / Sub") {
             LinkTarget::CreationIntent {
                 name, parent_path, ..
             } => {

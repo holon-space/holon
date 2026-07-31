@@ -133,6 +133,13 @@ pub fn mark_from_loro_value(key: &str, value: &loro::LoroValue) -> Option<holon_
                     })?;
                     EntityRef::Name { name }
                 }
+                "unknown_scheme" => {
+                    let uri = map.get("uri").and_then(|v| match v {
+                        loro::LoroValue::String(s) => Some(s.to_string()),
+                        _ => None,
+                    })?;
+                    EntityRef::UnknownScheme { uri }
+                }
                 _ => return None,
             };
             Some(InlineMark::Link { target, label })
@@ -208,8 +215,9 @@ pub fn read_marks_from_text(text: &loro::LoroText) -> Vec<holon_api::MarkSpan> {
 /// For boolean marks (Bold/Italic/.../Sub/Super) the value is `true` — Loro
 /// requires *some* value, and `true` is the canonical "this mark is present"
 /// payload across the spike and the Loro test fixtures. For `Link`, the value
-/// is a `LoroValue::Map` carrying `{ "type": "external"|"internal"|"name",
-/// "url"|"id"|"name": ..., "label": ... }` so the render layer can reconstruct
+/// is a `LoroValue::Map` carrying `{ "type":
+/// "external"|"internal"|"name"|"unknown_scheme", "url"|"id"|"name"|"uri": ...,
+/// "label": ... }` so the render layer can reconstruct
 /// the full `EntityRef`+label without going back to `Block.marks`.
 pub fn mark_to_loro_value(mark: &holon_api::InlineMark) -> loro::LoroValue {
     use holon_api::EntityRef;
@@ -238,6 +246,10 @@ pub fn mark_to_loro_value(mark: &holon_api::InlineMark) -> loro::LoroValue {
                 EntityRef::Name { name } => {
                     map.insert("type".to_string(), loro::LoroValue::from("name"));
                     map.insert("name".to_string(), loro::LoroValue::from(name.as_str()));
+                }
+                EntityRef::UnknownScheme { uri } => {
+                    map.insert("type".to_string(), loro::LoroValue::from("unknown_scheme"));
+                    map.insert("uri".to_string(), loro::LoroValue::from(uri.as_str()));
                 }
             }
             loro::LoroValue::from(map)

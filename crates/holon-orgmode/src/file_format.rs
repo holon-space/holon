@@ -10,6 +10,7 @@ use anyhow::Result;
 use holon_api::EntityUri;
 use holon_api::StorageEntity;
 use holon_api::block::Block;
+use holon_api::link_parser::LinkTargetClassifier;
 use holon_core::file_format::FileFormatAdapter;
 use holon_core::file_format::FileFormatParseResult;
 
@@ -18,19 +19,24 @@ use crate::models::OrgBlockExt;
 use crate::models::OrgDocumentExt;
 use crate::org_renderer::OrgRenderer;
 use crate::parser::parse_doc_id;
-use crate::parser::parse_org_file;
+use crate::parser::parse_org_file_with;
 
-pub struct OrgFormatAdapter;
+/// Carries the link-target classifier used at the ingest parse boundary. The
+/// default knows only the built-in entity schemes; the container injects a
+/// registry-backed one so `[[<entity>:<id>]]` resolves for every registered
+/// entity.
+#[derive(Default)]
+pub struct OrgFormatAdapter {
+    classifier: LinkTargetClassifier,
+}
 
 impl OrgFormatAdapter {
     pub fn new() -> Self {
-        Self
+        Self::default()
     }
-}
 
-impl Default for OrgFormatAdapter {
-    fn default() -> Self {
-        Self::new()
+    pub fn with_classifier(classifier: LinkTargetClassifier) -> Self {
+        Self { classifier }
     }
 }
 
@@ -46,7 +52,7 @@ impl FileFormatAdapter for OrgFormatAdapter {
         parent_dir_id: &EntityUri,
         root: &Path,
     ) -> Result<FileFormatParseResult> {
-        let result = parse_org_file(path, content, parent_dir_id, root)?;
+        let result = parse_org_file_with(path, content, parent_dir_id, root, &self.classifier)?;
         Ok(FileFormatParseResult {
             document: result.document,
             blocks: result.blocks,
@@ -204,7 +210,7 @@ mod tests {
         let content = "* Hello World\n:PROPERTIES:\n:ID: block-1\n:END:\n";
 
         let via_adapter = adapter.parse(&path, content, &parent, &root).unwrap();
-        let via_direct = parse_org_file(&path, content, &parent, &root).unwrap();
+        let via_direct = crate::parser::parse_org_file(&path, content, &parent, &root).unwrap();
 
         assert_eq!(via_adapter.blocks.len(), via_direct.blocks.len());
         assert_eq!(via_adapter.document.id, via_direct.document.id);

@@ -74,8 +74,14 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
         // so the observation adds only a cheap run extraction, never a second
         // partition pass (which would double the per-frame cost and widen
         // windowed settle races).
-        let (el, runs) =
-            styled_run_render(&el_id, &content, marks.as_ref().unwrap(), &block_uri, services, ctx);
+        let (el, runs) = styled_run_render(
+            &el_id,
+            &content,
+            marks.as_ref().unwrap(),
+            &block_uri,
+            services,
+            ctx,
+        );
         styled_runs = Some(runs);
         el
     } else {
@@ -284,7 +290,9 @@ fn styled_run_render(
                         // the healed junction and this segment becomes `Internal`.
                         services.follow_dangling_link(name.clone(), "main".to_string());
                     }
-                    None => services.set_focus_with_caret(
+                    // An unknown scheme resolves to nothing and must never mint
+                    // a page, so a click is an ordinary caret placement.
+                    Some(EntityRef::UnknownScheme { .. }) | None => services.set_focus_with_caret(
                         block.clone(),
                         styled_offset_to_buffer_offset(byte_offset),
                     ),
