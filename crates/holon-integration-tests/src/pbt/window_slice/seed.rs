@@ -169,14 +169,21 @@ pub const BAND_POST_COUNT_SCROLL: usize = 60;
 /// Graft the bug-#69 page shape under the Main focus root, in outline order:
 ///
 /// ```text
-///   BANDPRE-1, BANDPRE-2          plain rows above the band
-///   Band Data                     the query's data parent (its rows are
+///   BANDPRE-1, BANDPRE-2          plain rows above the section
+///   Band Section                  a plain headline — the band's PARENT
+///     Band Data                   the query's data parent (its rows are
 ///                                 source-typed, so the outline hides them)
-///   Band Query Head               the NESTED query band — paints BAND_ROW_COUNT rows
-///   BANDSIB-1                     the sibling that must start BELOW the band
+///     Band Query Head             the NESTED query band — paints BAND_ROW_COUNT rows
+///     BANDSIB-1                   the sibling that must start BELOW the band
 ///   BANDPOST-1 … BANDPOST-N       filler that pushes content past the viewport
 ///   BANDLAST                      the last row, reachable only by scrolling
 /// ```
+///
+/// The band sits at outline DEPTH 2, under a section headline, because that is
+/// the shape Martin's ClaudeCode page has and the depth at which he reproduced
+/// the overlap (depth 2 and 3). The band and the sibling it must not overlap
+/// are siblings under the same section, exactly as a real page's query block
+/// and the note beneath it are.
 ///
 /// Creation order is outline order: `create_block` appends. `post_count` sizes
 /// the filler tail — see [`BAND_POST_COUNT_OVERLAP`] /
@@ -196,7 +203,13 @@ pub async fn graft_band_geometry_page(env: &TestEnvironment, post_count: usize) 
         .with_context(|| format!("graft plain row above the band ({i})"))?;
     }
 
-    env.create_block("band-data", &root, "Band Data")
+    // The section headline that puts the band at DEPTH 2 — the depth at which
+    // Martin reproduced the overlap. Its children below are depth-2 rows.
+    env.create_block("band-section", &root, "Band Section")
+        .await
+        .context("graft the section headline that parents the band")?;
+
+    env.create_block("band-data", "band-section", "Band Data")
         .await
         .context("graft the band query's data parent")?;
     for i in 1..=BAND_ROW_COUNT {
@@ -212,7 +225,7 @@ pub async fn graft_band_geometry_page(env: &TestEnvironment, post_count: usize) 
         .with_context(|| format!("graft band data row {i}"))?;
     }
 
-    env.create_block("band-head", &root, "Band Query Head")
+    env.create_block("band-head", "band-section", "Band Query Head")
         .await
         .context("graft the band headline")?;
     env.create_source_block(
@@ -232,7 +245,9 @@ pub async fn graft_band_geometry_page(env: &TestEnvironment, post_count: usize) 
     .await
     .context("graft the band headline's render child")?;
 
-    env.create_block("band-sib-1", &root, BAND_SIBLING_CONTENT)
+    // Sibling of the band under the SAME section, so the seam this test judges
+    // is the one a real page has between a query block and the note under it.
+    env.create_block("band-sib-1", "band-section", BAND_SIBLING_CONTENT)
         .await
         .context("graft the sibling row directly below the band")?;
 

@@ -763,30 +763,34 @@ fn boot_band_page(app: &mut TestApp, post_count: usize) -> BandPage {
         })
         .expect("window opened");
 
+    // Settle on the MODEL, not on paint. The outline is virtualized AND the page
+    // boots scrolled, so the band is routinely off-viewport at this point —
+    // waiting for its rows to be PAINTED here would either hang or (worse) exit
+    // the moment some unrelated row appeared, judging geometry before the query
+    // had even resolved. What must be true before a test may drive is that the
+    // band's rows exist in the ViewModel; where they are on screen is the
+    // question the tests then ask.
+    let sut = window_wide(Box::new(bounds.clone()), engine.clone());
     let deadline = Instant::now() + Duration::from_secs(180);
     let mut round = 0u32;
+    let mut vm_rows = 0usize;
     while Instant::now() < deadline {
         settle_to_fixed_point(app, &bounds, &runtime, Duration::from_secs(30));
-        let elements = bounds.all_elements();
-        // The outline is virtualized, so the band may well be outside the
-        // viewport at boot; what has to be true before a test may drive is that
-        // the grafted page is on screen at all.
-        let painted = elements
-            .iter()
-            .filter(|(_, i)| {
-                i.displayed_text
-                    .as_deref()
-                    .is_some_and(|t| t.contains(BAND_SIBLING_CONTENT))
-            })
+        let vm = runtime.block_on(async { SutRenderer::widget_tree_snapshot(&sut).await });
+        vm_rows = vm
+            .walk()
+            .filter(|n| n.props.values().any(|v| v.contains(BAND_ROW_MARKER)))
             .count();
+        let elements = bounds.all_elements();
         let texts: Vec<String> = elements
             .iter()
             .filter_map(|(_, i)| i.displayed_text.as_deref().map(str::to_string))
             .collect();
         eprintln!(
-            "[band-boot] round {round}: elements={} band_rows={painted} pre={} sib={} head={} \
-             sample={:?}",
+            "[band-boot] round {round}: vm_rows={vm_rows} elements={} painted_band={} pre={} \
+             sib={} head={}",
             elements.len(),
+            texts.iter().filter(|t| t.contains(BAND_ROW_MARKER)).count(),
             texts.iter().filter(|t| t.contains(BAND_PRE_MARKER)).count(),
             texts
                 .iter()
@@ -796,13 +800,18 @@ fn boot_band_page(app: &mut TestApp, post_count: usize) -> BandPage {
                 .iter()
                 .filter(|t| t.contains("Band Query Head"))
                 .count(),
-            texts.iter().take(12).collect::<Vec<_>>(),
         );
         round += 1;
-        if painted >= 1 {
+        if vm_rows >= BAND_ROW_COUNT {
             break;
         }
     }
+    assert!(
+        vm_rows >= BAND_ROW_COUNT,
+        "model precondition: the band's ViewModel must hold all {BAND_ROW_COUNT} query rows before \
+         any geometry can be judged, got {vm_rows} — this is a DATA failure (the query never \
+         resolved), not a geometry defect"
+    );
 
     BandPage {
         runtime,
@@ -881,30 +890,51 @@ fn band_rows_do_not_overlap_the_following_sibling_row() {
     let mut app = TestApp::with_text_system_and_assets(text_system, assets);
     let page = boot_band_page(&mut app, BAND_POST_COUNT_OVERLAP);
 
+    // Reveal the BAND, not the sibling: `scroll_to_entity` brings its target to
+    // the top of the viewport, so revealing the sibling would push the band —
+    // the thing whose bottom edge this test measures — above the fold. With the
+    // band at the top, the seam it must not cross is in view whether the band is
+    // correct (sibling just below the band's ~18 rows) or defective (sibling
+    // drawn a few rows down, inside the band).
     {
         let driver = band_driver(&app, &page);
         page.runtime
             .block_on(async {
                 driver
-                    .scroll_to_entity(&holon_api::EntityUri::block("band-sib-1"))
+                    .scroll_to_entity(&holon_api::EntityUri::block("band-head"))
                     .await
             })
-            .expect("reveal the sibling row directly below the band");
+            .expect("reveal the nested query band");
     }
-    settle_to_fixed_point(
-        &mut app,
-        &page.bounds,
-        &page.runtime,
-        Duration::from_secs(30),
-    );
+    // Then settle on PAINT, bounded: the reveal's scroll → mount → paint cascade
+    // needs to commit before geometry is read. On a build where the band paints
+    // nothing this simply runs to its deadline and the assert below reports it.
+    let paint_deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < paint_deadline {
+        settle_to_fixed_point(
+            &mut app,
+            &page.bounds,
+            &page.runtime,
+            Duration::from_secs(30),
+        );
+        if painted_rows(&page.bounds, BAND_ROW_MARKER).len() >= BAND_ROW_COUNT {
+            break;
+        }
+    }
 
     let band = painted_rows(&page.bounds, BAND_ROW_MARKER);
+    eprintln!(
+        "[band-overlap] after reveal: band_painted={} sib_painted={} pre_painted={}",
+        band.len(),
+        painted_rows(&page.bounds, BAND_SIBLING_CONTENT).len(),
+        painted_rows(&page.bounds, BAND_PRE_MARKER).len(),
+    );
     assert!(
         !band.is_empty(),
-        "precondition: with the sibling revealed the band's lower rows must be on screen, but NO \
-         row carrying `{BAND_ROW_MARKER}` was painted while the backend holds {} matching block \
-         rows — that is a regression of #60 (the band paints nothing), not the reserved-height \
-         defect this test exists for",
+        "precondition: with the band revealed its rows must be on screen, but NO row carrying \
+         `{BAND_ROW_MARKER}` was painted while the ViewModel holds them and the backend holds {} \
+         matching block rows — that is a regression of #60 (the band paints nothing), not the \
+         reserved-height defect this test exists for",
         page.seeded_row_count(),
     );
 
