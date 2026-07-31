@@ -273,10 +273,26 @@ fn split_trailing_token(first_line: &str) -> Result<(String, Option<(Alias, bool
 /// boundary and recorded as [`DenseBlock::alias`]. Fails loud on malformed
 /// input (no `.ok()` swallowing).
 pub fn parse_dense(text: &str) -> Result<DenseParse> {
+    parse_dense_with(
+        text,
+        &holon_api::link_parser::LinkTargetClassifier::default(),
+    )
+}
+
+/// [`parse_dense`] against a specific link classifier.
+///
+/// `dense_patch` is a WRITE boundary for agent-authored text, so it must use
+/// the registry-backed classifier the org and UI boundaries use — with the
+/// default, every `[[<entity>:<id>]]` an agent writes degrades to an
+/// unknown-scheme link and its `block_links` row is silently lost.
+pub fn parse_dense_with(
+    text: &str,
+    classifier: &holon_api::link_parser::LinkTargetClassifier,
+) -> Result<DenseParse> {
     let path = std::path::Path::new("dense_projection.org");
     let root = std::path::Path::new("");
     let parent_dir_id = EntityUri::block("dense-projection-anchor");
-    let parsed = crate::parse_org_file(path, text, &parent_dir_id, root)?;
+    let parsed = crate::parse_org_file_with(path, text, &parent_dir_id, root, classifier)?;
     let doc_id = parsed.document.id.clone();
 
     let mut blocks = Vec::with_capacity(parsed.blocks.len());

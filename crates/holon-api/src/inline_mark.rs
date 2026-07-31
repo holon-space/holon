@@ -48,7 +48,9 @@ use crate::Value;
 /// upgrade rides the org writeback (which emits the resolved `[[id][label]]`
 /// form) and the normal re-ingest of that file.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+// `snake_case` (not `lowercase`) so multi-word variants match the tag the Loro
+// backend reads and writes. The three single-word variants are unchanged.
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum EntityRef {
     External {
         url: String,
@@ -1000,6 +1002,43 @@ mod tests {
         assert_eq!(keys.len(), all.len(), "key count mismatch");
         for k in &keys {
             assert!(all.contains(k), "{k} missing from all_loro_keys");
+        }
+    }
+
+    /// The serde `type` tag and the Loro backend's hand-written tag are two
+    /// independent spellings of ONE wire name. They drifted once
+    /// (`unknownscheme` vs `unknown_scheme`); pin every variant so they can't
+    /// again.
+    #[test]
+    fn entity_ref_serde_tags_are_the_loro_wire_names() {
+        let cases = [
+            (
+                EntityRef::External {
+                    url: "https://x".into(),
+                },
+                "external",
+            ),
+            (
+                EntityRef::Internal {
+                    id: EntityUri::parse("block:x").expect("valid uri"),
+                },
+                "internal",
+            ),
+            (EntityRef::Name { name: "P".into() }, "name"),
+            (
+                EntityRef::UnknownScheme {
+                    uri: "Areas:Work".into(),
+                },
+                "unknown_scheme",
+            ),
+        ];
+        for (value, expected_tag) in cases {
+            let json = serde_json::to_value(&value).expect("EntityRef serializes");
+            assert_eq!(
+                json.get("type").and_then(|t| t.as_str()),
+                Some(expected_tag),
+                "wire tag drifted for {value:?}"
+            );
         }
     }
 

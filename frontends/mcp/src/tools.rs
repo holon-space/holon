@@ -2684,7 +2684,7 @@ impl HolonMcpServer {
         Parameters(params): Parameters<DensePatchParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         use holon_org_format::Alias;
-        use holon_org_format::parse_dense;
+        use holon_org_format::parse_dense_with;
 
         use crate::dense_patch::PatchOp;
         use crate::dense_patch::Ref as PRef;
@@ -2695,7 +2695,14 @@ impl HolonMcpServer {
             .get(&params.handle)
             .map_err(|e| rmcp::ErrorData::invalid_params(format!("{e}"), None))?;
 
-        let parsed = parse_dense(&params.text).map_err(|e| {
+        // Agent-authored text is a write boundary: classify its `[[…]]`
+        // targets against the live entity registry, or every entity link an
+        // agent writes silently degrades to unknown-scheme.
+        let classifier = match &self.type_registry {
+            Some(registry) => registry.link_target_classifier(),
+            None => holon_api::link_parser::LinkTargetClassifier::default(),
+        };
+        let parsed = parse_dense_with(&params.text, &classifier).map_err(|e| {
             rmcp::ErrorData::invalid_params(format!("edited dense text did not parse: {e}"), None)
         })?;
 

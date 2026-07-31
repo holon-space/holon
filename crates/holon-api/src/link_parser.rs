@@ -156,6 +156,16 @@ impl LinkTargetClassifier {
         // the write paths use, so `[[Areas / Sub]]` and `[[Areas/Sub]]` agree
         // on name/parent/id.
         let segments = PageId::segments(target);
+
+        // A scheme-shaped SEGMENT (`Areas/cc-session:abc`) is reserved just as
+        // a scheme-shaped whole target is. The writer refuses to mint such a
+        // page, so classifying it as a creation intent would hand out an id for
+        // an intent that can never be fulfilled — the classifier applies the
+        // writer's own per-segment rule instead.
+        if segments.iter().any(|s| link_scheme_shape(s).is_some()) {
+            return LinkTarget::UnknownScheme(target.to_string());
+        }
+
         let name = segments.last().unwrap().to_string();
         let parent_path = if segments.len() > 1 {
             Some(segments[..segments.len() - 1].join("/"))
@@ -674,6 +684,42 @@ mod tests {
         // A nested segment is guarded too, and colon-space titles still pass.
         assert!(PageId::for_path("Areas/doc:x/Leaf").is_err());
         PageId::for_path("Areas/Ketosis: How to lose weight").expect("colon-space title is a page");
+    }
+
+    /// The classifier must never hand out a creation intent the writer will
+    /// refuse: every target it calls `CreationIntent` has to be a path
+    /// `PageId::for_path` accepts, and every path the writer rejects for its
+    /// scheme shape has to classify as a disclosed unknown scheme.
+    #[test]
+    fn creation_intents_are_exactly_what_the_writer_accepts() {
+        let classifier = LinkTargetClassifier::default();
+        for target in [
+            "cc-session:abc",
+            "Areas/cc-session:abc",
+            "Areas/doc:x/Leaf",
+            "Projects/New thing",
+            "Ketosis: How to lose weight",
+            "Areas/Ketosis: How to lose weight",
+        ] {
+            match classifier.classify(target) {
+                LinkTarget::CreationIntent { .. } => {
+                    PageId::for_path(target).unwrap_or_else(|e| {
+                        panic!(
+                            "{target:?} classified as a creation intent but the writer refuses \
+                             it ({e}) — an unfulfillable intent"
+                        )
+                    });
+                }
+                LinkTarget::UnknownScheme(_) => {
+                    assert!(
+                        PageId::for_path(target).is_err(),
+                        "{target:?} classified as unknown-scheme but the writer would accept it \
+                         as a page — the two rules disagree"
+                    );
+                }
+                other => panic!("{target:?} unexpectedly classified as {other:?}"),
+            }
+        }
     }
 
     #[test]

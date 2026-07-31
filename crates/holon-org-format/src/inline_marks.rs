@@ -724,7 +724,16 @@ fn open_delim(mark: &InlineMark) -> String {
             }
             let uri = match target {
                 EntityRef::External { url } => url.clone(),
-                EntityRef::Internal { id } => id.as_str().to_string(),
+                // Bare form `[[uri]]` when the label IS the uri, as the user
+                // typed it; explicit `[[uri][label]]` otherwise. Every target
+                // variant shares this rule, so no id form gains a spurious
+                // label on a round trip.
+                EntityRef::Internal { id } => {
+                    if id.as_str() == label {
+                        return "[[".into();
+                    }
+                    id.as_str().to_string()
+                }
                 // Dangling wiki link: `[[name]]` when the label IS the name
                 // (the bare form the user typed), `[[name][label]]` otherwise.
                 EntityRef::Name { name } => {
@@ -1517,18 +1526,14 @@ mod tests {
         );
     }
 
-    /// The bare form is legal input. Like every other id-form target it
-    /// re-renders in the explicit-label shape (`[[uri][uri]]`) and is a fixed
-    /// point from there on — the same convergence `[[block:x]]` has always had.
+    /// The bare form is byte-stable: an entity link the user typed without a
+    /// label must not sprout one on a round trip.
     #[test]
-    fn bare_registered_scheme_target_converges() {
-        let (text, marks) = extract_inline_marks("[[person:alice]]");
+    fn bare_registered_scheme_target_round_trips() {
+        let input = "[[person:alice]]";
+        let (text, marks) = extract_inline_marks(input);
         assert_eq!(text, "person:alice");
-        let rendered = render_inline_marks(&text, &marks);
-        assert_eq!(rendered, "[[person:alice][person:alice]]");
-        let (text2, marks2) = extract_inline_marks(&rendered);
-        assert_eq!((text2.as_str(), &marks2), ("person:alice", &marks));
-        assert_eq!(render_inline_marks(&text2, &marks2), rendered);
+        assert_eq!(render_inline_marks(&text, &marks), input);
     }
 
     /// `Areas:Work` is scheme-SHAPED but its scheme is not registered. The

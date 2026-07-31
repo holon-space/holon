@@ -1824,6 +1824,144 @@ mod teeth {
         );
     }
 
+    /// The `[[<entity>:<id>]]` chain for an entity a SIDECAR declares, driven
+    /// through the UI intent boundary (`block.create`) rather than org ingest.
+    ///
+    /// Deliberately uses a MULTI-WORD entity (`t_widget` → `t-widget:`): the
+    /// registry is keyed by SQL table name (underscored) while a scheme is
+    /// hyphenated, so a single-word built-in like `person` cannot tell a
+    /// working join from a broken one. Registration happens AFTER boot, so
+    /// this also pins the live-registry behavior — an entity installed at
+    /// runtime resolves its links with no re-wiring.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sidecar_entity_link_resolves_through_the_intent_boundary() {
+        use holon_pbt_core::capabilities::SutFocus;
+        use holon_pbt_core::capabilities::SutQueryResults;
+        use holon_pbt_core::capabilities::SutSqlProjection;
+        use holon_pbt_core::composition::CapProvider;
+
+        const SIDECAR_YAML: &str = r#"
+entities:
+  t_widget:
+    id_column: id
+    schema:
+      - name: id
+        sql_type: TEXT
+        primary_key: true
+"#;
+        const ENTITY_URI: &str = "t-widget:abc123";
+
+        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+        let comp = Arc::new(
+            HeadlessFrontendComponent::new_with_clock(
+                &[(
+                    "structural-page.org",
+                    "#+ID: structural-page\n* parent\n:PROPERTIES:\n:ID: parent\n:END:\n",
+                )],
+                Duration::from_millis(300),
+                false,
+                crate::pbt::frontend_slice::components::keystone_boot_clock(),
+            )
+            .await,
+        );
+        let engine = comp.engine();
+        let mut caps = CapMap::new();
+        comp.clone().register(&mut caps);
+        caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
+        caps.insert(comp.clone() as Arc<dyn SutFocus>);
+        caps.insert(comp.clone() as Arc<dyn SutQueryResults>);
+        caps.replace(Arc::new(OpDispatchWriter::with_resolver(
+            engine.clone(),
+            resolver.clone(),
+        )) as Arc<dyn SutBlockTreeWrite>);
+
+        // Install the integration's entity through the REAL registration path.
+        let sidecar =
+            holon_mcp_client::mcp_sidecar::McpSidecar::from_yaml(SIDECAR_YAML).expect("yaml");
+        let registry = comp.type_registry().await;
+        for (name, cfg) in &sidecar.entities {
+            let table = sidecar.prefixed_name(name).table_name();
+            registry
+                .register(cfg.to_type_definition(&table).expect("type definition"))
+                .expect("register");
+        }
+
+        // Author the link the way a live editor commit does: create the block,
+        // then `set_field(content)` with RAW org markup. That is the gesture the
+        // dispatcher parses inline marks for.
+        let parent = holon_api::EntityUri::block("parent");
+        let new_id = holon_api::EntityUri::block("entity-linker");
+        holon_pbt_core::capabilities::SutBlockCreate::apply_create_under_focus(
+            &caps,
+            &parent,
+            "",
+            Some(&new_id),
+        )
+        .await;
+        tokio::time::sleep(SETTLE).await;
+
+        let mut params: holon_api::StorageEntity = std::collections::HashMap::new();
+        params.insert("id".into(), holon_api::Value::String(new_id.to_string()));
+        params.insert("field".into(), holon_api::Value::String("content".into()));
+        params.insert(
+            "value".into(),
+            holon_api::Value::String(format!("See [[{ENTITY_URI}][Widget]] here")),
+        );
+        engine
+            .execute_operation(
+                &"block".to_string().into(),
+                "set_field",
+                params,
+                holon_api::OpOrigin::User,
+            )
+            .await
+            .expect("set_field(content) with an entity link must succeed");
+        tokio::time::sleep(SETTLE).await;
+
+        let rows = engine
+            .db_handle()
+            .query(
+                "SELECT target, kind, resolved_id FROM block_links WHERE source_block_id = \
+                 'block:entity-linker'",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("block_links query");
+        let entity_rows: Vec<_> = rows
+            .iter()
+            .filter(|r| r.get("target").and_then(|v| v.as_string()) == Some(ENTITY_URI))
+            .collect();
+        assert_eq!(
+            entity_rows.len(),
+            1,
+            "exactly one block_links row for {ENTITY_URI}, got {rows:?}"
+        );
+        assert_eq!(
+            entity_rows[0].get("kind").and_then(|v| v.as_string()),
+            Some("entity"),
+            "a sidecar-declared entity must store kind='entity' — a broken scheme/table-name join \
+             degrades it to an unresolved page link: {entity_rows:?}"
+        );
+
+        let backlink_rows = engine
+            .db_handle()
+            .query(
+                &format!("SELECT id FROM backlinks WHERE target_id = '{ENTITY_URI}'"),
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("backlinks query");
+        let sources: Vec<String> = backlink_rows
+            .iter()
+            .filter_map(|r| r.get("id").and_then(|v| v.as_string()).map(str::to_string))
+            .collect();
+        assert_eq!(
+            sources,
+            vec!["block:entity-linker".to_string()],
+            "the linking block must appear in `backlinks` under the sidecar entity URI"
+        );
+    }
+
     /// Apply `SplitBlock(c1)` to BOTH the oracle and the composed SUT,
     /// reconcile the minted ids, and run the catalog — the faithful
     /// structural write path over the real headless component stays green

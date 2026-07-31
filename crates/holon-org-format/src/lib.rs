@@ -33,6 +33,7 @@ pub use dense::AliasTable;
 pub use dense::DenseBlock;
 pub use dense::DenseParse;
 pub use dense::parse_dense;
+pub use dense::parse_dense_with;
 pub use dense::render_dense;
 pub use inline_marks::expected_reparse;
 pub use inline_marks::extract_inline_marks;

@@ -54,14 +54,18 @@ impl Default for TypeRegistry {
 }
 
 /// The registry IS the closed set of entity schemes a `[[…]]` target may
-/// resolve to. Registered names are already URI-scheme normalized
-/// (`EntityName`'s `_`→`-`), so the scheme is looked up verbatim.
+/// resolve to.
+///
+/// Types are keyed by SQL table name (`EntityName::table_name()`, UNDERSCORED)
+/// while a URI scheme is hyphenated, so `cc-session` must be folded to
+/// `cc_session` before the lookup — otherwise every multi-word sidecar entity
+/// silently classifies as unknown-scheme.
 impl LinkSchemeRegistry for TypeRegistry {
     fn is_registered_entity_scheme(&self, scheme: &str) -> bool {
         self.types
             .read()
             .expect("TypeRegistry poisoned")
-            .contains_key(scheme)
+            .contains_key(&scheme.replace('-', "_"))
     }
 }
 

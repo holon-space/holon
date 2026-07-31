@@ -8,6 +8,7 @@ use gpui::SharedString;
 use gpui::StrikethroughStyle;
 use gpui::StyledText;
 use gpui::UnderlineStyle;
+use holon_api::EntityRef;
 use holon_api::InlineMark;
 use holon_api::MarkSpan;
 use holon_api::Value;
@@ -153,9 +154,10 @@ pub(crate) fn build_highlights(
 
 /// Extract the theme-independent paint fingerprint from the highlight runs the
 /// widget actually hands to `StyledText::with_highlights`. This reads the REAL
-/// painted `HighlightStyle` (not a recomputation from marks), so a renderer that
-/// silently dropped a mark's weight/decoration shows up here as plain flags.
-/// `inv-paint-text-styling` compares this against `holon_api::style_fingerprint`.
+/// painted `HighlightStyle` (not a recomputation from marks), so a renderer
+/// that silently dropped a mark's weight/decoration shows up here as plain
+/// flags. `inv-paint-text-styling` compares this against
+/// `holon_api::style_fingerprint`.
 pub(crate) fn observed_styled_runs(
     highlights: &[(Range<usize>, HighlightStyle)],
 ) -> Vec<holon_api::StyledRun> {
@@ -249,6 +251,20 @@ fn merge_marks(active: &[&InlineMark], ctx: &GpuiRenderContext) -> HighlightStyl
                     wavy: false,
                 });
             }
+            // An unknown-scheme link resolves to nothing and cannot be
+            // followed, so it must not wear the healthy-link accent: muted
+            // foreground + wavy underline is the disclosed degraded state.
+            InlineMark::Link {
+                target: EntityRef::UnknownScheme { .. },
+                ..
+            } => {
+                style.color = Some(tc(ctx, |t| t.muted_foreground));
+                style.underline = Some(UnderlineStyle {
+                    color: None,
+                    thickness: px(1.0),
+                    wavy: true,
+                });
+            }
             InlineMark::Link { .. } => {
                 style.color = Some(tc(ctx, |t| t.accent_foreground));
                 style.underline = Some(UnderlineStyle {
@@ -267,7 +283,6 @@ fn merge_marks(active: &[&InlineMark], ctx: &GpuiRenderContext) -> HighlightStyl
 
 #[cfg(test)]
 mod tests {
-    use holon_api::EntityRef;
     use holon_api::EntityUri;
 
     use super::*;

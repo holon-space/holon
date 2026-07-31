@@ -475,6 +475,15 @@ impl HeadlessFrontendComponent {
         debug
     }
 
+    /// The container's live entity registry — the ONE the link classifier
+    /// reads, so registering an entity here flips its `[[scheme:id]]` links to
+    /// resolved exactly as installing an integration does at runtime.
+    pub async fn type_registry(&self) -> Arc<holon_profiles::TypeRegistry> {
+        self.injector
+            .resolve_async::<holon_profiles::TypeRegistry>()
+            .await
+    }
+
     /// Like [`Self::new`] but with the Loro CRDT layer ENABLED — the production
     /// bootstrap then registers `LoroModule` (the `BlockCellRegistry` backing
     /// `MutableText`) and ingests the org tree through Loro storage, so the

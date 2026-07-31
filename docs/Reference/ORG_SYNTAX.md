@@ -16,6 +16,7 @@ renderer emits it verbatim. Targets are classified in three states:
 | Web/mail URL | external link, unchanged | `[[https://example.com][site]]` |
 | Scheme-shaped, scheme **registered** as an entity | resolved entity URI | `[[block:abc]]`, `[[tag:rust]]`, `[[person:alice]]`, `[[cc-session:0f3a][the refactor]]` |
 | Scheme-shaped, scheme **not registered** | unknown-scheme link — disclosed, bytes preserved, never a page | `[[Areas:Work]]`, `[[doc:x]]` (retired H7, 2026-07-02) |
+| Any `/`-segment scheme-shaped | unknown-scheme link, same as above | `[[Areas/cc-session:abc]]` |
 | Not scheme-shaped | page-creation intent, hashed to a deterministic `block:` UUID | `[[Projects/New thing]]`, `[[Ketosis: How to lose weight]]` |
 
 "Scheme-shaped" is the RFC 3986 shape — `letter (letter|digit|+|-|.)* ':'` with
@@ -30,8 +31,17 @@ integration safe — its links move between resolved and unknown-scheme, never
 across the page/entity boundary, so no page can have been silently minted under a
 scheme that later becomes real.
 
+The reservation is applied **per `/`-segment**, and the classifier applies the
+writer's rule rather than a looser one of its own: `[[Areas/cc-session:abc]]` is
+an unknown-scheme link, not a creation intent whose page `PageId::for_path` would
+then refuse to mint. Classifier and writer accept exactly the same set, so no
+link can carry an intent that can never be fulfilled.
+
 The registered set is the entity registry (`TypeRegistry`): built-ins plus every
-entity a YAML sidecar declares. Pages are ordinary blocks tagged `Page`.
+entity a YAML sidecar declares. Registration is keyed by SQL table name
+(underscored) while a scheme is hyphenated, so the lookup folds `-` to `_` —
+without that fold every multi-word sidecar entity would silently read as an
+unknown scheme. Pages are ordinary blocks tagged `Page`.
 
 ### Heading blocks
 
