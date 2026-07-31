@@ -140,3 +140,114 @@ pub async fn graft_nested_query_block(env: &TestEnvironment) -> Result<()> {
     .context("graft the headline's render child")?;
     Ok(())
 }
+
+// ── Band-geometry scenario (bug #69) ────────────────────────────────────────
+
+/// Content prefix of the plain outline rows preceding the nested query band.
+pub const BAND_PRE_MARKER: &str = "BANDPRE-";
+/// Content prefix of the rows the band's query returns.
+pub const BAND_ROW_MARKER: &str = "BANDROW-";
+/// Content of the plain outline row that immediately FOLLOWS the band. The
+/// overlap invariant reads this one row's top edge against the band's painted
+/// bottom edge.
+pub const BAND_SIBLING_CONTENT: &str = "BANDSIB-1";
+/// Content prefix of the plain outline rows after the sibling, present only to
+/// push the page's content past the viewport so scrolling is a real operation.
+pub const BAND_POST_MARKER: &str = "BANDPOST-";
+/// Content of the LAST row of the page — the reachability invariant's target.
+pub const BAND_LAST_CONTENT: &str = "BANDLAST";
+/// Number of rows the band's query returns. Large enough that the band is
+/// several times taller than the ~4 rows the defective build reserves for it.
+pub const BAND_ROW_COUNT: usize = 18;
+/// Filler count for the OVERLAP scenario: the band and its immediate sibling
+/// are all that invariant reads, so keep the vault small and the settle fast.
+pub const BAND_POST_COUNT_OVERLAP: usize = 6;
+/// Filler count for the REACHABILITY scenario: enough rows that the page's
+/// content is several viewports tall and scrolling is a real operation.
+pub const BAND_POST_COUNT_SCROLL: usize = 60;
+
+/// Graft the bug-#69 page shape under the Main focus root, in outline order:
+///
+/// ```text
+///   BANDPRE-1, BANDPRE-2          plain rows above the band
+///   Band Data                     the query's data parent (its rows are
+///                                 source-typed, so the outline hides them)
+///   Band Query Head               the NESTED query band — paints BAND_ROW_COUNT rows
+///   BANDSIB-1                     the sibling that must start BELOW the band
+///   BANDPOST-1 … BANDPOST-N       filler that pushes content past the viewport
+///   BANDLAST                      the last row, reachable only by scrolling
+/// ```
+///
+/// Creation order is outline order: `create_block` appends. `post_count` sizes
+/// the filler tail — see [`BAND_POST_COUNT_OVERLAP`] /
+/// [`BAND_POST_COUNT_SCROLL`].
+///
+/// The caller must re-settle the window afterwards.
+pub async fn graft_band_geometry_page(env: &TestEnvironment, post_count: usize) -> Result<()> {
+    let root = main_focus_root(env).await?;
+
+    for i in 1..=2 {
+        env.create_block(
+            &format!("band-pre-{i}"),
+            &root,
+            &format!("{BAND_PRE_MARKER}{i}"),
+        )
+        .await
+        .with_context(|| format!("graft plain row above the band ({i})"))?;
+    }
+
+    env.create_block("band-data", &root, "Band Data")
+        .await
+        .context("graft the band query's data parent")?;
+    for i in 1..=BAND_ROW_COUNT {
+        // Source-typed so the outline skips them: their content can only reach
+        // the screen through the nested band under test.
+        env.create_source_block(
+            &format!("band-row-{i:02}"),
+            "band-data",
+            SourceLanguage::Other("qdata".to_string()),
+            &format!("{BAND_ROW_MARKER}{i:02}"),
+        )
+        .await
+        .with_context(|| format!("graft band data row {i}"))?;
+    }
+
+    env.create_block("band-head", &root, "Band Query Head")
+        .await
+        .context("graft the band headline")?;
+    env.create_source_block(
+        "band-head::src::0",
+        "band-head",
+        SourceLanguage::Query(QueryLanguage::HolonSql),
+        "SELECT id, content FROM block_raw WHERE parent_id = 'block:band-data' ORDER BY content",
+    )
+    .await
+    .context("graft the band headline's holon_sql source child")?;
+    env.create_source_block(
+        "band-head::render::0",
+        "band-head",
+        SourceLanguage::Render,
+        r#"list(#{sortkey: "content", item_template: rendered_text(col("content"))})"#,
+    )
+    .await
+    .context("graft the band headline's render child")?;
+
+    env.create_block("band-sib-1", &root, BAND_SIBLING_CONTENT)
+        .await
+        .context("graft the sibling row directly below the band")?;
+
+    for i in 1..=post_count {
+        env.create_block(
+            &format!("band-post-{i:03}"),
+            &root,
+            &format!("{BAND_POST_MARKER}{i:03}"),
+        )
+        .await
+        .with_context(|| format!("graft filler row {i}"))?;
+    }
+
+    env.create_block("band-last", &root, BAND_LAST_CONTENT)
+        .await
+        .context("graft the last row of the page")?;
+    Ok(())
+}
