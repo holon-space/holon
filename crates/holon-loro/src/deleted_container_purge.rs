@@ -204,6 +204,12 @@ mod tests {
             !format!("{value:?}").contains(SECRET),
             "the bootstrapped peer materializes the deleted block's content: {value:?}"
         );
+
+        // The bootstrapped peer's history is trimmed, so its frontiers are the
+        // shape `doc_lamport_height`'s `get_change(id).expect(...)` panics on if
+        // a frontier ever references a trimmed change (task #78).
+        peer.with_read(|d| Ok(crate::loro_backend::doc_lamport_height(d)))
+            .unwrap();
     }
 
     /// CONVERGENCE RUNG. The purge is made of ordinary deletion ops, so a peer
@@ -253,6 +259,16 @@ mod tests {
         let a_state = doc_a.with_read(|d| Ok(d.get_deep_value())).unwrap();
         let b_state = doc_b.with_read(|d| Ok(d.get_deep_value())).unwrap();
         assert_eq!(a_state, b_state, "peers diverged after a purge");
+
+        // The purge writes ops on top of a merged DAG; the shadow-mesh oracle
+        // reads `doc_lamport_height` at exactly such boundaries and panics if a
+        // frontier references a change it cannot resolve (task #78).
+        for (who, doc) in [("A", &doc_a), ("B", &doc_b)] {
+            let height = doc
+                .with_read(|d| Ok(crate::loro_backend::doc_lamport_height(d)))
+                .unwrap();
+            assert!(height > 0, "{who}: lamport height collapsed after a purge");
+        }
         assert!(
             !format!("{a_state:?}").contains(SECRET),
             "the concurrent edit resurrected the purged content: {a_state:?}"

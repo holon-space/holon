@@ -681,6 +681,17 @@ mod tests {
             full.snapshot_size,
             none.snapshot_size
         );
+
+        // Pruning purges root containers on a doc whose history is then trimmed
+        // away — the shape `doc_lamport_height` panics on if a frontier ever
+        // references a trimmed change (task #78).
+        for (label, extracted) in [("full", &full), ("none", &none)] {
+            let height = crate::loro_backend::doc_lamport_height(&extracted.shared_doc);
+            assert!(
+                height > 0,
+                "{label}: lamport height collapsed after pruning"
+            );
+        }
     }
 
     #[test]
