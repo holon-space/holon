@@ -560,8 +560,12 @@ pub fn unmount(
         _ => None,
     };
 
+    // Name the mount's root containers BEFORE the delete: the delete cascades
+    // and a gone node no longer names its roots.
+    let mount_roots = crate::deleted_container_purge::subtree_roots(&tree, mount_node)?;
     tree.delete(mount_node)
         .context("Failed to delete mount node")?;
+    crate::deleted_container_purge::purge_roots(source_doc, &mount_roots)?;
 
     if let Some(shared_doc) = reintegrate_doc {
         // Import the shared doc's updates to merge CRDT state (text edits, etc.)
@@ -888,6 +892,44 @@ mod tests {
         assert!(
             !String::from_utf8_lossy(&later_bytes).contains(FIRST_SECRET),
             "a later share of an unrelated subtree shipped the first share's plaintext"
+        );
+    }
+
+    /// `unmount` deletes the mount node, so whatever containers that node owns
+    /// must go with it. Prod mount nodes carry only plain values today (writes
+    /// to a mount are rejected — `loro_share_backend::tests::
+    /// write_to_mount_node_rejects`), so the container here is written
+    /// directly: this pins the call site's contract rather than a reachable
+    /// leak.
+    #[test]
+    fn unmount_takes_the_mount_nodes_own_containers_with_it() {
+        const MOUNT_SECRET: &str = "MOUNT-NODE-SECRET-b71c";
+
+        let doc = LoroDoc::new();
+        doc.set_peer_id(1).unwrap();
+        let (doc_root, _kept, shared_root, _block_b) = build_test_tree(&doc);
+
+        let result = share_subtree(
+            &doc,
+            shared_root,
+            Some(doc_root),
+            "collab-mount-purge".to_string(),
+            HistoryRetention::None,
+        )
+        .unwrap();
+
+        let tree = doc.get_tree(TREE_NAME);
+        set_text(&tree, result.mount_node, MOUNT_SECRET);
+        doc.commit();
+
+        unmount(&doc, result.mount_node, None).unwrap();
+
+        let bytes = doc
+            .export(ExportMode::shallow_snapshot(&doc.oplog_frontiers()))
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains(MOUNT_SECRET),
+            "the unmounted mount node's container survived in the source doc's compacted state"
         );
     }
 
