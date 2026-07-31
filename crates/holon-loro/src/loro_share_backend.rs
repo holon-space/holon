@@ -4601,8 +4601,14 @@ mod tests {
 
     /// PRIVACY RUNG at prod altitude for `commit_share_prune`. Sharing moves a
     /// subtree out of the global doc; its blocks' content must move with it.
-    /// The global doc's compacted state is what a later share of an unrelated
-    /// subtree is forked from and what the on-disk snapshot holds.
+    /// The global doc's state is what a later share of an unrelated subtree is
+    /// forked from.
+    ///
+    /// The assertion is on a shallow export, which is the boundary the purge
+    /// reaches: it clears state, not the oplog. `LoroDocumentStore::save_all`
+    /// writes a full snapshot on 63 of every 64 saves, so the on-disk file
+    /// keeps the shared blocks' original ops until the next compaction (tasks
+    /// #79/#80).
     #[tokio::test]
     async fn share_subtree_leaves_no_shared_plaintext_in_the_global_doc() {
         const SHARED_SECRET: &str = "SHARED-CHILD-SECRET-3d90";

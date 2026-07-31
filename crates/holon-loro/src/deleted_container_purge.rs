@@ -5,7 +5,13 @@
 //! from `(parent meta map, key, kind)`. `LoroTree::delete` removes the node and
 //! its meta map, but a root container has no parent to die with — it stays
 //! live, holding the deleted block's full content in state and therefore in
-//! every export, including the shallow snapshot Holon persists to disk.
+//! every export.
+//!
+//! The purge clears the STATE, which is what shallow exports carry. It does not
+//! reach the oplog: a full-history export still contains the deleted block's
+//! original ops. `LoroDocumentStore::save_all` writes a full snapshot on 63 of
+//! every 64 saves and a shallow one on the 64th, so on-disk plaintext survives
+//! until the next compaction (see tasks #79/#80).
 //!
 //! `LoroDoc::delete_root_container` empties such a root with ordinary deletion
 //! ops, so a peer that never purges converges on the same (empty) value once it

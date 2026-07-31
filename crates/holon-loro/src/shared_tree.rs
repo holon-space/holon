@@ -562,6 +562,11 @@ pub fn unmount(
 
     // Name the mount's root containers BEFORE the delete: the delete cascades
     // and a gone node no longer names its roots.
+    //
+    // `mount_roots` is empty on every path today (mount nodes carry only plain
+    // values). Should mounts ever own containers, this purge must move AFTER
+    // the reintegration import below — mergeable root ids are deterministic, so
+    // purging first would delete content the import brings back.
     let mount_roots = crate::deleted_container_purge::subtree_roots(&tree, mount_node)?;
     tree.delete(mount_node)
         .context("Failed to delete mount node")?;
@@ -892,6 +897,69 @@ mod tests {
         assert!(
             !String::from_utf8_lossy(&later_bytes).contains(FIRST_SECRET),
             "a later share of an unrelated subtree shipped the first share's plaintext"
+        );
+    }
+
+    /// TRIPWIRE, not a guarantee. `commit_share_prune` purges only when the
+    /// source's copy is dead, so a `Full`/`Since` share still leaves the
+    /// orphaned roots behind and the leak the test above closes stays open on
+    /// that path. Prod cannot reach it — `parse_retention` rejects "full" and
+    /// "since" (see `loro_share_backend::tests::
+    /// parse_retention_full_is_rejected_as_leaky`) — so nothing today makes the
+    /// gap visible if someone re-enables them.
+    ///
+    /// If you make `Full` purge, this test flips and the deferred ruling on
+    /// task #81 (privacy vs. `unmount(.., Some(..))` merge-back, which the
+    /// purge's deletion ops win against) must be revisited — do not simply
+    /// invert the assertion.
+    #[test]
+    fn full_retention_still_leaks_the_pruned_subtree_into_a_later_share() {
+        const FIRST_SECRET: &str = "FULL-RETENTION-TRIPWIRE-SECRET-8c5b";
+
+        let doc = LoroDoc::new();
+        crate::loro_backend::configure_text_styles(&doc);
+        doc.set_peer_id(1).unwrap();
+        let tree = doc.get_tree(TREE_NAME);
+        tree.enable_fractional_index(0);
+
+        let doc_root = tree.create(None).unwrap();
+        let first = tree.create(doc_root).unwrap();
+        set_text(&tree, first, "first subtree heading");
+        let first_child = tree.create(first).unwrap();
+        set_text(&tree, first_child, FIRST_SECRET);
+        let second = tree.create(doc_root).unwrap();
+        set_text(&tree, second, "second subtree - shared later");
+        doc.commit();
+
+        share_subtree(
+            &doc,
+            first,
+            Some(doc_root),
+            "tripwire-share-1".to_string(),
+            HistoryRetention::Full,
+        )
+        .unwrap();
+
+        // The later share is the prod shape (`None`) — the only thing carrying
+        // the secret into it is the unpurged orphan roots left by the `Full`
+        // prune above.
+        let later = share_subtree(
+            &doc,
+            second,
+            Some(doc_root),
+            "tripwire-share-2".to_string(),
+            HistoryRetention::None,
+        )
+        .unwrap();
+        let later_bytes = later
+            .extracted
+            .shared_doc
+            .export(ExportMode::Snapshot)
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&later_bytes).contains(FIRST_SECRET),
+            "the Full-retention purge gap closed — revisit the task #81 ruling before \
+             inverting this assertion"
         );
     }
 
