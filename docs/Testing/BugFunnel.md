@@ -9,7 +9,7 @@ distribution steers QA investment.
 - ENVIRONMENT: 123
 - COVERAGE: 68
 - PERCEPTION: 52
-- ORACLE: 39
+- ORACLE: 41
 
 Archived baseline (ENVIRONMENT 87 · COVERAGE 37 · PERCEPTION 35 · ORACLE 18 as of
 2026-07-22): the per-bug increment log below starts at commit e70c3a9245f2, which split
@@ -102,6 +102,23 @@ the archived baseline):
   — the same entry point prod's write-back uses; pinned by
   `crates/holon-integration-tests/tests/org_serializer_prod_content_parity.rs`, which asserts
   headline parity with prod AND content round-trip.)
+- (+1 ORACLE 2026-07-31, secondary COVERAGE: a `[[<entity>:<id>]]` link to any MULTI-WORD
+  sidecar-declared entity never resolved — it degraded to an unresolved link with no
+  `block_links` row and no backlink. `TypeRegistry` is keyed by SQL table name
+  (`EntityName::table_name()`, UNDERSCORED, set at `holon-mcp-client/src/mcp_integration.rs:178`)
+  while a URI scheme is HYPHENATED (`EntityName::new` normalizes `_`→`-`), so
+  `classify("cc-session:abc")` missed the `cc_session` key. Single-word entities (`person`,
+  `block`, `tag`) are unaffected because the two spellings coincide — which is exactly why it
+  escaped: the feature's own keystone probe used `person:alice`. ORACLE, a fixture-choice gap:
+  the keystone DID cover the whole chain but instantiated it with a scheme that cannot
+  discriminate a working join from a broken one. Found by adversarial verification, not a test.)
+- (+1 ORACLE 2026-07-31: the reference model diverges from the SUT on `inv-editor-text/mirror`
+  for ANY editor-authored explicit-label wiki link — reference keeps raw markup
+  (`see [[Some Page][lbl]]`), SUT `MutableText` holds the stripped label (`see lbl`), because
+  the reference does not run the org lens on `CreateBlockUnderFocus` content. Independent of
+  link classification: probed with `[[Some Page][lbl]]`, whose classification F1a does not
+  touch, and the divergence is identical. Blocks deterministic hand-authored replay of any
+  link case. Reference-model gap, not a product defect — the SUT is correct.)
 - (+1 ORACLE 2026-07-31, secondary ENVIRONMENT: `test_platform_geometry_determinism::
   test_platform_geometry_is_real_and_deterministic` is FLAKY on unmodified main — measured 2
   failures in 6 consecutive runs with no source change. Always the same signature: boot 0 records 99
