@@ -179,7 +179,13 @@ fn sql_references_identifier(sql: &str, name: &str) -> bool {
 /// `view_name`, depth-first (dependents-of-dependents go first). Used before
 /// DROP+recreate of a changed matview: leaving dependents in place corrupts
 /// them with duplicate rows (see the call site in [`reconcile_named_view`]).
-async fn drop_dependent_views(db_handle: &DbHandle, view_name: &str) -> Result<()> {
+///
+/// `view_name` may equally be a BASE TABLE: a table carrying dependent matviews
+/// cannot be `ALTER TABLE ... RENAME`d (Turso rejects it), so a shape migration
+/// must clear them first and let the owning schema modules rebuild them on
+/// their normal pass. See
+/// `schema_modules::migrate_junction_dropping_target_fk`.
+pub(crate) async fn drop_dependent_views(db_handle: &DbHandle, view_name: &str) -> Result<()> {
     let rows = db_handle
         .query(
             "SELECT name, sql FROM sqlite_master WHERE type='view'",

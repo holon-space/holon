@@ -16,24 +16,46 @@
 //!
 //! WHAT THESE TESTS DO AND DO NOT PROVE — measured, not assumed:
 //!
-//! `probe_whether_reboot_harness_takes_the_fast_path_skip` establishes that
-//! boot 2 here really does take the cold-boot skip (`block_raw.updated_at` is
-//! byte-identical across the reboot, so no file was re-ingested). The reboot
-//! seam is therefore genuinely exercised, including the skip.
+//! WHETHER BOOT 2 TAKES THE COLD-BOOT SKIP IS UNRESOLVED. Do not build on
+//! either answer.
 //!
-//! With that established, `wiped_junction_is_repaired_on_next_boot` shows
-//! something that was NOT expected: a junction emptied between boots comes back
-//! on the next boot even though nothing was re-ingested. So some non-ingest
-//! boot path re-derives these rows — the Loro tree carries `tags` in node meta
-//! (`loro_backend.rs`) and its boot projection emits edge fields over
-//! `EdgeField::ALL` (`loro_sync_controller.rs`), which is the leading
-//! candidate.
+//! `reboot_harness_takes_the_cold_boot_fast_path_skip` asks the question with a
+//! sound discriminator: corrupt a block's `content` in SQL only, leaving the
+//! org file and its stored hash untouched. An ingest that RUNS finds
+//! `content_differs` true and overwrites the corruption; a SKIPPED ingest
+//! leaves it standing. In this file the corruption is consistently OVERWRITTEN
+//! (2/2 runs, including in isolation), i.e. boot 2 re-ingests and the skip does
+//! NOT fire — which contradicts an independent run of the same probe shape that
+//! saw the corruption survive. Until that is reconciled the probe asserts only
+//! its premise and PRINTS the verdict.
+//!
+//! Note what does NOT work, because this file got it wrong once: comparing a
+//! block's `updated_at` across an unwiped reboot is not evidence of a skip, as
+//! a re-ingest of an unchanged vault writes nothing either. Only a store-vs-org
+//! divergence discriminates — which is why the question above is open rather
+//! than answered.
+//!
+//! Independently of that open question,
+//! `wiped_junction_is_repaired_on_next_boot` shows a junction emptied between
+//! boots coming back on the next boot. The mechanism is measured, not guessed,
+//! by sampling the TAGGED ROOT rather than an untagged child (the untagged
+//! child is untouched either way and has no discriminating power): the root IS
+//! rewritten. The wipe makes the doc-root invisible to the page lookup, that
+//! lookup misses, and the ingest path re-creates the page with
+//! `set_page(true)`.
+//!
+//! So the self-heal is re-derivation triggered by MISSING DERIVED STATE rather
+//! than by the file changing. It is NOT the Loro boot projection —
+//! that explanation was refuted by measurement (the repair also happens with
+//! Loro disabled).
 //!
 //! CONSEQUENCE: these cases cannot go red for the LIVE symptom (a real vault
 //! stuck at zero rows), because in this configuration the system self-repairs.
 //! They are regression guards for the reboot contract, not a reproduction of
-//! the dogfooded bug — whose remaining cause is still unidentified. Do not read
-//! a green run here as evidence that a deployed database is healthy.
+//! the dogfooded bug. The live mystery is the BOUNDARY of that self-heal: a
+//! page whose re-creation cannot complete — a quarantined file or an identity
+//! collision, both of which Martin's vault has — never heals. Do not read a
+//! green run here as evidence that a deployed database is healthy.
 //!
 //! @pbt kind harness
 //! @pbt covers reboot-junction-loss — block_tags/block_requires emptied by the
@@ -373,6 +395,7 @@ fn wiped_junction_is_repaired_on_next_boot() {
             file_hashes(&env).await
         );
         let stamp1 = updated_at(&env, "block:blk-a").await;
+        let root_stamp1 = updated_at(&env, "block:page-alpha").await;
 
         // Exactly what a pre-repair boot's `DROP TABLE block_tags` left behind:
         // an empty junction over an intact `block_raw` and an intact Loro tree.
@@ -393,17 +416,42 @@ fn wiped_junction_is_repaired_on_next_boot() {
         let boot2 = tag_pairs(&env).await;
         eprintln!("[wipe-repair] boot-2 block_tags = {boot2:?}");
 
-        // Without this the test would be ambiguous: a boot-2 that RE-INGESTED
-        // every file rebuilds the junction from org and proves nothing about a
-        // real vault, whose files are unchanged and therefore skipped. Asserting
-        // the skip was taken is what makes this evidence about deployed
-        // databases rather than about the harness.
-        assert_eq!(
-            stamp1,
-            updated_at(&env, "block:blk-a").await,
-            "this test only says something about a REAL vault if boot-2 took the cold-boot \
-             fast-path skip; `updated_at` moved, so the file was re-ingested and the repair \
-             observed below is the re-ingest, not a repair of an unchanged vault"
+        // WHAT ACTUALLY REPAIRS THIS — measured, and NOT what an earlier
+        // revision of this test claimed.
+        //
+        // Sampling the UNTAGGED child says nothing: it is untouched either way
+        // (an unwiped reboot leaves both untouched, which is why
+        // `reboot_harness_takes_the_cold_boot_fast_path_skip` has to corrupt
+        // content instead of comparing stamps). The TAGGED ROOT is the
+        // discriminator, and it IS rewritten here. The wipe makes the doc-root
+        // invisible to the page lookup (`block_raw JOIN block_tags WHERE
+        // tag='Page'`); that lookup misses, and the ingest path re-creates the
+        // page with `set_page(true)`, restoring the tag.
+        //
+        // So the repair is re-derivation triggered by MISSING DERIVED STATE, not
+        // by the file changing — which is exactly why it survives the fast-path
+        // skip. Its BOUNDARY is the open question behind the live symptom: a
+        // page whose re-creation cannot complete (quarantined file, identity
+        // collision) never heals, and Martin's vault contains such files.
+        let child_after = updated_at(&env, "block:blk-a").await;
+        let root_after = updated_at(&env, "block:page-alpha").await;
+        eprintln!(
+            "[wipe-repair] child blk-a {} | root page-alpha {}",
+            if child_after == stamp1 {
+                "untouched"
+            } else {
+                "rewritten"
+            },
+            if root_after == root_stamp1 {
+                "untouched"
+            } else {
+                "REWRITTEN"
+            }
+        );
+        assert_ne!(
+            root_after, root_stamp1,
+            "this test documents repair-by-re-derivation of the TAGGED ROOT; the root was NOT \
+             rewritten, so the rows returned by some other route and this explanation is stale"
         );
 
         let lost: Vec<_> = boot1.difference(&boot2).collect();
@@ -443,10 +491,19 @@ async fn updated_at(env: &TestEnvironment, id: &str) -> i64 {
 /// harness re-ingests every file on boot 2, then no test built on it can go red
 /// for the live symptom, and the coverage it appears to provide is illusory.
 ///
-/// Deliberately assertion-free about which way it goes — it PRINTS the verdict
-/// and pins only the premise (the stored hash exists at all). Read the output.
+/// THE DISCRIMINATOR: corrupt a block's `content` in SQL ONLY between boots,
+/// leaving the org file and the stored `file.content_hash` untouched. The org
+/// text and the store now disagree, so an ingest that RUNS finds
+/// `content_differs` true and overwrites the corruption from disk; an ingest
+/// that is SKIPPED leaves it standing. Surviving corruption therefore proves
+/// the skip fired.
+///
+/// It has to be a divergence like this. Comparing a block's `updated_at` (or
+/// any field) across an UNWIPED reboot proves nothing, because on an unchanged
+/// vault a re-ingest writes nothing either — an earlier revision of this file
+/// did exactly that and read a no-op as evidence of a skip.
 #[test]
-fn probe_whether_reboot_harness_takes_the_fast_path_skip() {
+fn reboot_harness_takes_the_cold_boot_fast_path_skip() {
     let rt = runtime();
     rt.clone().block_on(async move {
         let mut env = TestEnvironment::new(rt).expect("TestEnvironment::new");
@@ -459,30 +516,52 @@ fn probe_whether_reboot_harness_takes_the_fast_path_skip() {
         settle(&env).await;
 
         let hashes = file_hashes(&env).await;
-        let stamp1 = updated_at(&env, "block:blk-a").await;
         assert!(
             hashes.iter().any(|(_, h)| !h.is_empty()),
             "premise: boot-1 persists a `file.content_hash`, without which the skip is \
              unreachable by construction. file rows = {hashes:?}"
         );
 
+        // SQL only — the org file on disk and its stored hash stay as they were,
+        // so the fast path still believes this file is unchanged.
+        env.query_sql(
+            "UPDATE block_raw SET content = 'CORRUPTED-BY-PROBE' WHERE id = 'block:blk-a'",
+        )
+        .await
+        .expect("corrupt block content in SQL");
+
         env.stop_app().await.expect("stop_app");
         env.start_app(true).await.expect("boot-2 start_app");
         wait_for_seed_alpha(&env).await;
         settle(&env).await;
 
-        let stamp2 = updated_at(&env, "block:blk-a").await;
-        let skipped = stamp1 == stamp2;
+        let after = env
+            .query_sql("SELECT content FROM block_raw WHERE id = 'block:blk-a'")
+            .await
+            .expect("read content after reboot")
+            .first()
+            .and_then(|r| r.get("content"))
+            .and_then(|v| v.as_string())
+            .expect("block:blk-a must exist")
+            .to_string();
+
+        let skipped = after == "CORRUPTED-BY-PROBE";
         eprintln!(
-            "[fidelity] boot-1 updated_at={stamp1} boot-2 updated_at={stamp2} => boot-2 {}",
+            "[fidelity] boot-2 content = {after:?} => boot-2 {}",
             if skipped {
-                "took the FAST-PATH SKIP (no re-ingest)"
+                "TOOK THE SKIP (corruption survived — no ingest)"
             } else {
-                "RE-INGESTED the file (skip not taken — harness cannot reach the permanent-loss \
-                 shape)"
+                "RE-INGESTED (corruption overwritten from org — skip did NOT fire)"
             }
         );
-        eprintln!("[fidelity] boot-1 file hashes = {hashes:?}");
+        // Asserts the PREMISE only, deliberately. Two independent runs of this
+        // discriminator disagree on the verdict (see the module doc), so pinning
+        // either answer here would encode a conclusion the evidence does not
+        // yet support. Read the printed verdict.
+        assert!(
+            hashes.iter().any(|(_, h)| !h.is_empty()),
+            "the stored `file.content_hash` must still exist for the skip to be reachable at all"
+        );
     });
 }
 

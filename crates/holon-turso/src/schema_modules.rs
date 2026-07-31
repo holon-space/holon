@@ -145,47 +145,52 @@ async fn migrate_junction_dropping_target_fk(
             vec![],
         )
         .await?;
-    let Some(row) = stored.first() else {
-        return Ok(()); // Absent: the CREATE below makes it in the current shape.
-    };
-    let ddl = match row.get("sql") {
-        Some(holon_api::Value::String(s)) => s.clone(),
-        other => {
-            return Err(StorageError::SchemaError(format!(
-                "sqlite_master.sql for {table}: expected TEXT, got {other:?}"
-            )));
+    let old_shape = match stored.first() {
+        None => false, // Absent: the CREATE below makes it in the current shape.
+        Some(row) => {
+            let ddl = match row.get("sql") {
+                Some(holon_api::Value::String(s)) => s.clone(),
+                other => {
+                    return Err(StorageError::SchemaError(format!(
+                        "sqlite_master.sql for {table}: expected TEXT, got {other:?}"
+                    )));
+                }
+            };
+            // The current shape names the target column only inside prose
+            // comments explaining why it is NOT constrained; the
+            // `FOREIGN KEY (<col>)` clause itself appears in the old shape alone.
+            ddl.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .contains(&format!("FOREIGN KEY ({target_fk_column})"))
         }
     };
 
-    // The current shape names the target column only inside prose comments
-    // explaining why it is NOT constrained; the `FOREIGN KEY (<col>)` clause
-    // itself appears in the old shape alone.
-    let normalized = ddl.split_whitespace().collect::<Vec<_>>().join(" ");
-    if !normalized.contains(&format!("FOREIGN KEY ({target_fk_column})")) {
+    // The copy below is not transactional, so a crash between the rename and
+    // the copy leaves the staging table holding the ONLY surviving rows while
+    // the main table already reads current-shape. Resuming on that state is the
+    // difference between a retryable migration and one that silently strands
+    // every row on the next boot.
+    let staging = format!("{table}__pre_target_fk");
+    let staging_present = !db_handle
+        .query_positional(
+            &format!("SELECT name FROM sqlite_master WHERE type = 'table' AND name = '{staging}'"),
+            vec![],
+        )
+        .await?
+        .is_empty();
+
+    if !old_shape && !staging_present {
         return Ok(());
     }
-
-    tracing::warn!(
-        "[BlockSchemaModule] MIGRATING `{table}`: it carries the pre-2026-07-22 FOREIGN KEY on \
-         `{target_fk_column}`, which aborts a whole file ingest when that target is a forward or \
-         cross-file reference. Rebuilding the table without it and copying every row across."
-    );
-
-    let staging = format!("{table}__pre_target_fk");
-    // Any residue from an interrupted earlier attempt would otherwise collide
-    // with the RENAME below.
-    db_handle
-        .execute_ddl(&format!("DROP TABLE IF EXISTS {staging}"))
-        .await?;
-    db_handle
-        .execute_ddl(&format!("ALTER TABLE {table} RENAME TO {staging}"))
-        .await?;
-    // The index followed the table through the RENAME and still holds its old
-    // name, so the current-shape `CREATE INDEX IF NOT EXISTS` would find the
-    // name taken and silently leave the new table unindexed.
-    db_handle
-        .execute_ddl(&format!("DROP INDEX IF EXISTS {index_name}"))
-        .await?;
+    if old_shape && staging_present {
+        return Err(StorageError::SchemaError(format!(
+            "{table}: both the OLD-shape table and the staging table `{staging}` exist. That \
+             combination is not reachable by this migration (the staging table only appears once \
+             the old shape has been renamed away), so the rows may be split across the two and \
+             this refuses to guess which is authoritative."
+        )));
+    }
 
     let create_sql = match table {
         "block_requires" => include_str!("../sql/schema/block_requires.sql"),
@@ -196,26 +201,79 @@ async fn migrate_junction_dropping_target_fk(
             )));
         }
     };
+
+    if old_shape {
+        tracing::warn!(
+            "[BlockSchemaModule] MIGRATING `{table}`: it carries the pre-2026-07-22 FOREIGN KEY \
+             on `{target_fk_column}`, which aborts a whole file ingest when that target is a \
+             forward or cross-file reference. Rebuilding the table without it and copying every \
+             row across."
+        );
+        // A table carrying dependent matviews cannot be renamed — Turso rejects
+        // the ALTER outright. Every deployed database has `block_requires_agg`
+        // (and its chain) persisted, because `reconcile_named_view` early-returns
+        // on an unchanged SELECT and so never recreates them. Clearing them here
+        // is safe: their owning schema modules run AFTER this one and rebuild
+        // them on the same boot, and dynamic watch views are recreated on watch
+        // registration.
+        crate::matview_manager::drop_dependent_views(db_handle, table)
+            .await
+            .map_err(|e| {
+                StorageError::SchemaError(format!(
+                    "{table}: clearing dependent matviews before the shape migration failed: {e:#}"
+                ))
+            })?;
+        db_handle
+            .execute_ddl(&format!("ALTER TABLE {table} RENAME TO {staging}"))
+            .await?;
+        // The index followed the table through the RENAME and still holds its
+        // old name, so the current-shape `CREATE INDEX IF NOT EXISTS` would find
+        // the name taken and silently leave the new table unindexed.
+        db_handle
+            .execute_ddl(&format!("DROP INDEX IF EXISTS {index_name}"))
+            .await?;
+    } else {
+        tracing::warn!(
+            "[BlockSchemaModule] RESUMING an interrupted `{table}` migration: staging table \
+             `{staging}` is still present, so a previous attempt did not finish copying its rows."
+        );
+    }
+
     for stmt in sql_statements(create_sql) {
         db_handle.execute_ddl(stmt).await?;
     }
 
+    // `OR IGNORE` so a resumed run tolerates the rows the interrupted attempt
+    // already copied; the primary key makes the copy idempotent.
     db_handle
         .execute(
-            &format!("INSERT INTO {table} ({columns}) SELECT {columns} FROM {staging}"),
+            &format!("INSERT OR IGNORE INTO {table} ({columns}) SELECT {columns} FROM {staging}"),
             vec![],
         )
         .await?;
-    let migrated = db_handle
+    let count = db_handle
         .query_positional(&format!("SELECT COUNT(*) AS c FROM {table}"), vec![])
-        .await?;
-    let count = migrated
+        .await?
         .first()
         .and_then(|r| r.get("c"))
         .and_then(|v| v.as_i64())
         .ok_or_else(|| {
             StorageError::SchemaError(format!("{table}: post-migration COUNT(*) returned no row"))
         })?;
+    let staged = db_handle
+        .query_positional(&format!("SELECT COUNT(*) AS c FROM {staging}"), vec![])
+        .await?
+        .first()
+        .and_then(|r| r.get("c"))
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| StorageError::SchemaError(format!("{staging}: COUNT(*) returned no row")))?;
+    // Drop the only other copy of these rows solely on proof they all arrived.
+    if count < staged {
+        return Err(StorageError::SchemaError(format!(
+            "{table}: migration copied {count} row(s) but staging `{staging}` holds {staged}; \
+             refusing to drop staging while rows are unaccounted for"
+        )));
+    }
     db_handle
         .execute_ddl(&format!("DROP TABLE {staging}"))
         .await?;
@@ -1328,6 +1386,155 @@ mod tests {
             .and_then(|v| v.as_string())
             .expect("block_requires must exist")
             .to_string()
+    }
+
+    /// THE DEPLOYED SHAPE, not just the old table: a real pre-2026-07-22
+    /// database also carries the persisted `block_requires_agg` matview,
+    /// because `reconcile_named_view` early-returns on an unchanged SELECT
+    /// and therefore never recreates it across reboots. `BlockSchemaModule`
+    /// runs BEFORE the matview module, so it meets that matview still
+    /// standing — and Turso refuses to `ALTER TABLE ... RENAME` a table
+    /// with dependent materialized views. Without clearing them first,
+    /// `ensure_schema` Errs, the BOOT FAILS, and the ingest-aborting FK
+    /// survives.
+    #[tokio::test]
+    async fn migration_survives_the_persisted_dependent_matview() {
+        use crate::turso::TursoBackend;
+
+        let (_backend, handle) = TursoBackend::new_in_memory().await.unwrap();
+        CoreSchemaModule
+            .ensure_schema(&handle)
+            .await
+            .expect("core schema");
+
+        handle
+            .execute_ddl(OLD_BLOCK_REQUIRES_DDL)
+            .await
+            .expect("old-shape block_requires");
+        handle
+            .execute(
+                // ALLOW(sole_block_writer): schema-module unit test seeding the FK parent row.
+                "INSERT INTO block_raw (id, parent_id, depth, sort_key, content) VALUES \
+                 ('block:src', 'sentinel:no_parent', 0, 1.0, 'Source')",
+                vec![],
+            )
+            .await
+            .expect("seed block_raw");
+        handle
+            .execute(
+                "INSERT INTO block_requires (block_id, required_id) VALUES ('block:src', \
+                 'block:src')",
+                vec![],
+            )
+            .await
+            .expect("seed old junction row");
+
+        // The dependent matview a deployed database carries.
+        handle
+            .execute_ddl(
+                "CREATE MATERIALIZED VIEW block_requires_agg AS SELECT block_id AS source_id, \
+                 json_group_array(required_id) AS vals FROM block_requires GROUP BY block_id",
+            )
+            .await
+            .expect("persisted dependent matview");
+
+        BlockSchemaModule.ensure_schema(&handle).await.expect(
+            "boot must SUCCEED against a deployed pre-07-22 database; a rename blocked by the \
+                 persisted dependent matview fails the whole boot and leaves the FK in place",
+        );
+
+        let ddl = block_requires_ddl(&handle).await;
+        assert!(
+            !ddl.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .contains("FOREIGN KEY (required_id)"),
+            "the ingest-aborting target FK must be gone; DDL still reads: {ddl}"
+        );
+        let rows = handle
+            .query(
+                "SELECT block_id, required_id FROM block_requires",
+                HashMap::new(),
+            )
+            .await
+            .expect("query migrated rows");
+        assert_eq!(rows.len(), 1, "the migration must PRESERVE rows");
+    }
+
+    /// The copy is not transactional, so a crash between the rename and the
+    /// copy leaves the staging table holding the ONLY surviving rows. The
+    /// next boot sees a current-shape main table and must RESUME rather
+    /// than early-return — early-returning strands every row in an orphaned
+    /// staging table.
+    #[tokio::test]
+    async fn interrupted_migration_resumes_and_recovers_staged_rows() {
+        use crate::turso::TursoBackend;
+
+        let (_backend, handle) = TursoBackend::new_in_memory().await.unwrap();
+        CoreSchemaModule
+            .ensure_schema(&handle)
+            .await
+            .expect("core schema");
+        handle
+            .execute(
+                // ALLOW(sole_block_writer): schema-module unit test seeding the FK parent row.
+                "INSERT INTO block_raw (id, parent_id, depth, sort_key, content) VALUES \
+                 ('block:src', 'sentinel:no_parent', 0, 1.0, 'Source')",
+                vec![],
+            )
+            .await
+            .expect("seed block_raw");
+
+        // Exactly the state a crash between RENAME and the copy leaves behind:
+        // staging holds the rows, the main table does not exist yet.
+        handle
+            .execute_ddl(
+                "CREATE TABLE block_requires__pre_target_fk (block_id TEXT NOT NULL, required_id \
+                 TEXT NOT NULL, PRIMARY KEY (block_id, required_id))",
+            )
+            .await
+            .expect("staging table");
+        handle
+            .execute(
+                "INSERT INTO block_requires__pre_target_fk (block_id, required_id) VALUES \
+                 ('block:src', 'block:orphaned')",
+                vec![],
+            )
+            .await
+            .expect("stranded row");
+
+        BlockSchemaModule
+            .ensure_schema(&handle)
+            .await
+            .expect("boot must resume the interrupted migration");
+
+        let rows = handle
+            .query(
+                "SELECT block_id, required_id FROM block_requires WHERE required_id = \
+                 'block:orphaned'",
+                HashMap::new(),
+            )
+            .await
+            .expect("query recovered row");
+        assert_eq!(
+            rows.len(),
+            1,
+            "the row stranded in staging by the interrupted attempt must be recovered, not \
+             abandoned"
+        );
+
+        let staging_left = handle
+            .query(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = \
+                 'block_requires__pre_target_fk'",
+                HashMap::new(),
+            )
+            .await
+            .expect("query staging presence");
+        assert!(
+            staging_left.is_empty(),
+            "staging must be dropped once its rows are accounted for"
+        );
     }
 
     /// A database created before 2026-07-22 carries the old junction shape. The
