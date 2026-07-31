@@ -156,9 +156,15 @@ pub fn extract_subtree(
         collect_non_subtree_descendants(&tree, *root, &keep, &mut to_delete);
     }
 
-    // Empty every pruned node's content BEFORE deleting any node: deleting a
-    // node also deletes its descendants' containers, and a deleted container
-    // rejects further ops. All of `to_delete` is still alive at this point.
+    // Name every pruned node's root containers, then empty its content, BEFORE
+    // deleting any node: deleting a node also deletes its descendants'
+    // containers, a deleted container rejects further ops, and `meta.delete`
+    // inside `empty_child_containers` unnames the roots. All of `to_delete` is
+    // still alive at this point.
+    let mut pruned_roots = Vec::new();
+    for node in &to_delete {
+        pruned_roots.extend(crate::deleted_container_purge::subtree_roots(&tree, *node)?);
+    }
     for node in &to_delete {
         let meta = tree
             .get_meta(*node)
@@ -171,6 +177,10 @@ pub fn extract_subtree(
         // but delete is idempotent for already-deleted nodes.
         let _ = tree.delete(*node);
     }
+    // Emptying leaves the root containers alive with their op history; purging
+    // removes them, which is what keeps a pruned sibling's style-op payloads out
+    // of the shallow snapshot.
+    crate::deleted_container_purge::purge_roots(&forked, &pruned_roots)?;
     forked.commit();
 
     // Step 4: Export based on retention policy
@@ -254,8 +264,9 @@ fn collect_subtree_ids(tree: &LoroTree, root: TreeID) -> HashSet<TreeID> {
 /// them.
 ///
 /// Deleting a text's characters keeps them out of the exported bytes; its style
-/// spans are NOT covered — see
-/// [`tests::none_retention_leaks_sibling_mark_payloads_at_byte_level`].
+/// spans are not, so `extract_subtree` follows this with
+/// [`crate::deleted_container_purge::purge_roots`] — see
+/// [`tests::none_retention_does_not_leak_sibling_mark_payloads_at_byte_level`].
 fn empty_child_containers(meta: &loro::LoroMap) -> Result<()> {
     let keys: Vec<String> = match meta.get_value() {
         LoroValue::Map(m) => m.keys().cloned().collect(),
@@ -723,27 +734,20 @@ mod tests {
         );
     }
 
-    /// The same guarantee for a link mark's payload (its url and label), which
-    /// does NOT hold — this test fails, and is ignored to say so out loud.
+    /// The same guarantee for a link mark's payload (its url and label).
     ///
     /// Deleting a pruned node's characters keeps them out of the exported bytes
-    /// (the test above). Style spans have no such lever: the payload is
-    /// unreachable through every loro API on the shared doc — the node is
-    /// deleted, so its meta, richtext value and deep value are all empty — yet
-    /// the original style op stays in the shallow snapshot's retained segment.
-    /// `unmark`ing the full range before the delete does not remove it, and
-    /// neither does re-importing and re-exporting the snapshot.
-    ///
-    /// Closing it needs either a loro-fork change or an `extract_subtree` that
-    /// copies the kept subtree into a fresh doc instead of forking and pruning.
+    /// (the test above). Style spans have no such lever: the payload stayed in
+    /// the shallow snapshot's retained segment, and neither `unmark` nor a
+    /// re-import/re-export removed it. Purging the pruned node's mergeable ROOT
+    /// containers does — emptying them left them alive with their history.
     ///
     /// Byte-substring is a noisy oracle here (`mark_to_loro_value` builds a
     /// `std::collections::HashMap`, so field order — and thus which of
     /// url/label survives compression contiguously — varies per process);
     /// a hit is nonetheless proof the plaintext is present.
     #[test]
-    #[ignore = "known gap: loro retains style-op payloads in shallow snapshots; needs a loro-fork fix or a copy-based extract_subtree"]
-    fn none_retention_leaks_sibling_mark_payloads_at_byte_level() {
+    fn none_retention_does_not_leak_sibling_mark_payloads_at_byte_level() {
         const URL: &str = "https://secret.example.invalid/PROD-LINK-SECRET-7f31";
         const LABEL: &str = "PROD-LINK-LABEL-SECRET-7f31";
 
