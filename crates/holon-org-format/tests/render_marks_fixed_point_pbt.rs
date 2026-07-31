@@ -9,6 +9,7 @@
 //! below therefore runs at least TWO cycles and asserts both the emitted bytes
 //! and the stored `(content, marks)` state stop changing.
 
+use holon_api::EntityRef;
 use holon_api::EntityUri;
 use holon_api::InlineMark;
 use holon_api::MarkSpan;
@@ -73,6 +74,13 @@ fn assert_fixed_point_against(
         history.push((emitted, next_content.clone(), next_marks.clone()));
         state = (next_content, next_marks);
     }
+    // Settlement is required on the FIRST cycle, not eventually. Bytes that
+    // keep moving are the echo-loop condition, and "it converges by cycle 3"
+    // still means three write-backs and three re-ingests of the same block.
+    assert_eq!(
+        history[0].0, history[1].0,
+        "emitted bytes did not settle immediately.\nhistory: {history:#?}"
+    );
     // Two consecutive cycles must agree on BOTH the bytes and the stored marks.
     let last = history.last().expect("at least one cycle");
     let prev = &history[history.len() - 2];
@@ -89,6 +97,71 @@ fn assert_fixed_point_against(
 
 fn span(start: usize, end: usize, mark: InlineMark) -> MarkSpan {
     MarkSpan { start, end, mark }
+}
+
+fn link(start: usize, end: usize) -> MarkSpan {
+    MarkSpan {
+        start,
+        end,
+        mark: InlineMark::Link {
+            target: EntityRef::External {
+                url: "https://example.com".to_string(),
+            },
+            label: String::new(),
+        },
+    }
+}
+
+/// EVERY emission must settle on its FIRST cycle, whatever rung produced it.
+///
+/// Bytes that re-render differently are the echo-loop condition: write-back
+/// rewrites the file, the watcher re-ingests, and the pair never agrees. That
+/// is a worse failure than losing a mark, so it binds even on the rungs that
+/// have already given up on preserving content — "we could not represent this"
+/// is never a licence to emit churn.
+fn assert_settles_immediately(content: &str, marks: &[MarkSpan]) -> String {
+    let mut block = Block::new_text(
+        EntityUri::block("settle"),
+        EntityUri::block("parent"),
+        content,
+    );
+    block.marks = Some(marks.to_vec());
+    let (first, fidelity) = render_block_content_checked(&block);
+
+    let (c2, m2) = extract_inline_marks(&first);
+    let mut next = Block::new_text(EntityUri::block("settle"), EntityUri::block("parent"), &c2);
+    next.marks = Some(m2.clone());
+    let (second, _) = render_block_content_checked(&next);
+
+    assert_eq!(
+        first, second,
+        "emission did not settle on the first cycle (fidelity {fidelity:?}).\ncontent \
+         {content:?}\nmarks {marks:?}\nre-parsed as {c2:?} + {m2:?}"
+    );
+    first
+}
+
+/// A `Link` mark whose span CROSSES a markup literal's boundary. The parser
+/// cannot mint this — but Peritext can: "make link" over a selection that
+/// starts mid-identifier.
+///
+/// Org has no way to express it (the link delimiters would have to split the
+/// literal), so the emission necessarily degrades. What it must NOT do is
+/// degrade into bytes that re-render differently again.
+#[test]
+fn link_crossing_a_markup_literal_settles_immediately() {
+    assert_settles_immediately("/a/ _a_", &[link(2, 7)]);
+    assert_settles_immediately("_a_ _a_", &[link(2, 7)]);
+    assert_settles_immediately("the __init__ method", &[link(6, 14)]);
+}
+
+/// A `Link` mark over content that CONTAINS raw link syntax. Also
+/// unrepresentable — nested `[[…]]` is not a thing — and also required to
+/// settle rather than churn.
+#[test]
+fn link_over_raw_link_syntax_settles_immediately() {
+    assert_settles_immediately("see [[a][b]] here", &[link(0, 17)]);
+    assert_settles_immediately("[[a][b]]", &[link(0, 8)]);
 }
 
 /// The shape the fix itself manufactures: a user bolds an identifier, the

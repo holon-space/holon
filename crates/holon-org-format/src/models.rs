@@ -936,19 +936,25 @@ impl ToOrg for Block {
 ///
 /// 1. everything intact;
 /// 2. STYLING marks dropped — bold on a word is recoverable annoyance;
-/// 3. PROTECTIVE marks dropped too. Safe only because the check below still
-///    demands the ORIGINAL content back: if un-sealing a span would let it be
+/// 3. PROTECTIVE marks dropped too. Safe only because the check still demands
+///    the ORIGINAL content back: if un-sealing a span would let it be
 ///    reinterpreted, the quoting pass re-seals it with `=…=` and the check
 ///    proves it; if it cannot, this rung is refused;
-/// 4. everything retained, emitted UNVERIFIED, loud ERROR. Reached only when a
-///    data-bearing mark cannot be re-emitted — a `Link`'s target exists nowhere
-///    but the mark, so dropping it destroys data outright while keeping it
-///    leaves every byte on disk to recover from.
+/// 4. EVERY mark dropped, including data-bearing ones. Link targets are lost —
+///    they exist nowhere but the mark — so this rung is a last resort, but it
+///    always represents the content and always settles.
 ///
-/// Every rung is verified against `expected_reparse(content, ORIGINAL marks)`.
-/// Re-deriving the expectation from each rung's reduced mark set would make
-/// degradations self-justifying — dropping a `Verbatim` also drops the reason
-/// its span must stay literal.
+/// Two conditions gate every rung, and neither is optional:
+///
+/// - **Content**: the emission must re-parse to `expected_reparse(content,
+///   ORIGINAL marks)`. Re-deriving the expectation from each rung's reduced
+///   mark set would make degradations self-justifying — dropping a `Verbatim`
+///   also drops the reason its span must stay literal.
+/// - **Settlement**: the emission must be a FIXED POINT — re-parsing and
+///   re-rendering it must give the same bytes. Non-settling output is the
+///   echo-loop condition: write-back rewrites the file, the watcher re-ingests,
+///   and the two never agree. That is worse than any amount of lost formatting,
+///   so it binds even on the rung that has already given up on the content.
 ///
 /// Nothing here returns `Err`: `ToOrg::to_org` and the `FileFormatAdapter`
 /// render methods are `-> String`, and this runs inside the org-sync select
@@ -967,66 +973,149 @@ pub enum RenderFidelity {
     Exact,
     StylingDropped,
     ProtectiveDropped,
+    AllMarksDropped,
     ContentUnpreserved,
+}
+
+/// The mark subsets this ladder will emit, most-valuable first, paired with
+/// what giving up on each one costs.
+fn ladder(marks: &[MarkSpan]) -> Vec<(Vec<MarkSpan>, RenderFidelity, DegradeReason, &'static str)> {
+    let keep = |classes: &[MarkClass]| -> Vec<MarkSpan> {
+        marks
+            .iter()
+            .filter(|m| classes.contains(&m.mark.class()))
+            .cloned()
+            .collect()
+    };
+    vec![
+        (
+            marks.to_vec(),
+            RenderFidelity::Exact,
+            DegradeReason::StylingDropped,
+            "nothing",
+        ),
+        (
+            keep(&[MarkClass::Protective, MarkClass::DataBearing]),
+            RenderFidelity::StylingDropped,
+            DegradeReason::StylingDropped,
+            "styling",
+        ),
+        (
+            keep(&[MarkClass::DataBearing]),
+            RenderFidelity::ProtectiveDropped,
+            DegradeReason::ProtectiveDropped,
+            "styling and protective",
+        ),
+        (
+            Vec::new(),
+            RenderFidelity::AllMarksDropped,
+            DegradeReason::AllMarksDropped,
+            "EVERY mark, link targets included",
+        ),
+    ]
+}
+
+/// The emission the NEXT write-back cycle would produce for `(content, marks)`,
+/// judged on the content contract alone.
+///
+/// Deliberately does not apply the settlement check that
+/// [`render_block_content_checked`] layers on top: that check calls this, and
+/// making it recursive would not terminate. One level is all a fixed-point test
+/// needs — "would the next cycle emit these same bytes".
+fn contract_only_emission(content: &str, marks: &[MarkSpan]) -> Option<String> {
+    let contract = crate::inline_marks::expected_reparse(content, marks);
+    ladder(marks)
+        .into_iter()
+        // "This rung cannot represent the block" is the ladder's normal control
+        // flow, not a failure: the next rung is tried, and the reason is
+        // reported by the caller that actually degrades.
+        .find_map(|(retained, ..)| {
+            match crate::inline_marks::render_expecting(content, &retained, &contract) {
+                Ok(bytes) => Some(bytes),
+                Err(_) => None,
+            }
+        })
+        .or_else(|| {
+            crate::inline_marks::render_candidates(content, marks)
+                .into_iter()
+                .next()
+        })
+}
+
+/// True when re-ingesting `bytes` and rendering them again reproduces `bytes`.
+fn is_fixed_point(bytes: &str) -> bool {
+    let (content, marks) = crate::inline_marks::extract_inline_marks(bytes);
+    contract_only_emission(&content, &marks).as_deref() == Some(bytes)
 }
 
 /// [`render_block_content`] with the rung it landed on.
 pub fn render_block_content_checked(block: &Block) -> (String, RenderFidelity) {
     let marks = block.marks.as_deref().unwrap_or(&[]);
     let contract = crate::inline_marks::expected_reparse(&block.content, marks);
-    let render =
-        |emit: &[MarkSpan]| crate::inline_marks::render_expecting(&block.content, emit, &contract);
+    let rungs = ladder(marks);
 
-    let intact = match render(marks) {
-        Ok(bytes) => return (bytes, RenderFidelity::Exact),
-        Err(e) => e,
-    };
-
-    let keep = |class: &[MarkClass]| -> Vec<MarkSpan> {
-        marks
-            .iter()
-            .filter(|m| class.contains(&m.mark.class()))
-            .cloned()
-            .collect()
-    };
-    for (retained, reason, fidelity, what) in [
-        (
-            keep(&[MarkClass::Protective, MarkClass::DataBearing]),
-            DegradeReason::StylingDropped,
-            RenderFidelity::StylingDropped,
-            "styling",
-        ),
-        (
-            keep(&[MarkClass::DataBearing]),
-            DegradeReason::ProtectiveDropped,
-            RenderFidelity::ProtectiveDropped,
-            "styling and protective",
-        ),
-    ] {
-        if retained.len() == marks.len() {
+    // Pass 1 — both conditions. The first rung that keeps the content AND
+    // settles wins, so nothing is sacrificed that did not have to be.
+    let mut why_not = None;
+    for (retained, fidelity, reason, what) in &rungs {
+        let bytes = match crate::inline_marks::render_expecting(&block.content, retained, &contract)
+        {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                why_not.get_or_insert(e);
+                continue;
+            }
+        };
+        if !is_fixed_point(&bytes) {
             continue;
         }
-        if let Ok(bytes) = render(&retained) {
+        if *fidelity != RenderFidelity::Exact {
             disclose_degraded_render(
                 block,
-                reason,
+                *reason,
                 format_args!(
-                    "DROPPING {} {what} mark(s) — the content bytes and every link target are \
-                     kept: {intact}",
-                    marks.len() - retained.len()
+                    "DROPPING {what} ({} mark(s)) — the content bytes survive: {}",
+                    marks.len() - retained.len(),
+                    why_not
+                        .as_ref()
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(|| "unrepresentable with more marks".to_string())
                 ),
             );
-            return (bytes, fidelity);
+        }
+        return (bytes.clone(), *fidelity);
+    }
+
+    // Pass 2 — the content is already unrepresentable, so settlement is the
+    // only thing left worth protecting. Emitting churn on top of a corrupted
+    // block turns one bad write into an endless argument between write-back and
+    // the file watcher.
+    for (retained, ..) in &rungs {
+        for candidate in crate::inline_marks::render_candidates(&block.content, retained) {
+            if is_fixed_point(&candidate) {
+                disclose_degraded_render(
+                    block,
+                    DegradeReason::Unrepresentable,
+                    format_args!(
+                        "org cannot represent this block's content with its marks; writing the \
+                         closest form that at least STOPS CHANGING, so write-back does not loop: \
+                         {}",
+                        why_not.as_ref().map(|e| e.to_string()).unwrap_or_default()
+                    ),
+                );
+                return (candidate, RenderFidelity::ContentUnpreserved);
+            }
         }
     }
 
+    // Unreached in every shape measured so far — the marks-free rung represents
+    // any content and settles. Kept because "measured so far" is not a proof,
+    // and a silent non-settling emission is exactly what this ladder exists to
+    // prevent.
     disclose_degraded_render(
         block,
         DegradeReason::Unrepresentable,
-        format_args!(
-            "no emission preserves this block's content; writing the fully marked form UNVERIFIED \
-             so no link target is destroyed: {intact}"
-        ),
+        format_args!("NO emission of this block settles; write-back may loop on it"),
     );
     (
         crate::inline_marks::render_inline_marks(&block.content, marks),
@@ -1041,6 +1130,7 @@ pub fn render_block_content_checked(block: &Block) -> (String, RenderFidelity) {
 enum DegradeReason {
     StylingDropped,
     ProtectiveDropped,
+    AllMarksDropped,
     Unrepresentable,
 }
 

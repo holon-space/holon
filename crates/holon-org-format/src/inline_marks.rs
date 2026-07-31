@@ -99,19 +99,35 @@ pub(crate) fn render_expecting(
     emit_marks: &[MarkSpan],
     expected: &str,
 ) -> anyhow::Result<String> {
-    let emit_marks = &drop_duplicate_protective_marks(emit_marks);
-    let spans = quotable_markup_spans(content, emit_marks);
-    for delim in QUOTE_DELIMS {
-        let (quoted, shifted) = quote_spans(content, &spans, delim, emit_marks);
-        let candidate = render_inline_marks(&quoted, &shifted);
+    for candidate in render_candidates(content, emit_marks) {
         if extract_inline_marks(&candidate).0 == expected {
             return Ok(candidate);
         }
     }
     anyhow::bail!(
-        "no delimiter in {QUOTE_DELIMS:?} quotes the markup-shaped spans {spans:?} of content \
-         {content:?} (marks {emit_marks:?}) back to {expected:?}"
+        "no quote delimiter in {QUOTE_DELIMS:?} renders content {content:?} (marks {emit_marks:?}) \
+         back to {expected:?}"
     )
+}
+
+/// The emissions this module can produce for `(content, emit_marks)`, one per
+/// quote delimiter, in preference order and WITHOUT any verification.
+///
+/// Exposed unverified because the caller has two independent things to check —
+/// that an emission preserves the content, and that it is a fixed point — and
+/// a candidate can satisfy the second while failing the first. Collapsing them
+/// here would hide the emissions that settle but lose content, which are the
+/// only thing standing between an unrepresentable block and an echo loop.
+pub(crate) fn render_candidates(content: &str, emit_marks: &[MarkSpan]) -> Vec<String> {
+    let emit_marks = drop_duplicate_protective_marks(emit_marks);
+    let spans = quotable_markup_spans(content, &emit_marks);
+    QUOTE_DELIMS
+        .iter()
+        .map(|delim| {
+            let (quoted, shifted) = quote_spans(content, &spans, *delim, &emit_marks);
+            render_inline_marks(&quoted, &shifted)
+        })
+        .collect()
 }
 
 /// The parse-back form the render half is contractually required to produce —
