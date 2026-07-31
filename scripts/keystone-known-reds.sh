@@ -54,6 +54,16 @@ fi
 
 novel=0
 matched=0
+# Per-key hit counts + one example each. Parallel indexed arrays, not an
+# associative array — macOS ships bash 3.2.
+counts=()
+examples=()
+for i in "${!keys[@]}"; do
+    counts[$i]=0
+    examples[$i]=""
+done
+novel_file=$(mktemp)
+
 for log in "$@"; do
     if [ ! -f "$log" ]; then
         echo "[known-reds] NOVEL: log not found: $log" >&2
@@ -62,9 +72,14 @@ for log in "$@"; do
     fi
 
     # A panic prints "thread '…' panicked at <file>:<line>:" and the message on
-    # the NEXT line; that message line IS the signature.
+    # the NEXT line; that message line IS the signature. Proptest re-panics on
+    # every shrink step, so one failing case yields dozens of near-identical
+    # lines — hence the aggregation below.
     sigs_file=$(mktemp)
-    awk 'prev ~ /panicked at / { print } { prev = $0 }' "$log" | sort -u >"$sigs_file"
+    awk '/panicked at / {
+            loc = $0; sub(/^.*panicked at /, "", loc); sub(/:$/, "", loc)
+            if ((getline msg) > 0) print loc "\t" msg
+         }' "$log" >"$sigs_file"
 
     if [ ! -s "$sigs_file" ]; then
         echo "[known-reds] NOVEL: $log — run failed but no panic signature was extracted"
@@ -75,31 +90,46 @@ for log in "$@"; do
         continue
     fi
 
-    while IFS= read -r sig; do
-        hit=""
+    base=$(basename "$log")
+    while IFS=$'\t' read -r loc sig; do
+        hit=-1
         for i in "${!keys[@]}"; do
             if printf '%s\n' "$sig" | grep -qE -- "${patterns[$i]}"; then
-                hit="${keys[$i]}"
+                hit=$i
                 break
             fi
         done
-        if [ -n "$hit" ]; then
-            echo "WARN known-red [$hit] ($(basename "$log")): $sig"
+        if [ "$hit" -ge 0 ]; then
+            counts[$hit]=$(( ${counts[$hit]} + 1 ))
+            [ -z "${examples[$hit]}" ] && examples[$hit]="$base @ $loc: $(printf '%.240s' "$sig")"
             matched=$((matched + 1))
         else
-            echo "NOVEL signature ($(basename "$log")): $sig"
+            printf '%s @ %s: %.240s\n' "$base" "$loc" "$sig" >>"$novel_file"
             novel=$((novel + 1))
         fi
     done <"$sigs_file"
     rm -f "$sigs_file"
 done
 
+for i in "${!keys[@]}"; do
+    if [ "${counts[$i]}" -gt 0 ]; then
+        echo "WARN known-red [${keys[$i]}] x${counts[$i]}"
+        echo "     ${examples[$i]}"
+    fi
+done
+if [ -s "$novel_file" ]; then
+    echo ""
+    echo "NOVEL signatures (distinct, with occurrence counts):"
+    sort "$novel_file" | uniq -c | sort -rn | sed 's/^/  /'
+fi
+rm -f "$novel_file"
+
 echo ""
 if [ "$novel" -ne 0 ]; then
-    echo "[known-reds] FAIL: $novel novel signature(s), $matched known-red(s)."
+    echo "[known-reds] FAIL: $novel novel panic(s), $matched known-red panic(s)."
     echo "             A novel signature is a regression to triage (bug-gap-triage),"
     echo "             not a row to add to $registry."
     exit 1
 fi
-echo "[known-reds] PASS-WITH-NOTE: $matched known-red signature(s), 0 novel."
+echo "[known-reds] PASS-WITH-NOTE: $matched known-red panic(s), 0 novel."
 echo "             Registry: docs/Testing/KeystoneKnownReds.md"
