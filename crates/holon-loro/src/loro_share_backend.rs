@@ -1908,8 +1908,16 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
             let doc_arc = collab.doc();
             let doc = &*doc_arc;
             let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
+            // Name the mount's root containers BEFORE the delete: the delete
+            // cascades and a gone node no longer names its roots. Without the
+            // purge they outlive it, holding their content in the global doc's
+            // state and so in every export of it.
+            let mount_roots = crate::deleted_container_purge::subtree_roots(&tree, mount_tid)
+                .map_err(|e| err(format!("collect mount node roots to purge: {e:#}")))?;
             tree.delete(mount_tid)
                 .map_err(|e| err(format!("delete mount node {mount_block_id}: {e:#}")))?;
+            crate::deleted_container_purge::purge_roots(doc, &mount_roots)
+                .map_err(|e| err(format!("purge mount node containers: {e:#}")))?;
             doc.commit();
         }
         self.store
@@ -4624,6 +4632,57 @@ mod tests {
         assert!(
             !String::from_utf8_lossy(&bytes).contains(SHARED_SECRET),
             "the shared subtree's plaintext survived in the global doc's compacted state"
+        );
+    }
+
+    /// `unshare` deletes the mount node, so whatever containers that node owns
+    /// must go with it. Prod mount nodes carry only plain values today (writes
+    /// to a mount are rejected — see `write_to_mount_node_rejects`), so the
+    /// container here is written directly: this pins the call site's contract
+    /// rather than a reachable leak.
+    #[tokio::test]
+    async fn unshare_takes_the_mount_nodes_own_containers_with_it() {
+        const MOUNT_SECRET: &str = "MOUNT-NODE-SECRET-e402";
+
+        let (backend, _sql, _dir) = make_backend_with_sql();
+        seed_block(&backend, "root-a", None, "root-a").await;
+        seed_block(&backend, "shared-parent", Some("root-a"), "Shared heading").await;
+
+        let resp = backend
+            .share_subtree("block:shared-parent", "none".into())
+            .await
+            .unwrap();
+        let json: serde_json::Value = match resp.response.unwrap() {
+            Value::String(s) => serde_json::from_str(&s).unwrap(),
+            other => panic!("unexpected response: {other:?}"),
+        };
+        let mount_id = json["mount_block_id"].as_str().unwrap().to_string();
+
+        {
+            let collab = backend.global_doc().await.unwrap();
+            let doc_arc = collab.doc();
+            let doc = &*doc_arc;
+            let bare = mount_id.strip_prefix("block:").unwrap();
+            let mount_tid = find_tree_id_by_stable_id(doc, &EntityUri::block(bare))
+                .expect("mount node must be in the global tree after share");
+            let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
+            let meta = tree.get_meta(mount_tid).unwrap();
+            let text: loro::LoroText = meta.ensure_mergeable_text("content_raw").unwrap();
+            text.insert(0, MOUNT_SECRET).unwrap();
+            doc.commit();
+        }
+
+        backend.unshare(&mount_id).await.unwrap();
+
+        let collab = backend.global_doc().await.unwrap();
+        let doc_arc = collab.doc();
+        let doc = &*doc_arc;
+        let bytes = doc
+            .export(loro::ExportMode::shallow_snapshot(&doc.oplog_frontiers()))
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains(MOUNT_SECRET),
+            "the unshared mount node's container survived in the global doc's compacted state"
         );
     }
 }
