@@ -58,6 +58,28 @@ impl LinkTarget {
 /// unit tests / the reference model stay IO-free.
 pub const BUILT_IN_LINK_SCHEMES: &[&str] = &["block", "tag", "person"];
 
+/// The scheme half of a scheme-shaped `[[…]]` target — `cc-session` from
+/// `[[cc-session:abc]]`.
+///
+/// Minted ONLY by [`link_scheme_shape`], so holding one is proof the string
+/// already passed the RFC 3986 shape check. That turns "callers always pass a
+/// shape-validated scheme" from a comment into a compile-time fact, and stops a
+/// whole target (or a page title) being handed to a scheme lookup by mistake.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LinkScheme<'a>(&'a str);
+
+impl<'a> LinkScheme<'a> {
+    pub fn as_str(&self) -> &'a str {
+        self.0
+    }
+}
+
+impl fmt::Display for LinkScheme<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
 /// The set of entity schemes a [`LinkTargetClassifier`] resolves beyond the
 /// built-ins.
 ///
@@ -67,7 +89,7 @@ pub const BUILT_IN_LINK_SCHEMES: &[&str] = &["block", "tag", "person"];
 /// links between `Resolved` and `UnknownScheme` without a restart — and never
 /// across the page/entity boundary.
 pub trait LinkSchemeRegistry: Send + Sync {
-    fn is_registered_entity_scheme(&self, scheme: &str) -> bool;
+    fn is_registered_entity_scheme(&self, scheme: &LinkScheme<'_>) -> bool;
 }
 
 /// A fixed scheme set — the registry a test or a fixture supplies when it has
@@ -81,8 +103,8 @@ impl FixedLinkSchemes {
 }
 
 impl LinkSchemeRegistry for FixedLinkSchemes {
-    fn is_registered_entity_scheme(&self, scheme: &str) -> bool {
-        self.0.contains(scheme)
+    fn is_registered_entity_scheme(&self, scheme: &LinkScheme<'_>) -> bool {
+        self.0.contains(scheme.as_str())
     }
 }
 
@@ -120,8 +142,8 @@ impl LinkTargetClassifier {
         Self::with_registry(Arc::new(FixedLinkSchemes::new(schemes)))
     }
 
-    pub fn is_registered_entity_scheme(&self, scheme: &str) -> bool {
-        BUILT_IN_LINK_SCHEMES.contains(&scheme)
+    pub fn is_registered_entity_scheme(&self, scheme: &LinkScheme<'_>) -> bool {
+        BUILT_IN_LINK_SCHEMES.contains(&scheme.as_str())
             || self
                 .registry
                 .as_ref()
@@ -143,7 +165,7 @@ impl LinkTargetClassifier {
         // links work this way). A shaped target is never a page name, whether
         // or not its scheme happens to be registered right now.
         if let Some(scheme) = link_scheme_shape(target) {
-            return if self.is_registered_entity_scheme(scheme) {
+            return if self.is_registered_entity_scheme(&scheme) {
                 // ALLOW(entity_uri_from_raw): raw org-file wiki-link target
                 LinkTarget::Resolved(EntityUri::from_raw(target))
             } else {
@@ -208,7 +230,7 @@ impl LinkTargetClassifier {
 /// after the colon — the no-space rule is what keeps ordinary titles like
 /// `Ketosis: How to lose weight` on the page side without capitalization
 /// heuristics. Returns the scheme WITHOUT the colon.
-pub fn link_scheme_shape(target: &str) -> Option<&str> {
+pub fn link_scheme_shape(target: &str) -> Option<LinkScheme<'_>> {
     let colon = target.find(':')?;
     if target[colon + 1..].starts_with(' ') {
         return None;
@@ -220,7 +242,7 @@ pub fn link_scheme_shape(target: &str) -> Option<&str> {
     }
     chars
         .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
-        .then_some(scheme)
+        .then_some(LinkScheme(scheme))
 }
 
 /// Represents a link found in org-mode content.
@@ -331,9 +353,10 @@ impl PageId {
     fn reject_scheme_shaped(segment: &str) -> Result<(), String> {
         match link_scheme_shape(segment) {
             Some(scheme) => Err(format!(
-                "page name {segment:?} is scheme-shaped ({scheme:?} followed by ':'); that shape \
-                 is reserved for entity links like [[cc-session:abc]] — use '/' for hierarchy, or \
-                 put a space after the colon for a title"
+                "page name {segment:?} is scheme-shaped ({:?} followed by ':'); that shape is \
+                 reserved for entity links like [[cc-session:abc]] — use '/' for hierarchy, or \
+                 put a space after the colon for a title",
+                scheme.as_str()
             )),
             None => Ok(()),
         }
@@ -614,15 +637,16 @@ mod tests {
 
     #[test]
     fn scheme_shape_follows_rfc_3986() {
-        assert_eq!(link_scheme_shape("cc-session:abc"), Some("cc-session"));
-        assert_eq!(link_scheme_shape("Areas:Work"), Some("Areas"));
-        assert_eq!(link_scheme_shape("a+b.c-d:x"), Some("a+b.c-d"));
+        let shape = |t: &'static str| link_scheme_shape(t).map(|s| s.as_str());
+        assert_eq!(shape("cc-session:abc"), Some("cc-session"));
+        assert_eq!(shape("Areas:Work"), Some("Areas"));
+        assert_eq!(shape("a+b.c-d:x"), Some("a+b.c-d"));
         // No colon, colon-space, leading non-letter, and an illegal scheme char
         // are all NOT scheme-shaped.
-        assert_eq!(link_scheme_shape("Areas/Work"), None);
-        assert_eq!(link_scheme_shape("Ketosis: How to lose weight"), None);
-        assert_eq!(link_scheme_shape("1up:x"), None);
-        assert_eq!(link_scheme_shape("two words:x"), None);
+        assert_eq!(shape("Areas/Work"), None);
+        assert_eq!(shape("Ketosis: How to lose weight"), None);
+        assert_eq!(shape("1up:x"), None);
+        assert_eq!(shape("two words:x"), None);
     }
 
     #[test]

@@ -48,6 +48,7 @@ pub use trust::TrustDecision;
 pub use trust::TrustPolicy;
 pub use trust::TrustPolicyParseError;
 pub use trust::TrustRule;
+pub use type_registry::TableName;
 pub use type_registry::TypeRegistry;
 pub use type_registry::create_default_registry;
 pub use type_registry::type_profiles_from_registry;

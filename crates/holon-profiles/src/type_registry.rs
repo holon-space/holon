@@ -9,6 +9,7 @@
 //! immediately — no invalid expressions can exist in the registry.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use std::sync::RwLock;
 
@@ -20,6 +21,7 @@ use holon_api::TypeDefinition;
 /// A compiled computed field: name + pre-compiled Rhai AST.
 /// Stored in topological order (dependencies before dependents).
 pub use holon_api::entity_profile::CompiledComputedField;
+use holon_api::link_parser::LinkScheme;
 use holon_api::link_parser::LinkSchemeRegistry;
 use holon_api::link_parser::LinkTargetClassifier;
 use holon_core::util::expr_references;
@@ -53,19 +55,53 @@ impl Default for TypeRegistry {
     }
 }
 
-/// The registry IS the closed set of entity schemes a `[[…]]` target may
-/// resolve to.
+/// The key every [`TypeRegistry`] entry is stored under: the SQL table name,
+/// UNDERSCORED.
 ///
-/// Types are keyed by SQL table name (`EntityName::table_name()`, UNDERSCORED)
-/// while a URI scheme is hyphenated, so `cc-session` must be folded to
-/// `cc_session` before the lookup — otherwise every multi-word sidecar entity
-/// silently classifies as unknown-scheme.
+/// A URI scheme is HYPHENATED, so the two spellings differ for every
+/// multi-word entity and a raw-string key silently missed them. Only two
+/// constructors exist — [`TableName::of`] (from the entity's own
+/// `EntityName::table_name()`) and [`TableName::from_scheme`] (which applies
+/// the fold) — so a hyphen-keyed registration is now unrepresentable rather
+/// than merely discouraged.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TableName(String);
+
+impl TableName {
+    /// The table name an entity registers under.
+    pub fn of(entity: &holon_api::EntityName) -> Self {
+        Self(entity.table_name())
+    }
+
+    /// The table name a URI scheme maps to, folding `-` to `_`.
+    ///
+    /// Total and idempotent: `EntityName::new` normalizes `_`→`-` before
+    /// `table_name()` maps back, so every spelling of an entity — bare,
+    /// hyphenated, or prefixed — collapses to the same key this recovers.
+    pub fn from_scheme(scheme: &str) -> Self {
+        Self(scheme.replace('-', "_"))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for TableName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The registry IS the closed set of entity schemes a `[[…]]` target may
+/// resolve to. [`TableName::from_scheme`] carries the hyphen→underscore fold,
+/// so the join cannot be written wrong here.
 impl LinkSchemeRegistry for TypeRegistry {
-    fn is_registered_entity_scheme(&self, scheme: &str) -> bool {
+    fn is_registered_entity_scheme(&self, scheme: &LinkScheme<'_>) -> bool {
         self.types
             .read()
             .expect("TypeRegistry poisoned")
-            .contains_key(&scheme.replace('-', "_"))
+            .contains_key(TableName::from_scheme(scheme.as_str()).as_str())
     }
 }
 
@@ -94,13 +130,15 @@ impl TypeRegistry {
     /// Expressions are already compiled (at deserialization boundary via
     /// `CompiledExpr` serde). This method validates the topo-sort and
     /// stores the reordered definition.
+    /// The key is minted through [`TableName`], never taken raw, so a
+    /// hyphenated entity name cannot create a key no scheme lookup will find.
     pub fn register(&self, mut type_def: TypeDefinition) -> Result<()> {
         topo_sort_fields(&mut type_def);
-        let name = type_def.name.clone();
+        let key = TableName::from_scheme(&type_def.name);
         self.types
             .write()
             .expect("TypeRegistry poisoned")
-            .insert(name, type_def);
+            .insert(key.as_str().to_string(), type_def);
         Ok(())
     }
 
@@ -109,7 +147,7 @@ impl TypeRegistry {
     fn add_computed_fields(&self, entity_name: &str, fields: Vec<(String, String)>) -> Result<()> {
         let engine = RhaiEngine::new();
         let mut types = self.types.write().expect("TypeRegistry poisoned");
-        let Some(type_def) = types.get_mut(entity_name) else {
+        let Some(type_def) = types.get_mut(TableName::from_scheme(entity_name).as_str()) else {
             anyhow::bail!(
                 "TypeRegistry: cannot add computed fields to unknown entity '{entity_name}'"
             );
@@ -145,7 +183,7 @@ impl TypeRegistry {
         variants: Vec<holon_api::ProfileVariant>,
     ) -> Result<()> {
         let mut types = self.types.write().expect("TypeRegistry poisoned");
-        let Some(type_def) = types.get_mut(entity_name) else {
+        let Some(type_def) = types.get_mut(TableName::from_scheme(entity_name).as_str()) else {
             anyhow::bail!(
                 "TypeRegistry: cannot add profile variants to unknown entity '{entity_name}'"
             );
@@ -180,11 +218,14 @@ impl TypeRegistry {
     }
 
     /// Get a type definition by name.
+    ///
+    /// Accepts either spelling — table name or URI scheme — since both fold to
+    /// the one key entries are stored under.
     pub fn get(&self, name: &str) -> Option<TypeDefinition> {
         self.types
             .read()
             .expect("TypeRegistry poisoned")
-            .get(name)
+            .get(TableName::from_scheme(name).as_str())
             .cloned()
     }
 
@@ -211,7 +252,7 @@ impl TypeRegistry {
         self.types
             .read()
             .expect("TypeRegistry poisoned")
-            .get(entity_name)
+            .get(TableName::from_scheme(entity_name).as_str())
             .map(|td| {
                 td.fields
                     .iter()
@@ -224,12 +265,12 @@ impl TypeRegistry {
             .unwrap_or_default()
     }
 
-    /// Check if an entity is registered.
+    /// Check if an entity is registered. Accepts either spelling.
     pub fn contains(&self, name: &str) -> bool {
         self.types
             .read()
             .expect("TypeRegistry poisoned")
-            .contains_key(name)
+            .contains_key(TableName::from_scheme(name).as_str())
     }
 }
 
@@ -369,6 +410,48 @@ mod tests {
     use holon_api::FieldSchema;
 
     use super::*;
+
+    /// `TableName` is the ONE key form, so both spellings of an entity — the
+    /// hyphenated URI scheme and the underscored table name — must fold to the
+    /// same key. This is the join that silently dropped every multi-word
+    /// sidecar entity's links.
+    #[test]
+    fn table_name_folds_both_spellings_to_one_key() {
+        assert_eq!(
+            TableName::from_scheme("cc-session").as_str(),
+            TableName::from_scheme("cc_session").as_str(),
+            "a scheme and its table name must key the same entry"
+        );
+        assert_eq!(TableName::from_scheme("cc-session").as_str(), "cc_session");
+        // Idempotent, and single-word names are unaffected (which is exactly
+        // why a `person` fixture could not detect the broken join).
+        assert_eq!(TableName::from_scheme("person").as_str(), "person");
+        assert_eq!(
+            TableName::of(&holon_api::EntityName::new("cc_session")).as_str(),
+            TableName::from_scheme("cc-session").as_str(),
+            "EntityName::table_name() and the scheme fold must agree"
+        );
+    }
+
+    /// Registration keys through `TableName`, so an entity registered under a
+    /// HYPHENATED name is still found by its scheme lookup — a hyphen-keyed
+    /// entry cannot exist.
+    #[test]
+    fn a_hyphenated_registration_is_still_found_by_scheme() {
+        let registry = TypeRegistry::new();
+        let mut td = TypeDefinition::new("t-widget", vec![]);
+        td.primary_key = "id".to_string();
+        registry.register(td).expect("register");
+
+        assert!(
+            registry.contains("t-widget"),
+            "the hyphenated spelling must resolve"
+        );
+        assert!(
+            registry.contains("t_widget"),
+            "the underscored spelling must resolve to the SAME entry"
+        );
+    }
 
     #[test]
     fn register_and_retrieve() {
