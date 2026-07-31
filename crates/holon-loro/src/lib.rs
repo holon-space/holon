@@ -18,6 +18,7 @@ pub mod block_cell_registry;
 pub mod capability;
 pub mod consolidator;
 pub mod container_registry;
+pub mod deleted_container_purge;
 pub mod durable_state;
 
 #[cfg(all(
