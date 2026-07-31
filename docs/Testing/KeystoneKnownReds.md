@@ -35,6 +35,26 @@ markdown table separator; use character classes instead of alternation.
 | `org-blocks-ref-diverge` | known-red | `diverged from the oracle: .*"inv-blocks-match-ref/[a-z_]+".*fields diverge from reference` | `[inv-blocks-match-ref/org]` (or a sibling projection) reports `fields diverge from reference` on empty-content blocks. | Task #66 family, NEW 9. | #66 |
 | `editor-caret-mirror` | known-red | `diverged from the oracle: .*"inv-editor-caret/mirror".*Caret mismatch` | `[inv-editor-caret/mirror] Caret mismatch on <block>: reference model cursor_byte=…, SUT tracked caret=…`. | Task #66 family, NEW 10. | #66 |
 
+## Where it runs — local, not GitHub Actions
+
+The tier is a LOCAL nightly (Martin's machine or an orchestrator session). No
+scheduled workflow was added, because CI cannot currently execute the composed
+keystone at all:
+
+- `.github/workflows/ci.yml`'s `rust-checks` job runs
+  `cargo test --workspace --exclude rust_lib_holon` on `ubuntu-latest`, and
+  `pbt` IS a default feature of `holon-integration-tests`, so in principle the
+  keystone is in that job's scope.
+- In practice it never gets there. The last 200 CI runs are 200 failures; the
+  step spends ~14min compiling and then dies inside the `holon` crate's own
+  suite (`create_page_from_link`), before any `holon-integration-tests` binary
+  starts. `general_e2e_composed_pbt` appears in ZERO CI logs.
+- Full depth is hours of wall clock on top of that compile, on a 2-core runner.
+
+A scheduled job today would be a gate that never ran the keystone. Re-evaluate
+once CI is green and the runner budget is measured; until then
+`just keystone-nightly` IS the tier.
+
 ## Running the tier
 
 ```
