@@ -37,6 +37,10 @@ pub mod org_props {
     pub const SCHEDULED: &str = "scheduled";
     pub const DEADLINE: &str = "deadline";
     pub const ORG_PROPERTIES: &str = "org_properties";
+    /// JSON array of the `:PROPERTIES:` drawer keys in the order the author
+    /// wrote them, recorded at parse and replayed by the renderer. Underscore
+    /// prefix keeps it out of the drawer it describes.
+    pub const DRAWER_ORDER: &str = "_drawer_order";
 }
 
 // =============================================================================
@@ -172,12 +176,11 @@ fn format_properties_drawer(properties_json: &str) -> String {
         result.push_str(&format!(":ID: {}\n", value_str));
     }
 
-    // Render other properties (excluding ID which we already rendered).
-    // Sort by key for deterministic output — serde_json::Map uses IndexMap
-    // (preserve_order feature enabled by transitive dependency).
-    let mut sorted_props: Vec<_> = props.iter().filter(|(k, _)| k.as_str() != "ID").collect();
-    sorted_props.sort_by_key(|(a, _)| *a);
-    for (key, value) in sorted_props {
+    // Render other properties (excluding ID which we already rendered) in the
+    // JSON's own key order — serde_json::Map is an IndexMap (preserve_order
+    // enabled by a transitive dependency), and the renderer built that order
+    // from the author's drawer.
+    for (key, value) in props.iter().filter(|(k, _)| k.as_str() != "ID") {
         let value_str = match value {
             serde_json::Value::String(s) => s.clone(),
             _ => value.to_string(),
@@ -200,14 +203,13 @@ fn format_properties_drawer_without_id(properties_json: &str) -> String {
             )
         });
 
-    let mut sorted_props: Vec<_> = props.iter().filter(|(k, _)| k.as_str() != "ID").collect();
-    if sorted_props.is_empty() {
+    let drawer_props: Vec<_> = props.iter().filter(|(k, _)| k.as_str() != "ID").collect();
+    if drawer_props.is_empty() {
         return String::new();
     }
-    sorted_props.sort_by_key(|(a, _)| *a);
 
     let mut result = String::from(":PROPERTIES:\n");
-    for (key, value) in sorted_props {
+    for (key, value) in drawer_props {
         let value_str = match value {
             serde_json::Value::String(s) => s.clone(),
             _ => value.to_string(),

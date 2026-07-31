@@ -14,6 +14,24 @@ use crate::models::OrgBlockExt;
 use crate::models::ToOrg;
 use crate::models::render_document_header;
 
+/// The `:PROPERTIES:` drawer keys in the order the author wrote them, as
+/// recorded by the parser. Empty for blocks that never came from a file.
+fn authored_drawer_order(block: &Block) -> Vec<String> {
+    let Some(json) = block
+        .get_property(crate::models::org_props::DRAWER_ORDER)
+        .and_then(|v| v.as_string().map(|s| s.to_string()))
+    else {
+        return Vec::new();
+    };
+    serde_json::from_str(&json).unwrap_or_else(|e| {
+        panic!(
+            "malformed {} {json:?}: {e} — we wrote it, so a parse failure means the drawer-order \
+             carrier was corrupted in transit",
+            crate::models::org_props::DRAWER_ORDER
+        )
+    })
+}
+
 /// Render a Loro document (represented as blocks) to org-mode format.
 ///
 /// Takes a list of blocks in tree order and converts them to org-mode text.
@@ -310,11 +328,24 @@ impl OrgRenderer {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| block.id.id().to_string());
 
-            // Sort drawer properties by key for deterministic output.
+            // Order drawer properties by the sequence the author wrote them
+            // (recorded at parse in `_drawer_order`); keys the author never
+            // wrote follow, alphabetically, for determinism.
             // serde_json::Map uses IndexMap (preserve_order feature is enabled
             // by a transitive dependency), so insertion order matters.
+            // Exact spelling wins, so `:Effort:` and `:effort:` keep their own
+            // slots; the case-insensitive probe then catches the lifted keys the
+            // renderer re-spells (`:collapsed:` authored, `COLLAPSED` emitted).
+            let authored = authored_drawer_order(block);
+            let rank = |key: &str| {
+                authored
+                    .iter()
+                    .position(|k| k == key)
+                    .or_else(|| authored.iter().position(|k| k.eq_ignore_ascii_case(key)))
+                    .unwrap_or(usize::MAX)
+            };
             let mut drawer_props: Vec<_> = block.drawer_properties().into_iter().collect();
-            drawer_props.sort_by(|(a, _), (b, _)| a.cmp(b));
+            drawer_props.sort_by(|(a, _), (b, _)| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
 
             let mut org_props = serde_json::Map::new();
             org_props.insert("ID".to_string(), serde_json::Value::String(id));

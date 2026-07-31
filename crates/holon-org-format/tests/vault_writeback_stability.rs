@@ -73,16 +73,10 @@ fn changed_lines(before: &str, after: &str) -> Vec<(usize, String, String)> {
     out
 }
 
-/// Files that already moved under write-back BEFORE any inline-markup work,
-/// with the reason. Measured by A/B: with content emission reduced to raw
-/// passthrough (pre-task-#67 behavior) these same lines still differ, so they
-/// are not caused by the quoting.
-///
-/// The one entry is `:PROPERTIES:` drawer KEY ORDER —
-/// `format_properties_drawer` sorts keys while the file on disk holds them in
-/// insertion order. A different subsystem and a separate fix.
-const KNOWN_PRE_EXISTING_CHURN: &[(&str, usize)] =
-    &[("Agents/citrix/citrix-STX.BROWSER_AGENT.org", 3)];
+/// Files allowed to move under write-back, with the reason. EMPTY: the vault
+/// is byte-stable with no exceptions, and it stays that way — a file that
+/// starts moving is a regression, not a candidate for this list.
+const KNOWN_PRE_EXISTING_CHURN: &[(&str, usize)] = &[];
 
 fn pre_existing_allowance(path: &Path) -> usize {
     KNOWN_PRE_EXISTING_CHURN

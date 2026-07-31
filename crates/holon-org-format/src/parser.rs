@@ -718,6 +718,34 @@ fn process_headlines(
                 block.set_property(key, holon_api::Value::String(value.to_string()));
             }
         }
+        // Record the authored drawer key order so the renderer replays it
+        // instead of alphabetizing — a reordered drawer is pure write-back
+        // churn. `:BLOCKED-BY:` folds onto the canonical `:REQUIRES:` spelling
+        // so the slot it occupied is the one `:REQUIRES:` gets back.
+        let mut drawer_order: Vec<String> = Vec::new();
+        for (key, _) in string_properties.iter() {
+            let canonical = if key.eq_ignore_ascii_case("BLOCKED-BY") {
+                "REQUIRES".to_string()
+            } else {
+                key.clone()
+            };
+            // Exact-match dedupe: `:Effort:` and `:effort:` are DISTINCT drawer
+            // keys and both round-trip, so collapsing them by case would hand
+            // one of them the other's slot.
+            if !drawer_order.contains(&canonical) {
+                drawer_order.push(canonical);
+            }
+        }
+        if !drawer_order.is_empty() {
+            block.set_property(
+                crate::models::org_props::DRAWER_ORDER,
+                holon_api::Value::String(
+                    serde_json::to_string(&drawer_order)
+                        .expect("drawer key order is a Vec<String> — always serializable"),
+                ),
+            );
+        }
+
         // Store ID in properties (extract_properties filters it out since it's used for
         // block.id)
         block.set_property("ID", holon_api::Value::String(id.clone()));
@@ -787,11 +815,13 @@ fn extract_planning(headline: &Headline) -> (Option<String>, Option<String>) {
     (scheduled, deadline)
 }
 
-/// Extract custom properties from the property drawer (excludes :ID:).
-fn extract_properties(headline: &Headline) -> HashMap<String, String> {
+/// Extract custom properties from the property drawer (excludes :ID:), in the
+/// order the author wrote them. That order is authored data — the renderer
+/// replays it so write-back does not churn the file.
+fn extract_properties(headline: &Headline) -> Vec<(String, String)> {
     let drawer = match headline.properties() {
         Some(d) => d,
-        None => return HashMap::new(),
+        None => return Vec::new(),
     };
 
     drawer
