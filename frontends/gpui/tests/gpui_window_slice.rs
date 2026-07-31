@@ -845,6 +845,83 @@ fn painted_rows(bounds: &BoundsRegistry, marker: &str) -> Vec<(String, f32, f32)
 /// edge; anything deeper than this is real, visible overlap.
 const OVERLAP_EPSILON_PX: f32 = 1.0;
 
+/// `(y, height)` of the nearest `tree_item` ancestor — the OUTLINE ROW — above
+/// the first painted element carrying `marker`. This is the box the outline
+/// RESERVED; everything the outline lays out next starts at its bottom edge.
+fn outline_row_box(bounds: &BoundsRegistry, marker: &str) -> Option<(f32, f32)> {
+    let elements = bounds.all_elements();
+    let by_id: std::collections::HashMap<&str, _> = elements
+        .iter()
+        .map(|(id, info)| (id.as_str(), info))
+        .collect();
+
+    let (start_id, _) = elements.iter().find(|(_, i)| {
+        i.width > 1.0
+            && i.displayed_text
+                .as_deref()
+                .is_some_and(|t| t.contains(marker))
+    })?;
+
+    let mut cursor = Some(start_id.as_str());
+    let mut hops = 0;
+    while let Some(id) = cursor {
+        let info = by_id.get(id)?;
+        if info.widget_type.as_ref() == "tree_item" {
+            return Some((info.y, info.height));
+        }
+        hops += 1;
+        if hops > 24 {
+            return None;
+        }
+        cursor = info.parent_id.as_deref();
+    }
+    None
+}
+
+/// The chain of tracked ancestors above the first element whose displayed text
+/// contains `marker`, innermost first, as `widget_type[entity]@y+height`.
+///
+/// When a row paints outside the box its parent reserved, this names the exact
+/// container where the height stops agreeing — a bare "they overlap" says two
+/// boxes collide, this says which ancestor is short.
+fn ancestor_chain(bounds: &BoundsRegistry, marker: &str) -> Vec<String> {
+    let elements = bounds.all_elements();
+    let by_id: std::collections::HashMap<&str, _> = elements
+        .iter()
+        .map(|(id, info)| (id.as_str(), info))
+        .collect();
+
+    let Some((start_id, _)) = elements.iter().find(|(_, i)| {
+        i.width > 1.0
+            && i.displayed_text
+                .as_deref()
+                .is_some_and(|t| t.contains(marker))
+    }) else {
+        return vec![format!("<no painted element carrying `{marker}`>")];
+    };
+
+    let mut chain = Vec::new();
+    let mut cursor = Some(start_id.as_str());
+    // Bounded: a tracked chain deeper than this means a cycle, and printing it
+    // forever would bury the assertion it is meant to explain.
+    while let Some(id) = cursor {
+        let Some(info) = by_id.get(id) else { break };
+        chain.push(format!(
+            "{}[{}]@{:.1}+{:.1}",
+            info.widget_type,
+            info.entity_id.as_deref().unwrap_or("-"),
+            info.y,
+            info.height,
+        ));
+        if chain.len() >= 24 {
+            chain.push("…".to_string());
+            break;
+        }
+        cursor = info.parent_id.as_deref();
+    }
+    chain
+}
+
 /// A `SimUserDriver` over the booted band page — the same driver the windowed
 /// PBT loop uses, so scroll goes through production's wheel/reveal path.
 ///
@@ -929,6 +1006,14 @@ fn band_rows_do_not_overlap_the_following_sibling_row() {
         painted_rows(&page.bounds, BAND_SIBLING_CONTENT).len(),
         painted_rows(&page.bounds, BAND_PRE_MARKER).len(),
     );
+    eprintln!(
+        "[band-overlap] band row ancestors: {:#?}",
+        ancestor_chain(&page.bounds, BAND_ROW_MARKER)
+    );
+    eprintln!(
+        "[band-overlap] sibling ancestors: {:#?}",
+        ancestor_chain(&page.bounds, BAND_SIBLING_CONTENT)
+    );
     assert!(
         !band.is_empty(),
         "precondition: with the band revealed its rows must be on screen, but NO row carrying \
@@ -939,45 +1024,46 @@ fn band_rows_do_not_overlap_the_following_sibling_row() {
     );
 
     let band_bottom = band.iter().map(|(_, y, h)| y + h).fold(f32::MIN, f32::max);
-    let sibling = painted_rows(&page.bounds, BAND_SIBLING_CONTENT);
-    assert_eq!(
-        sibling.len(),
-        1,
-        "precondition: the sibling row `{BAND_SIBLING_CONTENT}` directly below the band must be on \
-         screen exactly once after being revealed, found {} — the page shape is not what this test \
-         assumes",
-        sibling.len(),
-    );
-    let (_, sibling_top, sibling_height) = sibling[0];
 
+    // THE CONTRACT. The outline row that HOLDS the band must reserve a box that
+    // contains what the band painted. Judged on the reserved box rather than on
+    // "is the next sibling below the band", because once the bug is fixed the
+    // band legitimately fills the viewport and pushes its sibling off-screen —
+    // a correct layout must not make its own oracle unsatisfiable. Everything
+    // the outline lays out after this row starts at the row's bottom edge, so
+    // this single comparison is what overlap reduces to, and it holds no matter
+    // where the viewport happens to sit.
+    let (row_y, row_h) = outline_row_box(&page.bounds, BAND_ROW_MARKER).expect(
+        "the band's painted rows must sit inside a tracked `tree_item` outline row — without one \
+         there is no reserved box to compare against and the page shape is not what this test \
+         assumes",
+    );
+    let row_bottom = row_y + row_h;
     eprintln!(
-        "[band-overlap] band rows={} y=[{:.1}..{:.1}] bottom={band_bottom:.1} sibling_top=\
-         {sibling_top:.1} sibling_height={sibling_height:.1}",
+        "[band-overlap] band rows={} painted y=[{:.1}..{band_bottom:.1}] | outline row reserved \
+         y=[{row_y:.1}..{row_bottom:.1}] ({row_h:.1}px)",
         band.len(),
         band.first().map(|r| r.1).unwrap_or(f32::NAN),
-        band.last().map(|r| r.1).unwrap_or(f32::NAN),
     );
-
-    let overlap = band_bottom - sibling_top;
     assert!(
-        overlap <= OVERLAP_EPSILON_PX,
-        "the outline placed the row FOLLOWING the nested band {overlap:.1}px INSIDE the band: the \
-         band's last painted row ends at y={band_bottom:.1} but `{BAND_SIBLING_CONTENT}` starts at \
-         y={sibling_top:.1} (band rows: {:?}). The outline reserved the height the band's row \
-         MEASURED at, not the height it PAINTED, so every following row draws on top of the \
-         band's lower rows.",
-        band.iter()
-            .map(|(t, y, h)| format!("{t}@{y:.1}+{h:.1}"))
-            .collect::<Vec<_>>(),
+        row_bottom + OVERLAP_EPSILON_PX >= band_bottom,
+        "the outline RESERVED {row_h:.1}px (y={row_y:.1}..{row_bottom:.1}) for its band row, but \
+         the band PAINTED down to y={band_bottom:.1} — short by {:.1}px. The next row starts at \
+         y={row_bottom:.1}, so it and everything after it draw on top of the band's lower rows. \
+         Band row ancestors (innermost first — the first 0-height entry is the container that \
+         drops the height): {:#?}",
+        band_bottom - row_bottom,
+        ancestor_chain(&page.bounds, BAND_ROW_MARKER),
     );
 
     // Nothing else may overlap either: within a single outline, no two painted
-    // text rows share vertical space. Catches the same defect for the band's
-    // OWN rows and for any later sibling.
+    // text rows share vertical space. Whatever of the page is on screen in this
+    // frame gets checked — the sibling included when it is visible, which is the
+    // direct reading of Martin's screenshots.
     let mut all: Vec<(String, f32, f32)> = painted_rows(&page.bounds, BAND_ROW_MARKER);
     all.extend(painted_rows(&page.bounds, BAND_PRE_MARKER));
     all.extend(painted_rows(&page.bounds, BAND_POST_MARKER));
-    all.extend(sibling);
+    all.extend(painted_rows(&page.bounds, BAND_SIBLING_CONTENT));
     all.sort_by(|a, b| a.1.total_cmp(&b.1));
     let overlaps: Vec<String> = all
         .windows(2)
@@ -1035,27 +1121,40 @@ fn page_with_a_nested_band_scrolls_to_its_last_row() {
 
     let driver = band_driver(&app, &page);
 
-    // Start at the TOP of the page: the outline may boot scrolled anywhere, and
-    // "can the last row be reached by scrolling down" is only a question once
-    // we are above it.
+    // Anchor ABOVE the last row, at the band: "can the last row be reached by
+    // scrolling down" is only a question from somewhere above it, and the band
+    // is the part of the page whose height the extent depends on. (Anchoring at
+    // the page's very first row instead leaves the band unpainted — the outline
+    // is virtualized and `band-pre-1` sits far enough above the band that the
+    // band never enters the built window.)
     page.runtime
         .block_on(async {
             driver
-                .scroll_to_entity(&holon_api::EntityUri::block("band-pre-1"))
+                .scroll_to_entity(&holon_api::EntityUri::block("band-head"))
                 .await
         })
-        .expect("reveal the first row of the page");
-    settle_to_fixed_point(
-        &mut app,
-        &page.bounds,
-        &page.runtime,
-        Duration::from_secs(30),
-    );
+        .expect("reveal the nested query band");
+    // Bounded paint-wait, same as the overlap rung: one fixed point is not
+    // enough for the reveal's scroll → mount → paint cascade to commit, and
+    // reading geometry from an in-flight frame reports an empty band as a #60
+    // regression.
+    let paint_deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < paint_deadline {
+        settle_to_fixed_point(
+            &mut app,
+            &page.bounds,
+            &page.runtime,
+            Duration::from_secs(30),
+        );
+        if !painted_rows(&page.bounds, BAND_ROW_MARKER).is_empty() {
+            break;
+        }
+    }
 
     let band = painted_rows(&page.bounds, BAND_ROW_MARKER);
     assert!(
         !band.is_empty(),
-        "precondition: with the top of the page revealed the band must paint rows, none carried \
+        "precondition: with the band revealed it must paint rows, none carried \
          `{BAND_ROW_MARKER}` while the backend holds {} matching block rows — that is a regression \
          of #60, not the scroll-extent defect this test exists for",
         page.seeded_row_count(),
@@ -1065,10 +1164,9 @@ fn page_with_a_nested_band_scrolls_to_its_last_row() {
         "precondition: `{BAND_LAST_CONTENT}` must start BELOW the fold, otherwise this test never \
          exercises scrolling — the seeded page is too short for the window"
     );
-    let top_before = painted_rows(&page.bounds, BAND_PRE_MARKER)
-        .first()
-        .map(|r| r.1)
-        .expect("precondition: the first plain row must be on screen before scrolling");
+    // Reference point for "did the wheel move anything at all", read from the
+    // band because that is what is on screen at the anchor.
+    let top_before = band[0].1;
 
     // Aim the wheel at a point provably INSIDE the main panel: the centre of a
     // row the panel actually painted. A hardcoded viewport centre would risk a
@@ -1079,10 +1177,10 @@ fn page_with_a_nested_band_scrolls_to_its_last_row() {
         .iter()
         .find_map(|(_, i)| {
             let text = i.displayed_text.as_deref()?;
-            (text.contains(BAND_PRE_MARKER) && i.width > 1.0)
+            (text.contains(BAND_ROW_MARKER) && i.width > 1.0)
                 .then(|| (i.x + i.width / 2.0, i.y + i.height / 2.0))
         })
-        .expect("precondition: a plain row must be painted to aim the wheel at");
+        .expect("precondition: a band row must be painted to aim the wheel at");
 
     let mut last_seen: Option<f32> = None;
     for step in 0..40 {
@@ -1109,7 +1207,7 @@ fn page_with_a_nested_band_scrolls_to_its_last_row() {
         }
     }
 
-    let top_after = painted_rows(&page.bounds, BAND_PRE_MARKER)
+    let top_after = painted_rows(&page.bounds, BAND_ROW_MARKER)
         .first()
         .map(|r| r.1);
     let scrolled_at_all = top_after.is_none_or(|y| (y - top_before).abs() > 1.0);
@@ -1117,10 +1215,10 @@ fn page_with_a_nested_band_scrolls_to_its_last_row() {
     assert!(
         last_seen.is_some(),
         "the page's LAST row `{BAND_LAST_CONTENT}` never became visible after 40 wheel-scrolls \
-         down (scroll moved the content at all: {scrolled_at_all}; first plain row y {top_before:.1} \
-         -> {top_after:?}). The outline's scroll extent is summed from the heights it RESERVED for \
-         its rows; the nested band paints {BAND_ROW_COUNT} rows but reserved far fewer, so the \
-         extent falls short by the difference and the rows past it are unreachable.",
+         down (scroll moved the content at all: {scrolled_at_all}; anchor band row y \
+         {top_before:.1} -> {top_after:?}). The outline's scroll extent is summed from the heights \
+         it RESERVED for its rows; if a nested band paints more than it reserved, the extent falls \
+         short by the difference and the rows past it are unreachable.",
     );
 
     eprintln!(

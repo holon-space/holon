@@ -175,6 +175,16 @@ fn build_switcher_bar(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Opti
 }
 
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
+    // A NESTED placement is one ROW of the enclosing outline: it has no
+    // definite height, so the `size_full` + absolute-slot shape below measures
+    // 0 while its content paints out of flow. The outline then advances by the
+    // headline alone and draws the next row on top of the band (bug #69). Same
+    // collapse as the two this file already documents, third context — so take
+    // the same content-height path they do.
+    if ctx.placement == crate::views::ShellPlacement::Nested {
+        return render_content_height(node, ctx);
+    }
+
     let slot = node
         .slot
         .as_ref()
