@@ -361,6 +361,14 @@ pub struct ExtractedShare {
     pub shared_tree_id: String,
     pub node_count: usize,
     pub snapshot_size: usize,
+    /// Whether the source's own copy of the shared content is unrecoverable —
+    /// true for [`HistoryRetention::None`], which discards the lineage
+    /// merge-back needs (see
+    /// [`tests::none_retention_reintegration_fails_loudly`]).
+    /// [`commit_share_prune`] purges the copy only then: under `Full`/`Since`
+    /// it is the substrate `unmount(.., Some(..))` merges the collaboration
+    /// back onto.
+    pub source_copy_is_dead: bool,
 }
 
 /// Phase A (non-destructive): fork the source doc, extract the subtree
@@ -378,6 +386,7 @@ pub fn extract_for_share(
     shared_tree_id: String,
     retention: HistoryRetention,
 ) -> Result<ExtractedShare> {
+    let source_copy_is_dead = matches!(retention, HistoryRetention::None);
     let extracted = extract_subtree(source_doc, subtree_root, retention)?;
     Ok(ExtractedShare {
         shared_doc: extracted.shared_doc,
@@ -387,16 +396,32 @@ pub fn extract_for_share(
         shared_tree_id,
         node_count: extracted.node_count,
         snapshot_size: extracted.snapshot_size,
+        source_copy_is_dead,
     })
 }
 
 /// Phase B (destructive): delete the subtree from the source doc,
 /// create a mount node at the original position, and commit the source
 /// doc. Returns the new mount node's `TreeID`.
+///
+/// When the source's copy of the shared content is dead
+/// ([`ExtractedShare::source_copy_is_dead`]) the deleted blocks' root
+/// containers are purged too: the tree delete alone leaves them alive holding
+/// the plaintext, which every later export of the source carries — including
+/// the fork a later share of an unrelated subtree is cut from, where they are
+/// no longer reachable from any node and so escape [`extract_subtree`]'s purge.
 pub fn commit_share_prune(source_doc: &LoroDoc, extracted: &ExtractedShare) -> Result<TreeID> {
     let tree = source_doc.get_tree(TREE_NAME);
+    // Name the roots BEFORE the delete: it cascades to descendants, and a gone
+    // node no longer names its roots.
+    let pruned_roots = if extracted.source_copy_is_dead {
+        crate::deleted_container_purge::subtree_roots(&tree, extracted.subtree_root_in_source)?
+    } else {
+        Vec::new()
+    };
     tree.delete(extracted.subtree_root_in_source)
         .context("Failed to delete subtree from source after extraction")?;
+    crate::deleted_container_purge::purge_roots(source_doc, &pruned_roots)?;
 
     let mount_node = create_mount_node(
         &tree,
@@ -798,6 +823,71 @@ mod tests {
         assert!(
             !rendered.contains(URL) && !rendered.contains(LABEL),
             "none-retention share leaked the pruned sibling's link payload into the raw bytes"
+        );
+    }
+
+    /// PRIVACY RUNG for the share's destructive half. `commit_share_prune`
+    /// deletes the shared subtree from the SOURCE doc, but its blocks'
+    /// mergeable children are ROOT containers: the tree delete leaves them
+    /// alive and unreachable, holding the plaintext in the source's state.
+    ///
+    /// That state is what every later export of the source reads from — most
+    /// consequentially the fork a LATER share of an unrelated subtree is cut
+    /// from, where the orphans are no longer reachable from any node and so
+    /// escape `extract_subtree`'s own purge. The first share's plaintext then
+    /// ships to the second share's recipient.
+    #[test]
+    fn commit_share_prune_leaves_no_pruned_plaintext_in_the_source_or_a_later_share() {
+        const FIRST_SECRET: &str = "FIRST-SHARE-SECRET-4a2e";
+
+        let doc = LoroDoc::new();
+        crate::loro_backend::configure_text_styles(&doc);
+        doc.set_peer_id(1).unwrap();
+        let tree = doc.get_tree(TREE_NAME);
+        tree.enable_fractional_index(0);
+
+        let doc_root = tree.create(None).unwrap();
+        let first = tree.create(doc_root).unwrap();
+        set_text(&tree, first, "first subtree heading");
+        let first_child = tree.create(first).unwrap();
+        set_text(&tree, first_child, FIRST_SECRET);
+        let second = tree.create(doc_root).unwrap();
+        set_text(&tree, second, "second subtree - shared later");
+        doc.commit();
+
+        share_subtree(
+            &doc,
+            first,
+            Some(doc_root),
+            "share-1".to_string(),
+            HistoryRetention::None,
+        )
+        .unwrap();
+
+        let source_bytes = doc
+            .export(ExportMode::shallow_snapshot(&doc.oplog_frontiers()))
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&source_bytes).contains(FIRST_SECRET),
+            "the pruned subtree's plaintext survived in the source doc's compacted state"
+        );
+
+        let later = share_subtree(
+            &doc,
+            second,
+            Some(doc_root),
+            "share-2".to_string(),
+            HistoryRetention::None,
+        )
+        .unwrap();
+        let later_bytes = later
+            .extracted
+            .shared_doc
+            .export(ExportMode::Snapshot)
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&later_bytes).contains(FIRST_SECRET),
+            "a later share of an unrelated subtree shipped the first share's plaintext"
         );
     }
 

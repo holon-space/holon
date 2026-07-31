@@ -4590,4 +4590,40 @@ mod tests {
             "snapshot resurrected after unshare (worker not dropped)"
         );
     }
+
+    /// PRIVACY RUNG at prod altitude for `commit_share_prune`. Sharing moves a
+    /// subtree out of the global doc; its blocks' content must move with it.
+    /// The global doc's compacted state is what a later share of an unrelated
+    /// subtree is forked from and what the on-disk snapshot holds.
+    #[tokio::test]
+    async fn share_subtree_leaves_no_shared_plaintext_in_the_global_doc() {
+        const SHARED_SECRET: &str = "SHARED-CHILD-SECRET-3d90";
+
+        let (backend, _sql, _dir) = make_backend_with_sql();
+        seed_block(&backend, "root-a", None, "root-a").await;
+        seed_block(&backend, "shared-parent", Some("root-a"), "Shared heading").await;
+        seed_block(
+            &backend,
+            "shared-child",
+            Some("shared-parent"),
+            SHARED_SECRET,
+        )
+        .await;
+
+        backend
+            .share_subtree("block:shared-parent", "none".into())
+            .await
+            .unwrap();
+
+        let collab = backend.global_doc().await.unwrap();
+        let doc_arc = collab.doc();
+        let doc = &*doc_arc;
+        let bytes = doc
+            .export(loro::ExportMode::shallow_snapshot(&doc.oplog_frontiers()))
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains(SHARED_SECRET),
+            "the shared subtree's plaintext survived in the global doc's compacted state"
+        );
+    }
 }
