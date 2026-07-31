@@ -7,6 +7,9 @@
 //! 2. Emphasis-shaped literals survive byte-for-byte; raw link syntax is
 //!    allowed to ADOPT into a `Link` mark (intended product behavior).
 
+use holon_api::EntityRef;
+use holon_api::InlineMark;
+use holon_api::MarkSpan;
 use holon_org_format::extract_inline_marks;
 use holon_org_format::render_lossless;
 
@@ -69,6 +72,79 @@ fn literal_shapes_round_trip_byte_identically() {
             "shape {shape:?} emitted as {emitted:?}"
         );
     }
+}
+
+/// KILL 1 (verifier round 3, from Martin's live vault — 18 occurrences of the
+/// shape). A `Verbatim` mark over raw link syntax is the store saying "this
+/// span is LITERAL TEXT, it is documentation about link syntax". Emitting
+/// `=[[uuid][Label]]=` is genuinely lossless and was byte-stable before task
+/// #67. If the expectation lets links adopt unconditionally it judges that
+/// correct emission wrong, degrades, strips the quoting — and the next cycle
+/// turns a documented example into a live link to a nonexistent page.
+#[test]
+fn verbatim_over_raw_link_syntax_stays_literal() {
+    let content = "Rule fork F5: raw link form — bare [[uuid][Label]] vs page-name sugar";
+    let literal_start = content[..content.find("[[uuid][Label]]").expect("literal is present")]
+        .chars()
+        .count();
+    let marks = vec![MarkSpan {
+        start: literal_start,
+        end: literal_start + "[[uuid][Label]]".chars().count(),
+        mark: InlineMark::Verbatim,
+    }];
+    let emitted = render_lossless(content, &marks).expect("this shape IS representable");
+    let (back, back_marks) = extract_inline_marks(&emitted);
+    assert_eq!(back, content, "emitted {emitted:?}");
+    assert!(
+        back_marks.iter().any(|m| m.mark == InlineMark::Verbatim),
+        "the protective mark must survive; got {back_marks:?}"
+    );
+    assert!(
+        !back_marks
+            .iter()
+            .any(|m| matches!(m.mark, InlineMark::Link { .. })),
+        "the literal must NOT have adopted into a link; got {back_marks:?}"
+    );
+}
+
+/// KILL 2 (verifier round 3). A `Link` mark's target exists ONLY in the mark —
+/// the content carries the label alone. Quoting a markup-shaped literal that
+/// sits INSIDE the label breaks the emission, and degrading by dropping marks
+/// then deletes the URL from disk and store, unrecoverably. Org parses no
+/// emphasis inside a link label, so the quoting has nothing to do there.
+#[test]
+fn markup_shaped_text_inside_a_link_label_keeps_the_url() {
+    let content = "the __init__ method";
+    let marks = vec![MarkSpan {
+        start: 0,
+        end: content.chars().count(),
+        mark: InlineMark::Link {
+            target: EntityRef::External {
+                url: "https://example.com".to_string(),
+            },
+            label: content.to_string(),
+        },
+    }];
+    let emitted = render_lossless(content, &marks).expect("this shape IS representable");
+    assert!(
+        emitted.contains("https://example.com"),
+        "the URL must reach disk; emitted {emitted:?}"
+    );
+    let (back, back_marks) = extract_inline_marks(&emitted);
+    assert_eq!(back, content, "emitted {emitted:?}");
+    let target = back_marks
+        .iter()
+        .find_map(|m| match &m.mark {
+            InlineMark::Link { target, .. } => Some(target),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the Link mark must survive; got {back_marks:?}"));
+    assert_eq!(
+        target,
+        &EntityRef::External {
+            url: "https://example.com".to_string()
+        }
+    );
 }
 
 #[test]

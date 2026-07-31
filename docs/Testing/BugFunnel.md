@@ -7,7 +7,7 @@ distribution steers QA investment.
 **Running distribution** (totals = archived baseline + sum of the increment log):
 
 - ENVIRONMENT: 120
-- COVERAGE: 65
+- COVERAGE: 66
 - PERCEPTION: 52
 - ORACLE: 39
 
@@ -129,6 +129,29 @@ the archived baseline):
   would-have-caught, not just green-after: against the pre-fix build the generator finds the
   corruption on case 0 and shrinks it to the minimal pair — content `"a"`, marks
   `[Bold{0,1}, Italic{0,1}]`.)
+- (+1 COVERAGE 2026-07-31: the THIRD fix for the entry above destroyed data on shapes that only a
+  REAL vault contains, found by simulating ingest->write-back over Martin's live vault. (a) The
+  expectation let raw link syntax adopt UNCONDITIONALLY, ignoring a `Verbatim` mark that says "this
+  span is literal". The vault line `Rule fork F5: raw link form — bare =[[uuid][Label]]= vs
+  page-name sugar` (18 occurrences) was therefore judged WRONG when emitted correctly, degraded,
+  lost its `=` quoting, and would next cycle have become a live link to a nonexistent page. (b) The
+  quoting pass ran inside `Link` mark spans, so `[[https://example.com][the __init__ method]]`
+  failed its check and the degraded rung — which dropped ALL marks — DELETED THE URL from disk and
+  store, unrecoverable. Root cause of both: a mark taxonomy that existed only in the author's head.
+  Now explicit as `MarkClass` on `InlineMark` (holon-api): STYLING is droppable, PROTECTIVE changes
+  what a span MEANS, DATA-BEARING carries payload stored nowhere else — so a new variant cannot
+  silently inherit the wrong policy. `expected_reparse` takes marks and suppresses adoption inside
+  non-styling spans; the ladder drops styling, then protective, and NEVER data-bearing, with every
+  rung verified against the expectation from the ORIGINAL marks (verifying against the degraded
+  mark set makes each degradation self-justifying). GAP = COVERAGE: every corpus in the repo was
+  written by someone who already knew which shapes were interesting. Closed by
+  `vault_writeback_stability.rs` — ingest->write-back over a real vault, zero changed lines — plus
+  link syntax and `Link` marks in `marked_content_strategy`. Would-have-caught: against the pre-fix
+  build the vault sim reproduces the F5 line verbatim and the generator finds it too.
+  METHOD NOTE: the round-3 PBT used the implementation's own contract function as its oracle, so
+  when that function was wrong the property stayed GREEN through both kills. The generator now
+  carries `expected_after_cycle`, computed from the segments it assembled — an oracle that asks the
+  code under test what "correct" means degrades in lockstep with it.)
 - (+1 COVERAGE 2026-07-31: an INDENTED body lost its FIRST line's indentation on every org round
   trip while later lines kept theirs, so `    a\n    b` came back `a\n    b` — silent, cumulative
   re-alignment of any indented note or code-ish body, and the doc-root preamble had the same

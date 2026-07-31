@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 // Import Block for use in extension traits (not re-exported to avoid FRB issues)
+use holon_api::MarkClass;
+use holon_api::MarkSpan;
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 use holon_api::types::ContentType;
@@ -923,61 +925,137 @@ impl ToOrg for Block {
     }
 }
 
-/// Render a text/headline `Block` to org. `identity` selects the canonical
 /// The org bytes for a block's `content` + `marks`, quoting every literal span
 /// org would otherwise eat as emphasis so the bytes parse back to what the
 /// store holds (`__default__` stays `__default__` instead of returning as
 /// `default`). Marked blocks included: the literal gaps between marks are
 /// exposed to the same loss.
 ///
-/// Degradation ladder, worst outcome last. Losing FORMATTING is a recoverable
-/// annoyance; changing CONTENT is permanent corruption, so a block that cannot
-/// be emitted with its marks is emitted WITHOUT them rather than as bytes that
-/// re-parse to different text. Every rung of the ladder is verified by
-/// `render_lossless` in its own right — none is assumed to be safe — and every
-/// rung below the first is disclosed.
+/// Degradation ladder, worst outcome last, ordered by what each rung
+/// SACRIFICES — and the order is dictated by [`MarkClass`], not by convenience:
+///
+/// 1. everything intact;
+/// 2. STYLING marks dropped — bold on a word is recoverable annoyance;
+/// 3. PROTECTIVE marks dropped too. Safe only because the check below still
+///    demands the ORIGINAL content back: if un-sealing a span would let it be
+///    reinterpreted, the quoting pass re-seals it with `=…=` and the check
+///    proves it; if it cannot, this rung is refused;
+/// 4. everything retained, emitted UNVERIFIED, loud ERROR. Reached only when a
+///    data-bearing mark cannot be re-emitted — a `Link`'s target exists nowhere
+///    but the mark, so dropping it destroys data outright while keeping it
+///    leaves every byte on disk to recover from.
+///
+/// Every rung is verified against `expected_reparse(content, ORIGINAL marks)`.
+/// Re-deriving the expectation from each rung's reduced mark set would make
+/// degradations self-justifying — dropping a `Verbatim` also drops the reason
+/// its span must stay literal.
 ///
 /// Nothing here returns `Err`: `ToOrg::to_org` and the `FileFormatAdapter`
 /// render methods are `-> String`, and this runs inside the org-sync select
 /// loop where an unwind stops write-back vault-wide until restart. Threading
 /// `Result` to a write-back gate is the follow-up.
 pub fn render_block_content(block: &Block) -> String {
-    let marks = block.marks.as_deref().unwrap_or(&[]);
-    match crate::inline_marks::render_lossless(&block.content, marks) {
-        Ok(bytes) => bytes,
-        Err(with_marks) => match crate::inline_marks::render_lossless(&block.content, &[]) {
-            Ok(bytes) => {
-                disclose_degraded_render(
-                    block,
-                    format_args!(
-                        "DROPPING {} inline mark(s) to keep the content bytes intact: {with_marks}",
-                        marks.len()
-                    ),
-                );
-                bytes
-            }
-            Err(bare) => {
-                disclose_degraded_render(
-                    block,
-                    format_args!("the content itself cannot be quoted, writing it RAW: {bare}"),
-                );
-                block.content.clone()
-            }
-        },
-    }
+    render_block_content_checked(block).0
 }
 
-/// Loud once per block per process, quiet after. A block whose marks cross is
-/// re-rendered on every write-back pass, so an unconditional ERROR would bury
-/// the log — but the first occurrence must be impossible to miss.
-fn disclose_degraded_render(block: &Block, detail: std::fmt::Arguments) {
-    static SEEN: std::sync::OnceLock<std::sync::Mutex<HashSet<String>>> =
+/// What [`render_block_content`] had to give up. `ContentUnpreserved` is the
+/// one outcome a caller must never treat as routine: the emitted bytes do NOT
+/// re-parse to the stored content. It is also the hook a write-back gate needs
+/// to quarantine the file instead of writing it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderFidelity {
+    Exact,
+    StylingDropped,
+    ProtectiveDropped,
+    ContentUnpreserved,
+}
+
+/// [`render_block_content`] with the rung it landed on.
+pub fn render_block_content_checked(block: &Block) -> (String, RenderFidelity) {
+    let marks = block.marks.as_deref().unwrap_or(&[]);
+    let contract = crate::inline_marks::expected_reparse(&block.content, marks);
+    let render =
+        |emit: &[MarkSpan]| crate::inline_marks::render_expecting(&block.content, emit, &contract);
+
+    let intact = match render(marks) {
+        Ok(bytes) => return (bytes, RenderFidelity::Exact),
+        Err(e) => e,
+    };
+
+    let keep = |class: &[MarkClass]| -> Vec<MarkSpan> {
+        marks
+            .iter()
+            .filter(|m| class.contains(&m.mark.class()))
+            .cloned()
+            .collect()
+    };
+    for (retained, reason, fidelity, what) in [
+        (
+            keep(&[MarkClass::Protective, MarkClass::DataBearing]),
+            DegradeReason::StylingDropped,
+            RenderFidelity::StylingDropped,
+            "styling",
+        ),
+        (
+            keep(&[MarkClass::DataBearing]),
+            DegradeReason::ProtectiveDropped,
+            RenderFidelity::ProtectiveDropped,
+            "styling and protective",
+        ),
+    ] {
+        if retained.len() == marks.len() {
+            continue;
+        }
+        if let Ok(bytes) = render(&retained) {
+            disclose_degraded_render(
+                block,
+                reason,
+                format_args!(
+                    "DROPPING {} {what} mark(s) — the content bytes and every link target are \
+                     kept: {intact}",
+                    marks.len() - retained.len()
+                ),
+            );
+            return (bytes, fidelity);
+        }
+    }
+
+    disclose_degraded_render(
+        block,
+        DegradeReason::Unrepresentable,
+        format_args!(
+            "no emission preserves this block's content; writing the fully marked form UNVERIFIED \
+             so no link target is destroyed: {intact}"
+        ),
+    );
+    (
+        crate::inline_marks::render_inline_marks(&block.content, marks),
+        RenderFidelity::ContentUnpreserved,
+    )
+}
+
+/// Why a block degraded. Keyed alongside the block id so a block that later
+/// degrades for a DIFFERENT reason gets its own loud first report instead of
+/// being silenced by an earlier, unrelated one.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum DegradeReason {
+    StylingDropped,
+    ProtectiveDropped,
+    Unrepresentable,
+}
+
+/// Loud once per (block, reason) per process, quiet after. A block whose marks
+/// cross is re-rendered on every write-back pass, so an unconditional ERROR
+/// would bury the log — but each distinct first occurrence must be impossible
+/// to miss.
+fn disclose_degraded_render(block: &Block, reason: DegradeReason, detail: std::fmt::Arguments) {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<HashSet<(String, DegradeReason)>>> =
         std::sync::OnceLock::new();
     let first = SEEN
         .get_or_init(|| std::sync::Mutex::new(HashSet::new()))
         .lock()
         .expect("degraded-render disclosure set poisoned")
-        .insert(block.id.as_str().to_string());
+        .insert((block.id.as_str().to_string(), reason));
     if first {
         tracing::error!(
             block = block.id.as_str(),

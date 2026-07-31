@@ -26,6 +26,7 @@
 use holon_api::EntityRef;
 use holon_api::EntityUri;
 use holon_api::InlineMark;
+use holon_api::MarkClass;
 use holon_api::MarkSpan;
 use holon_api::link_parser::LinkTarget;
 use holon_api::link_parser::classify_link;
@@ -73,20 +74,35 @@ const QUOTE_DELIMS: [char; 2] = ['=', '~'];
 /// The contract — the store→disk invariant this crate must not violate — is
 /// stated by [`expected_reparse`]: parsing the returned bytes reproduces every
 /// literal byte of `content`, with raw link syntax allowed to adopt into a
-/// `Link` mark (that adoption is intended product behavior, not loss).
-/// Emphasis-shaped literals must survive byte-for-byte, which they do by being
-/// wrapped in `=…=`; re-parsing gives them a `Verbatim` mark, and content plus
-/// that mark re-renders to the same bytes — a fixed point after one cycle.
+/// `Link` mark (that adoption is intended product behavior, not loss) UNLESS a
+/// protective or data-bearing mark already covers it.
 ///
 /// The check is TOTAL: it runs on the fully emitted string for every input,
 /// marks or no marks, with no shape short-circuiting it. `Err` means the
 /// content defeats both quote delimiters; the caller must disclose rather than
 /// write bytes known to be lossy.
 pub fn render_lossless(content: &str, marks: &[MarkSpan]) -> anyhow::Result<String> {
-    let expected = expected_reparse(content);
-    let spans = unprotected_markup_spans(content, marks);
+    render_expecting(content, marks, &expected_reparse(content, marks))
+}
+
+/// [`render_lossless`] with the expectation supplied separately, so a degraded
+/// emission can be judged against what the block ORIGINALLY meant.
+///
+/// This separation is the whole point. Degrading changes `emit_marks`, and
+/// `expected_reparse` reads marks — so re-deriving the expectation from the
+/// reduced set would make every degradation self-justifying. Dropping a
+/// `Verbatim` that seals `[[uuid][Label]]`, for instance, also drops the reason
+/// that span must not adopt, and the check would wave through the very link
+/// adoption the mark existed to prevent.
+pub(crate) fn render_expecting(
+    content: &str,
+    emit_marks: &[MarkSpan],
+    expected: &str,
+) -> anyhow::Result<String> {
+    let emit_marks = &drop_duplicate_protective_marks(emit_marks);
+    let spans = quotable_markup_spans(content, emit_marks);
     for delim in QUOTE_DELIMS {
-        let (quoted, shifted) = quote_spans(content, &spans, delim, marks);
+        let (quoted, shifted) = quote_spans(content, &spans, delim, emit_marks);
         let candidate = render_inline_marks(&quoted, &shifted);
         if extract_inline_marks(&candidate).0 == expected {
             return Ok(candidate);
@@ -94,24 +110,105 @@ pub fn render_lossless(content: &str, marks: &[MarkSpan]) -> anyhow::Result<Stri
     }
     anyhow::bail!(
         "no delimiter in {QUOTE_DELIMS:?} quotes the markup-shaped spans {spans:?} of content \
-         {content:?} (marks {marks:?}) back to {expected:?}"
+         {content:?} (marks {emit_marks:?}) back to {expected:?}"
     )
 }
 
-/// The parse-back form the render half is contractually required to produce.
+/// The parse-back form the render half is contractually required to produce —
+/// THE contract, in one function, so tests can assert against it directly
+/// rather than restating it (and drifting from it).
 ///
-/// Derived from the parser itself — the same walk as [`extract_inline_marks`],
-/// only emphasis nodes keep their source bytes instead of being stripped. So
-/// the two agree on every non-emphasis construct by construction, and the
-/// policy difference between them is the whole policy: **links adopt, emphasis
-/// stays literal**.
-fn expected_reparse(text: &str) -> String {
-    let mut state = ExtractState {
-        keep_emphasis_raw: true,
-        ..ExtractState::default()
-    };
-    walk_node(&parse_inline(text), &mut state);
-    state.out
+/// The ONLY transformation allowed between stored content and re-parsed
+/// content is **link adoption**: raw `[[…]]` syntax sitting in plain content
+/// becomes a `Link` mark, and the content keeps just the label. Everything
+/// else — emphasis-shaped text above all — must come back byte-identical.
+///
+/// Adoption is suppressed inside any span already covered by a protective or
+/// data-bearing mark, because for those spans the store has ALREADY said what
+/// the bytes mean. A `Verbatim` over `[[uuid][Label]]` says "this is literal
+/// text"; letting it adopt would silently convert a documented example into a
+/// live link to a page that does not exist. A `Link`'s own span holds its
+/// label, which org never re-parses.
+pub fn expected_reparse(content: &str, marks: &[MarkSpan]) -> String {
+    let sealed = sealed_char_ranges(marks);
+    let mut out = String::with_capacity(content.len());
+    let mut cursor = 0usize;
+    for (range, adopted) in link_adoptions(content) {
+        let start = content[..range.start].chars().count();
+        let end = content[..range.end].chars().count();
+        if sealed.iter().any(|(s, e)| *s <= start && end <= *e) {
+            continue;
+        }
+        out.push_str(&content[cursor..range.start]);
+        out.push_str(&adopted);
+        cursor = range.end;
+    }
+    out.push_str(&content[cursor..]);
+    out
+}
+
+/// Collapse repeated identical PROTECTIVE marks to one.
+///
+/// "This span is literal" said twice says nothing more than said once, and the
+/// doubled delimiters do not survive: `==x==` re-parses to the content `=x=`,
+/// gaining bytes. Styling marks are left alone — a repeated `Underline` is how
+/// org encodes the doubled `__x__` form, where the second pair is real syntax
+/// rather than a restatement.
+fn drop_duplicate_protective_marks(marks: &[MarkSpan]) -> Vec<MarkSpan> {
+    let mut seen: Vec<&MarkSpan> = Vec::new();
+    let mut kept = Vec::with_capacity(marks.len());
+    for m in marks {
+        let redundant = m.mark.class() == MarkClass::Protective
+            && seen
+                .iter()
+                .any(|s| s.start == m.start && s.end == m.end && s.mark == m.mark);
+        if !redundant {
+            seen.push(m);
+            kept.push(m.clone());
+        }
+    }
+    kept
+}
+
+/// Char ranges the store has already assigned a meaning to, so the renderer
+/// must not let the parser reinterpret them: protective marks (the span is
+/// literal) and data-bearing marks (the span is a link's label).
+fn sealed_char_ranges(marks: &[MarkSpan]) -> Vec<(usize, usize)> {
+    marks
+        .iter()
+        .filter(|m| m.mark.class() != MarkClass::Styling)
+        .map(|m| (m.start, m.end))
+        .collect()
+}
+
+/// Every raw link literal in `content`, as `(source byte range, adopted
+/// label)` — what that link would contribute to the content if the parser
+/// were allowed to adopt it.
+fn link_adoptions(content: &str) -> Vec<(std::ops::Range<usize>, String)> {
+    let mut found = Vec::new();
+    collect_link_nodes(&parse_inline(content), &mut found);
+    found
+        .into_iter()
+        .map(|range| {
+            let adopted = extract_inline_marks(&content[range.clone()]).0;
+            (range, adopted)
+        })
+        .collect()
+}
+
+fn collect_link_nodes(node: &SyntaxNode, found: &mut Vec<std::ops::Range<usize>>) {
+    for child in node.children() {
+        match inline_mark_kind(child.kind()) {
+            Some(MarkKindHint::Link) => {
+                let range = child.text_range();
+                found.push(usize::from(range.start())..usize::from(range.end()));
+            }
+            // An emphasis node's bytes stay literal, so a link nested inside
+            // one never adopts either.
+            Some(_) => {}
+            None => collect_link_nodes(&child, found),
+        }
+    }
 }
 
 /// Quote each span of `content` in `delim`, returning the quoted text and
@@ -164,20 +261,23 @@ fn quote_spans(
 }
 
 /// The markup-shaped spans of `content` that still need quoting: everything
-/// [`markup_source_spans`] found, minus what an existing Verbatim or Code mark
-/// already covers. Those two marks emit their own `=…=` / `~…~` delimiters, so
-/// quoting inside them would double the delimiters and corrupt the span.
-fn unprotected_markup_spans(content: &str, marks: &[MarkSpan]) -> Vec<std::ops::Range<usize>> {
-    let protecting: Vec<&MarkSpan> = marks
-        .iter()
-        .filter(|m| matches!(m.mark, InlineMark::Verbatim | InlineMark::Code))
-        .collect();
+/// [`markup_source_spans`] found, minus whatever a non-styling mark already
+/// covers.
+///
+/// Both exclusions are necessary, for different reasons:
+/// - PROTECTIVE marks emit their own `=…=` / `~…~`, so quoting inside one
+///   doubles the delimiters and corrupts the span.
+/// - DATA-BEARING marks hold a link label, and org parses no emphasis inside a
+///   link label. Quoting there adds `=` bytes to the LABEL, which then fails
+///   the check and costs the block its URL on the degraded rung.
+fn quotable_markup_spans(content: &str, marks: &[MarkSpan]) -> Vec<std::ops::Range<usize>> {
+    let sealed = sealed_char_ranges(marks);
     markup_source_spans(content)
         .into_iter()
         .filter(|span| {
             let start = content[..span.start].chars().count();
             let end = content[..span.end].chars().count();
-            !protecting.iter().any(|m| m.start <= start && end <= m.end)
+            !sealed.iter().any(|(s, e)| *s <= start && end <= *e)
         })
         .collect()
 }
@@ -977,7 +1077,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("render_lossless({content:?}, {marks:?}) bailed: {e}"));
         assert_eq!(
             extract_inline_marks(&emitted).0,
-            expected_reparse(content),
+            expected_reparse(content, marks),
             "content {content:?} marks {marks:?} emitted {emitted:?}"
         );
         emitted

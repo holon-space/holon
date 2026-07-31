@@ -25,6 +25,7 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 
 use holon_api::ContentType;
+use holon_api::EntityRef;
 use holon_api::InlineMark;
 use holon_api::MarkSpan;
 use holon_api::Priority;
@@ -305,6 +306,17 @@ pub fn valid_body() -> impl Strategy<Value = String> {
 pub struct MarkedContent {
     pub content: String,
     pub marks: Vec<MarkSpan>,
+    /// What `content` must look like after ONE store→disk→store cycle, derived
+    /// HERE from the segments this strategy assembled — never by asking the
+    /// renderer what it thinks the answer is.
+    ///
+    /// The independence is the point. An oracle that calls the code under test
+    /// to decide what is correct degrades in lockstep with it: a renderer whose
+    /// notion of "allowed" silently widens takes the oracle with it and the
+    /// property stays green through the regression. This field is computed from
+    /// the generator's own knowledge — it KNOWS which segments it made out of
+    /// raw link syntax and what each one's label is.
+    pub expected_after_cycle: String,
 }
 
 /// Where a generated mark sits relative to a markup-shaped literal in the
@@ -329,15 +341,41 @@ enum MarkGeometry {
     Whole,
 }
 
+/// Every mark class, because they are NOT interchangeable under degradation:
+/// styling is droppable, protective changes what a span MEANS, and a `Link`
+/// carries a target that exists nowhere else in the block.
 fn mark_kind_strategy() -> impl Strategy<Value = InlineMark> {
     prop_oneof![
-        Just(InlineMark::Bold),
-        Just(InlineMark::Italic),
-        Just(InlineMark::Underline),
-        Just(InlineMark::Verbatim),
-        Just(InlineMark::Code),
-        Just(InlineMark::Strike),
+        4 => prop_oneof![
+            Just(InlineMark::Bold),
+            Just(InlineMark::Italic),
+            Just(InlineMark::Underline),
+            Just(InlineMark::Strike),
+        ],
+        3 => prop_oneof![Just(InlineMark::Verbatim), Just(InlineMark::Code)],
+        3 => link_mark_strategy(),
     ]
+}
+
+/// `Link` marks with real targets — the data-bearing class. The label is left
+/// empty-ish on purpose: the renderer derives the emitted label from the
+/// content span, and a mismatch between the two is itself worth exercising.
+fn link_mark_strategy() -> impl Strategy<Value = InlineMark> {
+    prop_oneof![
+        Just(EntityRef::External {
+            url: "https://example.com/page".to_string()
+        }),
+        Just(EntityRef::Internal {
+            id: EntityUri::block("550e8400-e29b-41d4-a716-446655440000")
+        }),
+        Just(EntityRef::Name {
+            name: "Some Page".to_string()
+        }),
+    ]
+    .prop_map(|target| InlineMark::Link {
+        target,
+        label: String::new(),
+    })
 }
 
 /// Content built from alternating plain and markup-shaped segments, paired
@@ -345,8 +383,20 @@ fn mark_kind_strategy() -> impl Strategy<Value = InlineMark> {
 /// geometries above.
 pub fn marked_content_strategy() -> impl Strategy<Value = MarkedContent> {
     let segment = prop_oneof![
-        2 => "[a-z]{1,6}".prop_map(|w| (w, false)),
-        3 => markup_shaped_literal().prop_map(|w| (w, true)),
+        2 => "[a-z]{1,6}".prop_map(|w| (w, false, None)),
+        3 => markup_shaped_literal().prop_map(|w| (w, true, None)),
+        // RAW link syntax sitting in the content. Whether this adopts into a
+        // Link mark depends on whether a protective mark covers it, so it must
+        // be reachable as an anchor for the mark geometries below.
+        2 => prop_oneof![
+            Just(("[[Some Page]]".to_string(), Some("Some Page".to_string()))),
+            Just(("[[https://example.com][label]]".to_string(), Some("label".to_string()))),
+            Just(("[[uuid][Label]]".to_string(), Some("Label".to_string()))),
+            Just((
+                "[[https://example.com][the __init__ method]]".to_string(),
+                Some("the __init__ method".to_string()),
+            )),
+        ].prop_map(|(w, adopted)| (w, true, adopted)),
     ];
     let geometry = prop_oneof![
         // Co-extensive and crossing are the two that break naive renderers;
@@ -369,33 +419,34 @@ pub fn marked_content_strategy() -> impl Strategy<Value = MarkedContent> {
         .prop_map(|(segments, mark_specs)| {
             let content = segments
                 .iter()
-                .map(|(text, _)| text.as_str())
+                .map(|(text, _, _)| text.as_str())
                 .collect::<Vec<_>>()
                 .join(" ");
             let total = content.chars().count();
             // Char range of every segment, and of the literal ones alone.
             let mut ranges = Vec::new();
             let mut cursor = 0usize;
-            for (text, is_literal) in &segments {
+            for (text, is_literal, adopted) in &segments {
                 let len = text.chars().count();
-                ranges.push((cursor, cursor + len, *is_literal));
+                ranges.push((cursor, cursor + len, *is_literal, adopted.clone()));
                 cursor += len + 1;
             }
             let literals: Vec<(usize, usize)> = ranges
                 .iter()
-                .filter(|(_, _, is_literal)| *is_literal)
-                .map(|(s, e, _)| (*s, *e))
+                .filter(|(_, _, is_literal, _)| *is_literal)
+                .map(|(s, e, _, _)| (*s, *e))
                 .collect();
-            let anchors = if literals.is_empty() {
-                ranges.iter().map(|(s, e, _)| (*s, *e)).collect()
+            let anchors: Vec<(usize, usize)> = if literals.is_empty() {
+                ranges.iter().map(|(s, e, _, _)| (*s, *e)).collect()
             } else {
                 literals
             };
 
-            let marks = mark_specs
+            let marks: Vec<MarkSpan> = mark_specs
                 .into_iter()
                 .filter_map(|(geometry, kind, idx)| {
-                    let (start, end) = anchors[idx.index(anchors.len())];
+                    let anchor_idx = idx.index(anchors.len());
+                    let (start, end) = anchors[anchor_idx];
                     let (s, e) = match geometry {
                         MarkGeometry::CoExtensive => (start, end),
                         MarkGeometry::BoundaryBefore => (start.saturating_sub(3), start),
@@ -407,14 +458,68 @@ pub fn marked_content_strategy() -> impl Strategy<Value = MarkedContent> {
                         MarkGeometry::Crossing => (start, start + (end - start) / 2),
                         MarkGeometry::Whole => (0, total),
                     };
-                    (s < e && e <= total).then(|| MarkSpan {
+                    if s >= e || e > total {
+                        return None;
+                    }
+                    // A stored `Link` span IS a parsed label: plain text, already
+                    // trimmed by org, and never overlapping raw link syntax —
+                    // that syntax would have BECOME the mark, not sat inside it.
+                    // Checked on the FINAL span: the geometry above, not the
+                    // anchor, decides where the mark actually lands.
+                    if matches!(kind, InlineMark::Link { .. }) {
+                        let label: String = content.chars().skip(s).take(e - s).collect();
+                        let overlaps_raw_link = ranges
+                            .iter()
+                            .any(|(rs, re, _, adopted)| adopted.is_some() && s < *re && *rs < e);
+                        if label.trim() != label || overlaps_raw_link {
+                            return None;
+                        }
+                    }
+                    Some(MarkSpan {
                         start: s,
                         end: e,
                         mark: kind,
                     })
                 })
                 .collect();
-            MarkedContent { content, marks }
+            // A raw-link segment adopts UNLESS a non-styling mark covers it:
+            // protective says "this is literal", data-bearing says "this span
+            // is already a link's label". Both are decided from the generated
+            // structure, with no help from the renderer.
+            let sealed: Vec<(usize, usize)> = marks
+                .iter()
+                .filter(|m| {
+                    !matches!(
+                        m.mark,
+                        InlineMark::Bold
+                            | InlineMark::Italic
+                            | InlineMark::Underline
+                            | InlineMark::Strike
+                            | InlineMark::Sub
+                            | InlineMark::Super
+                    )
+                })
+                .map(|m| (m.start, m.end))
+                .collect();
+            let expected_after_cycle = ranges
+                .iter()
+                .map(|(start, end, _, adopted)| match adopted {
+                    Some(label) if !sealed.iter().any(|(s, e)| *s <= *start && *end <= *e) => {
+                        label.clone()
+                    }
+                    _ => content
+                        .chars()
+                        .skip(*start)
+                        .take(*end - *start)
+                        .collect::<String>(),
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            MarkedContent {
+                content,
+                marks,
+                expected_after_cycle,
+            }
         })
 }
 

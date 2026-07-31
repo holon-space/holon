@@ -75,7 +75,46 @@ pub enum InlineMark {
     Super,
 }
 
+/// What a mark MEANS, and therefore what a renderer is allowed to do with it
+/// when it cannot emit the block perfectly. The three classes are not
+/// interchangeable and the difference is not cosmetic:
+///
+/// - [`Styling`](MarkClass::Styling) decorates text that reads the same without
+///   it.
+/// - [`Protective`](MarkClass::Protective) is a claim ABOUT the text — "this
+///   span is literal". Dropping it does not lose decoration, it un-protects the
+///   span, so the next parse reinterprets those bytes as live markup.
+/// - [`DataBearing`](MarkClass::DataBearing) holds payload that exists NOWHERE
+///   else. A `Link`'s target lives only in the mark; the content carries the
+///   label alone. Dropping it deletes data outright.
+///
+/// Written as a classification on the type rather than as conditions at each
+/// call site so a new `InlineMark` variant cannot silently inherit the wrong
+/// policy — the match below stops compiling until it is classified.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkClass {
+    Styling,
+    Protective,
+    DataBearing,
+}
+
 impl InlineMark {
+    /// This mark's [`MarkClass`] — see that type for what each class permits.
+    pub fn class(&self) -> MarkClass {
+        match self {
+            InlineMark::Bold
+            | InlineMark::Italic
+            | InlineMark::Strike
+            | InlineMark::Underline
+            | InlineMark::Sub
+            | InlineMark::Super => MarkClass::Styling,
+            // Org parses no emphasis and no link syntax inside these.
+            InlineMark::Code | InlineMark::Verbatim => MarkClass::Protective,
+            // The target string is not recoverable from the content.
+            InlineMark::Link { .. } => MarkClass::DataBearing,
+        }
+    }
+
     /// The mark "key" used as the Loro `config_text_style` map key. Keys must
     /// be stable across versions because they're embedded in the persisted
     /// Loro document.

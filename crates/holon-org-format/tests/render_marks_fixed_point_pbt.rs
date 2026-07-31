@@ -14,8 +14,10 @@ use holon_api::InlineMark;
 use holon_api::MarkSpan;
 use holon_api::block::Block;
 use holon_block_roundtrip_testing::marked_content_strategy;
+use holon_org_format::RenderFidelity;
+use holon_org_format::expected_reparse;
 use holon_org_format::extract_inline_marks;
-use holon_org_format::render_block_content;
+use holon_org_format::render_block_content_checked;
 use proptest::prelude::*;
 
 /// Render → parse → render → parse, through the PROD emit path
@@ -23,6 +25,20 @@ use proptest::prelude::*;
 /// degradation ladder is part of what has to reach a fixed point. Returns the
 /// settled `(bytes, content)`; panics with the full trace when a cycle moves.
 fn assert_fixed_point(content: &str, marks: &[MarkSpan], cycles: usize) -> (String, String) {
+    assert_fixed_point_against(content, marks, cycles, None)
+}
+
+/// `expected_first_cycle` is an INDEPENDENT oracle — the generator's own view
+/// of what one cycle must produce. When it is `None` the crate's contract
+/// function stands in, which is fine for hand-written cases whose answer is
+/// obvious, but useless as a regression net: an oracle that asks the code under
+/// test what "correct" means goes wrong in lockstep with it.
+fn assert_fixed_point_against(
+    content: &str,
+    marks: &[MarkSpan],
+    cycles: usize,
+    expected_first_cycle: Option<&str>,
+) -> (String, String) {
     let mut state = (content.to_string(), marks.to_vec());
     let mut history: Vec<(String, String, Vec<MarkSpan>)> = Vec::new();
     for cycle in 0..cycles {
@@ -32,13 +48,28 @@ fn assert_fixed_point(content: &str, marks: &[MarkSpan], cycles: usize) -> (Stri
             &state.0,
         );
         block.marks = Some(state.1.clone());
-        let emitted = render_block_content(&block);
+        let (emitted, fidelity) = render_block_content_checked(&block);
         let (next_content, next_marks) = extract_inline_marks(&emitted);
-        assert_eq!(
-            next_content, state.0,
-            "cycle {cycle}: content CHANGED across one store→disk→store cycle.\nemitted \
-             {emitted:?}\nhistory: {history:#?}"
-        );
+        // The contract, not a restatement of it: content may differ from the
+        // stored bytes ONLY by link adoption, and only where no protective or
+        // data-bearing mark has already sealed the span.
+        //
+        // `ContentUnpreserved` is the one exemption, and it is not a loophole:
+        // it means every rung of the ladder REFUSED, i.e. org genuinely cannot
+        // express this state (a data-bearing mark strictly inside a markup
+        // literal, say). Reaching it is loudly disclosed in prod; silently
+        // reaching it here would be the bug, so the fidelity must say so.
+        if fidelity != RenderFidelity::ContentUnpreserved {
+            let oracle = match (cycle, expected_first_cycle) {
+                (0, Some(independent)) => independent.to_string(),
+                _ => expected_reparse(&state.0, &state.1),
+            };
+            assert_eq!(
+                next_content, oracle,
+                "cycle {cycle}: content changed in a way the contract does not allow (fidelity \
+                 {fidelity:?}).\nemitted {emitted:?}\nhistory: {history:#?}"
+            );
+        }
         history.push((emitted, next_content.clone(), next_marks.clone()));
         state = (next_content, next_marks);
     }
@@ -121,6 +152,11 @@ proptest! {
 
     #[test]
     fn any_generated_store_state_reaches_a_fixed_point(state in marked_content_strategy()) {
-        assert_fixed_point(&state.content, &state.marks, 3);
+        assert_fixed_point_against(
+            &state.content,
+            &state.marks,
+            3,
+            Some(&state.expected_after_cycle),
+        );
     }
 }
