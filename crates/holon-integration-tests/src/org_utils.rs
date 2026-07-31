@@ -133,19 +133,13 @@ pub fn serialize_block_recursive(
         headline.push_str(&format!("[#{}] ", priority.to_letter()));
     }
 
-    // Rich text: project the mark set back into org delimiters exactly as
-    // production's renderer does (`holon_org_format::models::
-    // render_headline_block`). Rendering `block.content` raw instead would write
-    // a file whose text has LOST every link/emphasis the block carries, so the
-    // SQL re-render never matches disk again — `inv-org-render-fixed-point`
-    // reports a permanent echo-loop and `inv-blocks-match-ref/org` a marks
-    // divergence, neither of which the mutation being simulated asked for.
-    let marks_rendered: Option<String> = block
-        .marks
-        .as_ref()
-        .filter(|m| !m.is_empty())
-        .map(|m| holon_orgmode::inline_marks::render_inline_marks(&block.content, m));
-    let content_text: &str = marks_rendered.as_deref().unwrap_or(&block.content);
+    // The block's org bytes come from the SAME entry point production's
+    // write-back uses (`OrgRenderer` → `Block::to_org` → `render_headline_block`
+    // → `render_block_content`), so this serializer inherits the checked
+    // degradation ladder — mark projection AND the verbatim-quoting of
+    // markup-shaped literals. Re-deriving the text here instead makes the
+    // harness's expected file disagree with what prod actually writes.
+    let content_text = holon_orgmode::models::render_block_content(block);
 
     // Only the first line is the org headline; subsequent lines are body
     // text that must come AFTER the :PROPERTIES: drawer (otherwise the parser

@@ -21,6 +21,24 @@ header against the log.
 Increment log (append-only, NEWEST FIRST — each counted bug adds exactly one line here;
 merge conflicts resolve by keeping both sides' lines and re-summing the totals ON TOP OF
 the archived baseline):
+- (+1 ENVIRONMENT 2026-07-31, secondary COVERAGE: the keystone harness's org serializer
+  (`serialize_block_recursive`, `crates/holon-integration-tests/src/org_utils.rs`) RE-IMPLEMENTED
+  block-content emission instead of calling prod's. It projected marks with the INNER
+  `render_inline_marks` and otherwise wrote `block.content` raw, while prod's write-back
+  (`WritebackRenderer::render_blocks` → `OrgRenderer::render_walk` → `Block::to_org` →
+  `render_headline_block` → `render_block_content`) goes through the checked degradation ladder,
+  which also verbatim-quotes markup-shaped literals. A block whose content is `__default__` with no
+  marks therefore reached disk as `=__default__=` from prod and as `__default__` from the harness —
+  and the harness form does not round-trip (it re-parses as `default` + Underline marks), so any
+  transition that rewrote a whole doc through the harness silently corrupted content the SUT held
+  correctly. ENVIRONMENT: the harness ran a DIFFERENT renderer than prod; every ladder change landed
+  the divergence again. Secondary COVERAGE: generated content is pre-normalized to the org round-trip
+  fixed point (`normalize_content_for_org_roundtrip`), so a store block holding a markup-shaped
+  literal with NO marks is not currently generatable — which is why no case ever hit it. Found by
+  review, not by a test. FIXED: the serializer now calls `holon_orgmode::models::render_block_content`
+  — the same entry point prod's write-back uses; pinned by
+  `crates/holon-integration-tests/tests/org_serializer_prod_content_parity.rs`, which asserts
+  headline parity with prod AND content round-trip.)
 - (+1 ORACLE 2026-07-31, secondary ENVIRONMENT: `test_platform_geometry_determinism::
   test_platform_geometry_is_real_and_deterministic` is FLAKY on unmodified main — measured 2
   failures in 6 consecutive runs with no source change. Always the same signature: boot 0 records 99
