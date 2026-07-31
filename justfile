@@ -138,6 +138,50 @@ hand-authored *FLAGS:
 keystone-full cases='16':
     just pbt general {{cases}}
 
+# Nightly full-depth keystone tier — LOCAL, not CI.
+#
+# The per-weave gate stays `keystone-smoke` (ONE case). This tier runs the
+# keystone at full depth N times serialized and judges the result against
+# docs/Testing/KeystoneKnownReds.md: a failure whose signature matches a
+# registered known red is a WARN (exit 0); ANY other signature exits non-zero.
+#
+# LOCAL nightly (Martin's machine / an orchestrator session), deliberately NOT a
+# GitHub Actions job: `.github/workflows/ci.yml`'s `cargo test --workspace` has
+# never reached the holon-integration-tests binaries — it spends ~14min
+# compiling and then dies in the `holon` crate's own suite (200/200 recent runs
+# red), and a full-depth keystone is hours of runtime on top. A scheduled job
+# would be a gate that never actually ran the keystone. Re-evaluate once CI is
+# green and the runner budget is known.
+#
+# Keystone runs must be serialized against every other keystone lane:
+#   /opt/homebrew/opt/parallel/bin/parallel --semaphore --id holon-keystone -j1 \
+#       --fg -- just keystone-nightly
+keystone-nightly runs='2' cases='64':
+    #!/usr/bin/env bash
+    # pipefail is REQUIRED: `just pbt` pipes through tee, so without it this
+    # recipe's status would be tee's and every red run would read as green.
+    set -euo pipefail
+    stamp=$(date +%Y%m%d-%H%M%S)
+    failed_logs=()
+    for i in $(seq 1 {{runs}}); do
+        log="/tmp/keystone-nightly-${stamp}-run${i}.log"
+        echo "== keystone-nightly run ${i}/{{runs}} (cases={{cases}}) -> $log =="
+        rc=0
+        just pbt general {{cases}} 2>&1 | tee "$log" || rc=$?
+        if [ "$rc" -eq 0 ]; then
+            echo "== run ${i}: GREEN =="
+        else
+            echo "== run ${i}: RED (exit $rc) — classifying =="
+            failed_logs+=("$log")
+        fi
+    done
+    echo ""
+    if [ "${#failed_logs[@]}" -eq 0 ]; then
+        echo "keystone-nightly: {{runs}}/{{runs}} runs GREEN at cases={{cases}}."
+        exit 0
+    fi
+    scripts/keystone-known-reds.sh "${failed_logs[@]}"
+
 # Vault-scale keystone lane: the ONE composed keystone over a ~25k-block
 # synthetic vault — Martin's real vault is 24,369 blocks, and the keystone's
 # scale knob defaults to 0, so no default run has ever been within three orders
