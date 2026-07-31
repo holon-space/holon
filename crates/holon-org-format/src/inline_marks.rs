@@ -1456,4 +1456,110 @@ mod tests {
         assert_eq!(out, input);
         assert!(marks.is_empty(), "unclosed (( must stay plain text");
     }
+
+    // --- F1a: three-state link-target classification at the parse boundary ---
+
+    fn only_link_target(text: &str) -> EntityRef {
+        let (_, marks) = extract_inline_marks(text);
+        marks
+            .into_iter()
+            .find_map(|m| match m.mark {
+                InlineMark::Link { target, .. } => Some(target),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no Link mark extracted from {text:?}"))
+    }
+
+    #[test]
+    fn registered_scheme_target_is_a_resolved_entity_uri() {
+        let input = "See [[person:alice][Alice]] here";
+        let (text, marks) = extract_inline_marks(input);
+        assert_eq!(text, "See Alice here");
+        assert_eq!(
+            only_link_target(input),
+            EntityRef::Internal {
+                // ALLOW(entity_uri_from_raw): test expectation literal
+                id: EntityUri::from_raw("person:alice")
+            }
+        );
+        assert_eq!(
+            render_inline_marks(&text, &marks),
+            input,
+            "entity link must re-render byte-stably"
+        );
+    }
+
+    #[test]
+    fn bare_registered_scheme_target_round_trips() {
+        let input = "[[person:alice]]";
+        let (text, marks) = extract_inline_marks(input);
+        assert_eq!(text, "person:alice");
+        assert_eq!(render_inline_marks(&text, &marks), input);
+    }
+
+    /// `Areas:Work` is scheme-SHAPED but its scheme is not registered. The
+    /// reservation rule says it is never a page-creation intent — it degrades
+    /// to a disclosed unknown-scheme link, bytes untouched.
+    #[test]
+    fn unregistered_scheme_target_is_not_a_page_name() {
+        let input = "[[Areas:Work][work]]";
+        let target = only_link_target(input);
+        assert!(
+            !matches!(target, EntityRef::Name { .. }),
+            "a scheme-shaped target must never be classified as a page name, got {target:?}"
+        );
+        let (text, marks) = extract_inline_marks(input);
+        assert_eq!(render_inline_marks(&text, &marks), input);
+    }
+
+    /// A colon FOLLOWED BY A SPACE is not an RFC 3986 scheme, so ordinary
+    /// titles keep page semantics with no capitalization heuristics.
+    #[test]
+    fn colon_space_target_keeps_page_semantics() {
+        let input = "[[Ketosis: How to lose weight]]";
+        assert_eq!(
+            only_link_target(input),
+            EntityRef::Name {
+                name: "Ketosis: How to lose weight".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn slash_hierarchy_target_keeps_page_semantics() {
+        assert_eq!(
+            only_link_target("[[Areas/Work][work]]"),
+            EntityRef::Name {
+                name: "Areas/Work".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn web_and_mail_links_stay_external() {
+        for (input, url) in [
+            ("[[https://example.com][site]]", "https://example.com"),
+            ("[[http://example.com][site]]", "http://example.com"),
+            ("[[mailto:a@b.c][mail]]", "mailto:a@b.c"),
+        ] {
+            assert_eq!(
+                only_link_target(input),
+                EntityRef::External {
+                    url: url.to_string()
+                },
+                "web/mail links must keep External classification: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn block_scheme_target_unchanged() {
+        assert_eq!(
+            only_link_target("[[block:abc-123][see also]]"),
+            EntityRef::Internal {
+                // ALLOW(entity_uri_from_raw): test expectation literal
+                id: EntityUri::from_raw("block:abc-123")
+            }
+        );
+    }
 }

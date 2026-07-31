@@ -1677,6 +1677,155 @@ mod teeth {
         );
     }
 
+    /// **F1a entity-URI links.** Boot the composed headless SUT from an org
+    /// file whose `c2` headline carries `[[person:alice][Alice]]` — a
+    /// scheme-shaped target whose scheme is a REGISTERED entity, not a page
+    /// name. Three assertions, one per F1a invariant:
+    ///
+    /// - `inv-entity-link-round-trips-org`: the org lens keeps the target as an
+    ///   `EntityRef::Internal` URI and re-renders the literal byte-for-byte.
+    /// - `inv-link-kind-matches-target-scheme`: the junction row is `kind =
+    ///   'entity'` with `resolved_id` = the full URI.
+    /// - `inv-entity-link-backlink-visible`: the `backlinks` matview carries
+    ///   the source block under `target_id = 'person:alice'`.
+    ///
+    /// Uses a BUILT-IN registered scheme (`person`) so the probe stays hermetic
+    /// — no MCP sidecar, no cache table, no registry seeding. The classifier is
+    /// scheme-generic, so this exercises the same arm a `cc-session:` link
+    /// takes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn org_ingest_entity_link_resolves_and_backlinks() {
+        use holon_pbt_core::capabilities::SutFocus;
+        use holon_pbt_core::capabilities::SutQueryResults;
+        use holon_pbt_core::capabilities::SutSqlProjection;
+        use holon_pbt_core::composition::CapProvider;
+
+        const TREE_ORG: &str = "#+ID: structural-page\n* parent\n:PROPERTIES:\n:ID: \
+                                parent\n:END:\n* c1\n:PROPERTIES:\n:ID: c1\n:END:\n* See \
+                                [[person:alice][Alice]] here\n:PROPERTIES:\n:ID: c2\n:END:\n";
+        const C2_RAW: &str = "See [[person:alice][Alice]] here";
+        const ENTITY_URI: &str = "person:alice";
+
+        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+        let comp = Arc::new(
+            HeadlessFrontendComponent::new_with_clock(
+                &[("structural-page.org", TREE_ORG)],
+                Duration::from_millis(300),
+                false,
+                crate::pbt::frontend_slice::components::keystone_boot_clock(),
+            )
+            .await,
+        );
+        let engine = comp.engine();
+        let mut caps = CapMap::new();
+        comp.clone().register(&mut caps);
+        caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
+        caps.insert(comp.clone() as Arc<dyn SutFocus>);
+        caps.insert(comp.clone() as Arc<dyn SutQueryResults>);
+        caps.replace(Arc::new(OpDispatchWriter::with_resolver(
+            engine.clone(),
+            resolver.clone(),
+        )) as Arc<dyn SutBlockTreeWrite>);
+
+        let journal_id = crate::pbt::frontend_slice::components::keystone_boot_journal_id();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            tokio::time::sleep(SETTLE).await;
+            if sut_ids(&caps).await.contains(&journal_id) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "[entity-link] boot journal {journal_id} did not fire within budget"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // (1) Org round-trip: the link target survives as a schemed URI and the
+        // literal re-renders byte-for-byte.
+        let (c2_content, c2_marks) = crate::pbt::types::normalize_content_for_org_roundtrip(
+            C2_RAW,
+            holon_api::ContentType::Text,
+        );
+        assert_eq!(c2_content, "See Alice here");
+        let marks = c2_marks.as_ref().expect("entity link must extract a mark");
+        let target = marks
+            .iter()
+            .find_map(|m| match &m.mark {
+                holon_api::InlineMark::Link { target, .. } => Some(target.clone()),
+                _ => None,
+            })
+            .expect("non-vacuity: the org lens must extract a Link mark");
+        assert_eq!(
+            target,
+            holon_api::EntityRef::Internal {
+                // ALLOW(entity_uri_from_raw): test expectation literal
+                id: holon_api::EntityUri::from_raw(ENTITY_URI)
+            },
+            "a registered scheme must classify as a resolved entity URI, not a page name"
+        );
+        assert_eq!(
+            holon_orgmode::inline_marks::render_inline_marks(&c2_content, marks),
+            C2_RAW,
+            "entity link must re-render byte-stably"
+        );
+
+        // (2) The junction row carries the entity kind and the full URI.
+        let rows = engine
+            .db_handle()
+            .query(
+                "SELECT target, kind, resolved_id FROM block_links WHERE source_block_id = \
+                 'block:c2'",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("block_links query");
+        let entity_rows: Vec<_> = rows
+            .iter()
+            .filter(|r| r.get("target").and_then(|v| v.as_string()) == Some(ENTITY_URI))
+            .collect();
+        assert_eq!(
+            entity_rows.len(),
+            1,
+            "exactly one block_links row for {ENTITY_URI}, got {rows:?}"
+        );
+        assert_eq!(
+            entity_rows[0].get("kind").and_then(|v| v.as_string()),
+            Some("entity"),
+            "entity-URI target must be stored as kind='entity': {entity_rows:?}"
+        );
+        assert_eq!(
+            entity_rows[0]
+                .get("resolved_id")
+                .and_then(|v| v.as_string()),
+            Some(ENTITY_URI),
+            "an entity link resolves at parse time — resolved_id is the full URI: {entity_rows:?}"
+        );
+
+        // (3) The source block is visible from the entity through `backlinks`.
+        let backlink_rows = engine
+            .db_handle()
+            .query(
+                "SELECT source_block_id FROM backlinks WHERE target_id = 'person:alice'",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("backlinks query");
+        let sources: Vec<String> = backlink_rows
+            .iter()
+            .filter_map(|r| {
+                r.get("source_block_id")
+                    .and_then(|v| v.as_string())
+                    .map(str::to_string)
+            })
+            .collect();
+        assert_eq!(
+            sources,
+            vec!["block:c2".to_string()],
+            "the linking block must appear in `backlinks` under the entity URI"
+        );
+    }
+
     /// Apply `SplitBlock(c1)` to BOTH the oracle and the composed SUT,
     /// reconcile the minted ids, and run the catalog — the faithful
     /// structural write path over the real headless component stays green
