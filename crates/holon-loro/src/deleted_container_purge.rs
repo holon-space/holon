@@ -151,6 +151,37 @@ mod tests {
         );
     }
 
+    /// The purge must not poison the id it freed. Undoing a delete re-creates
+    /// the block under the same stable id, and the fork keeps a purged root
+    /// permanently empty — so this only holds because a re-created node is a
+    /// new tree node with new root container names.
+    #[tokio::test]
+    async fn recreating_a_deleted_block_under_the_same_id_restores_its_content() {
+        let (_doc, backend) = backend_with_secret_block().await;
+        backend.delete_block("block:secret").await.unwrap();
+
+        backend
+            .create_block_with_properties(
+                EntityUri::no_parent(),
+                BlockContent::text(SECRET),
+                Some(EntityUri::block("secret")),
+                &HashMap::new(),
+                &Tags::default(),
+                &[],
+                &[],
+            )
+            .await
+            .unwrap();
+
+        let block = backend.get_block("block:secret").await.unwrap();
+        assert!(
+            format!("{:?}", block.content).contains(SECRET),
+            "the re-created block came back empty — the purge poisoned its root \
+             container: {:?}",
+            block.content
+        );
+    }
+
     /// The same guarantee downstream: a peer bootstrapped from the persisted
     /// compact snapshot — the artifact `save_compact_to_file` writes and the
     /// shallow-share path ships — must neither carry nor be able to materialize
