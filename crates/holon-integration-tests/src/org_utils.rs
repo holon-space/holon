@@ -133,10 +133,24 @@ pub fn serialize_block_recursive(
         headline.push_str(&format!("[#{}] ", priority.to_letter()));
     }
 
+    // Rich text: project the mark set back into org delimiters exactly as
+    // production's renderer does (`holon_org_format::models::
+    // render_headline_block`). Rendering `block.content` raw instead would write
+    // a file whose text has LOST every link/emphasis the block carries, so the
+    // SQL re-render never matches disk again — `inv-org-render-fixed-point`
+    // reports a permanent echo-loop and `inv-blocks-match-ref/org` a marks
+    // divergence, neither of which the mutation being simulated asked for.
+    let marks_rendered: Option<String> = block
+        .marks
+        .as_ref()
+        .filter(|m| !m.is_empty())
+        .map(|m| holon_orgmode::inline_marks::render_inline_marks(&block.content, m));
+    let content_text: &str = marks_rendered.as_deref().unwrap_or(&block.content);
+
     // Only the first line is the org headline; subsequent lines are body
     // text that must come AFTER the :PROPERTIES: drawer (otherwise the parser
     // sees the drawer as part of the body and the :ID: tag is lost).
-    let mut content_lines = block.content.lines();
+    let mut content_lines = content_text.lines();
     let title = content_lines.next().unwrap_or("").trim_end();
     let body: Vec<&str> = content_lines.collect();
 
