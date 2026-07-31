@@ -8,8 +8,8 @@ distribution steers QA investment.
 
 - ENVIRONMENT: 120
 - COVERAGE: 65
-- PERCEPTION: 49
-- ORACLE: 37
+- PERCEPTION: 50
+- ORACLE: 38
 
 Archived baseline (ENVIRONMENT 87 · COVERAGE 37 · PERCEPTION 35 · ORACLE 18 as of
 2026-07-22): the per-bug increment log below starts at commit e70c3a9245f2, which split
@@ -21,6 +21,41 @@ header against the log.
 Increment log (append-only, NEWEST FIRST — each counted bug adds exactly one line here;
 merge conflicts resolve by keeping both sides' lines and re-summing the totals ON TOP OF
 the archived baseline):
+- (+1 ORACLE 2026-07-31: a `[tree-desync]` ERROR storm — 300+ events per page-navigation click, in
+  both directions ("in provider but not row_map", "in row_map but not provider" naming the PREVIOUS
+  page's rows). ORACLE, not a data defect: the probe in
+  `crates/holon-frontend/src/reactive_view.rs` (`reactive::tree_desync`) compares provider ↔ row_map ↔
+  tree inside `apply_diff`, i.e. after EVERY individual `VecDiff`, while the contract it encodes —
+  row_map == provider — is a CONVERGENCE contract that may only be judged after a delta batch has
+  settled. Draining the previous page arrives as one `RemoveAt` per row, so the probe necessarily
+  fires on every intermediate state. Evidence (`/tmp/dogfood-0731-evidence/logs/app.log`, per-line
+  divergence sizes across one burst): the row_map-side excess falls monotonically 13, 12, 11 … 2, 1
+  and then stops — the final delta reaches equality and logs nothing. The state CONVERGES; only the
+  evaluation point is wrong. Investigated as the suspected cause of the #69 band-geometry bug and
+  found SEPARABLE: this divergence is about the outline's row set during navigation, #69 is about
+  the height reserved for one row of a settled page. NOT yet fixed — the fix is to evaluate the probe
+  at a settle boundary (once per frame, in `render`) rather than per delta, keeping it fail-loud
+  there; silencing it is explicitly not the fix, because a divergence that SURVIVES the batch is a
+  real bug this probe exists to catch.)
+- (+1 PERCEPTION 2026-07-31, secondary ORACLE: after the #60 nested-shell fix a nested query band
+  PAINTS its rows, but the outline reserves far less height than the band paints — following sibling
+  rows draw ON TOP of the band's lower rows (Martin's ClaudeCode page rendered all five sections
+  overlapping each other; evidence shots 01/03/04 in `/tmp/dogfood-0731-evidence/shots/`) and the
+  page's scroll extent falls short, leaving rows past it permanently unreachable. Differential
+  control: the same row count as PLAIN outline blocks scrolls fine. PERCEPTION for the same reason
+  as #60's row directly below — every model-layer oracle is satisfied (the ViewModel holds the rows,
+  the query returns them, the rows are even painted now); what is wrong is a RELATIONSHIP between
+  painted boxes, and nothing in the suite compared one row's bounds against another's or checked that
+  the scroll extent covers the content. Secondary ORACLE: `BoundsRegistry` already carries x/y/w/h,
+  so both invariants were expressible and simply did not exist. Covered by
+  `frontends/gpui/tests/gpui_window_slice.rs::band_rows_do_not_overlap_the_following_sibling_row`
+  and `::page_with_a_nested_band_scrolls_to_its_last_row`, plus the fixture-tier control
+  `frontends/gpui/tests/nested_band_height_spike.rs`. The control is GREEN, which REFUTES the first
+  hypothesis — a stale gpui `ListState` measurement for the band's row — at the fixture tier: with a
+  demonstrably virtualized outline, gpui re-measures a visible row whose nested band grew and places
+  the next sibling correctly. The remaining candidates are what the fixture does not model: the
+  `live_block` entity boundary, async row arrival through the real query pipeline, and the nesting
+  depth Martin reported.)
 - (+1 COVERAGE 2026-07-31: the org round trip STRIPS INLINE-MARKUP DELIMITERS from literal block
   content. `__default__` comes back as `default`; the same loss hits `_x_`, `*x*`, `/x/`, `~x~`,
   `=x=`, `+x+`, standalone or embedded in a sentence ("the __default__ profile is used" →
