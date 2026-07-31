@@ -3901,8 +3901,14 @@ impl CoreOperations for LoroBackend {
         write_doc
             .with_write(|doc| {
                 let tree = doc.get_tree(TREE_NAME);
+                // A block's mergeable children are ROOT containers, which
+                // `tree.delete` leaves alive holding the block's content. Name
+                // them while the subtree still exists, purge them once it is
+                // gone.
+                let roots = crate::deleted_container_purge::subtree_roots(&tree, tree_id)?;
                 match tree.delete(tree_id) {
                     Ok(()) => {
+                        crate::deleted_container_purge::purge_roots(doc, &roots)?;
                         doc.commit();
                         did_delete = true;
                         Ok(())
@@ -4192,9 +4198,17 @@ impl CoreOperations for LoroBackend {
         self.collab_doc
             .with_write(move |doc| {
                 let tree = doc.get_tree(TREE_NAME);
+                // Name every doomed subtree's root containers before ANY delete:
+                // one id in the batch may be an ancestor of another, and a
+                // deleted node no longer names its roots.
+                let mut roots = Vec::new();
+                for tid in &resolved {
+                    roots.extend(crate::deleted_container_purge::subtree_roots(&tree, *tid)?);
+                }
                 for tid in &resolved {
                     tree.delete(*tid)?;
                 }
+                crate::deleted_container_purge::purge_roots(doc, &roots)?;
                 doc.commit();
                 Ok(())
             })
