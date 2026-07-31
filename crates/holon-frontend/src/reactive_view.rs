@@ -31,6 +31,20 @@ use crate::render_context::AvailableSpace;
 use crate::render_context::LayoutHint;
 use crate::view_model::ViewModel;
 
+/// Per-driver test seam + ledger. Scoped to ONE `ReactiveView` so a test can
+/// suppress diffs or count divergences without touching another test's driver —
+/// the global `tree_desync` ledger stays a prod diagnostic and is never reset
+/// by tests.
+#[cfg(any(test, feature = "pbt"))]
+#[derive(Default)]
+pub(crate) struct DriverProbe {
+    /// Diffs to drop before applying, making `row_map` fall permanently behind
+    /// the provider.
+    pub(crate) suppress_next_diffs: std::sync::atomic::AtomicUsize,
+    /// Settle-boundary provider/row_map divergences THIS driver recorded.
+    pub(crate) desync_records: std::sync::atomic::AtomicUsize,
+}
+
 /// Build a per-row `RenderContext` for interpreting a collection's item
 /// template.
 ///
@@ -87,6 +101,8 @@ pub struct ReactiveView {
     inner: ReactiveViewInner,
     pub items: MutableVec<Arc<ReactiveViewModel>>,
     driver_handle: Mutex<Option<AbortHandle>>,
+    #[cfg(any(test, feature = "pbt"))]
+    pub(crate) probe: Arc<DriverProbe>,
 }
 
 /// Virtual child slot: entity profile defaults + parent context.
@@ -614,6 +630,8 @@ impl ReactiveView {
             },
             items: MutableVec::new(),
             driver_handle: Mutex::new(None),
+            #[cfg(any(test, feature = "pbt"))]
+            probe: Arc::new(DriverProbe::default()),
         }
     }
 
@@ -640,6 +658,8 @@ impl ReactiveView {
             },
             items: MutableVec::new(),
             driver_handle: Mutex::new(None),
+            #[cfg(any(test, feature = "pbt"))]
+            probe: Arc::new(DriverProbe::default()),
         }
     }
 
@@ -714,6 +734,8 @@ impl ReactiveView {
             },
             items: MutableVec::new_with_values(arced),
             driver_handle: Mutex::new(None),
+            #[cfg(any(test, feature = "pbt"))]
+            probe: Arc::new(DriverProbe::default()),
         }
     }
 
@@ -746,6 +768,8 @@ impl ReactiveView {
             },
             items: MutableVec::new(),
             driver_handle: Mutex::new(None),
+            #[cfg(any(test, feature = "pbt"))]
+            probe: Arc::new(DriverProbe::default()),
         }
     }
 
@@ -756,6 +780,8 @@ impl ReactiveView {
             inner: ReactiveViewInner::Static,
             items: MutableVec::new_with_values(arced),
             driver_handle: Mutex::new(None),
+            #[cfg(any(test, feature = "pbt"))]
+            probe: Arc::new(DriverProbe::default()),
         }
     }
 
@@ -769,6 +795,8 @@ impl ReactiveView {
             inner: ReactiveViewInner::StaticCollection { layout },
             items: MutableVec::new_with_values(arced),
             driver_handle: Mutex::new(None),
+            #[cfg(any(test, feature = "pbt"))]
+            probe: Arc::new(DriverProbe::default()),
         }
     }
 
@@ -1237,57 +1265,85 @@ impl ReactiveView {
             let interpret_row = interpret_row.clone();
             let get_sort_key = get_sort_key.clone();
             let ds_probe = data_source.clone();
-            data_source.keyed_rows_signal_vec().for_each(move |diff| {
-                let mut tree = tree.lock().unwrap();
-                let mut key_index = key_index.lock().unwrap();
-                let mut row_map = row_map.lock().unwrap();
-                // Adopted orphans changed depth, so their interpreted widgets
-                // (depth-dependent rule outcomes baked in) are stale —
-                // re-interpret them at their post-adoption depth.
-                // A row's stated parent is always canonical (see `rowset_depth`).
-                let parent_key = |row: &holon_api::widget_spec::DataRow| {
-                    extract_parent_id(row).map(|p| (p, holon_api::Occurrence::Canonical))
-                };
-                let reinterpret_adopted = |tree: &mut crate::mutable_tree::MutableTree,
-                                           row_map: &HashMap<
+            // Second handle for the settle-boundary probe below: `apply_one`
+            // takes ownership of `row_map`.
+            let row_map_probe = row_map.clone();
+            #[cfg(any(test, feature = "pbt"))]
+            let probe = self.probe.clone();
+            #[cfg(any(test, feature = "pbt"))]
+            let probe_settle = probe.clone();
+            let diff_stream = data_source.keyed_rows_signal_vec().to_stream();
+            async move {
+                use futures::FutureExt as _;
+                use futures::StreamExt as _;
+                futures::pin_mut!(diff_stream);
+                let apply_one = move |diff: VecDiff<(
                     holon_api::RowKey,
                     Arc<holon_api::widget_spec::DataRow>,
-                >,
-                                           adopted: Vec<holon_api::RowKey>,
-                                           interpret_row: &InterpretRowFn,
-                                           get_sort_key: &dyn Fn(
-                    &holon_api::widget_spec::DataRow,
-                ) -> String| {
-                    for id in adopted {
-                        let Some(row) = row_map.get(&id).cloned() else {
-                            continue;
-                        };
-                        let parent = parent_key(&row);
-                        let sk = get_sort_key(&row);
-                        let depth = rowset_depth(row_map, &row);
-                        let (w, ov) = interpret_row(row, depth, id.1.clone());
-                        tree.update(&id, parent, sk, w, ov);
+                )>| {
+                    #[cfg(any(test, feature = "pbt"))]
+                    if probe
+                        .suppress_next_diffs
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        > 0
+                    {
+                        probe
+                            .suppress_next_diffs
+                            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        return;
                     }
-                };
-                // `tree.remove` evicts the node's whole subtree, but upstream
-                // only dropped the one key — the survivors are still live in
-                // `row_map`/`key_index`. Re-insert them (DFS order, so parents
-                // land before children); each becomes a root until its own
-                // parent reappears, at which point `adopt_orphans` re-attaches
-                // it. Skipping this desyncs `key_index` from upstream indices
-                // and strands the survivors for `tree.update` to trip over.
-                let reinstate_evicted = |tree: &mut crate::mutable_tree::MutableTree,
-                                         row_map: &HashMap<
-                    holon_api::RowKey,
-                    Arc<holon_api::widget_spec::DataRow>,
-                >,
-                                         evicted: Vec<holon_api::RowKey>,
-                                         interpret_row: &InterpretRowFn,
-                                         get_sort_key: &dyn Fn(
-                    &holon_api::widget_spec::DataRow,
-                ) -> String| {
-                    for id in evicted {
-                        let row = row_map
+                    let mut tree = tree.lock().unwrap();
+                    let mut key_index = key_index.lock().unwrap();
+                    let mut row_map = row_map.lock().unwrap();
+                    // Adopted orphans changed depth, so their interpreted widgets
+                    // (depth-dependent rule outcomes baked in) are stale —
+                    // re-interpret them at their post-adoption depth.
+                    // A row's stated parent is always canonical (see `rowset_depth`).
+                    let parent_key = |row: &holon_api::widget_spec::DataRow| {
+                        extract_parent_id(row).map(|p| (p, holon_api::Occurrence::Canonical))
+                    };
+                    let reinterpret_adopted = |tree: &mut crate::mutable_tree::MutableTree,
+                                               row_map: &HashMap<
+                        holon_api::RowKey,
+                        Arc<holon_api::widget_spec::DataRow>,
+                    >,
+                                               adopted: Vec<holon_api::RowKey>,
+                                               interpret_row: &InterpretRowFn,
+                                               get_sort_key: &dyn Fn(
+                        &holon_api::widget_spec::DataRow,
+                    )
+                        -> String| {
+                        for id in adopted {
+                            let Some(row) = row_map.get(&id).cloned() else {
+                                continue;
+                            };
+                            let parent = parent_key(&row);
+                            let sk = get_sort_key(&row);
+                            let depth = rowset_depth(row_map, &row);
+                            let (w, ov) = interpret_row(row, depth, id.1.clone());
+                            tree.update(&id, parent, sk, w, ov);
+                        }
+                    };
+                    // `tree.remove` evicts the node's whole subtree, but upstream
+                    // only dropped the one key — the survivors are still live in
+                    // `row_map`/`key_index`. Re-insert them (DFS order, so parents
+                    // land before children); each becomes a root until its own
+                    // parent reappears, at which point `adopt_orphans` re-attaches
+                    // it. Skipping this desyncs `key_index` from upstream indices
+                    // and strands the survivors for `tree.update` to trip over.
+                    let reinstate_evicted = |tree: &mut crate::mutable_tree::MutableTree,
+                                             row_map: &HashMap<
+                        holon_api::RowKey,
+                        Arc<holon_api::widget_spec::DataRow>,
+                    >,
+                                             evicted: Vec<holon_api::RowKey>,
+                                             interpret_row: &InterpretRowFn,
+                                             get_sort_key: &dyn Fn(
+                        &holon_api::widget_spec::DataRow,
+                    )
+                        -> String| {
+                        for id in evicted {
+                            let row = row_map
                             .get(&id)
                             .unwrap_or_else(|| {
                                 panic!(
@@ -1297,130 +1353,102 @@ impl ReactiveView {
                                 )
                             })
                             .clone();
-                        let parent = parent_key(&row);
-                        let sk = get_sort_key(&row);
-                        let depth = rowset_depth(row_map, &row);
-                        let (w, ov) = interpret_row(row, depth, id.1.clone());
-                        let adopted = tree.insert(id, parent, sk, w, ov);
-                        for aid in adopted {
-                            let arow = row_map
-                                .get(&aid)
-                                .unwrap_or_else(|| {
-                                    panic!(
-                                        "reinstated node adopted {aid:?}, which is absent from \
+                            let parent = parent_key(&row);
+                            let sk = get_sort_key(&row);
+                            let depth = rowset_depth(row_map, &row);
+                            let (w, ov) = interpret_row(row, depth, id.1.clone());
+                            let adopted = tree.insert(id, parent, sk, w, ov);
+                            for aid in adopted {
+                                let arow = row_map
+                                    .get(&aid)
+                                    .unwrap_or_else(|| {
+                                        panic!(
+                                            "reinstated node adopted {aid:?}, which is absent from \
                                          row_map — the driver's row_map and the tree have diverged"
-                                    )
+                                        )
+                                    })
+                                    .clone();
+                                let aparent = parent_key(&arow);
+                                let ask = get_sort_key(&arow);
+                                let adepth = rowset_depth(row_map, &arow);
+                                let (aw, aov) = interpret_row(arow, adepth, aid.1.clone());
+                                tree.update(&aid, aparent, ask, aw, aov);
+                            }
+                        }
+                    };
+                    let diff_label = match &diff {
+                        VecDiff::Replace { values } => format!("Replace({} rows)", values.len()),
+                        VecDiff::InsertAt { index, value } => {
+                            format!("InsertAt({index}, {})", value.0.0)
+                        }
+                        VecDiff::UpdateAt { index, value } => {
+                            format!("UpdateAt({index}, {})", value.0.0)
+                        }
+                        VecDiff::RemoveAt { index } => format!("RemoveAt({index})"),
+                        VecDiff::Push { value } => format!("Push({})", value.0.0),
+                        VecDiff::Pop {} => "Pop".to_string(),
+                        VecDiff::Clear {} => "Clear".to_string(),
+                        VecDiff::Move {
+                            old_index,
+                            new_index,
+                        } => {
+                            format!("Move({old_index} -> {new_index})")
+                        }
+                    };
+                    match diff {
+                        VecDiff::Replace { values } => {
+                            row_map.clear();
+                            *key_index = values.iter().map(|(k, _)| k.clone()).collect();
+                            // Fill row_map first: rowset_depth needs the FULL
+                            // rowset to resolve parent chains regardless of row
+                            // arrival order within the batch.
+                            for (k, row) in &values {
+                                row_map.insert(k.clone(), row.clone());
+                            }
+                            let entries: Vec<_> = values
+                                .into_iter()
+                                .map(|(k, row)| {
+                                    let parent = parent_key(&row);
+                                    let sk = get_sort_key(&row);
+                                    let depth = rowset_depth(&row_map, &row);
+                                    let (w, ov) = interpret_row(row, depth, k.1.clone());
+                                    (k, parent, sk, w, ov)
                                 })
-                                .clone();
-                            let aparent = parent_key(&arow);
-                            let ask = get_sort_key(&arow);
-                            let adepth = rowset_depth(row_map, &arow);
-                            let (aw, aov) = interpret_row(arow, adepth, aid.1.clone());
-                            tree.update(&aid, aparent, ask, aw, aov);
+                                .collect();
+                            tree.rebuild(entries);
                         }
-                    }
-                };
-                let diff_label = match &diff {
-                    VecDiff::Replace { values } => format!("Replace({} rows)", values.len()),
-                    VecDiff::InsertAt { index, value } => {
-                        format!("InsertAt({index}, {})", value.0.0)
-                    }
-                    VecDiff::UpdateAt { index, value } => {
-                        format!("UpdateAt({index}, {})", value.0.0)
-                    }
-                    VecDiff::RemoveAt { index } => format!("RemoveAt({index})"),
-                    VecDiff::Push { value } => format!("Push({})", value.0.0),
-                    VecDiff::Pop {} => "Pop".to_string(),
-                    VecDiff::Clear {} => "Clear".to_string(),
-                    VecDiff::Move {
-                        old_index,
-                        new_index,
-                    } => {
-                        format!("Move({old_index} -> {new_index})")
-                    }
-                };
-                match diff {
-                    VecDiff::Replace { values } => {
-                        row_map.clear();
-                        *key_index = values.iter().map(|(k, _)| k.clone()).collect();
-                        // Fill row_map first: rowset_depth needs the FULL
-                        // rowset to resolve parent chains regardless of row
-                        // arrival order within the batch.
-                        for (k, row) in &values {
-                            row_map.insert(k.clone(), row.clone());
+                        VecDiff::InsertAt {
+                            index,
+                            value: (key, row),
+                        } => {
+                            row_map.insert(key.clone(), row.clone());
+                            key_index.insert(index, key.clone());
+                            let parent = parent_key(&row);
+                            let sk = get_sort_key(&row);
+                            let depth = rowset_depth(&row_map, &row);
+                            let (w, ov) = interpret_row(row, depth, key.1.clone());
+                            let adopted = tree.insert(key, parent, sk, w, ov);
+                            reinterpret_adopted(
+                                &mut tree,
+                                &row_map,
+                                adopted,
+                                interpret_row.as_ref(),
+                                get_sort_key.as_ref(),
+                            );
                         }
-                        let entries: Vec<_> = values
-                            .into_iter()
-                            .map(|(k, row)| {
-                                let parent = parent_key(&row);
-                                let sk = get_sort_key(&row);
-                                let depth = rowset_depth(&row_map, &row);
-                                let (w, ov) = interpret_row(row, depth, k.1.clone());
-                                (k, parent, sk, w, ov)
-                            })
-                            .collect();
-                        tree.rebuild(entries);
-                    }
-                    VecDiff::InsertAt {
-                        index,
-                        value: (key, row),
-                    } => {
-                        row_map.insert(key.clone(), row.clone());
-                        key_index.insert(index, key.clone());
-                        let parent = parent_key(&row);
-                        let sk = get_sort_key(&row);
-                        let depth = rowset_depth(&row_map, &row);
-                        let (w, ov) = interpret_row(row, depth, key.1.clone());
-                        let adopted = tree.insert(key, parent, sk, w, ov);
-                        reinterpret_adopted(
-                            &mut tree,
-                            &row_map,
-                            adopted,
-                            interpret_row.as_ref(),
-                            get_sort_key.as_ref(),
-                        );
-                    }
-                    VecDiff::UpdateAt {
-                        index: _,
-                        value: (key, row),
-                    } => {
-                        row_map.insert(key.clone(), row.clone());
-                        let parent = parent_key(&row);
-                        let sk = get_sort_key(&row);
-                        let depth = rowset_depth(&row_map, &row);
-                        let (w, ov) = interpret_row(row, depth, key.1.clone());
-                        tree.update(&key, parent, sk, w, ov);
-                    }
-                    VecDiff::RemoveAt { index } => {
-                        let key = key_index.remove(index);
-                        row_map.remove(&key);
-                        let evicted = tree.remove(&key);
-                        reinstate_evicted(
-                            &mut tree,
-                            &row_map,
-                            evicted,
-                            interpret_row.as_ref(),
-                            get_sort_key.as_ref(),
-                        );
-                    }
-                    VecDiff::Push { value: (key, row) } => {
-                        row_map.insert(key.clone(), row.clone());
-                        key_index.push(key.clone());
-                        let parent = parent_key(&row);
-                        let sk = get_sort_key(&row);
-                        let depth = rowset_depth(&row_map, &row);
-                        let (w, ov) = interpret_row(row, depth, key.1.clone());
-                        let adopted = tree.insert(key, parent, sk, w, ov);
-                        reinterpret_adopted(
-                            &mut tree,
-                            &row_map,
-                            adopted,
-                            interpret_row.as_ref(),
-                            get_sort_key.as_ref(),
-                        );
-                    }
-                    VecDiff::Pop {} => {
-                        if let Some(key) = key_index.pop() {
+                        VecDiff::UpdateAt {
+                            index: _,
+                            value: (key, row),
+                        } => {
+                            row_map.insert(key.clone(), row.clone());
+                            let parent = parent_key(&row);
+                            let sk = get_sort_key(&row);
+                            let depth = rowset_depth(&row_map, &row);
+                            let (w, ov) = interpret_row(row, depth, key.1.clone());
+                            tree.update(&key, parent, sk, w, ov);
+                        }
+                        VecDiff::RemoveAt { index } => {
+                            let key = key_index.remove(index);
                             row_map.remove(&key);
                             let evicted = tree.remove(&key);
                             reinstate_evicted(
@@ -1431,54 +1459,140 @@ impl ReactiveView {
                                 get_sort_key.as_ref(),
                             );
                         }
+                        VecDiff::Push { value: (key, row) } => {
+                            row_map.insert(key.clone(), row.clone());
+                            key_index.push(key.clone());
+                            let parent = parent_key(&row);
+                            let sk = get_sort_key(&row);
+                            let depth = rowset_depth(&row_map, &row);
+                            let (w, ov) = interpret_row(row, depth, key.1.clone());
+                            let adopted = tree.insert(key, parent, sk, w, ov);
+                            reinterpret_adopted(
+                                &mut tree,
+                                &row_map,
+                                adopted,
+                                interpret_row.as_ref(),
+                                get_sort_key.as_ref(),
+                            );
+                        }
+                        VecDiff::Pop {} => {
+                            if let Some(key) = key_index.pop() {
+                                row_map.remove(&key);
+                                let evicted = tree.remove(&key);
+                                reinstate_evicted(
+                                    &mut tree,
+                                    &row_map,
+                                    evicted,
+                                    interpret_row.as_ref(),
+                                    get_sort_key.as_ref(),
+                                );
+                            }
+                        }
+                        VecDiff::Clear {} => {
+                            key_index.clear();
+                            row_map.clear();
+                            tree.rebuild(vec![]);
+                        }
+                        VecDiff::Move { .. } => {}
                     }
-                    VecDiff::Clear {} => {
-                        key_index.clear();
-                        row_map.clear();
-                        tree.rebuild(vec![]);
+                    // The tree renders exactly the rows the driver holds: both are
+                    // maintained under this one lock scope, so they must agree at
+                    // every diff boundary. A divergence is the dropped-row bug —
+                    // a row the panel was given that renders no node — and
+                    // recording it here names the diff that caused it.
+                    if crate::reactive::tree_desync::enabled() {
+                        let tree_ids: std::collections::HashSet<EntityUri> =
+                            tree.flat_ids().into_iter().map(|k| k.0).collect();
+                        let row_ids: std::collections::HashSet<EntityUri> =
+                            row_map.keys().map(|k| k.0.clone()).collect();
+                        if tree_ids != row_ids {
+                            crate::reactive::tree_desync::record(
+                                &diff_label,
+                                "row_map",
+                                "tree",
+                                &row_ids,
+                                &tree_ids,
+                            );
+                        }
                     }
-                    VecDiff::Move { .. } => {}
+                };
+
+                // Provider vs `row_map` is a CONVERGENCE contract, not a
+                // per-diff one: the provider snapshot flips to the new page in
+                // one step while `row_map` catches up one `VecDiff` at a time,
+                // so during a multi-row drain they necessarily disagree. Judging
+                // it per diff produced 300+ ERRORs per page navigation whose
+                // divergence drained monotonically to zero — noise that trains
+                // readers to ignore a probe that exists to catch a real dropped
+                // row. Evaluate it once the ready backlog is empty instead.
+                //
+                // Diffs are applied in exactly the arrival order they always
+                // were; only WHEN this probe runs changed.
+                while let Some(diff) = diff_stream.next().await {
+                    apply_one(diff);
+                    // Drain everything already queued before judging. The inner
+                    // poll uses a noop waker, but the loop always returns to the
+                    // awaited `next()` above, which re-registers the real one —
+                    // so no wakeup is lost.
+                    while let Some(Some(queued)) = diff_stream.next().now_or_never() {
+                        apply_one(queued);
+                    }
+
+                    if crate::reactive::tree_desync::enabled() {
+                        // The provider is the driver's only source of rows, so a
+                        // row it holds that never reached `row_map` — once the
+                        // backlog is empty — is a delivery gap in the signal-vec
+                        // subscription, a different culprit from a tree that lost
+                        // a row it was given.
+                        let sample = || {
+                            let row_ids: std::collections::HashSet<EntityUri> = row_map_probe
+                                .lock()
+                                .unwrap()
+                                .keys()
+                                .map(|k| k.0.clone())
+                                .collect();
+                            let provider_ids: std::collections::HashSet<EntityUri> = ds_probe
+                                .rows_snapshot()
+                                .iter()
+                                .filter_map(|r| holon_api::data_row_entity_uri(r))
+                                .collect();
+                            (provider_ids != row_ids).then_some((provider_ids, row_ids))
+                        };
+
+                        // CONFIRM before recording. A write can land between the
+                        // drain ending and the sample above, which leaves the
+                        // provider legitimately ahead of `row_map` — the diff for
+                        // it is queued, not lost. Draining again and re-sampling
+                        // absorbs exactly that case, so the window in which a
+                        // concurrent write can fake a divergence shrinks to the
+                        // second sample. A divergence that survives both passes
+                        // is the real dropped-row bug this probe exists for.
+                        let divergence = match sample() {
+                            None => None,
+                            Some(_) => {
+                                while let Some(Some(queued)) = diff_stream.next().now_or_never() {
+                                    apply_one(queued);
+                                }
+                                sample()
+                            }
+                        };
+
+                        if let Some((provider_ids, row_ids)) = divergence {
+                            crate::reactive::tree_desync::record(
+                                "settle",
+                                "provider",
+                                "row_map",
+                                &provider_ids,
+                                &row_ids,
+                            );
+                            #[cfg(any(test, feature = "pbt"))]
+                            probe_settle
+                                .desync_records
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
                 }
-                // The tree renders exactly the rows the driver holds: both are
-                // maintained under this one lock scope, so they must agree at
-                // every diff boundary. A divergence is the dropped-row bug —
-                // a row the panel was given that renders no node — and
-                // recording it here names the diff that caused it.
-                if crate::reactive::tree_desync::enabled() {
-                    let tree_ids: std::collections::HashSet<EntityUri> =
-                        tree.flat_ids().into_iter().map(|k| k.0).collect();
-                    let row_ids: std::collections::HashSet<EntityUri> =
-                        row_map.keys().map(|k| k.0.clone()).collect();
-                    if tree_ids != row_ids {
-                        crate::reactive::tree_desync::record(
-                            &diff_label,
-                            "row_map",
-                            "tree",
-                            &row_ids,
-                            &tree_ids,
-                        );
-                    }
-                    // The provider is the driver's only source of rows, so a
-                    // row it holds that never reached `row_map` is a delivery
-                    // gap in the signal-vec subscription — a different culprit
-                    // from a tree that lost a row it was given.
-                    let provider_ids: std::collections::HashSet<EntityUri> = ds_probe
-                        .rows_snapshot()
-                        .iter()
-                        .filter_map(|r| holon_api::data_row_entity_uri(r))
-                        .collect();
-                    if provider_ids != row_ids {
-                        crate::reactive::tree_desync::record(
-                            &diff_label,
-                            "provider",
-                            "row_map",
-                            &provider_ids,
-                            &row_ids,
-                        );
-                    }
-                }
-                async {}
-            })
+            }
         };
 
         // Focus driver: re-interpret affected rows when the focused block
@@ -3096,6 +3210,146 @@ mod tests {
             ),
             row,
         )
+    }
+
+    /// Deterministic settle: yield to the spawned driver task until it has
+    /// reached the observable state, instead of a fixed sleep that couples
+    /// correctness to CPU scheduling.
+    async fn settle_until(mut ready: impl FnMut() -> bool, desc: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !ready() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "tree driver did not settle within 10s waiting for {desc}",
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    }
+
+    fn start_tree_view(data_source: Arc<dyn holon_api::ReactiveRowProvider>) -> ReactiveView {
+        let view = ReactiveView::new_collection(
+            CollectionConfig {
+                layout: CollectionVariant::from_name("tree", 0.0)
+                    .expect("`tree` layout is registered as a builtin"),
+                item_template: RenderExpr::FunctionCall {
+                    name: "row".to_string(),
+                    args: vec![],
+                },
+                sort_key: None,
+                virtual_child: None,
+                rules: Vec::new(),
+            },
+            data_source,
+            None,
+            None,
+        );
+        let services: Arc<dyn crate::reactive::BuilderServices> =
+            Arc::new(StubBuilderServices::new());
+        view.start(services, &tokio::runtime::Handle::current());
+        view
+    }
+
+    /// Page navigation empties the provider in one step while the driver still
+    /// holds a backlog of `RemoveAt` diffs — provider and `row_map` disagree at
+    /// every intermediate diff, but converge once the backlog drains. Judging
+    /// the pair per diff turned one navigation into a 300+ ERROR storm; judging
+    /// it at the settle boundary must stay silent.
+    #[tokio::test]
+    async fn page_drain_does_not_report_tree_desync() {
+        crate::shadow_builders::register_render_dsl_widget_names();
+        const N: usize = 24;
+
+        let rows = MutableVec::new();
+        rows.lock_mut().replace_cloned(
+            (0..N)
+                .map(|i| keyed(Arc::new(make_row(&format!("b{i}"), "seeded"))))
+                .collect(),
+        );
+        let source = Arc::new(ScriptedRows(rows.clone()));
+        let view = start_tree_view(source.clone());
+
+        settle_until(|| view.items.lock_ref().len() == N, "N rows seeded").await;
+        assert_eq!(
+            view.items.lock_ref().len(),
+            N,
+            "seeding must not be vacuous"
+        );
+
+        // No await between removals: the provider snapshot empties in one go
+        // while the driver task, on this current-thread runtime, cannot run.
+        for _ in 0..N {
+            rows.lock_mut().remove(0);
+        }
+
+        settle_until(|| view.items.lock_ref().is_empty(), "backlog drained").await;
+        assert!(
+            view.items.lock_ref().is_empty(),
+            "the drain must actually have removed every row"
+        );
+        assert_eq!(
+            view.probe
+                .desync_records
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "draining a {N}-row page reported a provider/row_map divergence, but the driver \
+             converged"
+        );
+
+        view.stop();
+    }
+
+    /// The settle-boundary probe must still bite: a diff the driver never
+    /// applies leaves `row_map` permanently short of the provider, and that
+    /// survives the drain-and-resample confirmation.
+    #[tokio::test]
+    async fn a_persistent_provider_row_map_divergence_still_reports() {
+        crate::shadow_builders::register_render_dsl_widget_names();
+
+        let rows = MutableVec::new();
+        rows.lock_mut()
+            .replace_cloned(vec![keyed(Arc::new(make_row("b0", "seeded")))]);
+        let source = Arc::new(ScriptedRows(rows.clone()));
+        let view = start_tree_view(source.clone());
+
+        settle_until(|| view.items.lock_ref().len() == 1, "seed row").await;
+        view.probe
+            .suppress_next_diffs
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+
+        rows.lock_mut()
+            .push_cloned(keyed(Arc::new(make_row("b1", "never applied"))));
+
+        // The probe runs in the same driver wake as the suppressed diff, with
+        // no await in between — so an observed counter of 0 means it has run.
+        settle_until(
+            || {
+                view.probe
+                    .suppress_next_diffs
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    == 0
+            },
+            "the suppressed diff to reach the driver",
+        )
+        .await;
+        view.probe
+            .suppress_next_diffs
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+
+        assert_eq!(
+            source.rows_snapshot().len(),
+            2,
+            "the provider must hold the new row — otherwise nothing diverges"
+        );
+        assert!(
+            view.probe
+                .desync_records
+                .load(std::sync::atomic::Ordering::Relaxed)
+                >= 1,
+            "a row the provider holds never reached row_map and stayed missing, yet the \
+             settle-boundary probe recorded nothing"
+        );
+
+        view.stop();
     }
 
     /// Boot-crash reproducer at the driver+tree PAIR level — the layer with no
