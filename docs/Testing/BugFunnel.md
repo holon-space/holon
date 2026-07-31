@@ -7,7 +7,7 @@ distribution steers QA investment.
 **Running distribution** (totals = archived baseline + sum of the increment log):
 
 - ENVIRONMENT: 122
-- COVERAGE: 66
+- COVERAGE: 67
 - PERCEPTION: 52
 - ORACLE: 39
 
@@ -21,6 +21,34 @@ header against the log.
 Increment log (append-only, NEWEST FIRST — each counted bug adds exactly one line here;
 merge conflicts resolve by keeping both sides' lines and re-summing the totals ON TOP OF
 the archived baseline):
+- (+1 COVERAGE 2026-08-01: a watched query whose trailing `ORDER BY` qualifies its columns
+  with a source table alias (`SELECT b.* FROM block b JOIN block_tags bt … ORDER BY b.sort_key`
+  — the SHIPPED sidebar shape, and what GQL compiles the right-sidebar query to) failed the
+  view read with `no such table: b`. `MatviewManager::watch`
+  (`crates/holon-turso/src/matview_manager.rs:807`) lifts the clause off the SOURCE query via
+  `util::trailing_order_by` and `query_view_ordered` (`matview_manager.rs:765`) splices it
+  VERBATIM onto `SELECT *, rowid AS _rowid FROM watch_view_… {clause}`, where the source
+  `FROM` aliases are out of scope. Second, quieter manifestation at the same clause:
+  `util::order_by_sort_spec` rejected the dot in `b.title` as an inexpressible expression, so
+  `BackendEngine::query_ordering_spec` (`crates/holon/src/api/backend_engine.rs:327`) returned
+  `None` and the collection rendered in default order behind a warn-level trace only. The
+  keystone HAS the seam (`SetupWatch` → `register_watch` with caller-supplied SQL, reaching
+  `query_ordering_spec`) but `TestQuery::to_sql/to_prql/to_gql` never emits an `ORDER BY` at
+  all, so the triggering interaction is ungeneratable — the alphabet is narrowed, which is
+  #42's blocked `QueryTable` widening. Stood in with a dedicated integration test against
+  real Turso (`crates/holon-turso/tests/watch_preserves_order.rs`,
+  `watch_honours_an_alias_qualified_order_by` + `sort_spec_sees_through_a_table_alias`), both
+  red-for-the-right-reason first (`no such table: d`; `None` vs `Some("title")`). FIXED: new
+  `util::rewrite_order_by_for_view` re-expresses the clause in the view's OWN output columns
+  — dropping the qualifier is SQLite's own view-column naming rule for an unaliased `t.col`
+  projection — verified against `PRAGMA table_info(<matview>)` (supported for matviews in our
+  turso fork, `core/translate/pragma.rs:1317`) and `bail!`ing with the term, the derived
+  column and the view's real column list when the projection renamed it. No silent drop: that
+  is the #72 class. NOT fixed here and NOT the same defect: #72's `LIMIT` drop is the same
+  seam's other arm — `strip_order_by` removes ORDER BY/LIMIT/OFFSET together for the matview
+  body while `trailing_order_by` deliberately re-emits only the ORDER BY, documented at
+  `util.rs:46-48`, because the matview holds the unbounded relation and its CDC stream
+  delivers changes beyond any window.)
 - (+1 ENVIRONMENT 2026-07-31, secondary COVERAGE: the keystone harness's org serializer
   (`serialize_block_recursive`, `crates/holon-integration-tests/src/org_utils.rs`) RE-IMPLEMENTED
   block-content emission instead of calling prod's. It projected marks with the INNER

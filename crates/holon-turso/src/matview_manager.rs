@@ -771,6 +771,29 @@ impl MatviewManager {
             .with_context(|| format!("Failed to query view {view_name}: {select_sql}"))
     }
 
+    /// Output column names of a materialized view, so a source query's
+    /// `ORDER BY` can be re-expressed against them.
+    async fn view_columns(&self, view_name: &str) -> Result<Vec<String>> {
+        let rows = self
+            .db_handle
+            .query(&format!("PRAGMA table_info({view_name})"), HashMap::new())
+            .await
+            .with_context(|| format!("PRAGMA table_info({view_name}) for the ORDER BY rewrite"))?;
+        rows.iter()
+            .map(|row| {
+                row.get("name")
+                    .and_then(|v| v.as_string())
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "PRAGMA table_info({view_name}) returned a row with no textual \
+                             `name`: {row:?}"
+                        )
+                    })
+            })
+            .collect()
+    }
+
     /// Subscribe to CDC for a specific view, returning a filtered stream.
     ///
     /// Registers with the single demultiplexer task instead of spawning a
@@ -804,7 +827,25 @@ impl MatviewManager {
     pub async fn watch(&self, sql: &str) -> Result<WatchResult> {
         let view_name = self.ensure_view(sql).await?;
         let stream = self.subscribe_cdc(&view_name).await?;
-        let order_by = crate::util::trailing_order_by(sql);
+        // The clause comes off the SOURCE query, where its table aliases are in
+        // scope; over the view they are not, so it has to be re-expressed in the
+        // view's own output columns before it can be spliced onto the read.
+        let order_by = match crate::util::trailing_order_by(sql) {
+            Some(clause) => {
+                let columns = self.view_columns(&view_name).await?;
+                Some(
+                    crate::util::rewrite_order_by_for_view(&clause, &columns).with_context(
+                        || {
+                            format!(
+                                "watch: cannot re-apply `{clause}` over view {view_name}. Source \
+                                 SQL: {sql}"
+                            )
+                        },
+                    )?,
+                )
+            }
+            None => None,
+        };
         let initial_rows = self
             .query_view_ordered(&view_name, order_by.as_deref())
             .await?;

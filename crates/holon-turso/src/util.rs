@@ -1,6 +1,10 @@
 //! Small Turso-local helpers. These mirror the equivalents in `holon::util`
 //! but are kept here so the adapter has no dependency on the `holon` crate.
 
+use anyhow::Context;
+use anyhow::Result;
+use anyhow::bail;
+
 /// Spawn a fire-and-forget future onto the current async executor.
 ///
 /// On native this uses `tokio::spawn`. On wasm32-unknown — where there is no
@@ -48,6 +52,107 @@ pub fn trailing_order_by(sql: &str) -> Option<String> {
     Some(sql[start..end].trim().to_string())
 }
 
+/// Rewrite an `ORDER BY` clause lifted off a source query so it is valid over
+/// the materialized view that query became.
+///
+/// The clause names the source `FROM` aliases (`ORDER BY b.title`), which are
+/// out of scope over `FROM watch_view_…`. SQLite names a view column after the
+/// bare column of an unaliased `t.col` projection, so dropping the qualifier is
+/// its own naming rule; a qualified term landing on no view column means the
+/// projection renamed it, which is an error rather than a wrong order.
+pub fn rewrite_order_by_for_view(order_by: &str, view_columns: &[String]) -> Result<String> {
+    let bytes = order_by.as_bytes();
+    let mut out = String::with_capacity(order_by.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            let end = string_literal_end(bytes, i);
+            out.push_str(&order_by[i..end]);
+            i = end;
+            continue;
+        }
+        let Some((first, mut end)) = scan_ident(order_by, i) else {
+            let ch = order_by[i..].chars().next().expect("i is a char boundary");
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        };
+        let mut path = vec![first];
+        while bytes.get(end) == Some(&b'.') {
+            let (segment, next) = scan_ident(order_by, end + 1).with_context(|| {
+                format!(
+                    "ORDER BY qualifies `{}` with a `.` that no identifier follows, so the clause \
+                     cannot be rewritten onto the view. Clause: {order_by}",
+                    path.join(".")
+                )
+            })?;
+            path.push(segment);
+            end = next;
+        }
+        match path.as_slice() {
+            [_] => out.push_str(&order_by[i..end]),
+            [.., qualifier, column] => {
+                if !view_columns.iter().any(|c| c.eq_ignore_ascii_case(column)) {
+                    bail!(
+                        "ORDER BY term `{term}` qualifies column `{column}` with `{qualifier}`, a \
+                         source-query alias that is out of scope over the materialized view. \
+                         Dropping the qualifier yields `{column}`, which the view does not project \
+                         — its columns are: {cols}. Project the column under its bare name, or \
+                         drop the ORDER BY.",
+                        term = &order_by[i..end],
+                        cols = view_columns.join(", "),
+                    );
+                }
+                out.push('"');
+                out.push_str(column);
+                out.push('"');
+            }
+            [] => unreachable!("path always holds the identifier that opened it"),
+        }
+        i = end;
+    }
+    Ok(out)
+}
+
+/// The identifier starting at `start` — bare or `"`/`` ` ``-quoted — and the
+/// byte index just past it.
+fn scan_ident(sql: &str, start: usize) -> Option<(String, usize)> {
+    let bytes = sql.as_bytes();
+    match *bytes.get(start)? {
+        quote @ (b'"' | b'`') => {
+            let mut i = start + 1;
+            while i < bytes.len() && bytes[i] != quote {
+                i += 1;
+            }
+            (i < bytes.len()).then(|| (sql[start + 1..i].to_string(), i + 1))
+        }
+        c if c.is_ascii_alphabetic() || c == b'_' => {
+            let mut i = start;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            Some((sql[start..i].to_string(), i))
+        }
+        _ => None,
+    }
+}
+
+/// Byte index just past the single-quoted string literal opening at `start`.
+fn string_literal_end(bytes: &[u8], start: usize) -> usize {
+    let mut i = start + 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            if bytes.get(i + 1) == Some(&b'\'') {
+                i += 2;
+                continue;
+            }
+            return i + 1;
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
 /// Translate an `ORDER BY` clause into the render layer's sort-key spec —
 /// `col` for ascending, `-col` for descending — so a watched query's declared
 /// order can drive the rendered collection's sort.
@@ -92,6 +197,12 @@ pub fn order_by_sort_spec(order_by: &str) -> Option<String> {
             return None;
         }
     };
+
+    // The term is lifted off the SOURCE query, so it may qualify the column
+    // with a `FROM` alias (`b.title`); the rows being sorted are the view's,
+    // whose column carries the bare name. A qualifier inside an expression
+    // (`lower(b.title)`) still fails the plain-column check below.
+    let column = column.rsplit('.').next().expect("rsplit yields one part");
 
     // Only `"` and `` ` `` quote an IDENTIFIER. A single-quoted term is a string
     // literal, so it keeps its quotes here and falls into the warn-and-decline
@@ -175,6 +286,7 @@ fn keyword_at(bytes: &[u8], idx: usize, keyword: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::order_by_sort_spec;
+    use super::rewrite_order_by_for_view;
     use super::strip_order_by;
 
     #[test]
@@ -245,6 +357,55 @@ mod tests {
     #[should_panic(expected = "expects an ORDER BY clause")]
     fn sort_spec_rejects_a_non_order_by_clause() {
         order_by_sort_spec("LIMIT 10");
+    }
+
+    #[test]
+    fn rewrite_drops_the_source_alias_onto_the_views_column() {
+        let cols = vec!["id".to_string(), "title".to_string(), "name".to_string()];
+        assert_eq!(
+            rewrite_order_by_for_view("ORDER BY d.name ASC, b.title DESC", &cols).unwrap(),
+            "ORDER BY \"name\" ASC, \"title\" DESC"
+        );
+        // Unqualified terms are already in the view's vocabulary.
+        assert_eq!(
+            rewrite_order_by_for_view("ORDER BY title DESC", &cols).unwrap(),
+            "ORDER BY title DESC"
+        );
+        // A qualified column inside an expression is rewritten in place.
+        assert_eq!(
+            rewrite_order_by_for_view("ORDER BY lower(b.title)", &cols).unwrap(),
+            "ORDER BY lower(\"title\")"
+        );
+        // Quoted identifiers on either side of the dot.
+        assert_eq!(
+            rewrite_order_by_for_view("ORDER BY \"b\".\"title\"", &cols).unwrap(),
+            "ORDER BY \"title\""
+        );
+    }
+
+    /// The #72 class — a clause we cannot express over the view must be an
+    /// error, never a silently dropped order.
+    #[test]
+    fn rewrite_fails_loud_when_the_column_is_not_projected() {
+        let cols = vec!["id".to_string(), "t".to_string()];
+        let err = rewrite_order_by_for_view("ORDER BY b.title", &cols)
+            .expect_err("a column the view does not project cannot be rewritten");
+        let msg = format!("{err}");
+        assert!(msg.contains("b.title"), "{msg}");
+        assert!(msg.contains("title"), "{msg}");
+        assert!(
+            msg.contains("id, t"),
+            "the view's real columns belong in the error: {msg}"
+        );
+    }
+
+    #[test]
+    fn rewrite_leaves_string_literals_alone() {
+        let cols = vec!["title".to_string()];
+        assert_eq!(
+            rewrite_order_by_for_view("ORDER BY 'b.title', b.title", &cols).unwrap(),
+            "ORDER BY 'b.title', \"title\""
+        );
     }
 
     #[test]
