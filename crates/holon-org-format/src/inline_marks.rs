@@ -50,84 +50,153 @@ use uuid::Uuid;
 /// mode is the only shape the emit path can round-trip losslessly, and it is
 /// what this module's contract has always documented.
 pub fn extract_inline_marks(text: &str) -> (String, Vec<MarkSpan>) {
+    let mut state = ExtractState::default();
+    walk_node(&parse_inline(text), &mut state);
+    (state.out, state.marks)
+}
+
+fn parse_inline(text: &str) -> SyntaxNode {
     let config = ParseConfig {
         use_sub_superscript: UseSubSuperscript::Brace,
         ..Default::default()
     };
-    let org = config.parse(text);
-    let mut state = ExtractState::default();
-    walk_node(org.document().syntax(), &mut state);
-    (state.out, state.marks)
+    config.parse(text).document().syntax().clone()
 }
 
-/// Delimiters tried, in order, to verbatim-quote a markup-shaped literal.
-/// `=` is Verbatim, `~` is Code; both are protected from emphasis parsing.
+/// Delimiters tried, in order, to quote a markup-shaped literal. `=` is
+/// Verbatim, `~` is Code; org parses no emphasis inside either.
 const QUOTE_DELIMS: [char; 2] = ['=', '~'];
 
-/// Rewrite `text` so that [`extract_inline_marks`] returns `text` unchanged:
-/// every span org would consume as emphasis markup is wrapped in `=…=`
-/// (Verbatim), which org does not parse for emphasis.
+/// Emit `content` + `marks` as the org bytes that belong on disk, quoting
+/// every literal span org would otherwise eat as emphasis.
 ///
-/// This is the render half of the store→disk invariant: emitted bytes must
-/// parse back to exactly the stored content. A store that holds the literal
-/// `__default__` with no marks would otherwise reach disk as live org
-/// underline markup and come back as `default` — one-shot data loss.
+/// The contract — the store→disk invariant this crate must not violate — is
+/// stated by [`expected_reparse`]: parsing the returned bytes reproduces every
+/// literal byte of `content`, with raw link syntax allowed to adopt into a
+/// `Link` mark (that adoption is intended product behavior, not loss).
+/// Emphasis-shaped literals must survive byte-for-byte, which they do by being
+/// wrapped in `=…=`; re-parsing gives them a `Verbatim` mark, and content plus
+/// that mark re-renders to the same bytes — a fixed point after one cycle.
 ///
-/// Link spans are left alone: their delimiters carry the target, and the
-/// stored form for a link is content + a `Link` mark, not literal `[[…]]`.
-///
-/// Fails when neither `=` nor `~` can quote the span (a shape whose own
-/// content defeats both) rather than emitting bytes it knows are lossy.
-pub fn escape_markup_literals(text: &str) -> anyhow::Result<String> {
-    let spans = markup_source_spans(text);
-    if spans.is_empty() {
-        return Ok(text.to_string());
-    }
+/// The check is TOTAL: it runs on the fully emitted string for every input,
+/// marks or no marks, with no shape short-circuiting it. `Err` means the
+/// content defeats both quote delimiters; the caller must disclose rather than
+/// write bytes known to be lossy.
+pub fn render_lossless(content: &str, marks: &[MarkSpan]) -> anyhow::Result<String> {
+    let expected = expected_reparse(content);
+    let spans = unprotected_markup_spans(content, marks);
     for delim in QUOTE_DELIMS {
-        let candidate = wrap_spans(text, &spans, delim);
-        if extract_inline_marks(&candidate).0 == text {
+        let (quoted, shifted) = quote_spans(content, &spans, delim, marks);
+        let candidate = render_inline_marks(&quoted, &shifted);
+        if extract_inline_marks(&candidate).0 == expected {
             return Ok(candidate);
         }
     }
     anyhow::bail!(
-        "cannot verbatim-quote markup-shaped literal content for org render: no delimiter in \
-         {QUOTE_DELIMS:?} round-trips the spans {spans:?} of {text:?}"
+        "no delimiter in {QUOTE_DELIMS:?} quotes the markup-shaped spans {spans:?} of content \
+         {content:?} (marks {marks:?}) back to {expected:?}"
     )
 }
 
-/// Wrap each byte range of `text` in `delim`, outermost ranges only.
-fn wrap_spans(text: &str, spans: &[std::ops::Range<usize>], delim: char) -> String {
-    let mut out = String::with_capacity(text.len() + spans.len() * 2);
-    let mut cursor = 0usize;
-    for span in spans {
-        out.push_str(&text[cursor..span.start]);
-        out.push(delim);
-        out.push_str(&text[span.clone()]);
-        out.push(delim);
-        cursor = span.end;
-    }
-    out.push_str(&text[cursor..]);
-    out
+/// The parse-back form the render half is contractually required to produce.
+///
+/// Derived from the parser itself — the same walk as [`extract_inline_marks`],
+/// only emphasis nodes keep their source bytes instead of being stripped. So
+/// the two agree on every non-emphasis construct by construction, and the
+/// policy difference between them is the whole policy: **links adopt, emphasis
+/// stays literal**.
+fn expected_reparse(text: &str) -> String {
+    let mut state = ExtractState {
+        keep_emphasis_raw: true,
+        ..ExtractState::default()
+    };
+    walk_node(&parse_inline(text), &mut state);
+    state.out
 }
 
-/// Byte ranges of the outermost emphasis-markup nodes org finds in `text`,
-/// in source order. Uses the same parser and config as
-/// [`extract_inline_marks`] — there is exactly one emphasis grammar in this
-/// crate, and it is orgize's.
-fn markup_source_spans(text: &str) -> Vec<std::ops::Range<usize>> {
-    let config = ParseConfig {
-        use_sub_superscript: UseSubSuperscript::Brace,
-        ..Default::default()
+/// Quote each span of `content` in `delim`, returning the quoted text and
+/// `marks` re-anchored onto it.
+///
+/// A quote inserts one char at the span's start and one at its end. A mark
+/// boundary moves past every insertion before it, and past a span-CLOSE that
+/// lands exactly on it — so a quote opening where a mark opens sits inside the
+/// mark, and a quote closing where a mark closes sits inside it too. Nested
+/// that way, both delimiter pairs strip cleanly on re-parse.
+fn quote_spans(
+    content: &str,
+    spans: &[std::ops::Range<usize>],
+    delim: char,
+    marks: &[MarkSpan],
+) -> (String, Vec<MarkSpan>) {
+    let mut quoted = String::with_capacity(content.len() + spans.len() * 2);
+    let mut opens: Vec<usize> = Vec::with_capacity(spans.len());
+    let mut closes: Vec<usize> = Vec::with_capacity(spans.len());
+    let mut cursor = 0usize;
+    for span in spans {
+        quoted.push_str(&content[cursor..span.start]);
+        quoted.push(delim);
+        quoted.push_str(&content[span.clone()]);
+        quoted.push(delim);
+        cursor = span.end;
+        opens.push(content[..span.start].chars().count());
+        closes.push(content[..span.end].chars().count());
+    }
+    quoted.push_str(&content[cursor..]);
+
+    let shift = |pos: usize| -> usize {
+        let before = opens
+            .iter()
+            .chain(closes.iter())
+            .filter(|p| **p < pos)
+            .count();
+        let closing_here = closes.iter().filter(|p| **p == pos).count();
+        pos + before + closing_here
     };
-    let org = config.parse(text);
+    let shifted = marks
+        .iter()
+        .map(|m| MarkSpan {
+            start: shift(m.start),
+            end: shift(m.end),
+            mark: m.mark.clone(),
+        })
+        .collect();
+    (quoted, shifted)
+}
+
+/// The markup-shaped spans of `content` that still need quoting: everything
+/// [`markup_source_spans`] found, minus what an existing Verbatim or Code mark
+/// already covers. Those two marks emit their own `=…=` / `~…~` delimiters, so
+/// quoting inside them would double the delimiters and corrupt the span.
+fn unprotected_markup_spans(content: &str, marks: &[MarkSpan]) -> Vec<std::ops::Range<usize>> {
+    let protecting: Vec<&MarkSpan> = marks
+        .iter()
+        .filter(|m| matches!(m.mark, InlineMark::Verbatim | InlineMark::Code))
+        .collect();
+    markup_source_spans(content)
+        .into_iter()
+        .filter(|span| {
+            let start = content[..span.start].chars().count();
+            let end = content[..span.end].chars().count();
+            !protecting.iter().any(|m| m.start <= start && end <= m.end)
+        })
+        .collect()
+}
+
+/// Byte ranges of the outermost emphasis-markup nodes org finds in `text`, in
+/// source order. Uses the same parser and config as [`extract_inline_marks`] —
+/// there is exactly one emphasis grammar in this crate, and it is orgize's.
+fn markup_source_spans(text: &str) -> Vec<std::ops::Range<usize>> {
     let mut spans = Vec::new();
-    collect_markup_spans(org.document().syntax(), &mut spans);
+    collect_markup_spans(&parse_inline(text), &mut spans);
     spans
 }
 
 fn collect_markup_spans(node: &SyntaxNode, spans: &mut Vec<std::ops::Range<usize>>) {
     for child in node.children() {
         match inline_mark_kind(child.kind()) {
+            // Link delimiters carry the target; quoting them would turn a link
+            // into literal text. Their subtree is not descended into for the
+            // same reason — see `expected_reparse`, which lets links adopt.
             Some(MarkKindHint::Link) => {}
             Some(_) => {
                 let range = child.text_range();
@@ -143,18 +212,26 @@ struct ExtractState {
     out: String,
     marks: Vec<MarkSpan>,
     char_pos: usize,
+    /// Emit emphasis nodes as their literal source bytes and mint no mark —
+    /// the [`expected_reparse`] policy. Links still adopt.
+    keep_emphasis_raw: bool,
 }
 
 fn walk_node(node: &SyntaxNode, state: &mut ExtractState) {
     for child in node.children_with_tokens() {
         match child {
-            NodeOrToken::Node(child_node) => {
-                if let Some(kind_hint) = inline_mark_kind(child_node.kind()) {
-                    emit_mark(child_node, kind_hint, state);
-                } else {
-                    walk_node(&child_node, state);
+            NodeOrToken::Node(child_node) => match inline_mark_kind(child_node.kind()) {
+                Some(kind_hint) => {
+                    if state.keep_emphasis_raw && kind_hint != MarkKindHint::Link {
+                        let raw = child_node.text().to_string();
+                        state.char_pos += raw.chars().count();
+                        state.out.push_str(&raw);
+                    } else {
+                        emit_mark(child_node, kind_hint, state);
+                    }
                 }
-            }
+                None => walk_node(&child_node, state),
+            },
             NodeOrToken::Token(tok) => {
                 scan_text_for_block_refs(tok.text(), state);
             }
@@ -864,17 +941,30 @@ mod tests {
         assert_eq!(marks, Vec::<MarkSpan>::new());
     }
 
-    /// The render-half invariant, stated directly: whatever
-    /// `escape_markup_literals` emits must extract back to the input.
+    /// The render-half invariant, stated directly and totally: for ANY
+    /// content, what `render_lossless` emits must parse back to
+    /// `expected_reparse` of that content — every literal byte intact, links
+    /// free to adopt.
+    fn assert_lossless(content: &str, marks: &[MarkSpan]) -> String {
+        let emitted = render_lossless(content, marks)
+            .unwrap_or_else(|e| panic!("render_lossless({content:?}, {marks:?}) bailed: {e}"));
+        assert_eq!(
+            extract_inline_marks(&emitted).0,
+            expected_reparse(content),
+            "content {content:?} marks {marks:?} emitted {emitted:?}"
+        );
+        emitted
+    }
+
     #[test]
-    fn escaped_literals_extract_back_unchanged() {
+    fn markup_shaped_literals_survive_render() {
         for literal in [
             "__default__",
             "_default_",
             "*bold-looking*",
             "/italic-looking/",
             "~tilde-looking~",
-            // Content that already ends in the quote delimiter: the wrap has
+            // Content that already ends in the quote delimiter: the quote has
             // to survive `==x==`, which org reads as verbatim `=x=`.
             "=verbatim-looking=",
             "+strike-looking+",
@@ -886,29 +976,110 @@ mod tests {
             "snake_case_ident and a_b_c",
             "",
         ] {
-            let escaped = escape_markup_literals(literal).expect("escapable");
             assert_eq!(
-                extract_inline_marks(&escaped).0,
-                literal,
-                "escaped {literal:?} to {escaped:?}"
+                extract_inline_marks(&assert_lossless(literal, &[])).0,
+                literal
             );
         }
     }
 
+    /// Emphasis mixed with raw link syntax. The link ADOPTS (its `[[…]]` bytes
+    /// become a Link mark — intended product behavior); the emphasis-shaped
+    /// literal must not.
     #[test]
-    fn escape_is_a_noop_without_markup() {
-        assert_eq!(
-            escape_markup_literals("no markup here").expect("escapable"),
-            "no markup here"
+    fn link_mixed_with_emphasis_keeps_the_emphasis_literal() {
+        for content in [
+            "a *b* and [[c]]",
+            "[[https://e.com][l]] and __y__",
+            "[[block:xyz][lbl]] and __y__",
+            "see [[foo]] here",
+            "text with [[link]] only",
+            "footnote [fn:1] and *x*",
+        ] {
+            assert_lossless(content, &[]);
+        }
+    }
+
+    /// A link's own label bytes survive: org does not parse emphasis inside a
+    /// link label, so `__lbl__` comes back whole once the link adopts.
+    #[test]
+    fn link_label_bytes_survive_adoption() {
+        let emitted = assert_lossless("[[https://example.com][__lbl__]]", &[]);
+        assert_eq!(extract_inline_marks(&emitted).0, "__lbl__");
+    }
+
+    /// A block that ALREADY carries marks still has literal gaps between them,
+    /// and those gaps are exposed to exactly the same loss.
+    #[test]
+    fn literal_gaps_between_marks_survive() {
+        // `bold` is marked; the `__y__` sitting after it is a literal.
+        let marks = vec![MarkSpan {
+            start: 0,
+            end: 4,
+            mark: InlineMark::Bold,
+        }];
+        let emitted = assert_lossless("bold and __y__ after", &marks);
+        let (text, back) = extract_inline_marks(&emitted);
+        assert_eq!(text, "bold and __y__ after");
+        assert!(
+            back.iter().any(|m| m.mark == InlineMark::Bold),
+            "the Bold mark must survive too; got {back:?}"
         );
     }
 
-    /// Links keep their `[[…]]` bytes — their delimiters carry the target, so
-    /// quoting them would turn a link into literal text.
+    /// The shape this fix MINTS: a healed block comes back with a Verbatim
+    /// mark, and a later edit appends new literal markup next to it. That
+    /// block now takes the marks-present path and must still be lossless.
     #[test]
-    fn escape_leaves_links_alone() {
-        let link = "[[https://example.com][label]]";
-        assert_eq!(escape_markup_literals(link).expect("escapable"), link);
+    fn healed_block_extended_with_new_literal_markup_survives() {
+        let marks = vec![MarkSpan {
+            start: 0,
+            end: 11,
+            mark: InlineMark::Verbatim,
+        }];
+        assert_lossless("__default__ and __init__", &marks);
+    }
+
+    /// Marks minted outside the org parser (Peritext reads, block-split,
+    /// templates) carry no guarantee that their content is org-clean.
+    #[test]
+    fn externally_minted_mark_over_markup_shaped_text_survives() {
+        // Italic over `the`, with a markup-shaped literal beside it.
+        let marks = vec![MarkSpan {
+            start: 0,
+            end: 3,
+            mark: InlineMark::Italic,
+        }];
+        assert_lossless("the __default__ profile", &marks);
+        // Italic over the whole literal: the quote nests INSIDE the emphasis
+        // delimiters (`/=__default__=/`), so both strip cleanly.
+        let marks = vec![MarkSpan {
+            start: 4,
+            end: 15,
+            mark: InlineMark::Italic,
+        }];
+        assert_lossless("the __default__ profile", &marks);
+    }
+
+    /// A mark that CROSSES a markup-shaped literal — covering part of it — is
+    /// not expressible in org at all (the emphasis delimiter would land inside
+    /// the quote). The render half must say so, not emit corrupt bytes: before
+    /// this check existed the emit was `the /__default/__ profile`, which
+    /// re-parses with two stray `/` in the content.
+    #[test]
+    fn mark_crossing_a_markup_literal_is_refused_not_corrupted() {
+        let marks = vec![MarkSpan {
+            start: 4,
+            end: 13,
+            mark: InlineMark::Italic,
+        }];
+        let err = render_lossless("the __default__ profile", &marks)
+            .expect_err("a crossing mark is unrepresentable and must be refused");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("__default__"),
+            "error must name the content: {msg}"
+        );
     }
 
     #[test]

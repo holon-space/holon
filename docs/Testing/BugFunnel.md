@@ -8,7 +8,7 @@ distribution steers QA investment.
 
 - ENVIRONMENT: 120
 - COVERAGE: 65
-- PERCEPTION: 50
+- PERCEPTION: 51
 - ORACLE: 39
 
 Archived baseline (ENVIRONMENT 87 · COVERAGE 37 · PERCEPTION 35 · ORACLE 18 as of
@@ -87,13 +87,28 @@ the archived baseline):
   classes that exclude EVERY org markup character, so `round_trip_pbt.rs` structurally could not
   generate the shape. Now covered by `crates/holon-org-format/tests/org_roundtrip_characterization.rs`
   (8 tests, un-ignored on fix). FIXED 2026-07-31 (Martin's ruling: verbatim-quote on render):
-  `escape_markup_literals` in `crates/holon-org-format/src/inline_marks.rs` wraps every span the
-  parser would consume in `=…=`, so `__default__` reaches disk as `=__default__=` and parses back
-  literally (plus a Verbatim mark — the shape is a fixed point after one cycle, and the token stays
-  greppable on disk). Detection reuses orgize with `extract_inline_marks`' own config, so there is
-  no second emphasis grammar. COVERAGE gap closed at the source: `valid_title`/`valid_body` now
-  carry a weighted `markup_shaped_literal()` arm, verified red-without-the-fix in
-  `round_trip_pbt` and `org_block_round_trip_pbt`.)
+  `render_lossless` in `crates/holon-org-format/src/inline_marks.rs` quotes every span the parser
+  would consume in `=…=`, so `__default__` reaches disk as `=__default__=` and parses back
+  literally (plus a Verbatim mark — a fixed point after one cycle, and the token stays greppable on
+  disk). Detection reuses orgize with `extract_inline_marks`' own config, so there is no second
+  emphasis grammar. The emit is gated by a TOTAL self-check against `expected_reparse` — the same
+  parser walk with emphasis kept raw — which states the policy exactly: LINKS MAY ADOPT, EMPHASIS
+  MUST STAY LITERAL. Applies to marked blocks too (the literal gaps between marks were equally
+  lossy). COVERAGE gap closed at the source: `valid_title`/`valid_body` now carry a weighted
+  `markup_shaped_literal()` arm, verified red-without-the-fix in `round_trip_pbt` and
+  `org_block_round_trip_pbt`.)
+- (+1 PERCEPTION 2026-07-31: the FIRST fix for the entry above shipped three defects a fresh-context
+  verifier caught, all invisible to the tests that certified it. (a) Its self-check compared the
+  re-parse byte-for-byte against the input, so any content mixing a literal link with emphasis
+  (`a *b* and [[c]]`) failed the check and PANICKED render — inside the org-sync select loop, which
+  an unwind stops vault-wide. (b) The quoting was wired only into the no-marks path on a provenance
+  argument ("marks only come from the org parser") that is FALSE — Peritext reads, block-split,
+  template instantiation and the markdown adapters all mint marks, and the Verbatim mark the fix
+  itself mints puts a healed block into the unprotected path. (c) An early return skipped the check
+  entirely whenever there was nothing to quote. GAP = PERCEPTION: every test asserted on content
+  the FIX chose to quote, none asserted the check ran on content it chose not to. Now pinned by
+  `render_lossless_shapes.rs` (33 adversarial shapes, no input may skip the check) plus unit rungs
+  for the marked/healed/externally-minted paths.)
 - (+1 COVERAGE 2026-07-31: an INDENTED body lost its FIRST line's indentation on every org round
   trip while later lines kept theirs, so `    a\n    b` came back `a\n    b` — silent, cumulative
   re-alignment of any indented note or code-ish body, and the doc-root preamble had the same

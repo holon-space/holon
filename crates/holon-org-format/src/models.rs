@@ -928,20 +928,28 @@ impl ToOrg for Block {
 /// headline case). Free function (not an inherent method) because `Block` is
 /// defined in `holon-api`.
 pub(crate) fn render_headline_block(block: &Block, identity: HeadlineIdentity) -> String {
-    // Rich text: re-emit org delimiters from the mark set before splitting
-    // into title + body lines. When marks are absent the content is a LITERAL
-    // — any span org would read as emphasis gets verbatim-quoted, so the bytes
-    // on disk parse back to exactly what the store holds (`__default__` stays
-    // `__default__` instead of coming back as `default`).
-    let emitted: String = match block.marks.as_ref().filter(|m| !m.is_empty()) {
-        Some(marks) => crate::inline_marks::render_inline_marks(&block.content, marks),
-        None => crate::inline_marks::escape_markup_literals(&block.content).unwrap_or_else(|e| {
-            panic!(
-                "org render of block {} would emit lossy bytes: {e:#}",
-                block.id.as_str()
-            )
-        }),
-    };
+    // Re-emit org delimiters from the mark set and quote every literal span
+    // org would otherwise eat as emphasis, so the bytes on disk parse back to
+    // what the store holds (`__default__` stays `__default__` instead of
+    // coming back as `default`). Applies with or without marks: the literal
+    // gaps between marks are exposed to exactly the same loss.
+    let marks = block.marks.as_deref().unwrap_or(&[]);
+    let emitted: String = crate::inline_marks::render_lossless(&block.content, marks)
+        .unwrap_or_else(|e| {
+            // Degraded but disclosed. `ToOrg::to_org` and the `FileFormatAdapter`
+            // render methods return `String`, so an `Err` here has nowhere to go
+            // except a panic — and this runs inside the org-sync select loop,
+            // where an unwind stops write-back vault-wide until restart. Emitting
+            // the unquoted form is strictly better than today's silent loss: same
+            // bytes, plus a loud ERROR naming the block.
+            tracing::error!(
+                block = block.id.as_str(),
+                error = %e,
+                "org render cannot quote this content losslessly; writing the UNQUOTED form, \
+                 which will lose inline-markup delimiters on re-parse"
+            );
+            crate::inline_marks::render_inline_marks(&block.content, marks)
+        });
     let title_str = emitted.lines().next().unwrap_or("").trim_end().to_string();
     let body_str: Option<String> = {
         let lines: Vec<&str> = emitted.lines().collect();
