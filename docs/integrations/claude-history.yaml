@@ -157,6 +157,75 @@ entities:
       write_through: true
       max_fan_out: 50
 
+  # Agent-grain attribution: one row per subagent invocation, so a Holon task
+  # can link to the Claude agents that worked on it. Session rollups (how many
+  # agents, when) derive by grouping on session_id — no separate entity.
+  #
+  # Fans out over cached projects exactly like `task`. The provider reads only
+  # each transcript's head plus its mtime, so a project's agents cost O(agents)
+  # rather than O(transcript bytes) — the bodies run to hundreds of megabytes.
+  # Like `task`, there is no incremental watermark: agents carry no field that
+  # tracks against what is already cached, so each fan-out re-reads a bounded
+  # set of most-recently-active projects.
+  agent:
+    profile_variants:
+      - name: default
+        render: >-
+          expand_toggle(#{
+            header: row(text(col("agent_type")), spacer(8), text(col("description"))),
+            content: live_query(#{
+              sql: "SELECT uuid, role, content, timestamp AS ts FROM cc_agent_message_fdw WHERE agent_id = $context_id AND role IS NOT NULL ORDER BY timestamp",
+              item_template: chat_bubble(#{sender: col("role"), time: col("ts")}, text(col("content")))
+            })
+          })
+    schema:
+      # NOT a globally unique id: resume/fork copies the subagents/ directory
+      # byte-identically, so one agent id can sit under several (session_id,
+      # project_id) pairs. The provider dedups per listing, attributing the row
+      # to the lexicographic min (session_id, project_id); cross-project dedup
+      # is Deferred, so a duplicate spanning projects still lands fan-out-order.
+      - name: id
+        sql_type: TEXT
+        primary_key: true
+      - name: session_id
+        sql_type: TEXT
+        indexed: true
+      - name: project_id
+        sql_type: TEXT
+        nullable: true
+      - name: agent_type
+        sql_type: TEXT
+        nullable: true
+      - name: description
+        sql_type: TEXT
+        nullable: true
+      - name: parent_agent_id
+        sql_type: TEXT
+        nullable: true
+      - name: tool_use_id
+        sql_type: TEXT
+        nullable: true
+      - name: spawn_depth
+        sql_type: INTEGER
+        nullable: true
+      - name: started_at
+        sql_type: TEXT
+        nullable: true
+      - name: ended_at
+        sql_type: TEXT
+        nullable: true
+    vtable:
+      list_resource: "claude-history://projects/{project_id}/agents"
+      uri_params:
+        project_id:
+          enumerate_from:
+            entity: project
+            field: id
+            order_by: last_activity DESC
+            limit: 50
+      write_through: true
+      max_fan_out: 50
+
   message:
     # ENABLED: unpinned fan-out over locally cached sessions. A pinned query
     # (`SELECT ... FROM cc_message_fdw WHERE session_id = X`, e.g. the session
@@ -198,6 +267,82 @@ entities:
         primary_key: true
       - name: session_id
         sql_type: TEXT
+        nullable: true
+      # Null throughout the main conversation; set on every row the provider
+      # serves from a subagent transcript.
+      - name: agent_id
+        sql_type: TEXT
+        nullable: true
+      - name: parent_uuid
+        sql_type: TEXT
+        nullable: true
+      - name: type
+        sql_type: TEXT
+        nullable: true
+      - name: timestamp
+        sql_type: TEXT
+        nullable: true
+      - name: role
+        sql_type: TEXT
+        nullable: true
+      - name: model
+        sql_type: TEXT
+        nullable: true
+      - name: content
+        sql_type: TEXT
+        nullable: true
+      - name: git_branch
+        sql_type: TEXT
+        nullable: true
+      - name: cwd
+        sql_type: TEXT
+        nullable: true
+
+  # A subagent's transcript. Separate from `message` because the provider
+  # serves it under a different resource (`agents/{agent_id}/messages`) — one
+  # entity can declare only one list_resource. Same row shape as `message`;
+  # here `agent_id` is always set and `session_id` names the spawning session.
+  #
+  # The `agent` render pins this by agent id, so opening one agent costs
+  # exactly one resource read and always shows live rows. An unpinned query
+  # enumerates `cc_agent`, bounded the same way as `message`.
+  #
+  # The watermark is "nothing cached yet", NOT the `modified > MAX(timestamp)`
+  # idiom `message` uses: cc_agent.ended_at is the transcript's mtime, which is
+  # always >= its last message timestamp, so that comparison would be
+  # permanently true and re-fetch every agent on every notification. Cost of
+  # this choice: the unpinned warm-up does not backfill messages appended to an
+  # agent it already cached — the pinned render reads through and is unaffected.
+  # substr(cc_agent.id, 10) strips the 'cc-agent:' scheme (9 chars) to match
+  # cc_agent_message.agent_id, which stores raw ids.
+  agent_message:
+    vtable:
+      list_resource: "claude-history://agents/{agent_id}/messages"
+      uri_params:
+        agent_id:
+          enumerate_from:
+            entity: agent
+            field: id
+            where: >-
+              NOT EXISTS (SELECT 1 FROM cc_agent_message m
+                          WHERE m.agent_id = substr(cc_agent.id, 10))
+            order_by: ended_at DESC
+            limit: 20
+      write_through: true
+      max_fan_out: 50
+    profile_variants:
+      - name: default
+        render: 'row(text(col("content")))'
+    schema:
+      - name: uuid
+        sql_type: TEXT
+        primary_key: true
+      - name: session_id
+        sql_type: TEXT
+        nullable: true
+      - name: agent_id
+        sql_type: TEXT
+        indexed: true
         nullable: true
       - name: parent_uuid
         sql_type: TEXT

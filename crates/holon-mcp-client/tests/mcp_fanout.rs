@@ -1306,8 +1306,8 @@ fn claude_history_yaml_multi_project_shape() {
         "project must not declare a vtable (sync owns the cache table)"
     );
 
-    // session + task fan out over project via enumerate_from on project_id.
-    for ent in ["session", "task"] {
+    // session + task + agent fan out over project via enumerate_from on project_id.
+    for ent in ["session", "task", "agent"] {
         let e = cfg.entities.get(ent).unwrap_or_else(|| panic!("{ent}"));
         assert!(
             e.sync.is_none(),
@@ -1361,6 +1361,67 @@ fn claude_history_yaml_multi_project_shape() {
             .contains("substr(cc_session.id, 12)"),
         "message watermark must strip the cc-session: scheme"
     );
+
+    // Agent grain: `agent` carries the attribution columns a Holon task links
+    // through, and `agent_message` is pinned by agent id (the `agent` render's
+    // live_query) with the same bounded+watermarked fan-out as `message`.
+    let agent = cfg.entities.get("agent").expect("agent entity");
+    let agent_cols: Vec<&str> = agent.schema.iter().map(|f| f.name.as_str()).collect();
+    for col in [
+        "id",
+        "session_id",
+        "project_id",
+        "agent_type",
+        "parent_agent_id",
+    ] {
+        assert!(
+            agent_cols.contains(&col),
+            "agent must declare '{col}' (have: {agent_cols:?})"
+        );
+    }
+
+    let agent_msg = cfg
+        .entities
+        .get("agent_message")
+        .expect("agent_message entity");
+    let amvt = agent_msg.vtable.as_ref().expect("agent_message vtable");
+    assert_eq!(
+        amvt.list_resource.as_deref(),
+        Some("claude-history://agents/{agent_id}/messages"),
+        "agent_message must read the provider's agent-scoped message resource"
+    );
+    assert!(amvt.write_through);
+    assert_eq!(amvt.max_fan_out, Some(50));
+    let amef = match amvt.uri_params.get("agent_id") {
+        Some(UriParamValue::Dynamic(d)) => &d.enumerate_from,
+        other => panic!("agent_message agent_id must enumerate_from, got {other:?}"),
+    };
+    assert_eq!(amef.entity, "agent");
+    assert_eq!(amef.limit, Some(20));
+    let am_where = amef.where_sql.as_deref().expect("agent_message watermark");
+    assert!(
+        am_where.contains("substr(cc_agent.id, 10)"),
+        "agent_message watermark must strip the 9-char 'cc-agent:' scheme: {am_where}"
+    );
+    // cc_agent.ended_at is an mtime (always >= the last message timestamp), so
+    // the `modified > MAX(timestamp)` idiom would never suppress a re-fetch.
+    assert!(
+        am_where.contains("NOT EXISTS"),
+        "agent_message must watermark on 'nothing cached yet', not on ended_at: {am_where}"
+    );
+
+    // agent_id is the attribution column on BOTH message shapes.
+    for ent in ["message", "agent_message"] {
+        let cols: Vec<&str> = cfg.entities[ent]
+            .schema
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert!(
+            cols.contains(&"agent_id"),
+            "{ent} must declare agent_id (have: {cols:?})"
+        );
+    }
 
     // The clash invariant: sync XOR write-through vtable, per entity.
     for (name, e) in &cfg.entities {
