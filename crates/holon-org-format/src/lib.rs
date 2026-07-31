@@ -34,6 +34,7 @@ pub use dense::DenseBlock;
 pub use dense::DenseParse;
 pub use dense::parse_dense;
 pub use dense::render_dense;
+pub use inline_marks::escape_markup_literals;
 pub use inline_marks::extract_inline_marks;
 pub use inline_marks::render_inline_marks;
 pub use models::BlockResolver;

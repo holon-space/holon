@@ -517,7 +517,9 @@ pub trait OrgBlockExt {
     /// Get the body text (content after first line)
     fn body(&self) -> Option<String>;
 
-    /// Set content from title and body
+    /// Replace content with `title` + `body`, both plain literals. Any
+    /// existing marks are dropped: their spans indexed the old content, and
+    /// keeping them would project styling onto unrelated characters.
     fn set_title_and_body(&mut self, title: String, body: Option<String>);
 
     /// Get the task state (TODO keyword)
@@ -614,6 +616,7 @@ impl OrgBlockExt for Block {
         } else {
             self.content = title;
         }
+        self.marks = None;
         self.updated_at = holon_api::clock::now_millis();
     }
 
@@ -925,28 +928,28 @@ impl ToOrg for Block {
 /// headline case). Free function (not an inherent method) because `Block` is
 /// defined in `holon-api`.
 pub(crate) fn render_headline_block(block: &Block, identity: HeadlineIdentity) -> String {
-    // Rich text: re-emit org delimiters from the mark set before
-    // splitting into title + body lines. When marks=None, content is
-    // already raw org text (no marks to project) — emit as-is.
-    let with_marks_rendered: Option<String> = block
-        .marks
-        .as_ref()
-        .filter(|m| !m.is_empty())
-        .map(|m| crate::inline_marks::render_inline_marks(&block.content, m));
-    let title_str = match with_marks_rendered.as_ref() {
-        Some(rendered) => rendered.lines().next().unwrap_or("").trim_end().to_string(),
-        None => block.org_title(),
+    // Rich text: re-emit org delimiters from the mark set before splitting
+    // into title + body lines. When marks are absent the content is a LITERAL
+    // — any span org would read as emphasis gets verbatim-quoted, so the bytes
+    // on disk parse back to exactly what the store holds (`__default__` stays
+    // `__default__` instead of coming back as `default`).
+    let emitted: String = match block.marks.as_ref().filter(|m| !m.is_empty()) {
+        Some(marks) => crate::inline_marks::render_inline_marks(&block.content, marks),
+        None => crate::inline_marks::escape_markup_literals(&block.content).unwrap_or_else(|e| {
+            panic!(
+                "org render of block {} would emit lossy bytes: {e:#}",
+                block.id.as_str()
+            )
+        }),
     };
-    let body_str: Option<String> = match with_marks_rendered.as_ref() {
-        Some(rendered) => {
-            let lines: Vec<&str> = rendered.lines().collect();
-            if lines.len() > 1 {
-                Some(lines[1..].join("\n"))
-            } else {
-                None
-            }
+    let title_str = emitted.lines().next().unwrap_or("").trim_end().to_string();
+    let body_str: Option<String> = {
+        let lines: Vec<&str> = emitted.lines().collect();
+        if lines.len() > 1 {
+            Some(lines[1..].join("\n"))
+        } else {
+            None
         }
-        None => block.body(),
     };
 
     // Text blocks (headlines) render with stars, TODO, etc.

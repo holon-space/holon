@@ -80,64 +80,36 @@ fn assert_content_survives(content: &str) {
 /// comes back as `default`. `_x_` is org UNDERLINE, so `__default__` parses as
 /// underline-inside-underline and both delimiter pairs are consumed into marks.
 #[test]
-#[ignore = "OPEN BUG (task #67, BugFunnel 2026-07-31): the org round trip strips inline-markup \
-              delimiters from literal content. These assert the CORRECT behavior deliberately — do \
-              NOT relax them to the lossy result. Un-ignore is the acceptance step once the escape \
-              design fork is ruled."]
 fn dunder_content_survives_roundtrip() {
     assert_content_survives("__default__");
 }
 
 #[test]
-#[ignore = "OPEN BUG (task #67, BugFunnel 2026-07-31): the org round trip strips inline-markup \
-              delimiters from literal content. These assert the CORRECT behavior deliberately — do \
-              NOT relax them to the lossy result. Un-ignore is the acceptance step once the escape \
-              design fork is ruled."]
 fn single_underscore_content_survives_roundtrip() {
     assert_content_survives("_default_");
 }
 
 #[test]
-#[ignore = "OPEN BUG (task #67, BugFunnel 2026-07-31): the org round trip strips inline-markup \
-              delimiters from literal content. These assert the CORRECT behavior deliberately — do \
-              NOT relax them to the lossy result. Un-ignore is the acceptance step once the escape \
-              design fork is ruled."]
 fn star_content_survives_roundtrip() {
     assert_content_survives("*bold-looking*");
 }
 
 #[test]
-#[ignore = "OPEN BUG (task #67, BugFunnel 2026-07-31): the org round trip strips inline-markup \
-              delimiters from literal content. These assert the CORRECT behavior deliberately — do \
-              NOT relax them to the lossy result. Un-ignore is the acceptance step once the escape \
-              design fork is ruled."]
 fn slash_content_survives_roundtrip() {
     assert_content_survives("/italic-looking/");
 }
 
 #[test]
-#[ignore = "OPEN BUG (task #67, BugFunnel 2026-07-31): the org round trip strips inline-markup \
-              delimiters from literal content. These assert the CORRECT behavior deliberately — do \
-              NOT relax them to the lossy result. Un-ignore is the acceptance step once the escape \
-              design fork is ruled."]
 fn tilde_content_survives_roundtrip() {
     assert_content_survives("~tilde-looking~");
 }
 
 #[test]
-#[ignore = "OPEN BUG (task #67, BugFunnel 2026-07-31): the org round trip strips inline-markup \
-              delimiters from literal content. These assert the CORRECT behavior deliberately — do \
-              NOT relax them to the lossy result. Un-ignore is the acceptance step once the escape \
-              design fork is ruled."]
 fn equals_content_survives_roundtrip() {
     assert_content_survives("=verbatim-looking=");
 }
 
 #[test]
-#[ignore = "OPEN BUG (task #67, BugFunnel 2026-07-31): the org round trip strips inline-markup \
-              delimiters from literal content. These assert the CORRECT behavior deliberately — do \
-              NOT relax them to the lossy result. Un-ignore is the acceptance step once the escape \
-              design fork is ruled."]
 fn plus_content_survives_roundtrip() {
     assert_content_survives("+strike-looking+");
 }
@@ -145,10 +117,6 @@ fn plus_content_survives_roundtrip() {
 /// Markup-looking text mixed with ordinary words — the realistic dogfood shape
 /// (an identifier inside a sentence).
 #[test]
-#[ignore = "OPEN BUG (task #67, BugFunnel 2026-07-31): the org round trip strips inline-markup \
-              delimiters from literal content. These assert the CORRECT behavior deliberately — do \
-              NOT relax them to the lossy result. Un-ignore is the acceptance step once the escape \
-              design fork is ruled."]
 fn dunder_identifier_inside_a_sentence_survives_roundtrip() {
     assert_content_survives("the __default__ profile is used");
 }
@@ -329,4 +297,23 @@ fn indented_first_preamble_line_survives_roundtrip() {
 fn plain_preamble_survives_roundtrip() {
     let preamble = "just a preamble line";
     assert_eq!(preamble, preamble_after_roundtrip(preamble));
+}
+
+/// The doc-root preamble is the OTHER verbatim-emit site. It must not lose
+/// markup-shaped literals either.
+#[test]
+fn markup_shaped_preamble_survives_roundtrip() {
+    let preamble = "the __default__ profile and *stars*";
+    assert_eq!(preamble, preamble_after_roundtrip(preamble));
+}
+
+// ===========================================================================
+// Family 5 — body text (the second half of a block's content)
+// ===========================================================================
+
+/// A block's `content` is `title\nbody` and the parser extracts marks from the
+/// WHOLE thing, so the body half is exposed to exactly the same loss.
+#[test]
+fn markup_shaped_body_survives_roundtrip() {
+    assert_content_survives("plain heading\nthe __default__ profile is used");
 }

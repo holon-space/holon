@@ -236,12 +236,53 @@ pub fn valid_tag() -> impl Strategy<Value = String> {
     ]
 }
 
+/// Text whose bytes COLLIDE with org inline markup — `__init__`, `*bold*`,
+/// `=verbatim=`, and the same shapes embedded in a sentence.
+///
+/// The store holds these as LITERALS (no marks): they arrive from seeds, MCP
+/// `block.create` and typing, never from the org parser. A round trip that
+/// emits them unquoted parses them back as emphasis and drops the delimiters,
+/// which is one-shot data loss. Purely alphanumeric character classes cannot
+/// reach this shape, so it gets its own weighted arm.
+pub fn markup_shaped_literal() -> impl Strategy<Value = String> {
+    (
+        prop_oneof![
+            Just("_"),
+            Just("__"),
+            Just("*"),
+            Just("**"),
+            Just("/"),
+            Just("~"),
+            Just("="),
+            Just("+"),
+        ],
+        "[a-z][a-z0-9]{0,10}",
+        prop::option::of("[a-z]{1,6}"),
+        prop::option::of("[a-z]{1,6}"),
+    )
+        .prop_map(|(marker, ident, before, after)| {
+            let core = format!("{marker}{ident}{marker}");
+            match (before, after) {
+                (None, None) => core,
+                (Some(b), None) => format!("{b} {core}"),
+                (None, Some(a)) => format!("{core} {a}"),
+                (Some(b), Some(a)) => format!("{b} {core} {a}"),
+            }
+        })
+}
+
 pub fn valid_title() -> impl Strategy<Value = String> {
-    "[a-zA-Z0-9][a-zA-Z0-9 ]{0,48}[a-zA-Z0-9]"
+    prop_oneof![
+        4 => "[a-zA-Z0-9][a-zA-Z0-9 ]{0,48}[a-zA-Z0-9]",
+        1 => markup_shaped_literal(),
+    ]
 }
 
 pub fn valid_body() -> impl Strategy<Value = String> {
-    "[a-zA-Z0-9 .,!?\n]{10,200}"
+    prop_oneof![
+        4 => "[a-zA-Z0-9 .,!?\n]{10,200}",
+        1 => markup_shaped_literal(),
+    ]
 }
 
 pub fn valid_source_code() -> impl Strategy<Value = String> {

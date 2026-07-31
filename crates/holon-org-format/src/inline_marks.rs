@@ -60,6 +60,84 @@ pub fn extract_inline_marks(text: &str) -> (String, Vec<MarkSpan>) {
     (state.out, state.marks)
 }
 
+/// Delimiters tried, in order, to verbatim-quote a markup-shaped literal.
+/// `=` is Verbatim, `~` is Code; both are protected from emphasis parsing.
+const QUOTE_DELIMS: [char; 2] = ['=', '~'];
+
+/// Rewrite `text` so that [`extract_inline_marks`] returns `text` unchanged:
+/// every span org would consume as emphasis markup is wrapped in `=…=`
+/// (Verbatim), which org does not parse for emphasis.
+///
+/// This is the render half of the store→disk invariant: emitted bytes must
+/// parse back to exactly the stored content. A store that holds the literal
+/// `__default__` with no marks would otherwise reach disk as live org
+/// underline markup and come back as `default` — one-shot data loss.
+///
+/// Link spans are left alone: their delimiters carry the target, and the
+/// stored form for a link is content + a `Link` mark, not literal `[[…]]`.
+///
+/// Fails when neither `=` nor `~` can quote the span (a shape whose own
+/// content defeats both) rather than emitting bytes it knows are lossy.
+pub fn escape_markup_literals(text: &str) -> anyhow::Result<String> {
+    let spans = markup_source_spans(text);
+    if spans.is_empty() {
+        return Ok(text.to_string());
+    }
+    for delim in QUOTE_DELIMS {
+        let candidate = wrap_spans(text, &spans, delim);
+        if extract_inline_marks(&candidate).0 == text {
+            return Ok(candidate);
+        }
+    }
+    anyhow::bail!(
+        "cannot verbatim-quote markup-shaped literal content for org render: no delimiter in \
+         {QUOTE_DELIMS:?} round-trips the spans {spans:?} of {text:?}"
+    )
+}
+
+/// Wrap each byte range of `text` in `delim`, outermost ranges only.
+fn wrap_spans(text: &str, spans: &[std::ops::Range<usize>], delim: char) -> String {
+    let mut out = String::with_capacity(text.len() + spans.len() * 2);
+    let mut cursor = 0usize;
+    for span in spans {
+        out.push_str(&text[cursor..span.start]);
+        out.push(delim);
+        out.push_str(&text[span.clone()]);
+        out.push(delim);
+        cursor = span.end;
+    }
+    out.push_str(&text[cursor..]);
+    out
+}
+
+/// Byte ranges of the outermost emphasis-markup nodes org finds in `text`,
+/// in source order. Uses the same parser and config as
+/// [`extract_inline_marks`] — there is exactly one emphasis grammar in this
+/// crate, and it is orgize's.
+fn markup_source_spans(text: &str) -> Vec<std::ops::Range<usize>> {
+    let config = ParseConfig {
+        use_sub_superscript: UseSubSuperscript::Brace,
+        ..Default::default()
+    };
+    let org = config.parse(text);
+    let mut spans = Vec::new();
+    collect_markup_spans(org.document().syntax(), &mut spans);
+    spans
+}
+
+fn collect_markup_spans(node: &SyntaxNode, spans: &mut Vec<std::ops::Range<usize>>) {
+    for child in node.children() {
+        match inline_mark_kind(child.kind()) {
+            Some(MarkKindHint::Link) => {}
+            Some(_) => {
+                let range = child.text_range();
+                spans.push(usize::from(range.start())..usize::from(range.end()));
+            }
+            None => collect_markup_spans(&child, spans),
+        }
+    }
+}
+
 #[derive(Default)]
 struct ExtractState {
     out: String,
@@ -784,6 +862,53 @@ mod tests {
         let (out, marks) = extract("a*not bold*b");
         assert_eq!(out, "a*not bold*b");
         assert_eq!(marks, Vec::<MarkSpan>::new());
+    }
+
+    /// The render-half invariant, stated directly: whatever
+    /// `escape_markup_literals` emits must extract back to the input.
+    #[test]
+    fn escaped_literals_extract_back_unchanged() {
+        for literal in [
+            "__default__",
+            "_default_",
+            "*bold-looking*",
+            "/italic-looking/",
+            "~tilde-looking~",
+            // Content that already ends in the quote delimiter: the wrap has
+            // to survive `==x==`, which org reads as verbatim `=x=`.
+            "=verbatim-looking=",
+            "+strike-looking+",
+            "the __default__ profile is used",
+            "a =b= and __c__ together",
+            "_{braced-sub}",
+            // No markup: must pass through byte-identically, no stray quotes.
+            "plain words only",
+            "snake_case_ident and a_b_c",
+            "",
+        ] {
+            let escaped = escape_markup_literals(literal).expect("escapable");
+            assert_eq!(
+                extract_inline_marks(&escaped).0,
+                literal,
+                "escaped {literal:?} to {escaped:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn escape_is_a_noop_without_markup() {
+        assert_eq!(
+            escape_markup_literals("no markup here").expect("escapable"),
+            "no markup here"
+        );
+    }
+
+    /// Links keep their `[[…]]` bytes — their delimiters carry the target, so
+    /// quoting them would turn a link into literal text.
+    #[test]
+    fn escape_leaves_links_alone() {
+        let link = "[[https://example.com][label]]";
+        assert_eq!(escape_markup_literals(link).expect("escapable"), link);
     }
 
     #[test]

@@ -1184,7 +1184,13 @@ fn apply_equivalent_block_mutation(
             if let Some(id) = &section.id {
                 if let Some(block) = blocks.iter_mut().find(|b| b.id.id() == id) {
                     let body = block.body();
-                    block.set_title_and_body(new_title.clone(), body);
+                    // The mutation writes `new_title` into the org TEXT, so
+                    // org's inline-markup semantics apply to it: `+x+` typed
+                    // into a file IS strike markup, and the store keeps the
+                    // delimiter-stripped text plus a mark.
+                    let (parsed_title, _) =
+                        holon_orgmode::inline_marks::extract_inline_marks(new_title);
+                    block.set_title_and_body(parsed_title, body);
                 }
             }
         }

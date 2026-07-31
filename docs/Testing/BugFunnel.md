@@ -86,10 +86,14 @@ the archived baseline):
   `holon_block_roundtrip_testing::valid_title`/`valid_body` are `[a-zA-Z0-9 ...]` character
   classes that exclude EVERY org markup character, so `round_trip_pbt.rs` structurally could not
   generate the shape. Now covered by `crates/holon-org-format/tests/org_roundtrip_characterization.rs`
-  (8 `#[ignore]`d red tests — deliberately NOT locked in as expected-lossy). NOT FIXED: the escape
-  mechanism is an open design fork (backslash escape needs an orgize-fork grammar change and
-  renders as a literal `\` in Emacs/Logseq; zero-width space is Emacs-canonical but puts invisible
-  bytes in Martin's vault; "org markup is authoritative" accepts the loss). Escalated to Martin.)
+  (8 tests, un-ignored on fix). FIXED 2026-07-31 (Martin's ruling: verbatim-quote on render):
+  `escape_markup_literals` in `crates/holon-org-format/src/inline_marks.rs` wraps every span the
+  parser would consume in `=…=`, so `__default__` reaches disk as `=__default__=` and parses back
+  literally (plus a Verbatim mark — the shape is a fixed point after one cycle, and the token stays
+  greppable on disk). Detection reuses orgize with `extract_inline_marks`' own config, so there is
+  no second emphasis grammar. COVERAGE gap closed at the source: `valid_title`/`valid_body` now
+  carry a weighted `markup_shaped_literal()` arm, verified red-without-the-fix in
+  `round_trip_pbt` and `org_block_round_trip_pbt`.)
 - (+1 COVERAGE 2026-07-31: an INDENTED body lost its FIRST line's indentation on every org round
   trip while later lines kept theirs, so `    a\n    b` came back `a\n    b` — silent, cumulative
   re-alignment of any indented note or code-ish body, and the doc-root preamble had the same
