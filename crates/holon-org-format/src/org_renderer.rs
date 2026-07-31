@@ -41,12 +41,13 @@ impl OrgRenderer {
         // headline. Without this it is silently deleted on every write-back,
         // and a page promoted from a `:Page:`-tagged headline loses the whole
         // body it was carrying.
-        let preamble = doc_block
-            .content
-            .split_once('\n')
-            .map(|(_, rest)| rest)
-            .unwrap_or("")
-            .trim_matches('\n');
+        let preamble = crate::models::trim_blank_lines(
+            doc_block
+                .content
+                .split_once('\n')
+                .map(|(_, rest)| rest)
+                .unwrap_or(""),
+        );
         if !preamble.is_empty() {
             result.push('\n');
             result.push_str(preamble);

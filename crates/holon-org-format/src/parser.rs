@@ -220,7 +220,7 @@ pub fn parse_org_file(
     if let Some(body) = top_section
         .body
         .as_deref()
-        .map(str::trim)
+        .map(crate::models::trim_blank_lines)
         .filter(|b| !b.is_empty())
     {
         document.content = format!("{}\n{}", document.content, body);
@@ -1008,7 +1008,7 @@ fn extract_image_links(body: &str) -> (Option<String>, Vec<String>) {
         remaining.push_str(line);
     }
 
-    let trimmed = remaining.trim();
+    let trimmed = crate::models::trim_blank_lines(&remaining);
     let plain_text = if trimmed.is_empty() {
         None
     } else {

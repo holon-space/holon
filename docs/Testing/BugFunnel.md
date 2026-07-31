@@ -7,7 +7,7 @@ distribution steers QA investment.
 **Running distribution** (totals = archived baseline + sum of the increment log):
 
 - ENVIRONMENT: 120
-- COVERAGE: 63
+- COVERAGE: 65
 - PERCEPTION: 49
 - ORACLE: 37
 
@@ -21,6 +21,38 @@ header against the log.
 Increment log (append-only, NEWEST FIRST — each counted bug adds exactly one line here;
 merge conflicts resolve by keeping both sides' lines and re-summing the totals ON TOP OF
 the archived baseline):
+- (+1 COVERAGE 2026-07-31: the org round trip STRIPS INLINE-MARKUP DELIMITERS from literal block
+  content. `__default__` comes back as `default`; the same loss hits `_x_`, `*x*`, `/x/`, `~x~`,
+  `=x=`, `+x+`, standalone or embedded in a sentence ("the __default__ profile is used" →
+  "the default profile is used"). Found outside a test: task #67, via a ~4% flake in
+  `undo_cycle_task_state_coverage.rs` whose unordered `pick_target` occasionally selected
+  `block:__default__` and mislabelled the content loss as an undo failure. Root cause:
+  `render_headline_block` (`crates/holon-org-format/src/models.rs`) emits `block.org_title()`
+  VERBATIM when the block carries no marks, so markup-shaped literal text reaches disk as live
+  org markup; `parse_org_file` then correctly consumes those delimiters into `MarkSpan`s and the
+  block's content is permanently shorter. The round trip is FIXED-POINT STABLE (pass 2 re-emits
+  `__default__`), so this is one-shot data loss, not an echo loop. GAP = COVERAGE:
+  `holon_block_roundtrip_testing::valid_title`/`valid_body` are `[a-zA-Z0-9 ...]` character
+  classes that exclude EVERY org markup character, so `round_trip_pbt.rs` structurally could not
+  generate the shape. Now covered by `crates/holon-org-format/tests/org_roundtrip_characterization.rs`
+  (8 `#[ignore]`d red tests — deliberately NOT locked in as expected-lossy). NOT FIXED: the escape
+  mechanism is an open design fork (backslash escape needs an orgize-fork grammar change and
+  renders as a literal `\` in Emacs/Logseq; zero-width space is Emacs-canonical but puts invisible
+  bytes in Martin's vault; "org markup is authoritative" accepts the loss). Escalated to Martin.)
+- (+1 COVERAGE 2026-07-31: an INDENTED body lost its FIRST line's indentation on every org round
+  trip while later lines kept theirs, so `    a\n    b` came back `a\n    b` — silent, cumulative
+  re-alignment of any indented note or code-ish body, and the doc-root preamble had the same
+  defect. Root cause: `str::trim` used as "strip surrounding blank lines" in three places
+  (`extract_image_links` on the parse side; `render_headline_block`'s body and
+  `OrgRenderer::render_document`'s preamble on the render side) — `trim` eats leading spaces of
+  the first content line, which is indentation, not padding. Fixed by a shared
+  `models::trim_blank_lines` that removes whole WHITESPACE-ONLY LINES at both ends and preserves
+  every surviving line's own indentation; all three sites now share it, so parse and render agree
+  and `render(parse(render(x))) == render(x)` still holds (`test_render_string_stability` was the
+  guard that caught a newline-only first attempt). GAP = COVERAGE: `valid_body` is
+  `[a-zA-Z0-9 .,!?\n]{10,200}`, which CAN emit leading spaces, but the round-trip PBT normalizes
+  bodies before comparing, so the asymmetry was invisible to it. Now covered by
+  `indented_first_preamble_line_survives_roundtrip`.)
 - (+1 PERCEPTION 2026-07-30, secondary ORACLE: the ClaudeCode page rendered its section HEADLINES
   but ZERO rows under every query section, and re-navigating never recovered — the original
   "blank page" bug (yesterday's `query_block` variant had the same defect, minus the headline).

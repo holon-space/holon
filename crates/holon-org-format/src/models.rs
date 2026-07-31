@@ -396,6 +396,42 @@ impl OrgDocumentExt for Block {
 
 /// Renders the file-level org header (#+TITLE, #+TODO) from a document block's
 /// properties.
+/// Trim whole BLANK (whitespace-only) lines off both ends of a body, keeping
+/// every surviving line's own indentation.
+///
+/// `str::trim` cannot do this: it also eats the FIRST content line's leading
+/// spaces, so an indented body came back with line 1 flush-left and every
+/// later line still indented. Both the renderer and the parser go through
+/// here so the two ends agree and `render(parse(render(x))) == render(x)`.
+pub(crate) fn trim_blank_lines(s: &str) -> &str {
+    let mut start = 0usize;
+    let mut end = s.len();
+    loop {
+        match s[start..end].find('\n') {
+            Some(i) if s[start..start + i].trim().is_empty() => start += i + 1,
+            _ => break,
+        }
+    }
+    loop {
+        match s[start..end].rfind('\n') {
+            Some(i) => {
+                let nl = start + i;
+                if s[nl + 1..end].trim().is_empty() {
+                    end = nl;
+                } else {
+                    break;
+                }
+            }
+            None => break,
+        }
+    }
+    if s[start..end].trim().is_empty() {
+        ""
+    } else {
+        &s[start..end]
+    }
+}
+
 pub fn render_document_header(doc_block: &Block) -> String {
     let mut result = String::new();
 
@@ -981,7 +1017,7 @@ pub(crate) fn render_headline_block(block: &Block, identity: HeadlineIdentity) -
     // Body text (source blocks are child Block entities, rendered via tree
     // traversal)
     if let Some(body) = body_str {
-        let trimmed_body = body.trim();
+        let trimmed_body = trim_blank_lines(&body);
         if !trimmed_body.is_empty() {
             result.push_str(trimmed_body);
             if !trimmed_body.ends_with('\n') {
