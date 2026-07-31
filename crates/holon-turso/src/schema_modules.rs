@@ -146,23 +146,19 @@ impl SchemaModule for BlockSchemaModule {
     async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
         tracing::info!("[BlockSchemaModule] Migrating junction tables");
 
-        // Drop the legacy and the previous-name junction tables before
-        // recreating. `task_blockers` is the pre-rename name; dropping it
-        // (rather than ALTER RENAME) is correct because the matviews and
+        // `task_blockers` is the pre-rename name of `block_requires`; dropping
+        // it (rather than ALTER RENAME) is correct because the matviews and
         // edge-field descriptors all reference `block_requires` now and
         // existing rows would no longer be reachable through the renamed
         // schema.
+        //
+        // Only the LEGACY name is dropped. The junctions below hold projected
+        // state that persists across boots exactly as `block_raw` does, and
+        // `ensure_schema` runs on every boot — dropping them here empties the
+        // vault's tags and requirement edges on each start. A future shape
+        // change to one of them is a versioned migration, not a standing wipe.
         db_handle
             .execute_ddl("DROP TABLE IF EXISTS task_blockers")
-            .await?;
-        db_handle
-            .execute_ddl("DROP TABLE IF EXISTS block_requires")
-            .await?;
-        db_handle
-            .execute_ddl("DROP TABLE IF EXISTS block_tags")
-            .await?;
-        db_handle
-            .execute_ddl("DROP TABLE IF EXISTS advice_suppressed")
             .await?;
 
         for stmt in sql_statements(include_str!("../sql/schema/block_requires.sql")) {
@@ -1201,6 +1197,99 @@ mod tests {
     }
 
     /// The `clock` relation is created + seeded by `CoreSchemaModule`, and an
+    /// `ensure_schema` runs on EVERY boot, so it must be non-destructive: the
+    /// junction tables hold projected state that persists across restarts
+    /// exactly like `block_raw` does. A `DROP TABLE` here silently empties them
+    /// on the second boot, and the unchanged-file ingest fast path then never
+    /// refills them — the vault's `Page` tags vanish while `block_raw`
+    /// survives.
+    #[tokio::test]
+    async fn block_junction_schema_is_non_destructive_across_boots() {
+        use crate::turso::TursoBackend;
+
+        let (_backend, handle) = TursoBackend::new_in_memory().await.unwrap();
+
+        CoreSchemaModule
+            .ensure_schema(&handle)
+            .await
+            .expect("core schema");
+        BlockSchemaModule
+            .ensure_schema(&handle)
+            .await
+            .expect("boot-1 junction schema");
+
+        handle
+            .execute(
+                // ALLOW(sole_block_writer): schema-module unit test seeding the FK parent row.
+                "INSERT INTO block_raw (id, parent_id, depth, sort_key, content) VALUES \
+                 ('block:p', 'sentinel:no_parent', 0, 1.0, 'Page One')",
+                vec![],
+            )
+            .await
+            .expect("seed block_raw");
+        handle
+            .execute(
+                "INSERT INTO block_tags (block_id, tag) VALUES ('block:p', 'Page')",
+                vec![],
+            )
+            .await
+            .expect("seed block_tags");
+        handle
+            .execute(
+                "INSERT INTO block_requires (block_id, required_id) VALUES ('block:p', 'block:q')",
+                vec![],
+            )
+            .await
+            .expect("seed block_requires");
+
+        // Boot 2: the same modules run again over the same database.
+        CoreSchemaModule
+            .ensure_schema(&handle)
+            .await
+            .expect("boot-2 core schema");
+        BlockSchemaModule
+            .ensure_schema(&handle)
+            .await
+            .expect("boot-2 junction schema");
+
+        let blocks = handle
+            .query(
+                "SELECT id FROM block_raw WHERE id != 'sentinel:no_parent'",
+                HashMap::new(),
+            )
+            .await
+            .expect("query block_raw");
+        assert_eq!(
+            blocks.len(),
+            1,
+            "premise: `block_raw` survives a second `ensure_schema`"
+        );
+
+        let tags = handle
+            .query("SELECT block_id, tag FROM block_tags", HashMap::new())
+            .await
+            .expect("query block_tags");
+        assert_eq!(
+            tags.len(),
+            1,
+            "`block_tags` was EMPTIED by the second `ensure_schema` while `block_raw` survived — \
+             every boot wipes the vault's Page tags"
+        );
+
+        let requires = handle
+            .query(
+                "SELECT block_id, required_id FROM block_requires",
+                HashMap::new(),
+            )
+            .await
+            .expect("query block_requires");
+        assert_eq!(
+            requires.len(),
+            1,
+            "`block_requires` was EMPTIED by the second `ensure_schema`"
+        );
+    }
+
     /// `UPDATE` of the day row emits CDC through a matview (base tables never
     /// emit directly — only matviews do; see `cdc_base_vs_matview_repro`).
     #[tokio::test]
