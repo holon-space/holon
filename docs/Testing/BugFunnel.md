@@ -6,7 +6,7 @@ distribution steers QA investment.
 
 **Running distribution** (totals = archived baseline + sum of the increment log):
 
-- ENVIRONMENT: 122
+- ENVIRONMENT: 123
 - COVERAGE: 68
 - PERCEPTION: 52
 - ORACLE: 39
@@ -58,6 +58,32 @@ the archived baseline):
   `Block` and assert render→parse→render is a fixed point, which a NORMALIZING renderer
   satisfies by construction because its own first render establishes the order the second
   reproduces. Only a disk-first property can see it.)
+- (+1 ENVIRONMENT 2026-08-01, secondary ORACLE: the P0 write-back-quarantine guard
+  `region_writeback_loss::partial_ingest_does_not_rewrite_the_file`
+  (`crates/holon-integration-tests/tests/region_writeback_loss.rs:232`) has been RED on main since
+  2026-07-27 and STOPPED TESTING ITS OWN SUBJECT. Not a prod defect: nothing is lost. The test
+  stages a "partial ingest" by authoring `:ID: shared-child` into `zzz_bad.org` while `aaa_owner.org`
+  already owns that id, expecting the cross-document re-parent to fail mid-scan (Loro
+  `resolve_parent_tree_id`) so `on_file_changed`'s `Err` arm quarantines the file
+  (`crates/holon-filesystem/src/file_sync_controller.rs:1513`) and disk stays byte-identical. Since
+  `cc73054f6a77` ("fix(sync): cross-doc ingest guard + stale-block writeback prune") the
+  cross-doc-membership guard (`file_sync_controller.rs:2561-2593`) intercepts FIRST: `shared-child`
+  is folded into `foreign_subtree_ids`, no Move is ever authored, ingest returns `Ok`, and the
+  sanctioned prune plus the `needs_id_writeback` forced round-trip (`file_sync_controller.rs:3356`,
+  file has no `#+ID:`) rewrite the file. Measured on main: ZERO `ingest FAILED partway` events, ONE
+  `cross-doc membership` warn, and the on-disk delta is exactly (a) a `#+ID:` header gained and (b)
+  `*** Shared`/`shared-child` pruned — `bad-top`, `Parent`, `bad-tail` and every body line survive.
+  ENVIRONMENT: the fixture's stand-in no longer reaches the code path the test exists to pin, so the
+  quarantine branch is now UNEXERCISED by this file. Secondary ORACLE: the assertion is byte-equality
+  over the whole file, which judges "the file did not change" rather than the contract "no
+  un-ingested line was lost", so it cannot distinguish a sanctioned convergence from real loss and
+  it went red for a reason it was never about. Attribution pinned by A/B in one workspace: GREEN at
+  `70226735aa8e` (1 passed), RED at `cc73054f6a77` and RED on main `cf6702487db1` with a
+  BYTE-IDENTICAL failure signature — so the recent org render-ladder work (`3508205e50`, #67) is
+  EXONERATED. NOT FIXED (triage-only pass, task #95): the repair is to restage a genuine partial
+  ingest that the cross-doc guard does not absorb and to assert survival of the authored ids rather
+  than byte-equality; until then the quarantine branch's only remaining coverage is the sibling
+  `three_mode_region_survives_ingest_and_writeback`, which passes.)
 - (+1 ENVIRONMENT 2026-07-31, secondary COVERAGE: the keystone harness's org serializer
   (`serialize_block_recursive`, `crates/holon-integration-tests/src/org_utils.rs`) RE-IMPLEMENTED
   block-content emission instead of calling prod's. It projected marks with the INNER
