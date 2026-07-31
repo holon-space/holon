@@ -116,6 +116,114 @@ impl SchemaModule for CoreSchemaModule {
     }
 }
 
+/// Migrate one junction table off the pre-2026-07-22 shape that carried a
+/// FOREIGN KEY on its TARGET column, PRESERVING its rows.
+///
+/// The target FK is the data-loss defect that change removed: a `:REQUIRES:` /
+/// suppression edge legitimately points at a block parsed later in the same
+/// scan, in another file, or never — and a FK on it fails the source block's
+/// create transaction at COMMIT, aborting the WHOLE file ingest (dogfood
+/// 2026-07-10). A database still carrying it keeps hitting that.
+///
+/// Detection sniffs the stored DDL, the same way `HistorySchemaModule` does;
+/// there is no schema-version table in this crate to consult. `HistorySchema`
+/// can simply drop what it finds because its relation is a disclosed ephemeral
+/// cache — these junctions are durable projected state, so the old rows are
+/// copied across instead.
+///
+/// A no-op on a current-shape database (one `sqlite_master` read).
+async fn migrate_junction_dropping_target_fk(
+    db_handle: &DbHandle,
+    table: &str,
+    target_fk_column: &str,
+    index_name: &str,
+    columns: &str,
+) -> Result<()> {
+    let stored = db_handle
+        .query_positional(
+            &format!("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '{table}'"),
+            vec![],
+        )
+        .await?;
+    let Some(row) = stored.first() else {
+        return Ok(()); // Absent: the CREATE below makes it in the current shape.
+    };
+    let ddl = match row.get("sql") {
+        Some(holon_api::Value::String(s)) => s.clone(),
+        other => {
+            return Err(StorageError::SchemaError(format!(
+                "sqlite_master.sql for {table}: expected TEXT, got {other:?}"
+            )));
+        }
+    };
+
+    // The current shape names the target column only inside prose comments
+    // explaining why it is NOT constrained; the `FOREIGN KEY (<col>)` clause
+    // itself appears in the old shape alone.
+    let normalized = ddl.split_whitespace().collect::<Vec<_>>().join(" ");
+    if !normalized.contains(&format!("FOREIGN KEY ({target_fk_column})")) {
+        return Ok(());
+    }
+
+    tracing::warn!(
+        "[BlockSchemaModule] MIGRATING `{table}`: it carries the pre-2026-07-22 FOREIGN KEY on \
+         `{target_fk_column}`, which aborts a whole file ingest when that target is a forward or \
+         cross-file reference. Rebuilding the table without it and copying every row across."
+    );
+
+    let staging = format!("{table}__pre_target_fk");
+    // Any residue from an interrupted earlier attempt would otherwise collide
+    // with the RENAME below.
+    db_handle
+        .execute_ddl(&format!("DROP TABLE IF EXISTS {staging}"))
+        .await?;
+    db_handle
+        .execute_ddl(&format!("ALTER TABLE {table} RENAME TO {staging}"))
+        .await?;
+    // The index followed the table through the RENAME and still holds its old
+    // name, so the current-shape `CREATE INDEX IF NOT EXISTS` would find the
+    // name taken and silently leave the new table unindexed.
+    db_handle
+        .execute_ddl(&format!("DROP INDEX IF EXISTS {index_name}"))
+        .await?;
+
+    let create_sql = match table {
+        "block_requires" => include_str!("../sql/schema/block_requires.sql"),
+        "advice_suppressed" => include_str!("../sql/schema/advice_suppressed.sql"),
+        other => {
+            return Err(StorageError::SchemaError(format!(
+                "migrate_junction_dropping_target_fk: no schema file bound for `{other}`"
+            )));
+        }
+    };
+    for stmt in sql_statements(create_sql) {
+        db_handle.execute_ddl(stmt).await?;
+    }
+
+    db_handle
+        .execute(
+            &format!("INSERT INTO {table} ({columns}) SELECT {columns} FROM {staging}"),
+            vec![],
+        )
+        .await?;
+    let migrated = db_handle
+        .query_positional(&format!("SELECT COUNT(*) AS c FROM {table}"), vec![])
+        .await?;
+    let count = migrated
+        .first()
+        .and_then(|r| r.get("c"))
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| {
+            StorageError::SchemaError(format!("{table}: post-migration COUNT(*) returned no row"))
+        })?;
+    db_handle
+        .execute_ddl(&format!("DROP TABLE {staging}"))
+        .await?;
+
+    tracing::warn!("[BlockSchemaModule] `{table}` migrated; {count} row(s) preserved");
+    Ok(())
+}
+
 /// Block junction-table schema module.
 ///
 /// Owns `block_requires` and `block_tags` (the production junction tables).
@@ -160,6 +268,27 @@ impl SchemaModule for BlockSchemaModule {
         db_handle
             .execute_ddl("DROP TABLE IF EXISTS task_blockers")
             .await?;
+
+        // Databases created before 2026-07-22 still carry a FOREIGN KEY on the
+        // junction TARGET column. Until now the unconditional drop above
+        // reshaped them by destroying them; with the drop gone this is the only
+        // path that reshapes them, so it must migrate rather than assume.
+        migrate_junction_dropping_target_fk(
+            db_handle,
+            "block_requires",
+            "required_id",
+            "idx_block_requires_required",
+            "block_id, required_id",
+        )
+        .await?;
+        migrate_junction_dropping_target_fk(
+            db_handle,
+            "advice_suppressed",
+            "lesson_id",
+            "idx_advice_suppressed_lesson",
+            "anchor_id, lesson_id",
+        )
+        .await?;
 
         for stmt in sql_statements(include_str!("../sql/schema/block_requires.sql")) {
             db_handle.execute_ddl(stmt).await?;
@@ -1174,6 +1303,133 @@ mod tests {
             fields.iter().all(|d| d.entity == "block"),
             "block_edge_fields must only return entity==block descriptors"
         );
+    }
+
+    /// The pre-2026-07-22 junction DDL, verbatim: a FOREIGN KEY on the TARGET
+    /// column, which aborts a whole file ingest when that target is a forward
+    /// or cross-file reference.
+    const OLD_BLOCK_REQUIRES_DDL: &str = "CREATE TABLE block_requires (block_id TEXT NOT NULL, \
+                                          required_id TEXT NOT NULL, PRIMARY KEY (block_id, \
+                                          required_id), FOREIGN KEY (block_id) REFERENCES \
+                                          block_raw(id) ON DELETE CASCADE, FOREIGN KEY \
+                                          (required_id) REFERENCES block_raw(id) ON DELETE \
+                                          CASCADE)";
+
+    async fn block_requires_ddl(handle: &DbHandle) -> String {
+        handle
+            .query_positional(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'block_requires'",
+                vec![],
+            )
+            .await
+            .expect("read block_requires DDL")
+            .first()
+            .and_then(|r| r.get("sql"))
+            .and_then(|v| v.as_string())
+            .expect("block_requires must exist")
+            .to_string()
+    }
+
+    /// A database created before 2026-07-22 carries the old junction shape. The
+    /// boot-time drop used to reshape it by destroying it; now that the drop is
+    /// gone, `ensure_schema` must migrate it in place and keep every row —
+    /// otherwise such a database silently keeps the ingest-aborting FK.
+    #[tokio::test]
+    async fn pre_target_fk_junction_is_migrated_preserving_rows() {
+        use crate::turso::TursoBackend;
+
+        let (_backend, handle) = TursoBackend::new_in_memory().await.unwrap();
+        CoreSchemaModule
+            .ensure_schema(&handle)
+            .await
+            .expect("core schema");
+
+        // Stand up the OLD shape, as an old database would have it.
+        handle
+            .execute_ddl(OLD_BLOCK_REQUIRES_DDL)
+            .await
+            .expect("old-shape block_requires");
+        handle
+            .execute_ddl(
+                "CREATE INDEX IF NOT EXISTS idx_block_requires_required ON \
+                 block_requires(required_id)",
+            )
+            .await
+            .expect("old-shape index");
+        handle
+            .execute(
+                // ALLOW(sole_block_writer): schema-module unit test seeding the FK parent row.
+                "INSERT INTO block_raw (id, parent_id, depth, sort_key, content) VALUES \
+                 ('block:src', 'sentinel:no_parent', 0, 1.0, 'Source')",
+                vec![],
+            )
+            .await
+            .expect("seed block_raw");
+        handle
+            .execute(
+                "INSERT INTO block_requires (block_id, required_id) VALUES ('block:src', \
+                 'block:src')",
+                vec![],
+            )
+            .await
+            .expect("seed old junction row");
+
+        BlockSchemaModule
+            .ensure_schema(&handle)
+            .await
+            .expect("boot over an old-shape database");
+
+        let ddl = block_requires_ddl(&handle).await;
+        assert!(
+            !ddl.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .contains("FOREIGN KEY (required_id)"),
+            "the ingest-aborting target FK must be gone after migration; DDL still reads: {ddl}"
+        );
+
+        let rows = handle
+            .query(
+                "SELECT block_id, required_id FROM block_requires",
+                HashMap::new(),
+            )
+            .await
+            .expect("query migrated rows");
+        assert_eq!(
+            rows.len(),
+            1,
+            "the migration must PRESERVE rows, not drop the table"
+        );
+
+        // The target FK is really gone: a dangling target now inserts, where the
+        // old shape aborted the transaction.
+        handle
+            .execute(
+                "INSERT INTO block_requires (block_id, required_id) VALUES ('block:src', \
+                 'block:never-ingested')",
+                vec![],
+            )
+            .await
+            .expect("a dangling target must be insertable after the migration");
+
+        // Second boot is a no-op: no re-migration, nothing lost.
+        BlockSchemaModule
+            .ensure_schema(&handle)
+            .await
+            .expect("second boot");
+        assert_eq!(
+            block_requires_ddl(&handle).await,
+            ddl,
+            "a current-shape database must not be reshaped again"
+        );
+        let rows = handle
+            .query(
+                "SELECT block_id, required_id FROM block_requires",
+                HashMap::new(),
+            )
+            .await
+            .expect("query rows after second boot");
+        assert_eq!(rows.len(), 2, "second boot must preserve every row");
     }
 
     #[test]

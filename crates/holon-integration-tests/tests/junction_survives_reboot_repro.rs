@@ -14,9 +14,26 @@
 //!    skip is what would otherwise re-assert the junction rows, so on an
 //!    unchanged vault nothing ever refills them.
 //!
-//! The two tests below pin each half of the junction contract across a real
-//! second boot: the `Page` tags the org files themselves imply, and an
-//! edge-field set written through the production Loro writer.
+//! WHAT THESE TESTS DO AND DO NOT PROVE — measured, not assumed:
+//!
+//! `probe_whether_reboot_harness_takes_the_fast_path_skip` establishes that
+//! boot 2 here really does take the cold-boot skip (`block_raw.updated_at` is
+//! byte-identical across the reboot, so no file was re-ingested). The reboot
+//! seam is therefore genuinely exercised, including the skip.
+//!
+//! With that established, `wiped_junction_is_repaired_on_next_boot` shows
+//! something that was NOT expected: a junction emptied between boots comes back
+//! on the next boot even though nothing was re-ingested. So some non-ingest
+//! boot path re-derives these rows — the Loro tree carries `tags` in node meta
+//! (`loro_backend.rs`) and its boot projection emits edge fields over
+//! `EdgeField::ALL` (`loro_sync_controller.rs`), which is the leading
+//! candidate.
+//!
+//! CONSEQUENCE: these cases cannot go red for the LIVE symptom (a real vault
+//! stuck at zero rows), because in this configuration the system self-repairs.
+//! They are regression guards for the reboot contract, not a reproduction of
+//! the dogfooded bug — whose remaining cause is still unidentified. Do not read
+//! a green run here as evidence that a deployed database is healthy.
 //!
 //! @pbt kind harness
 //! @pbt covers reboot-junction-loss — block_tags/block_requires emptied by the
@@ -78,6 +95,25 @@ async fn wait_for_seed(env: &TestEnvironment) {
             std::time::Instant::now() < deadline,
             "org scan never populated both seeded blocks (have {} rows)",
             rows.len()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Wait until the org scan has landed `alpha.org`'s block.
+async fn wait_for_seed_alpha(env: &TestEnvironment) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(25);
+    loop {
+        let rows = env
+            .query_sql("SELECT id FROM block_raw WHERE id = 'block:blk-a'")
+            .await
+            .expect("query block_raw");
+        if !rows.is_empty() {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "org scan never populated block:blk-a"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -336,6 +372,7 @@ fn wiped_junction_is_repaired_on_next_boot() {
             "[wipe-repair] boot-1 file hashes = {:?}",
             file_hashes(&env).await
         );
+        let stamp1 = updated_at(&env, "block:blk-a").await;
 
         // Exactly what a pre-repair boot's `DROP TABLE block_tags` left behind:
         // an empty junction over an intact `block_raw` and an intact Loro tree.
@@ -355,6 +392,20 @@ fn wiped_junction_is_repaired_on_next_boot() {
 
         let boot2 = tag_pairs(&env).await;
         eprintln!("[wipe-repair] boot-2 block_tags = {boot2:?}");
+
+        // Without this the test would be ambiguous: a boot-2 that RE-INGESTED
+        // every file rebuilds the junction from org and proves nothing about a
+        // real vault, whose files are unchanged and therefore skipped. Asserting
+        // the skip was taken is what makes this evidence about deployed
+        // databases rather than about the harness.
+        assert_eq!(
+            stamp1,
+            updated_at(&env, "block:blk-a").await,
+            "this test only says something about a REAL vault if boot-2 took the cold-boot \
+             fast-path skip; `updated_at` moved, so the file was re-ingested and the repair \
+             observed below is the re-ingest, not a repair of an unchanged vault"
+        );
+
         let lost: Vec<_> = boot1.difference(&boot2).collect();
         assert!(
             lost.is_empty(),
@@ -364,6 +415,74 @@ fn wiped_junction_is_repaired_on_next_boot() {
             lost.len(),
             boot1.len()
         );
+    });
+}
+
+/// `updated_at` for a seeded block. Every ingest rewrites it
+/// (`block_params.rs` stamps `now_millis()` on each write), so it discriminates
+/// "boot 2 re-ingested this file" from "boot 2 took the cold-boot fast-path
+/// skip" without needing log capture.
+async fn updated_at(env: &TestEnvironment, id: &str) -> i64 {
+    env.query_sql(&format!(
+        "SELECT updated_at FROM block_raw WHERE id = '{id}'"
+    ))
+    .await
+    .expect("query updated_at")
+    .first()
+    .and_then(|r| r.get("updated_at"))
+    .and_then(|v| v.as_i64())
+    .expect("block must exist")
+}
+
+/// FIDELITY PROBE (task #87): does the reboot harness actually exercise the
+/// cold-boot fast-path SKIP?
+///
+/// It matters because the skip is the half of the junction-loss bug that makes
+/// the loss PERMANENT: a re-ingested file re-derives its `Page` tag from org
+/// (`parser.rs` `set_page(true)`), so only a SKIPPED file stays empty. If this
+/// harness re-ingests every file on boot 2, then no test built on it can go red
+/// for the live symptom, and the coverage it appears to provide is illusory.
+///
+/// Deliberately assertion-free about which way it goes — it PRINTS the verdict
+/// and pins only the premise (the stored hash exists at all). Read the output.
+#[test]
+fn probe_whether_reboot_harness_takes_the_fast_path_skip() {
+    let rt = runtime();
+    rt.clone().block_on(async move {
+        let mut env = TestEnvironment::new(rt).expect("TestEnvironment::new");
+        env.write_org_file("alpha.org", ALPHA_ORG)
+            .await
+            .expect("write alpha.org");
+
+        env.start_app(true).await.expect("boot-1 start_app");
+        wait_for_seed_alpha(&env).await;
+        settle(&env).await;
+
+        let hashes = file_hashes(&env).await;
+        let stamp1 = updated_at(&env, "block:blk-a").await;
+        assert!(
+            hashes.iter().any(|(_, h)| !h.is_empty()),
+            "premise: boot-1 persists a `file.content_hash`, without which the skip is \
+             unreachable by construction. file rows = {hashes:?}"
+        );
+
+        env.stop_app().await.expect("stop_app");
+        env.start_app(true).await.expect("boot-2 start_app");
+        wait_for_seed_alpha(&env).await;
+        settle(&env).await;
+
+        let stamp2 = updated_at(&env, "block:blk-a").await;
+        let skipped = stamp1 == stamp2;
+        eprintln!(
+            "[fidelity] boot-1 updated_at={stamp1} boot-2 updated_at={stamp2} => boot-2 {}",
+            if skipped {
+                "took the FAST-PATH SKIP (no re-ingest)"
+            } else {
+                "RE-INGESTED the file (skip not taken — harness cannot reach the permanent-loss \
+                 shape)"
+            }
+        );
+        eprintln!("[fidelity] boot-1 file hashes = {hashes:?}");
     });
 }
 
