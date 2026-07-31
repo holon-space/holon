@@ -33,6 +33,30 @@ Unlike traditional PKM tools that treat external systems as import/export target
 
 ---
 
+## State Ownership
+
+Every piece of state lives in the store whose owner authors it.
+
+- **User-authored state** — blocks, their positions, tags, notes, properties —
+  lives in the user's stores: org files and the CRDT document. Only there does
+  it get the guarantees user data needs: it survives re-ingest, replicates
+  across devices, participates in sharing, and answers to undo.
+- **Provider-authored state** — the fields of an external entity — lives in
+  that integration's cache table, refetchable from the source. Copying it
+  into user stores would create a second copy with no answer to "which one
+  wins" when the provider changes it.
+
+The two meet through references, not through mixing: a block *links to* an
+entity by its URI, and queries join the two stores on that key. What the user
+says *about* an entity is user-authored and therefore lives in blocks; what
+the entity *is* stays provider-authored in the cache. Putting user-authored
+state anywhere else (for example, rows in a derived SQL table only) silently
+demotes it to second-class data that a re-ingest or sync will drop; putting
+provider-authored state into blocks turns every provider update into a
+conflict.
+
+---
+
 ## The Three Modes
 
 Capture, Orient, and Flow ship as **default layout and profile configuration** (overridable by users), which is why no mode enum exists in the production codebase. The modes are a design vocabulary and a default set of layouts/profiles — not a built-in state machine.
