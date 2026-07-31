@@ -9,7 +9,7 @@ distribution steers QA investment.
 - ENVIRONMENT: 120
 - COVERAGE: 65
 - PERCEPTION: 50
-- ORACLE: 38
+- ORACLE: 39
 
 Archived baseline (ENVIRONMENT 87 · COVERAGE 37 · PERCEPTION 35 · ORACLE 18 as of
 2026-07-22): the per-bug increment log below starts at commit e70c3a9245f2, which split
@@ -21,6 +21,22 @@ header against the log.
 Increment log (append-only, NEWEST FIRST — each counted bug adds exactly one line here;
 merge conflicts resolve by keeping both sides' lines and re-summing the totals ON TOP OF
 the archived baseline):
+- (+1 ORACLE 2026-07-31, secondary ENVIRONMENT: `test_platform_geometry_determinism::
+  test_platform_geometry_is_real_and_deterministic` is FLAKY on unmodified main — measured 2
+  failures in 6 consecutive runs with no source change. Always the same signature: boot 0 records 99
+  elements against 92 on boots 1 and 2, and all 7 extras are ZERO-HEIGHT chrome of one sidebar-shaped
+  tree row (`icon`, `row`, 3×`spacer`, 2×`text` at y=137–150, x=12–150). ORACLE: the test's own
+  stable signal is invariant across every run, failing or passing — 80 non-degenerate elements, 8
+  distinct entities — but the assertion compares the FULL element multiset including in-flight
+  zero-height records, so it judges a transient the app is entitled to have rather than the geometry
+  contract it exists to pin. Secondary ENVIRONMENT: which boot captures the transient depends on
+  boot timing (the failing runs also log `[GPUI] pre-warm timeout`). Fix direction: compare the
+  non-degenerate geometry the test already computes, or settle the frame before snapshotting; do NOT
+  simply retry, which would hide a real determinism regression. Found while gating the #69 fix: an
+  A/B of 6 runs per side gave 2/6 failures WITHOUT the fix and 4/6 WITH it. The failure is therefore
+  NOT attributable to #69 — it reproduces on untouched code — but note honestly that n=6 per side
+  cannot distinguish those rates (Fisher p≈0.57; p≈0.18 pooling earlier observations), so whether
+  the #69 fix raises the rate is UNRESOLVED and would need ~30 runs per side to settle.)
 - (+1 ORACLE 2026-07-31: a `[tree-desync]` ERROR storm — 300+ events per page-navigation click, in
   both directions ("in provider but not row_map", "in row_map but not provider" naming the PREVIOUS
   page's rows). ORACLE, not a data defect: the probe in
