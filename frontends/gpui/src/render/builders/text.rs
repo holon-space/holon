@@ -225,6 +225,29 @@ fn compute_segments<'a>(
     segments
 }
 
+/// How a link run is painted.
+///
+/// Split out from theme lookup so the RULE is unit-testable without a window:
+/// the paint oracle's `StyleFlags` carries neither colour nor waviness, so this
+/// function is the only place the disclosure can be asserted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LinkDecoration {
+    /// Followable: accent colour, straight underline.
+    Healthy,
+    /// Resolves to nothing and cannot be followed — muted colour + wavy
+    /// underline, so it never wears the healthy-link accent.
+    Unresolved,
+}
+
+pub(crate) fn link_decoration(target: &EntityRef) -> LinkDecoration {
+    match target {
+        EntityRef::UnknownScheme { .. } => LinkDecoration::Unresolved,
+        EntityRef::Internal { .. } | EntityRef::External { .. } | EntityRef::Name { .. } => {
+            LinkDecoration::Healthy
+        }
+    }
+}
+
 fn merge_marks(active: &[&InlineMark], ctx: &GpuiRenderContext) -> HighlightStyle {
     let mut style = HighlightStyle::default();
     for mark in active {
@@ -251,26 +274,16 @@ fn merge_marks(active: &[&InlineMark], ctx: &GpuiRenderContext) -> HighlightStyl
                     wavy: false,
                 });
             }
-            // An unknown-scheme link resolves to nothing and cannot be
-            // followed, so it must not wear the healthy-link accent: muted
-            // foreground + wavy underline is the disclosed degraded state.
-            InlineMark::Link {
-                target: EntityRef::UnknownScheme { .. },
-                ..
-            } => {
-                style.color = Some(tc(ctx, |t| t.muted_foreground));
+            InlineMark::Link { target, .. } => {
+                let (color, wavy) = match link_decoration(target) {
+                    LinkDecoration::Healthy => (tc(ctx, |t| t.accent_foreground), false),
+                    LinkDecoration::Unresolved => (tc(ctx, |t| t.muted_foreground), true),
+                };
+                style.color = Some(color);
                 style.underline = Some(UnderlineStyle {
                     color: None,
                     thickness: px(1.0),
-                    wavy: true,
-                });
-            }
-            InlineMark::Link { .. } => {
-                style.color = Some(tc(ctx, |t| t.accent_foreground));
-                style.underline = Some(UnderlineStyle {
-                    color: None,
-                    thickness: px(1.0),
-                    wavy: false,
+                    wavy,
                 });
             }
             // Sub/Super: HighlightStyle has no baseline-shift field; renders
@@ -289,6 +302,43 @@ mod tests {
 
     fn span(start: usize, end: usize, mark: InlineMark) -> MarkSpan {
         MarkSpan::new(start, end, mark)
+    }
+
+    /// An unknown-scheme link must be DISCLOSED, not merely typed: it resolves
+    /// to nothing and cannot be followed, so painting it with the healthy-link
+    /// accent would tell the reader it works.
+    #[test]
+    fn an_unknown_scheme_link_is_disclosed_as_unresolved() {
+        assert_eq!(
+            link_decoration(&EntityRef::UnknownScheme {
+                uri: "cc-session:abc".to_string(),
+            }),
+            LinkDecoration::Unresolved,
+            "an unknown-scheme link must not be painted as a healthy link"
+        );
+    }
+
+    /// The other three targets are all followable, so none may pick up the
+    /// degraded treatment.
+    #[test]
+    fn resolvable_link_targets_stay_healthy() {
+        for target in [
+            EntityRef::Internal {
+                id: EntityUri::parse("block:abc").expect("valid uri"),
+            },
+            EntityRef::External {
+                url: "https://example.com".to_string(),
+            },
+            EntityRef::Name {
+                name: "Some Page".to_string(),
+            },
+        ] {
+            assert_eq!(
+                link_decoration(&target),
+                LinkDecoration::Healthy,
+                "{target:?} is followable and must keep the healthy-link treatment"
+            );
+        }
     }
 
     #[test]

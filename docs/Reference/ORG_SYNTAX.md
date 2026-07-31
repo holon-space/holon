@@ -34,8 +34,18 @@ scheme that later becomes real.
 The reservation is applied **per `/`-segment**, and the classifier applies the
 writer's rule rather than a looser one of its own: `[[Areas/cc-session:abc]]` is
 an unknown-scheme link, not a creation intent whose page `PageId::for_path` would
-then refuse to mint. Classifier and writer accept exactly the same set, so no
-link can carry an intent that can never be fulfilled.
+then refuse to mint. Over the scheme-shape rule the two accept exactly the same
+set, so no link can carry a scheme-shaped intent that can never be fulfilled.
+
+One known gap, not yet closed: the writer also refuses an **empty or
+whitespace-only segment** (`[[a//b]]`, `[[Areas/]]`) as a malformed path, but
+the classifier still calls those creation intents. `LinkTarget` has no honest
+bucket for them — `UnknownScheme` means "scheme-shaped, scheme unclaimed" and
+these carry no scheme — so closing it needs a new variant threaded through
+`EntityRef`, its serde tag, the Loro codec, the org renderer and the link
+styling. The failure is disclosed rather than silent: following such a link
+calls the writer, which refuses loudly. Pinned by
+`empty_segment_targets_still_diverge_from_the_writer`.
 
 The registered set is the entity registry (`TypeRegistry`): built-ins plus every
 entity a YAML sidecar declares. Registration is keyed by SQL table name

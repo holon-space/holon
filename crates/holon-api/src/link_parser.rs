@@ -686,12 +686,15 @@ mod tests {
         PageId::for_path("Areas/Ketosis: How to lose weight").expect("colon-space title is a page");
     }
 
-    /// The classifier must never hand out a creation intent the writer will
-    /// refuse: every target it calls `CreationIntent` has to be a path
-    /// `PageId::for_path` accepts, and every path the writer rejects for its
-    /// scheme shape has to classify as a disclosed unknown scheme.
+    /// Over the SCHEME-SHAPE rule the classifier and the writer agree exactly:
+    /// nothing the classifier calls a creation intent is refused by
+    /// `PageId::for_path` for its shape, and everything the writer refuses for
+    /// its shape classifies as a disclosed unknown scheme.
+    ///
+    /// Scoped deliberately — the empty-segment rule is NOT yet aligned; see
+    /// [`empty_segment_targets_still_diverge_from_the_writer`].
     #[test]
-    fn creation_intents_are_exactly_what_the_writer_accepts() {
+    fn creation_intents_match_the_writer_on_scheme_shape() {
         let classifier = LinkTargetClassifier::default();
         for target in [
             "cc-session:abc",
@@ -719,6 +722,42 @@ mod tests {
                 }
                 other => panic!("{target:?} unexpectedly classified as {other:?}"),
             }
+        }
+    }
+
+    /// KNOWN DIVERGENCE, pinned so it cannot drift unnoticed.
+    ///
+    /// `PageId::for_path` refuses an empty/whitespace segment as a malformed
+    /// path, but the classifier still calls these creation intents and mints an
+    /// optimistic id for them — an intent the writer can never fulfil, exactly
+    /// the class of bug the scheme-shape rule above was tightened to remove.
+    ///
+    /// Not fixed here because `LinkTarget` has no honest bucket for it:
+    /// `UnknownScheme` means "scheme-shaped, scheme unclaimed" and these have
+    /// no scheme at all, so a faithful fix needs a new variant that ripples
+    /// through `EntityRef`, its serde tag, the Loro codec, the org renderer
+    /// and the GPUI link styling. TODO: add that variant and fold these
+    /// cases into the test above.
+    ///
+    /// The failure is at least DISCLOSED rather than silent: clicking such a
+    /// link routes to `follow_dangling_link`, which calls the writer and fails
+    /// loudly.
+    #[test]
+    fn empty_segment_targets_still_diverge_from_the_writer() {
+        let classifier = LinkTargetClassifier::default();
+        for target in ["a//b", " /b", "Areas/"] {
+            assert!(
+                PageId::for_path(target).is_err(),
+                "{target:?} must be refused by the writer as a malformed path"
+            );
+            assert!(
+                matches!(
+                    classifier.classify(target),
+                    LinkTarget::CreationIntent { .. }
+                ),
+                "{target:?} is expected to STILL classify as a creation intent — if this now                  fails the divergence was fixed: fold these cases into \
+                 `creation_intents_match_the_writer_on_scheme_shape` and delete this test"
+            );
         }
     }
 
