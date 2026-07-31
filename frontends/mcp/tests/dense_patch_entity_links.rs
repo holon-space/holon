@@ -53,7 +53,7 @@ fn registry_with_t_widget() -> Arc<TypeRegistry> {
 /// registry-less server.
 #[test]
 fn di_provided_server_handle_carries_the_type_registry() {
-    let injector = Injector::new();
+    let injector = Injector::root();
     injector.provide::<TypeRegistry>(Provider::root({
         let registry = registry_with_t_widget();
         move |_| Shared::from(registry.clone())

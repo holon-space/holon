@@ -140,6 +140,24 @@ pub fn normalize_content_for_org_roundtrip(
     content: &str,
     content_type: ContentType,
 ) -> (String, Option<Vec<holon_api::MarkSpan>>) {
+    normalize_content_for_org_roundtrip_with(
+        content,
+        content_type,
+        &holon_api::link_parser::LinkTargetClassifier::default(),
+    )
+}
+
+/// [`normalize_content_for_org_roundtrip`] against a specific classifier.
+///
+/// The default knows only the built-in schemes, which is what keeps the
+/// reference model IO-free — but it therefore cannot see a sidecar-declared
+/// entity. A probe covering one passes a `with_schemes` classifier, which adds
+/// the scheme without adding a registry or any IO.
+pub fn normalize_content_for_org_roundtrip_with(
+    content: &str,
+    content_type: ContentType,
+    classifier: &holon_api::link_parser::LinkTargetClassifier,
+) -> (String, Option<Vec<holon_api::MarkSpan>>) {
     if content_type == ContentType::Source {
         return (content.trim_end().to_string(), None);
     }
@@ -155,7 +173,8 @@ pub fn normalize_content_for_org_roundtrip(
             Some((first, rest)) => format!("{}\n{}", first.trim(), rest),
             None => trimmed_end.trim_start().to_string(),
         };
-        let (rendered, spans) = holon_orgmode::inline_marks::extract_inline_marks(&trimmed);
+        let (rendered, spans) =
+            holon_orgmode::inline_marks::extract_inline_marks_with(&trimmed, classifier);
         if rendered == text && spans == marks {
             holon_api::canonicalize_marks(&mut marks);
             let marks = if marks.is_empty() { None } else { Some(marks) };

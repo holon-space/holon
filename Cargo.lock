@@ -5469,6 +5469,7 @@ dependencies = [
  "holon-filesystem",
  "holon-frontend",
  "holon-loro",
+ "holon-mcp-client",
  "holon-org-format",
  "holon-orgmode",
  "holon-profiles",

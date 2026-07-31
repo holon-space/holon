@@ -1748,11 +1748,15 @@ mod teeth {
 
         // (1) Org round-trip: the link target survives as a schemed URI and the
         // literal re-renders byte-for-byte.
-        let (c2_content, c2_marks) = crate::pbt::types::normalize_content_for_org_roundtrip(
+        // The org lens here is the IO-free reference one, so the sidecar's
+        // scheme must be handed to it explicitly — `with_schemes` adds the
+        // scheme without adding a registry or any IO.
+        let (c2_content, c2_marks) = crate::pbt::types::normalize_content_for_org_roundtrip_with(
             C2_RAW,
             holon_api::ContentType::Text,
+            &holon_api::link_parser::LinkTargetClassifier::with_schemes(["t-widget"]),
         );
-        assert_eq!(c2_content, "See Alice here");
+        assert_eq!(c2_content, "See Widget here");
         let marks = c2_marks.as_ref().expect("entity link must extract a mark");
         let target = marks
             .iter()
