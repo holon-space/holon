@@ -29,10 +29,21 @@ use loro::ValueOrContainer;
 /// a gone node no longer names its roots. Descendants already deleted by an
 /// earlier operation are not reachable here; their roots were purged by that
 /// operation.
+///
+/// Errors if a node in the walk is absent from the tree. Under-collecting here
+/// fails toward leaving plaintext behind, so an unwalkable node is loud rather
+/// than an empty child list. `children` returning `None` is NOT that signal —
+/// the tree state keys children by parent, so a childless leaf has no entry.
 pub fn subtree_roots(tree: &LoroTree, node: TreeID) -> Result<Vec<ContainerID>> {
     let mut out = Vec::new();
     let mut queue = vec![node];
     while let Some(current) = queue.pop() {
+        if !tree.contains(current) {
+            bail!(
+                "cannot collect the roots to purge under {current:?}: the node is absent from \
+                 the tree, so its descendants' containers would be left behind"
+            );
+        }
         let meta = tree
             .get_meta(current)
             .with_context(|| format!("meta of block being deleted {current:?}"))?;
