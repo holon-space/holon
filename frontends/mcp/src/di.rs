@@ -126,6 +126,11 @@ pub struct McpServerHandle {
     config: McpServerConfig,
     engine: Option<Arc<BackendEngine>>,
     debug: Arc<DebugServices>,
+    /// The live entity registry every session's server classifies `[[…]]`
+    /// targets against. `None` degrades every `[[<entity>:<id>]]` an agent
+    /// writes through `dense_patch` to an unknown-scheme link, so the DI
+    /// provider always supplies it.
+    type_registry: Option<Arc<holon_profiles::TypeRegistry>>,
     builder_services: std::sync::OnceLock<Arc<dyn BuilderServices>>,
     state: Mutex<ServerState>,
 }
@@ -143,6 +148,17 @@ impl McpServerHandle {
         debug: Arc<DebugServices>,
         builder_services: Option<Arc<dyn BuilderServices>>,
     ) -> Self {
+        Self::with_type_registry(config, engine, debug, builder_services, None)
+    }
+
+    /// [`Self::new`] carrying the live entity registry.
+    pub fn with_type_registry(
+        config: McpServerConfig,
+        engine: Option<Arc<BackendEngine>>,
+        debug: Arc<DebugServices>,
+        builder_services: Option<Arc<dyn BuilderServices>>,
+        type_registry: Option<Arc<holon_profiles::TypeRegistry>>,
+    ) -> Self {
         let lock = std::sync::OnceLock::new();
         if let Some(bs) = builder_services {
             lock.set(bs).ok();
@@ -151,12 +167,18 @@ impl McpServerHandle {
             config,
             engine,
             debug,
+            type_registry,
             builder_services: lock,
             state: Mutex::new(ServerState {
                 task: None,
                 cancellation_token: None,
             }),
         }
+    }
+
+    /// The live entity registry this handle hands to every session's server.
+    pub fn type_registry(&self) -> Option<&Arc<holon_profiles::TypeRegistry>> {
+        self.type_registry.as_ref()
     }
 
     /// Set the builder services used for `describe_ui` and related MCP tools.
@@ -180,6 +202,7 @@ impl McpServerHandle {
         let engine = self.engine.clone();
         let debug = self.debug.clone();
         let builder_services = self.builder_services.get().cloned();
+        let type_registry = self.type_registry.clone();
         let bind_address = self.config.bind_address;
         let cancellation_token = CancellationToken::new();
         let token_for_task = cancellation_token.clone();
@@ -189,6 +212,7 @@ impl McpServerHandle {
                 engine,
                 debug,
                 builder_services,
+                type_registry,
                 bind_address,
                 token_for_task,
             )
@@ -289,6 +313,7 @@ pub async fn run_http_server(
     engine: Option<Arc<BackendEngine>>,
     debug: Arc<DebugServices>,
     builder_services: Option<Arc<dyn BuilderServices>>,
+    type_registry: Option<Arc<holon_profiles::TypeRegistry>>,
     bind_address: SocketAddr,
     cancellation_token: CancellationToken,
 ) -> anyhow::Result<()> {
@@ -358,10 +383,11 @@ pub async fn run_http_server(
             {
                 let backend_cell = backend_cell.clone();
                 let debug = debug.clone();
+                let type_registry = type_registry.clone();
                 move || {
                     Ok(HolonMcpServer::with_backend_cell(
                         backend_cell.clone(),
-                        None,
+                        type_registry.clone(),
                         debug.clone(),
                     ))
                 }
@@ -459,7 +485,16 @@ impl Module for McpServerModule {
                 .ok()
                 .unwrap_or_else(|| Arc::new(DebugServices::default()));
 
-            Shared::new(McpServerHandle::new((*config).clone(), engine, debug, None))
+            // ALLOW(ok): optional DI service
+            let type_registry = resolver.try_resolve::<holon_profiles::TypeRegistry>().ok();
+
+            Shared::new(McpServerHandle::with_type_registry(
+                (*config).clone(),
+                engine,
+                debug,
+                None,
+                type_registry,
+            ))
         }));
 
         Ok(())
@@ -492,6 +527,19 @@ pub fn start_embedded_mcp_server_with_debug(
     default_port: u16,
     debug: Arc<DebugServices>,
 ) {
+    start_embedded_mcp_server_with_registry(engine, builder_services, default_port, debug, None)
+}
+
+/// [`start_embedded_mcp_server_with_debug`] carrying the live entity registry,
+/// so `[[<entity>:<id>]]` links an agent writes through `dense_patch` classify
+/// against the entities that actually exist.
+pub fn start_embedded_mcp_server_with_registry(
+    engine: Option<Arc<BackendEngine>>,
+    builder_services: Option<Arc<dyn BuilderServices>>,
+    default_port: u16,
+    debug: Arc<DebugServices>,
+    type_registry: Option<Arc<holon_profiles::TypeRegistry>>,
+) {
     let mcp_port: u16 = std::env::var("MCP_SERVER_PORT")
         .ok() // ALLOW(ok): non-critical env var
         .and_then(|s| s.parse().ok()) // ALLOW(ok): non-critical env var parse
@@ -505,6 +553,7 @@ pub fn start_embedded_mcp_server_with_debug(
             engine,
             debug,
             builder_services,
+            type_registry,
             bind_address,
             cancellation_token,
         )

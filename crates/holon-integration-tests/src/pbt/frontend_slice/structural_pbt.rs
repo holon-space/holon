@@ -1678,7 +1678,7 @@ mod teeth {
     }
 
     /// **F1a entity-URI links.** Boot the composed headless SUT from an org
-    /// file whose `c2` headline carries `[[person:alice][Alice]]` — a
+    /// file whose `c2` headline carries `[[t-widget:abc123][Widget]]` — a
     /// scheme-shaped target whose scheme is a REGISTERED entity, not a page
     /// name. Three assertions, one per F1a invariant:
     ///
@@ -1687,12 +1687,13 @@ mod teeth {
     /// - `inv-link-kind-matches-target-scheme`: the junction row is `kind =
     ///   'entity'` with `resolved_id` = the full URI.
     /// - `inv-entity-link-backlink-visible`: the `backlinks` matview carries
-    ///   the source block under `target_id = 'person:alice'`.
+    ///   the source block under `target_id = 't-widget:abc123'`.
     ///
-    /// Uses a BUILT-IN registered scheme (`person`) so the probe stays hermetic
-    /// — no MCP sidecar, no cache table, no registry seeding. The classifier is
-    /// scheme-generic, so this exercises the same arm a `cc-session:` link
-    /// takes.
+    /// Uses a MULTI-WORD entity a YAML sidecar declares, registered BEFORE the
+    /// boot scan. A single-word built-in like `person` cannot discriminate at
+    /// this boundary: the registry is keyed by SQL table name (underscored)
+    /// while a scheme is hyphenated, and for one-word names the two spellings
+    /// coincide — `person:alice` passes whether or not the fold exists.
     #[tokio::test(flavor = "multi_thread")]
     async fn org_ingest_entity_link_resolves_and_backlinks() {
         use holon_pbt_core::capabilities::SutFocus;
@@ -1702,17 +1703,21 @@ mod teeth {
 
         const TREE_ORG: &str = "#+ID: structural-page\n* parent\n:PROPERTIES:\n:ID: \
                                 parent\n:END:\n* c1\n:PROPERTIES:\n:ID: c1\n:END:\n* See \
-                                [[person:alice][Alice]] here\n:PROPERTIES:\n:ID: c2\n:END:\n";
-        const C2_RAW: &str = "See [[person:alice][Alice]] here";
-        const ENTITY_URI: &str = "person:alice";
+                                [[t-widget:abc123][Widget]] here\n:PROPERTIES:\n:ID: \
+                                c2\n:END:\n";
+        const C2_RAW: &str = "See [[t-widget:abc123][Widget]] here";
+        const ENTITY_URI: &str = "t-widget:abc123";
+        const SIDECAR_YAML: &str = "entities:\n  t_widget:\n    id_column: id\n    schema:\n      \
+                                    - name: id\n        sql_type: TEXT\n        primary_key: true\n";
 
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let comp = Arc::new(
-            HeadlessFrontendComponent::new_with_clock(
+            HeadlessFrontendComponent::new_with_clock_and_sidecar(
                 &[("structural-page.org", TREE_ORG)],
                 Duration::from_millis(300),
                 false,
                 crate::pbt::frontend_slice::components::keystone_boot_clock(),
+                SIDECAR_YAML,
             )
             .await,
         );
@@ -1808,7 +1813,7 @@ mod teeth {
             .query(
                 // `backlinks` projects the SOURCE block's columns alongside
                 // `target_id`, so the source id is plain `id`.
-                "SELECT id FROM backlinks WHERE target_id = 'person:alice'",
+                &format!("SELECT id FROM backlinks WHERE target_id = '{ENTITY_URI}'"),
                 std::collections::HashMap::new(),
             )
             .await

@@ -361,6 +361,20 @@ impl HolonMcpServer {
         Self::with_type_registry(engine, None, debug, builder_services)
     }
 
+    /// The classifier every parse boundary this server owns must use.
+    ///
+    /// Registry-backed when one was wired, so `[[<entity>:<id>]]` resolves for
+    /// exactly the entities that exist. The `None` arm knows only the built-in
+    /// schemes — every sidecar entity link degrades to unknown-scheme and loses
+    /// its `block_links` row — so it exists only for servers built without a
+    /// container at all.
+    pub fn link_classifier(&self) -> holon_api::link_parser::LinkTargetClassifier {
+        match &self.type_registry {
+            Some(registry) => registry.link_target_classifier(),
+            None => holon_api::link_parser::LinkTargetClassifier::default(),
+        }
+    }
+
     pub fn with_type_registry(
         engine: Option<Arc<BackendEngine>>,
         type_registry: Option<Arc<holon_profiles::TypeRegistry>>,

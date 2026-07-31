@@ -149,8 +149,9 @@ fn parse_args() -> Result<Config> {
 async fn run_stdio_server(
     engine: std::sync::Arc<holon::api::backend_engine::BackendEngine>,
     debug: std::sync::Arc<DebugServices>,
+    type_registry: Option<std::sync::Arc<holon_profiles::TypeRegistry>>,
 ) -> Result<()> {
-    let server = HolonMcpServer::with_type_registry(Some(engine), None, debug, None);
+    let server = HolonMcpServer::with_type_registry(Some(engine), type_registry, debug, None);
     use rmcp::transport::stdio;
     let running = server.serve(stdio()).await?;
 
@@ -186,6 +187,7 @@ async fn run_stdio_server(
 async fn run_http_server_standalone(
     engine: std::sync::Arc<holon::api::backend_engine::BackendEngine>,
     debug: std::sync::Arc<DebugServices>,
+    type_registry: Option<std::sync::Arc<holon_profiles::TypeRegistry>>,
     bind_address: SocketAddr,
 ) -> Result<()> {
     use tokio_util::sync::CancellationToken;
@@ -205,8 +207,15 @@ async fn run_http_server_standalone(
     tracing::info!("MCP endpoint: http://{}/mcp", bind_address);
 
     // Use the shared run_http_server from di module
-    holon_mcp::di::run_http_server(Some(engine), debug, None, bind_address, cancellation_token)
-        .await
+    holon_mcp::di::run_http_server(
+        Some(engine),
+        debug,
+        None,
+        type_registry,
+        bind_address,
+        cancellation_token,
+    )
+    .await
 }
 
 #[tokio::main]
@@ -364,7 +373,8 @@ async fn main() -> Result<()> {
             token_for_signal.cancel();
         });
         let debug = Arc::new(DebugServices::default());
-        holon_mcp::di::run_http_server(None, debug, None, bind_address, cancellation_token).await?;
+        holon_mcp::di::run_http_server(None, debug, None, None, bind_address, cancellation_token)
+            .await?;
         return Ok(());
     }
 
@@ -480,6 +490,10 @@ async fn main() -> Result<()> {
     // engine is registered in the container.
     let engine = injector.resolve::<holon::api::backend_engine::BackendEngine>();
     let debug = injector.resolve::<DebugServices>();
+    // The live entity registry the link classifier reads. Without it every
+    // `[[<entity>:<id>]]` an agent writes through `dense_patch` degrades to an
+    // unknown-scheme link and loses its `block_links` row.
+    let type_registry = Some(injector.resolve::<holon_profiles::TypeRegistry>());
 
     // Shutdown flush: spawn a task that awaits Ctrl+C and flushes any
     // in-flight shared-doc saves before the process exits. The 150ms
@@ -513,11 +527,11 @@ async fn main() -> Result<()> {
     // Run server based on transport mode
     match config.transport_mode {
         TransportMode::Stdio => {
-            run_stdio_server(engine, debug).await?;
+            run_stdio_server(engine, debug, type_registry).await?;
         }
         TransportMode::Http { bind_address } => {
             tracing::info!("Starting Holon MCP server in HTTP mode on {}", bind_address);
-            run_http_server_standalone(engine, debug, bind_address).await?;
+            run_http_server_standalone(engine, debug, type_registry, bind_address).await?;
         }
     }
 

@@ -441,15 +441,22 @@ impl HolonMcpServer {
 
         let name = type_def.name.clone();
 
-        // Register in TypeRegistry (validates computed field expressions)
-        if let Some(ref registry) = self.type_registry {
-            registry.register(type_def.clone()).map_err(|e| {
-                rmcp::ErrorData::internal_error(
-                    format!("Failed to register type '{}': {e}", name),
-                    None,
-                )
-            })?;
-        }
+        // Register in TypeRegistry (validates computed field expressions).
+        // A missing registry is a WIRING error, not a reason to skip: silently
+        // creating the extension table without registering the type leaves an
+        // entity SQL can see but no link, query or profile can resolve.
+        let registry = self.type_registry.as_ref().ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                format!(
+                    "cannot register type '{name}': this MCP server was built without a \
+                     TypeRegistry — the entity would exist in SQL but resolve nowhere"
+                ),
+                None,
+            )
+        })?;
+        registry.register(type_def.clone()).map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("Failed to register type '{name}': {e}"), None)
+        })?;
 
         // Create extension table via DynamicSchemaModule
         if !type_def.fields.is_empty() {
@@ -2695,13 +2702,7 @@ impl HolonMcpServer {
             .get(&params.handle)
             .map_err(|e| rmcp::ErrorData::invalid_params(format!("{e}"), None))?;
 
-        // Agent-authored text is a write boundary: classify its `[[…]]`
-        // targets against the live entity registry, or every entity link an
-        // agent writes silently degrades to unknown-scheme.
-        let classifier = match &self.type_registry {
-            Some(registry) => registry.link_target_classifier(),
-            None => holon_api::link_parser::LinkTargetClassifier::default(),
-        };
+        let classifier = self.link_classifier();
         let parsed = parse_dense_with(&params.text, &classifier).map_err(|e| {
             rmcp::ErrorData::invalid_params(format!("edited dense text did not parse: {e}"), None)
         })?;

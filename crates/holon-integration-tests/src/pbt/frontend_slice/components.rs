@@ -429,7 +429,34 @@ impl HeadlessFrontendComponent {
         loro_enabled: bool,
         clock: Arc<holon_api::TestClock>,
     ) -> Self {
-        Self::new_impl(org_files, settle, loro_enabled, Some(clock), None).await
+        Self::new_impl(org_files, settle, loro_enabled, Some(clock), None, None).await
+    }
+
+    /// [`Self::new_with_clock`] with an MCP sidecar's entities registered
+    /// BEFORE the boot org scan, so `[[<entity>:<id>]]` targets in `org_files`
+    /// classify against them on FIRST ingest — the order a vault whose
+    /// integration is already installed actually boots in.
+    ///
+    /// Needed because every built-in entity is single-word: the registry is
+    /// keyed by SQL table name (underscored) and a scheme is hyphenated, so
+    /// only a multi-word entity can tell a working scheme/table-name join from
+    /// a broken one, and no built-in supplies that.
+    pub async fn new_with_clock_and_sidecar(
+        org_files: &[(&str, &str)],
+        settle: Duration,
+        loro_enabled: bool,
+        clock: Arc<holon_api::TestClock>,
+        sidecar_yaml: &str,
+    ) -> Self {
+        Self::new_impl(
+            org_files,
+            settle,
+            loro_enabled,
+            Some(clock),
+            None,
+            Some(sidecar_yaml),
+        )
+        .await
     }
 
     /// [`Self::new_with_clock`] with the session's Loro peer id pinned.
@@ -443,7 +470,15 @@ impl HeadlessFrontendComponent {
         clock: Arc<holon_api::TestClock>,
         peer_id: u64,
     ) -> Self {
-        Self::new_impl(org_files, settle, loro_enabled, Some(clock), Some(peer_id)).await
+        Self::new_impl(
+            org_files,
+            settle,
+            loro_enabled,
+            Some(clock),
+            Some(peer_id),
+            None,
+        )
+        .await
     }
 
     /// `DebugServices` wired to THIS component's session, for backing an
@@ -497,7 +532,7 @@ impl HeadlessFrontendComponent {
         settle: Duration,
         loro_enabled: bool,
     ) -> Self {
-        Self::new_impl(org_files, settle, loro_enabled, None, None).await
+        Self::new_impl(org_files, settle, loro_enabled, None, None, None).await
     }
 
     async fn new_impl(
@@ -506,6 +541,7 @@ impl HeadlessFrontendComponent {
         loro_enabled: bool,
         clock: Option<Arc<holon_api::TestClock>>,
         peer_id: Option<u64>,
+        sidecar_yaml: Option<&str>,
     ) -> Self {
         use holon_frontend::HolonConfig;
         use holon_frontend::SessionConfig;
@@ -562,6 +598,7 @@ impl HeadlessFrontendComponent {
         // instead of the OS `SystemClock`. `None` → the factory falls back to
         // `SystemClock`, unchanged.
         let clock_for_di = clock.clone();
+        let sidecar_for_di = sidecar_yaml.map(str::to_string);
 
         let (session, engine, reactive) = holon_app::new_from_config_with_di(
             holon_config,
@@ -579,6 +616,26 @@ impl HeadlessFrontendComponent {
                     injector.provide::<holon_api::InjectedClock>(fluxdi::Provider::root(
                         move |_| injected.clone().into(),
                     ));
+                }
+                // Install the sidecar's entities on the SAME registry the link
+                // classifier reads, BEFORE the org scan — a link ingested while
+                // its entity is unregistered would be a permanent
+                // unknown-scheme, so this must not be racy or silent.
+                if let Some(yaml) = &sidecar_for_di {
+                    let sidecar = holon_mcp_client::mcp_sidecar::McpSidecar::from_yaml(yaml)
+                        .expect("sidecar YAML parses");
+                    let registry = injector
+                        .try_resolve::<holon_profiles::TypeRegistry>()
+                        .expect("TypeRegistry must be provided before the test DI hook runs");
+                    for (name, cfg) in &sidecar.entities {
+                        let table = sidecar.prefixed_name(name).table_name();
+                        registry
+                            .register(
+                                cfg.to_type_definition(&table)
+                                    .expect("entity with a schema yields a TypeDefinition"),
+                            )
+                            .expect("sidecar entity registers");
+                    }
                 }
                 Ok(())
             },
