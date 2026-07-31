@@ -4903,7 +4903,7 @@ dependencies = [
 [[package]]
 name = "loro"
 version = "1.13.7"
-source = "git+https://github.com/nightscape/loro.git?rev=4d179c68#4d179c688c8a0717954155b78eb6135cc83d9824"
+source = "git+https://github.com/nightscape/loro.git?rev=855da28b#855da28b03e12a5e9ab468684176f9d46c3d00ea"
 dependencies = [
  "enum-as-inner 0.6.1",
  "generic-btree",
@@ -4918,7 +4918,7 @@ dependencies = [
 [[package]]
 name = "loro-common"
 version = "1.13.1"
-source = "git+https://github.com/nightscape/loro.git?rev=4d179c68#4d179c688c8a0717954155b78eb6135cc83d9824"
+source = "git+https://github.com/nightscape/loro.git?rev=855da28b#855da28b03e12a5e9ab468684176f9d46c3d00ea"
 dependencies = [
  "arbitrary",
  "enum-as-inner 0.6.1",
@@ -4935,7 +4935,7 @@ dependencies = [
 [[package]]
 name = "loro-delta"
 version = "1.13.0"
-source = "git+https://github.com/nightscape/loro.git?rev=4d179c68#4d179c688c8a0717954155b78eb6135cc83d9824"
+source = "git+https://github.com/nightscape/loro.git?rev=855da28b#855da28b03e12a5e9ab468684176f9d46c3d00ea"
 dependencies = [
  "arrayvec",
  "enum-as-inner 0.5.1",
@@ -4946,7 +4946,7 @@ dependencies = [
 [[package]]
 name = "loro-internal"
 version = "1.13.7"
-source = "git+https://github.com/nightscape/loro.git?rev=4d179c68#4d179c688c8a0717954155b78eb6135cc83d9824"
+source = "git+https://github.com/nightscape/loro.git?rev=855da28b#855da28b03e12a5e9ab468684176f9d46c3d00ea"
 dependencies = [
  "append-only-bytes",
  "arref",
@@ -4992,7 +4992,7 @@ dependencies = [
 [[package]]
 name = "loro-kv-store"
 version = "1.13.7"
-source = "git+https://github.com/nightscape/loro.git?rev=4d179c68#4d179c688c8a0717954155b78eb6135cc83d9824"
+source = "git+https://github.com/nightscape/loro.git?rev=855da28b#855da28b03e12a5e9ab468684176f9d46c3d00ea"
 dependencies = [
  "bytes",
  "ensure-cov",
@@ -5008,7 +5008,7 @@ dependencies = [
 [[package]]
 name = "loro-rle"
 version = "1.6.0"
-source = "git+https://github.com/nightscape/loro.git?rev=4d179c68#4d179c688c8a0717954155b78eb6135cc83d9824"
+source = "git+https://github.com/nightscape/loro.git?rev=855da28b#855da28b03e12a5e9ab468684176f9d46c3d00ea"
 dependencies = [
  "append-only-bytes",
  "num",
@@ -5035,7 +5035,7 @@ dependencies = [
 [[package]]
 name = "loro_fractional_index"
 version = "1.13.0"
-source = "git+https://github.com/nightscape/loro.git?rev=4d179c68#4d179c688c8a0717954155b78eb6135cc83d9824"
+source = "git+https://github.com/nightscape/loro.git?rev=855da28b#855da28b03e12a5e9ab468684176f9d46c3d00ea"
 dependencies = [
  "once_cell",
  "rand 0.8.5",

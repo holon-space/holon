@@ -305,4 +305,4 @@ core-graphics = { path = ".cargo/patches/core-graphics" }
 # fork's loro-internal — no duplicate registry/path loro-internal.
 # PR upstream is planned (fork-and-contribute); drop this patch when a released
 # loro version ships fork_at-on-shallow.
-loro = { git = "https://github.com/nightscape/loro.git", rev = "4d179c68" }
+loro = { git = "https://github.com/nightscape/loro.git", rev = "855da28b" }
