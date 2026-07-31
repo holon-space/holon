@@ -498,22 +498,23 @@ pub fn render_inline_marks(text: &str, marks: &[MarkSpan]) -> String {
 
     detect_crossing_marks(marks.iter().copied());
 
-    // Bucket events by char position. At each position we may emit several
-    // closes (in inverse opening order) and several opens (outer-first).
+    // Bucket events by char position, then order them so delimiters nest
+    // strictly LIFO — every close is the mirror of the most recent open.
+    // `nesting_key` is one total order over the marks; opens ascend it
+    // (outermost first) and closes descend it (innermost first), so a
+    // non-LIFO emit like `*=x*=` is unrepresentable by construction.
     let mut opens_at: BTreeMap<usize, Vec<&MarkSpan>> = BTreeMap::new();
     let mut closes_at: BTreeMap<usize, Vec<&MarkSpan>> = BTreeMap::new();
     for &m in &marks {
         opens_at.entry(m.start).or_default().push(m);
         closes_at.entry(m.end).or_default().push(m);
     }
-    // Sort opens at same position: longer marks (later end) open first → outer.
+    let key = |m: &MarkSpan| nesting_key(m, &marks);
     for v in opens_at.values_mut() {
-        v.sort_by_key(|m| std::cmp::Reverse(m.end));
+        v.sort_by_key(|m| key(m));
     }
-    // Sort closes at same position: most-recently-opened (later start) closes
-    // first.
     for v in closes_at.values_mut() {
-        v.sort_by_key(|m| std::cmp::Reverse(m.start));
+        v.sort_by_key(|m| std::cmp::Reverse(key(m)));
     }
 
     let mut out = String::with_capacity(text.len() + marks.len() * 4);
@@ -541,6 +542,32 @@ pub fn render_inline_marks(text: &str, marks: &[MarkSpan]) -> String {
     emit_events(n, &mut out);
 
     out
+}
+
+/// Total order deciding which of two marks nests OUTSIDE the other. Ascending
+/// = outermost first; a mark's close event is emitted in the exact reverse.
+///
+/// Beyond the obvious span ordering, two ties matter because org's own parser
+/// is not symmetric about them:
+/// - `Verbatim`/`Code` must sit INSIDE ordinary emphasis. They suppress
+///   emphasis parsing, so `=*x*=` comes back as the literal content `*x*` — the
+///   content would GAIN bytes. `*=x=*` comes back as `x` + both marks.
+/// - `Link` must be innermost. Org does not parse emphasis inside a link label,
+///   so an outer link swallows the emphasis delimiters into the label.
+///
+/// The final `position` tiebreak keeps the order total (and therefore the
+/// output deterministic) for marks that are identical in every other respect.
+fn nesting_key(m: &MarkSpan, all: &[&MarkSpan]) -> (usize, std::cmp::Reverse<usize>, u8, usize) {
+    let depth = match m.mark {
+        InlineMark::Link { .. } => 2,
+        InlineMark::Verbatim | InlineMark::Code => 1,
+        _ => 0,
+    };
+    let position = all
+        .iter()
+        .position(|other| std::ptr::eq(*other, m))
+        .unwrap_or(0);
+    (m.start, std::cmp::Reverse(m.end), depth, position)
 }
 
 /// Open delimiter for a mark. For Link, this is `[[uri][` (the label and

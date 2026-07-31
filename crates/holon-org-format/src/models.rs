@@ -5,6 +5,7 @@
 //! the `properties` JSON field.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 // Import Block for use in extension traits (not re-exported to avoid FRB issues)
 use holon_api::block::Block;
@@ -923,33 +924,80 @@ impl ToOrg for Block {
 }
 
 /// Render a text/headline `Block` to org. `identity` selects the canonical
+/// The org bytes for a block's `content` + `marks`, quoting every literal span
+/// org would otherwise eat as emphasis so the bytes parse back to what the
+/// store holds (`__default__` stays `__default__` instead of returning as
+/// `default`). Marked blocks included: the literal gaps between marks are
+/// exposed to the same loss.
+///
+/// Degradation ladder, worst outcome last. Losing FORMATTING is a recoverable
+/// annoyance; changing CONTENT is permanent corruption, so a block that cannot
+/// be emitted with its marks is emitted WITHOUT them rather than as bytes that
+/// re-parse to different text. Every rung of the ladder is verified by
+/// `render_lossless` in its own right — none is assumed to be safe — and every
+/// rung below the first is disclosed.
+///
+/// Nothing here returns `Err`: `ToOrg::to_org` and the `FileFormatAdapter`
+/// render methods are `-> String`, and this runs inside the org-sync select
+/// loop where an unwind stops write-back vault-wide until restart. Threading
+/// `Result` to a write-back gate is the follow-up.
+pub fn render_block_content(block: &Block) -> String {
+    let marks = block.marks.as_deref().unwrap_or(&[]);
+    match crate::inline_marks::render_lossless(&block.content, marks) {
+        Ok(bytes) => bytes,
+        Err(with_marks) => match crate::inline_marks::render_lossless(&block.content, &[]) {
+            Ok(bytes) => {
+                disclose_degraded_render(
+                    block,
+                    format_args!(
+                        "DROPPING {} inline mark(s) to keep the content bytes intact: {with_marks}",
+                        marks.len()
+                    ),
+                );
+                bytes
+            }
+            Err(bare) => {
+                disclose_degraded_render(
+                    block,
+                    format_args!("the content itself cannot be quoted, writing it RAW: {bare}"),
+                );
+                block.content.clone()
+            }
+        },
+    }
+}
+
+/// Loud once per block per process, quiet after. A block whose marks cross is
+/// re-rendered on every write-back pass, so an unconditional ERROR would bury
+/// the log — but the first occurrence must be impossible to miss.
+fn disclose_degraded_render(block: &Block, detail: std::fmt::Arguments) {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<HashSet<String>>> =
+        std::sync::OnceLock::new();
+    let first = SEEN
+        .get_or_init(|| std::sync::Mutex::new(HashSet::new()))
+        .lock()
+        .expect("degraded-render disclosure set poisoned")
+        .insert(block.id.as_str().to_string());
+    if first {
+        tracing::error!(
+            block = block.id.as_str(),
+            "org render is DEGRADED for this block: {detail}"
+        );
+    } else {
+        tracing::debug!(
+            block = block.id.as_str(),
+            "org render still degraded: {detail}"
+        );
+    }
+}
+
+/// Render a text/headline `Block` to org. `identity` selects the canonical
 /// drawer form or the dense trailing-token form (`crate::dense`). Callers MUST
 /// have already dispatched Source/Image content types (this only handles the
 /// headline case). Free function (not an inherent method) because `Block` is
 /// defined in `holon-api`.
 pub(crate) fn render_headline_block(block: &Block, identity: HeadlineIdentity) -> String {
-    // Re-emit org delimiters from the mark set and quote every literal span
-    // org would otherwise eat as emphasis, so the bytes on disk parse back to
-    // what the store holds (`__default__` stays `__default__` instead of
-    // coming back as `default`). Applies with or without marks: the literal
-    // gaps between marks are exposed to exactly the same loss.
-    let marks = block.marks.as_deref().unwrap_or(&[]);
-    let emitted: String = crate::inline_marks::render_lossless(&block.content, marks)
-        .unwrap_or_else(|e| {
-            // Degraded but disclosed. `ToOrg::to_org` and the `FileFormatAdapter`
-            // render methods return `String`, so an `Err` here has nowhere to go
-            // except a panic — and this runs inside the org-sync select loop,
-            // where an unwind stops write-back vault-wide until restart. Emitting
-            // the unquoted form is strictly better than today's silent loss: same
-            // bytes, plus a loud ERROR naming the block.
-            tracing::error!(
-                block = block.id.as_str(),
-                error = %e,
-                "org render cannot quote this content losslessly; writing the UNQUOTED form, \
-                 which will lose inline-markup delimiters on re-parse"
-            );
-            crate::inline_marks::render_inline_marks(&block.content, marks)
-        });
+    let emitted: String = render_block_content(block);
     let title_str = emitted.lines().next().unwrap_or("").trim_end().to_string();
     let body_str: Option<String> = {
         let lines: Vec<&str> = emitted.lines().collect();

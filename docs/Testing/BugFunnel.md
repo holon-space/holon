@@ -8,7 +8,7 @@ distribution steers QA investment.
 
 - ENVIRONMENT: 120
 - COVERAGE: 65
-- PERCEPTION: 51
+- PERCEPTION: 52
 - ORACLE: 39
 
 Archived baseline (ENVIRONMENT 87 · COVERAGE 37 · PERCEPTION 35 · ORACLE 18 as of
@@ -109,6 +109,26 @@ the archived baseline):
   the FIX chose to quote, none asserted the check ran on content it chose not to. Now pinned by
   `render_lossless_shapes.rs` (33 adversarial shapes, no input may skip the check) plus unit rungs
   for the marked/healed/externally-minted paths.)
+- (+1 PERCEPTION 2026-07-31: the SECOND fix for the entry above shipped a composition bug WORSE than
+  the original: co-extensive marks emitted mis-nested delimiters. `render_inline_marks` sorted
+  same-position closes by `Reverse(start)`, which TIES for marks sharing a span, so Bold+Verbatim
+  over one span emitted `*=x*=` — non-LIFO, not valid org, so the next parse swallowed the
+  delimiters INTO the content and the block converged to `*=__init__*=`. The state was one the fix
+  MANUFACTURED (quoting a bolded identifier re-ingests as Bold+Verbatim co-extensive), and the
+  degraded path re-emitted the very bytes the checker had just rejected, so content was polluted
+  rather than preserved. The nesting bug was general and pre-existing — plain `hello` with
+  Bold+Italic mis-nests identically — and only became reachable because the fix started minting
+  Verbatim. GAP = PERCEPTION, and structural: `assert_render_is_fixed_point` was only ever called
+  with `marks=None`, NO generator anywhere produced arbitrary mark sets (every mark in every test
+  came from parsing org text, which can only mint states the parser can express), and no property
+  ran a marked block through TWO cycles — so three review rounds walked through the same hole.
+  Closed by `marked_content_strategy` in `holon-block-roundtrip-testing`: `(content, marks)` store
+  states with marks minted INDEPENDENTLY of parsing, spans weighted onto the adversarial geometries
+  (co-extensive, crossing, boundary-aligned, contained-with-slack, inside, duplicate), driven
+  through >=2 full render->parse cycles against the PROD emit path. Acceptance was
+  would-have-caught, not just green-after: against the pre-fix build the generator finds the
+  corruption on case 0 and shrinks it to the minimal pair — content `"a"`, marks
+  `[Bold{0,1}, Italic{0,1}]`.)
 - (+1 COVERAGE 2026-07-31: an INDENTED body lost its FIRST line's indentation on every org round
   trip while later lines kept theirs, so `    a\n    b` came back `a\n    b` — silent, cumulative
   re-alignment of any indented note or code-ish body, and the doc-root preamble had the same

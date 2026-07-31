@@ -47,6 +47,7 @@ pub use models::ToOrg;
 pub use models::find_document_id;
 pub use models::get_block_file_path;
 pub use models::org_props;
+pub use models::render_block_content;
 pub use models::render_document_header;
 pub use org_renderer::OrgRenderer;
 pub use parser::ParseResult;

@@ -5563,6 +5563,7 @@ dependencies = [
  "anyhow",
  "hex",
  "holon-api",
+ "holon-block-roundtrip-testing",
  "orgize",
  "proptest 1.11.0",
  "serde",
