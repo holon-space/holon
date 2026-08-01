@@ -100,6 +100,12 @@ pub fn normalize_block(block: &Block) -> Block {
     for prop in INTERNAL_PROPS {
         normalized.properties.remove(*prop);
     }
+    // `_`-prefixed keys are prod's declared internal-property namespace, not
+    // user content: the org drawer serializer never emits them (`OrgBlockExt::
+    // drawer_properties`) and `effect_id` excludes them from effect identity.
+    // The reference model does not re-derive them, so the whole namespace is
+    // stripped here rather than key-by-key (`_provenance`, `_drawer_order`, …).
+    normalized.properties.retain(|k, _| !k.starts_with('_'));
     // Strip Null-valued and empty-string properties: the org parser stores
     // task_state=Null explicitly in the DB but the reference model omits absent
     // properties. Empty-string task_state means "no state" and is lost during
