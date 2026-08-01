@@ -169,6 +169,34 @@ fn whole_scheme_shaped_target_survives_roundtrip() {
     assert_org_bytes_survive("see [[block:abc-123][a block]] here");
 }
 
+/// A DOUBLE colon after the scheme (`tag::x`) is a well-formed URI whose path
+/// simply starts with `:`. It is scheme-shaped, its scheme is registered, and
+/// `EntityUri::parse` accepts it — so nothing about it is malformed and the
+/// authored bytes must come back untouched.
+///
+/// The trap is `EntityUri::from_raw`, whose colon-leading-path guard exists to
+/// keep BARE synthetic ids (`root-layout::src::0`) off the entity path and
+/// excepts only `block`. Reached from authored link text it rejects `tag::x`
+/// and re-mints it as `block:tag::x`, so the round trip emits
+/// `[[block:tag::x][tag::x]]` — the author's link silently rewritten.
+#[test]
+fn double_colon_scheme_target_survives_roundtrip() {
+    assert_org_bytes_survive("see [[tag::x]] here");
+    assert_org_bytes_survive("see [[person::odd]] here");
+    assert_org_bytes_survive("see [[tag::x][the tag]] here");
+    assert_org_bytes_survive("see [[person::odd][that person]] here");
+}
+
+/// The same arm's other input: a REGISTERED scheme whose path is not a legal
+/// URI (`tag:a b` — a space is not URI-encodable). It is still authored text,
+/// so it too must come back verbatim rather than through a re-mint that
+/// cannot even build a URI to hold it.
+#[test]
+fn unparseable_registered_scheme_target_survives_roundtrip() {
+    assert_org_bytes_survive("see [[tag:a b]] here");
+    assert_org_bytes_survive("see [[tag:a b][spaced]] here");
+}
+
 // ===========================================================================
 // Family 2 — empty content
 // ===========================================================================

@@ -30,12 +30,13 @@ pub enum LinkTarget {
     },
     /// External URL: `[[https://...]]`
     External(String),
-    /// Scheme-shaped target whose scheme is not registered: `[[Areas:Work]]`,
+    /// Scheme-shaped target that names no entity right now: `[[Areas:Work]]`,
     /// `[[cc-sesion:abc]]` (typo), a link left behind by an uninstalled
-    /// integration. The scheme SHAPE is reserved, so this is never a
+    /// integration, or a registered scheme carrying a path no URI can hold
+    /// (`[[tag:a b]]`). The scheme SHAPE is reserved, so this is never a
     /// page-creation intent — it is disclosed as an unresolved entity link and
-    /// flips back to [`Resolved`](Self::Resolved) the moment its scheme is
-    /// registered.
+    /// flips to [`Resolved`](Self::Resolved) once its scheme is registered AND
+    /// it parses.
     UnknownScheme(String),
 }
 
@@ -174,11 +175,23 @@ impl LinkTargetClassifier {
         // links work this way). A shaped target is never a page name, whether
         // or not its scheme happens to be registered right now.
         if let Some(scheme) = link_scheme_shape(target) {
-            return if self.is_registered_entity_scheme(&scheme) {
-                // ALLOW(entity_uri_from_raw): raw org-file wiki-link target
-                LinkTarget::Resolved(EntityUri::from_raw(target))
-            } else {
-                LinkTarget::UnknownScheme(target.to_string())
+            // `EntityUri::parse`, never `from_raw`: `from_raw` guesses whether
+            // a colon-leading path means "bare synthetic id" and RE-MINTS what
+            // it rejects as `block:<whole target>`. That guess has no business
+            // here — the shape check above already proved this is a scheme, so
+            // the only question left is whether the target is a legal URI. The
+            // guess turned `[[tag::x]]` into `[[block:tag::x][tag::x]]` and
+            // panicked outright on `[[tag:a b]]`.
+            //
+            // This matches `EntityRef::entity_uri()`, which is the single
+            // discriminator every consumer asks — so a target it calls an
+            // entity is exactly the one classified `Resolved` here.
+            return match EntityUri::parse(target) {
+                Ok(uri) if self.is_registered_entity_scheme(&scheme) => LinkTarget::Resolved(uri),
+                // Scheme-shaped but unregistered, or not a legal URI at all:
+                // either way it names no entity right now and its bytes are
+                // the author's. `Resolved` would have to invent a URI.
+                _ => LinkTarget::UnknownScheme(target.to_string()),
             };
         }
 
