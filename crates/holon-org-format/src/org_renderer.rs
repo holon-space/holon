@@ -258,7 +258,11 @@ impl OrgRenderer {
 
     /// Prepare a block for org rendering by transferring Loro properties to
     /// org_props format.
-    fn prepare_block_for_org(block: &mut Block, depth: usize) {
+    ///
+    /// Public so a caller that owns its own tree walk (the integration-test
+    /// serializer) can reach `Block::to_org` through the SAME preparation
+    /// write-back uses instead of re-deriving the drawer.
+    pub fn prepare_block_for_org(block: &mut Block, depth: usize) {
         let properties = block.properties_map();
 
         // Set level from depth (level = depth + 1)

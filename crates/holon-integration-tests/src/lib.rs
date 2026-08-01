@@ -75,7 +75,6 @@ pub use mcp_user_driver::mcp_base_url_from_env;
 pub use mutation_driver::DirectUserDriver;
 pub use mutation_driver::ReactiveEngineDriver;
 pub use mutation_driver::UserDriver;
-pub use org_utils::INTERNAL_PROPS;
 pub use org_utils::assign_reference_sequences;
 pub use org_utils::assign_reference_sequences_canonical;
 pub use org_utils::extract_first_block_id;
