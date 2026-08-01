@@ -63,6 +63,7 @@ mod boot;
 mod clock;
 mod docs;
 mod editor;
+mod entity_schemes;
 mod focus;
 mod layout;
 mod misc;

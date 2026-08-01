@@ -51,6 +51,7 @@ use holon_pbt_core::capabilities::SutBlockTreeWrite;
 use holon_pbt_core::capabilities::SutClockAdvance;
 use holon_pbt_core::capabilities::SutEditorMirrorRead;
 use holon_pbt_core::capabilities::SutEditorMirrorWrite;
+use holon_pbt_core::capabilities::SutEntityTypeRegister;
 use holon_pbt_core::capabilities::SutErrorLog;
 use holon_pbt_core::capabilities::SutFocus;
 use holon_pbt_core::capabilities::SutFocusWrite;
@@ -2513,6 +2514,72 @@ impl SutViewControl for HeadlessFrontendComponent {
 impl SutMcpEmit for HeadlessFrontendComponent {
     async fn emit_mcp_data(&self) {
         tracing::trace!("[apply] EmitMcpData (headless frontend slice: no MCP integration, no-op)");
+    }
+}
+
+/// `SutEntityTypeRegister` (the `RegisterEntityScheme` transition): mint an
+/// entity type at runtime by CALLING the `create_entity_type` MCP tool over a
+/// real rmcp transport, against a server sharing THIS component's engine and
+/// `TypeRegistry` — the same container the link classifier reads.
+///
+/// The server is built per call rather than kept: it holds no state of its own
+/// (engine, registry and debug services are all shared `Arc`s), so a fresh one
+/// is the same server an integration would reconnect to.
+#[async_trait::async_trait(?Send)]
+impl SutEntityTypeRegister for HeadlessFrontendComponent {
+    async fn register_entity_type(&self, entity_name: &str) {
+        use rmcp::ServiceExt;
+
+        let server = holon_mcp::server::HolonMcpServer::with_type_registry(
+            Some(self.engine()),
+            Some(self.type_registry().await),
+            self.mcp_debug_services().await,
+            None,
+        );
+        let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+        // Both sides handshake concurrently — `serve` blocks until the peer's
+        // `initialize` arrives.
+        let (server_running, client_running) = tokio::try_join!(
+            async {
+                server
+                    .serve(server_transport)
+                    .await
+                    .map_err(anyhow::Error::from)
+            },
+            async { ().serve(client_transport).await.map_err(anyhow::Error::from) },
+        )
+        .expect("in-process MCP handshake for create_entity_type");
+        let result = client_running
+            .peer()
+            .call_tool(rmcp::model::CallToolRequestParam {
+                name: "create_entity_type".into(),
+                arguments: serde_json::json!({
+                    "type_definition": {
+                        "name": entity_name,
+                        "fields": [
+                            { "name": "id", "sql_type": "TEXT", "primary_key": true },
+                            { "name": "title", "sql_type": "TEXT", "nullable": true },
+                        ],
+                    }
+                })
+                .as_object()
+                .cloned(),
+            })
+            .await
+            .unwrap_or_else(|e| panic!("create_entity_type('{entity_name}') failed over MCP: {e}"));
+        assert!(
+            result.is_error != Some(true),
+            "create_entity_type('{entity_name}') reported a tool error: {:?}",
+            result.content
+        );
+        client_running
+            .cancel()
+            .await
+            .expect("MCP client loop shuts down");
+        server_running
+            .cancel()
+            .await
+            .expect("MCP server loop shuts down");
     }
 }
 

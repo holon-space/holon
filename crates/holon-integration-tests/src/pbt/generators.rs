@@ -248,7 +248,15 @@ pub fn typing_text_strategy() -> BoxedStrategy<String> {
         // draw and `inv-blocks-match-ref/block_raw` (which DOES compare marks)
         // can never observe a link-mark divergence — the undo-drops-marks bug
         // (Mac dogfood 2026-07-19) was structurally unreachable for this reason.
+        //
+        // The second arm types a SCHEME-shaped target (`t-widget:` — the entity
+        // `RegisterEntityScheme` mints) rather than a wiki name, because the
+        // `block_links` junction must be derived registry-INDEPENDENTLY and only
+        // a link typed while its scheme is still unregistered witnesses that.
         2 => "[a-z]{2,5}".prop_map(|w| format!("[[{w}]]")),
+        2 => "[a-z]{2,5}".prop_map(|w| {
+            format!("[[{}:{w}]]", crate::pbt::transitions::register_entity_scheme::LINKED_SCHEME)
+        }),
     ]
     .boxed()
 }
@@ -1303,5 +1311,131 @@ mod advice_rule_tests {
             prop_assert_eq!(parsed.k.get(), k);
             prop_assert_eq!(parsed.active, active);
         }
+    }
+}
+
+#[cfg(test)]
+mod scheme_link_arm_tests {
+    use std::time::Duration;
+
+    use proptest::strategy::ValueTree;
+    use proptest::test_runner::TestRunner;
+
+    use super::*;
+    use crate::pbt::frontend_slice::components::HeadlessFrontendComponent;
+    use crate::pbt::transitions::register_entity_scheme::LINKED_SCHEME;
+
+    /// Draw keystroke literals until the scheme-shaped arm fires. Panics rather
+    /// than returning `None`: a strategy that cannot reach the arm makes every
+    /// assertion downstream of it vacuous.
+    fn sample_scheme_link_literal() -> String {
+        let mut runner = TestRunner::deterministic();
+        let strat = typing_text_strategy();
+        let prefix = format!("[[{LINKED_SCHEME}:");
+        for _ in 0..500 {
+            let drawn = strat
+                .new_tree(&mut runner)
+                .expect("typing strategy draws")
+                .current();
+            if drawn.starts_with(&prefix) {
+                return drawn;
+            }
+        }
+        panic!(
+            "reachability floor: 500 draws of typing_text_strategy produced no {prefix}…]] \
+             literal — the scheme-shaped link arm is unreachable and the generative arm of bug \
+             #98 certifies nothing"
+        );
+    }
+
+    /// The scheme-shaped arm is drawable AND its literal lands in `block_links`
+    /// with NO entity registered — the registration-independence the junction
+    /// is supposed to have (bug #98). The expectation is the shared oracle
+    /// `derive_block_links` over the marks the production extractor produces,
+    /// so the row SET is judged, not merely counted.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scheme_link_arm_reaches_block_links_unregistered() {
+        let literal = sample_scheme_link_literal();
+
+        let comp = HeadlessFrontendComponent::new(
+            &[("doc0.org", "#+ID: ref-doc-0\n* Doc zero\n")],
+            Duration::from_millis(300),
+        )
+        .await;
+        assert!(
+            !comp.type_registry().await.contains(LINKED_SCHEME),
+            "the arm must be proven WITHOUT the scheme registered — that is the whole property"
+        );
+        // `set_field("content")` is the op an editor commit sends and the ONLY
+        // one that extracts inline marks — the same rung `TypeChars` reaches
+        // through the driver. A `block.create` carrying the literal would store
+        // it as raw text with NULL marks and prove nothing about typing.
+        comp.create_block("block:scheme-link", "block:ref-doc-0", "")
+            .await;
+        let mut params: holon_api::StorageEntity = std::collections::HashMap::new();
+        params.insert(
+            "id".into(),
+            holon_api::Value::String("block:scheme-link".into()),
+        );
+        params.insert("field".into(), holon_api::Value::String("content".into()));
+        params.insert("value".into(), holon_api::Value::String(literal.clone()));
+        comp.engine()
+            .execute_operation(
+                &holon_api::EntityName::new("block"),
+                "set_field",
+                params,
+                holon_api::OpOrigin::User,
+            )
+            .await
+            .expect("set_field(content) with the typed literal");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let (_, marks) = holon_orgmode::inline_marks::extract_inline_marks(&literal);
+        let expected: Vec<(String, String)> = holon_api::derive_block_links(&marks)
+            .into_iter()
+            .map(|l| (l.target, l.kind.as_str().to_string()))
+            .collect();
+        assert_eq!(
+            expected,
+            vec![(
+                literal
+                    .trim_start_matches("[[")
+                    .trim_end_matches("]]")
+                    .to_string(),
+                "entity".to_string()
+            )],
+            "non-vacuity: the generated literal {literal:?} must derive exactly one entity link"
+        );
+
+        let rows = comp
+            .engine()
+            .db_handle()
+            .query(
+                "SELECT target, kind FROM block_links WHERE source_block_id = \
+                 'block:scheme-link' ORDER BY target, kind",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("block_links query");
+        let actual: Vec<(String, String)> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.get("target")
+                        .and_then(|v| v.as_string())
+                        .expect("target")
+                        .to_string(),
+                    r.get("kind")
+                        .and_then(|v| v.as_string())
+                        .expect("kind")
+                        .to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            actual, expected,
+            "a scheme-shaped link typed while its entity is UNREGISTERED must still write its \
+             junction row"
+        );
     }
 }

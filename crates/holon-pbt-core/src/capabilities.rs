@@ -2892,6 +2892,40 @@ pub trait SutTemplateInstantiate {
     );
 }
 
+/// SUT capability: register a NEW entity type at runtime through the
+/// agent-facing MCP `create_entity_type` tool — the rung an MCP sidecar
+/// provider actually connects on. Drives the `RegisterEntityScheme` transition.
+///
+/// The tool, not `TypeRegistry::register`: the tool also creates the extension
+/// table and registers the GQL node, so poking the registry directly would be a
+/// lower driver rung than production ever takes and would bake the difference
+/// into the harness. Only compositions that can serve MCP tools over the SAME
+/// container the link classifier reads insert this cap, so every other slice
+/// deselects the transition by cap narrowing.
+#[holon_macros::capmap_adapter]
+pub trait SutEntityTypeRegister {
+    /// Register `entity_name` (the SQL table spelling, e.g. `t_widget`). A tool
+    /// error is a loud panic: the reference has already recorded the
+    /// registration, so a swallowed failure would resurface as an unrelated
+    /// divergence.
+    async fn register_entity_type(&self, entity_name: &str);
+}
+
+/// Reference-side view of which entity schemes have been registered at runtime.
+/// Read ONLY to keep `RegisterEntityScheme` from minting the same entity twice;
+/// deliberately NOT read by any link oracle — `block_links` is registration
+/// independent, so an expectation that changed with this set would contradict
+/// the property.
+pub trait RefEntitySchemes {
+    fn entity_scheme_registered(&self, entity_name: &str) -> bool;
+}
+
+/// Write side of [`RefEntitySchemes`]. Plain trait (no `capmap_adapter`): a
+/// `&mut self` cap cannot live behind the `Arc` a `CapMap` stores.
+pub trait RefEntitySchemesMut: RefEntitySchemes {
+    fn note_entity_scheme_registered(&mut self, entity_name: &str);
+}
+
 /// SUT capability: turn an existing non-page block into a page via the
 /// production `block.convert_block_to_page` compound (BlockToPageTransform,
 /// Option B). Mints a NEW page under the destination, re-homes the origin's

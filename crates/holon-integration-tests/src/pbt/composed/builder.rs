@@ -496,6 +496,13 @@ async fn compose_sut_seeded_impl(
             comp.engine(),
             resolver.clone(),
         )) as Arc<dyn SutTemplateInstantiate>);
+        // Runtime entity-type registration (`RegisterEntityScheme`) — the
+        // component serves the `create_entity_type` MCP tool over its OWN engine
+        // and `TypeRegistry`, i.e. the container the link classifier reads. This
+        // is what lets a sequence interleave a scheme registration with the org
+        // ingest of a `[[t-widget:…]]` link (bug #98); a slice without the cap
+        // narrows the transition out.
+        caps.insert(comp.clone() as Arc<dyn holon_pbt_core::capabilities::SutEntityTypeRegister>);
         // The VM-rung driver (§8.11 layer-localization): install the frontend's OWN
         // headless `ReactiveEngineDriver` as THE driver backing the gesture caps, so
         // the composed `CapMap` drives user gestures UI-adjacently (click-intent

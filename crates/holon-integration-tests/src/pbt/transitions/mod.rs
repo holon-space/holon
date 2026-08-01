@@ -117,6 +117,7 @@ pub mod outdent;
 mod pin_block;
 mod press_key;
 mod redo;
+pub mod register_entity_scheme;
 mod remove_watch;
 mod rename_document;
 pub(crate) mod rename_page;
@@ -194,6 +195,7 @@ pub use outdent::Outdent;
 pub use pin_block::PinBlock;
 pub use press_key::PressKey;
 pub use redo::Redo;
+pub use register_entity_scheme::RegisterEntityScheme;
 pub use remove_watch::RemoveWatch;
 pub use rename_document::RenameDocument;
 pub use rename_page::RenamePage;
@@ -267,6 +269,7 @@ crate::declare_e2e_transitions! {
         PinBlock(PinBlock),
         PressKey(PressKey),
         Redo(Redo),
+        RegisterEntityScheme(RegisterEntityScheme),
         SimulateRestart(SimulateRestart),
         RemoveWatch(RemoveWatch),
         SetEdgeField(SetEdgeField),
