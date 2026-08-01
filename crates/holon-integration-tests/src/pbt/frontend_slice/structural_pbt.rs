@@ -1971,6 +1971,151 @@ entities:
         );
     }
 
+    /// The SAME entity-link chain as
+    /// [`sidecar_entity_link_resolves_through_the_intent_boundary`], with the
+    /// two events in the order production actually produces them: the block
+    /// carrying the link is ingested by the BOOT ORG SCAN first, and the
+    /// entity registers only afterwards (in prod: when the MCP provider
+    /// connects, `holon-app/src/mcp_integrations.rs:272-273`, whose factory is
+    /// resolved at `wiring.rs:333` — after `turso_seams.rs:898-905` has already
+    /// spawned the scan).
+    ///
+    /// A link's resolution must not depend on WHEN its scheme registered
+    /// relative to the scan (Model.md invariants 3 and 4: the projection is
+    /// reproducible from the replica, and derived holders recompute at
+    /// quiescence). Its twin above differs ONLY in that order, so a failure
+    /// here while the twin is green localises the defect to the ordering and
+    /// not to the scheme/table-name join, the sidecar path, or the fixture.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn entity_scheme_registered_after_org_scan_still_links() {
+        use holon_pbt_core::capabilities::SutFocus;
+        use holon_pbt_core::capabilities::SutQueryResults;
+        use holon_pbt_core::capabilities::SutSqlProjection;
+        use holon_pbt_core::composition::CapProvider;
+
+        const SIDECAR_YAML: &str = r#"
+entities:
+  t_widget:
+    id_column: id
+    schema:
+      - name: id
+        sql_type: TEXT
+        primary_key: true
+"#;
+        const ENTITY_URI: &str = "t-widget:abc123";
+
+        // The link is ALREADY on disk when the app boots — nothing in this
+        // test ever writes a block. Bare `:ID:` per ORG_SYNTAX; the parser
+        // adds the `block:` scheme at the boundary.
+        let org = "#+ID: structural-page\n* parent\n:PROPERTIES:\n:ID: parent\n:END:\n** See \
+                   [[t-widget:abc123][Widget]] here\n:PROPERTIES:\n:ID: \
+                   entity-linker\n:END:\n";
+
+        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+        let comp = Arc::new(
+            HeadlessFrontendComponent::new_with_clock(
+                &[("structural-page.org", org)],
+                Duration::from_millis(300),
+                false,
+                crate::pbt::frontend_slice::components::keystone_boot_clock(),
+            )
+            .await,
+        );
+        let engine = comp.engine();
+        let mut caps = CapMap::new();
+        comp.clone().register(&mut caps);
+        caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
+        caps.insert(comp.clone() as Arc<dyn SutFocus>);
+        caps.insert(comp.clone() as Arc<dyn SutQueryResults>);
+        caps.replace(Arc::new(OpDispatchWriter::with_resolver(
+            engine.clone(),
+            resolver.clone(),
+        )) as Arc<dyn SutBlockTreeWrite>);
+        tokio::time::sleep(SETTLE).await;
+
+        // Ingest happened, and it happened BEFORE registration. Pin that the
+        // scan actually landed the block and parsed a mark, so a red below is
+        // unambiguously the ordering defect and not a parse/ingest failure.
+        let pre = engine
+            .db_handle()
+            .query(
+                "SELECT id, marks FROM block_raw WHERE id = 'block:entity-linker'",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("block_raw query");
+        assert_eq!(
+            pre.len(),
+            1,
+            "the boot org scan must have ingested the linking block; got {pre:?}"
+        );
+        // `marks` is a jsonb column — CDC delivers it as Value::Json/Array,
+        // never Value::String — so match on the rendered value rather than
+        // reaching for `as_string`, which would silently be None here.
+        let marks = format!("{:?}", pre[0].get("marks"));
+        assert!(
+            marks.contains(ENTITY_URI),
+            "the ingested block must carry a Link mark for {ENTITY_URI} (the target string is \
+             preserved verbatim whatever the classifier decided); marks = {marks:?}"
+        );
+
+        // NOW install the integration's entity, through the REAL registration
+        // path — the same call the sidecar makes when its provider connects.
+        let sidecar =
+            holon_mcp_client::mcp_sidecar::McpSidecar::from_yaml(SIDECAR_YAML).expect("yaml");
+        let registry = comp.type_registry().await;
+        for (name, cfg) in &sidecar.entities {
+            let table = sidecar.prefixed_name(name).table_name();
+            registry
+                .register(cfg.to_type_definition(&table).expect("type definition"))
+                .expect("register");
+        }
+        tokio::time::sleep(SETTLE).await;
+
+        let rows = engine
+            .db_handle()
+            .query(
+                "SELECT target, kind, resolved_id FROM block_links WHERE source_block_id = \
+                 'block:entity-linker'",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("block_links query");
+        let entity_rows: Vec<_> = rows
+            .iter()
+            .filter(|r| r.get("target").and_then(|v| v.as_string()) == Some(ENTITY_URI))
+            .collect();
+        assert_eq!(
+            entity_rows.len(),
+            1,
+            "exactly one block_links row for {ENTITY_URI}, got {rows:?} — a link ingested before \
+             its scheme registered must still be a link"
+        );
+        assert_eq!(
+            entity_rows[0].get("kind").and_then(|v| v.as_string()),
+            Some("entity"),
+            "kind must be 'entity' regardless of registration order: {entity_rows:?}"
+        );
+
+        let backlink_rows = engine
+            .db_handle()
+            .query(
+                &format!("SELECT id FROM backlinks WHERE target_id = '{ENTITY_URI}'"),
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("backlinks query");
+        let sources: Vec<String> = backlink_rows
+            .iter()
+            .filter_map(|r| r.get("id").and_then(|v| v.as_string()).map(str::to_string))
+            .collect();
+        assert_eq!(
+            sources,
+            vec!["block:entity-linker".to_string()],
+            "the entity page must show the backlink once its scheme is registered"
+        );
+    }
+
     /// Apply `SplitBlock(c1)` to BOTH the oracle and the composed SUT,
     /// reconcile the minted ids, and run the catalog — the faithful
     /// structural write path over the real headless component stays green
