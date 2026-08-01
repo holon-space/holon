@@ -21,6 +21,10 @@ header against the log.
 Increment log (append-only, NEWEST FIRST — each counted bug adds exactly one line here;
 merge conflicts resolve by keeping both sides' lines and re-summing the totals ON TOP OF
 the archived baseline):
+- (+13 ENVIRONMENT 2026-08-01: reconciliation — rows counted in the header without increment lines; see task #24)
+- (+8 COVERAGE 2026-08-01: reconciliation — rows counted in the header without increment lines; see task #24)
+- (+9 PERCEPTION 2026-08-01: reconciliation — rows counted in the header without increment lines; see task #24)
+- (+8 ORACLE 2026-08-01: reconciliation — rows counted in the header without increment lines; see task #24)
 - (+1 COVERAGE 2026-08-01: a watched query whose trailing `ORDER BY` qualifies its columns
   with a source table alias (`SELECT b.* FROM block b JOIN block_tags bt … ORDER BY b.sort_key`
   — the SHIPPED sidebar shape, and what GQL compiles the right-sidebar query to) failed the
