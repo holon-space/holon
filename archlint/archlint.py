@@ -69,14 +69,21 @@ def has_allow(
     Multi-line ast-grep matches (e.g. method chains spanning several lines)
     require checking the entire span — the user typically annotates the .ok()
     line itself, which is below the match's start.
+
+    rustfmt's `wrap_comments` reflows a long `// ALLOW(...)` line across
+    multiple `//` lines, so the marker can land above the line directly
+    preceding the match — walk upward through contiguous `//` comment lines
+    until the marker is found or a non-comment line is hit.
     """
     marker = f"ALLOW({tag})"
     if end_1indexed is None or end_1indexed < start_1indexed:
         end_1indexed = start_1indexed
     start_idx = start_1indexed - 1
-    if start_idx - 1 >= 0 and start_idx - 1 < len(file_lines):
-        if marker in file_lines[start_idx - 1]:
+    idx = start_idx - 1
+    while idx >= 0 and file_lines[idx].lstrip().startswith("//"):
+        if marker in file_lines[idx]:
             return True
+        idx -= 1
     for idx in range(max(start_idx, 0), min(end_1indexed, len(file_lines))):
         if marker in file_lines[idx]:
             return True
@@ -184,11 +191,18 @@ def is_default_skipped(rel: str) -> bool:
     return any(s in rel for s in DEFAULT_SKIPS)
 
 
+WORKTREE_PREFIX_RE = re.compile(r"^.*\.claude/worktrees/[^/]+/")
+
+
 def relpath(p: Path) -> str:
     try:
-        return str(p.resolve().relative_to(REPO_ROOT))
+        rel = str(p.resolve().relative_to(REPO_ROOT))
     except ValueError:
-        return str(p)
+        rel = str(p)
+    # jj/git workspaces nest under .claude/worktrees/<name>/ (possibly
+    # repeatedly for nested workspaces); baseline keys are relative to the
+    # true repo root, so strip every such prefix greedily before returning.
+    return WORKTREE_PREFIX_RE.sub("", rel)
 
 
 # ---------------------------------------------------------------- ast-grep
