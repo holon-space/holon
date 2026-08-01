@@ -5,12 +5,12 @@
 `LiveData::group_by` (stateful: element→last-owning-doc accumulator), so `di.rs` delivers
 both feed removals AND cross-doc departures as `OrgRerender::Block { doc, Remove(id) }`
 directly to the owning doc, with the id sanctioned (`on_block_changed`); the former
-`on_block_removed` reverse lookup is deleted. The mass-truncation tripwire threshold
-(`max(3, 25%)`) is deliberately RETAINED: state-driven renders can still shrink a file
-without a delivered op (cross-doc moves are grounded since 2026-07-24 — `group_by` emits
-the source-doc departure Remove before the destination Upsert — leaving
-TOCTOU-spent sanctions and matview-lag races). Tightening toward zero requires grounding
-those classes too — the C2b history relation named below.
+`on_block_removed` reverse lookup is deleted. Since 2026-08-01 the block-driven guard is
+ZERO-TOLERANCE (`FileSyncController::veto_ungrounded_removals`): the former
+mass-truncation threshold (`max(3, 25%)`) let an unsanctioned removal of a few blocks
+through silently, which destroyed the blocks a folder companion authored under an inlined
+foreign page root (BugFunnel 2026-08-01). A removal grounded by neither a delivered op nor
+a sibling file now refuses the write and quarantines the file whatever its size.
 **Context:** first-principles session on block loss, 2026-07-12; empirical basis: the seven
 block-loss classes found and fixed 2026-07-10..12.
 
@@ -53,8 +53,9 @@ conformance tripwires (not patches):
   quarantine (SurvivingProjection union admits blocks that legitimately moved to sibling files,
   e.g. companion de-inline).
 - `re_render_all_tracked` is reclassified as a RECOVERY path (state-driven by nature, like
-  reseed). Recovery paths carry the guard as tripwire. Follow-up (not this increment): feed it
-  from the C2b history relation so even recovery can ground removals in recorded ops.
+  reseed). It carries the same veto, grounded by the removal ids the feed accumulated for it
+  plus the sibling union; a file whose render drops anything else is quarantined and the batch
+  continues past it.
 
 **Standing disciplines** (established by this cycle's fixes, now doctrine):
 - Diff bases are never private: projections diff against SINK TRUTH; in-memory bases are

@@ -371,12 +371,12 @@ fn partial_ingest_does_not_rewrite_the_file() {
     });
 }
 
-// ── Foreign page inline: silent block loss (BugFunnel 2026-08-01) ───────────
-// RED, disclosed. A folder-companion that INLINES a foreign page root has that
-// headline AND every block beneath it deleted from disk on write-back, while
-// those blocks land in NO store row and NO other file, and NOTHING is logged.
-// `check_writeback_lossless` does not fire, so the quarantine above never
-// engages. See the BugFunnel row dated 2026-08-01.
+// ── Foreign page inline: the removal must be refused ────────────────────────
+// A folder-companion that INLINES a foreign page root re-renders WITHOUT that
+// subtree (`get_blocks` stops at Page boundaries), so write-back would delete
+// blocks authored only here. No op sanctions that removal, so the write-back
+// removal guard refuses it: disk stays intact and the file is quarantined
+// (loud). See the BugFunnel row dated 2026-08-01.
 
 /// The page-file's `#+ID:` — the id the companion below inlines.
 const INLINED_PAGE_ID: &str = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
@@ -447,52 +447,40 @@ async fn companion_env(
     env
 }
 
-/// Blocks authored under an inlined foreign page root must not vanish: either
-/// this file keeps them, or the owning page-file adopts them, or the ingest is
-/// refused and quarantined. Today none of the three happens.
+/// Blocks authored under an inlined foreign page root must not vanish. Nothing
+/// sanctions their removal, so the write-back is refused: the companion keeps
+/// them on disk and the refusal is DISCLOSED (quarantine), never silent.
 #[test]
 fn companion_inlining_a_foreign_page_root_keeps_its_blocks() {
     let rt = runtime();
     rt.clone().block_on(async {
         let env = companion_env(rt.clone()).await;
 
+        // (1) The refusal is LOUD and names THIS file. Asserted first: a
+        // companion that merely happened to keep its blocks (e.g. because no
+        // write-back ran at all) must not pass for a guarded one.
+        let disclosed = wait_until(async || quarantine_disclosed_for("Frontends.org")).await;
+        assert!(
+            disclosed,
+            "the ungrounded removal of the inlined subtree must be refused and DISCLOSED for the \
+             companion — a silent outcome is the data-loss bug. Captured ERRORs:\n{}",
+            captured_errors()
+        );
+        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+
         let on_disk = env
             .org_fs
             .read_to_string(&env.org_file_path(COMPANION_PATH))
             .await
             .expect("read companion");
-        let page_disk = env
-            .org_fs
-            .read_to_string(&env.org_file_path(PAGE_FILE_PATH))
-            .await
-            .expect("read page file");
-        let store_ids: HashSet<String> = env
-            .non_page_block_rows()
-            .await
-            .iter()
-            .filter_map(|r| r.get("id").and_then(|v| v.as_string()).map(str::to_string))
-            .collect();
 
-        // The loss is SILENT: no refusal, no quarantine, nothing to alert on.
-        // Asserted first so a future fix that merely starts disclosing the loss
-        // is not mistaken for a fix that prevents it.
-        let errors = captured_errors();
+        // (2) The contract: the refused write-back left every authored block on
+        // disk — `inlined-descendant` above all, since it is authored ONLY here
+        // and reaches no store row and no other file.
         assert!(
-            errors.is_empty(),
-            "unexpected disclosure — if the loss is now reported, this test's framing needs \
-             revisiting:\n{errors}"
-        );
-
-        // `inlined-descendant` is authored only by the companion. It must
-        // survive SOMEWHERE: this file, the owning page-file, or the store.
-        let survives = on_disk.contains("inlined-descendant")
-            || page_disk.contains("inlined-descendant")
-            || store_ids.contains("block:inlined-descendant");
-        assert!(
-            survives,
-            "silent data loss: `inlined-descendant` was authored under the inlined foreign page \
-             root and is now in NO store row, NO other file, and deleted from its own file.\n  \
-             companion on disk:\n{on_disk}\n  page-file on disk:\n{page_disk}",
+            on_disk.contains("inlined-descendant"),
+            "`inlined-descendant` is authored only under the inlined foreign page root — the \
+             refused write-back must leave it on disk.\n  companion on disk:\n{on_disk}",
         );
         assert_nothing_lost(&companion_file(), &on_disk, "foreign-page-inline");
     });

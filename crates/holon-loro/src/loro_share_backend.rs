@@ -1107,8 +1107,8 @@ impl LoroShareBackend {
 /// Interim N4 guard (dogfood 2026-07-20). Sharing the **root layout block** or
 /// the **default-document root** wraps the ENTIRE UI (sidebars, panels, advice,
 /// render/src blocks) under a share mount — the frontend collapses to a blank
-/// screen and, absent the mass-truncation tripwire on write-back, the on-disk
-/// vault can be destroyed. These are structural/layout blocks, never user
+/// screen and, absent the write-back removal guard, the on-disk vault can be
+/// destroyed. These are structural/layout blocks, never user
 /// content, so sharing them is always a mistake. Reject loudly.
 ///
 /// This is deliberately cheap and id-based. ADR 0028 replaces the mechanism

@@ -213,8 +213,8 @@ fn make_doc_and_blocks() -> (Block, Vec<Block>) {
 }
 
 /// A `Page` doc with `n` leaf children `b0..b{n-1}` (content `heading {i}`) —
-/// used by the mass-truncation tripwire test, which needs enough blocks that
-/// dropping a large fraction crosses the threshold.
+/// used by the mass-truncation and name_chain-failure cases, which need more
+/// blocks than the three-block fixture above.
 fn make_doc_and_n_blocks(n: usize) -> (Block, Vec<Block>) {
     let doc_id = EntityUri::block("doc-1");
     let mut doc = Block::new_text(doc_id.clone(), EntityUri::no_parent(), "My Document");
@@ -282,7 +282,7 @@ fn full_render_oracle(h: &Harness) -> String {
 /// `materialize_page_identity_file` on any authoritative page upsert, which
 /// `authoritative_name_chain`-bails on these single-doc mocks (whose doc-root
 /// block is absent from `get_block_authoritative`) — an interaction unrelated
-/// to the drop-tripwire behaviour these tests pin.
+/// to the removal-guard behaviour these tests pin.
 fn reseed_lever_tags() -> Tags {
     let mut tags = Tags::default();
     tags.insert("Todo");
@@ -471,19 +471,16 @@ async fn remove_takes_full_reseed() {
     );
 }
 
-/// **Fork B B1' (RED-first): a SINGLE ungrounded drop on the block-driven path
-/// passes SILENTLY (below the mass-truncation tripwire).** After the file is on
-/// disk with b1/b2/b3, the store loses b2 and a reseed renders b1/b3. On this
-/// path a single ungrounded drop is indistinguishable from a routine deletion —
-/// the block feed collapses every removal to a full re-render and delivers NO
-/// delete op here (see `di.rs`). The mass-truncation tripwire fires only on the
-/// row-28 signature (a large fraction of the file), so this 1-of-3 drop
-/// PROCEEDS (disk shrinks to b1/b3), the file is NOT quarantined, and no loud
-/// error is emitted (else routine deletions would flood
-/// `inv-no-observed-errors`). Hard grounding of every drop is deferred to the
-/// C2b history relation / removal-op delivery.
+/// **A SINGLE ungrounded drop on the block-driven path VETOES + quarantines.**
+/// After the file is on disk with b1/b2/b3, the store loses b2 and a reseed
+/// renders b1/b3 while the delta is an `Upsert` — no `Remove` op sanctions b2's
+/// disappearance and no sibling file carries it. One destroyed block is still
+/// destroyed, so the write is REFUSED (ADR 0025), disk keeps all three blocks,
+/// and the file is quarantined. A genuine user deletion is the neighbouring
+/// case: it arrives as `Remove(b2)` and writes cleanly
+/// (`block_driven_writeback_writes_sanctioned_deletion`).
 #[tokio::test]
-async fn block_driven_writeback_small_drop_passes_silently() {
+async fn block_driven_writeback_vetoes_single_ungrounded_drop() {
     let mut h = build_harness();
     let all = h.reader.blocks.lock().unwrap().clone();
     let (b1, b3) = (all[0].clone(), all[2].clone());
@@ -507,42 +504,50 @@ async fn block_driven_writeback_small_drop_passes_silently() {
     b1_tagged.tags = reseed_lever_tags();
     h.reader.set_block(b1_tagged.clone());
 
-    h.controller
+    let veto = h
+        .controller
         .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b1_tagged))
-        .await
-        .expect("a single ungrounded drop is below the tripwire — proceeds, never Err");
-
-    // The write proceeded — disk converged to b1/b3 (a routine deletion must reach
-    // disk; the small-drop case passes the tripwire silently).
-    let after = std::fs::read_to_string(&h.path).unwrap();
+        .await;
     assert!(
-        !after.contains("Second heading"),
-        "the small drop must be written (deletion converges), not vetoed; got {after:?}"
+        veto.is_err(),
+        "an ungrounded drop must VETO the write-back (Err), however small"
+    );
+    let msg = format!("{:#}", veto.unwrap_err());
+    assert!(
+        msg.contains("UNGROUNDED WRITE-BACK REMOVAL"),
+        "veto error must name the removal guard; got {msg}"
     );
 
-    // NOT quarantined: a later edit still writes normally.
+    // Disk is intact — the lossy projection was refused.
+    let after = std::fs::read_to_string(&h.path).unwrap();
+    assert!(
+        after.contains("Second heading"),
+        "the vetoed write must leave b2 on disk; got {after:?}"
+    );
+
+    // Quarantined: a later edit is skipped rather than written.
     let mut b1_v2 = b1.clone();
     b1_v2.content = "First heading edited".to_string();
     h.reader.set_blocks(vec![b1_v2.clone(), b3.clone()]);
     h.controller
         .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b1_v2))
         .await
-        .expect("a non-quarantined file keeps accepting writes");
+        .expect("a quarantined file's later edit is skipped (Ok), not an error");
     let after_edit = std::fs::read_to_string(&h.path).unwrap();
     assert!(
-        after_edit.contains("First heading edited"),
-        "the file is not quarantined — later edits still land; got {after_edit:?}"
+        after_edit.contains("Second heading"),
+        "the file stays quarantined — no lossy write over disk; got {after_edit:?}"
     );
 }
 
-/// **Fork B B1' (RED-first): a MASS TRUNCATION (row-28 signature) VETOES +
-/// quarantines.** A 20-block doc is on disk; the store then loses 15 of them
-/// (an FK-rollback-style truncation — NOT a user delete: the delta is an
-/// `Upsert` and none has a sibling file). A reseed renders only 5 blocks;
-/// writing it would DELETE 15 lines from disk. 15 dropped > `max(3, 20/4=5)=5`
-/// → the mass-truncation tripwire fires: the write is REFUSED (Err), disk is
-/// left intact, and the file is quarantined so a later edit is skipped too.
-/// This is the row-28 protection on the block-driven path.
+/// **A MASS TRUNCATION (the row-28 signature) VETOES + quarantines.** A
+/// 20-block doc is on disk; the store then loses 15 of them (an
+/// FK-rollback-style truncation — NOT a user delete: the delta is an `Upsert`
+/// and none has a sibling file). A reseed renders only 5 blocks; writing it
+/// would DELETE 15 lines from disk. The write is REFUSED (Err), disk is left
+/// intact, and the file is quarantined so a later edit is skipped too. The
+/// single-drop sibling case above proves the guard is not size-gated; this one
+/// pins the original row-28 shape end-to-end.
 #[tokio::test]
 async fn block_driven_writeback_vetoes_mass_truncation() {
     let mut h = build_harness_with_blocks(20);
@@ -578,8 +583,8 @@ async fn block_driven_writeback_vetoes_mass_truncation() {
     );
     let msg = format!("{:#}", veto.unwrap_err());
     assert!(
-        msg.contains("MASS TRUNCATION"),
-        "veto error must name the mass-truncation tripwire; got {msg}"
+        msg.contains("UNGROUNDED WRITE-BACK REMOVAL"),
+        "veto error must name the removal guard; got {msg}"
     );
 
     // Disk is intact — the truncated projection was refused.
@@ -711,21 +716,18 @@ fn build_harness_with_failing_child_name_chain(n: usize) -> Harness {
     }
 }
 
-/// **BugFunnel row 23/29 (RED-first): a SMALL ungrounded drop whose blocks FAIL
-/// `name_chain` (a prohibited page-under-non-page topology) HARD-VETOES +
-/// quarantines, even though the drop count is FAR under the mass-truncation
-/// threshold.** This is the first-boot Projects.org destruction: the re-homed
-/// subtree blocks were absent from the projection, their `name_chain` failed
-/// loud (the 749-error storm), they stayed UNGROUNDED — but the count fell
-/// under the 25% threshold so the truncated file was written anyway (6,245
-/// lines deleted). A name_chain grounding failure must ABORT the write, never
-/// fall through the threshold. Pre-fix this test is RED (the write proceeds and
-/// disk loses `heading 6`/`heading 7`).
+/// **BugFunnel row 23/29: a drop whose blocks FAIL `name_chain` (a prohibited
+/// page-under-non-page topology) is reported as UNRESOLVABLE, not as a plain
+/// ungrounded drop.** This is the first-boot Projects.org destruction: the
+/// re-homed subtree blocks were absent from the projection and their
+/// `name_chain` failed loud (the 749-error storm). Both arms veto, but the
+/// grounding failure must say so — otherwise the diagnosis of a topology bug
+/// reads as a routine removal refusal.
 #[tokio::test]
 async fn name_chain_failed_ungrounded_drop_hard_vetoes() {
-    // 8 blocks on disk; threshold = max(3, 8/4=2) = 3. We drop only 2 —
-    // deliberately UNDER the threshold, so the mass-truncation tripwire never
-    // fires; the veto must come from the name_chain grounding failure alone.
+    // 8 blocks on disk, 2 dropped. The dropped blocks' own-file path cannot be
+    // resolved, so the veto must come from the name_chain grounding failure and
+    // carry its message.
     let mut h = build_harness_with_failing_child_name_chain(8);
     let all = h.reader.blocks.lock().unwrap().clone();
     let b0 = all[0].clone();
@@ -741,9 +743,9 @@ async fn name_chain_failed_ungrounded_drop_hard_vetoes() {
         "precondition: all 8 blocks on disk; got {seeded:?}"
     );
 
-    // The store loses the last 2 blocks (a SMALL drop, under threshold). Force a
-    // reseed via a tags change on b0 (Upsert, no sanctioned removal). The dropped
-    // blocks' `name_chain` fails loud → UNRESOLVABLE → hard veto.
+    // The store loses the last 2 blocks. Force a reseed via a tags change on b0
+    // (Upsert, no sanctioned removal). The dropped blocks' `name_chain` fails
+    // loud → UNRESOLVABLE, so that error wins over the plain-removal one.
     let keep: Vec<Block> = all[..6].to_vec();
     h.reader.set_blocks(keep);
     let mut b0_tagged = b0.clone();
@@ -756,8 +758,7 @@ async fn name_chain_failed_ungrounded_drop_hard_vetoes() {
         .await;
     assert!(
         veto.is_err(),
-        "a name_chain-failed ungrounded drop must HARD-VETO the write (Err), even though 2 < \
-         threshold 3"
+        "a name_chain-failed ungrounded drop must HARD-VETO the write (Err)"
     );
     let msg = format!("{:#}", veto.unwrap_err());
     assert!(

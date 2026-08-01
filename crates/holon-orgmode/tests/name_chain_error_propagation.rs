@@ -417,13 +417,10 @@ async fn sweep_skips_prohibited_doc_but_materializes_the_legit_one() {
 /// 6,245-line `Projects.org` destruction: a `* Holon` heading collided with a
 /// same-named subdir page, the re-homed subtree landed page-under-non-page, and
 /// on the block-driven re-render its blocks were absent from the projection.
-/// The tripwire's sibling-grounding called the REAL `name_chain` on those
-/// absent blocks → it failed loud (the 749-error storm) → they stayed
-/// UNGROUNDED — but the count fell under the 25% mass-truncation threshold and
-/// the truncated file was written anyway. The fix: a name_chain grounding
-/// failure makes the drop UNRESOLVABLE, which ABORTS the write regardless of
-/// the threshold. Pre-fix this is RED (Container.org is rewritten without the
-/// prohibited subtree).
+/// The guard's sibling-grounding calls the REAL `name_chain` on those absent
+/// blocks → it fails loud (the 749-error storm) → they stay UNGROUNDED and the
+/// write is REFUSED under the UNRESOLVABLE error, which names the prohibited
+/// topology rather than reporting a generic removal.
 #[tokio::test]
 async fn writeback_drop_of_prohibited_subtree_hard_vetoes_prod_name_chain() {
     let cap = ErrorCapture::default();
@@ -451,9 +448,9 @@ async fn writeback_drop_of_prohibited_subtree_hard_vetoes_prod_name_chain() {
     );
 
     // 2) The store now returns ONLY the leaves — the prohibited subtree was
-    //    re-homed/de-inlined, so a re-render drops it. A fresh controller's
-    //    tripwire grounds the absent blocks via the REAL name_chain, which fails
-    //    loud (prohibited page under non-page `b1`) → UNRESOLVABLE → HARD VETO.
+    //    re-homed/de-inlined, so a re-render drops it. A fresh controller's guard
+    //    grounds the absent blocks via the REAL name_chain, which fails loud
+    //    (prohibited page under non-page `b1`) → UNRESOLVABLE → HARD VETO.
     let truncated = container_fixtures(true);
     let mut controller = build_controller(&truncated, vec![], root.clone());
     let veto = controller

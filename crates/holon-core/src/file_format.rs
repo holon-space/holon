@@ -38,16 +38,15 @@ pub struct FileFormatParseResult {
 /// from a real parse/IO failure (which is `Err`). `dropped` is one `id:
 /// excerpt` per source block grounded by neither the surviving union nor a
 /// sanctioned removal; `source_block_count` is the total non-empty block count
-/// of `source`, so a caller can size a threshold (e.g. the recovery-path
-/// mass-truncation tripwire: veto only when `dropped.len()` exceeds a fraction
-/// of `source_block_count`).
+/// of `source`, reported alongside so a veto can say how much of the file the
+/// drop covers.
 #[derive(Debug, Clone, Default)]
 pub struct WritebackDropVerdict {
     /// One `id: excerpt` per ungrounded (dropped) source block; empty =
     /// lossless.
     pub dropped: Vec<String>,
     /// Non-empty block count parsed from `source` (the file about to be
-    /// overwritten) — the denominator for a proportional drop threshold.
+    /// overwritten) — context for how much of the file a drop covers.
     pub source_block_count: usize,
 }
 
@@ -163,16 +162,11 @@ pub trait FileFormatAdapter: Send + Sync {
     /// error. Real parse/IO defects are still `Err` (never folded into the
     /// verdict).
     ///
-    /// Lets a caller apply a NON-quarantine policy to a drop. The block-driven
-    /// write-back paths ground every op-delivered removal (per-block `Remove`
-    /// deltas are threaded end-to-end into `sanctioned_removals`; ADR 0025 root
-    /// item), but state-driven renders can still shrink a file without a
-    /// delivered op (cross-doc moves, matview-lag races), so instead of vetoing
-    /// every ungrounded drop they run a MASS-TRUNCATION tripwire off the
-    /// verdict: veto+quarantine only when the drop count exceeds a fraction of
-    /// `source_block_count` (the row-28 loss signature), letting single/small
-    /// drops pass. The intent-bearing ingest boundary keeps using
-    /// `check_writeback_lossless` to quarantine any drop.
+    /// The block-driven write-back paths need the drops as data because they
+    /// widen the grounding first (the sibling-file union is resolved per absent
+    /// block, and an unresolvable own-file path is its own hard veto) before
+    /// deciding. Their verdict is the same as the ingest boundary's: any
+    /// remaining ungrounded drop refuses the write and quarantines the file.
     fn writeback_drops(
         &self,
         path: &Path,

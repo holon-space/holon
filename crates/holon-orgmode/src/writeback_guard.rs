@@ -24,31 +24,22 @@
 //! caller quarantines the file (loud ERROR) so no write-back path rewrites the
 //! truncated state over disk.
 //!
-//! ## Op-grounding is the MECHANISM; the caller chooses the POLICY (ADR 0025)
+//! ## One verdict, two entry points (ADR 0025)
 //!
-//! This module only *detects* ungrounded drops (via [`writeback_drops`] /
-//! [`ensure_ingest_lossless`]); each write-back path decides what to DO with
-//! the verdict, matched to how much intent that path holds:
-//! - **ingest re-project** (the original row-28 site) is one of the two
-//!   irreducibly intent-less boundaries but its `source` is a SETTLED user
-//!   edit, so ANY ungrounded drop is loss → [`ensure_ingest_lossless`] →
-//!   quarantine. Grounds only via the file's own projection; a permanent
-//!   tripwire, exempt from "delete defensive code" sweeps.
-//! - **`on_block_changed` / `re_render_all_tracked`** are MID-FLIGHT,
-//!   state-driven paths. Since the ADR 0025 ROOT-ITEM threading the feed
-//!   preserves per-block `Remove` identity end-to-end (di.rs): the
-//!   `LiveData::group_by` routing knows each block's last owning doc, so a feed
-//!   removal — and a cross-doc departure — arrives as `OrgRerender::Block {
-//!   doc, BlockDelta::Remove(id) }` on the owning doc with the id as a
-//!   sanctioned removal (`on_block_changed`) — every op-delivered deletion is
-//!   grounded. What remains ungroundable are shrinks with no delivered op
-//!   (TOCTOU-spent sanctions, matview-lag races), so these paths still run a
-//!   MASS-TRUNCATION tripwire off the [`WritebackDrops`] verdict
-//!   (`FileSyncController::tripwire_mass_truncation`): veto+quarantine only
-//!   when the ungrounded-drop count exceeds a fraction of the block count (the
-//!   row-28 signature), letting single/small drops pass. ADR 0025 names the
-//!   follow-up that grounds those last classes (and tightens the tripwire
-//!   toward zero): the C2b history relation.
+//! Every write-back path refuses an ungrounded drop; they differ only in how
+//! they assemble the grounding, which is why this module exposes the verdict
+//! twice:
+//! - **ingest re-project** (the original row-28 site) grounds solely via the
+//!   file's own projection — it holds no op — and calls
+//!   [`ensure_ingest_lossless`] for the `Err` directly.
+//! - **`on_block_changed` / `re_render_all_tracked`** widen the grounding
+//!   first: the feed preserves per-block `Remove` identity end-to-end (di.rs),
+//!   so a removal — and a cross-doc departure via `LiveData::group_by` —
+//!   arrives on the owning doc as a sanctioned removal, and each absent block's
+//!   own-file path is resolved to fold in the sibling it de-inlined into. They
+//!   take the [`WritebackDrops`] verdict as data
+//!   (`FileSyncController::veto_ungrounded_removals`) to do that widening, then
+//!   veto + quarantine on whatever remains ungrounded.
 //!
 //! ## Canonical reformat is NOT loss
 //!
@@ -271,12 +262,12 @@ pub fn ensure_ingest_lossless(
 /// `id: excerpt` per source block grounded by NEITHER the `surviving` union NOR
 /// `sanctioned_removals`; empty means lossless.
 ///
-/// This lets the two write-back POLICIES share one mechanism: the
-/// intent-bearing ingest boundary wraps a non-empty verdict into a quarantining
-/// [`IngestLoss`] (via [`ensure_ingest_lossless`]); the block-driven paths,
-/// which cannot yet ground removals (ADR 0025 C2b follow-up), DISCLOSE the
-/// verdict loudly and proceed. A source that no longer parses is a real defect
-/// and is propagated as `Err`, never folded into the verdict.
+/// The block-driven paths take the verdict as data so they can widen the
+/// grounding (resolve each absent block's own file, fold the sibling in) before
+/// refusing; the ingest boundary skips that and wraps a non-empty verdict into
+/// an [`IngestLoss`] via [`ensure_ingest_lossless`]. A source that no longer
+/// parses is a real defect and is propagated as `Err`, never folded into the
+/// verdict.
 #[derive(Debug, Clone, Default)]
 pub struct WritebackDrops {
     /// Number of non-empty blocks parsed from `source`.

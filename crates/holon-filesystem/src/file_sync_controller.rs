@@ -192,16 +192,6 @@ async fn flush_pending_creates(
     Ok(())
 }
 
-/// Mass-truncation tripwire (Fork B B1' / ADR 0025): the block-driven
-/// write-back path vetoes only when the ungrounded-drop count exceeds
-/// `max(TRIPWIRE_MIN_DROP_BLOCKS, block_count / TRIPWIRE_DROP_FRACTION_DENOM)`.
-/// `3` and `4` (= 25%) are chosen so the row-28 loss class (an FK-rollback that
-/// aborted ~20 contiguous blocks) fires while routine single-block deletions /
-/// splits never do. TEMPORARY: tighten toward zero once removals are grounded
-/// in ops (per-block `Remove` delivery / the ADR-0025 C2b history relation).
-const TRIPWIRE_MIN_DROP_BLOCKS: usize = 3;
-const TRIPWIRE_DROP_FRACTION_DENOM: usize = 4;
-
 /// Outcome of grounding a write-back's absent (drop-candidate) blocks against
 /// the sibling files they may have de-inlined into.
 ///
@@ -210,11 +200,10 @@ const TRIPWIRE_DROP_FRACTION_DENOM: usize = 4;
 /// own-file path could NOT be resolved because `name_chain` failed loud (a
 /// prohibited page-under-non-page topology; BugFunnel row 23 / row 29). A
 /// non-empty `unresolvable` set means write-back genuinely CANNOT prove where
-/// those blocks went — so the guard must ABORT the write (quarantine) rather
-/// than silently tolerate the drop under the mass-truncation threshold. This is
-/// the fix for the first-boot 6,245-line Projects.org destruction, where a
-/// name_chain-failed grounding storm left blocks ungrounded but the count fell
-/// under the 25% threshold and the truncated file was written anyway.
+/// those blocks went. Every ungrounded drop vetoes, so this set does not change
+/// the VERDICT; it is kept separate because a grounding failure and a plain
+/// removal need different diagnoses — this one names a prohibited topology
+/// (the first-boot 6,245-line Projects.org destruction was a storm of them).
 #[derive(Debug, Default)]
 struct SiblingGrounding {
     siblings: Vec<(PathBuf, String)>,
@@ -3691,23 +3680,19 @@ impl FileSyncController {
             return Ok(true);
         }
 
-        // Fork B B1' / ADR 0025: mass-truncation tripwire on the block-driven path
-        // (previously UNGUARDED — a P0 hole: this path could SILENTLY drop a large
-        // chunk present on disk). Only a reseed can shrink the block set, so the
-        // cheap content-only path skips the check (no per-keystroke re-parse).
-        // Grounding = the delta's `Remove` id (a sanctioned deletion) UNION the
-        // sibling files a de-inlined child page moved into; the tripwire vetoes
-        // only on the row-28 mass-truncation signature (single/small drops pass
-        // silently — cross-doc moves and matview-lag races still shrink a file
-        // without a `Remove` op; see `tripwire_mass_truncation`). On veto the
-        // file is quarantined and the Err propagates to `on_block_feed`
+        // ADR 0025 removal guard on the block-driven path. Only a reseed can
+        // shrink the block set, so the cheap content-only path skips the check
+        // (no per-keystroke re-parse). Grounding = the delta's `Remove` id (a
+        // sanctioned deletion) UNION the sibling files a de-inlined child page
+        // moved into; anything else the render drops is loss and vetoes. On veto
+        // the file is quarantined and the Err propagates to `on_block_feed`
         // (di.rs), which logs it.
         if reseeded {
             let sanctioned_removals = match delta {
                 BlockDelta::Remove(id) => HashSet::from([id.as_str().to_string()]),
                 BlockDelta::Upsert(_) => HashSet::new(),
             };
-            self.tripwire_mass_truncation(&path, &disk_at_write, &rendered, &sanctioned_removals)
+            self.veto_ungrounded_removals(&path, &disk_at_write, &rendered, &sanctioned_removals)
                 .await?;
         }
 
@@ -4052,19 +4037,19 @@ impl FileSyncController {
     /// unknown, e.g. block.deleted, block.fields_changed).
     ///
     /// ADR 0025: this is a RECOVERY path — state-driven by nature (like a
-    /// reseed). Since the ROOT-ITEM threading it is no longer op-BLIND:
-    /// `sanctioned_removals` carries every per-block `Remove` id the feed
-    /// delivered since the last flush that could not be routed to a single
-    /// file (deleted pages owning their own file, cold `last_projection`),
-    /// so a deletion landing here is grounded exactly like on the per-block
-    /// path. Absences are additionally grounded via the sibling-file union
-    /// (a de-inlined child page). What remains UNGROUNDED here are absences
-    /// with no delivered op at all — for those the guard fires
-    /// the MASS-TRUNCATION tripwire only (see `tripwire_mass_truncation`): a
-    /// single/small ungrounded drop passes, a row-28-shaped mass truncation
-    /// vetoes + quarantines that one file. Follow-up named by ADR 0025: feed it
-    /// the C2b history relation so EVERY removal is grounded and the tripwire
-    /// tightens toward zero.
+    /// reseed). The `sanctioned_removals` parameter exists so a caller CAN
+    /// ground a deletion here, but the only production caller (`di.rs`'s
+    /// debounced bulk re-render) passes an EMPTY set: every removal it could
+    /// ground is already routed to the owning doc as an `on_block_changed`
+    /// `Remove`. So in practice absences here are grounded only by the
+    /// sibling-file union (a de-inlined child page), and anything else
+    /// vetoes + quarantines that one file (see `veto_ungrounded_removals`).
+    ///
+    /// Known consequence, deliberate under the fail-loud ruling: a shrink this
+    /// path cannot explain — a sanction spent by a render whose write was
+    /// TOCTOU-skipped, or a matview-lag race — now yields a DISCLOSED
+    /// quarantine instead of a silent pass. That quarantine is sticky: it
+    /// clears only on a fully-successful ingest, i.e. a real disk change.
     pub async fn re_render_all_tracked(
         &mut self,
         sanctioned_removals: &HashSet<String>,
@@ -4198,22 +4183,17 @@ impl FileSyncController {
                 continue;
             }
 
-            // ADR 0025 recovery-path tripwire: absences are grounded via the
-            // accumulated per-block `Remove` ids (`sanctioned_removals`, delivered
-            // by the feed and routed here when no single file could consume them)
-            // plus the sibling-file union. Removals with no delivered op remain
-            // indistinguishable from loss, so single/small ungrounded drops pass
-            // silently; only a MASS truncation (the row-28 signature)
+            // ADR 0025 removal guard. `sanctioned_removals` is empty from the
+            // production caller (see this method's doc), so absences here are
+            // grounded by the sibling-file union alone and anything else
             // vetoes+quarantines that one file. A parse/IO defect propagates
-            // (loud); a tripwire veto skips just this file and the batch
-            // continues. Grounding those last removals is the ADR-0025 C2b
-            // history-relation follow-up.
+            // (loud); a veto skips just this file and the batch continues.
             if let Err(e) = self
-                .tripwire_mass_truncation(&path, &disk_content, &rendered, sanctioned_removals)
+                .veto_ungrounded_removals(&path, &disk_content, &rendered, sanctioned_removals)
                 .await
             {
                 if self.is_quarantined(&path) {
-                    // Tripwire fired (already quarantined + logged): skip this file.
+                    // Guard vetoed (already quarantined + logged): skip this file.
                     continue;
                 }
                 // A real parse/IO defect — surface it loudly.
@@ -4726,11 +4706,11 @@ impl FileSyncController {
     /// [`writeback_sibling_grounding`](Self::writeback_sibling_grounding))
     /// plus `sanctioned_removals` (the triggering delta's `Remove` ids; empty
     /// on recovery/ingest paths). Returns `(verdict, unresolvable)`: the
-    /// verdict (dropped `id: excerpt` list + source block count for the
-    /// tripwire threshold) and the ids of absent blocks whose own-file path
-    /// could not be resolved (name_chain failed loud — a HARD-veto signal,
-    /// see [`SiblingGrounding`]). Real parse/IO defects propagate as `Err`
-    /// (never swallowed).
+    /// verdict (dropped `id: excerpt` list + source block count, the latter
+    /// only to say how much of the file the drop covers) and the ids of absent
+    /// blocks whose own-file path could not be resolved (name_chain failed
+    /// loud, see [`SiblingGrounding`]). Real parse/IO defects propagate as
+    /// `Err` (never swallowed).
     async fn writeback_drops(
         &self,
         path: &Path,
@@ -4799,13 +4779,10 @@ impl FileSyncController {
                     // resolved because `name_chain` failed loud (a prohibited
                     // page-under-non-page topology). We genuinely cannot prove
                     // where this block went, so it is UNRESOLVABLE — record it
-                    // and surface it loudly. The tripwire treats any unresolvable
-                    // drop as a HARD veto (abort + quarantine), independent of the
-                    // mass-truncation threshold: a name_chain-failed grounding
-                    // storm must ABORT the write, never let the truncated
-                    // projection reach disk (the first-boot 6,245-line Projects.org
-                    // destruction: 749 such failures fell under the 25% threshold
-                    // and the file was rewritten anyway).
+                    // and surface it loudly, with the topology named. The write
+                    // aborts either way (every ungrounded drop vetoes), but a
+                    // grounding storm diagnosed as a plain removal sends the
+                    // reader hunting the wrong bug.
                     tracing::error!(
                         block_id = %block.id,
                         path = %path.display(),
@@ -4830,38 +4807,22 @@ impl FileSyncController {
         Ok(grounding)
     }
 
-    /// Fork B B1' / ADR 0025 recovery-path MASS-TRUNCATION tripwire.
+    /// ADR 0025 write-back removal guard: a block on disk that the projection
+    /// drops must be grounded, or the write is refused.
     ///
-    /// Since the ADR 0025 ROOT-ITEM threading the block-driven paths DO receive
-    /// per-block `Remove` ids: `on_block_changed` sanctions its delta's
-    /// `Remove`, the block-feed resolver (di.rs) routes BOTH a genuine feed
-    /// removal AND a cross-doc DEPARTURE (via `LiveData::group_by`'s
-    /// `Remove{old doc}`) as an `on_block_changed` `Remove` delta grounded in
-    /// the owning file, and `re_render_all_tracked` handles the residual bulk
-    /// recovery reseeds (which carry no per-block intent). Every op-delivered
-    /// deletion — and now every group-key departure — is therefore grounded.
-    /// The residual UNGROUNDED-drop tolerance below exists because state-driven
-    /// renders can still legitimately shrink a file without a delivered
-    /// `Remove` op:
-    /// - a sanction consumed by a render whose write was TOCTOU-skipped — the
-    ///   id is spent, the shrink reappears on a later state-driven render;
-    /// - matview-lag races between store truth and the delta that triggered the
-    ///   render.
-    ///
-    /// So this tripwire fires ONLY on the row-28 loss SIGNATURE — a MASS
-    /// truncation, where an FK-rollback aborted a large contiguous chunk (~20
-    /// blocks) at once. It vetoes+quarantines when the ungrounded-drop count
-    /// exceeds `max(TRIPWIRE_MIN_DROP_BLOCKS, 25% of the file's block count)`,
-    /// and lets single/small drops pass SILENTLY (no log — else routine
-    /// moves/races flood `inv-no-observed-errors`).
+    /// Grounding is the union of the sibling files the same convergence pass
+    /// materializes (a legitimately de-inlined child page) and
+    /// `sanctioned_removals` — the `Remove` ids the triggering op delivered
+    /// (`on_block_changed`'s own delta; the accumulated feed removals and
+    /// `LiveData::group_by` cross-doc departures on the recovery path). An
+    /// absence grounded by NEITHER is loss by definition (ADR 0025), so it
+    /// vetoes + quarantines regardless of how few blocks it covers: a
+    /// single destroyed block is still destroyed.
     ///
     /// Returns `Ok(())` to proceed with the write, `Err` (after quarantining)
     /// to refuse it. Real parse/IO defects propagate as `Err` WITHOUT
-    /// quarantining (they are bugs to surface, not truncations). This is
-    /// ADR 0025's "recovery paths carry the guard as tripwire" posture.
-    /// Tightening toward zero needs the classes above grounded too — the
-    /// C2b history relation follow-up.
-    async fn tripwire_mass_truncation(
+    /// quarantining (they are bugs to surface, not removals).
+    async fn veto_ungrounded_removals(
         &mut self,
         path: &Path,
         source: &str,
@@ -4872,13 +4833,10 @@ impl FileSyncController {
             .writeback_drops(path, source, rendered, sanctioned_removals)
             .await?;
 
-        // HARD veto (BugFunnel row 23/29): any absent block whose own-file path
-        // could NOT be resolved (name_chain failed loud — a prohibited topology)
-        // is UNRESOLVABLE. We cannot prove it was preserved elsewhere, so the
-        // grounding failure must ABORT the write regardless of the count — never
-        // let it fall under the mass-truncation threshold. This is the fix for the
-        // first-boot 6,245-line Projects.org destruction (749 name_chain failures
-        // that stayed under the 25% threshold and truncated the file anyway).
+        // Checked before the drop verdict (BugFunnel row 23/29): an absent block
+        // whose own-file path could NOT be resolved (name_chain failed loud — a
+        // prohibited topology) refuses the write under its OWN error, so the
+        // message names the topology bug rather than a generic removal.
         if !unresolvable.is_empty() {
             let err = anyhow::anyhow!(
                 "UNRESOLVABLE WRITE-BACK DROP: {} on-disk block(s) are absent from the projection \
@@ -4893,18 +4851,14 @@ impl FileSyncController {
             return Err(err);
         }
 
-        let threshold = std::cmp::max(
-            TRIPWIRE_MIN_DROP_BLOCKS,
-            verdict.source_block_count / TRIPWIRE_DROP_FRACTION_DENOM,
-        );
-        if verdict.dropped.len() > threshold {
+        if !verdict.dropped.is_empty() {
             let err = anyhow::anyhow!(
-                "MASS TRUNCATION on the block-driven write-back path: {} of {} on-disk block(s) \
-                 would be DELETED, grounded by neither a sibling materialized file nor a \
-                 sanctioned removal — the row-28 loss signature (threshold {}). Dropped: {:?}",
+                "UNGROUNDED WRITE-BACK REMOVAL: {} of {} on-disk block(s) would be DELETED, \
+                 grounded by neither a sibling materialized file nor a sanctioned removal. An \
+                 unsanctioned removal is data loss (ADR 0025), so the write is REFUSED. Dropped: \
+                 {:?}",
                 verdict.dropped.len(),
                 verdict.source_block_count,
-                threshold,
                 verdict.dropped,
             );
             self.quarantine_writeback(path, &err);
@@ -4913,12 +4867,12 @@ impl FileSyncController {
         Ok(())
     }
 
-    /// Quarantine `path` from write-back after a mass-truncation tripwire fire
-    /// (Fork B B1', row-28 posture): the store projection would DELETE a large
-    /// chunk of blocks present on disk, grounded by nothing — refuse the write
-    /// and skip this file until a clean re-ingest clears the quarantine.
-    /// Loud + disclosed (an ERROR here means a real truncation was caught,
-    /// not routine noise — single/small drops never reach this).
+    /// Quarantine `path` from write-back after the removal guard vetoed: the
+    /// store projection would DELETE block(s) present on disk that no op
+    /// sanctioned and no sibling file carries — refuse the write and skip this
+    /// file until a clean re-ingest clears the quarantine. Loud + disclosed,
+    /// sharing the ingest quarantine's wording so one disclosure family covers
+    /// both refusal paths.
     fn quarantine_writeback(&mut self, path: &Path, err: &anyhow::Error) {
         if self.quarantined.insert(CanonicalPath::new(path)) {
             self.quarantine_skip_logged
@@ -4928,9 +4882,9 @@ impl FileSyncController {
             tracing::error!(
                 path = %path.display(),
                 error = %format!("{err:#}"),
-                "[FileSyncController] block-driven write-back VETOED (mass-truncation tripwire) — \
-                 QUARANTINING this file so its truncated projection is not rendered over disk. \
-                 Un-quarantines on the next fully-successful ingest.",
+                "[FileSyncController] write-back would remove on-disk blocks that no op sanctioned \
+                 — QUARANTINING this file from write-back so its lossy projection is not rendered \
+                 over disk. Un-quarantines on the next fully-successful ingest.",
             );
         }
     }
