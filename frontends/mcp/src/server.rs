@@ -353,14 +353,6 @@ pub struct HolonMcpServer {
 }
 
 impl HolonMcpServer {
-    pub fn new(
-        engine: Option<Arc<BackendEngine>>,
-        debug: Arc<DebugServices>,
-        builder_services: Option<Arc<dyn BuilderServices>>,
-    ) -> Self {
-        Self::with_type_registry(engine, None, debug, builder_services)
-    }
-
     /// The classifier every parse boundary this server owns must use.
     ///
     /// Registry-backed when one was wired, so `[[<entity>:<id>]]` resolves for

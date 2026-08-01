@@ -156,6 +156,7 @@ pub fn try_start_embedded_mcp(
     runtime: &tokio::runtime::Handle,
     engine: &Arc<holon::api::BackendEngine>,
     reactive_engine: &Arc<ReactiveEngine>,
+    type_registry: Arc<holon_profiles::TypeRegistry>,
     debug: Arc<holon_mcp::server::DebugServices>,
     env_var: &str,
     label: &str,
@@ -177,7 +178,13 @@ pub fn try_start_embedded_mcp(
     let engine = Some(engine.clone());
     let services: Arc<dyn BuilderServices> = reactive_engine.clone();
     let _guard = runtime.enter();
-    holon_mcp::di::start_embedded_mcp_server_with_debug(engine, Some(services), port, debug);
+    holon_mcp::di::start_embedded_mcp_server_with_registry(
+        engine,
+        Some(services),
+        port,
+        debug,
+        Some(type_registry),
+    );
     eprintln!("[{label}] MCP server starting on port {port}");
     wait_for_mcp_listener(port, MCP_BIND_TIMEOUT, label);
 }

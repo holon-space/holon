@@ -141,17 +141,7 @@ struct ServerState {
 }
 
 impl McpServerHandle {
-    /// Create a new MCP server handle
-    pub fn new(
-        config: McpServerConfig,
-        engine: Option<Arc<BackendEngine>>,
-        debug: Arc<DebugServices>,
-        builder_services: Option<Arc<dyn BuilderServices>>,
-    ) -> Self {
-        Self::with_type_registry(config, engine, debug, builder_services, None)
-    }
-
-    /// [`Self::new`] carrying the live entity registry.
+    /// Create a new MCP server handle carrying the live entity registry.
     pub fn with_type_registry(
         config: McpServerConfig,
         engine: Option<Arc<BackendEngine>>,

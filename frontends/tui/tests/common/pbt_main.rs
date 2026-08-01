@@ -134,10 +134,12 @@ pub fn run(label: &'static str) {
     let render_notify: Arc<tokio::sync::Notify> = Arc::new(tokio::sync::Notify::new());
     let (input_tx, input_rx) = tokio::sync::mpsc::channel::<InputEvent>(64);
 
+    let type_registry = runtime.block_on(frontend.type_registry());
     try_start_embedded_mcp(
         runtime.handle(),
         &backend_engine,
         &reactive,
+        type_registry,
         debug.clone(),
         "PBT_MCP_PORT",
         label,

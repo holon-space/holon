@@ -441,6 +441,11 @@ impl HeadlessFrontendComponent {
     /// keyed by SQL table name (underscored) and a scheme is hyphenated, so
     /// only a multi-word entity can tell a working scheme/table-name join from
     /// a broken one, and no built-in supplies that.
+    ///
+    /// WARNING: this registers the sidecar's scheme into the SUT only. If the
+    /// reference lens's `normalize_content_for_org_roundtrip_with` classifier
+    /// isn't ALSO given the scheme, mirror-class divergences will show up and
+    /// get misattributed to prod instead of the test oracle.
     pub async fn new_with_clock_and_sidecar(
         org_files: &[(&str, &str)],
         settle: Duration,
