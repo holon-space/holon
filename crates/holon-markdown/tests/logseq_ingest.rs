@@ -88,7 +88,7 @@ fn block_ref_becomes_internal_link_mark() {
     let child = find(&r.blocks, "a child referencing");
     assert!(link_targets(child).iter().any(|t| matches!(
         t,
-        EntityRef::Internal { id } if id.id() == "11111111-0000-4000-8000-000000000001"
+        EntityRef::Scheme { raw } if raw == "block:11111111-0000-4000-8000-000000000001"
     )));
 }
 

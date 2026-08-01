@@ -39,6 +39,7 @@ const MAIN_PANEL_TREE: &str = r#"tree(#{parent_id: col("parent_id"), sortkey: co
 struct SlotCapableServices {
     interpreter: Arc<RenderInterpreter<ReactiveViewModel>>,
     rt_handle: tokio::runtime::Handle,
+    link_classifier: holon_api::link_parser::LinkTargetClassifier,
 }
 
 impl SlotCapableServices {
@@ -47,6 +48,7 @@ impl SlotCapableServices {
             interpreter: Arc::new(holon_frontend::shadow_builders::build_shadow_interpreter()),
             rt_handle: tokio::runtime::Handle::try_current()
                 .unwrap_or_else(|_| RUNTIME.handle().clone()),
+            link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
         }
     }
 }
@@ -61,6 +63,10 @@ static RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLo
 impl BuilderServices for SlotCapableServices {
     fn interpret(&self, expr: &RenderExpr, ctx: &RenderContext) -> ReactiveViewModel {
         self.interpreter.interpret(expr, ctx, self)
+    }
+
+    fn link_classifier(&self) -> &holon_api::link_parser::LinkTargetClassifier {
+        &self.link_classifier
     }
 
     fn virtual_child_config(&self, entity_name: &str) -> Option<VirtualChildConfig> {

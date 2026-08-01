@@ -164,14 +164,16 @@ where
             let InlineMark::Link { target, .. } = &span.mark else {
                 continue;
             };
-            let EntityRef::Internal { id } = target else {
+            // Only a target that NAMES an entity can be a burned reference; a
+            // colon-bearing page path names none.
+            let Some(uri) = target.entity_uri() else {
                 continue;
             };
-            if burned.contains(id) {
+            if burned.contains(&uri) {
                 found.push(UnhealedReference {
                     site: "block_raw.marks[link]",
                     source: block.id.to_string(),
-                    target: id.to_string(),
+                    target: uri.to_string(),
                 });
             }
         }

@@ -341,6 +341,10 @@ pub struct HarnessEnv {
     /// Memoized profile engine — see [`ProfileEngineCache`]. Empty in a fresh
     /// clone, so it never carries another state's engine.
     pub profile_engine: ProfileEngineCache,
+
+    /// The reference's answer to "is this link scheme registered?" — built-in
+    /// schemes only, since the reference carries no live type registry.
+    pub link_classifier: holon_api::link_parser::LinkTargetClassifier,
 }
 
 /// Memo for [`ReferenceState::profile_engine`], keyed by a fingerprint of the
@@ -664,6 +668,7 @@ impl ReferenceState {
                 real_editor: false,
                 interpreter,
                 profile_engine: ProfileEngineCache::default(),
+                link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
             },
             loro: LoroRefExt::default(),
             clock: ClockState::new(),
@@ -1810,9 +1815,7 @@ impl ReferenceState {
             0,
             origin_content.chars().count(),
             InlineMark::Link {
-                target: EntityRef::Internal {
-                    id: page_id.clone(),
-                },
+                target: EntityRef::from_uri(&page_id.clone()),
                 label: origin_content.clone(),
             },
         );
@@ -2524,6 +2527,10 @@ impl holon_frontend::reactive::BuilderServices for ReferenceState {
         ctx: &holon_frontend::RenderContext,
     ) -> holon_frontend::ReactiveViewModel {
         self.harness.interpreter.interpret(expr, ctx, self)
+    }
+
+    fn link_classifier(&self) -> &holon_api::link_parser::LinkTargetClassifier {
+        &self.harness.link_classifier
     }
 
     fn get_block_data(

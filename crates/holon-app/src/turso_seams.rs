@@ -247,10 +247,9 @@ impl CacheBlockReader {
                 if let InlineMark::Link { target, .. } = &mut span.mark {
                     if let EntityRef::Name { name } = &*target {
                         if let Some(rid) = resolved.get(&(bid.clone(), name.clone())) {
-                            *target = EntityRef::Internal {
-                                // ALLOW(entity_uri_from_raw): a block_links row
-                                id: EntityUri::from_raw(rid),
-                            };
+                            // `rid` is a resolved block id from the junction —
+                            // already a schemed URI string, stored verbatim.
+                            *target = EntityRef::Scheme { raw: rid.clone() };
                         }
                     }
                 }

@@ -36,37 +36,88 @@ use crate::Value;
 
 /// Target of a `Link` mark.
 ///
-/// `Internal` references a block by its `EntityUri` (so renames update the
-/// label via a Phase 6 hook). `External` carries a raw URL string — we don't
-/// pull in the `url` crate since the URL is presented verbatim in both org
-/// `[[uri][label]]` and the editor's link popover. `Name` is a DANGLING
-/// wiki-name target (links increment 2): the page it names may not exist yet
-/// — pages are created lazily, never as placeholders — so the mark keeps the
-/// user's exact target string (`[[Linked Page]]`, or a `parent/leaf`
-/// name-chain used as a suffix resolution hint). Resolution state lives in
-/// the `block_links` junction (`resolved_id`); the dangling→resolved mark
-/// upgrade rides the org writeback (which emits the resolved `[[id][label]]`
-/// form) and the normal re-ingest of that file.
+/// `Scheme` holds a colon-bearing target EXACTLY as authored —
+/// `[[block:uuid]]`, `[[cc-session:8f21]]`, `[[Areas:Work]]`, and also
+/// `[[Meeting/Notes:2026]]`. Two things are deliberately NOT stored:
+///
+/// 1. Whether any entity claims the scheme. That is a property of the live
+///    `TypeRegistry`, not of the text; storing it would encode the registry
+///    contents at the ingest instant — a hidden mutable input that makes the
+///    projection irreproducible from the org bytes (Model.md invariants 3, 4).
+/// 2. Whether the target is a WHOLE scheme-shaped URI at all. The classifier
+///    returns `UnknownScheme` for two different shapes — a whole scheme-shaped
+///    target AND a wiki path whose later segment carries a colon
+///    (`link_parser.rs:172` and `:196`) — and only the first names an entity.
+///
+/// Hence a `String`, not an `EntityUri`: `Meeting/Notes:2026` is not a valid
+/// absolute URI, so parsing at STORE time either loses the mark or (worse)
+/// coerces it to `block:Meeting/Notes:2026`, silently rewriting authored link
+/// text. Use [`EntityRef::entity_uri`] to ask, at each use site, whether this
+/// target names an entity.
+///
+/// `External` carries a raw URL string — we don't pull in the `url` crate
+/// since the URL is presented verbatim in both org `[[uri][label]]` and the
+/// editor's link popover. `Name` is a DANGLING wiki-name target (links
+/// increment 2): the page it names may not exist yet — pages are created
+/// lazily, never as placeholders — so the mark keeps the user's exact target
+/// string (`[[Linked Page]]`, or a `parent/leaf` name-chain used as a suffix
+/// resolution hint). Resolution state lives in the `block_links` junction
+/// (`resolved_id`); the dangling→resolved mark upgrade rides the org
+/// writeback (which emits the resolved `[[id][label]]` form) and the normal
+/// re-ingest of that file.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-// `snake_case` (not `lowercase`) so multi-word variants match the tag the Loro
-// backend reads and writes. The three single-word variants are unchanged.
+// `snake_case` (not `lowercase`) so the `unknown_scheme` compat alias matches
+// the tag the Loro backend reads.
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EntityRef {
     External {
         url: String,
     },
-    Internal {
-        id: EntityUri,
+    /// Colon-bearing target, verbatim — see the type doc. `internal` (key
+    /// `id`) and `unknown_scheme` (key `uri`) are the two pre-merge wire
+    /// spellings; both stay readable, and because this is a plain `String`
+    /// even the non-URI targets `unknown_scheme` could hold load unchanged.
+    #[serde(rename = "scheme", alias = "internal", alias = "unknown_scheme")]
+    Scheme {
+        #[serde(alias = "id", alias = "uri")]
+        raw: String,
     },
     Name {
         name: String,
     },
-    /// Scheme-shaped target whose scheme no entity claims (`[[Areas:Work]]`,
-    /// a typo, a link outliving its integration). Distinct from `Name` because
-    /// the scheme shape is reserved: this can never become a page.
-    UnknownScheme {
-        uri: String,
-    },
+}
+
+impl EntityRef {
+    /// A scheme-shaped target built from an already-parsed URI.
+    pub fn from_uri(uri: &EntityUri) -> Self {
+        Self::Scheme {
+            raw: uri.as_str().to_string(),
+        }
+    }
+
+    /// The entity this target names, or `None` when it names no entity.
+    ///
+    /// `Some` only for a WHOLE scheme-shaped target (`t-widget:abc`). A wiki
+    /// path that merely carries a colon in a later segment
+    /// (`Meeting/Notes:2026`) is a page path — minting
+    /// `block:Meeting/Notes:2026` for it would rewrite the user's link text
+    /// — and every non-`Scheme` variant names no entity either.
+    ///
+    /// The shape check is the same one the classifier uses to tell the two
+    /// cases apart, so this is that parse decision made once. A target that is
+    /// scheme-SHAPED but not a parseable URI (`t-widget:a b`) also yields
+    /// `None`: the conservative direction, since the alternative is inventing
+    /// an entity reference the author never wrote.
+    pub fn entity_uri(&self) -> Option<EntityUri> {
+        let Self::Scheme { raw } = self else {
+            return None;
+        };
+        crate::link_parser::link_scheme_shape(raw)?;
+        // ALLOW(ok): scheme-shaped but unparseable (`t-widget:a b`) means "no
+        // entity", which is the answer every caller needs; the raw text is
+        // still rendered verbatim from `raw`, so nothing is lost.
+        EntityUri::parse(raw).ok()
+    }
 }
 
 /// One inline mark kind. The `Link` variant carries its target inline so a
@@ -356,24 +407,42 @@ pub struct DerivedLink {
 
 /// Derive the `block_links` rows implied by a block's inline marks.
 ///
-/// External URL links and unknown-scheme links are NOT block links (they never
-/// resolve to an entity) and are skipped. Duplicate `(target, kind)` pairs
-/// collapse to one row (junction PK is `(source, target, kind)`).
+/// External URL links are NOT block links (they never name an entity) and are
+/// skipped. Duplicate `(target, kind)` pairs collapse to one row (junction PK
+/// is `(source, target, kind)`).
+///
+/// Registry-INDEPENDENT on purpose: a target that NAMES an entity yields a row
+/// whether or not an entity currently claims its scheme. The junction is a
+/// soft-target relation (no FK, dangling representable — see
+/// `sql/schema/block_links.sql`), so a row whose target does not exist yet is
+/// already a supported state, and it is what lets a link survive being
+/// ingested before its integration registers: nothing has to re-derive the
+/// junction later. Classifying by REGISTRATION here instead would make the
+/// junction a function of WHEN the block was written.
+///
+/// Registration-independent is not shape-independent: a `Scheme` target that
+/// names no entity (a wiki path with a colon in a later segment) yields no row,
+/// exactly as it did before it shared a variant with entity targets.
 pub fn derive_block_links(marks: &[MarkSpan]) -> Vec<DerivedLink> {
     let mut out: Vec<DerivedLink> = Vec::new();
     for span in marks {
         let derived = match &span.mark {
             InlineMark::Link { target, .. } => match target {
-                EntityRef::External { .. } | EntityRef::UnknownScheme { .. } => continue,
-                EntityRef::Internal { id } => DerivedLink {
-                    target: id.as_str().to_string(),
-                    kind: match id.scheme() {
-                        "tag" => LinkKind::Tag,
-                        "block" => LinkKind::Block,
-                        _ => LinkKind::Entity,
-                    },
-                    resolved: Some(id.clone()),
-                },
+                EntityRef::External { .. } => continue,
+                EntityRef::Scheme { .. } => {
+                    let Some(uri) = target.entity_uri() else {
+                        continue;
+                    };
+                    DerivedLink {
+                        target: uri.as_str().to_string(),
+                        kind: match uri.scheme() {
+                            "tag" => LinkKind::Tag,
+                            "block" => LinkKind::Block,
+                            _ => LinkKind::Entity,
+                        },
+                        resolved: Some(uri),
+                    }
+                }
                 EntityRef::Name { name } => DerivedLink {
                     target: name.clone(),
                     kind: LinkKind::Page,
@@ -966,9 +1035,7 @@ mod tests {
             10,
             20,
             InlineMark::Link {
-                target: EntityRef::Internal {
-                    id: EntityUri::block("abc-123"),
-                },
+                target: EntityRef::from_uri(&EntityUri::block("abc-123")),
                 label: "see also".to_string(),
             },
         )];
@@ -1019,17 +1086,16 @@ mod tests {
                 "external",
             ),
             (
-                EntityRef::Internal {
-                    id: EntityUri::parse("block:x").expect("valid uri"),
-                },
-                "internal",
+                EntityRef::from_uri(&EntityUri::parse("block:x").expect("valid uri")),
+                "scheme",
             ),
             (EntityRef::Name { name: "P".into() }, "name"),
             (
-                EntityRef::UnknownScheme {
-                    uri: "Areas:Work".into(),
-                },
-                "unknown_scheme",
+                // A scheme nothing has registered carries the SAME tag: whether
+                // it resolves is asked of the registry at read time, never
+                // stored.
+                EntityRef::from_uri(&EntityUri::parse("t-widget:abc").expect("valid uri")),
+                "scheme",
             ),
         ];
         for (value, expected_tag) in cases {
@@ -1038,6 +1104,55 @@ mod tests {
                 json.get("type").and_then(|t| t.as_str()),
                 Some(expected_tag),
                 "wire tag drifted for {value:?}"
+            );
+        }
+    }
+
+    /// Every legacy payload must load, INCLUDING the ones whose target is not
+    /// a parseable absolute URI.
+    ///
+    /// `LinkTarget::UnknownScheme` covers two structural shapes — a whole
+    /// scheme-shaped target (`t-widget:abc`) and a wiki path with a colon in a
+    /// later segment (`Areas/cc-session:abc`) — so marks written before the
+    /// merge hold both. The second is not a valid URI, so storing this variant
+    /// as an `EntityUri` makes those marks either fail to load or get silently
+    /// rewritten to `block:…`. The raw target is authored text; it round-trips
+    /// verbatim or the vault is corrupted.
+    #[test]
+    fn legacy_mark_payloads_load_verbatim() {
+        let cases = [
+            (
+                r#"{"type":"unknown_scheme","uri":"Areas/cc-session:abc"}"#,
+                "Areas/cc-session:abc",
+            ),
+            (
+                r#"{"type":"unknown_scheme","uri":"Meeting/Notes:2026"}"#,
+                "Meeting/Notes:2026",
+            ),
+            (
+                r#"{"type":"unknown_scheme","uri":"t-widget:abc123"}"#,
+                "t-widget:abc123",
+            ),
+            (
+                r#"{"type":"internal","id":"block:abc-123"}"#,
+                "block:abc-123",
+            ),
+            (r#"{"type":"scheme","raw":"tag:work"}"#, "tag:work"),
+        ];
+        for (json, expected_raw) in cases {
+            let got: EntityRef = serde_json::from_str(json)
+                .unwrap_or_else(|e| panic!("legacy payload must load: {json} — {e}"));
+            let EntityRef::Scheme { raw } = &got else {
+                panic!("expected Scheme for {json}, got {got:?}");
+            };
+            assert_eq!(raw, expected_raw, "target text was altered loading {json}");
+            // And it must survive a re-serialize unchanged.
+            let reser = serde_json::to_value(&got).expect("serializes");
+            assert_eq!(reser.get("type").and_then(|t| t.as_str()), Some("scheme"));
+            assert_eq!(
+                reser.get("raw").and_then(|t| t.as_str()),
+                Some(expected_raw),
+                "round trip altered the target text for {json}"
             );
         }
     }

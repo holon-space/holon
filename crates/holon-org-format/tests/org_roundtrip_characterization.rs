@@ -127,6 +127,48 @@ fn bare_double_bracket_content_survives_roundtrip() {
     assert_content_survives("see [[not-a-link");
 }
 
+/// A block whose content carries a LINK must re-render its link markup
+/// byte-identically. Unlike [`assert_content_survives`], which compares the
+/// STRIPPED content (a link's content is just its label), this asserts on the
+/// emitted org bytes — which is where a mangled link target shows up.
+fn assert_org_bytes_survive(org: &str) {
+    let (content, marks) = holon_org_format::extract_inline_marks(org);
+    let mut block = Block::new_text(
+        EntityUri::block("link-bytes"),
+        EntityUri::block("parent"),
+        &content,
+    );
+    block.marks = Some(marks);
+    let (emitted, _) = holon_org_format::render_block_content_checked(&block);
+    assert_eq!(org, emitted, "link markup must survive extract → render");
+}
+
+/// A colon in a LATER path segment does not make a target scheme-shaped: the
+/// scheme shape is a property of the WHOLE target, so `Meeting/Notes:2026` is
+/// an ordinary wiki page path that happens to contain a colon.
+///
+/// `LinkTarget::UnknownScheme` covers BOTH shapes (`link_parser.rs:172` for the
+/// whole target, `:196` for a scheme-shaped segment), so anything that turns
+/// that one verdict into an `EntityUri` mints `block:Meeting/Notes:2026` and
+/// REWRITES the user's text. Link text is authored data — no round trip may
+/// ever edit it.
+#[test]
+fn colon_in_a_later_path_segment_survives_roundtrip() {
+    assert_org_bytes_survive("see [[Meeting/Notes:2026]] here");
+    assert_org_bytes_survive("see [[Projects/Q3:plan][the plan]] here");
+    assert_org_bytes_survive("see [[Areas/cc-session:abc]] here");
+}
+
+/// The other half of the same rule: a WHOLE scheme-shaped target is a genuine
+/// entity link and must ALSO come back byte-identically, registered or not.
+#[test]
+fn whole_scheme_shaped_target_survives_roundtrip() {
+    assert_org_bytes_survive("see [[t-widget:abc123]] here");
+    assert_org_bytes_survive("see [[t-widget:abc123][Widget]] here");
+    assert_org_bytes_survive("see [[Areas:Work]] here");
+    assert_org_bytes_survive("see [[block:abc-123][a block]] here");
+}
+
 // ===========================================================================
 // Family 2 — empty content
 // ===========================================================================

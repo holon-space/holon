@@ -360,6 +360,9 @@ mod backend {
                 operation_engine,
                 ui_watcher,
                 profiles,
+                // The worker assembles the engine without a DI container, so no
+                // registry-backed classifier is reachable: built-in schemes only.
+                holon_api::link_parser::LinkTargetClassifier::default(),
             ),
         ));
 

@@ -584,6 +584,10 @@ impl FrontendInjectorExt for Injector {
                 let preference_defs = resolver.resolve::<Vec<preferences::PreferenceDef>>();
                 let holon_config = resolver.resolve::<HolonConfig>();
                 let locked_keys = resolver.resolve::<LockedKeys>();
+                // Registry-backed: it answers for entity types registered after
+                // boot (an MCP sidecar connecting) without re-wiring.
+                let link_classifier =
+                    (*resolver.resolve::<holon_api::link_parser::LinkTargetClassifier>()).clone();
 
                 let profiles = engine.profile_resolver().clone();
                 let query_engine = Some(engine.clone() as Arc<dyn holon::api::QueryEngine>);
@@ -611,6 +615,7 @@ impl FrontendInjectorExt for Injector {
                     operation_engine,
                     ui_watcher,
                     profiles,
+                    link_classifier,
                     error_tracker,
                     ready_signal,
                     preference_defs,

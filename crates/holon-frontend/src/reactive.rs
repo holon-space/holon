@@ -106,6 +106,12 @@ pub trait BuilderServices: Send + Sync {
     /// watcher is running.
     fn get_block_data(&self, id: &EntityUri) -> (RenderExpr, Vec<Arc<DataRow>>);
 
+    /// The live authority on whether a scheme-shaped link target names a
+    /// registered entity. Deliberately has NO default: a built-ins-only default
+    /// would silently make every impl report unregistered schemes as broken
+    /// forever, which is exactly the bug live classification removes.
+    fn link_classifier(&self) -> &holon_api::link_parser::LinkTargetClassifier;
+
     /// Resolve the entity profile for a data row. Returns `None` when no entity
     /// type could be inferred.
     fn resolve_profile(&self, row: &DataRow) -> Option<holon_api::RenderProfile>;
@@ -2965,6 +2971,10 @@ impl BuilderServices for ReactiveEngine {
         results.snapshot()
     }
 
+    fn link_classifier(&self) -> &holon_api::link_parser::LinkTargetClassifier {
+        self.session.link_classifier()
+    }
+
     /// Override the trait default to delegate to the inherent `snapshot`,
     /// which has thread-local cycle detection for `LiveBlock` resolution.
     /// Without this, `live_block(A) → live_block(B) → live_block(A)` (or
@@ -3529,6 +3539,9 @@ impl BuilderServices for ReactiveEngine {
 pub struct StubBuilderServices {
     interpreter: Arc<RenderInterpreter<ReactiveViewModel>>,
     rt_handle: tokio::runtime::Handle,
+    /// No registry is wired into a stub, so it resolves the built-in schemes
+    /// only.
+    link_classifier: holon_api::link_parser::LinkTargetClassifier,
 }
 
 fn stub_runtime_handle() -> tokio::runtime::Handle {
@@ -3556,6 +3569,7 @@ impl StubBuilderServices {
         Self {
             interpreter: Arc::new(crate::shadow_builders::build_shadow_interpreter()),
             rt_handle,
+            link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
         }
     }
 
@@ -3563,6 +3577,7 @@ impl StubBuilderServices {
         Self {
             interpreter: Arc::new(crate::shadow_builders::build_shadow_interpreter()),
             rt_handle,
+            link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
         }
     }
 }
@@ -3580,6 +3595,10 @@ impl BuilderServices for StubBuilderServices {
 
     fn get_block_data(&self, _: &EntityUri) -> (RenderExpr, Vec<Arc<DataRow>>) {
         (table_expr(), vec![])
+    }
+
+    fn link_classifier(&self) -> &holon_api::link_parser::LinkTargetClassifier {
+        &self.link_classifier
     }
 
     fn resolve_profile(&self, _: &DataRow) -> Option<holon_api::RenderProfile> {

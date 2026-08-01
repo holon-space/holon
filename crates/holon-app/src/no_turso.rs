@@ -81,5 +81,7 @@ pub fn from_block_query_source(
         operation_engine,
         ui_watcher,
         profiles,
+        // No type registry in the Turso-free wiring: built-in schemes only.
+        holon_api::link_parser::LinkTargetClassifier::default(),
     ))
 }

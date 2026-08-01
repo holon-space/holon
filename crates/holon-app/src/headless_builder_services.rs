@@ -31,6 +31,9 @@ pub struct HeadlessBuilderServices {
     engine: Arc<BackendEngine>,
     interpreter: Arc<RenderInterpreter<ReactiveViewModel>>,
     rt_handle: tokio::runtime::Handle,
+    /// The `describe_ui` path holds a bare engine, not a DI container, so no
+    /// registry-backed classifier is reachable: built-in schemes only.
+    link_classifier: holon_api::link_parser::LinkTargetClassifier,
 }
 
 impl HeadlessBuilderServices {
@@ -45,6 +48,7 @@ impl HeadlessBuilderServices {
             engine,
             interpreter: Arc::new(holon_frontend::shadow_builders::build_shadow_interpreter()),
             rt_handle,
+            link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
         }
     }
 }
@@ -56,6 +60,10 @@ impl BuilderServices for HeadlessBuilderServices {
 
     fn get_block_data(&self, _: &EntityUri) -> (RenderExpr, Vec<Arc<DataRow>>) {
         (table_expr(), vec![])
+    }
+
+    fn link_classifier(&self) -> &holon_api::link_parser::LinkTargetClassifier {
+        &self.link_classifier
     }
 
     fn resolve_profile(&self, row: &DataRow) -> Option<holon_api::RenderProfile> {

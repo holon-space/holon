@@ -176,22 +176,30 @@ fn focus_block(entity_id: Option<String>) {
     });
 }
 
-/// Click on a link run targeting an entity. `Internal` navigates the main
-/// region to the target block (GPUI parity: `navigation.focus`). `Name`
+/// Click on a link run targeting an entity. A target that names an entity
+/// navigates the main region to it (GPUI parity: `navigation.focus`). `Name`
 /// (dangling wiki-link) lazily creates+heals the page chain via
 /// `block.create_page_from_link`; see the gap note below.
 fn follow_internal_link(target: &EntityRef) {
     let intent = match target {
-        EntityRef::Internal { id } => OperationIntent::new(
-            EntityName::new("navigation"),
-            "focus".to_string(),
-            [
-                ("region".to_string(), Value::String("main".to_string())),
-                ("block_id".to_string(), Value::String(id.to_string())),
-            ]
-            .into_iter()
-            .collect(),
-        ),
+        // A colon-bearing target that names no entity (`Meeting/Notes:2026`)
+        // has nothing to navigate to and must never mint a page, so the click
+        // is inert — matching GPUI, which places the caret instead.
+        EntityRef::Scheme { .. } => {
+            let Some(uri) = target.entity_uri() else {
+                return;
+            };
+            OperationIntent::new(
+                EntityName::new("navigation"),
+                "focus".to_string(),
+                [
+                    ("region".to_string(), Value::String("main".to_string())),
+                    ("block_id".to_string(), Value::String(uri.to_string())),
+                ]
+                .into_iter()
+                .collect(),
+            )
+        }
         EntityRef::Name { name } => {
             // GAP vs GPUI: GPUI's `follow_dangling_link` creates the page AND
             // navigates to the fresh leaf in one gesture, threading the create

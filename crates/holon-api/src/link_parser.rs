@@ -150,6 +150,15 @@ impl LinkTargetClassifier {
                 .is_some_and(|r| r.is_registered_entity_scheme(scheme))
     }
 
+    /// Does this scheme-shaped target name an entity that exists RIGHT NOW?
+    ///
+    /// The read-time counterpart to persisting a bare `EntityRef::Scheme`: the
+    /// mark records only that the target is scheme-shaped, so every consumer
+    /// needing the registration answer asks here, against the live registry.
+    pub fn resolves_entity(&self, uri: &EntityUri) -> bool {
+        link_scheme_shape(uri.as_str()).is_some_and(|s| self.is_registered_entity_scheme(&s))
+    }
+
     /// Classify a raw link target string.
     pub fn classify(&self, target: &str) -> LinkTarget {
         // External URLs — checked first so a web scheme is never a candidate

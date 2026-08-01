@@ -2,7 +2,7 @@
 //! (ForeignVaultCompat Inc 1, docs/Proposals/ForeignVaultCompat-2026-07-12.md
 //! §4-5). WS-1 already taught the org parser two LogSeq-org deltas:
 //! case-insensitive `:id:` drawer lookup, and `((uuid))` block-refs →
-//! `InlineMark::Link{EntityRef::Internal}`. This proves a whole small
+//! `InlineMark::Link{EntityRef::Scheme}`. This proves a whole small
 //! LogSeq-org vault — journals + pages laid out the way LogSeq writes them —
 //! ingests into the Holon block substrate with no silent loss.
 //!
@@ -135,7 +135,7 @@ fn logseq_org_vault_ingests_without_loss() {
             );
         }
 
-        // ── 3. cross-file `((uuid))` → Internal link mark ────────────────
+        // ── 3. cross-file `((uuid))` → scheme link mark ──────────────────
         let now_block = &blocks["7c9e6a10-0003-4a00-9000-000000000003"];
         let now_content = field(now_block, "content");
         let now_marks = field(now_block, "marks");
@@ -144,10 +144,10 @@ fn logseq_org_vault_ingests_without_loss() {
             "((uuid)) ref label not preserved in content: {now_content:?}"
         );
         assert!(
-            now_marks.contains("\"type\":\"internal\"")
-                && now_marks.contains("block:7c9e6a10-1001-4a00-9000-000000000010"),
-            "((uuid)) block-ref did not become an Internal link mark targeting the referenced \
-             block: marks={now_marks:?}"
+            now_marks.contains("\"type\":\"scheme\"")
+                && now_marks.contains("\"raw\":\"block:7c9e6a10-1001-4a00-9000-000000000010\""),
+            "((uuid)) block-ref did not become a scheme link mark carrying the referenced block's \
+             URI verbatim: marks={now_marks:?}"
         );
 
         // ── 4. bare `[[Page]]` → Name link mark; dangling represented ─────

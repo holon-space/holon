@@ -1212,9 +1212,7 @@ mod tests {
 
         let ctrl = test_controller();
         let mark = InlineMark::Link {
-            target: EntityRef::Internal {
-                id: EntityUri::block("abc-123"),
-            },
+            target: EntityRef::from_uri(&EntityUri::block("abc-123")),
             label: "see also".into(),
         };
         let action = ctrl.apply_mark(2..10, &mark);

@@ -111,9 +111,7 @@ mod tests {
     }
 
     fn internal(id: &str) -> EntityRef {
-        EntityRef::Internal {
-            id: EntityUri::parse(id).unwrap(),
-        }
+        EntityRef::from_uri(&EntityUri::parse(id).unwrap())
     }
 
     #[test]

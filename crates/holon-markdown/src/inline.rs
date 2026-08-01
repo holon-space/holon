@@ -144,9 +144,7 @@ pub fn scan_inline(text: &str) -> InlineParse {
                 let inner: String = s.src[s.i + 2..close].iter().collect();
                 let inner = inner.trim().to_string();
                 if !inner.is_empty() {
-                    let target = EntityRef::Internal {
-                        id: EntityUri::block(&inner),
-                    };
+                    let target = EntityRef::from_uri(&EntityUri::block(&inner));
                     let label = format!("(({inner}))");
                     s.emit_marked(
                         &label,

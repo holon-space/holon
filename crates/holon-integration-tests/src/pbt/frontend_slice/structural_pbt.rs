@@ -1683,7 +1683,7 @@ mod teeth {
     /// name. Three assertions, one per F1a invariant:
     ///
     /// - `inv-entity-link-round-trips-org`: the org lens keeps the target as an
-    ///   `EntityRef::Internal` URI and re-renders the literal byte-for-byte.
+    ///   `EntityRef::Scheme` URI and re-renders the literal byte-for-byte.
     /// - `inv-link-kind-matches-target-scheme`: the junction row is `kind =
     ///   'entity'` with `resolved_id` = the full URI.
     /// - `inv-entity-link-backlink-visible`: the `backlinks` matview carries
@@ -1767,9 +1767,8 @@ mod teeth {
             .expect("non-vacuity: the org lens must extract a Link mark");
         assert_eq!(
             target,
-            holon_api::EntityRef::Internal {
-                // ALLOW(entity_uri_from_raw): test expectation literal
-                id: holon_api::EntityUri::from_raw(ENTITY_URI)
+            holon_api::EntityRef::Scheme {
+                raw: ENTITY_URI.to_string()
             },
             "a registered scheme must classify as a resolved entity URI, not a page name"
         );

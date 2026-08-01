@@ -80,7 +80,6 @@ pub const EXTERNAL_ID: &str = "external_id";
 /// running a newer version).
 pub fn mark_from_loro_value(key: &str, value: &loro::LoroValue) -> Option<holon_api::InlineMark> {
     use holon_api::EntityRef;
-    use holon_api::EntityUri;
     use holon_api::InlineMark;
     match key {
         "bold" => Some(InlineMark::Bold),
@@ -115,16 +114,25 @@ pub fn mark_from_loro_value(key: &str, value: &loro::LoroValue) -> Option<holon_
                     })?;
                     EntityRef::External { url }
                 }
-                "internal" => {
-                    let id_str = map.get("id").and_then(|v| match v {
+                // `internal` and `unknown_scheme` are the two pre-merge
+                // spellings of a scheme-shaped target (they differed only in
+                // whether the scheme was registered at ingest, which is no
+                // longer persisted); their payload key differed too.
+                // `internal` (key `id`) and `unknown_scheme` (key `uri`) are the
+                // two pre-merge spellings. The target is stored verbatim, never
+                // parsed here: `unknown_scheme` also held wiki paths that are
+                // not valid URIs, and coercing those would silently rewrite
+                // authored link text.
+                "scheme" | "internal" | "unknown_scheme" => {
+                    let stored = map
+                        .get("raw")
+                        .or_else(|| map.get("uri"))
+                        .or_else(|| map.get("id"));
+                    let raw = stored.and_then(|v| match v {
                         loro::LoroValue::String(s) => Some(s.to_string()),
                         _ => None,
                     })?;
-                    EntityRef::Internal {
-                        // ALLOW(entity_uri_from_raw): internal-link target id from Loro mark map
-                        // field
-                        id: EntityUri::from_raw(&id_str),
-                    }
+                    EntityRef::Scheme { raw }
                 }
                 "name" => {
                     let name = map.get("name").and_then(|v| match v {
@@ -132,13 +140,6 @@ pub fn mark_from_loro_value(key: &str, value: &loro::LoroValue) -> Option<holon_
                         _ => None,
                     })?;
                     EntityRef::Name { name }
-                }
-                "unknown_scheme" => {
-                    let uri = map.get("uri").and_then(|v| match v {
-                        loro::LoroValue::String(s) => Some(s.to_string()),
-                        _ => None,
-                    })?;
-                    EntityRef::UnknownScheme { uri }
                 }
                 _ => return None,
             };
@@ -215,10 +216,12 @@ pub fn read_marks_from_text(text: &loro::LoroText) -> Vec<holon_api::MarkSpan> {
 /// For boolean marks (Bold/Italic/.../Sub/Super) the value is `true` — Loro
 /// requires *some* value, and `true` is the canonical "this mark is present"
 /// payload across the spike and the Loro test fixtures. For `Link`, the value
-/// is a `LoroValue::Map` carrying `{ "type":
-/// "external"|"internal"|"name"|"unknown_scheme", "url"|"id"|"name"|"uri": ...,
-/// "label": ... }` so the render layer can reconstruct
-/// the full `EntityRef`+label without going back to `Block.marks`.
+/// is a `LoroValue::Map` carrying
+/// `{ "type": "external"|"scheme"|"name", "url"|"raw"|"name": ..., "label": ...
+/// }` so the render layer can reconstruct the full `EntityRef`+label without
+/// going back to `Block.marks`. The reader also accepts the two pre-merge
+/// spellings of `scheme` (`internal` with an `id` key, `unknown_scheme` with a
+/// `uri` key); nothing writes them any more.
 pub fn mark_to_loro_value(mark: &holon_api::InlineMark) -> loro::LoroValue {
     use holon_api::EntityRef;
     use holon_api::InlineMark;
@@ -239,17 +242,13 @@ pub fn mark_to_loro_value(mark: &holon_api::InlineMark) -> loro::LoroValue {
                     map.insert("type".to_string(), loro::LoroValue::from("external"));
                     map.insert("url".to_string(), loro::LoroValue::from(url.as_str()));
                 }
-                EntityRef::Internal { id } => {
-                    map.insert("type".to_string(), loro::LoroValue::from("internal"));
-                    map.insert("id".to_string(), loro::LoroValue::from(id.as_str()));
+                EntityRef::Scheme { raw } => {
+                    map.insert("type".to_string(), loro::LoroValue::from("scheme"));
+                    map.insert("raw".to_string(), loro::LoroValue::from(raw.as_str()));
                 }
                 EntityRef::Name { name } => {
                     map.insert("type".to_string(), loro::LoroValue::from("name"));
                     map.insert("name".to_string(), loro::LoroValue::from(name.as_str()));
-                }
-                EntityRef::UnknownScheme { uri } => {
-                    map.insert("type".to_string(), loro::LoroValue::from("unknown_scheme"));
-                    map.insert("uri".to_string(), loro::LoroValue::from(uri.as_str()));
                 }
             }
             loro::LoroValue::from(map)
@@ -5219,5 +5218,68 @@ mod concurrent_child_creation_semantics {
             err.to_string().contains("predates the mergeable migration"),
             "the refusal must name the migration; got: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod legacy_link_mark_payloads {
+    use holon_api::EntityRef;
+    use holon_api::InlineMark;
+
+    use super::*;
+
+    fn link_map(kind: &str, key: &str, target: &str) -> loro::LoroValue {
+        let mut map = std::collections::HashMap::new();
+        map.insert("label".to_string(), loro::LoroValue::from(target));
+        map.insert("type".to_string(), loro::LoroValue::from(kind));
+        map.insert(key.to_string(), loro::LoroValue::from(target));
+        loro::LoroValue::from(map)
+    }
+
+    /// Loro marks written before the scheme merge carry `internal`/`id` or
+    /// `unknown_scheme`/`uri`. The latter also holds targets that are NOT
+    /// valid absolute URIs (a wiki path with a colon in a later segment), so a
+    /// reader that pushes the payload through `EntityUri::from_raw` silently
+    /// rewrites `Areas/cc-session:abc` to `block:Areas/cc-session:abc` — a
+    /// silent edit of authored link text, worse than refusing to load.
+    #[test]
+    fn every_legacy_spelling_reads_back_verbatim() {
+        let cases = [
+            ("unknown_scheme", "uri", "Areas/cc-session:abc"),
+            ("unknown_scheme", "uri", "Meeting/Notes:2026"),
+            ("unknown_scheme", "uri", "t-widget:abc123"),
+            ("internal", "id", "block:abc-123"),
+            ("scheme", "raw", "tag:work"),
+        ];
+        for (kind, key, target) in cases {
+            let value = link_map(kind, key, target);
+            let mark = mark_from_loro_value("link", &value)
+                .unwrap_or_else(|| panic!("legacy {kind} mark must read: {target}"));
+            let InlineMark::Link {
+                target: EntityRef::Scheme { raw },
+                ..
+            } = &mark
+            else {
+                panic!("expected a Scheme link for {kind}/{target}, got {mark:?}");
+            };
+            assert_eq!(raw, target, "{kind} payload altered the target text");
+        }
+    }
+
+    /// The write half round-trips: what we emit today reads back
+    /// byte-identical.
+    #[test]
+    fn scheme_marks_round_trip_through_loro() {
+        for target in ["Areas/cc-session:abc", "t-widget:abc123", "block:abc-123"] {
+            let mark = InlineMark::Link {
+                target: EntityRef::Scheme {
+                    raw: target.to_string(),
+                },
+                label: target.to_string(),
+            };
+            let value = mark_to_loro_value(&mark);
+            let back = mark_from_loro_value("link", &value).expect("round trips");
+            assert_eq!(back, mark, "loro round trip altered {target}");
+        }
     }
 }

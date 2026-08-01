@@ -374,7 +374,7 @@ fn walk_node(node: &SyntaxNode, state: &mut ExtractState) {
 }
 
 /// Scan `text` for `((uuid))` block-ref patterns. Valid UUIDs become
-/// `InlineMark::Link` with `EntityRef::Internal`; non-UUID `((...))` is
+/// `InlineMark::Link` with `EntityRef::Scheme`; non-UUID `((...))` is
 /// emitted as plain text.
 fn scan_text_for_block_refs(text: &str, state: &mut ExtractState) {
     let mut pos = 0usize;
@@ -394,9 +394,7 @@ fn scan_text_for_block_refs(text: &str, state: &mut ExtractState) {
             if !inner.is_empty() && Uuid::parse_str(inner).is_ok() {
                 let label = format!("(({inner}))");
                 let mark = InlineMark::Link {
-                    target: EntityRef::Internal {
-                        id: EntityUri::block(inner),
-                    },
+                    target: EntityRef::from_uri(&EntityUri::block(inner)),
                     label: label.clone(),
                 };
                 push_with_inner_marks(state, &label, vec![], mark);
@@ -579,8 +577,15 @@ fn strip_link(raw: &str, classifier: &LinkTargetClassifier) -> (String, InlineMa
     };
     let target = match classifier.classify(&uri) {
         LinkTarget::External(s) => EntityRef::External { url: s },
-        LinkTarget::Resolved(uri) => EntityRef::Internal { id: uri },
-        LinkTarget::UnknownScheme(uri) => EntityRef::UnknownScheme { uri },
+        // Both colon-bearing verdicts persist IDENTICALLY, as the authored
+        // text. The classifier still runs — External and CreationIntent need
+        // it — but neither the registration answer NOR the whole-URI-vs-path
+        // shape is recorded: both are re-derived at each use site, so a link
+        // ingested before its integration connects is indistinguishable from
+        // one ingested after, and `Meeting/Notes:2026` is never coerced into a
+        // `block:` URI it was not.
+        LinkTarget::Resolved(resolved) => EntityRef::from_uri(&resolved),
+        LinkTarget::UnknownScheme(raw) => EntityRef::Scheme { raw },
         // Links increment 2: a wiki-name target stays DANGLING (`Name`) — no
         // deterministic-id minting into the mark at parse time. Pages are
         // created lazily; the exact target string (possibly a `parent/leaf`
@@ -728,11 +733,14 @@ fn open_delim(mark: &InlineMark) -> String {
                 // typed it; explicit `[[uri][label]]` otherwise. Every target
                 // variant shares this rule, so no id form gains a spurious
                 // label on a round trip.
-                EntityRef::Internal { id } => {
-                    if id.as_str() == label {
+                // Bytes are preserved exactly — the target is emitted as it was
+                // authored, so neither an unregistered scheme nor a
+                // colon-bearing page path is edited by a render cycle.
+                EntityRef::Scheme { raw } => {
+                    if raw == label {
                         return "[[".into();
                     }
-                    id.as_str().to_string()
+                    raw.clone()
                 }
                 // Dangling wiki link: `[[name]]` when the label IS the name
                 // (the bare form the user typed), `[[name][label]]` otherwise.
@@ -741,15 +749,6 @@ fn open_delim(mark: &InlineMark) -> String {
                         return "[[".into();
                     }
                     name.clone()
-                }
-                // Bytes are preserved exactly: an unknown scheme must survive
-                // an edit cycle untouched so registering its integration
-                // restores the link.
-                EntityRef::UnknownScheme { uri } => {
-                    if uri == label {
-                        return "[[".into();
-                    }
-                    uri.clone()
                 }
             };
             format!("[[{uri}][")
@@ -775,19 +774,18 @@ fn close_delim(mark: &InlineMark) -> String {
     }
 }
 
-/// Returns `true` when the mark is a block-ref link: `EntityRef::Internal`
+/// Returns `true` when the mark is a block-ref link: `EntityRef::Scheme`
 /// whose label starts with `((`, ends with `))`, AND the inner text matches
 /// the id (stripped of its `block:` scheme). This heuristically distinguishes
 /// `((uuid))` from `[[block:uuid][label]]` for round-trip fidelity.
 fn is_block_ref_link(mark: &InlineMark) -> bool {
     match mark {
         InlineMark::Link {
-            target: EntityRef::Internal { id },
+            target: EntityRef::Scheme { raw },
             label,
         } if label.starts_with("((") && label.ends_with("))") && label.len() > 4 => {
             let inner = &label[2..label.len() - 2];
-            id.as_str()
-                .strip_prefix("block:")
+            raw.strip_prefix("block:")
                 .is_some_and(|uuid| inner.trim() == uuid)
         }
         _ => false,
@@ -922,7 +920,7 @@ mod tests {
 
     #[test]
     fn link_internal_block_uri() {
-        // `block:uuid` is a Resolved link target → Internal EntityRef.
+        // `block:uuid` is a Resolved link target → a scheme-shaped EntityRef.
         let (out, marks) = extract("[[block:abc-123][see also]]");
         assert_eq!(out, "see also");
         assert_eq!(marks.len(), 1);
@@ -930,10 +928,10 @@ mod tests {
             InlineMark::Link { target, label } => {
                 assert_eq!(label, "see also");
                 match target {
-                    EntityRef::Internal { id } => {
-                        assert_eq!(id.as_str(), "block:abc-123");
+                    EntityRef::Scheme { raw } => {
+                        assert_eq!(raw.as_str(), "block:abc-123");
                     }
-                    other => panic!("expected Internal, got {other:?}"),
+                    other => panic!("expected a scheme target, got {other:?}"),
                 }
             }
             other => panic!("expected Link, got {other:?}"),
@@ -1436,10 +1434,10 @@ mod tests {
             InlineMark::Link { target, label } => {
                 assert_eq!(label, BLOCK_REF_ORG);
                 match target {
-                    EntityRef::Internal { id } => {
-                        assert_eq!(id.as_str(), format!("block:{BLOCK_REF_UUID}"));
+                    EntityRef::Scheme { raw } => {
+                        assert_eq!(raw.as_str(), format!("block:{BLOCK_REF_UUID}"));
                     }
-                    other => panic!("expected Internal, got {other:?}"),
+                    other => panic!("expected a scheme target, got {other:?}"),
                 }
             }
             other => panic!("expected Link, got {other:?}"),
@@ -1514,9 +1512,8 @@ mod tests {
         assert_eq!(text, "See Alice here");
         assert_eq!(
             only_link_target(input),
-            EntityRef::Internal {
-                // ALLOW(entity_uri_from_raw): test expectation literal
-                id: EntityUri::from_raw("person:alice")
+            EntityRef::Scheme {
+                raw: "person:alice".to_string()
             }
         );
         assert_eq!(
@@ -1595,9 +1592,8 @@ mod tests {
     fn block_scheme_target_unchanged() {
         assert_eq!(
             only_link_target("[[block:abc-123][see also]]"),
-            EntityRef::Internal {
-                // ALLOW(entity_uri_from_raw): test expectation literal
-                id: EntityUri::from_raw("block:abc-123")
+            EntityRef::Scheme {
+                raw: "block:abc-123".to_string()
             }
         );
     }

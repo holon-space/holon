@@ -271,9 +271,7 @@ async fn id_form_links_resolve_trivially_and_externals_are_skipped() {
             0,
             3,
             InlineMark::Link {
-                target: EntityRef::Internal {
-                    id: holon_api::EntityUri::block("other"),
-                },
+                target: EntityRef::from_uri(&holon_api::EntityUri::block("other")),
                 label: "abc".to_string(),
             },
         ),

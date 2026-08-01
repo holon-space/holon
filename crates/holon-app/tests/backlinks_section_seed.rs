@@ -143,7 +143,7 @@ async fn main_panel_render_content(db: &holon::storage::DbHandle) -> Option<Stri
     })
 }
 
-/// An id-form (`EntityRef::Internal`) link mark — resolves trivially at the
+/// An id-form (`EntityRef::Scheme`) link mark — resolves trivially at the
 /// write boundary, so the `backlinks` matview picks it up without needing the
 /// target to exist or be Page-tagged.
 fn id_link_marks(target_local: &str, label: &str, start: usize, end: usize) -> String {
@@ -151,9 +151,7 @@ fn id_link_marks(target_local: &str, label: &str, start: usize, end: usize) -> S
         start,
         end,
         InlineMark::Link {
-            target: EntityRef::Internal {
-                id: EntityUri::block(target_local),
-            },
+            target: EntityRef::from_uri(&EntityUri::block(target_local)),
             label: label.to_string(),
         },
     )])

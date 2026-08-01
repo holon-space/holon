@@ -12,6 +12,7 @@ use holon_api::EntityRef;
 use holon_api::InlineMark;
 use holon_api::MarkSpan;
 use holon_api::Value;
+use holon_api::link_parser::LinkTargetClassifier;
 use holon_frontend::ReactiveViewModel;
 
 use super::prelude::*;
@@ -239,12 +240,23 @@ pub(crate) enum LinkDecoration {
     Unresolved,
 }
 
-pub(crate) fn link_decoration(target: &EntityRef) -> LinkDecoration {
+/// The mark says only that the target is scheme-shaped; whether that scheme
+/// names a live entity is a property of the registry, so it is asked here, per
+/// paint.
+pub(crate) fn link_decoration(
+    target: &EntityRef,
+    classifier: &LinkTargetClassifier,
+) -> LinkDecoration {
     match target {
-        EntityRef::UnknownScheme { .. } => LinkDecoration::Unresolved,
-        EntityRef::Internal { .. } | EntityRef::External { .. } | EntityRef::Name { .. } => {
-            LinkDecoration::Healthy
-        }
+        // A colon-bearing target that names no entity at all (a wiki path like
+        // `Meeting/Notes:2026`) is not an entity link and is not unresolved —
+        // it is an ordinary page target, painted like any other.
+        EntityRef::Scheme { .. } => match target.entity_uri() {
+            Some(uri) if classifier.resolves_entity(&uri) => LinkDecoration::Healthy,
+            Some(_) => LinkDecoration::Unresolved,
+            None => LinkDecoration::Healthy,
+        },
+        EntityRef::External { .. } | EntityRef::Name { .. } => LinkDecoration::Healthy,
     }
 }
 
@@ -275,7 +287,7 @@ fn merge_marks(active: &[&InlineMark], ctx: &GpuiRenderContext) -> HighlightStyl
                 });
             }
             InlineMark::Link { target, .. } => {
-                let (color, wavy) = match link_decoration(target) {
+                let (color, wavy) = match link_decoration(target, ctx.services.link_classifier()) {
                     LinkDecoration::Healthy => (tc(ctx, |t| t.accent_foreground), false),
                     LinkDecoration::Unresolved => (tc(ctx, |t| t.muted_foreground), true),
                 };
@@ -304,15 +316,16 @@ mod tests {
         MarkSpan::new(start, end, mark)
     }
 
-    /// An unknown-scheme link must be DISCLOSED, not merely typed: it resolves
+    /// An unregistered scheme must be DISCLOSED, not merely typed: it resolves
     /// to nothing and cannot be followed, so painting it with the healthy-link
     /// accent would tell the reader it works.
     #[test]
     fn an_unknown_scheme_link_is_disclosed_as_unresolved() {
         assert_eq!(
-            link_decoration(&EntityRef::UnknownScheme {
-                uri: "cc-session:abc".to_string(),
-            }),
+            link_decoration(
+                &EntityRef::from_uri(&EntityUri::parse("cc-session:abc").expect("valid uri")),
+                &LinkTargetClassifier::default(),
+            ),
             LinkDecoration::Unresolved,
             "an unknown-scheme link must not be painted as a healthy link"
         );
@@ -323,9 +336,7 @@ mod tests {
     #[test]
     fn resolvable_link_targets_stay_healthy() {
         for target in [
-            EntityRef::Internal {
-                id: EntityUri::parse("block:abc").expect("valid uri"),
-            },
+            EntityRef::from_uri(&EntityUri::parse("block:abc").expect("valid uri")),
             EntityRef::External {
                 url: "https://example.com".to_string(),
             },
@@ -334,9 +345,66 @@ mod tests {
             },
         ] {
             assert_eq!(
-                link_decoration(&target),
+                link_decoration(&target, &LinkTargetClassifier::default()),
                 LinkDecoration::Healthy,
                 "{target:?} is followable and must keep the healthy-link treatment"
+            );
+        }
+    }
+
+    /// The pair below is the whole point of live classification: the SAME
+    /// stored mark decorates differently depending on the registry it is read
+    /// against, so a link ingested before its provider connects heals on its
+    /// own instead of staying broken forever.
+    #[test]
+    fn a_scheme_link_is_unresolved_while_its_scheme_is_unregistered() {
+        assert_eq!(
+            link_decoration(&t_widget_link(), &LinkTargetClassifier::default()),
+            LinkDecoration::Unresolved,
+        );
+    }
+
+    #[test]
+    fn the_same_scheme_link_is_healthy_once_the_scheme_registers() {
+        assert_eq!(
+            link_decoration(
+                &t_widget_link(),
+                &LinkTargetClassifier::with_schemes(["t-widget"]),
+            ),
+            LinkDecoration::Healthy,
+        );
+    }
+
+    fn t_widget_link() -> EntityRef {
+        EntityRef::from_uri(&EntityUri::parse("t-widget:abc").expect("valid uri"))
+    }
+
+    /// A colon in a LATER path segment does not make a target scheme-shaped, so
+    /// `entity_uri()` returns `None` and there is no registration question to
+    /// ask: it is an ordinary page target and paints Healthy. Painting it
+    /// Unresolved would tell the user a perfectly good page link is broken.
+    ///
+    /// Registration cannot change this — asserted against a classifier that
+    /// DOES know `cc-session`, so the answer is a property of the target's
+    /// shape, not of the registry.
+    ///
+    /// Intended-for-now gap: unlike a `Name` target, clicking one of these is
+    /// inert (no lazy page creation) — see `rendered_text.rs`.
+    #[test]
+    fn a_colon_bearing_page_path_is_healthy_not_unresolved() {
+        for raw in ["Meeting/Notes:2026", "Areas/cc-session:abc"] {
+            let target = EntityRef::Scheme {
+                raw: raw.to_string(),
+            };
+            assert_eq!(
+                link_decoration(&target, &LinkTargetClassifier::default()),
+                LinkDecoration::Healthy,
+                "{raw} names no entity, so it must not be painted as a broken link"
+            );
+            assert_eq!(
+                link_decoration(&target, &LinkTargetClassifier::with_schemes(["cc-session"])),
+                LinkDecoration::Healthy,
+                "{raw} must not become an entity link just because a scheme registered"
             );
         }
     }
@@ -401,9 +469,7 @@ mod tests {
             0,
             8,
             InlineMark::Link {
-                target: EntityRef::Internal {
-                    id: EntityUri::block("abc"),
-                },
+                target: EntityRef::from_uri(&EntityUri::block("abc")),
                 label: "see also".into(),
             },
         )];

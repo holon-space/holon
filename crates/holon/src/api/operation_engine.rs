@@ -772,9 +772,7 @@ impl DispatchingOperationEngine {
             0,
             label.chars().count(),
             InlineMark::Link {
-                target: EntityRef::Internal {
-                    id: convert_page_uri(&plan.page_id),
-                },
+                target: EntityRef::from_uri(&convert_page_uri(&plan.page_id)),
                 label: label.clone(),
             },
         )];

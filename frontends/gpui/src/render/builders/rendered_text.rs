@@ -277,8 +277,23 @@ fn styled_run_render(
                     return;
                 };
                 match link_at_offset(&segments, byte_offset) {
-                    Some(EntityRef::Internal { id }) => {
-                        services.dispatch_intent(nav_focus(id.to_string()));
+                    // Scheme-shaped: only the LIVE registry knows whether it
+                    // names an entity. Unregistered resolves to nothing and
+                    // must never mint a page, so a click is an ordinary caret
+                    // placement.
+                    Some(target @ EntityRef::Scheme { .. }) => {
+                        match target.entity_uri() {
+                            Some(uri) if services.link_classifier().resolves_entity(&uri) => {
+                                services.dispatch_intent(nav_focus(uri.to_string()));
+                            }
+                            // Either the scheme is unregistered, or the target
+                            // names no entity at all — neither may mint a page,
+                            // so the click is ordinary caret placement.
+                            _ => services.set_focus_with_caret(
+                                block.clone(),
+                                styled_offset_to_buffer_offset(byte_offset),
+                            ),
+                        }
                     }
                     Some(EntityRef::External { url }) => {
                         services.dispatch_intent(nav_focus(url.clone()));
@@ -287,12 +302,11 @@ fn styled_run_render(
                         // Dangling link: create the page chain for this name (lazy
                         // page-create, 2026-07-10 links ruling) and navigate the
                         // main region to the new leaf; the next render re-resolves
-                        // the healed junction and this segment becomes `Internal`.
+                        // the healed junction and this segment becomes a
+                        // resolving `Scheme` target.
                         services.follow_dangling_link(name.clone(), "main".to_string());
                     }
-                    // An unknown scheme resolves to nothing and must never mint
-                    // a page, so a click is an ordinary caret placement.
-                    Some(EntityRef::UnknownScheme { .. }) | None => services.set_focus_with_caret(
+                    None => services.set_focus_with_caret(
                         block.clone(),
                         styled_offset_to_buffer_offset(byte_offset),
                     ),
@@ -445,9 +459,7 @@ mod tests {
     }
 
     fn internal_uri(id: &str) -> EntityRef {
-        EntityRef::Internal {
-            id: EntityUri::parse(id).unwrap(),
-        }
+        EntityRef::from_uri(&EntityUri::parse(id).unwrap())
     }
 
     #[test]

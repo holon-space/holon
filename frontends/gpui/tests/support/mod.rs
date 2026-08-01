@@ -100,11 +100,18 @@ fn canned_live_query_row(prefix: &str, ix: usize) -> ReactiveViewModel {
 /// (no `LiveBlock`, no `EditableText`, no reactive collections). If a fixture
 /// pulls on one of these methods, the panic names which capability it touched,
 /// so the fixture can be narrowed or moved to the slow E2E layer.
-pub struct StubServices;
+#[derive(Default)]
+pub struct StubServices {
+    /// Built-in schemes only — a pure-layout fixture has no registry.
+    link_classifier: holon_api::link_parser::LinkTargetClassifier,
+}
 
 impl BuilderServices for StubServices {
     fn interpret(&self, _: &RenderExpr, _: &FrontendRenderContext) -> ReactiveViewModel {
         unimplemented!("StubServices::interpret — fixture is not pure-layout")
+    }
+    fn link_classifier(&self) -> &holon_api::link_parser::LinkTargetClassifier {
+        &self.link_classifier
     }
     fn get_block_data(&self, _: &EntityUri) -> (RenderExpr, Vec<Arc<DataRow>>) {
         unimplemented!("StubServices::get_block_data — fixture references a LiveBlock")
@@ -267,6 +274,9 @@ impl BuilderServices for TestServices {
     }
     fn get_block_data(&self, id: &EntityUri) -> (RenderExpr, Vec<Arc<DataRow>>) {
         self.inner.get_block_data(id)
+    }
+    fn link_classifier(&self) -> &holon_api::link_parser::LinkTargetClassifier {
+        self.inner.link_classifier()
     }
     fn resolve_profile(&self, row: &DataRow) -> Option<RowProfile> {
         self.inner.resolve_profile(row)
@@ -713,7 +723,7 @@ pub fn render_fixture_sized(
     });
 
     let bounds = BoundsRegistry::new();
-    let services: Arc<dyn BuilderServices> = Arc::new(StubServices);
+    let services: Arc<dyn BuilderServices> = Arc::new(StubServices::default());
 
     let bounds_for_view = bounds.clone();
     let _window: WindowHandle<FixtureView> = cx.update(|cx| {

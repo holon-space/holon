@@ -202,9 +202,7 @@ async fn create_linker(
         0,
         label.chars().count(),
         InlineMark::Link {
-            target: EntityRef::Internal {
-                id: holon_api::EntityUri::from_raw(target),
-            },
+            target: EntityRef::from_uri(&holon_api::EntityUri::from_raw(target)),
             label: label.clone(),
         },
     );

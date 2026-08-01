@@ -343,6 +343,11 @@ pub struct FrontendSession<T = ()> {
     /// type registry. Consumers read profiles through this handle and never
     /// branch on which storage backend is wired.
     profiles: Arc<dyn holon_api::entity_profile::ProfileResolving>,
+    /// Answers "does this scheme name a registered entity?" against the LIVE
+    /// registry. Marks persist only that a target is scheme-shaped, so link
+    /// decoration and link-click ask this at read time — a link ingested
+    /// before its provider connects heals on the next render.
+    link_classifier: holon_api::link_parser::LinkTargetClassifier,
     error_tracker: PublishErrorTracker,
     ready_signal: Option<tokio::sync::watch::Receiver<Option<Result<(), String>>>>,
     /// Extra services resolved from DI (for tests)
@@ -370,6 +375,7 @@ pub struct SessionParts {
     pub operation_engine: Option<Arc<dyn holon_api::OperationEngine>>,
     pub ui_watcher: Arc<dyn holon_api::UiWatcher>,
     pub profiles: Arc<dyn holon_api::entity_profile::ProfileResolving>,
+    pub link_classifier: holon_api::link_parser::LinkTargetClassifier,
     pub error_tracker: PublishErrorTracker,
     pub ready_signal: Option<tokio::sync::watch::Receiver<Option<Result<(), String>>>>,
     pub preference_defs: Arc<Vec<preferences::PreferenceDef>>,
@@ -389,6 +395,7 @@ impl SessionParts {
         operation_engine: Option<Arc<dyn holon_api::OperationEngine>>,
         ui_watcher: Arc<dyn holon_api::UiWatcher>,
         profiles: Arc<dyn holon_api::entity_profile::ProfileResolving>,
+        link_classifier: holon_api::link_parser::LinkTargetClassifier,
     ) -> Self {
         let theme_registry = Arc::new(theme::ThemeRegistry::load(None));
         let preference_defs = Arc::new(preferences::define_preferences(&theme_registry));
@@ -398,6 +405,7 @@ impl SessionParts {
             operation_engine,
             ui_watcher,
             profiles,
+            link_classifier,
             error_tracker: PublishErrorTracker::new(),
             ready_signal: None,
             preference_defs,
@@ -420,6 +428,7 @@ impl FrontendSession<()> {
             operation_engine: parts.operation_engine,
             ui_watcher: parts.ui_watcher,
             profiles: parts.profiles,
+            link_classifier: parts.link_classifier,
             error_tracker: parts.error_tracker,
             ready_signal: parts.ready_signal,
             extras: (),
@@ -460,6 +469,12 @@ impl<T> FrontendSession<T> {
     /// here so it never panics for lack of an engine.
     pub fn profiles(&self) -> &Arc<dyn holon_api::entity_profile::ProfileResolving> {
         &self.profiles
+    }
+
+    /// The live scheme classifier — the read-time authority on whether a
+    /// scheme-shaped link target names a registered entity.
+    pub fn link_classifier(&self) -> &holon_api::link_parser::LinkTargetClassifier {
+        &self.link_classifier
     }
 
     /// The query-execution capability (ADR 0004 — "Turso is one of four").

@@ -365,8 +365,24 @@ fn link_mark_strategy() -> impl Strategy<Value = InlineMark> {
         Just(EntityRef::External {
             url: "https://example.com/page".to_string()
         }),
-        Just(EntityRef::Internal {
-            id: EntityUri::block("550e8400-e29b-41d4-a716-446655440000")
+        Just(EntityRef::from_uri(&EntityUri::block(
+            "550e8400-e29b-41d4-a716-446655440000"
+        ))),
+        // A scheme-shaped target whose scheme NO entity claims must round-trip
+        // byte-identically too — it is the same variant, and forgetting that
+        // is how `[[Areas:Work]]` would start rendering as a block ref.
+        Just(EntityRef::from_uri(
+            &EntityUri::parse("t-widget:abc123").expect("valid entity uri")
+        )),
+        // A wiki path whose LATER segment carries a colon. Same variant again,
+        // but NOT a URI — coercing it to one rewrites the author's text to
+        // `block:Meeting/Notes:2026`. Only a generated case covers this, since
+        // the whole-URI arms above parse cleanly and hide the distinction.
+        Just(EntityRef::Scheme {
+            raw: "Meeting/Notes:2026".to_string()
+        }),
+        Just(EntityRef::Scheme {
+            raw: "Areas/cc-session:abc".to_string()
         }),
         Just(EntityRef::Name {
             name: "Some Page".to_string()

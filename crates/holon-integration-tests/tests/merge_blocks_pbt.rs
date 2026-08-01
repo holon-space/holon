@@ -411,9 +411,7 @@ async fn seed_tree(env: &TestEnvironment, case: &MergeCase) {
         0,
         label.chars().count(),
         InlineMark::Link {
-            target: EntityRef::Internal {
-                id: holon_api::EntityUri::block(DUP),
-            },
+            target: EntityRef::from_uri(&holon_api::EntityUri::block(DUP)),
             label: label.to_string(),
         },
     )];
