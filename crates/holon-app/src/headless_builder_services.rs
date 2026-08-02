@@ -84,6 +84,13 @@ impl BuilderServices for HeadlessBuilderServices {
         anyhow::bail!("HeadlessBuilderServices does not support live queries")
     }
 
+    /// One-shot querying IS available headlessly even though live watching is
+    /// not — `describe_ui`'s deferred-subtree expansion needs a snapshot, not a
+    /// subscription.
+    fn query_engine(&self) -> Option<Arc<dyn holon_api::QueryEngine>> {
+        Some(self.engine.clone() as Arc<dyn holon_api::QueryEngine>)
+    }
+
     fn widget_state(&self, _: &str) -> WidgetState {
         WidgetState::default()
     }

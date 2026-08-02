@@ -384,6 +384,17 @@ pub struct DescribeUiParams {
     /// JSON
     #[serde(default = "default_text_format")]
     pub format: String,
+    /// Resolve subtrees the render interpreter defers to the platform layer —
+    /// currently a `live_query`'s rows, which are executed once (a snapshot, no
+    /// watcher is left running). Default true. Disabling keeps the call purely
+    /// structural and cheap; every unresolved subtree is then reported as an
+    /// explicit `unevaluated` node, never as empty content.
+    #[serde(default = "default_true")]
+    pub expand_deferred: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_text_format() -> String {

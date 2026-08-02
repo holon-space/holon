@@ -2908,7 +2908,11 @@ impl HolonMcpServer {
     #[tool(
         description = "Render a block's UI as a structural tree. Returns what an LLM agent would \
                        'see': widget hierarchy, entity IDs, labels, and nesting. Use format \
-                       'text' for readable output or 'json' for structured data."
+                       'text' for readable output or 'json' for structured data. Subtrees the \
+                       render interpreter defers to the platform layer (a live_query's rows) are \
+                       resolved by running the query once, unless expand_deferred is false; any \
+                       subtree left unresolved is reported as an explicit 'unevaluated' node, so \
+                       an empty result always means empty and never 'not evaluated'."
     )]
     async fn describe_ui(
         &self,
@@ -2941,14 +2945,27 @@ impl HolonMcpServer {
         .await
         .ok(); // ALLOW(ok): timeout non-fatal — render whatever we have
 
-        let display_tree = tokio::task::spawn_blocking(move || svc.snapshot_resolved(&block_id))
-            .await
-            .map_err(|e| {
-                rmcp::ErrorData::internal_error(
-                    format!("Shadow interpretation panicked: {e}"),
-                    None,
-                )
-            })?;
+        let svc_resolve = svc.clone();
+        let mut display_tree =
+            tokio::task::spawn_blocking(move || svc_resolve.snapshot_resolved(&block_id))
+                .await
+                .map_err(|e| {
+                    rmcp::ErrorData::internal_error(
+                        format!("Shadow interpretation panicked: {e}"),
+                        None,
+                    )
+                })?;
+
+        // The interpreter is pure and synchronous, so it hands back structural
+        // prototypes for the subtrees it defers to the platform layer. Resolve
+        // them here, or mark them — never report a prototype as content.
+        let resolver = crate::describe_ui_expand::EngineResolver { services: svc };
+        let policy = if params.expand_deferred {
+            crate::describe_ui_expand::DeferredPolicy::Expand(&resolver)
+        } else {
+            crate::describe_ui_expand::DeferredPolicy::MarkOnly
+        };
+        crate::describe_ui_expand::resolve_deferred(&mut display_tree, policy).await;
 
         let output = format_display_tree(&display_tree, &params.format)?;
         Ok(CallToolResult::success(vec![Content::text(output)]))

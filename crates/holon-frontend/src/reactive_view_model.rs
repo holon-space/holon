@@ -1005,7 +1005,7 @@ impl ReactiveViewModel {
                 // lifetime). Collapsed and not-yet-materialised → None →
                 // header-only render. Expanded → cache hit → snapshot the
                 // materialised VM and append after the header.
-                let all_children = match self
+                let (all_children, content_deferred) = match self
                     .lazy_slot
                     .as_ref()
                     .and_then(|s| s.materialize_if_gated())
@@ -1017,13 +1017,14 @@ impl ReactiveViewModel {
                         };
                         let mut items = header_children.items;
                         items.push(snapshot);
-                        LazyChildren::fully_materialized(items)
+                        (LazyChildren::fully_materialized(items), false)
                     }
-                    None => header_children,
+                    None => (header_children, self.lazy_slot.is_some()),
                 };
                 ViewKind::ExpandToggle {
                     target_id,
                     expanded: is_expanded,
+                    content_deferred,
                     children: all_children,
                 }
             }

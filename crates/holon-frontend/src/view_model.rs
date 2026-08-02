@@ -137,6 +137,32 @@ pub struct ViewModel {
     pub occurrence: holon_api::Occurrence,
 }
 
+/// A mechanism by which the pure render interpreter leaves a subtree
+/// unresolved for the platform layer to finish.
+///
+/// The two differ in expansion cost: forcing an `ExpandToggleContent` thunk is
+/// pure interpretation, while `LiveQueryRows` must execute a query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeferredMechanism {
+    /// `live_query` rows. The interpreter builds `content` from an empty row
+    /// vector as a structural prototype and carries `query` / `query_lang` /
+    /// `query_context_id` / `render_expr` so a consumer can resolve it itself.
+    LiveQueryRows,
+    /// `expand_toggle` content behind an unforced `LazyReactiveSlot` — the
+    /// thunk only fires once the `expanded` gate opens.
+    ExpandToggleContent,
+}
+
+impl DeferredMechanism {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LiveQueryRows => "live_query_rows",
+            Self::ExpandToggleContent => "expand_toggle_content",
+        }
+    }
+}
+
 /// The kind of widget this node represents.
 ///
 /// Each variant has typed fields instead of stringly-typed `widget: String`.
@@ -279,6 +305,12 @@ pub enum ViewKind {
     ExpandToggle {
         target_id: String,
         expanded: bool,
+        /// A content thunk exists but its gate never opened, so `children`
+        /// holds the header alone. Distinguishes "collapsed, content not built"
+        /// from "no content template at all" — without it a snapshot consumer
+        /// cannot tell the two apart (BugFunnel 2026-08-02).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        content_deferred: bool,
         children: LazyChildren,
     },
     PrefField {
@@ -418,6 +450,17 @@ pub enum ViewKind {
     /// Stream hasn't delivered a structure event yet. Renders as nothing.
     Loading,
 
+    /// A subtree the pure interpreter deliberately left unresolved, standing in
+    /// for the structural prototype it emits instead. Snapshot consumers that
+    /// do not resolve deferrals themselves must emit this rather than pass the
+    /// prototype off as content — an empty prototype is indistinguishable from
+    /// a legitimately empty result (BugFunnel 2026-08-02).
+    Unevaluated {
+        mechanism: DeferredMechanism,
+        /// Why this subtree was not resolved, in consumer-facing terms.
+        reason: String,
+    },
+
     /// A flat tree item: single content child + depth metadata for indentation.
     TreeItem {
         depth: usize,
@@ -483,6 +526,7 @@ impl ViewKind {
             ViewKind::Error { .. } => "error",
             ViewKind::Empty => "empty",
             ViewKind::Loading => "loading",
+            ViewKind::Unevaluated { .. } => "unevaluated",
             ViewKind::TreeItem { .. } => "tree_item",
         }
     }
@@ -779,6 +823,7 @@ impl ViewModel {
             LayoutWidget::ExpandToggle => ViewKind::ExpandToggle {
                 target_id: String::new(),
                 expanded: false,
+                content_deferred: false,
                 children: lazy,
             },
             LayoutWidget::BottomDock => {
@@ -882,6 +927,7 @@ impl ViewModel {
                     .get("expanded")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
+                content_deferred: false,
                 children: LazyChildren::fully_materialized(children),
             },
             ElementWidget::PrefField => ViewKind::PrefField {
@@ -1151,10 +1197,19 @@ impl ViewModel {
             ViewKind::ExpandToggle {
                 target_id,
                 expanded,
+                content_deferred,
                 children,
             } => {
                 let icon = if *expanded { "\u{25BC}" } else { "\u{25B6}" };
-                let _ = writeln!(out, "{pad}expand_toggle({icon} {target_id}){ops_suffix}");
+                let deferred = if *content_deferred {
+                    " content=UNEVALUATED"
+                } else {
+                    ""
+                };
+                let _ = writeln!(
+                    out,
+                    "{pad}expand_toggle({icon} {target_id}){deferred}{ops_suffix}"
+                );
                 for child in &children.items {
                     child.fmt_indent(out, indent + 1);
                 }
@@ -1282,6 +1337,9 @@ impl ViewModel {
             ViewKind::Loading => {
                 let _ = writeln!(out, "{pad}(loading)");
             }
+            ViewKind::Unevaluated { mechanism, reason } => {
+                let _ = writeln!(out, "{pad}UNEVALUATED[{}]: {reason}", mechanism.as_str());
+            }
         }
     }
 
@@ -1326,6 +1384,65 @@ impl ViewModel {
                     child.collect_ids_recursive(ids);
                 }
             }
+        }
+    }
+
+    /// Mutable sibling of [`ViewModel::children`], for post-passes that rewrite
+    /// a snapshot in place.
+    pub fn children_mut(&mut self) -> &mut [ViewModel] {
+        match &mut self.kind {
+            // LazyChildren nodes
+            ViewKind::Row { children, .. }
+            | ViewKind::Section { children, .. }
+            | ViewKind::List { children, .. }
+            | ViewKind::Tree { children }
+            | ViewKind::Outline { children }
+            | ViewKind::Table { children }
+            | ViewKind::Columns { children, .. }
+            | ViewKind::Board { children, .. }
+            | ViewKind::Column { children, .. }
+            | ViewKind::QueryResult { children }
+            | ViewKind::PrefField { children, .. }
+            | ViewKind::TreeItem { children, .. }
+            | ViewKind::Card { children, .. }
+            | ViewKind::ChatBubble { children, .. }
+            | ViewKind::Collapsible { children, .. }
+            | ViewKind::OnHover { children, .. }
+            | ViewKind::ExpandToggle { children, .. }
+            | ViewKind::BottomDock { children, .. } => &mut children.items,
+
+            // Box<ViewModel> wrappers
+            ViewKind::Focusable { child }
+            | ViewKind::Selectable { child }
+            | ViewKind::Draggable { child }
+            | ViewKind::Drawer { child, .. }
+            | ViewKind::PieMenu { child, .. }
+            | ViewKind::ViewModeSwitcher { child, .. }
+            | ViewKind::LiveBlock { content: child, .. }
+            | ViewKind::LiveQuery { content: child, .. }
+            | ViewKind::RenderBlock { content: child } => std::slice::from_mut(child.as_mut()),
+
+            // Leaf nodes
+            ViewKind::Text { .. }
+            | ViewKind::Badge { .. }
+            | ViewKind::Icon { .. }
+            | ViewKind::Checkbox { .. }
+            | ViewKind::Divider
+            | ViewKind::Spacer { .. }
+            | ViewKind::EditableText { .. }
+            | ViewKind::RenderedText { .. }
+            | ViewKind::Image { .. }
+            | ViewKind::SourceBlock { .. }
+            | ViewKind::SourceEditor { .. }
+            | ViewKind::BlockOperations { .. }
+            | ViewKind::StateToggle { .. }
+            | ViewKind::TableRow { .. }
+            | ViewKind::OpButton { .. }
+            | ViewKind::DropZone { .. }
+            | ViewKind::Error { .. }
+            | ViewKind::Empty
+            | ViewKind::Unevaluated { .. }
+            | ViewKind::Loading => &mut [],
         }
     }
 
@@ -1382,6 +1499,7 @@ impl ViewModel {
             | ViewKind::DropZone { .. }
             | ViewKind::Error { .. }
             | ViewKind::Empty
+            | ViewKind::Unevaluated { .. }
             | ViewKind::Loading => &[],
         }
     }
@@ -1452,6 +1570,7 @@ impl ViewModel {
             ViewKind::RenderBlock { .. } => "render_entity",
             ViewKind::Error { .. } => "error",
             ViewKind::TreeItem { .. } => "tree_item",
+            ViewKind::Unevaluated { .. } => "unevaluated",
             ViewKind::Empty | ViewKind::Loading => return None,
         })
     }

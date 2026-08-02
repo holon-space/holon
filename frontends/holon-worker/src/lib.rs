@@ -1111,11 +1111,17 @@ mod backend {
                     )
                     .await;
                 });
-                // Match the native `describe_ui` (frontends/mcp `snapshot_resolved`
-                // + `format_display_tree`): the RESOLVED tree round-trips as a
-                // `ViewModel` for the live-MCP twin's `refresh_ui`, whereas raw
-                // `snapshot` leaves unresolved `live_block` placeholders that do
-                // not deserialize.
+                // `snapshot_resolved`, not raw `snapshot`: the RESOLVED tree
+                // round-trips as a `ViewModel` for the live-MCP twin's
+                // `refresh_ui`, whereas `snapshot` leaves unresolved
+                // `live_block` placeholders that do not deserialize.
+                //
+                // DIVERGES from the native `describe_ui` (frontends/mcp): that
+                // one then runs `describe_ui_expand::resolve_deferred`, so it
+                // resolves a `live_query`'s rows and marks whatever it could
+                // not resolve. This handler does neither, so a `live_query`
+                // here still yields the interpreter's empty prototype — the
+                // BugFunnel 2026-08-02 PERCEPTION defect, unfixed on this path.
                 let snapshot = reactive.snapshot_resolved(&block_uri);
                 if format == "json" {
                     // Return the ViewModel as a JSON VALUE (object), NOT a

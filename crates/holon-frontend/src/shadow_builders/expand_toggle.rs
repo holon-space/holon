@@ -174,6 +174,30 @@ mod tests {
         );
     }
 
+    /// `default_expanded: true` seeds the gate open, so the snapshot
+    /// materialises the lazy content child instead of rendering header-only.
+    /// Pins the builder's documented contract (BugFunnel 2026-08-02).
+    ///
+    /// KNOWN RED — `"content"` is absent from
+    /// `holon_api::render_eval::is_template_arg`, so `get_template("
+    /// content")` is always `None` and `lazy_slot` is never
+    /// built. Un-ignore once templateness is decided per-widget: allowlisting
+    /// `"content"` globally would break `text`/`source_editor`, which take it
+    /// as a scalar.
+    #[test]
+    #[ignore = "prod defect: is_template_arg omits \"content\" — see BugFunnel 2026-08-02"]
+    fn default_expanded_materialises_content_in_snapshot() {
+        let vm = interpret_toggle(
+            r#"expand_toggle(#{default_expanded: true, header: text("A Page"), content: text("HELLO-STATIC")})"#,
+        );
+        let snap = vm.snapshot();
+        let rendered = snap.pretty_print(0);
+        assert!(
+            rendered.contains("HELLO-STATIC"),
+            "default_expanded toggle must materialise its content; got:\n{rendered}"
+        );
+    }
+
     /// Default expand_toggle (no knob) keeps the leading-chevron shape: the
     /// prop is false and NO hover gate is allocated.
     #[test]
