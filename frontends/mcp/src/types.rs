@@ -391,14 +391,20 @@ pub struct DescribeUiParams {
     /// explicit `unevaluated` node, never as empty content.
     #[serde(default = "default_true")]
     pub expand_deferred: bool,
-}
-
-fn default_true() -> bool {
-    true
+    /// Annotate each entity-bound node with the rect the frontend actually
+    /// painted for it (x/y/width/height/has_visible_area). Defaults to true.
+    /// Nodes with no measurement carry an explicit absence marker — never a
+    /// zero rect.
+    #[serde(default = "default_true")]
+    pub include_geometry: bool,
 }
 
 fn default_text_format() -> String {
     "text".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]

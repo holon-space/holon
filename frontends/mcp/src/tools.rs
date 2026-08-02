@@ -356,6 +356,38 @@ fn format_display_tree(
     }
 }
 
+/// Same rendering, plus the rects the frontend actually painted for each
+/// entity-bound node. A `None` provider is disclosed in the output — the
+/// caller never has to guess whether "no geometry" means "not painted" or
+/// "nobody was measuring".
+fn format_display_tree_with_geometry(
+    tree: &holon_frontend::view_model::ViewModel,
+    format: &str,
+    geometry: Option<&dyn holon_frontend::geometry::GeometryProvider>,
+) -> Result<String, rmcp::ErrorData> {
+    let value = serde_json::to_value(tree).map_err(|e| {
+        rmcp::ErrorData::internal_error(
+            "serialization_failed",
+            Some(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+    match format {
+        "json" => {
+            let annotated = crate::describe_ui_geometry::annotate_json(&value, geometry);
+            serde_json::to_string_pretty(&annotated).map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    "serialization_failed",
+                    Some(serde_json::json!({"error": e.to_string()})),
+                )
+            })
+        }
+        _ => {
+            let report = crate::describe_ui_geometry::geometry_text_report(&value, geometry);
+            Ok(format!("{}\n{report}", tree.pretty_print(0)))
+        }
+    }
+}
+
 #[tool_router(router = tool_router_backend, vis = "pub(crate)")]
 impl HolonMcpServer {
     #[tool(description = "Create a table with specified schema")]
@@ -2912,7 +2944,10 @@ impl HolonMcpServer {
                        render interpreter defers to the platform layer (a live_query's rows) are \
                        resolved by running the query once, unless expand_deferred is false; any \
                        subtree left unresolved is reported as an explicit 'unevaluated' node, so \
-                       an empty result always means empty and never 'not evaluated'."
+                       an empty result always means empty and never 'not evaluated'. By default \
+                       each entity-bound node also carries the rect the window actually painted \
+                       for it (x/y/width/height/has_visible_area); pass include_geometry=false \
+                       to omit it."
     )]
     async fn describe_ui(
         &self,
@@ -2967,7 +3002,12 @@ impl HolonMcpServer {
         };
         crate::describe_ui_expand::resolve_deferred(&mut display_tree, policy).await;
 
-        let output = format_display_tree(&display_tree, &params.format)?;
+        let output = if params.include_geometry {
+            let geometry = self.debug.geometry.get().cloned();
+            format_display_tree_with_geometry(&display_tree, &params.format, geometry.as_deref())?
+        } else {
+            format_display_tree(&display_tree, &params.format)?
+        };
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 

@@ -2528,6 +2528,9 @@ pub fn setup_interaction_pump(
     // gone idle after its last paint (iOS) — see `FlushOnReadGeometry`.
     let geometry: Arc<dyn holon_frontend::geometry::GeometryProvider> =
         Arc::new(geometry::FlushOnReadGeometry(bounds_registry));
+    // `describe_ui` reads the same measured rects, so an agent inspecting the
+    // tree sees what the window painted rather than structure alone.
+    debug.geometry.set(geometry.clone()).ok();
     let driver: Arc<dyn holon_frontend::user_driver::UserDriver> = Arc::new(
         user_driver::GpuiUserDriver::new(tx, geometry, engine.read().unwrap().clone()),
     );

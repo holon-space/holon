@@ -174,6 +174,11 @@ pub struct DebugServices {
     /// window creation; MCP tools read it to stay decoupled from the
     /// concrete frontend.
     pub user_driver: std::sync::OnceLock<Arc<dyn UserDriver>>,
+    /// Frontend-supplied measured-layout registry. `describe_ui` joins its
+    /// nodes against this to report the rects the window actually painted.
+    /// Unset in a headless run — the tool then declares geometry unavailable
+    /// rather than reporting zeros.
+    pub geometry: std::sync::OnceLock<Arc<dyn holon_frontend::geometry::GeometryProvider>>,
     /// FileSystem port for org-file reads (ADR 0011). Populated from DI by
     /// `DebugServicesPopulatorModule` so inspection tools see the same vault
     /// the session uses (in tests: the in-memory filesystem).
@@ -273,6 +278,7 @@ impl Default for DebugServices {
             input_router: Arc::new(InputRouter::new()),
             interaction_tx: std::sync::OnceLock::new(),
             user_driver: std::sync::OnceLock::new(),
+            geometry: std::sync::OnceLock::new(),
             org_fs: std::sync::OnceLock::new(),
             reset_tx: std::sync::OnceLock::new(),
             reset_builder: std::sync::OnceLock::new(),
