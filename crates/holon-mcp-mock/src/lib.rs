@@ -24,6 +24,12 @@ pub const LIST_TOOL: &str = "list-items";
 pub const WRITE_TOOL: &str = "write-item";
 /// The single resource URI for resource-based sync scenarios.
 pub const RESOURCE_URI: &str = "mock://items";
+/// The live-fleet resource of the claude-history provider.
+pub const LIVE_URI: &str = "claude-history://live";
+/// The projects resource of the claude-history provider. `LiveFleet` serves it
+/// empty: the claude-history sidecar syncs it alongside `live`, and an
+/// unhandled URI is a hard read_resource error.
+pub const PROJECTS_URI: &str = "claude-history://projects";
 
 /// Which challenging behaviour the server exhibits. See the catalogue doc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +54,11 @@ pub enum Scenario {
     Stateful,
     /// Advertises `resources.subscribe` and pushes an `updated` notification.
     SubscribePush,
+    /// Serves the claude-history provider's `live` fleet listing: the first
+    /// read carries a running background session plus a foreground one, later
+    /// reads drop the background one — the provider omits a session once its
+    /// job reaches a terminal state.
+    LiveFleet,
     /// Write tool accepts the call and acks success (well-formed write).
     WriteHappy,
     /// Write tool dedups on the idempotency key: the first call with a key
@@ -79,6 +90,7 @@ impl Scenario {
             "tool_error" => Self::ToolError,
             "stateful" => Self::Stateful,
             "subscribe_push" => Self::SubscribePush,
+            "live_fleet" => Self::LiveFleet,
             "write_happy" => Self::WriteHappy,
             "write_duplicate_detected" => Self::WriteDuplicateDetected,
             "write_conflict" => Self::WriteConflict,
@@ -118,6 +130,53 @@ fn item(n: usize) -> serde_json::Value {
     })
 }
 
+/// The claude-history `live` listing as of read number `read_count`: the
+/// background session is present only on the first read.
+fn live_fleet(read_count: u64) -> Vec<serde_json::Value> {
+    let foreground = serde_json::json!({
+        "id": "live-fg-1",
+        "kind": "session",
+        "session_id": "s-fg-1",
+        "project_id": "p-holon",
+        "cwd": "/w/holon",
+        "name": "main session",
+        "state": "running",
+        "status": "waiting-on-user",
+        "tempo": "idle",
+        "needs": "input",
+        "detail": "awaiting a prompt",
+        "started_at": "2026-08-03T09:00:00Z",
+        "updated_at": "2026-08-03T09:31:00Z",
+        "pid": 4242,
+        "job_id": serde_json::Value::Null,
+        "cli_version": "2.1.0",
+        "tokens": 51200,
+    });
+    if read_count > 1 {
+        return vec![foreground];
+    }
+    let background = serde_json::json!({
+        "id": "live-bg-1",
+        "kind": "bg",
+        "session_id": "s-bg-1",
+        "project_id": "p-holon",
+        "cwd": "/w/holon/lane",
+        "name": "lane-chatinput",
+        "state": "running",
+        "status": "working",
+        "tempo": "steady",
+        "needs": "nothing",
+        "detail": "editing claude-history.yaml",
+        "started_at": "2026-08-03T09:10:00Z",
+        "updated_at": "2026-08-03T09:30:00Z",
+        "pid": 4243,
+        "job_id": "job-77",
+        "cli_version": "2.1.0",
+        "tokens": 8192,
+    });
+    vec![background, foreground]
+}
+
 /// The mock server handler. `read_count`/`items` back the stateful and push
 /// scenarios; all others are pure functions of the request.
 pub struct MockServer {
@@ -153,7 +212,9 @@ impl ServerHandler for MockServer {
                 .enable_resources()
                 .enable_resources_subscribe()
                 .build(),
-            Scenario::Stateful => ServerCapabilities::builder().enable_resources().build(),
+            Scenario::Stateful | Scenario::LiveFleet => {
+                ServerCapabilities::builder().enable_resources().build()
+            }
             _ => ServerCapabilities::builder().enable_tools().build(),
         };
         ServerInfo {
@@ -262,6 +323,25 @@ impl ServerHandler for MockServer {
         let read_count = self.read_count.clone();
         let items = self.items.clone();
         async move {
+            if scenario == Scenario::LiveFleet {
+                let body = match request.uri.as_str() {
+                    PROJECTS_URI => "[]".to_string(),
+                    LIVE_URI => {
+                        let mut c = read_count.lock().await;
+                        *c += 1;
+                        serde_json::to_string(&live_fleet(*c)).unwrap()
+                    }
+                    other => {
+                        return Err(McpError::resource_not_found(
+                            format!("LiveFleet serves no resource '{other}'"),
+                            None,
+                        ));
+                    }
+                };
+                return Ok(ReadResourceResult {
+                    contents: vec![ResourceContents::text(body, request.uri)],
+                });
+            }
             if request.uri != RESOURCE_URI {
                 return Err(McpError::resource_not_found("unknown resource", None));
             }
@@ -350,6 +430,7 @@ fn tool_response(
         // Resource-based and write scenarios never reach this read helper.
         Scenario::Stateful
         | Scenario::SubscribePush
+        | Scenario::LiveFleet
         | Scenario::WriteHappy
         | Scenario::WriteDuplicateDetected
         | Scenario::WriteConflict

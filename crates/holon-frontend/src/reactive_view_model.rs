@@ -355,6 +355,13 @@ pub struct ReactiveViewModel {
     /// content children only while it is `true`.
     pub hovered: Option<Mutable<bool>>,
 
+    /// Ephemeral compose buffer owned by this node (`input_box`). Unlike
+    /// `editable_text`, which re-derives its content from a row column on
+    /// every CDC write, a draft tracks no row: it survives the churn of the
+    /// list beneath it and is cleared only when its wired operation
+    /// dispatches successfully.
+    pub draft: Option<Mutable<String>>,
+
     /// Operations available at this node.
     pub operations: Vec<OperationWiring>,
 
@@ -552,6 +559,7 @@ impl ReactiveViewModel {
             lazy_slot: Self::push_down_lazy_slot(&self.lazy_slot, &fresh.lazy_slot),
             expanded: self.expanded.clone(),
             hovered: self.hovered.clone(),
+            draft: self.draft.clone(),
             operations: fresh.operations.clone(),
             triggers: fresh.triggers.clone(),
             layout_hint: fresh.layout_hint,
@@ -602,6 +610,7 @@ impl ReactiveViewModel {
                             ),
                             expanded: old_child.expanded.clone(),
                             hovered: old_child.hovered.clone(),
+                            draft: old_child.draft.clone(),
                             operations: fresh_child.operations.clone(),
                             triggers: fresh_child.triggers.clone(),
                             layout_hint: fresh_child.layout_hint,
@@ -1197,6 +1206,7 @@ impl Default for ReactiveViewModel {
             lazy_slot: None,
             expanded: None,
             hovered: None,
+            draft: None,
             operations: vec![],
             triggers: vec![],
             layout_hint: LayoutHint::default(),

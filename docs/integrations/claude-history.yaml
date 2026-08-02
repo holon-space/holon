@@ -37,6 +37,76 @@ entities:
     sync:
       list_resource: "claude-history://projects"
 
+  # The fleet of sessions running RIGHT NOW. Liveness is not derivable from
+  # `session` (a projection of transcripts on disk, where a finished and a
+  # running session look alike), so anything that must act on a live process —
+  # sending a message to a backgrounded session, or just showing who is busy —
+  # reads this entity instead.
+  #
+  # SYNC-only and MIRROR semantics: `claude-history://live` is a param-free
+  # resource returning a top-level array of the currently-live sessions, and
+  # each sync replaces the cache wholesale. A session the provider stops
+  # listing (its job reached a terminal state) therefore DISAPPEARS from
+  # `cc_live_session` — a stale row here would name a dead process.
+  live_session:
+    profile_variants:
+      - name: default
+        render: 'row(text(col("name")), spacer(8), text(col("state")))'
+    schema:
+      - name: id
+        sql_type: TEXT
+        primary_key: true
+      - name: kind
+        sql_type: TEXT
+      - name: session_id
+        sql_type: TEXT
+        indexed: true
+      - name: project_id
+        sql_type: TEXT
+        nullable: true
+      - name: cwd
+        sql_type: TEXT
+      - name: name
+        sql_type: TEXT
+        nullable: true
+      - name: state
+        sql_type: TEXT
+        nullable: true
+      - name: status
+        sql_type: TEXT
+        nullable: true
+      - name: tempo
+        sql_type: TEXT
+        nullable: true
+      - name: needs
+        sql_type: TEXT
+        nullable: true
+      - name: detail
+        sql_type: TEXT
+        nullable: true
+      - name: started_at
+        sql_type: TEXT
+        nullable: true
+      - name: updated_at
+        sql_type: TEXT
+        nullable: true
+      - name: pid
+        sql_type: INTEGER
+        nullable: true
+      # Set only for backgrounded sessions; the handle a later feature needs to
+      # address one.
+      - name: job_id
+        sql_type: TEXT
+        nullable: true
+      - name: cli_version
+        sql_type: TEXT
+        nullable: true
+      - name: tokens
+        sql_type: INTEGER
+        nullable: true
+    sync:
+      list_resource: "claude-history://live"
+
   session:
     profile_variants:
       - name: default
