@@ -340,3 +340,19 @@
 # lookup in focus_path -> navigation.focus_pin -> the focus_roots projection the pin
 # invariants read. Break any link in that chain and this case goes red on its own.
 {"name": "shift-click-bullet-pins-block-to-right-sidebar", "description": "Teeth for the modifier-click dispatch path. Drove out a shipped defect: block_profile.yaml passed region: \"right\" to focus_pin, which Region::from_str rejects (it accepts only main/left_sidebar/right_sidebar), so the shipped shift+click-to-pin gesture failed at the navigation provider. Undetectable before the keystone generated modifier-carrying clicks.", "transitions": [{"PinBlock": {"region": "right_sidebar", "block_id": "block:c1"}}]}
+
+# Indent whose new parent is a DE-INLINED sibling page is a cross-FILE move. The
+# source file's write-back must drop the moved block, but writeback_sibling_grounding
+# only reads a sibling file reachable from an ABSENT block's own id: gen-1 is not a
+# page (name_chain -> empty -> Ok(None)) and the destination page was never in the
+# source file, so nothing grounds the drop and ADR 0025 vetoes a LEGITIMATE move.
+# Journals.org keeps a stale "* s" copy of gen-1, which is why inv-blocks-match-ref/org
+# sees gen-1 under TWO parents and render != disk persists.
+# Distilled from the 2026-08-02 `just pbt general 48` shrink. The shrink reached this
+# state via NavigateBack, whose target depends on nav HISTORY; replayed standalone it
+# focused elsewhere, gen-1 was born under a different parent, and the case was VACUOUSLY
+# green. NavigateFocus pins the precondition directly: gen-1 must be born under
+# block:journals so its previous sibling IS the de-inlined day page. If a future change
+# makes this case green, FIRST confirm gen-1 still lands under block:journals — a green
+# here is only meaningful if that still holds.
+{"name": "indent-onto-deinlined-sibling-page-vetoes-writeback", "description": "Pre-existing keystone red, reproduced 2026-08-02 in 3 transitions: Indent(block:gen-1) re-parents a plain block onto its previous sibling, the seeded de-inlined daily journal page block:61133fe7 (2026-01-15), which lives in its OWN org file. The store performs the move correctly (the SQL render of Journals.org rightly omits gen-1), but veto_ungrounded_removals refuses that write with UNGROUNDED WRITE-BACK REMOVAL and quarantines Journals.org, so the stale on-disk copy survives. Root cause: writeback_sibling_grounding (file_sync_controller.rs:4897) resolves doc_id_to_path(block.id), which is Ok(None) for a NON-page block (name_chain returns an empty chain, sync_ports.rs:206-220), so the destination file is never read and a legitimate cross-file move is misread as data loss. Fires inv-blocks-match-ref/org (10 SUT blocks vs 9 ref, gen-1 under BOTH block:journals and block:61133fe7), inv-org-render-fixed-point (render != disk persisted 5s) and inv-no-observed-errors.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": ["MCPServer"]}}, "transitions": [{"NavigateFocus": {"region": "main", "block_id": "block:journals"}}, {"CreateBlockUnderFocus": {"content": "s", "id": "block:gen-1"}}, {"Indent": {"block_id": "block:gen-1"}}]}
