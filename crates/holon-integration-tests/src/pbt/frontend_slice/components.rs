@@ -1308,6 +1308,7 @@ impl HeadlessFrontendComponent {
                 &resolved,
                 id,
                 "left_sidebar",
+                holon_api::ClickModifiers::none(),
             )
             .is_some()
             {
@@ -2723,15 +2724,40 @@ impl SutNavHistoryDrive for HeadlessFrontendComponent {
             .await;
     }
 
+    /// Shift+click on the block's bullet — the production gesture, not a
+    /// synthetic `focus_pin` dispatch. The bullet's `selectable` declares
+    /// `shift_action: focus_pin(#{region: ..., block_id: col("id")})`
+    /// (`assets/default/types/block_profile.yaml`), so the destination region
+    /// and the block id both come from the rendered template; `region` here is
+    /// only the destination the transition predicts, asserted against the one
+    /// the shipped bullet can produce.
+    ///
+    /// This is the only keystone path that exercises a modifier-carrying click
+    /// end to end: YAML `shift_action` → `is_template_arg` → `selectable`
+    /// wiring → modifier-keyed intent lookup → dispatch → `focus_roots`.
     async fn pin_block(&self, region: holon_api::Region, block_id: &holon_api::EntityUri) {
+        assert_eq!(
+            region,
+            holon_api::Region::RightSidebar,
+            "the block bullet's shift_action pins into the right sidebar only"
+        );
         // Resolve the oracle id → SUT-real id: the production `PinBlock` generator
         // draws its target from the oracle's editable descendants, which after a
-        // `SplitBlock` include the synthetic `block::split-N`. `focus_pin` of a
-        // synthetic id would pin a GHOST (the matview's `focus_roots` would then hold
+        // `SplitBlock` include the synthetic `block::split-N`. Clicking a synthetic
+        // id would pin a GHOST (the matview's `focus_roots` would then hold
         // the synthetic while the resolved oracle holds the real id → divergence).
         let resolved = self.resolve_id(block_id);
-        self.dispatch_navigation("focus_pin", region, Some(resolved.to_string()), None)
-            .await;
+        self.driver
+            .click_entity_with_modifiers(
+                &resolved,
+                holon_api::Region::Main.as_str(),
+                holon_api::ClickModifiers::shift(),
+            )
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[PinBlock] shift+click on the {resolved} bullet failed: {e:#}")
+            });
+        self.settle_focus_matviews().await;
     }
 
     async fn unpin_block(&self, history_id: i64) {

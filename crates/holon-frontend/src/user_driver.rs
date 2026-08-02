@@ -695,32 +695,19 @@ impl ReactiveEngineDriver {
     }
 }
 
-#[async_trait::async_trait]
-impl UserDriver for ReactiveEngineDriver {
-    async fn synthetic_dispatch(
-        &self,
-        entity: &str,
-        op: &str,
-        params: HashMap<String, Value>,
-    ) -> Result<()> {
-        let intent = OperationIntent::new(entity.into(), op.into(), params);
-        self.engine.dispatch_intent_sync(intent).await
-    }
-
+impl ReactiveEngineDriver {
     /// Mirror GPUI's `selectable` + `render_entity` click priority:
-    /// dispatch the node's bound click intent if one exists; otherwise
-    /// fall through to `navigation::editor_focus` (cursor placement).
+    /// dispatch the node's click intent bound for exactly `modifiers` if one
+    /// exists; otherwise fall through to cursor placement.
     ///
-    /// The bound-action path is the same one GPUI takes
-    /// (`frontends/gpui/src/render/builders/selectable.rs:46-54` reads
-    /// `node.click_intent()` and dispatches it from `on_mouse_down`).
+    /// `modifiers` is the set held down at mouse-down. `ClickModifiers::none()`
+    /// selects the widget's `action:` wiring, `shift()` its `shift_action:`,
+    /// and so on — the same lookup GPUI's `selectable` performs against its
+    /// `HashMap<ClickModifiers, OperationIntent>`
+    /// (`frontends/gpui/src/render/builders/selectable.rs`).
     /// `BuilderServices::snapshot_resolved` recursively interprets every
-    /// nested `live_block` so the resolved tree contains the
-    /// sidebar/panel children where the bound action lives;
-    /// `find_click_intent_in_view_model` then walks it.
-    ///
-    /// This keeps the headless and GPUI paths converging on the same
-    /// click semantics: ViewModels carry the intent, drivers dispatch it.
+    /// nested `live_block` so the resolved tree contains the sidebar/panel
+    /// children where the bound action lives.
     ///
     /// Poll for the entity in the resolved tree: nested `live_block`
     /// watches stream in async, so a click that lands immediately after
@@ -729,7 +716,12 @@ impl UserDriver for ReactiveEngineDriver {
     /// ALLOW(fallback): pre-existing doc on router-poll behavior
     /// never found, we fall through to cursor placement — same as GPUI
     /// when nothing intercepts the click.
-    async fn click_entity(&self, entity_id: &EntityUri, region: &str) -> Result<()> {
+    pub async fn click_entity_with_modifiers(
+        &self,
+        entity_id: &EntityUri,
+        region: &str,
+        modifiers: holon_api::ClickModifiers,
+    ) -> Result<()> {
         let root_uri = holon_api::root_layout_block_uri();
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
@@ -741,9 +733,9 @@ impl UserDriver for ReactiveEngineDriver {
             // walker would return the LeftSidebar's `navigation.focus` for a
             // Main click and diverge from production GPUI semantics. See
             // FU-15 in `devlog/2026-05-07-164740-logseq-sidebar-followups.md`.
-            if let Some(intent) =
-                crate::focus_path::find_click_intent_in_region(&resolved, entity_id, region)
-            {
+            if let Some(intent) = crate::focus_path::find_click_intent_in_region(
+                &resolved, entity_id, region, modifiers,
+            ) {
                 return self.apply_intent(intent).await;
             }
             // The entity is already rendered in this region but binds no
@@ -786,6 +778,27 @@ impl UserDriver for ReactiveEngineDriver {
         }
         self.engine.set_focus(Some(entity_id.clone()));
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl UserDriver for ReactiveEngineDriver {
+    async fn synthetic_dispatch(
+        &self,
+        entity: &str,
+        op: &str,
+        params: HashMap<String, Value>,
+    ) -> Result<()> {
+        let intent = OperationIntent::new(entity.into(), op.into(), params);
+        self.engine.dispatch_intent_sync(intent).await
+    }
+
+    /// Primary (no-modifier) click. The general gesture — including
+    /// modifier-carrying clicks — is
+    /// [`ReactiveEngineDriver::click_entity_with_modifiers`].
+    async fn click_entity(&self, entity_id: &EntityUri, region: &str) -> Result<()> {
+        self.click_entity_with_modifiers(entity_id, region, holon_api::ClickModifiers::none())
+            .await
     }
 
     /// Headless `state_toggle` click. `click_entity` cannot disambiguate the

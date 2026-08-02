@@ -1161,7 +1161,11 @@ impl UserDriver for GpuiUserDriver {
     fn click_intent_of(&self, entity_id: &EntityUri) -> Option<OperationIntent> {
         let root_uri = holon_api::root_layout_block_uri();
         let resolved = self.engine.snapshot_resolved(&root_uri);
-        holon_frontend::focus_path::find_click_intent_in_view_model(&resolved, entity_id)
+        holon_frontend::focus_path::find_click_intent_in_view_model(
+            &resolved,
+            entity_id,
+            holon_api::ClickModifiers::none(),
+        )
     }
 
     /// The text actually rendered for `entity_id` on screen — read from

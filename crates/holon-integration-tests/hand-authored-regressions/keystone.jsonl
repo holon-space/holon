@@ -332,3 +332,11 @@
 # red FIRST, masking this case -- run it with
 # HOLON_HAND_AUTHORED_CASE=org-drawer-order-property-leaks-into-projections.
 {"name": "org-drawer-order-property-leaks-into-projections", "description": "UNRATIFIED investigation repro (2026-08-01). Pinned storage={Turso} frontend draw seeds the forward-edge corpus and ingests forward-edge-page.org. fe-blocked's :REQUIRES: drawer key makes the org parser (crates/holon-org-format/src/parser.rs, the drawer_order block after the property loop) persist `_drawer_order` into block.properties; the property reaches block_raw.properties, the block matview and the org lens, while the reference models only {sequence}. Fires inv-blocks-match-ref/{org,block_raw,matview}. The block_raw arm's `requires: []` in the failure dump is NOT a lost edge: that arm compares the {Content,Properties,Marks} SUBSET and block_raw carries no junction columns by design (see SutBackend::block_raw_snapshot doc + compare_block_raw_subset). Transitions are incidental; the seed alone is red.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateBlockUnderFocus": {"content": "drawer order probe", "id": "block:dorder0"}}]}
+
+# Modifier-click generation (2026-08-02). The keystone drives PinBlock as a REAL
+# shift+click on the block's bullet, so this one-transition case guards the whole
+# modifier path: block_profile.yaml's `shift_action: focus_pin(...)` ->
+# is_template_arg -> selectable's per-modifier wiring -> the modifier-keyed intent
+# lookup in focus_path -> navigation.focus_pin -> the focus_roots projection the pin
+# invariants read. Break any link in that chain and this case goes red on its own.
+{"name": "shift-click-bullet-pins-block-to-right-sidebar", "description": "Teeth for the modifier-click dispatch path. Drove out a shipped defect: block_profile.yaml passed region: \"right\" to focus_pin, which Region::from_str rejects (it accepts only main/left_sidebar/right_sidebar), so the shipped shift+click-to-pin gesture failed at the navigation provider. Undetectable before the keystone generated modifier-carrying clicks.", "transitions": [{"PinBlock": {"region": "right_sidebar", "block_id": "block:c1"}}]}

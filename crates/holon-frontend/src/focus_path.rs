@@ -163,19 +163,27 @@ pub fn find_click_intent_oneshot(
 /// nested block, then walks it here. The `OperationWiring` info is identical
 /// across both representations, so the resulting `OperationIntent` matches
 /// what GPUI would dispatch on a real click.
+///
+/// `modifiers` selects WHICH click wiring is returned: `ClickModifiers::none()`
+/// is the primary click, `ClickModifiers::shift()` the `shift_action:` wiring,
+/// and so on. A node binding only a modifier action yields `None` for a
+/// primary click (and vice versa) — the same discrimination the GPUI
+/// `selectable` handler performs on its `HashMap<ClickModifiers, _>`.
 pub fn find_click_intent_in_view_model(
     root: &crate::view_model::ViewModel,
     entity_id: &EntityUri,
+    modifiers: holon_api::ClickModifiers,
 ) -> Option<crate::operations::OperationIntent> {
     fn walk(
         node: &crate::view_model::ViewModel,
         entity_id: &EntityUri,
+        modifiers: holon_api::ClickModifiers,
     ) -> Option<crate::operations::OperationIntent> {
         if node.entity_id().as_ref() == Some(entity_id) {
             if let Some(op) = node
                 .operations
                 .iter()
-                .find(|ow| ow.descriptor.is_click_triggered())
+                .find(|ow| ow.descriptor.click_modifiers() == Some(modifiers))
             {
                 return Some(crate::operations::OperationIntent::new(
                     op.descriptor.entity_name.clone(),
@@ -185,13 +193,13 @@ pub fn find_click_intent_in_view_model(
             }
         }
         for child in node.children() {
-            if let Some(intent) = walk(child, entity_id) {
+            if let Some(intent) = walk(child, entity_id, modifiers) {
                 return Some(intent);
             }
         }
         None
     }
-    walk(root, entity_id)
+    walk(root, entity_id, modifiers)
 }
 
 /// Region-scoped variant: only walk the subtree rooted at the clicked region's
@@ -241,9 +249,10 @@ pub fn find_click_intent_in_region(
     root: &crate::view_model::ViewModel,
     entity_id: &EntityUri,
     region: &str,
+    modifiers: holon_api::ClickModifiers,
 ) -> Option<crate::operations::OperationIntent> {
     let panel = find_region_panel(root, region)?;
-    find_click_intent_in_view_model(panel, entity_id)
+    find_click_intent_in_view_model(panel, entity_id, modifiers)
 }
 
 /// Resolve the intent a click on `entity_id`'s `state_toggle` glyph dispatches,
@@ -1558,7 +1567,12 @@ mod tests {
         let root = ViewModel::layout("columns", vec![left_panel, main_panel]);
 
         // LeftSidebar click on block:foo → fires the bound nav.focus.
-        let left_intent = find_click_intent_in_region(&root, &uri("block:foo"), "left_sidebar")
+        let left_intent = find_click_intent_in_region(
+            &root,
+            &uri("block:foo"),
+            "left_sidebar",
+            holon_api::ClickModifiers::none(),
+        )
             .expect("left_sidebar click on block:foo should yield an intent");
         assert_eq!(left_intent.entity_name.as_str(), "navigation");
         assert_eq!(left_intent.op_name, "focus");
@@ -1567,14 +1581,32 @@ mod tests {
         // panel's subtree. Returns None; production would fall through to
         // editor_focus.
         assert!(
-            find_click_intent_in_region(&root, &uri("block:foo"), "main").is_none(),
+            find_click_intent_in_region(
+                &root,
+                &uri("block:foo"),
+                "main",
+                holon_api::ClickModifiers::none()
+            )
+            .is_none(),
             "Main click on block:foo must NOT pick up the LeftSidebar's bound action"
         );
 
         // Unknown region → None (defensive).
-        assert!(find_click_intent_in_region(&root, &uri("block:foo"), "bogus_region").is_none());
+        assert!(find_click_intent_in_region(
+            &root,
+            &uri("block:foo"),
+            "bogus_region",
+            holon_api::ClickModifiers::none()
+        )
+        .is_none());
 
         // Entity not in any panel's subtree → None.
-        assert!(find_click_intent_in_region(&root, &uri("block:never"), "left_sidebar").is_none());
+        assert!(find_click_intent_in_region(
+            &root,
+            &uri("block:never"),
+            "left_sidebar",
+            holon_api::ClickModifiers::none()
+        )
+        .is_none());
     }
 }
