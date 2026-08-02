@@ -183,6 +183,12 @@ pub trait DocumentManager: Send + Sync {
     /// same invariant for the seed set. A caller must not reparent, coerce, or
     /// slug around this; propagate the error (see `doc_id_to_path`).
     ///
+    /// **Empty titles are rejected, never returned.** A page whose title is
+    /// empty (e.g. a never-completed placeholder root) names no directory
+    /// entry; returning it would let `root.join(chain)` resolve OUTSIDE the
+    /// vault. Fail loud so the offending page is named, rather than sanitized
+    /// away — see [`VaultPath`](crate::VaultPath).
+    ///
     /// Root stop recognizes BOTH `no_parent()` and the broader `is_sentinel()`
     /// (synthetic ids) as valid roots — matching the loop's own break
     /// condition, so a legitimate sentinel-rooted chain is never mistaken for a
@@ -228,7 +234,17 @@ pub trait DocumentManager: Send + Sync {
             };
 
             if doc.is_page() {
-                chain.push(doc.title());
+                let title = doc.title();
+                if title.is_empty() {
+                    anyhow::bail!(
+                        "name_chain({doc_id}): page '{current_id}' has an EMPTY title and so \
+                         contributes no path segment — no page file can be named for it inside \
+                         the vault root (an empty segment escapes it); chain so far \
+                         (root-to-here, reversed at return) = {:?}",
+                        chain
+                    );
+                }
+                chain.push(title);
             } else if !is_self {
                 anyhow::bail!(
                     "name_chain({doc_id}): non-page ancestor '{current_id}' found while walking \

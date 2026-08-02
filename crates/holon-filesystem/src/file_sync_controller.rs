@@ -59,6 +59,7 @@ use crate::sync_ports::MatchSituation;
 use crate::sync_ports::MatchVerdict;
 use crate::sync_ports::MountRegistry;
 use crate::sync_ports::ThreeWayTextMerge;
+use crate::vault_path::VaultPath;
 
 /// Bump when the org renderer changes in a way that alters the canonical
 /// projection bytes (formatting, property ordering, directive layout, …).
@@ -91,6 +92,14 @@ pub enum BlockDelta {
 /// How many creates the ingest hands the authority per batch. Matches the
 /// progress-line granularity so every chunk boundary is also a liveness tick.
 const CREATE_CHUNK_BLOCKS: usize = ingest_progress::PROGRESS_EVERY_BLOCKS;
+
+/// Disclosure sites for `failure_disclosed`. Two DISTINCT diagnoses of the same
+/// underlying condition, each worth one loud line: the identity-file pre-flight
+/// reports it via `authoritative_name_chain`, the write path via
+/// `doc_id_to_path`. Keying by site stops whichever fires first from muting the
+/// other.
+const IDENTITY_PREFLIGHT_SITE: &str = "identity-file-preflight";
+const PATH_DERIVATION_SITE: &str = "page-file-path-derivation";
 
 /// What the creates pass must do with one buffered create once the authority
 /// reports whether it persisted it.
@@ -373,6 +382,12 @@ pub struct FileSyncController {
     /// read used from immutable contexts.
     quarantine_skip_logged: std::sync::Mutex<HashSet<CanonicalPath>>,
 
+    /// `(entity, site)` pairs already disclosed loudly, so a condition that is
+    /// permanent for the session is not re-logged on every CDC event (the EROFS
+    /// `writeback_readonly` precedent). Keyed by site because one site's
+    /// success must not mute another site's still-failing diagnosis.
+    failure_disclosed: std::sync::Mutex<HashSet<(EntityUri, &'static str)>>,
+
     /// Copy-on-write seed docs (`holon_api::is_seed_layout_doc`, e.g.
     /// `block:__default__`) stay VIRTUAL through boot: the boot seed/re-seed
     /// writes them into Loro from the current asset, and those writes must NOT
@@ -474,6 +489,7 @@ impl FileSyncController {
             scan_feed_ids: None,
             quarantined: HashSet::new(),
             quarantine_skip_logged: std::sync::Mutex::new(HashSet::new()),
+            failure_disclosed: std::sync::Mutex::new(HashSet::new()),
             boot_seeding: true,
             seed_pristine: HashMap::new(),
             writeback_readonly: HashSet::new(),
@@ -1156,10 +1172,12 @@ impl FileSyncController {
         if document.is_page() {
             let current_chain = self.authoritative_name_chain(&document_uri).await?;
             if !current_chain.is_empty() {
-                let current_path = self
-                    .root_dir
-                    .join(current_chain.join("/"))
-                    .with_extension("org");
+                let current_path =
+                    VaultPath::page_file_from_name_chain(&self.root_dir, &current_chain)
+                        .with_context(|| {
+                            format!("on_file_deleted: stale-rename guard for {document_uri}")
+                        })?
+                        .into_path_buf();
                 if CanonicalPath::new(&current_path) != *canonical {
                     info!(
                         "[FileSyncController] Deleted file {} is stale — document {} now lives at \
@@ -3475,10 +3493,16 @@ impl FileSyncController {
                     return Ok(());
                 }
                 Ok(_) => {
-                    if let Some(parent) = path.parent() {
+                    // The normalization write-back re-renders org bytes over the
+                    // ingested file. `on_file_changed` is `pub`, so containment
+                    // is proven here rather than inherited from the watcher's
+                    // provenance.
+                    let target = VaultPath::inside(&self.root_dir, path.to_path_buf())
+                        .context("ingest normalization write-back")?;
+                    if let Some(parent) = target.as_path().parent() {
                         self.fs.create_dir_all(parent).await?;
                     }
-                    self.fs.write(path, rendered.as_bytes()).await?;
+                    self.fs.write(target.as_path(), rendered.as_bytes()).await?;
                     self.run_post_write_hook(path);
                     info!(
                         "[FileSyncController] Wrote merged content to {}",
@@ -3569,15 +3593,34 @@ impl FileSyncController {
         if let BlockDelta::Upsert(b) = delta {
             match self.block_reader.get_block_authoritative(&b.id).await {
                 Ok(Some(auth)) if auth.is_page() => {
-                    if let Err(e) = self.materialize_page_identity_file(&auth.id).await {
-                        tracing::error!(
-                            doc_id = %doc_id,
-                            block_id = %auth.id,
-                            error = %format!("{e:#}"),
-                            "[FileSyncController] on_block_changed: page identity-file \
-                             pre-flight failed — continuing with this document's normal \
-                             write-back path.",
-                        );
+                    // The mark is keyed on `auth.id` — the page whose identity
+                    // file failed — NOT on the routed `doc_id`: an untitled page
+                    // is typically routed to its PARENT, so keying on the
+                    // document would both collapse two failing pages into one
+                    // disclosure and re-arm on the parent's unrelated success.
+                    match self.materialize_page_identity_file(&auth.id).await {
+                        Ok(()) => self.clear_failure(&auth.id, IDENTITY_PREFLIGHT_SITE),
+                        Err(e) => {
+                            if self.first_failure_for_doc(&auth.id, IDENTITY_PREFLIGHT_SITE) {
+                                tracing::error!(
+                                    doc_id = %doc_id,
+                                    block_id = %auth.id,
+                                    error = %format!("{e:#}"),
+                                    "[FileSyncController] on_block_changed: page identity-file \
+                                     pre-flight failed — continuing with this document's normal \
+                                     write-back path. Repeats for this page log at DEBUG until \
+                                     it succeeds.",
+                                );
+                            } else {
+                                tracing::debug!(
+                                    doc_id = %doc_id,
+                                    block_id = %auth.id,
+                                    error = %format!("{e:#}"),
+                                    "[FileSyncController] on_block_changed: page identity-file \
+                                     pre-flight still failing (already disclosed once at ERROR)",
+                                );
+                            }
+                        }
                     }
                 }
                 Ok(_) => {}
@@ -3594,24 +3637,24 @@ impl FileSyncController {
             }
         }
 
-        let path = match self.doc_id_to_path(doc_id).await {
+        let vault_path = match self.doc_id_to_path(doc_id).await {
             Ok(Some(p)) => p,
             Ok(None) => return Ok(false),
             Err(e) => {
                 // §3.1 Finding A / R11: name_chain failed loud (e.g. a
-                // prohibited page-under-non-page topology). Do NOT swallow this
-                // into a silent no-op — surface it, then skip only THIS block's
-                // write so the sync loop keeps serving every other document.
-                tracing::error!(
-                    doc_id = %doc_id,
-                    error = %format!("{e:#}"),
-                    "[FileSyncController] on_block_changed: could not resolve doc to a \
-                     page-file path (name_chain failed loud) — SKIPPING this document's \
-                     write-back; all other documents continue.",
+                // prohibited page-under-non-page topology, or an ancestor that
+                // names no path segment). Do NOT swallow this into a silent
+                // no-op — disclose it, then skip only THIS block's write so the
+                // sync loop keeps serving every other document.
+                self.disclose_derivation_failure(
+                    doc_id,
+                    &e,
+                    "on_block_changed: this block's edit is NOT written to disk",
                 );
                 return Ok(false);
             }
         };
+        let path = vault_path.as_path().to_path_buf();
         let canonical = CanonicalPath::new(&path);
 
         // If disk content differs from last_projection, there's a pending external
@@ -3702,7 +3745,7 @@ impl FileSyncController {
         // survives) but does NOT stamp `last_projection`, so a later-writable
         // path re-attempts.
         if !self
-            .write_back_or_skip_readonly(doc_id, &path, rendered.as_bytes())
+            .write_back_or_skip_readonly(doc_id, &vault_path, rendered.as_bytes())
             .await?
         {
             return Ok(true);
@@ -4087,6 +4130,13 @@ impl FileSyncController {
                 self.on_file_changed(&path).await?;
             }
 
+            // This tracked path is the write-back target below, and
+            // `write_back_or_skip_readonly` accepts only a proven one — so the
+            // containment claim is established HERE, at the boundary where a
+            // disk-discovered path enters the write path, rather than assumed.
+            let vault_path = VaultPath::inside(&self.root_dir, path.clone())
+                .context("[re_render_all_tracked] tracked path")?;
+
             // Resolve path → doc_id
             let rel_path = path.strip_prefix(&self.root_dir).with_context(|| {
                 format!(
@@ -4207,7 +4257,7 @@ impl FileSyncController {
 
             // EROFS row 346: skip-with-one-loud-error (see on_block_changed).
             if !self
-                .write_back_or_skip_readonly(&doc.id, &path, rendered.as_bytes())
+                .write_back_or_skip_readonly(&doc.id, &vault_path, rendered.as_bytes())
                 .await?
             {
                 continue;
@@ -4259,7 +4309,15 @@ impl FileSyncController {
                 ),
             };
             if block.is_page() {
-                chain.push(block.title());
+                let title = block.title();
+                if title.is_empty() {
+                    anyhow::bail!(
+                        "authoritative_name_chain({page_id}): page '{current}' has an EMPTY title \
+                         and so contributes no path segment — no page file can be named for it \
+                         inside the vault root (an empty segment escapes it)"
+                    );
+                }
+                chain.push(title);
                 subtree_root_page = Some(current.clone());
             } else if !is_self {
                 // Non-page ancestor. A page directly under a non-page is normally
@@ -4279,6 +4337,7 @@ impl FileSyncController {
                     .expect("a non-self walk has folded in >=1 page");
                 match self.doc_id_to_path(root_page).await? {
                     Some(path) => {
+                        let path = path.into_path_buf();
                         let rel = path.strip_prefix(&self.root_dir).unwrap_or(&path);
                         let mut segs = path_to_name_chain(rel);
                         // The root page's own title is already in `chain`; keep
@@ -4333,7 +4392,9 @@ impl FileSyncController {
         if chain.is_empty() {
             return Ok(());
         }
-        let path = self.root_dir.join(chain.join("/")).with_extension("org");
+        let vault_path = VaultPath::page_file_from_name_chain(&self.root_dir, &chain)
+            .with_context(|| format!("materialize_page_identity_file({page_id})"))?;
+        let path = vault_path.as_path().to_path_buf();
         let canonical = CanonicalPath::new(&path);
         // D3 / identity plan §5: a page RENAME changes its authoritative title,
         // so its file moves from `<old-title>.org` to this `<new-title>.org`.
@@ -4343,10 +4404,23 @@ impl FileSyncController {
         // DOUBLE-HOMED across two files (inv-every-page-has-its-own-file). The
         // removal's own delete event is made safe by the stale-file guard in
         // `on_file_deleted`.
-        let prior_path = if let Some(ref registrar) = self.alias_registrar {
-            registrar.resolve_alias_to_path(page_id).await
-        } else {
-            None
+        // This path feeds an `fs.remove` below, so it is proven contained on the
+        // way in — a rename cleanup that DELETES outside the vault is the same
+        // escape class as a write that does, and the alias registrar is the same
+        // unproven source `doc_id_to_path` checks.
+        let prior_path = match &self.alias_registrar {
+            Some(registrar) => match registrar.resolve_alias_to_path(page_id).await {
+                Some(prior) => {
+                    Some(VaultPath::inside(&self.root_dir, prior).with_context(|| {
+                        format!(
+                            "materialize_page_identity_file({page_id}): prior alias path (rename \
+                         cleanup DELETE)"
+                        )
+                    })?)
+                }
+                None => None,
+            },
+            None => None,
         };
         // Already ours (we wrote it) — nothing to do.
         if self.last_projection.contains_key(&canonical) {
@@ -4379,7 +4453,7 @@ impl FileSyncController {
         // registering the alias — a path that could not be written does not own
         // a file to advertise.
         if !self
-            .write_back_or_skip_readonly(page_id, &path, rendered.as_bytes())
+            .write_back_or_skip_readonly(page_id, &vault_path, rendered.as_bytes())
             .await?
         {
             return Ok(());
@@ -4394,10 +4468,11 @@ impl FileSyncController {
             registrar.register_alias(page_id, &path).await;
         }
         // Remove the orphaned old file left by a page rename (see `prior_path`).
-        if let Some(prior) = prior_path {
-            let prior_canonical = CanonicalPath::new(&prior);
-            if prior_canonical != canonical && self.fs.exists(&prior) {
-                self.fs.remove(&prior).await.map_err(|e| {
+        if let Some(prior_vault) = prior_path {
+            let prior = prior_vault.as_path();
+            let prior_canonical = CanonicalPath::new(prior);
+            if prior_canonical != canonical && self.fs.exists(prior) {
+                self.fs.remove(prior).await.map_err(|e| {
                     anyhow::anyhow!(
                         "materialize_page_identity_file({page_id}): removing orphaned old file {} \
                          after rename to {}: {e}",
@@ -4406,7 +4481,7 @@ impl FileSyncController {
                     )
                 })?;
                 self.forget_file_state(&prior_canonical);
-                self.run_post_write_hook(&prior);
+                self.run_post_write_hook(prior);
                 tracing::info!(
                     "[FileSyncController] Removed orphaned old file {} after page {} renamed to {}",
                     prior.display(),
@@ -4443,23 +4518,22 @@ impl FileSyncController {
             if blocks.is_empty() {
                 continue;
             }
-            let path = match self.doc_id_to_path(&doc_id).await {
+            let vault_path = match self.doc_id_to_path(&doc_id).await {
                 Ok(Some(p)) => p,
                 Ok(None) => continue,
                 Err(e) => {
                     // §3.1 Finding A / R11: name_chain failed loud for this
-                    // document. Surface it and skip only this one — the boot
+                    // document. Disclose it and skip only this one — the boot
                     // sweep continues materializing every other fileless page.
-                    tracing::error!(
-                        doc_id = %doc_id,
-                        error = %format!("{e:#}"),
-                        "[FileSyncController] materialize_missing_page_files: could not \
-                         resolve doc to a page-file path (name_chain failed loud) — \
-                         SKIPPING this document; sweep continues.",
+                    self.disclose_derivation_failure(
+                        &doc_id,
+                        &e,
+                        "materialize_missing_page_files: this page gets NO file; sweep continues",
                     );
                     continue;
                 }
             };
+            let path = vault_path.as_path().to_path_buf();
             let canonical = CanonicalPath::new(&path);
             if self.last_projection.contains_key(&canonical) {
                 continue;
@@ -4481,7 +4555,7 @@ impl FileSyncController {
             }
             // EROFS row 346: skip-with-one-loud-error (see on_block_changed).
             if !self
-                .write_back_or_skip_readonly(&doc_id, &path, rendered.as_bytes())
+                .write_back_or_skip_readonly(&doc_id, &vault_path, rendered.as_bytes())
                 .await?
             {
                 continue;
@@ -4771,7 +4845,7 @@ impl FileSyncController {
                 continue;
             }
             let sibling = match self.doc_id_to_path(&block.id).await {
-                Ok(Some(p)) => p,
+                Ok(Some(p)) => p.into_path_buf(),
                 Ok(None) => continue,
                 Err(e) => {
                     // §3.1 Finding A / R11 + BugFunnel row 23/29: this absent
@@ -4783,13 +4857,15 @@ impl FileSyncController {
                     // aborts either way (every ungrounded drop vetoes), but a
                     // grounding storm diagnosed as a plain removal sends the
                     // reader hunting the wrong bug.
-                    tracing::error!(
-                        block_id = %block.id,
-                        path = %path.display(),
-                        error = %format!("{e:#}"),
-                        "[FileSyncController] writeback_sibling_grounding: could not resolve \
-                         an absent block's own-file path (name_chain failed loud) — UNRESOLVABLE; \
-                         the guard will ABORT + quarantine this write (the safe outcome).",
+                    self.disclose_derivation_failure(
+                        &block.id,
+                        &e,
+                        &format!(
+                            "writeback_sibling_grounding for {}: this absent block is \
+                             UNRESOLVABLE, so the guard ABORTS + quarantines that write (the \
+                             safe outcome)",
+                            path.display()
+                        ),
                     );
                     grounding.unresolvable.push(block.id.as_str().to_string());
                     continue;
@@ -4893,19 +4969,28 @@ impl FileSyncController {
     ///
     /// Return-type contract (Fork B B1 / §3.1 Finding A — do NOT collapse the
     /// two `None`-like cases into one):
-    /// - `Ok(Some(path))` — the doc resolved to a page-file path.
+    /// - `Ok(Some(path))` — the doc resolved to a page-file path, PROVEN to be
+    ///   inside the vault root ([`VaultPath`]).
     /// - `Ok(None)` — the doc is **legitimately not a page** (empty
     ///   name-chain). A silent skip is correct here (a non-page block owns no
     ///   file).
-    /// - `Err(e)` — `name_chain` FAILED LOUD (e.g. the no-pages-under-non-pages
-    ///   assertion tripped, or a hierarchy read errored). This is a real,
-    ///   previously-unseen condition and MUST NOT be swallowed into the same
-    ///   bucket as "not a page". Every caller `tracing::error!`s it and skips
-    ///   only THIS document (bounded blast radius — never crash the sync loop).
-    async fn doc_id_to_path(&self, doc_id: &EntityUri) -> Result<Option<PathBuf>> {
-        // Try alias registrar first (fastest path)
+    /// - `Err(e)` — `name_chain` FAILED LOUD (the no-pages-under-non-pages
+    ///   assertion tripped, an empty title named no path segment, the derived
+    ///   path escaped the vault root, or a hierarchy read errored). This is a
+    ///   real, previously-unseen condition and MUST NOT be swallowed into the
+    ///   same bucket as "not a page". Every caller `tracing::error!`s it and
+    ///   skips only THIS document (bounded blast radius — never crash the sync
+    ///   loop).
+    async fn doc_id_to_path(&self, doc_id: &EntityUri) -> Result<Option<VaultPath>> {
+        // Try alias registrar first (fastest path). An alias is only ever
+        // registered from an ingested vault file, so containment must already
+        // hold — assert it here rather than trust it, so NO path this function
+        // yields can name a file outside the vault.
         if let Some(ref registrar) = self.alias_registrar {
             if let Some(path) = registrar.resolve_alias_to_path(doc_id).await {
+                let path = VaultPath::inside(&self.root_dir, path)
+                    .with_context(|| format!("doc_id_to_path({doc_id}): alias-registrar path"))?;
+                self.clear_failure(doc_id, PATH_DERIVATION_SITE);
                 return Ok(Some(path));
             }
         }
@@ -4917,8 +5002,21 @@ impl FileSyncController {
         if chain.is_empty() {
             return Ok(None);
         }
-        let path = self.root_dir.join(chain.join("/")).with_extension("org");
+        let path = VaultPath::page_file_from_name_chain(&self.root_dir, &chain)
+            .with_context(|| format!("doc_id_to_path({doc_id})"))?;
+        self.clear_failure(doc_id, PATH_DERIVATION_SITE);
         Ok(Some(path))
+    }
+
+    /// Re-arm the loud disclosure for ONE `(doc, site)` after that site's
+    /// condition resolves. Scoped to the site on purpose: clearing a doc's
+    /// other marks would let one site's success mute a different,
+    /// still-failing diagnosis.
+    fn clear_failure(&self, doc_id: &EntityUri, site: &'static str) {
+        self.failure_disclosed
+            .lock()
+            .expect("failure_disclosed poisoned")
+            .remove(&(doc_id.clone(), site));
     }
 
     /// Write `rendered` to `path` for `doc_id`, applying the read-only
@@ -4934,12 +5032,21 @@ impl FileSyncController {
     /// - `Err(e)`    — a non-EROFS IO error propagates LOUDLY, per-event: only
     ///   the persistent read-only condition is de-duplicated; a transient or
     ///   unexpected fault stays visible on every occurrence.
+    ///
+    /// Takes a [`VaultPath`], not a bare `&Path`: this is where every
+    /// PROJECTION write-back reaches the filesystem, so requiring the
+    /// containment proof HERE is what makes an out-of-vault projection write
+    /// unrepresentable rather than merely unreached. A caller holding an
+    /// unproven path must run it through a checked constructor first — as the
+    /// ingest normalization write-back does, which is the other route org bytes
+    /// take to disk.
     async fn write_back_or_skip_readonly(
         &mut self,
         doc_id: &EntityUri,
-        path: &Path,
+        vault_path: &VaultPath,
         rendered: &[u8],
     ) -> Result<bool> {
+        let path = vault_path.as_path();
         let canonical = CanonicalPath::new(path);
         if self.writeback_readonly.contains(&canonical) {
             tracing::debug!(
@@ -4972,6 +5079,55 @@ impl FileSyncController {
             Err(e) => {
                 Err(e).with_context(|| format!("org write-back to {} failed", path.display()))
             }
+        }
+    }
+
+    /// True the FIRST time `(doc_id, site)` fails; false for every repeat until
+    /// [`clear_failure`](Self::clear_failure) re-arms the doc. The
+    /// caller logs loudly on `true` and at DEBUG on `false` — one loud
+    /// disclosure per distinct diagnosis, never a per-tick flood.
+    fn first_failure_for_doc(&self, doc_id: &EntityUri, site: &'static str) -> bool {
+        self.failure_disclosed
+            .lock()
+            .expect("failure_disclosed poisoned")
+            .insert((doc_id.clone(), site))
+    }
+
+    /// Disclose that `doc_id`'s page-file path could not be derived inside the
+    /// vault root, ONCE per doc (the EROFS `mark_readonly_writeback`
+    /// precedent). `consequence` names what this particular call site is
+    /// refusing to do.
+    ///
+    /// The first failure is a loud ERROR carrying the full anyhow chain; a
+    /// repeat for the same doc drops to DEBUG, because the condition is
+    /// typically permanent for the session and a per-sync-tick ERROR would
+    /// bury every other error in the log. The mark clears the moment
+    /// `doc_id_to_path` derives a path for that doc again, so a NEW occurrence
+    /// is loud again.
+    fn disclose_derivation_failure(
+        &self,
+        doc_id: &EntityUri,
+        err: &anyhow::Error,
+        consequence: &str,
+    ) {
+        if self.first_failure_for_doc(doc_id, PATH_DERIVATION_SITE) {
+            tracing::error!(
+                doc_id = %doc_id,
+                error = %format!("{err:#}"),
+                consequence,
+                "[FileSyncController] could not resolve this doc to a page-file path inside the \
+                 vault root (name_chain / VaultPath failed loud) — REFUSING write-back for THIS \
+                 document; every other document continues. Repeats for this doc log at DEBUG \
+                 until its path resolves again.",
+            );
+        } else {
+            tracing::debug!(
+                doc_id = %doc_id,
+                error = %format!("{err:#}"),
+                consequence,
+                "[FileSyncController] page-file path still underivable for this doc (already \
+                 disclosed once at ERROR)",
+            );
         }
     }
 

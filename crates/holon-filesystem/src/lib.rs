@@ -29,6 +29,7 @@ pub mod ingest_progress;
 pub mod sync_base_store;
 pub mod sync_conflict;
 pub mod sync_ports;
+pub mod vault_path;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod writeback_render;
 
@@ -84,6 +85,7 @@ pub use sync_ports::MatchVerdict;
 pub use sync_ports::MountRegistry;
 pub use sync_ports::ShareWritebackDisclosure;
 pub use sync_ports::ThreeWayTextMerge;
+pub use vault_path::VaultPath;
 #[cfg(not(target_arch = "wasm32"))]
 pub use writeback_render::WritebackRenderer;
 
