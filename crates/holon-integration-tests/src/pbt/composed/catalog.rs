@@ -35,6 +35,11 @@ use super::invariants;
 fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
     let mut catalog: Vec<Box<dyn CapInvariant>> = vec![
         invariants::no_parent_cycles::wire(),
+        // Vault write boundary: every path the FS was asked to write or create
+        // must lie under the run's vault root. Needs `SutFsWrites`, no ref —
+        // catches a traversal in ANY derived path (name chain, image content,
+        // `file:` URI), not just the one call site a fix was reported at.
+        invariants::no_write_outside_vault_root::wire(),
         invariants::source_language::wire(),
         // Org render fixed point (E1): needs `SutOrgRender`, no ref. Only the
         // frontend slice supplies it (production CacheBlockReader + OrgRenderer).

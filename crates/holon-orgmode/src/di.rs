@@ -491,6 +491,16 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                     controller = controller.with_mount_registry(registry);
                 }
 
+                // Image bytes for `[[file:…]]` blocks, so an image synced from a
+                // peer materializes on disk. Absent in every container today →
+                // `materialize_images` / `ingest_images` stay no-ops.
+                if let Some(images) = resolver
+                    .optional_resolve_async::<dyn holon_filesystem::ImageDataProvider>()
+                    .await
+                {
+                    controller = controller.with_image_data(images);
+                }
+
                 // R3b: wire the C2b history store so the org-ingest doc-page
                 // create records provenance (absent in org-standalone/no-Turso
                 // wirings). Plus the injected clock, when a test provides one, so

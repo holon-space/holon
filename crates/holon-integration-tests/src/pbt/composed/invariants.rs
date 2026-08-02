@@ -61,6 +61,7 @@ pub mod no_errors;
 pub mod no_orphan;
 pub mod no_page_under_non_page;
 pub mod no_parent_cycles;
+pub mod no_write_outside_vault_root;
 pub mod org_render_fixed_point;
 pub mod settle_budget;
 pub mod sidebar_page_tag_preserved;

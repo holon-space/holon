@@ -559,3 +559,118 @@ async fn sweep_skips_underivable_docs_but_materializes_the_legit_one() {
     );
     assert_containment_disclosed(&cap.errors(), "husk");
 }
+
+// ---------------------------------------------------------------------------
+// Shape C — an IMAGE block's path. `block.content` of an image block is author-
+// or CRDT-sync-supplied data, and `materialize_images` turns it into a write
+// target. A traversal segment there is the same containment escape as an
+// underivable name chain, in the direction that PLANTS bytes: a peer that can
+// send a block can send the bytes to go with it.
+// ---------------------------------------------------------------------------
+
+/// The bytes half of a synced image block — always present, as if a peer had
+/// sent the image along with the block that names it.
+struct PeerImageBytes;
+
+#[async_trait]
+impl holon_filesystem::ImageDataProvider for PeerImageBytes {
+    async fn read_image_data(&self, _: &EntityUri) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(Some(b"PEER-SUPPLIED-IMAGE-BYTES".to_vec()))
+    }
+    async fn write_image_data(&self, _: &EntityUri, _: Vec<u8>) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+/// A page owning ONE image block whose content is `image_content`.
+fn image_fixtures(image_content: &str) -> Fixtures {
+    let owner = page("legit", EntityUri::no_parent(), "Legit Page");
+    let image = Block::new_image(
+        EntityUri::block("img"),
+        owner.id.clone(),
+        image_content.to_string(),
+    );
+
+    let mut by_id = HashMap::new();
+    for b in [&owner, &image] {
+        by_id.insert(b.id.clone(), b.clone());
+    }
+    let mut children = HashMap::new();
+    children.insert(owner.id.clone(), vec![image.clone()]);
+
+    Fixtures {
+        husk_id: owner.id.clone(),
+        child_page_id: owner.id.clone(),
+        legit_id: owner.id.clone(),
+        by_id,
+        children,
+    }
+}
+
+/// Drive ONE image-block upsert through the real write-back and report
+/// `(the owning page's org file was written, the block's content afterwards)`.
+async fn materialize_image_with_content(
+    image_content: &str,
+    root: &std::path::Path,
+) -> (bool, String) {
+    let f = image_fixtures(image_content);
+    let image = f.by_id[&EntityUri::block("img")].clone();
+    let content = image.content.clone();
+    let mut controller = build_controller(&f, vec![f.legit_id.clone()], root.to_path_buf())
+        .with_image_data(Arc::new(PeerImageBytes));
+    controller
+        .on_block_changed(&f.legit_id, &BlockDelta::Upsert(image))
+        .await
+        .expect("a refused image path must be a bounded skip, never abort write-back");
+    (root.join("Legit Page.org").exists(), content)
+}
+
+#[tokio::test]
+async fn image_path_traversal_never_writes_outside_the_vault_root() {
+    // The vault is a SUBDIRECTORY of the tmpdir, so `../` escapes the vault
+    // while still landing inside the tmpdir the test cleans up.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("vault");
+    std::fs::create_dir_all(&root).unwrap();
+    let escape = tmp.path().join("escape.png");
+    assert!(
+        !escape.exists(),
+        "test precondition: {escape:?} must not exist"
+    );
+
+    let (page_written, content) = materialize_image_with_content("../escape.png", &root).await;
+
+    let planted = std::fs::read(&escape).unwrap_or_default();
+    assert!(
+        !escape.exists(),
+        "an image block's content escaped the vault root and PLANTED {} bytes at {escape:?}: {:?}",
+        planted.len(),
+        String::from_utf8_lossy(&planted),
+    );
+    // A refused image must not take the surrounding write-back down with it.
+    assert!(
+        page_written,
+        "the owning page's org file must still be written; dir: {:?}",
+        walkdir(&root)
+    );
+    assert_eq!(
+        content, "../escape.png",
+        "the block keeps its content — the path is refused as a WRITE TARGET, not rewritten"
+    );
+}
+
+#[tokio::test]
+async fn contained_image_path_still_materializes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("vault");
+    std::fs::create_dir_all(&root).unwrap();
+
+    let (page_written, _) = materialize_image_with_content("attachments/sub/img.png", &root).await;
+
+    assert!(page_written, "the owning page's org file must be written");
+    assert!(
+        root.join("attachments/sub/img.png").exists(),
+        "a CONTAINED image path must still materialize; dir: {:?}",
+        walkdir(&root)
+    );
+}

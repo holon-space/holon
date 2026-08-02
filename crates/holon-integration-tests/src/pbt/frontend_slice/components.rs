@@ -55,6 +55,7 @@ use holon_pbt_core::capabilities::SutEntityTypeRegister;
 use holon_pbt_core::capabilities::SutErrorLog;
 use holon_pbt_core::capabilities::SutFocus;
 use holon_pbt_core::capabilities::SutFocusWrite;
+use holon_pbt_core::capabilities::SutFsWrites;
 use holon_pbt_core::capabilities::SutHistory;
 use holon_pbt_core::capabilities::SutHistoryWrite;
 use holon_pbt_core::capabilities::SutMatviews;
@@ -615,6 +616,16 @@ impl HeadlessFrontendComponent {
                 crate::test_environment::install_headless_render_interpreter(
                     injector,
                     &org_fs_for_di,
+                );
+                // Image bytes for every image block, so the write-back's
+                // `materialize_images` actually reaches disk — the seat that
+                // turns an image block's content into a filesystem path.
+                injector.provide::<dyn holon_filesystem::ImageDataProvider>(
+                    fluxdi::Provider::root(move |_| {
+                        Arc::new(
+                            crate::pbt::frontend_slice::peer_image_data::PeerImageData::default(),
+                        ) as Arc<dyn holon_filesystem::ImageDataProvider>
+                    }),
                 );
                 if let Some(test_clock) = clock_for_di.clone() {
                     let injected =
@@ -1879,6 +1890,20 @@ impl SutOrgRead for HeadlessFrontendComponent {
 /// component's own injector + org_fs. The doc-block id per file is the parent
 /// the production parser reconstructs from the file's persisted `:ID:` drawer
 /// (== the block_raw doc row).
+#[async_trait::async_trait(?Send)]
+impl SutFsWrites for HeadlessFrontendComponent {
+    async fn vault_write_targets(&self) -> (String, Vec<String>) {
+        (
+            self.org_root.to_string_lossy().to_string(),
+            self.org_fs
+                .write_targets()
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect(),
+        )
+    }
+}
+
 #[async_trait::async_trait(?Send)]
 impl SutOrgRender for HeadlessFrontendComponent {
     async fn snapshot_org_render_pairs(&self) -> Vec<(String, String, String)> {
@@ -3769,6 +3794,7 @@ impl HeadlessFrontendComponent {
         // block matviews live (this component's real Turso projection) so the
         // differential runs on the same slice that maintains them.
         caps.insert(self.clone() as Arc<dyn SutMatviews>);
+        caps.insert(self.clone() as Arc<dyn SutFsWrites>);
         caps.insert(self as Arc<dyn SutOrgRender>);
     }
 }

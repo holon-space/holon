@@ -40,6 +40,11 @@ struct State {
     files: BTreeMap<PathBuf, FileEntry>,
     dirs: BTreeSet<PathBuf>,
     clock: u64,
+    /// Append-only log of every path this adapter was ASKED to create or
+    /// write, normalized. Distinct from `files`/`dirs`, which hold only what
+    /// currently exists: a containment check must see the target of a write
+    /// that was later removed or overwritten.
+    write_targets: Vec<PathBuf>,
 }
 
 pub struct InMemoryFileSystem {
@@ -61,6 +66,7 @@ impl InMemoryFileSystem {
                 files: BTreeMap::new(),
                 dirs: BTreeSet::new(),
                 clock: 0,
+                write_targets: Vec::new(),
             }),
             tx,
         }
@@ -79,11 +85,19 @@ impl InMemoryFileSystem {
         self.lock().clock
     }
 
+    /// Every path this adapter was asked to write or create, normalized and in
+    /// call order. Feeds the containment invariant: a write ATTEMPT that
+    /// escaped the vault root is a defect even when the write itself failed.
+    pub fn write_targets(&self) -> Vec<PathBuf> {
+        self.lock().write_targets.clone()
+    }
+
     /// Synchronous `create_dir_all` for non-async construction contexts
     /// (the trait method delegates here).
     pub fn mkdir_all(&self, path: &Path) {
         let path = normalize(path);
         let mut st = self.lock();
+        st.write_targets.push(path.clone());
         let mut cur = PathBuf::new();
         for comp in path.components() {
             cur.push(comp.as_os_str());
@@ -202,6 +216,7 @@ impl FileSystem for InMemoryFileSystem {
         let path = normalize(path);
         let (kind, tick) = {
             let mut st = self.lock();
+            st.write_targets.push(path.clone());
             match path.parent() {
                 Some(parent) if st.dirs.contains(parent) => {}
                 Some(parent) => {

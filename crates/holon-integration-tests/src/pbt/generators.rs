@@ -582,6 +582,27 @@ pub fn generate_org_file_content_with_keywords(
     // sibling-order prediction is exercised in both directions; the presence of
     // the non-exempt Text sub-heading is what makes the ordering actually
     // checked (a pure Source/Image group is order-exempt).
+    // An image block's path is CONTENT — authored in the org file or delivered
+    // by a synced peer — so the alphabet must include the shapes an attacker or
+    // a malformed peer document produces, not only the well-behaved one. The
+    // contained shapes are the controls: whatever rejects the traversals must
+    // still materialize these.
+    let image_path = prop_oneof![
+        6 => (
+            "[a-z][a-z0-9_]{2,12}",
+            prop::sample::select(vec!["png", "jpg", "gif", "webp", "svg"]),
+        )
+            .prop_map(|(stem, ext)| format!("attachments/{stem}.{ext}")),
+        1 => Just("attachments/sub/img.png".to_string()),
+        2 => prop::sample::select(vec![
+            "../escape.png",
+            "a/../../escape.png",
+            "attachments/../../escape.png",
+            "/tmp/escape.png",
+        ])
+        .prop_map(str::to_string),
+    ];
+
     let file_with_render_artifacts = (
         "[a-z_]+_[0-9]+\\.org",
         "[A-Z][a-zA-Z0-9 ]{0,15}", // heading
@@ -590,9 +611,8 @@ pub fn generate_org_file_content_with_keywords(
         "[a-z0-9-]+",              // sub-heading id
         prop::sample::select(vec!["python", "rust", "shell"]),
         "[a-zA-Z_][a-zA-Z0-9_ ]{3,20}", // source body
-        prop::sample::select(vec!["png", "jpg", "gif", "webp", "svg"]),
-        "[a-z][a-z0-9_]{2,12}", // image stem
-        prop::bool::ANY,        // image_first
+        image_path,
+        prop::bool::ANY, // image_first
     )
         .prop_map(
             |(
@@ -603,8 +623,7 @@ pub fn generate_org_file_content_with_keywords(
                 sub_id_raw,
                 lang,
                 body,
-                ext,
-                stem,
+                image_path,
                 image_first,
             )| {
                 let doc_uri = EntityUri::block("gen-placeholder");
@@ -630,7 +649,7 @@ pub fn generate_org_file_content_with_keywords(
                 let image = Block::new_image(
                     EntityUri::block(&format!("{id}::img::0")),
                     heading_uri.clone(),
-                    format!("attachments/{stem}.{ext}"),
+                    image_path,
                 );
 
                 let mut sub =

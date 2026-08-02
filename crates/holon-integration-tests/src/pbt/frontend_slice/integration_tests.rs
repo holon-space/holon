@@ -24,6 +24,40 @@ async fn new_component() -> Arc<HeadlessFrontendComponent> {
     )
 }
 
+const IMAGE_ORG: &str = "\
+* Has an image
+[[file:attachments/a.png]]
+";
+
+/// Non-vacuity guard for `inv-no-write-outside-vault-root` over the IMAGE-path
+/// class: that invariant reads the FS write log, so it can only catch an image
+/// path escape if image materialization reaches the filesystem here at all.
+///
+/// IGNORED because it currently FAILS, and that failure is the honest record of
+/// a known coverage gap: the `ImageDataProvider` seat now resolves in this
+/// harness (verified), the doc's org file is written twice, yet no image byte
+/// reaches the FS — so nothing between ingesting a `[[file:…]]` line and
+/// `materialize_images` produces an image block on this path. Until that is
+/// localized, the image-path class is covered by the deterministic
+/// `holon-orgmode` test
+/// `image_path_traversal_never_writes_outside_the_vault_root`, NOT by the
+/// keystone. Un-ignore when image materialization reaches disk here.
+#[ignore = "known gap: image materialization does not reach the FS in the frontend slice"]
+#[tokio::test]
+async fn image_materialization_reaches_the_filesystem_in_the_frontend_slice() {
+    let component = Arc::new(
+        HeadlessFrontendComponent::new(&[("image.org", IMAGE_ORG)], Duration::from_millis(600))
+            .await,
+    );
+    let (root, targets) =
+        holon_pbt_core::capabilities::SutFsWrites::vault_write_targets(component.as_ref()).await;
+    assert!(
+        targets.iter().any(|t| t.ends_with(".png")),
+        "no image write reached the FS — `inv-no-write-outside-vault-root` cannot see the \
+         image-path class. root={root}, targets={targets:?}"
+    );
+}
+
 /// E1 make-or-break PROBE (Step-A): does `SutWatch` over the PRODUCTION
 /// reactive watch surface actually deliver rows in the windowless session?
 /// Register an `AllBlocks` query watch through `register_query_watch` (→

@@ -13,6 +13,7 @@
 pub mod block_query_component;
 pub mod builders;
 pub mod components;
+pub mod peer_image_data;
 
 #[cfg(test)]
 mod integration_tests;

@@ -52,6 +52,11 @@ impl VaultPath {
 
     /// Accept an already-built path only if it is a strict descendant of
     /// `root`.
+    ///
+    /// The value carries the NORMALIZED path — the one containment was proven
+    /// for. Handing back the caller's spelling would let a proven-contained
+    /// verdict travel with a path that still reads `..`, which is how a check
+    /// and the write it guards come to disagree.
     pub fn inside(root: &Path, path: PathBuf) -> Result<Self> {
         let normalized_root = lexically_normalize(root);
         let normalized = lexically_normalize(&path);
@@ -62,7 +67,7 @@ impl VaultPath {
                 root.display()
             );
         }
-        Ok(Self(path))
+        Ok(Self(normalized))
     }
 
     pub fn as_path(&self) -> &Path {
@@ -142,6 +147,18 @@ mod tests {
     fn empty_chain_is_refused() {
         VaultPath::page_file_from_name_chain(Path::new("/vault"), &[])
             .expect_err("an empty chain names no page file");
+    }
+
+    /// A contained path that merely SPELLS a climb normalizes on the way in, so
+    /// the proven value and the write target are the same path.
+    #[test]
+    fn a_contained_path_is_carried_normalized() {
+        let derived = VaultPath::inside(
+            Path::new("/vault"),
+            PathBuf::from("/vault/attachments/../img.png"),
+        )
+        .expect("a path that stays inside must be accepted");
+        assert_eq!(derived.as_path(), Path::new("/vault/img.png"));
     }
 
     #[test]

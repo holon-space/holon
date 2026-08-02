@@ -100,6 +100,7 @@ const CREATE_CHUNK_BLOCKS: usize = ingest_progress::PROGRESS_EVERY_BLOCKS;
 /// other.
 const IDENTITY_PREFLIGHT_SITE: &str = "identity-file-preflight";
 const PATH_DERIVATION_SITE: &str = "page-file-path-derivation";
+const IMAGE_PATH_SITE: &str = "image-file-path-derivation";
 
 /// What the creates pass must do with one buffered create once the authority
 /// reports whether it persisted it.
@@ -788,8 +789,19 @@ impl FileSyncController {
         match self.block_reader.load_file_hashes().await {
             Ok(rows) => {
                 for (uri, hash) in rows {
-                    if let Some(canonical) = self.file_uri_to_canonical_path(&uri) {
-                        self.last_projection_hash.insert(canonical, hash);
+                    // One unusable persisted row must not stop the boot: skip
+                    // it (its file re-ingests) and disclose why.
+                    match self.file_uri_to_canonical_path(&uri) {
+                        Ok(Some(canonical)) => {
+                            self.last_projection_hash.insert(canonical, hash);
+                        }
+                        Ok(None) => {}
+                        Err(e) => tracing::error!(
+                            file_uri = %uri,
+                            error = %format!("{e:#}"),
+                            "[FileSyncController] skipping a persisted file hash whose path \
+                             leaves the vault root — that file will be re-ingested.",
+                        ),
                     }
                 }
                 info!(
@@ -816,13 +828,11 @@ impl FileSyncController {
     }
 
     /// Convert a `file:<encoded-path>` EntityUri back to a CanonicalPath
-    /// relative to this controller's `root_dir`. Returns None if the URI
-    /// scheme isn't `file:` or the on-disk path doesn't exist (which can
-    /// legitimately happen if the user deleted the file while the row
-    /// lingers — next sync will tombstone it).
-    fn file_uri_to_canonical_path(&self, uri: &EntityUri) -> Option<CanonicalPath> {
+    /// relative to this controller's `root_dir`. `Ok(None)` when the URI scheme
+    /// isn't `file:`; `Err` when the id names a path outside the vault.
+    fn file_uri_to_canonical_path(&self, uri: &EntityUri) -> Result<Option<CanonicalPath>> {
         if uri.scheme() != "file" {
-            return None;
+            return Ok(None);
         }
         let encoded = uri.id();
         // `EntityUri::file` percent-encodes path segments; reverse it before
@@ -831,8 +841,17 @@ impl FileSyncController {
         // than swallowing them — keeps the fast-path correct for ASCII paths
         // and visibly broken for the rare non-UTF-8 case.
         let decoded = percent_encoding::percent_decode_str(encoded).decode_utf8_lossy();
-        let abs = self.root_dir.join(decoded.as_ref());
-        Some(CanonicalPath::new(&abs))
+        // The `file:` id is persisted (and peer-syncable) data, so the path it
+        // names is derived, not given. Prove containment here rather than at
+        // whichever caller first opens it.
+        let abs = VaultPath::inside(&self.root_dir, self.root_dir.join(decoded.as_ref()))
+            .with_context(|| {
+                format!(
+                    "file URI '{uri}' names a path outside the vault root '{}'",
+                    self.root_dir.display()
+                )
+            })?;
+        Ok(Some(CanonicalPath::new(abs.as_path())))
     }
 
     /// Phase 1: `sha256(RENDERER_VERSION || consolidator_tag || disk_bytes)`.
@@ -1649,11 +1668,24 @@ impl FileSyncController {
     /// carries no explicit id (a name-chain-only page).
     async fn companion_doc_id(&self, rel_dir: &str) -> Result<Option<String>> {
         for ext in self.format.extensions() {
-            let candidate = self.root_dir.join(format!("{rel_dir}.{ext}"));
-            if self.fs.exists(&candidate) {
+            // `rel_dir` is a join of page TITLES, so it carries author-supplied
+            // text. An escaping chain must not reach outside the vault for a
+            // file whose `#+ID` would then be ADOPTED as a page identity.
+            let candidate = VaultPath::inside(
+                &self.root_dir,
+                self.root_dir.join(format!("{rel_dir}.{ext}")),
+            )
+            .with_context(|| {
+                format!(
+                    "folder-companion lookup for '{rel_dir}' left the vault root '{}'",
+                    self.root_dir.display()
+                )
+            })?;
+            let candidate = candidate.as_path();
+            if self.fs.exists(candidate) {
                 let content = self
                     .fs
-                    .read_to_string(&candidate)
+                    .read_to_string(candidate)
                     .await
                     .with_context(|| format!("read companion {}", candidate.display()))?;
                 if let Some(bare) = self.format.doc_id_from_content(&content) {
@@ -4603,7 +4635,38 @@ impl FileSyncController {
         let blocks = self.block_reader.get_blocks(doc_id).await?;
 
         for block in blocks.iter().filter(|b| b.is_image_block()) {
-            let image_path = self.resolve_image_path(&block.content)?;
+            // A refused path is THIS image's problem: the block keeps its
+            // content and the rest of the document still materializes. The
+            // condition is permanent until the content changes and every
+            // write-back retries it, so disclose once per block (the
+            // `PATH_DERIVATION_SITE` precedent) instead of on every pass.
+            let image_path = match self.resolve_image_path(&block.content) {
+                Ok(p) => {
+                    self.clear_failure(&block.id, IMAGE_PATH_SITE);
+                    p
+                }
+                Err(e) => {
+                    if self.first_failure_for_doc(&block.id, IMAGE_PATH_SITE) {
+                        tracing::error!(
+                            doc_id = %doc_id,
+                            block_id = %block.id,
+                            error = %format!("{e:#}"),
+                            "[FileSyncController] refusing to materialize an image OUTSIDE the \
+                             vault root — the block keeps its content and no file is written. \
+                             Repeats for this block log at DEBUG.",
+                        );
+                    } else {
+                        debug!(
+                            doc_id = %doc_id,
+                            block_id = %block.id,
+                            error = %format!("{e:#}"),
+                            "[FileSyncController] image path still outside the vault root \
+                             (already disclosed once at ERROR)",
+                        );
+                    }
+                    continue;
+                }
+            };
             if self.fs.exists(&image_path) {
                 continue;
             }
@@ -4695,37 +4758,22 @@ impl FileSyncController {
         Ok(())
     }
 
-    /// Resolve a relative image path to an absolute path under root_dir.
-    /// Returns Err if the resolved path escapes the root directory (path
-    /// traversal).
+    /// Resolve an image block's path to a write target PROVEN to be inside the
+    /// vault.
+    ///
+    /// The input is `block.content` — authored in an org file or delivered by a
+    /// synced peer — so a traversal segment is untrusted input, not a broken
+    /// invariant: it earns an `Err`, never a panic. [`VaultPath`] normalizes
+    /// before comparing components, so `<root>/a/../../x` cannot pass.
     fn resolve_image_path(&self, relative_path: &str) -> Result<PathBuf> {
-        let joined = self.root_dir.join(relative_path);
-        let canonical_root = self
-            .fs
-            .canonicalize(&self.root_dir)
-            .unwrap_or_else(|_| self.root_dir.clone());
-        // For paths that don't exist yet, canonicalize the parent and append the
-        // filename
-        let resolved = if self.fs.exists(&joined) {
-            self.fs.canonicalize(&joined)?
-        } else if let Some(parent) = joined.parent() {
-            let canonical_parent = if self.fs.exists(parent) {
-                self.fs.canonicalize(parent)?
-            } else {
-                parent.to_path_buf()
-            };
-            canonical_parent.join(joined.file_name().unwrap_or_default())
-        } else {
-            joined.clone()
-        };
-        assert!(
-            resolved.starts_with(&canonical_root) || joined.starts_with(&self.root_dir),
-            "Image path traversal blocked: {} resolves to {} which is outside {}",
-            relative_path,
-            resolved.display(),
-            self.root_dir.display()
-        );
-        Ok(joined)
+        let target = VaultPath::inside(&self.root_dir, self.root_dir.join(relative_path))
+            .with_context(|| {
+                format!(
+                    "image path '{relative_path}' does not name a file inside the vault root '{}'",
+                    self.root_dir.display()
+                )
+            })?;
+        Ok(target.into_path_buf())
     }
 
     /// Run the post-org-write hook (fire-and-forget).

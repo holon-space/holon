@@ -1990,6 +1990,19 @@ pub trait SutOrgRead {
     async fn org_block_snapshot(&self) -> Vec<holon_api::Block>;
 }
 
+// ─── Phase 6f'' — FsWrites cluster ───────────────────────────────────
+//
+// Binds: `inv-no-write-outside-vault-root`.
+
+#[holon_macros::capmap_adapter]
+pub trait SutFsWrites {
+    /// `(vault root, every path the filesystem was ASKED to write or create)`,
+    /// both normalized. The write log — not a directory listing — because a
+    /// target that escaped the root is a defect even if the write then failed
+    /// or the file was removed again.
+    async fn vault_write_targets(&self) -> (String, Vec<String>);
+}
+
 // ─── Reference-side: extended read-only projections ──────────────────
 //
 // Each surfaces `ReferenceState` fields that invariant bodies need. Thin
