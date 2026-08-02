@@ -1,56 +1,61 @@
 # Release Pipeline
 
-How Holon releases are built, signed, attested, and shipped — and every piece
-of one-time manual setup needed outside this repo before the gated parts turn
-on. Written for someone who has never done any of this before.
+**The workflow files are the specification.** What builds, in what order, with
+which tools, into which artifact names, lives in
+`.github/workflows/release-desktop.yml` (tag `v*.*.*`) and
+`.github/workflows/release-mobile.yml` (tag `mobile-v*.*.*`). Read those for
+"what happens".
 
-## Overview
+This document holds only what those files cannot say: *why* the pipeline is
+shaped this way, the one-time setup that happens outside the repo, where each
+secret comes from, the human steps, and what to do when a release job fails.
 
-Two workflows, decoupled by tag prefix:
+## Why two workflows
 
-| Tag | Workflow | Ships |
-|---|---|---|
-| `v1.2.0` (`v*.*.*`) | `.github/workflows/release-desktop.yml` | macOS `.app` (universal2 zip), Linux `.tar.gz`, Windows `.zip` → attached to a GitHub Release |
-| `mobile-v1.2.0` (`mobile-v*.*.*`) | `.github/workflows/release-mobile.yml` | iOS → TestFlight, Android → Google Play internal testing track (+ both artifacts mirrored on a GitHub Release) |
+Desktop and mobile are decoupled by tag prefix so a desktop fix can ship
+without pushing a new build number to Apple/Google (stores reject reused build
+numbers, and every mobile upload consumes review/TestFlight processing time).
+The two workflows share nothing but the attestation and release-notes pattern.
 
-**Source-integrity guarantee**: every artifact gets a GitHub **Artifact
-Attestation** (SLSA build provenance) — a cryptographic, publicly verifiable
-statement that the file was built by this repo's release workflow from the
-exact tagged commit. This — not OS code-signing — is the "no injected code"
-mechanism. OS signing (Apple notarization, Play signing) only proves the
-*publisher's identity* to the OS; the attestation proves the *source* of the
-bits. End users verify with:
+## Why attestation, not code signing, is the integrity mechanism
+
+Both workflows attach a GitHub **Artifact Attestation** (SLSA build
+provenance) to every artifact: a publicly verifiable statement that the file
+was built by this repo's release workflow from the exact tagged commit. OS
+code-signing (Apple notarization, Play signing) only proves the *publisher's
+identity* to the OS — it says nothing about which source produced the bits.
+The attestation is what makes "no injected code" checkable by anyone:
 
 ```
 gh attestation verify <downloaded-file> --repo <owner>/holon
 ```
 
-### Gating: what runs today vs. after setup
+Per-OS `SHA256SUMS-*.txt` files are attached as a plain-checksum fallback.
 
-Apple Developer Program enrollment hasn't happened yet, so all
-Apple-dependent steps are gated behind repo **variables** (not secrets). The
-pipeline never hard-fails on missing Apple credentials — it skips with a loud
-warning and labels the output:
+## Why the Apple/Android paths are gated on repo *variables*
 
-| Repo variable | When unset / not `"true"` | When `"true"` |
-|---|---|---|
-| `APPLE_RELEASE_ENABLED` | Desktop: macOS artifact is built but **unsigned**, named `…-unsigned.zip`, release notes say so. Mobile: iOS job is skipped entirely (a stub job logs why). | macOS is codesigned + notarized; iOS builds a signed IPA and uploads to TestFlight. |
-| `ANDROID_RELEASE_ENABLED` | Android jobs are skipped entirely (stub jobs log why). | Mobile (`mobile-v*`): builds a **release-keystore-signed** AAB (bundletool) and uploads it to the Play internal track; a sideloadable `holon-release.apk` is also attached to the Release. Desktop (`v*`): additionally attaches the same-shaped sideloadable `holon-release.apk` to every desktop GitHub Release (no store involvement). |
+Apple Developer Program enrollment and the Android keystore are external
+prerequisites that may not exist yet. Rather than let a release fail on
+missing credentials, both workflows branch on repo **variables**
+`APPLE_RELEASE_ENABLED` and `ANDROID_RELEASE_ENABLED`; when a variable is not
+`"true"` the gated job is replaced by a stub job (`ios-skipped`,
+`android-skipped`, `android-apk-skipped`) that emits a `::warning::` saying
+exactly which variable and secrets are missing, and the generated release
+notes label the degraded output (e.g. an `-unsigned` macOS zip). This is the
+"fall back visibly" rule applied to CI: a release still ships, but nobody can
+mistake it for a signed one.
 
-Windows is intentionally unsigned in v1 (decision: no paid or free signing
-cert yet). Users see one SmartScreen prompt; the release notes say so.
-Provenance attestation still applies.
+Variables (not secrets) because they must be readable in `if:` conditions and
+carry nothing sensitive. Set them under Settings → Secrets and variables →
+Actions → **Variables**.
 
-## Current blocker: non-reproducible `gpui-component` patch
-
-The workspace `Cargo.toml` patches `gpui-component` to a **local path**
-(`/Users/martin/Workspaces/rust/gpui-component/crates/ui` — see the
-"NON-REPRODUCIBLE BUILD" comment block in the root `Cargo.toml`). **No GitHub
-runner can build `holon-gpui` until that patch is converted to a pushed git
-pin** (steps are spelled out in that comment). Fixing this is a prerequisite
-for the first real release; the workflows are otherwise complete.
+Windows is unsigned by decision (no OV/EV certificate purchased for v1). Users
+see one SmartScreen prompt; the release notes say so. Attestation still
+applies.
 
 ## One-time manual setup, in order
+
+All of this happens outside the repo and cannot be automated.
 
 ### 1. Apple Developer Program (unblocks macOS signing + iOS)
 
@@ -71,7 +76,7 @@ for the first real release; the workflows are otherwise complete.
    - `APPLE_API_ISSUER_ID` — the Issuer ID shown at the top of the page (a UUID)
    - `APPLE_API_KEY_P8_BASE64` — `base64 -i AuthKey_XXXX.p8 | pbcopy`
 
-### 3. macOS: Developer ID Application certificate (for notarized desktop builds)
+### 3. macOS: Developer ID Application certificate
 
 1. On a Mac: Keychain Access → Certificate Assistant → **Request a
    Certificate From a Certificate Authority** → save the `.certSigningRequest`.
@@ -97,22 +102,18 @@ for the first real release; the workflows are otherwise complete.
    (distribution) → select the `space.holon.gpui` App ID and your
    Distribution certificate → name it (e.g. `Holon AppStore`) → download.
    - `IOS_PROVISIONING_PROFILE_BASE64` — `base64 -i Holon_AppStore.mobileprovision | pbcopy`
-   (The workflow reads the profile's Name/UUID out of the file itself; the
-   name is passed to xcodebuild automatically.)
+
+   The profile's Name/UUID is read out of the file itself, so no extra secret
+   is needed for it.
 4. Register the app in App Store Connect: **My Apps** → **+** → New App →
    platform iOS, bundle ID `space.holon.gpui`, pick a globally-unique app
    name and an SKU (e.g. `holon-ios`).
-5. Finally set repo **variable** `APPLE_RELEASE_ENABLED` = `true`
-   (Settings → Secrets and variables → Actions → **Variables** tab).
+5. Finally set repo variable `APPLE_RELEASE_ENABLED` = `true`.
 
 ### 5. Google Play: service account (Android upload auth)
 
-Prereq: a Play Console developer account (exists already) and the app created
-in Play Console (**Create app**, package name `space.holon.gpui`). The very
-first AAB upload to the internal track may need to be done by hand in Play
-Console before API uploads are accepted — Play quirk, do it once with the
-CI-built `holon-release.aab` off the GitHub Release if the first `supply` run
-complains.
+Prereq: a Play Console developer account and the app created in Play Console
+(**Create app**, package name `space.holon.gpui`).
 
 1. Play Console → **Setup** → **API access** → link a Google Cloud project.
 2. In that Cloud project: IAM & Admin → Service Accounts → **Create service
@@ -120,16 +121,15 @@ complains.
 3. Back in Play Console → API access → grant the service account access to
    the app with the **Release manager** role (or a custom role with
    release-to-testing-tracks permission).
-4. Store as repo secret:
-   - `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON` — the **raw JSON file contents**
-     (paste as-is, not base64).
+4. Store as repo secret `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON` — the **raw JSON
+   file contents** (paste as-is, not base64).
 
 ### 6. Android release keystore
 
-Generate once, back it up somewhere safe (losing it means you can never
-update the app again under the same signature, unless you enroll in Play App
-Signing — recommended: enroll during app creation, then this keystore is
-"only" your upload key and is resettable):
+Generate once and back it up somewhere safe. Losing it means you can never
+update the app again under the same signature — unless you enroll in Play App
+Signing (recommended: enroll during app creation, then this keystore is
+"only" your upload key and is resettable).
 
 ```
 keytool -genkeypair -v \
@@ -138,133 +138,123 @@ keytool -genkeypair -v \
   -keyalg RSA -keysize 4096 -validity 10000
 ```
 
-Store as repo secrets:
+Store as repo secrets `ANDROID_RELEASE_KEYSTORE_BASE64`
+(`base64 -i holon-release.jks`), `ANDROID_RELEASE_KEYSTORE_PASSWORD`,
+`ANDROID_RELEASE_KEY_ALIAS` (`holon`, or whatever you chose), and
+`ANDROID_RELEASE_KEY_PASSWORD` (same as the store password if you pressed
+Enter at the prompt). Then set `ANDROID_RELEASE_ENABLED` = `true`.
 
-- `ANDROID_RELEASE_KEYSTORE_BASE64` — `base64 -i holon-release.jks | pbcopy`
-- `ANDROID_RELEASE_KEYSTORE_PASSWORD` — the keystore password
-- `ANDROID_RELEASE_KEY_ALIAS` — `holon` (or whatever you chose)
-- `ANDROID_RELEASE_KEY_PASSWORD` — the key password (same as store password
-  if you pressed Enter at the prompt)
+There is **no debug-keystore fallback** by design:
+`frontends/gpui/android/build-release-aab.sh` and `build-release-apk.sh` both
+require `KEYSTORE_FILE` / `KEYSTORE_PASSWORD` / `KEY_ALIAS` and abort if any
+is unset, so a misconfigured secret produces a failed release, never a
+debug-signed one that Play would reject later.
 
-Then set repo **variable** `ANDROID_RELEASE_ENABLED` = `true`.
+## Where each secret comes from
 
-The release job **never** falls back to the debug keystore — the packaging
-scripts (`build-release-aab.sh` for Play, `build-release-apk.sh` for the
-sideload artifact) require every keystore variable and fail loud otherwise.
-Both strip the dev manifest's `android:debuggable="true"` (Play rejects
-debuggable builds) and inject `versionCode`/`versionName` at link time. The AAB
-is signed with `jarsigner`; the sideload APK with `apksigner` — same keystore
-and env vars in both.
+The workflows say which secret they consume; this table says where you obtain
+it. Names not listed here do not exist.
 
-## Complete secrets & variables reference
-
-Repo **variables** (Settings → Secrets and variables → Actions → Variables):
-
-| Variable | Purpose |
+| Secret | Where it comes from |
 |---|---|
-| `APPLE_RELEASE_ENABLED` | `true` ⇒ macOS signing+notarization runs and the iOS TestFlight job runs. Anything else ⇒ unsigned macOS build, iOS skipped loudly. |
-| `ANDROID_RELEASE_ENABLED` | `true` ⇒ Android build+Play upload runs. Anything else ⇒ skipped loudly. |
+| `APPLE_TEAM_ID` | developer.apple.com → Membership |
+| `APPLE_API_KEY_ID` | App Store Connect → Integrations → API key list |
+| `APPLE_API_ISSUER_ID` | Same page, Issuer ID |
+| `APPLE_API_KEY_P8_BASE64` | base64 of the downloaded `.p8` |
+| `MACOS_DEVELOPER_ID_CERT_P12_BASE64` | base64 of exported Developer ID Application `.p12` |
+| `MACOS_DEVELOPER_ID_CERT_PASSWORD` | your `.p12` export password |
+| `IOS_DISTRIBUTION_CERT_P12_BASE64` | base64 of exported Apple Distribution `.p12` |
+| `IOS_DISTRIBUTION_CERT_PASSWORD` | your `.p12` export password |
+| `IOS_PROVISIONING_PROFILE_BASE64` | base64 of the App Store provisioning profile |
+| `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON` | raw JSON key of the Play service account |
+| `ANDROID_RELEASE_KEYSTORE_BASE64` | base64 of `holon-release.jks` (keytool, above) |
+| `ANDROID_RELEASE_KEYSTORE_PASSWORD` / `_KEY_ALIAS` / `_KEY_PASSWORD` | chosen at keytool time |
 
-Repo **secrets**:
+## Cutting a release — the human steps
 
-| Secret | Used by | Where it comes from |
-|---|---|---|
-| `APPLE_TEAM_ID` | iOS build | developer.apple.com → Membership |
-| `APPLE_API_KEY_ID` | macOS notarization, TestFlight upload | App Store Connect → Integrations → API key list |
-| `APPLE_API_ISSUER_ID` | macOS notarization, TestFlight upload | Same page, Issuer ID |
-| `APPLE_API_KEY_P8_BASE64` | macOS notarization, TestFlight upload | base64 of the downloaded `.p8` |
-| `MACOS_DEVELOPER_ID_CERT_P12_BASE64` | macOS codesign | base64 of exported Developer ID Application `.p12` |
-| `MACOS_DEVELOPER_ID_CERT_PASSWORD` | macOS codesign | your `.p12` export password |
-| `IOS_DISTRIBUTION_CERT_P12_BASE64` | iOS codesign | base64 of exported Apple Distribution `.p12` |
-| `IOS_DISTRIBUTION_CERT_PASSWORD` | iOS codesign | your `.p12` export password |
-| `IOS_PROVISIONING_PROFILE_BASE64` | iOS codesign | base64 of the App Store provisioning profile |
-| `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON` | Play upload | raw JSON key of the Play service account |
-| `ANDROID_RELEASE_KEYSTORE_BASE64` | APK signing | base64 of `holon-release.jks` (keytool, above) |
-| `ANDROID_RELEASE_KEYSTORE_PASSWORD` | APK signing | chosen at keytool time |
-| `ANDROID_RELEASE_KEY_ALIAS` | APK signing | chosen at keytool time |
-| `ANDROID_RELEASE_KEY_PASSWORD` | APK signing | chosen at keytool time |
+1. **Bump the macOS bundle version by hand.**
+   `frontends/gpui/macos/Info.plist` (`CFBundleVersion`,
+   `CFBundleShortVersionString`) is copied verbatim into the `.app` by
+   `scripts/bundle-macos.sh`; nothing injects it. Everything else derives from
+   the tag: desktop artifact names, the iOS build number, and the Android
+   `versionName`/`versionCode` (`code = major*10000 + minor*100 + patch`).
+   Because that derivation is deterministic, **re-submitting to a store
+   requires bumping the patch version and tagging again** — stores reject
+   reused build numbers. There is no automated version bumping or changelog
+   generation.
 
-## How to cut a release
-
-1. **Bump versions manually** (no automation in v1):
-   - `frontends/gpui/Cargo.toml` — `version`
-   - `frontends/gpui/macos/Info.plist` — `CFBundleVersion` + `CFBundleShortVersionString`
-   - iOS `frontends/gpui/ios/Info.plist` and the Android manifest do **not**
-     need manual bumps: the mobile workflow injects the version from the tag
-     (Info.plist via fastlane, APK via `aapt2 --version-code/--version-name`).
-     Mobile version/build numbers are derived deterministically from the tag
-     (`code = major*10000 + minor*100 + patch`), so **re-submitting to a
-     store requires bumping patch and tagging again** — stores reject reused
-     build numbers.
-2. **Tag and push.** Tags are a git-level concept; jj has no tag command, and
-   this repo is jj/git-colocated, so plain git is correct here (the one place
-   git commands are right in this repo). From a clean, pushed `main`:
+2. **Tag and push.** Tags are a git-level concept and jj has no tag command;
+   this repo is jj/git-colocated, so plain git is correct here — the one place
+   git commands are right in this repo. From a clean, pushed `main`:
 
    ```
-   git tag v1.2.0 && git push origin v1.2.0            # desktop release
-   git tag mobile-v1.2.0 && git push origin mobile-v1.2.0  # mobile release
+   git tag v1.2.0 && git push origin v1.2.0                  # desktop
+   git tag mobile-v1.2.0 && git push origin mobile-v1.2.0    # mobile
    ```
 
-3. Watch the run under Actions. Desktop: artifacts + `SHA256SUMS-<os>.txt`
-   appear on the GitHub Release for the tag. Mobile: TestFlight processes the
-   build (test in the TestFlight app); the Android build lands as a **draft
-   release on the internal testing track** — promote manually in Play Console.
+3. **Finish in the stores by hand.** Nothing is auto-promoted. iOS lands in
+   TestFlight and needs processing plus (for external testers) review; Android
+   lands as a **draft on the internal testing track** and must be promoted in
+   Play Console.
 
-## How users verify a download
+## Failure-mode playbook
 
-```
-gh attestation verify Holon-1.2.0-linux-x86_64.tar.gz --repo <owner>/holon
-```
-
-Prints the workflow, repository, and commit the artifact was built from,
-verified against GitHub's Sigstore instance. Also compare
-`sha256sum <file>` against the attached `SHA256SUMS-<os>.txt`.
+- **A gated job "did nothing".** Look for the `*-skipped` stub job in the run;
+  its warning names the missing variable/secret. This is expected before
+  setup, not a pipeline bug.
+- **First Play upload rejected by the API.** A brand-new Play app may require
+  the very first AAB to be uploaded by hand in Play Console before the API
+  accepts uploads. Download `holon-release.aab` off the GitHub Release the run
+  created and upload it manually, once.
+- **Play rejects the build as debuggable.** Should be impossible — both
+  packaging scripts strip `android:debuggable` and fail loud if the strip did
+  not change the manifest. If it happens, the checked-in dev manifest changed
+  shape; fix the script, don't work around it in Play.
+- **Store rejects a reused build number.** Bump patch, tag again (see above).
+  Never retag an existing tag.
+- **A macOS/Windows/Linux artifact fails to launch on a specific machine.**
+  The AppImage and Windows artifacts are freshly minted; a runtime failure on
+  one machine is a finding to triage, not automatically a pipeline defect.
+  Check the glibc floor and Vulkan driver requirement first (below).
 
 ## Design decisions & known limitations
 
 - **macOS universal2**: one lipo'd arm64+x86_64 binary in a single
   `Holon.app` — one download, no arch confusion, at the cost of a second
-  cargo build (~2× mac build time).
+  cargo build (~2× mac build time). This is why macOS builds in its own
+  per-arch matrix plus a finalize job rather than the main build matrix.
 - **Assets placement**: the binary resolves `assets/` next to the executable.
   Linux/Windows archives place `assets/` beside the binary; the macOS bundle
   puts them in `Contents/Resources/assets` with a symlink from
   `Contents/MacOS/assets` (codesign forbids non-code files in `MacOS/`).
   Packaging copies assets via `scripts/stage-assets.sh` (real files copied,
   symlinks dereferenced, dangling links dropped with a loud warning).
-  `assets/queries/*.prql` are three vestigial links into `crates/*/queries`
-  that resolve only through the `frontends/gpui/assets` → `../../assets`
-  indirection and never in a flat package, so all three are dropped. A plain
+  `assets/queries/*.prql` are vestigial links into `crates/*/queries` that
+  resolve only through the `frontends/gpui/assets` → `../../assets`
+  indirection and never in a flat package, so they are dropped. A plain
   `cp -R` would ship them as dangling links (broken at runtime) and fails the
   Windows build outright (`cp: cannot create symbolic link …`).
-- **Linux packaging**: two artifacts per release — a portable **AppImage**
-  (bundles the GUI shared libs so users need no `-dev`/runtime packages) and a
-  plain **`.tar.gz`** (kept as a fallback; needs the system GUI libs present).
-  Built on **Ubuntu 22.04** so the glibc floor is 2.35 (covers 22.04 / Debian
-  12 / etc.) rather than 24.04's 2.39. glibc itself can't be bundled, so that
-  floor is the hard minimum; a Vulkan-capable GPU driver is also required at
-  runtime. Further options (`.deb`/Flatpak, or an even older glibc via a
-  manylinux container) are follow-ups.
+- **Linux glibc floor**: built on Ubuntu 22.04 so the floor is glibc 2.35
+  (covers 22.04 / Debian 12 / etc.) rather than 24.04's 2.39. glibc cannot be
+  bundled, so that floor is the hard minimum; a Vulkan-capable GPU driver is
+  also required at runtime. Two artifacts ship: a portable AppImage that
+  bundles the GUI shared libs, and a plain `.tar.gz` fallback that needs the
+  system GUI libs present. `.deb`/Flatpak, or an older floor via a manylinux
+  container, are follow-ups.
 - **Windows CRT**: built with `-C target-feature=+crt-static`, so the `.exe`
   has no VC++ redistributable (`vcruntime140.dll`) dependency — it runs on a
   clean Windows install. x86_64 only; no ARM64 Windows build.
 - **AAB for Play, APK for sideload**: Google Play rejects APK uploads for this
-  app ("APKs are not allowed for this application", mobile-v0.0.13) — a new
-  Play app requires an **AAB**, no opt-out. There is no Gradle project; the AAB
-  is produced by a direct `aapt2 --proto-format` + **bundletool** pipeline in
-  `frontends/gpui/android/build-release-aab.sh` (pinned bundletool 1.17.2,
-  checksum-verified in CI). bundletool `validate` + a `build-apks
-  --mode=universal` badging diff against the direct-APK output gate correctness.
-  The direct-APK pipeline (`build-release-apk.sh`) still runs to produce a
-  sideloadable `holon-release.apk` attached to the GitHub Release; only the AAB
-  is uploaded to Play.
+  app ("APKs are not allowed for this application", observed on
+  `mobile-v0.0.13`) — a new Play app requires an AAB, with no opt-out. There
+  is no Gradle project, so the AAB is produced by a direct `aapt2
+  --proto-format` + bundletool pipeline in
+  `frontends/gpui/android/build-release-aab.sh`, which ends in a bundletool
+  `validate`. The direct-APK pipeline (`build-release-apk.sh`) still runs to
+  produce a sideloadable `holon-release.apk` for the GitHub Release; only the
+  AAB goes to Play.
 - **Play track**: uploads go to `internal` as `draft`, never auto-promoted.
 - **Windows signing**: skipped in v1 by decision. Follow-up if SmartScreen
   friction matters: an OV/EV cert or Azure Trusted Signing.
 - **Windows build**: `gpui_windows` (holon-space/zed fork) compiles in CI
-  (proven by the `v0.0.1` run, ~48 min). The AppImage and (first-run) Windows
-  artifact are still freshly minted — a runtime failure on a specific machine
-  is a finding, not a pipeline bug.
-- **No automated version bumping** and no changelog generation in v1.
-- **Nightly is unpinned**: `rust-toolchain.toml` says `channel = "nightly"`
-  (no date). Releases build with whatever nightly is current that day; pin a
-  dated nightly there if a release ever breaks on a fresh toolchain.
+  (proven by the `v0.0.1` run, ~48 min).
