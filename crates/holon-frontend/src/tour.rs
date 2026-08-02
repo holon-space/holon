@@ -368,6 +368,7 @@ mod tests {
             styled_runs: None,
             opacity: None,
             expected_size: Default::default(),
+            vm_node: None,
         }
     }
 

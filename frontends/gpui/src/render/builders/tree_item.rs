@@ -366,6 +366,10 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
                         ctx.bounds_registry.clone(),
                         chevron_el.into_any_element(),
                     )
+                    // This row draws its own chevron rather than dispatching an
+                    // `expand_toggle` node, so this is the only site that can
+                    // tell `describe_ui` which node the chevron paints.
+                    .with_vm_node(Some(target_id))
                     .with_displayed_text(chevron_glyph(collapsed))
                     // The disclosure affordance is PERSISTENT: a parent row is
                     // identifiable without hovering it (and touch has no hover

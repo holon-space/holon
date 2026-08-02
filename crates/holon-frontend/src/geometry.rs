@@ -11,6 +11,21 @@ use std::sync::RwLock;
 
 use crate::size_expectation::SizeBounds;
 
+/// The view-model node an element was created to render.
+///
+/// `ElementInfo::widget_type` names the *tracker* (`selectable`,
+/// `rendered_text`, …); this names the *node* whose builder the tracker wraps.
+/// One entity is usually rendered by a whole chain of nodes, so without this
+/// the only available join is entity-wide and every node of the chain reports
+/// the same sibling's rect.
+#[derive(Debug, Clone)]
+pub struct VmNode {
+    /// The node's serde widget tag — `column`, `tree_item`, `card`.
+    pub tag: Arc<str>,
+    /// The entity URI the node renders. `None` for nodes bound to no row.
+    pub entity: Option<Arc<str>>,
+}
+
 /// Metadata about a rendered UI element: bounds, widget type, entity binding.
 #[derive(Debug, Clone)]
 pub struct ElementInfo {
@@ -63,6 +78,12 @@ pub struct ElementInfo {
     /// `Free`) so widgets opt in incrementally; see
     /// [`crate::size_expectation`] for the AST and ergonomics.
     pub expected_size: SizeBounds,
+    /// The view-model node this element was created to render, when the
+    /// registration site knows it — see [`VmNode`]. `None` at sites that
+    /// genuinely cannot tell (hand-rolled trackers inside a builder, frontends
+    /// whose renderer does not thread the node), and absence stays absence:
+    /// consumers fall back to a coarser, disclosed join rather than guessing.
+    pub vm_node: Option<VmNode>,
 }
 
 impl ElementInfo {

@@ -18,15 +18,50 @@ use holon_frontend::geometry::GeometryProvider;
 use serde_json::Value;
 use serde_json::json;
 
-/// Registry elements grouped by the entity they render.
+/// How a node's rect was found — from strongest evidence to weakest. Only
+/// [`JoinKind::Exact`] measures the node itself; the other two measure some
+/// element that merely renders the same entity, so they are disclosed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JoinKind {
+    /// The element the node dispatch wrapped around THIS node's builder.
+    Exact,
+    /// A tracker whose own name equals the node's widget tag. Used by
+    /// frontends that record no [`VmNode`], and by builder-internal trackers.
+    WidgetType,
+    /// Any element of the same entity — a sibling in the node chain.
+    EntityOnly,
+    /// Matched only after stripping URI schemes from BOTH sides, i.e. the two
+    /// ids were NOT equal. `doc:x` reaching a `block:x` element is a real
+    /// mis-join risk, so this tier always names the entity it measured.
+    BareId,
+}
+
+impl JoinKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            JoinKind::Exact => "exact",
+            JoinKind::WidgetType => "widget_type",
+            JoinKind::EntityOnly => "entity_only",
+            JoinKind::BareId => "bare_id",
+        }
+    }
+}
+
+/// Registry elements indexed for the three join tiers.
 pub struct GeometryIndex {
+    /// entity URI -> view-model tag -> the trackers that wrap that node.
+    by_vm_node: HashMap<String, HashMap<String, Vec<(String, ElementInfo)>>>,
+    /// Entity-bound elements under their VERBATIM URI.
     by_entity: HashMap<String, Vec<(String, ElementInfo)>>,
+    /// The same elements under their scheme-stripped id, consulted only when
+    /// the verbatim key misses: renderers tag with the schemed row id
+    /// (`block:foo`) while a view-model may carry either form. Keeping this a
+    /// separate tier stops `doc:x` and `block:x` from sharing one bucket.
+    by_bare: HashMap<String, Vec<(String, ElementInfo)>>,
     total: usize,
 }
 
-/// Strip one leading URI scheme so both sides of the join key alike: renderers
-/// tag with the schemed row id (`block:foo`) while the view-model may carry
-/// either form.
+/// Strip one leading URI scheme. Only ever used for the last-resort tier.
 fn bare_id(id: &str) -> &str {
     for scheme in ["block:", "doc:", "page:"] {
         if let Some(rest) = id.strip_prefix(scheme) {
@@ -38,52 +73,98 @@ fn bare_id(id: &str) -> &str {
 
 impl GeometryIndex {
     pub fn build(provider: &dyn GeometryProvider) -> Self {
+        let mut by_vm_node: HashMap<String, HashMap<String, Vec<(String, ElementInfo)>>> =
+            HashMap::new();
         let mut by_entity: HashMap<String, Vec<(String, ElementInfo)>> = HashMap::new();
+        let mut by_bare: HashMap<String, Vec<(String, ElementInfo)>> = HashMap::new();
         let elements = provider.all_elements();
         let total = elements.len();
         for (el_id, info) in elements {
+            if let Some(vm) = &info.vm_node {
+                if let Some(entity) = &vm.entity {
+                    by_vm_node
+                        .entry(entity.to_string())
+                        .or_default()
+                        .entry(vm.tag.to_string())
+                        .or_default()
+                        .push((el_id.clone(), info.clone()));
+                }
+            }
             if let Some(entity) = info.entity_id.clone() {
-                by_entity
+                by_bare
                     .entry(bare_id(&entity).to_string())
+                    .or_default()
+                    .push((el_id.clone(), info.clone()));
+                by_entity
+                    .entry(entity.to_string())
                     .or_default()
                     .push((el_id, info));
             }
         }
-        Self { by_entity, total }
+        Self {
+            by_vm_node,
+            by_entity,
+            by_bare,
+            total,
+        }
     }
 
     pub fn total_elements(&self) -> usize {
         self.total
     }
 
-    /// Candidates for a `(widget_type, entity_id)` pair. The pair is NOT
-    /// guaranteed unique (the registry itself warns when a pair migrates
-    /// el_id), so the caller decides what to do with >1 rather than picking.
+    /// Candidates for a node, strongest tier first. No tier is unique by
+    /// construction (one entity can be rendered in two panels), so the caller
+    /// decides what to do with >1 rather than picking.
     fn candidates(
         &self,
         widget: Option<&str>,
         entity: &str,
-    ) -> (Vec<&(String, ElementInfo)>, bool) {
-        let all = match self.by_entity.get(bare_id(entity)) {
-            Some(v) => v,
-            None => return (Vec::new(), true),
+    ) -> (Vec<&(String, ElementInfo)>, JoinKind) {
+        let own = widget.and_then(|widget| {
+            self.by_vm_node
+                .get(entity)
+                .and_then(|by_tag| by_tag.get(widget))
+        });
+        if let Some(own) = own {
+            return (own.iter().collect(), JoinKind::Exact);
+        }
+        // Reaching the scheme-stripped map means the two ids differed, so every
+        // match found through it is approximate no matter how well the widget
+        // tag lines up.
+        let (all, via_bare) = match self.by_entity.get(entity) {
+            Some(v) => (v, false),
+            None => match self.by_bare.get(bare_id(entity)) {
+                Some(v) => (v, true),
+                None => return (Vec::new(), JoinKind::EntityOnly),
+            },
         };
         if let Some(widget) = widget {
-            let exact: Vec<_> = all
+            let same_type: Vec<_> = all
                 .iter()
                 .filter(|(_, info)| &*info.widget_type == widget)
                 .collect();
-            if !exact.is_empty() {
-                return (exact, true);
+            if !same_type.is_empty() {
+                let kind = if via_bare {
+                    JoinKind::BareId
+                } else {
+                    JoinKind::WidgetType
+                };
+                return (same_type, kind);
             }
         }
-        (all.iter().collect(), false)
+        let kind = if via_bare {
+            JoinKind::BareId
+        } else {
+            JoinKind::EntityOnly
+        };
+        (all.iter().collect(), kind)
     }
 }
 
 /// The geometry facts for one node, or the reason there are none.
 fn node_geometry(index: &GeometryIndex, widget: Option<&str>, entity: &str) -> Value {
-    let (candidates, exact_pair) = index.candidates(widget, entity);
+    let (candidates, kind) = index.candidates(widget, entity);
     match candidates.len() {
         0 => json!({ "absent": "not_painted" }),
         1 => {
@@ -97,9 +178,12 @@ fn node_geometry(index: &GeometryIndex, widget: Option<&str>, entity: &str) -> V
                 "has_visible_area": info.has_visible_area(),
             });
             let map = obj.as_object_mut().expect("geometry object");
-            if !exact_pair {
-                map.insert("match".into(), json!("entity_only"));
+            map.insert("match".into(), json!(kind.as_str()));
+            if matches!(kind, JoinKind::EntityOnly | JoinKind::BareId) {
                 map.insert("painted_as".into(), json!(&*info.widget_type));
+            }
+            if kind == JoinKind::BareId {
+                map.insert("matched_entity".into(), json!(info.entity_id.as_deref()));
             }
             if let Some(focused) = info.focused {
                 map.insert("focused".into(), json!(focused));
@@ -136,9 +220,10 @@ fn node_key(node: &serde_json::Map<String, Value>) -> Option<(Option<&str>, &str
     Some((node.get("widget").and_then(Value::as_str), entity))
 }
 
-/// Walk every object in the tree, annotating the ones that look like widget
-/// nodes. Recursion is structure-agnostic (it does not hard-code
-/// `children.items`) so a render-schema change cannot silently drop geometry.
+/// Walk every object in the tree, annotating each one that carries an
+/// `entity.id` (see [`node_key`]). Recursion is structure-agnostic (it does not
+/// hard-code `children.items`) so a render-schema change cannot silently drop
+/// geometry.
 fn annotate_in_place(value: &mut Value, index: &GeometryIndex) {
     match value {
         Value::Object(map) => {
@@ -229,9 +314,13 @@ pub fn geometry_text_report(tree: &Value, geometry: Option<&dyn GeometryProvider
                 } else {
                     " NO-VISIBLE-AREA"
                 },
-                match geo.get("painted_as").and_then(Value::as_str) {
-                    Some(painted) => format!(" (via {painted})"),
-                    None => String::new(),
+                match (
+                    geo.get("painted_as").and_then(Value::as_str),
+                    geo.get("matched_entity").and_then(Value::as_str),
+                ) {
+                    (Some(painted), Some(matched)) => format!(" (via {painted} on {matched})"),
+                    (Some(painted), None) => format!(" (via {painted})"),
+                    (None, _) => String::new(),
                 }
             ),
         };

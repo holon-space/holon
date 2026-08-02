@@ -23,6 +23,7 @@ use gpui::Pixels;
 use gpui::Window;
 use holon_frontend::geometry::ElementInfo;
 use holon_frontend::geometry::GeometryProvider;
+use holon_frontend::geometry::VmNode;
 use holon_frontend::size_expectation::SizeBounds;
 
 /// Shared registry of element metadata, populated during GPUI render passes.
@@ -384,6 +385,9 @@ pub struct TransparentTracker {
     displayed_text: Option<Arc<str>>,
     /// The alpha the wrapped element declares — see [`ElementInfo::opacity`].
     opacity: Option<f32>,
+    /// The view-model node this tracker wraps — see [`VmNode`]. Set by the
+    /// node-dispatch `tag_node()`, which is the only site that holds the node.
+    vm_node: Option<VmNode>,
     child: Option<AnyElement>,
 }
 
@@ -402,6 +406,7 @@ impl TransparentTracker {
             entity_id: None,
             displayed_text: None,
             opacity: None,
+            vm_node: None,
             child: Some(child),
         }
     }
@@ -417,6 +422,17 @@ impl TransparentTracker {
     /// visible control from one that is laid out but transparent.
     pub fn with_opacity(mut self, opacity: f32) -> Self {
         self.opacity = Some(opacity);
+        self
+    }
+
+    /// Declare which view-model node this tracker was created for, so
+    /// `describe_ui` can join that node to THIS rect instead of to a sibling
+    /// element that merely renders the same entity.
+    pub fn with_vm_node(mut self, entity: Option<&str>) -> Self {
+        self.vm_node = Some(VmNode {
+            tag: Arc::clone(&self.widget_type),
+            entity: entity.map(Arc::from),
+        });
         self
     }
 
@@ -495,6 +511,7 @@ impl Element for TransparentTracker {
                 styled_runs: None,
                 opacity: self.opacity,
                 expected_size: self.expected_size.clone(),
+                vm_node: self.vm_node.clone(),
             },
         );
         push_parent(Arc::clone(&self.el_id));
@@ -579,6 +596,7 @@ impl Element for BoundsTracker {
                 styled_runs: self.styled_runs.clone(),
                 opacity: None,
                 expected_size: self.expected_size.clone(),
+                vm_node: None,
             },
         );
         push_parent(Arc::clone(&self.el_id));
@@ -621,6 +639,7 @@ mod tests {
             styled_runs: None,
             opacity: None,
             expected_size: SizeBounds::default(),
+            vm_node: None,
         }
     }
 

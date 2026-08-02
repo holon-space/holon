@@ -23,7 +23,7 @@ holon_macros::builder_registry!("src/render/builders",
     skip: [prelude, columns, style],
     node_dispatch: AnyElement,
     context: GpuiRenderContext,
-    transform: crate::render::builders::tag(ctx, __name, __inner),
+    transform: crate::render::builders::tag_node(ctx, __name, node, __inner),
 );
 
 /// Wrapper applied to every builder's output via the `transform:` template in
@@ -40,6 +40,29 @@ pub(crate) fn tag<E: gpui::IntoElement>(
     el: E,
 ) -> AnyElement {
     tag_with_entity_id(ctx, name, None, el)
+}
+
+/// The `transform:` template above — `tag()` plus the identity of the node
+/// whose builder is being wrapped. That identity is what lets `describe_ui`
+/// report a node's OWN rect: every node of a row's chain (`tree_item` >
+/// `column` > `selectable` > `rendered_text`) renders the same entity, so an
+/// entity-wide join can only hand them all one sibling's box.
+pub(crate) fn tag_node<E: gpui::IntoElement>(
+    ctx: &GpuiRenderContext,
+    name: &'static str,
+    node: &holon_frontend::reactive_view_model::ReactiveViewModel,
+    el: E,
+) -> AnyElement {
+    let seq = ctx.bounds_registry.next_seq();
+    let id = format!("{name}#{seq}");
+    crate::geometry::TransparentTracker::new(
+        id,
+        name,
+        ctx.bounds_registry.clone(),
+        el.into_any_element(),
+    )
+    .with_vm_node(node.row_id().as_deref())
+    .into_any_element()
 }
 
 /// Like `tag()`, but binds an `entity_id` on the tracker so PBT generators
