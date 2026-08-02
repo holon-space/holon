@@ -687,6 +687,10 @@ pub fn is_template_arg(name: &str) -> bool {
             | "header_template"
             | "child_template"
             | "action"
+            | "shift_action"
+            | "cmd_action"
+            | "ctrl_action"
+            | "alt_action"
             | "parent_id"
             | "sortkey"
             | "sort_key"
@@ -848,7 +852,57 @@ pub fn eval_binary_op(op: &BinaryOperator, left: &Value, right: &Value) -> Value
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render_dsl::parse_render_dsl;
     use crate::render_types::Arg;
+
+    /// First `target`-named call in `expr`, depth-first.
+    fn find_call<'a>(expr: &'a RenderExpr, target: &str) -> Option<&'a [Arg]> {
+        match expr {
+            RenderExpr::FunctionCall { name, args } if name == target => Some(args),
+            RenderExpr::FunctionCall { args, .. } => {
+                args.iter().find_map(|a| find_call(&a.value, target))
+            }
+            RenderExpr::Object { fields } => fields.values().find_map(|v| find_call(v, target)),
+            RenderExpr::Array { items } => items.iter().find_map(|v| find_call(v, target)),
+            _ => None,
+        }
+    }
+
+    /// The shipped left sidebar is the reference user of modifier-click:
+    /// cmd-click (macOS) / ctrl-click (Windows+Linux) open the page in a tab.
+    /// Parsing the real asset rather than a synthetic expression keeps this
+    /// pinned to the affordance users actually get.
+    #[test]
+    fn shipped_left_sidebar_resolves_modifier_click_action_templates() {
+        let org = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/default/index.org"
+        ))
+        .expect("read assets/default/index.org");
+        let source = org
+            .lines()
+            .find(|l| l.contains("item_template: selectable("))
+            .expect("left-sidebar render expression in assets/default/index.org");
+
+        let expr = parse_render_dsl(source).expect("parse the shipped left-sidebar expression");
+        let args =
+            find_call(&expr, "selectable").expect("selectable call in the shipped expression");
+        let resolved = resolve_args(args, &HashMap::<String, Value>::new());
+
+        // `action` is allowlisted, so its presence proves the fixture parsed and
+        // reached `selectable` — a failure below is then specifically about the
+        // modifier-click names, not a malformed fixture.
+        assert!(
+            resolved.get_template("action").is_some(),
+            "primary `action` template missing — the fixture is malformed"
+        );
+        for key in ["cmd_action", "ctrl_action"] {
+            assert!(
+                resolved.get_template(key).is_some(),
+                "`{key}` did not resolve as a template, so the modifier-click action is dead"
+            );
+        }
+    }
 
     #[test]
     fn test_eval_binary_op_arithmetic() {

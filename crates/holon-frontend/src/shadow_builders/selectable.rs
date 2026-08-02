@@ -84,9 +84,12 @@ holon_macros::widget_builder! {
         // `cmd_action: navigation_open_tab(...)` (macOS) and
         // `ctrl_action: navigation_open_tab(...)` (Windows/Linux) so a
         // modifier-click opens the page in a new tab instead of replacing the
-        // current one. Adding a modifier is one table row here — no change to
-        // the `Trigger` enum or the frontend dispatch (it looks the active
-        // modifier set up in a `HashMap<ClickModifiers, _>`).
+        // current one. Adding a modifier is one table row here plus its name in
+        // `holon_api::render_eval::is_template_arg` — without the latter the arg
+        // parses as a scalar and `get_template` silently returns `None`, leaving
+        // the affordance dead. No change to the `Trigger` enum or the frontend
+        // dispatch (it looks the active modifier set up in a
+        // `HashMap<ClickModifiers, _>`).
         // Touch mapping (mobile): long-press → the same secondary action; the
         // desktop-first wiring above is the reference, mobile long-press routes
         // to the identical `<modifier>_action` intent.
