@@ -65,15 +65,18 @@ crates/
 └── holon-integration-tests/  # Cross-crate integration & property-based tests
 
 frontends/
-├── gpui/       # GPUI frontend (primary)
-├── flutter/    # Flutter frontend with FFI bridge
-├── mcp/        # MCP server frontend (stdio + HTTP)
-├── ply/        # Ply frontend
-├── tui/        # Terminal UI frontend
-├── blinc/      # Native Rust GUI (blinc-app)
-├── dioxus/     # Dioxus frontend
-└── waterui/    # WaterUI frontend
+├── gpui/         # GPUI frontend (primary)
+├── mcp/          # MCP server frontend (stdio + HTTP)
+├── ply/          # Ply frontend
+├── tui/          # Terminal UI frontend
+├── dioxus/       # Dioxus frontend
+├── dioxus-web/   # Dioxus web frontend (wasm32, trunk build)
+├── holon-worker/ # Holon backend as a Web Worker (wasm32-wasip1-threads)
+└── waterui/      # WaterUI frontend
 ```
+
+Archived prototypes (Flutter, Blinc) are not in the tree; they live on the
+`frontends/flutter` and `frontends/blinc` bookmarks.
 
 ## Key Concepts
 
@@ -114,7 +117,6 @@ Intelligence resides in the data structure, not in the AI model. The substitutio
 ### Prerequisites
 
 - Rust (see `rust-toolchain.toml` for the exact version)
-- For Flutter frontend: Flutter SDK + Dart
 
 ### Build
 
