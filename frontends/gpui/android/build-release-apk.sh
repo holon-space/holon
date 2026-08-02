@@ -46,17 +46,29 @@ esac
 LIBCXX="$NDK/toolchains/llvm/prebuilt/$NDK_HOST/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
 
 SO="$PROJECT_ROOT/target/aarch64-linux-android/release/libholon_gpui.so"
-for f in "$SO" "$LIBCXX" "$PLATFORM" "$BT/aapt2" "$KEYSTORE_FILE"; do
+for f in "$SO" "$LIBCXX" "$PLATFORM" "$BT/aapt2" "$BT/d8" "$KEYSTORE_FILE"; do
     if [ ! -e "$f" ]; then
         echo "ERROR: required file missing: $f" >&2
         exit 1
     fi
 done
+command -v javac >/dev/null || { echo "ERROR: javac not on PATH (a JDK is required to build classes.dex)" >&2; exit 1; }
 
 rm -rf "$BUILD"
 mkdir -p "$BUILD/lib/arm64-v8a"
 cp "$SO" "$BUILD/lib/arm64-v8a/"
 cp "$LIBCXX" "$BUILD/lib/arm64-v8a/"
+
+# Compile the vendored soft-keyboard host class (dev.gpui.mobile.GpuiTextInputView)
+# to classes.dex. The GPUI Android runtime looks this class up via find_app_class +
+# JNI to raise the platform IME, and the manifest declares hasCode="true" — an APK
+# without the dex ships a keyboard that can never surface. Small and
+# self-contained (imports only android.*) — always rebuilt.
+JAVA_SRC="$SCRIPT_DIR/java/dev/gpui/mobile/GpuiTextInputView.java"
+mkdir -p "$BUILD/classes" "$BUILD/dex"
+javac -source 8 -target 8 -cp "$PLATFORM" -d "$BUILD/classes" "$JAVA_SRC"
+"$BT/d8" --min-api 33 --output "$BUILD/dex" "$BUILD/classes"/dev/gpui/mobile/*.class
+cp "$BUILD/dex/classes.dex" "$BUILD/classes.dex"
 
 # The checked-in manifest is a dev manifest (android:debuggable="true").
 # Google Play rejects debuggable APKs, so strip the attribute for release —
@@ -84,9 +96,21 @@ RES_DIR="$PROJECT_ROOT/assets/icons/app/android/res"
     --version-code "$VERSION_CODE" --version-name "$VERSION_NAME" \
     "$BUILD/res.zip"
 
-(cd "$BUILD" && zip -0 holon-unaligned.apk lib/arm64-v8a/libholon_gpui.so lib/arm64-v8a/libc++_shared.so)
+# classes.dex goes in at APK root, alongside the native libs and BEFORE alignment
+# and signing, so the signature covers it.
+(cd "$BUILD" && zip -0 holon-unaligned.apk classes.dex lib/arm64-v8a/libholon_gpui.so lib/arm64-v8a/libc++_shared.so)
 
 "$BT/zipalign" -f 4 "$BUILD/holon-unaligned.apk" "$BUILD/holon-release.apk"
+
+# Assert the SHIPPED artifact carries the dex. The manifest declares hasCode="true",
+# so an APK without classes.dex installs fine and then fails the runtime
+# find_app_class lookup — a defect only reproducible on-device. Checking the aligned
+# APK (not the intermediate build dir) is what makes this assertion meaningful.
+if ! unzip -Z1 "$BUILD/holon-release.apk" | grep -qxF 'classes.dex'; then
+    echo "ERROR: holon-release.apk has no classes.dex — the soft-keyboard host class" >&2
+    echo "       (dev.gpui.mobile.GpuiTextInputView) is missing from the shipped APK." >&2
+    exit 1
+fi
 
 "$BT/apksigner" sign \
     --ks "$KEYSTORE_FILE" \

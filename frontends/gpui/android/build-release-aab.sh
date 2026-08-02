@@ -51,17 +51,30 @@ esac
 LIBCXX="$NDK/toolchains/llvm/prebuilt/$NDK_HOST/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
 
 SO="$PROJECT_ROOT/target/aarch64-linux-android/release/libholon_gpui.so"
-for f in "$SO" "$LIBCXX" "$PLATFORM" "$BT/aapt2" "$KEYSTORE_FILE" "$BUNDLETOOL_JAR"; do
+for f in "$SO" "$LIBCXX" "$PLATFORM" "$BT/aapt2" "$BT/d8" "$KEYSTORE_FILE" "$BUNDLETOOL_JAR"; do
     if [ ! -e "$f" ]; then
         echo "ERROR: required file missing: $f" >&2
         exit 1
     fi
 done
+command -v javac >/dev/null || { echo "ERROR: javac not on PATH (a JDK is required to build classes.dex)" >&2; exit 1; }
 
 rm -rf "$BUILD"
-mkdir -p "$BUILD/module/lib/arm64-v8a" "$BUILD/module/manifest" "$BUILD/proto"
+mkdir -p "$BUILD/module/lib/arm64-v8a" "$BUILD/module/manifest" "$BUILD/module/dex" \
+    "$BUILD/classes" "$BUILD/dex" "$BUILD/proto"
 cp "$SO" "$BUILD/module/lib/arm64-v8a/"
 cp "$LIBCXX" "$BUILD/module/lib/arm64-v8a/"
+
+# Compile the vendored soft-keyboard host class (dev.gpui.mobile.GpuiTextInputView)
+# to classes.dex. This app is NO LONGER a pure no-dex NativeActivity: the GPUI
+# runtime looks this class up via find_app_class + JNI to raise the platform IME,
+# so the dex is REQUIRED in the base module (manifest hasCode="true"). Small and
+# self-contained (imports only android.*) — always rebuilt.
+JAVA_SRC="$SCRIPT_DIR/java/dev/gpui/mobile/GpuiTextInputView.java"
+javac -source 8 -target 8 -cp "$PLATFORM" -d "$BUILD/classes" "$JAVA_SRC"
+"$BT/d8" --min-api 33 --output "$BUILD/dex" "$BUILD/classes"/dev/gpui/mobile/*.class
+# bundletool base-module layout carries dex under dex/ (peer of manifest/, lib/).
+cp "$BUILD/dex/classes.dex" "$BUILD/module/dex/classes.dex"
 
 # The checked-in manifest is a dev manifest (android:debuggable="true").
 # Google Play rejects debuggable builds, so strip the attribute for release —
@@ -97,23 +110,29 @@ done
 
 # 3. Assemble the base module in bundletool's expected layout:
 #      manifest/AndroidManifest.xml   (proto)
+#      dex/classes.dex                (the soft-keyboard host class)
 #      resources.pb
 #      lib/arm64-v8a/*.so
-#    No dex/ (manifest hasCode="false" — pure NativeActivity app), no res/,
-#    no assets/. Fail loud if the app ever grows a classes.dex the APK path
-#    would carry but this path silently drops.
-if [ "$(unzip -Z1 "$BUILD/base-proto.apk" | grep -c '\.dex$' || true)" != "0" ]; then
-    echo "ERROR: proto APK contains a .dex — base module assembly must include dex/" >&2
-    exit 1
-fi
+#    The dex is REQUIRED (manifest hasCode="true"): dropping it silently ships a
+#    build where the keyboard can never surface. The bundle is asserted below.
 cp "$BUILD/proto/AndroidManifest.xml" "$BUILD/module/manifest/AndroidManifest.xml"
 cp "$BUILD/proto/resources.pb" "$BUILD/module/resources.pb"
-(cd "$BUILD/module" && zip -q -r -X "../base.zip" manifest resources.pb lib)
+(cd "$BUILD/module" && zip -q -r -X "../base.zip" manifest dex resources.pb lib)
 
 # 4. Build the bundle.
 java -jar "$BUNDLETOOL_JAR" build-bundle \
     --modules="$BUILD/base.zip" \
     --output="$BUILD/holon-release.aab"
+
+# Assert the SHIPPED bundle carries the dex. The manifest declares hasCode="true",
+# so a bundle without it installs fine and then fails the runtime find_app_class
+# lookup — a defect only reproducible on-device. Checking the .aab itself (not the
+# staging dir bundletool consumed) is what makes this assertion meaningful.
+if ! unzip -Z1 "$BUILD/holon-release.aab" | grep -q 'dex/classes\.dex$'; then
+    echo "ERROR: holon-release.aab has no dex/classes.dex — the soft-keyboard host" >&2
+    echo "       class (dev.gpui.mobile.GpuiTextInputView) is missing from the bundle." >&2
+    exit 1
+fi
 
 # 5. Sign the AAB with jarsigner (Play's requirement for uploaded bundles),
 #    using the SAME keystore/env as the APK's apksigner step. Passwords are
