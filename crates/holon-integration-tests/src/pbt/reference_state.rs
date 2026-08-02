@@ -1048,10 +1048,7 @@ impl ReferenceState {
     pub fn main_rendered_block_ids(&self) -> BTreeSet<EntityUri> {
         let query = self.active_main_query();
         let mut focus_roots = std::collections::BTreeMap::new();
-        focus_roots.insert(
-            "main".to_string(),
-            self.expected_focus_root_ids(Region::Main),
-        );
+        focus_roots.insert("main".to_string(), self.rendered_focus_root(Region::Main));
         query
             .rendered_block_ids(&self.domain.block_state.blocks, &focus_roots)
             .into_iter()
@@ -1206,7 +1203,7 @@ impl ReferenceState {
         if self.no_content_update_set().contains(&focused) {
             return None;
         }
-        let focus_roots = self.expected_focus_root_ids(Region::Main);
+        let focus_roots = self.rendered_focus_root(Region::Main);
         if !self.is_descendant_of_any(&focused, &focus_roots) {
             return None;
         }
@@ -1220,7 +1217,7 @@ impl ReferenceState {
     /// Used by the "edit any visible block" transitions — JoinBlock today;
     /// SplitBlock and friends if/when the focus-only asymmetry is dropped.
     pub fn main_editable_descendants(&self) -> Vec<EntityUri> {
-        let focus_roots = self.expected_focus_root_ids(Region::Main);
+        let focus_roots = self.rendered_focus_root(Region::Main);
         let no_update = self.no_content_update_set();
         let peer_modified = self.peer_modified_stable_ids();
         self.domain
@@ -2213,11 +2210,12 @@ impl ReferenceState {
     /// of `navigation_history WHERE closed_at IS NULL`, excluding home rows
     /// (block_id NULL — they don't JOIN against `root.id` in the consumer GQL).
     ///
-    /// For Region::Main, the close-prior-then-insert contract of
-    /// `NavigateFocus`/`NavigateHome` keeps this set at size ≤ 1. For
-    /// Region::RightSidebar, `PinBlock` can grow it (move-to-top dedup
-    /// keeps each block_id unique within the region). Consumers use
-    /// CHILD_OF*0..N to expand to root + descendants.
+    /// This is the region's OPEN SET, not what the panel shows. `PinBlock`
+    /// grows it for Region::RightSidebar and `navigation.open_tab` grows it
+    /// for Region::Main (background tabs); even at boot it is not a singleton.
+    /// For what the main panel actually RENDERS, use
+    /// [`Self::rendered_focus_root`]. Consumers use CHILD_OF*0..N to expand to
+    /// root + descendants.
     pub fn expected_focus_root_ids(&self, region: Region) -> BTreeSet<EntityUri> {
         self.ui
             .user
@@ -2233,6 +2231,28 @@ impl ReferenceState {
     // line padding to preserve archlint line offsets — Phase C semantic flip
     // intentionally trimmed body; downstream test files reference offsets.
     // Removing this comment shifts following ALLOW directives.
+
+    /// The region's RENDERED focus root — what the main panel actually shows,
+    /// as opposed to [`Self::expected_focus_root_ids`]'s open SET.
+    ///
+    /// Prod's main-panel query ends
+    /// `JOIN navigation_cursor nc ON nc.region = fr.region AND nc.history_id =
+    /// fr.history_id` (`assets/default/index.org`,
+    /// `default-main-panel::src::0`), so exactly one open row projects: the
+    /// cursor's. An open row that is not the cursor's is a BACKGROUND tab —
+    /// present in `focus_roots`, absent from the panel. A cursor sitting on a
+    /// row that is no longer open projects nothing at all (the blank-panel
+    /// mode `navigate_back_keeps_panel_populated` locks down).
+    ///
+    /// Returned as a set because every consumer expands it through
+    /// `is_descendant_of_any` / `rendered_block_ids`, which take a root set.
+    pub fn rendered_focus_root(&self, region: Region) -> BTreeSet<EntityUri> {
+        let open = self.expected_focus_root_ids(region);
+        match self.current_focus(region) {
+            Some(cursor) if open.contains(&cursor) => BTreeSet::from([cursor]),
+            _ => BTreeSet::new(),
+        }
+    }
 
     /// Check if `block_id` is a descendant of any block in `roots` (or is
     /// itself in `roots`).

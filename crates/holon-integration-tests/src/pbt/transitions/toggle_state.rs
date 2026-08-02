@@ -161,7 +161,7 @@ impl<R: RefLifecycle + RefFocus + RefFocusRoots + RefBlockTree + RefLayout + Ref
     type Reason = Reason;
 
     fn preconditions(&self, state: &R) -> Validated<(), Reason> {
-        let focus_roots = state.expected_focus_root_ids(CapRegion::Main);
+        let focus_roots = state.rendered_focus_root_ids(CapRegion::Main);
         let checks: Vec<Validated<(), Reason>> = vec![
             check(state.app_started(), Reason::AppNotStarted),
             // `state_toggle` only exists when the block renders interactively

@@ -126,8 +126,9 @@ impl ReferenceState {
         };
         let pins = self.ui.user.open_pins.entry(region).or_default();
         match pins.last_mut() {
-            // Main region carries exactly one open row (nav_focus clears+pushes
-            // one); reopening only changes which block that row points at.
+            // Back/forward retarget the row the cursor is on, which for a
+            // nav_focus-built history is the last one; reopening only changes
+            // which block that row points at.
             Some(pin) => pin.block_id = target,
             None => pins.push(OpenPinEntry {
                 history_id: fallback_history_id,
@@ -253,6 +254,51 @@ impl RefNavHistoryMut for ReferenceState {
         self.ui.tab.focused_entity_id.remove(&region);
         self.ui.tab.focused_cursor.remove(&region);
         // Mirror `UiState::set_focus`: the nav target becomes the global focus.
+        self.ui.tab.focused_block = Some(block_id.clone());
+        self.blur_active_editor();
+    }
+
+    fn nav_open_tab(&mut self, region: Region, block_id: &EntityUri) {
+        // Cursor bookkeeping is identical to `nav_focus` — the tab the user
+        // opened becomes the current one either way. What differs is the open
+        // set: `focus` CLOSES the region's other rows, `open_tab` leaves them
+        // open (`provider.rs::open_tab` inserts without a close sweep), so the
+        // region accumulates background tabs.
+        let already_current = self.current_focus(region).as_ref() == Some(block_id);
+        self.ui.tab.last_navigate_first_visit =
+            self.ui.tab.seen_focus_targets.insert(block_id.clone());
+
+        if !already_current {
+            let history = self.ui.tab.navigation_history.entry(region).or_default();
+            history.entries.truncate(history.cursor + 1);
+            history.entries.push(Some(block_id.clone()));
+            history.cursor = history.entries.len() - 1;
+        }
+
+        // Dedup mirrors `get_open_history_id.sql`: an open row for this
+        // `(region, block_id)` means `open_tab` delegated to `activate` —
+        // cursor-only, no INSERT, and NO reordering (no SQL moves open rows).
+        let pins = self.ui.user.open_pins.entry(region).or_default();
+        let already_open = pins.iter().any(|p| p.block_id.as_ref() == Some(block_id));
+        if !already_open {
+            let history_id = self.ui.tab.next_history_id;
+            self.ui.tab.next_history_id += 1;
+            let added_ts_logical = self.ui.user.next_pin_ts;
+            self.ui.user.next_pin_ts += 1;
+            self.ui
+                .user
+                .open_pins
+                .entry(region)
+                .or_default()
+                .push(OpenPinEntry {
+                    history_id,
+                    block_id: Some(block_id.clone()),
+                    added_ts_logical,
+                });
+        }
+
+        self.ui.tab.focused_entity_id.remove(&region);
+        self.ui.tab.focused_cursor.remove(&region);
         self.ui.tab.focused_block = Some(block_id.clone());
         self.blur_active_editor();
     }

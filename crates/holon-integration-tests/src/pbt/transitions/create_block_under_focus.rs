@@ -81,7 +81,7 @@ fn create_under_focus_parent<R: RefLayout + RefFocusRoots + RefLayoutInteract>(
     if state.has_user_index_org() {
         return None;
     }
-    let roots = state.expected_focus_root_ids(CapRegion::Main);
+    let roots = state.rendered_focus_root_ids(CapRegion::Main);
     if roots.len() != 1 {
         return None;
     }

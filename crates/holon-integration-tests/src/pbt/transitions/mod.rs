@@ -114,6 +114,7 @@ mod navigate_forward;
 mod navigate_home;
 mod nothing;
 pub mod outdent;
+mod open_tab_via_modifier_click;
 mod pin_block;
 mod press_key;
 mod redo;
@@ -192,6 +193,7 @@ pub use navigate_forward::NavigateForward;
 pub use navigate_home::NavigateHome;
 pub use nothing::Nothing;
 pub use outdent::Outdent;
+pub use open_tab_via_modifier_click::OpenTabViaModifierClick;
 pub use pin_block::PinBlock;
 pub use press_key::PressKey;
 pub use redo::Redo;
@@ -266,6 +268,7 @@ crate::declare_e2e_transitions! {
         NavigateForward(NavigateForward),
         NavigateHome(NavigateHome),
         Outdent(Outdent),
+        OpenTabViaModifierClick(OpenTabViaModifierClick),
         PinBlock(PinBlock),
         PressKey(PressKey),
         Redo(Redo),
@@ -545,6 +548,7 @@ mod required_caps_guard {
         one!(NavigateBack, c::SutNavHistoryDrive);
         one!(NavigateForward, c::SutNavHistoryDrive);
         one!(PinBlock, c::SutNavHistoryDrive);
+        one!(OpenTabViaModifierClick, c::SutNavHistoryDrive);
         one!(UnpinBlock, c::SutNavHistoryDrive);
         // WatchRegister
         one!(SetupWatch, c::SutWatchRegister);

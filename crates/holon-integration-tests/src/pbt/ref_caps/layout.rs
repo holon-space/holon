@@ -55,7 +55,7 @@ impl RefLayout for ReferenceState {
     }
 
     fn expected_visible_content_ids(&self, region: CapRegion) -> BTreeSet<EntityUri> {
-        let focus_roots = self.expected_focus_root_ids(from_cap_region(region));
+        let focus_roots = self.rendered_focus_root(from_cap_region(region));
         // A block is legitimately in the region's main panel iff it descends from
         // the current focus root — regardless of how it renders. Per the fork-A
         // program-rendering ruling (block_profile.yaml), source blocks are NOT

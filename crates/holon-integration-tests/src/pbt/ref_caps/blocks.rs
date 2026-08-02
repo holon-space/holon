@@ -65,7 +65,7 @@ impl RefBlockTree for ReferenceState {
     }
 
     fn focus_root_ids(&self, region: CapRegion) -> BTreeSet<EntityUri> {
-        cap_id_set(self.expected_focus_root_ids(from_cap_region(region)))
+        cap_id_set(self.rendered_focus_root(from_cap_region(region)))
     }
 
     fn previous_sibling(&self, id: &EntityUri) -> Option<EntityUri> {

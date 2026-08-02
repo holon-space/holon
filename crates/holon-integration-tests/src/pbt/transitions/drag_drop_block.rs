@@ -59,7 +59,7 @@ impl<
         }
 
         let source = drag_source.unwrap();
-        let focus_roots = state.expected_focus_root_ids(CapRegion::Main);
+        let focus_roots = state.rendered_focus_root_ids(CapRegion::Main);
         let candidates: Vec<EntityUri> = state
             .all_block_ids()
             .into_iter()
@@ -100,7 +100,7 @@ impl<
     type Reason = Reason;
 
     fn preconditions(&self, state: &R) -> Validated<(), Reason> {
-        let focus_roots = state.expected_focus_root_ids(CapRegion::Main);
+        let focus_roots = state.rendered_focus_root_ids(CapRegion::Main);
         let mut checks: Vec<Validated<(), Reason>> = vec![
             check(state.app_started(), Reason::AppNotStarted),
             check(state.is_properly_setup(), Reason::NotProperlySetup),

@@ -101,7 +101,7 @@ impl holon_pbt_core::capabilities::RefTaskStateToggle for ReferenceState {
                 owned_render_expr
             };
 
-        let main_focus_roots = self.expected_focus_root_ids(holon_api::Region::Main);
+        let main_focus_roots = self.rendered_focus_root(holon_api::Region::Main);
         let visible_text_block_ids: Vec<EntityUri> = self
             .domain
             .block_state

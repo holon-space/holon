@@ -24,6 +24,7 @@
 use std::collections::BTreeSet;
 
 use holon_api::EntityUri;
+use holon_pbt_core::capabilities::CapRegion;
 use holon_pbt_core::capabilities::RefBlockTree;
 use holon_pbt_core::capabilities::RefFocus;
 use holon_pbt_core::capabilities::RefLayout;
@@ -144,13 +145,12 @@ impl InvEmbeddedPageCollapsedLazy {
             ));
         };
 
-        let main_focus_roots: BTreeSet<EntityUri> = ref_
-            .expected_focus_root_rows()
-            .into_iter()
-            .filter(|(region, _)| region == "main")
-            .flat_map(|(_, ids)| ids)
-            .filter_map(|id| EntityUri::parse(&id).ok())
-            .collect();
+        // The RENDERED root, not the region's open set. This prong demands an
+        // `expand_toggle` inside the main panel, and the panel query joins
+        // `navigation_cursor` — a page embedded under a BACKGROUND tab is in
+        // `focus_roots` but structurally cannot appear in the panel, so asking
+        // for its toggle would be an unsatisfiable demand.
+        let main_focus_roots: BTreeSet<EntityUri> = ref_.focus_root_ids(CapRegion::Main);
 
         let non_seed = ref_.all_non_seed_block_ids();
 

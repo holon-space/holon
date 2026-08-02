@@ -107,9 +107,9 @@ impl RefFocusMut for ReferenceState {
 // ─── Phase 7 Stage B — extended ref-side cap impls ───────────────────
 
 impl RefFocusRoots for ReferenceState {
-    fn expected_focus_root_ids(&self, region: CapRegion) -> BTreeSet<EntityUri> {
+    fn rendered_focus_root_ids(&self, region: CapRegion) -> BTreeSet<EntityUri> {
         let api_region = from_cap_region(region);
-        cap_id_set(self.expected_focus_root_ids(api_region))
+        cap_id_set(self.rendered_focus_root(api_region))
     }
 }
 

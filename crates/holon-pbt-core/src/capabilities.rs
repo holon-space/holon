@@ -899,6 +899,12 @@ pub trait SutNavHistoryDrive {
     async fn navigate_forward(&self, region: holon_api::Region);
     async fn pin_block(&self, region: holon_api::Region, block_id: &holon_api::EntityUri);
     async fn unpin_block(&self, history_id: i64);
+    /// `OpenTabViaModifierClick`: cmd- or ctrl-click a LEFT SIDEBAR row. The
+    /// sidebar `item_template` declares BOTH `cmd_action` and `ctrl_action` as
+    /// `navigation_open_tab(...)` (`assets/default/index.org`), so — like
+    /// `pin_block`s shift+click — the op, its region and its block id all come
+    /// from the rendered template; the driver only supplies the gesture.
+    async fn open_tab_via_modifier_click(&self, block_id: &holon_api::EntityUri, use_ctrl: bool);
 }
 
 /// SUT capability: block-level UI interactions driven through the UI driver —
@@ -2012,9 +2018,11 @@ pub trait SutFsWrites {
 /// Focus-roots expected by the reference model — per-region set of
 /// block ids that the reactive engine should use as pin roots.
 pub trait RefFocusRoots {
-    /// Expected focus-root block ids for `region`. Wide PBT reads from
-    /// `ReferenceState::expected_focus_root_ids`; pure slice: empty set.
-    fn expected_focus_root_ids(&self, region: CapRegion) -> BTreeSet<EntityUri>;
+    /// The RENDERED focus root for `region` — the cursor's open row, i.e.
+    /// what the main panel projects. NOT the region's open SET (background
+    /// tabs are open but unrendered): that is `expected_focus_root_rows`.
+    /// Wide PBT reads `ReferenceState::rendered_focus_root`; pure slice: empty.
+    fn rendered_focus_root_ids(&self, region: CapRegion) -> BTreeSet<EntityUri>;
 }
 
 /// Layout-block metadata needed by matview + ViewModel invariants.
@@ -2151,6 +2159,13 @@ pub trait RefNavHistoryMut: RefNavHistory {
     /// budget flag, set the block as global focus, clear region focus,
     /// blur.
     fn nav_focus(&mut self, region: holon_api::Region, block_id: &EntityUri);
+    /// `OpenTabViaModifierClick`: `open_tab(region, block_id)` — APPEND an open row
+    /// for `block_id` if the region has none (never closing or reordering the
+    /// others, unlike `nav_focus`), then move the cursor onto it. When a row is
+    /// already open for that block, prod's `open_tab` delegates to `activate`:
+    /// cursor-only, no new row. The appended row is a BACKGROUND tab until the
+    /// cursor lands on it — open in `focus_roots`, unrendered by the panel.
+    fn nav_open_tab(&mut self, region: holon_api::Region, block_id: &EntityUri);
 }
 
 /// Reference-side document read surface — the `files.documents` map (uri →

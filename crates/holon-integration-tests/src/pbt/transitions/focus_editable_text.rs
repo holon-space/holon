@@ -146,7 +146,7 @@ impl<
     type Reason = Reason;
 
     fn preconditions(&self, state: &R) -> Validated<(), Reason> {
-        let focus_roots = state.expected_focus_root_ids(CapRegion::Main);
+        let focus_roots = state.rendered_focus_root_ids(CapRegion::Main);
 
         let checks: Vec<Validated<(), Reason>> = vec![
             check(state.has_editor_buffer(), Reason::NoEditorBuffer),

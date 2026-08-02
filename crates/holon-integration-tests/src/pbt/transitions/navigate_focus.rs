@@ -104,7 +104,7 @@ impl<R: RefLifecycle + RefBlockTree + RefLayout + RefFocusRoots + RefNavHistoryM
             // bump in `bulk_external_add.rs:65`. Once a text descendant
             // exists, the weight drops back to base so the rest of the
             // random strategy can run.
-            let main_focus_roots = state.expected_focus_root_ids(CapRegion::Main);
+            let main_focus_roots = state.rendered_focus_root_ids(CapRegion::Main);
             let main_has_text_descendant = state.all_block_ids().iter().any(|id| {
                 state.is_text_block(id)
                     && !state.is_page_block(id)

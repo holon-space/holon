@@ -1300,6 +1300,15 @@ impl HeadlessFrontendComponent {
     /// (`find_click_intent_in_region`), and fail loud if the entry never binds
     /// rather than let the click silently fake focus.
     async fn await_sidebar_nav_intent(&self, id: &EntityUri) {
+        self.await_sidebar_intent(id, holon_api::ClickModifiers::none())
+            .await
+    }
+
+    /// Modifier-parameterised form of [`Self::await_sidebar_nav_intent`]. The
+    /// primary click resolves `navigation.focus`, cmd/ctrl resolve
+    /// `navigation.open_tab`; both stream in on the same nested `live_block`
+    /// watch, so both need the same barrier.
+    async fn await_sidebar_intent(&self, id: &EntityUri, modifiers: holon_api::ClickModifiers) {
         let root_uri = holon_api::root_layout_block_uri();
         let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(5));
         loop {
@@ -1308,20 +1317,28 @@ impl HeadlessFrontendComponent {
                 &resolved,
                 id,
                 "left_sidebar",
-                holon_api::ClickModifiers::none(),
+                modifiers,
             )
             .is_some()
             {
                 return;
             }
+            // Name the wiring actually awaited: a primary click resolves the
+            // row's `action:` (navigation.focus), cmd/ctrl its `cmd_action:` /
+            // `ctrl_action:` (navigation.open_tab). A message naming the wrong
+            // one sends the reader to the wrong template arg.
+            let awaited = if modifiers == holon_api::ClickModifiers::none() {
+                "navigation.focus (the row's `action:`)"
+            } else {
+                "navigation.open_tab (the row's `cmd_action:` / `ctrl_action:`)"
+            };
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "[SutFocusWrite::apply_navigate_focus] LeftSidebar never bound a navigation.focus \
-                 click-intent for {id} within 5s — the sidebar page list (nested live_block \
-                 watch) did not stream the target's selectable, so a click would fall through to \
-                 an in-memory set_focus (no navigation_history write) and leave current_focus on \
-                 the boot default. Sidebar-render / CDC-settle faithfulness gap, not a fake-focus \
-                 escape."
+                "[await_sidebar_intent] LeftSidebar never bound a {awaited} click-intent for \
+                 {id} with modifiers {modifiers:?} within 5s — either the sidebar page list \
+                 (nested live_block watch) did not stream the target's selectable, or that \
+                 template arg resolves to None (check `is_template_arg`). A click would then \
+                 fall through to an in-memory set_focus, writing NO navigation_history row."
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -2756,6 +2773,34 @@ impl SutNavHistoryDrive for HeadlessFrontendComponent {
             .await
             .unwrap_or_else(|e| {
                 panic!("[PinBlock] shift+click on the {resolved} bullet failed: {e:#}")
+            });
+        self.settle_focus_matviews().await;
+    }
+
+    /// Cmd/ctrl+click a left-sidebar row — the production open-in-tab gesture.
+    /// Nothing about `open_tab` is hardcoded here: the op name, its region and
+    /// its block id come from the sidebar `item_template`'s `cmd_action` /
+    /// `ctrl_action`.
+    async fn open_tab_via_modifier_click(&self, block_id: &holon_api::EntityUri, use_ctrl: bool) {
+        let modifiers = if use_ctrl {
+            holon_api::ClickModifiers::ctrl()
+        } else {
+            holon_api::ClickModifiers::cmd()
+        };
+        let resolved = self.resolve_id(block_id);
+        self.await_sidebar_intent(&resolved, modifiers).await;
+        self.driver
+            .click_entity_with_modifiers(
+                &resolved,
+                holon_api::Region::LeftSidebar.as_str(),
+                modifiers,
+            )
+            .await
+            .unwrap_or_else(|e| {
+                panic!(
+                    "[OpenTabViaModifierClick] {modifiers:?} click on sidebar row {resolved} \
+                     failed: {e:#}"
+                )
             });
         self.settle_focus_matviews().await;
     }
