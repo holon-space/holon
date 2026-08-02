@@ -225,6 +225,7 @@ mod tests {
             named: HashMap::new(),
             rows: HashMap::new(),
             templates: HashMap::new(),
+            widget: None,
         }
     }
 

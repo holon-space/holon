@@ -49,7 +49,13 @@ fn build_wiring(name: &str, args: &[Arg], row: &DataRow, trigger: Trigger) -> Op
 }
 
 holon_macros::widget_builder! {
-    raw fn selectable(ba: BA<'_>) -> ViewModel {
+    fn selectable(
+        action: Expr,
+        shift_action: Expr,
+        cmd_action: Expr,
+        ctrl_action: Expr,
+        alt_action: Expr,
+    ) -> ViewModel {
         let child = if let Some(child_expr) = ba.args.positional_exprs.first() {
             (ba.interpret)(child_expr, ba.ctx)
         } else {
@@ -65,7 +71,7 @@ holon_macros::widget_builder! {
         // as `bound_params`. Positional args are stashed under `pos_<i>` to
         // preserve the previous wire format for ops that consume them.
         let mut operations = Vec::new();
-        if let Some(RenderExpr::FunctionCall { name, args, .. }) = ba.args.get_template("action") {
+        if let Some(RenderExpr::FunctionCall { name, args, .. }) = action {
             operations.push(build_wiring(
                 name,
                 args,
@@ -93,15 +99,13 @@ holon_macros::widget_builder! {
         // Touch mapping (mobile): long-press → the same secondary action; the
         // desktop-first wiring above is the reference, mobile long-press routes
         // to the identical `<modifier>_action` intent.
-        for (template_key, modifiers) in [
-            ("shift_action", ClickModifiers::shift()),
-            ("cmd_action", ClickModifiers::cmd()),
-            ("ctrl_action", ClickModifiers::ctrl()),
-            ("alt_action", ClickModifiers::alt()),
+        for (template, modifiers) in [
+            (shift_action, ClickModifiers::shift()),
+            (cmd_action, ClickModifiers::cmd()),
+            (ctrl_action, ClickModifiers::ctrl()),
+            (alt_action, ClickModifiers::alt()),
         ] {
-            if let Some(RenderExpr::FunctionCall { name, args, .. }) =
-                ba.args.get_template(template_key)
-            {
+            if let Some(RenderExpr::FunctionCall { name, args, .. }) = template {
                 operations.push(build_wiring(name, args, ba.ctx.row(), Trigger::Click {
                     modifiers,
                 }));

@@ -467,6 +467,11 @@ pub struct ResolvedArgs {
     /// existing scalar accessors and builders stay byte-compatible.
     pub rows: HashMap<String, Arc<dyn ReactiveRowProvider>>,
     pub templates: HashMap<String, RenderExpr>,
+    /// The widget these args were resolved for, when the caller knew it.
+    /// Its declared params answer "is this arg a template?" per-widget;
+    /// `None` (value functions, synthetic arg bags) falls back to the
+    /// global `is_template_arg` allowlist.
+    pub widget: Option<&'static crate::WidgetMeta>,
 }
 
 impl ResolvedArgs {
@@ -477,6 +482,7 @@ impl ResolvedArgs {
             named: HashMap::new(),
             rows: HashMap::new(),
             templates: HashMap::new(),
+            widget: None,
         }
     }
 
@@ -487,6 +493,7 @@ impl ResolvedArgs {
             named: HashMap::new(),
             rows: HashMap::new(),
             templates: HashMap::new(),
+            widget: None,
         }
     }
 
@@ -547,7 +554,23 @@ impl ResolvedArgs {
         }
     }
 
+    /// The unevaluated expression passed under `name`, or `None` when the arg
+    /// was absent.
+    ///
+    /// Asking for a name that this widget does not classify as a template is a
+    /// programming error, not an absent arg: such an arg was already evaluated
+    /// to a scalar during resolution, so the lookup could never succeed and the
+    /// feature behind it would be silently dead. Declare the param as `Expr` /
+    /// `Collection` on the widget (or, for `raw fn` widgets, add it to
+    /// `is_template_arg`).
     pub fn get_template(&self, name: &str) -> Option<&RenderExpr> {
+        assert!(
+            is_template_arg_for(self.widget, name),
+            "widget `{}`: get_template({name:?}) but `{name}` is not a \
+             declared Expr/Collection param and is not on the \
+             is_template_arg allowlist — it was resolved as a scalar",
+            self.widget.map_or("<unknown>", |m| m.name),
+        );
         self.templates.get(name)
     }
 
@@ -637,6 +660,18 @@ pub fn resolve_args_with<K: RowKey>(
     row: &HashMap<K, Value>,
     fns: &dyn ValueFnLookup,
 ) -> ResolvedArgs {
+    resolve_args_for_widget(args, row, fns, None)
+}
+
+/// `resolve_args_with` for a call site that knows which widget it is
+/// resolving args for: the widget's declared params decide templateness,
+/// so a migrated widget needs no entry in `is_template_arg`.
+pub fn resolve_args_for_widget<K: RowKey>(
+    args: &[Arg],
+    row: &HashMap<K, Value>,
+    fns: &dyn ValueFnLookup,
+    widget: Option<&'static crate::WidgetMeta>,
+) -> ResolvedArgs {
     let mut positional = Vec::new();
     let mut positional_exprs = Vec::new();
     let mut named = HashMap::new();
@@ -645,7 +680,7 @@ pub fn resolve_args_with<K: RowKey>(
 
     for arg in args {
         match &arg.name {
-            Some(name) if is_template_arg(name) => {
+            Some(name) if is_template_arg_for(widget, name) => {
                 templates.insert(name.clone(), arg.value.clone());
             }
             Some(name) => match eval_to_interp(&arg.value, row, fns) {
@@ -675,9 +710,26 @@ pub fn resolve_args_with<K: RowKey>(
         named,
         rows,
         templates,
+        widget,
     }
 }
 
+/// Per-widget answer to "must this named arg stay an unevaluated template?".
+///
+/// A widget that declares the param decides for itself; everything else —
+/// `raw fn` widgets with no declared params, value functions, undeclared args
+/// — is judged by the global allowlist below. Migrating a widget to typed
+/// params is therefore what retires its allowlist entries.
+pub fn is_template_arg_for(widget: Option<&crate::WidgetMeta>, name: &str) -> bool {
+    match widget.and_then(|m| m.classifies_as_template(name)) {
+        Some(declared) => declared,
+        None => is_template_arg(name),
+    }
+}
+
+/// Global allowlist for widgets that have not been migrated to typed
+/// params. Templateness is really per-widget, so every name here is a widget's
+/// question answered for the whole DSL — shrink this list, don't grow it.
 pub fn is_template_arg(name: &str) -> bool {
     matches!(
         name,
@@ -1530,6 +1582,7 @@ mod mutation_gap_tests {
             named: HashMap::new(),
             rows: HashMap::new(),
             templates: HashMap::new(),
+            widget: None,
         }
     }
 
@@ -1880,7 +1933,7 @@ mod mutation_gap_tests {
         .into_iter()
         .collect();
         args.templates.insert(
-            "tpl".to_string(),
+            "item_template".to_string(),
             RenderExpr::ColumnRef {
                 name: "x".to_string(),
             },
@@ -1915,10 +1968,52 @@ mod mutation_gap_tests {
         assert_eq!(args.get_positional_column_name(5), None);
 
         assert!(matches!(
-            args.get_template("tpl"),
+            args.get_template("item_template"),
             Some(RenderExpr::ColumnRef { name }) if name == "x"
         ));
-        assert!(args.get_template("nope").is_none());
         assert!(args.get_rows("nope").is_none());
+    }
+
+    /// The backstop: a name no widget declares and the allowlist does not
+    /// carry was resolved as a scalar, so `get_template` can only ever answer
+    /// `None`. That silent `None` is what kept `expand_toggle`'s `content`
+    /// dead, so it is a panic now rather than an absent-arg answer.
+    #[test]
+    #[should_panic(expected = "not a")]
+    fn get_template_for_an_unclassified_name_panics() {
+        let row: HashMap<String, Value> = HashMap::new();
+        let args = resolve_args(&[], &row);
+        let _ = args.get_template("nope");
+    }
+
+    /// A widget's own declared params answer templateness — the allowlist is
+    /// consulted only for names the widget says nothing about.
+    #[test]
+    fn declared_params_override_the_global_allowlist() {
+        static META: crate::WidgetMeta = crate::WidgetMeta {
+            name: "probe",
+            category: crate::WidgetCategory::Special,
+            params: &[
+                crate::StaticParam {
+                    name: "content",
+                    type_hint: "Expr",
+                    default: None,
+                },
+                crate::StaticParam {
+                    name: "header",
+                    type_hint: "String",
+                    default: None,
+                },
+            ],
+            doc: "",
+        };
+        // Undeclared by `probe`, so the allowlist still rules.
+        assert!(is_template_arg_for(Some(&META), "item_template"));
+        // Declared as Expr though the allowlist has never heard of it.
+        assert!(is_template_arg_for(Some(&META), "content"));
+        assert!(!is_template_arg("content"));
+        // Declared as a scalar though the allowlist calls it a template.
+        assert!(!is_template_arg_for(Some(&META), "header"));
+        assert!(is_template_arg("header"));
     }
 }

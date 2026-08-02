@@ -13,7 +13,7 @@ use holon_api::render_eval::column_ref_name;
 use holon_api::render_eval::eval_binary_op;
 use holon_api::render_eval::eval_to_value;
 use holon_api::render_eval::resolve_args;
-use holon_api::render_eval::resolve_args_with;
+use holon_api::render_eval::resolve_args_for_widget;
 use holon_api::render_types::OperationWiring;
 use holon_api::render_types::RenderExpr;
 use holon_api::widget_spec::DataRow;
@@ -71,7 +71,7 @@ where
 // the same `RenderInterpreter` under a disjoint name space: a given name
 // is either a widget builder or a value function, never both.
 //
-// Arg evaluation (`resolve_args_with`) dispatches `FunctionCall` nodes
+// Arg evaluation (`resolve_args_for_widget`) dispatches `FunctionCall` nodes
 // into the value-fn registry via a short-lived `ValueFnBinding` that
 // carries `&services` and `&ctx` — the slice of interpreter state a
 // value fn needs.
@@ -104,7 +104,7 @@ where
 
 /// Short-lived `ValueFnLookup` that captures the services + ctx a
 /// value-fn needs. Constructed fresh at the top of `interpret()` and
-/// passed to `resolve_args_with`.
+/// passed to `resolve_args_for_widget`.
 struct ValueFnBinding<'a> {
     fns: &'a HashMap<String, Arc<dyn ValueFn>>,
     services: &'a dyn BuilderServices,
@@ -149,6 +149,11 @@ pub struct RenderInterpreter<W: 'static> {
     /// `ops_of(uri)`). Dispatched during arg evaluation — see
     /// `ValueFnBinding` above.
     value_fns: HashMap<String, Arc<dyn ValueFn>>,
+    /// Declared params per widget, keyed by DSL name. Drives per-widget
+    /// template-vs-scalar arg classification; a widget absent here (or one
+    /// declaring no params) is judged by the global `is_template_arg`
+    /// allowlist instead.
+    widget_metas: HashMap<String, &'static holon_api::WidgetMeta>,
     annotator: Option<AnnotatorFn<W>>,
 }
 
@@ -172,8 +177,15 @@ impl<W> RenderInterpreter<W> {
         Self {
             builders: HashMap::new(),
             value_fns: HashMap::new(),
+            widget_metas: HashMap::new(),
             annotator: None,
         }
+    }
+
+    /// Bind the macro-generated `WIDGET_META` of every registered builder so
+    /// arg classification can consult the widget's own param list.
+    pub fn set_widget_metas(&mut self, metas: Vec<&'static holon_api::WidgetMeta>) {
+        self.widget_metas = metas.into_iter().map(|m| (m.name.to_string(), m)).collect();
     }
 
     pub fn register(&mut self, name: impl Into<String>, builder: impl Builder<W> + 'static) {
@@ -243,7 +255,7 @@ impl<W> RenderInterpreter<W> {
 
         match expr {
             RenderExpr::FunctionCall { name, args } => {
-                // Bind the value-fn registry so `resolve_args_with` can
+                // Bind the value-fn registry so `resolve_args_for_widget` can
                 // dispatch `FunctionCall` arg expressions (e.g.
                 // `collection: focus_chain()`) through it.
                 let binding = ValueFnBinding {
@@ -251,7 +263,12 @@ impl<W> RenderInterpreter<W> {
                     services,
                     ctx,
                 };
-                let resolved = resolve_args_with(args, ctx.row(), &binding);
+                let resolved = resolve_args_for_widget(
+                    args,
+                    ctx.row(),
+                    &binding,
+                    self.widget_metas.get(name.as_str()).copied(),
+                );
                 // `live_block(id, #{role: "page_title", ...})` — second
                 // positional Object arg becomes ctx.flags for the resolved
                 // block's variant dispatch. AST stays shape-stable; flags

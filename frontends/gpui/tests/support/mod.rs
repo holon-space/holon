@@ -110,6 +110,9 @@ impl BuilderServices for StubServices {
     fn interpret(&self, _: &RenderExpr, _: &FrontendRenderContext) -> ReactiveViewModel {
         unimplemented!("StubServices::interpret — fixture is not pure-layout")
     }
+    fn clone_arc(&self) -> Arc<dyn BuilderServices> {
+        unimplemented!("StubServices::clone_arc — fixture reached a lazy widget")
+    }
     fn link_classifier(&self) -> &holon_api::link_parser::LinkTargetClassifier {
         &self.link_classifier
     }
@@ -271,6 +274,16 @@ impl TestServices {
 impl BuilderServices for TestServices {
     fn interpret(&self, expr: &RenderExpr, ctx: &FrontendRenderContext) -> ReactiveViewModel {
         self.inner.interpret(expr, ctx)
+    }
+    /// Deliberately loud rather than delegating to `inner.clone_arc()`: the
+    /// recorded drawer/caret/focus state lives in THIS instance's mutexes, so
+    /// a stub handle would interpret deferred content against defaults and the
+    /// fixture's assertions would silently read the wrong services.
+    fn clone_arc(&self) -> Arc<dyn BuilderServices> {
+        unimplemented!(
+            "TestServices::clone_arc — a lazy widget would capture a handle \
+             that drops this fixture's recorded state"
+        )
     }
     fn get_block_data(&self, id: &EntityUri) -> (RenderExpr, Vec<Arc<DataRow>>) {
         self.inner.get_block_data(id)

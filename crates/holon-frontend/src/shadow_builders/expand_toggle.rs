@@ -13,7 +13,7 @@ fn row_collapsed(row: &holon_api::widget_spec::DataRow) -> bool {
 }
 
 holon_macros::widget_builder! {
-    raw fn expand_toggle(ba: BA<'_>) -> ViewModel {
+    fn expand_toggle(header: Expr, content: Expr) -> ViewModel {
         let target_id = ba.ctx.row().get("id")
             .and_then(|v| v.as_string())
             .unwrap_or("")
@@ -61,7 +61,7 @@ holon_macros::widget_builder! {
         let seed_expanded = ba.services.block_expanded_view(&target_id).unwrap_or(default_expanded);
         let expanded = futures_signals::signal::Mutable::new(seed_expanded);
 
-        let header = ba.args.get_template("header")
+        let header = header
             .cloned()
             .unwrap_or_else(|| holon_api::render_types::RenderExpr::FunctionCall {
                 name: "text".to_string(),
@@ -78,7 +78,7 @@ holon_macros::widget_builder! {
         // unnecessary FDW fetches. The cache lives for the VM lifetime, so
         // re-collapse + re-expand is instant. `push_down_lazy_slot` carries
         // the cache forward across structural rebuilds.
-        let lazy_slot = ba.args.get_template("content").cloned().map(|template| {
+        let lazy_slot = content.cloned().map(|template| {
             let services_arc = ba.services.clone_arc();
             let ctx = ba.ctx.clone();
             let thunk: Arc<dyn Fn() -> ViewModel + Send + Sync> =
@@ -177,15 +177,7 @@ mod tests {
     /// `default_expanded: true` seeds the gate open, so the snapshot
     /// materialises the lazy content child instead of rendering header-only.
     /// Pins the builder's documented contract (BugFunnel 2026-08-02).
-    ///
-    /// KNOWN RED — `"content"` is absent from
-    /// `holon_api::render_eval::is_template_arg`, so `get_template("
-    /// content")` is always `None` and `lazy_slot` is never
-    /// built. Un-ignore once templateness is decided per-widget: allowlisting
-    /// `"content"` globally would break `text`/`source_editor`, which take it
-    /// as a scalar.
     #[test]
-    #[ignore = "prod defect: is_template_arg omits \"content\" — see BugFunnel 2026-08-02"]
     fn default_expanded_materialises_content_in_snapshot() {
         let vm = interpret_toggle(
             r#"expand_toggle(#{default_expanded: true, header: text("A Page"), content: text("HELLO-STATIC")})"#,
@@ -196,6 +188,24 @@ mod tests {
             rendered.contains("HELLO-STATIC"),
             "default_expanded toggle must materialise its content; got:\n{rendered}"
         );
+    }
+
+    /// The `content:` arg reaches the lazy slot and materialises once the
+    /// gate is open. Guards the class of bug where a widget's template arg is
+    /// classified as a scalar and silently never renders.
+    #[test]
+    fn content_template_materialises_when_expanded() {
+        let vm = interpret_toggle(
+            r#"expand_toggle(#{default_expanded: true, header: text("A Page"), content: text("body")})"#,
+        );
+        let slot = vm
+            .lazy_slot
+            .as_ref()
+            .expect("content: must build a lazy slot");
+        let content = slot
+            .materialize_if_gated()
+            .expect("an expanded toggle must materialise its content");
+        assert_eq!(content.widget_name().as_deref(), Some("text"));
     }
 
     /// Default expand_toggle (no knob) keeps the leading-chevron shape: the

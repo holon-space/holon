@@ -225,6 +225,8 @@ pub use render_eval::eval_to_value;
 /// flutter_rust_bridge:ignore
 pub use render_eval::is_template_arg;
 /// flutter_rust_bridge:ignore
+pub use render_eval::is_template_arg_for;
+/// flutter_rust_bridge:ignore
 pub use render_eval::resolve_args;
 // Re-export render types
 pub use render_types::{

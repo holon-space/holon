@@ -55,6 +55,7 @@ pub fn build_shadow_interpreter() -> RenderInterpreter<ReactiveViewModel> {
     register_render_dsl_widget_names();
     let mut interp = RenderInterpreter::new();
     register_all(&mut interp);
+    interp.set_widget_metas(all_widget_metas());
     interp.register("column", |ba: prelude::BA<'_>| {
         let gap = ba.args.get_f64("gap").unwrap_or(0.0) as f32;
         // Placement guard (accordion.rs, §3): bless ONLY direct `accordion(...)`

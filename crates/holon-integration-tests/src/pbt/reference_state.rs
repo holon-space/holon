@@ -2529,6 +2529,17 @@ impl holon_frontend::reactive::BuilderServices for ReferenceState {
         self.harness.interpreter.interpret(expr, ctx, self)
     }
 
+    /// The reference model is the proptest state machine's owned, mutating
+    /// state — a handle would have to be a COPY, and a lazy slot materialising
+    /// against a copy would render a snapshot the model has already moved past,
+    /// silently diverging from the SUT it exists to judge.
+    fn clone_arc(&self) -> Arc<dyn holon_frontend::reactive::BuilderServices> {
+        unimplemented!(
+            "ReferenceState::clone_arc — the ref model cannot hand out a \
+             handle; a lazy widget reached the reference render path"
+        )
+    }
+
     fn link_classifier(&self) -> &holon_api::link_parser::LinkTargetClassifier {
         &self.harness.link_classifier
     }

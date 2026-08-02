@@ -58,6 +58,19 @@ impl BuilderServices for HeadlessBuilderServices {
         self.interpreter.interpret(expr, ctx, self)
     }
 
+    /// A handle over the same engine and interpreter. `describe_ui` is the
+    /// caller that needs it: reporting what the UI *should* render means
+    /// materialising the lazy slots (`expand_toggle` content, tabs), which
+    /// interpret through the captured services long after the build returns.
+    fn clone_arc(&self) -> Arc<dyn BuilderServices> {
+        Arc::new(Self {
+            engine: self.engine.clone(),
+            interpreter: self.interpreter.clone(),
+            rt_handle: self.rt_handle.clone(),
+            link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
+        })
+    }
+
     fn get_block_data(&self, _: &EntityUri) -> (RenderExpr, Vec<Arc<DataRow>>) {
         (table_expr(), vec![])
     }

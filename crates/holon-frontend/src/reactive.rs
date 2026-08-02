@@ -91,16 +91,15 @@ pub trait BuilderServices: Send + Sync {
     /// Return an owned handle to this services instance.
     ///
     /// Needed by widgets that capture services for deferred interpretation
-    /// (lazy slots, suspendable subscriptions). Implementors that participate
-    /// in lazy-materialisation paths override this; the default panics so
-    /// non-participating stubs (test, headless) fail loud if accidentally
-    /// driven through such a path.
-    fn clone_arc(&self) -> Arc<dyn BuilderServices> {
-        unimplemented!(
-            "clone_arc not implemented for this BuilderServices impl; only services that drive \
-             lazy widgets (expand_toggle, tabs, view_mode_switcher) need to override this"
-        )
-    }
+    /// (lazy slots, suspendable subscriptions): `expand_toggle`, tabs,
+    /// `view_mode_switcher`.
+    ///
+    /// REQUIRED on purpose — it used to carry a panicking default, and every
+    /// impl that never thought about lazy widgets inherited that panic without
+    /// stating it. An impl that genuinely cannot hand out a handle (one whose
+    /// per-instance state a copy would silently drop) says so in its own body,
+    /// naming itself and the reason.
+    fn clone_arc(&self) -> Arc<dyn BuilderServices>;
 
     /// Get the current (RenderExpr, Vec<Arc<DataRow>>) for a block, ensuring a
     /// watcher is running.
@@ -3591,6 +3590,17 @@ impl Default for StubBuilderServices {
 impl BuilderServices for StubBuilderServices {
     fn interpret(&self, expr: &RenderExpr, ctx: &RenderContext) -> ReactiveViewModel {
         self.interpreter.interpret(expr, ctx, self)
+    }
+
+    /// A stub carries no engine state, so a handle is just a second stub over
+    /// the same interpreter — enough for the lazy widgets (`expand_toggle`,
+    /// tabs, `view_mode_switcher`) that gpui layout and unit tests drive.
+    fn clone_arc(&self) -> Arc<dyn BuilderServices> {
+        Arc::new(Self {
+            interpreter: self.interpreter.clone(),
+            rt_handle: self.rt_handle.clone(),
+            link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
+        })
     }
 
     fn get_block_data(&self, _: &EntityUri) -> (RenderExpr, Vec<Arc<DataRow>>) {

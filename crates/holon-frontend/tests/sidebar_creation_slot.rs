@@ -65,6 +65,16 @@ impl BuilderServices for SlotCapableServices {
         self.interpreter.interpret(expr, ctx, self)
     }
 
+    /// All state here is the shared interpreter and a default classifier, so a
+    /// handle is a second instance over the same interpreter.
+    fn clone_arc(&self) -> Arc<dyn BuilderServices> {
+        Arc::new(Self {
+            interpreter: self.interpreter.clone(),
+            rt_handle: self.rt_handle.clone(),
+            link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
+        })
+    }
+
     fn link_classifier(&self) -> &holon_api::link_parser::LinkTargetClassifier {
         &self.link_classifier
     }
