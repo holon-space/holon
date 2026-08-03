@@ -2002,6 +2002,7 @@ impl OperationProvider for LoroShareBackend {
                 }
                 other => other,
             },
+            delivery: holon_core::Delivery::Proven,
             response: result.response,
             follow_ups: result.follow_ups,
         })

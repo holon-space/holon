@@ -281,6 +281,87 @@ pub struct ToolConfig {
     /// error otherwise.
     #[serde(default)]
     pub key_param: Option<String>,
+    /// How this tool's *successful* response reports whether the effect
+    /// provably landed. Absent means a transport-level ack is itself the proof
+    /// — correct only for providers that never ack an unproven effect.
+    #[serde(default)]
+    pub outcome: Option<OutcomeConfig>,
+}
+
+/// Which response field carries the provider's own delivery verdict, and which
+/// of its values PROVE the effect landed.
+///
+/// Some providers deliberately ack an effect they cannot prove happened (the
+/// claude-history server returns `{"outcome":"unconfirmed"}` as a success
+/// whenever it cannot confirm a message reached the session). Without this
+/// declaration such an ack is indistinguishable from proof of delivery, and the
+/// UI claims a message landed that may never have.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OutcomeConfig {
+    /// Response field holding the verdict, e.g. `outcome`.
+    pub field: String,
+    /// Values that PROVE the effect landed.
+    pub proven: Vec<String>,
+    /// Values that explicitly state the effect is NOT proven to have landed.
+    #[serde(default)]
+    pub unproven: Vec<String>,
+}
+
+/// What a successful response says about whether the effect landed. Parsed
+/// from the provider's payload at the dispatch chokepoint, never re-decided
+/// downstream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AckVerdict {
+    /// The provider vouched for delivery.
+    Proven,
+    /// The call succeeded but delivery is not proven; `detail` is the
+    /// provider's own wording, for verbatim disclosure.
+    Unproven { detail: String },
+}
+
+impl OutcomeConfig {
+    /// Classify a successful tool response. A field that is missing, non-string
+    /// or carries a word this declaration does not know is UNPROVEN with a
+    /// detail naming exactly what was seen: the one thing we may never do is
+    /// assume delivery from a payload we could not read.
+    pub fn classify(&self, tool: &str, response: &holon_api::Value) -> AckVerdict {
+        let holon_api::Value::Object(map) = response else {
+            return AckVerdict::Unproven {
+                detail: format!(
+                    "'{tool}' declares `outcome.field: {}` but its response is not an object: \
+                     {response:?}",
+                    self.field
+                ),
+            };
+        };
+        let Some(holon_api::Value::String(verdict)) = map.get(self.field.as_str()) else {
+            return AckVerdict::Unproven {
+                detail: format!(
+                    "'{tool}' response carries no string `{}` field, so delivery is unproven: \
+                     {response:?}",
+                    self.field
+                ),
+            };
+        };
+        if self.proven.iter().any(|p| p == verdict) {
+            return AckVerdict::Proven;
+        }
+        if self.unproven.iter().any(|u| u == verdict) {
+            return AckVerdict::Unproven {
+                detail: format!(
+                    "'{tool}' acked `{}: {verdict}` — dispatched, but delivery is NOT proven",
+                    self.field
+                ),
+            };
+        }
+        AckVerdict::Unproven {
+            detail: format!(
+                "'{tool}' acked `{}: {verdict}`, which the sidecar classifies as neither proven \
+                 nor unproven — treating it as unproven",
+                self.field
+            ),
+        }
+    }
 }
 
 /// Connector-wide write policy (leases/read-write ruling).
@@ -529,6 +610,20 @@ impl McpSidecar {
                 ),
                 _ => {}
             }
+            if let Some(outcome) = &tool.outcome {
+                if outcome.proven.is_empty() {
+                    anyhow::bail!(
+                        "sidecar tool '{name}' declares `outcome:` with no `proven:` values — \
+                         nothing could ever count as delivery"
+                    );
+                }
+                if let Some(clash) = outcome.proven.iter().find(|p| outcome.unproven.contains(p)) {
+                    anyhow::bail!(
+                        "sidecar tool '{name}' lists outcome value '{clash}' as BOTH proven and \
+                         unproven"
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -545,6 +640,90 @@ impl McpSidecar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn outcome_sidecar(extra: &str) -> anyhow::Result<McpSidecar> {
+        McpSidecar::from_yaml(&format!(
+            r#"
+entities:
+  session:
+    id_column: id
+tools:
+  send_message:
+    entity: session
+    effect: once_only
+    undo:
+      reversible: false
+    outcome:
+      field: outcome
+{extra}
+"#
+        ))
+    }
+
+    fn verdict(response: serde_json::Value) -> AckVerdict {
+        let sidecar = outcome_sidecar("      proven: [delivered]\n      unproven: [unconfirmed]")
+            .expect("valid outcome declaration");
+        sidecar.tools["send_message"]
+            .outcome
+            .as_ref()
+            .expect("declared")
+            .classify("send_message", &holon_api::Value::from(response))
+    }
+
+    #[test]
+    fn a_proven_outcome_value_is_proof_of_delivery() {
+        assert_eq!(
+            verdict(serde_json::json!({"outcome": "delivered"})),
+            AckVerdict::Proven
+        );
+    }
+
+    /// The headline: a SUCCESSFUL response the provider labels unproven must
+    /// not be read as delivery, and the disclosure must quote its word.
+    #[test]
+    fn a_declared_unproven_outcome_is_not_proof_of_delivery() {
+        let AckVerdict::Unproven { detail } =
+            verdict(serde_json::json!({"outcome": "unconfirmed"}))
+        else {
+            panic!("`unconfirmed` must not classify as proven")
+        };
+        assert!(detail.contains("unconfirmed"), "got: {detail}");
+    }
+
+    /// An outcome word the declaration does not know is disclosed as unproven,
+    /// never silently defaulted into success.
+    #[test]
+    fn an_unknown_outcome_value_is_not_proof_of_delivery() {
+        let AckVerdict::Unproven { detail } = verdict(serde_json::json!({"outcome": "who_knows"}))
+        else {
+            panic!("an unknown outcome word must not classify as proven")
+        };
+        assert!(detail.contains("who_knows"), "got: {detail}");
+    }
+
+    /// A response missing the declared field means the sidecar and the provider
+    /// disagree — that is a reason to doubt delivery, not to assume it.
+    #[test]
+    fn a_missing_outcome_field_is_not_proof_of_delivery() {
+        let AckVerdict::Unproven { detail } = verdict(serde_json::json!({"ok": true})) else {
+            panic!("a missing outcome field must not classify as proven")
+        };
+        assert!(detail.contains("outcome"), "got: {detail}");
+    }
+
+    #[test]
+    fn an_outcome_declaration_with_no_proven_values_is_a_loud_config_error() {
+        let err = outcome_sidecar("      proven: []").unwrap_err().to_string();
+        assert!(err.contains("no `proven:` values"), "got: {err}");
+    }
+
+    #[test]
+    fn an_outcome_value_that_is_both_proven_and_unproven_is_a_loud_config_error() {
+        let err = outcome_sidecar("      proven: [delivered]\n      unproven: [delivered]")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("BOTH proven and unproven"), "got: {err}");
+    }
 
     #[test]
     fn parse_valid_precondition() {

@@ -107,16 +107,79 @@ entities:
     sync:
       list_resource: "claude-history://live"
 
+  # What the live fleet is BLOCKED on right now — the AskUserQuestion a session
+  # is sitting on. Same SYNC-only MIRROR semantics as `live_session`: each sync
+  # replaces the cache wholesale, so a question the provider stops listing
+  # (answered, or its session died) DISAPPEARS instead of offering an answer
+  # nobody is waiting for.
+  #
+  # `id` is the provider's `answer_question.question_id`: server-derived, opaque,
+  # and VOLATILE — it fingerprints the question text and its labels, so editing
+  # the question mints a new id and the old one fails to RESOLVE rather than
+  # answering something else. It is therefore read off the row at dispatch time
+  # and never persisted anywhere longer-lived than this evicting mirror.
+  #
+  # `options` holds the offered answers as a JSON array in a TEXT column; the
+  # `question_options` widget parses it and renders one button per answer.
+  # Only the head question of a session (`answerable`) can actually be answered.
+  pending_question:
+    profile_variants:
+      - name: default
+        render: >-
+          row(text(col("question")), spacer(8),
+              question_options(#{
+                options: col("options"),
+                action: answer_question()
+              }))
+    schema:
+      - name: id
+        sql_type: TEXT
+        primary_key: true
+      - name: session_id
+        sql_type: TEXT
+        indexed: true
+      - name: job_id
+        sql_type: TEXT
+        nullable: true
+      - name: question_index
+        sql_type: INTEGER
+        nullable: true
+      - name: question
+        sql_type: TEXT
+        nullable: true
+      - name: multi_select
+        sql_type: INTEGER
+        nullable: true
+      - name: options
+        sql_type: TEXT
+        nullable: true
+      - name: answerable
+        sql_type: INTEGER
+        nullable: true
+      - name: asked_at
+        sql_type: TEXT
+        nullable: true
+    sync:
+      list_resource: "claude-history://live/questions"
+
   session:
     profile_variants:
       - name: default
         render: >-
           expand_toggle(#{
             header: row(text(col("first_prompt")), spacer(8), text(col("message_count"))),
-            content: live_query(#{
-              sql: "SELECT uuid, role, content, timestamp AS ts FROM cc_message_fdw WHERE session_id = $context_id AND role IS NOT NULL ORDER BY timestamp",
-              item_template: chat_bubble(#{sender: col("role"), time: col("ts")}, text(col("content")))
-            })
+            content: column(
+              live_query(#{
+                sql: "SELECT uuid, role, content, timestamp AS ts FROM cc_message_fdw WHERE session_id = $context_id AND role IS NOT NULL ORDER BY timestamp",
+                item_template: chat_bubble(#{sender: col("role"), time: col("ts")}, text(col("content")))
+              }),
+              input_box(#{
+                placeholder: "Message this session",
+                submit_label: "Send",
+                text_param: "message",
+                action: send_message()
+              })
+            )
           })
     schema:
       - name: id
@@ -439,7 +502,52 @@ entities:
         sql_type: TEXT
         nullable: true
 
-tools: {}
+# Messaging a live agent session is an irreversible external effect with no
+# natural dedup key — the provider has no idempotency parameter, so a second
+# dispatch is a second message in someone's session. Hence `once_only` under the
+# safe designation: every send is queued for explicit human approval and the
+# store's compare-and-take makes one intent fire at most once.
+#
+# No `precondition`: only backgrounded sessions are reachable, and that is a
+# property of `live_session` (`job_id`), not of the `session` entity this tool
+# targets — a Rhai check over `session`'s columns could not express it honestly.
+writes: enabled
+once_only: confirm_manually
+tools:
+  send_message:
+    entity: session
+    display_name: Send message
+    effect: once_only
+    # This provider acks a send it CANNOT prove landed: `unconfirmed` is a
+    # successful MCP response meaning "dispatched, delivery not proven", and it
+    # is the common outcome for a busy session. Without this mapping the ack
+    # alone would be read as delivery and the UI would fabricate a record of a
+    # message that may never have arrived.
+    outcome:
+      field: outcome
+      proven: [delivered]
+      unproven: [unconfirmed]
+    undo:
+      reversible: false
+  # Answering unblocks a live human-owned session — irreversible, and the
+  # provider exposes no idempotency parameter, so this is `once_only` for the
+  # same reason `send_message` is. `keyed` is a PROPOSAL about the provider
+  # deduping on `question_id`, and no mock can validate a claim about the real
+  # provider's dedup; the safe fallback stands until that is measured against
+  # the real binary.
+  answer_question:
+    entity: pending_question
+    display_name: Answer question
+    effect: once_only
+    # `recorded` is the provider's proof that the answer reached the dialog.
+    # Anything else it may report — including the `wrong_option_recorded`
+    # correction — is not proof, and the unlisted-value path discloses it
+    # verbatim rather than defaulting to success.
+    outcome:
+      field: outcome
+      proven: [recorded]
+    undo:
+      reversible: false
 
 # Sidecar-declared derived views (generic `views:` mechanism, Phase 2).
 # Each entry becomes `CREATE MATERIALIZED VIEW {entity_prefix}{name} AS {sql}`

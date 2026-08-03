@@ -181,6 +181,7 @@ async fn convert(engine: &BackendEngine, origin: &str, destination_path: &str) -
         )
         .await
         .expect("convert_block_to_page dispatch")
+        .response
         .expect("convert returns the new page id");
     match out {
         Value::String(s) => s,
@@ -429,6 +430,7 @@ async fn convert_without_destination_defaults_to_nearest_page_ancestor() {
         )
         .await
         .expect("convert dispatch")
+        .response
         .expect("page id")
     {
         Value::String(s) => s,

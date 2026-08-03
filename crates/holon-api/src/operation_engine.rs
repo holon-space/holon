@@ -71,6 +71,42 @@ impl OpOrigin {
     }
 }
 
+/// Whether an operation's effect is PROVEN to have taken hold.
+///
+/// Local operations are proven by construction: they committed, or they
+/// returned `Err`. An external connector write is proven only when the remote
+/// vouches for it — a provider that acks an effect it could not confirm
+/// (`{"outcome":"unconfirmed"}`) has told us the truth, and reporting that as
+/// delivery would turn its honesty into a fabricated record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Delivery {
+    Proven,
+    /// Dispatched, delivery not proven. `detail` is the provider's own wording
+    /// and is surfaced verbatim; never auto-retried.
+    Unproven {
+        detail: String,
+    },
+}
+
+/// What an engine dispatch reports: the operation's response payload and
+/// whether its effect is proven to have landed. The two travel together so a
+/// caller cannot read the response and silently assume delivery.
+#[derive(Debug, Clone)]
+pub struct OpOutcome {
+    pub response: Option<Value>,
+    pub delivery: Delivery,
+}
+
+impl OpOutcome {
+    /// An outcome from a path whose effect is proven by construction.
+    pub fn proven(response: Option<Value>) -> Self {
+        Self {
+            response,
+            delivery: Delivery::Proven,
+        }
+    }
+}
+
 /// Execute, discover, and undo/redo operations.
 #[async_trait]
 pub trait OperationEngine: Send + Sync {
@@ -84,7 +120,7 @@ pub trait OperationEngine: Send + Sync {
         op_name: &str,
         params: StorageEntity,
         origin: OpOrigin,
-    ) -> Result<Option<Value>>;
+    ) -> Result<OpOutcome>;
 
     /// The operations registered for `entity_name`.
     async fn available_operations(&self, entity_name: &str) -> Vec<OperationDescriptor>;

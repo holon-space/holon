@@ -769,7 +769,7 @@ impl BackendEngine {
         op_name: &str,
         params: StorageEntity,
         origin: holon_api::OpOrigin,
-    ) -> Result<Option<Value>> {
+    ) -> Result<holon_api::OpOutcome> {
         use tracing::Instrument;
         use tracing::info;
 

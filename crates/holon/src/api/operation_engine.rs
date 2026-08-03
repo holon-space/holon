@@ -24,6 +24,7 @@ use holon_api::EntityName;
 use holon_api::HistoryEvent;
 use holon_api::HistoryStore;
 use holon_api::OpOrigin;
+use holon_api::OpOutcome;
 use holon_api::Operation;
 use holon_api::OperationDescriptor;
 use holon_api::PROPOSAL_PROPERTY;
@@ -67,7 +68,7 @@ impl OperationEngine for BackendEngine {
         op_name: &str,
         params: StorageEntity,
         origin: OpOrigin,
-    ) -> Result<Option<Value>> {
+    ) -> Result<OpOutcome> {
         BackendEngine::execute_operation(self, entity_name, op_name, params, origin).await
     }
 
@@ -1560,6 +1561,7 @@ impl DispatchingOperationEngine {
                     record.op_name, record.entity
                 )
             })?
+            .response
         } else {
             let mut response = std::collections::HashMap::new();
             response.insert(
@@ -1623,7 +1625,7 @@ impl OperationEngine for DispatchingOperationEngine {
         op_name: &str,
         params: StorageEntity,
         origin: OpOrigin,
-    ) -> Result<Option<Value>> {
+    ) -> Result<OpOutcome> {
         // Trust gate (VisionGapAnalysis C5): a sub-threshold (origin, entity,
         // op) never reaches canonical state — it is coerced into a proposal
         // emission under `block:proposals`. This runs FIRST so every shape
@@ -1633,7 +1635,8 @@ impl OperationEngine for DispatchingOperationEngine {
         if self.trust_policy.decide(&origin, entity_name, op_name) == TrustDecision::Propose {
             return self
                 .coerce_to_proposal(entity_name, op_name, params, &origin)
-                .await;
+                .await
+                .map(OpOutcome::proven);
         }
 
         // Engine-level compounds: proposal confirmation (C5). Acceptance
@@ -1641,10 +1644,16 @@ impl OperationEngine for DispatchingOperationEngine {
         // retracts without executing.
         if entity_name.as_str() == "block" {
             if op_name == ACCEPT_PROPOSAL_OP {
-                return self.run_resolve_proposal(&params, &origin, true).await;
+                return self
+                    .run_resolve_proposal(&params, &origin, true)
+                    .await
+                    .map(OpOutcome::proven);
             }
             if op_name == REJECT_PROPOSAL_OP {
-                return self.run_resolve_proposal(&params, &origin, false).await;
+                return self
+                    .run_resolve_proposal(&params, &origin, false)
+                    .await
+                    .map(OpOutcome::proven);
             }
         }
 
@@ -1652,7 +1661,10 @@ impl OperationEngine for DispatchingOperationEngine {
         // `create` dispatches (each re-enters this method and gets stamping /
         // history / undo classification like any other op).
         if op_name == INSTANTIATE_TEMPLATE_OP && entity_name.as_str() == "block" {
-            return self.run_instantiate_template(&params, &origin).await;
+            return self
+                .run_instantiate_template(&params, &origin)
+                .await
+                .map(OpOutcome::proven);
         }
 
         // Engine-level compound: block → page (Option B). Composed from ordinary
@@ -1661,14 +1673,20 @@ impl OperationEngine for DispatchingOperationEngine {
         // composite `UndoEntry`. Intercepted here (like `instantiate_template`)
         // so undo/redo replay the CONSTITUENTS, never the compound name.
         if op_name == CONVERT_BLOCK_TO_PAGE_OP && entity_name.as_str() == "block" {
-            return self.run_convert_block_to_page(&params, &origin).await;
+            return self
+                .run_convert_block_to_page(&params, &origin)
+                .await
+                .map(OpOutcome::proven);
         }
 
         // Engine-level compound: duplicate-identity merge. Same shape as the
         // block→page transform — invertible constituents assembled into ONE
         // composite `UndoEntry`.
         if op_name == MERGE_BLOCKS_OP && entity_name.as_str() == "block" {
-            return self.run_merge_blocks(&params, &origin).await;
+            return self
+                .run_merge_blocks(&params, &origin)
+                .await
+                .map(OpOutcome::proven);
         }
 
         // Provenance stamping (ADR 0024 P8 / C2a): the dispatcher drops `origin`
@@ -1766,7 +1784,10 @@ impl OperationEngine for DispatchingOperationEngine {
             .await?;
         }
 
-        Ok(result.response)
+        Ok(OpOutcome {
+            response: result.response,
+            delivery: result.delivery,
+        })
     }
 
     async fn available_operations(&self, entity_name: &str) -> Vec<OperationDescriptor> {
@@ -2042,7 +2063,7 @@ mod instantiate_template_tests {
             )
             .await
             .unwrap();
-        let Some(Value::String(root_id)) = root_id else {
+        let Some(Value::String(root_id)) = root_id.response else {
             panic!("instantiate_template must return the instance root id");
         };
 

@@ -905,7 +905,7 @@ impl HolonMcpServer {
                 )
             })?;
 
-        let content = match response {
+        let content = match response.response {
             Some(value) => Content::text(value.to_json_string()),
             None => Content::text(format!(
                 "Operation '{}' on entity '{}' executed successfully",
@@ -1382,7 +1382,7 @@ impl HolonMcpServer {
                 )
             })?;
 
-        let content = match response {
+        let content = match response.response {
             Some(value) => Content::text(value.to_json_string()),
             None => Content::text(format!(
                 "Command '{}' executed successfully on block '{}'",
@@ -1595,7 +1595,7 @@ impl HolonMcpServer {
             .map_err(|e| {
                 rmcp::ErrorData::internal_error(format!("block.create failed: {e}"), None)
             })?;
-        if let Some(existing) = response {
+        if let Some(existing) = response.response {
             return Err(rmcp::ErrorData::invalid_params(
                 format!(
                     "id collision: a block with id {new_id:?} already exists ({existing:?}) — \
@@ -3332,7 +3332,7 @@ impl HolonMcpServer {
                     serde_json::json!({
                         "matched_operation": format!("{}.{}", entity_name, operation.name),
                         "entity_id": entity_id,
-                        "result": response.map(|v| v.to_json_string()),
+                        "result": response.response.map(|v| v.to_json_string()),
                     })
                     .to_string(),
                 )]))

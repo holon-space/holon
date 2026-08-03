@@ -253,6 +253,7 @@ async fn dispatch(
     engine
         .execute_operation(&EntityName::new("block"), op, params, origin)
         .await
+        .map(|out| out.response)
 }
 
 fn response_field(response: &Option<Value>, key: &str) -> String {

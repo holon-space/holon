@@ -20,6 +20,7 @@ fn submit_wiring(
     args: &[Arg],
     row: &DataRow,
     modified_param: String,
+    id_param: String,
 ) -> OperationWiring {
     let (entity_name, op_name) = match name.split_once('.') {
         Some((e, o)) => (e.to_string(), o.to_string()),
@@ -28,6 +29,15 @@ fn submit_wiring(
     let resolved = resolve_args(args, row);
     let mut bound_params: std::collections::HashMap<String, Value> =
         std::collections::HashMap::new();
+    // The row's `id` names the entity this box composes for. Cache tables store
+    // it scheme-qualified (`cc-session:<id>`) while the operation wants the
+    // bare id, so the URI is unwrapped here rather than at every declaration
+    // site. A box with no row is not bound to an entity and binds nothing.
+    if let Some(raw) = row.get("id").and_then(|v| v.as_string()) {
+        let target = holon_api::EntityUri::parse(raw)
+            .unwrap_or_else(|e| panic!("input_box: row id must be an entity URI: {e}"));
+        bound_params.insert(id_param, Value::String(target.id().to_string()));
+    }
     for (k, v) in &resolved.named {
         bound_params.insert(k.clone(), v.clone());
     }
@@ -67,6 +77,7 @@ holon_macros::widget_builder! {
         #[default = false] multiline: bool,
         #[default = "Send"] submit_label: String,
         #[default = "content"] text_param: String,
+        #[default = "id"] id_param: String,
     ) -> ViewModel {
         // `action:` is the whole point of the widget — a compose box with no
         // wired operation has nothing to submit to, so say so on screen rather
@@ -77,7 +88,7 @@ holon_macros::widget_builder! {
                 "input_box requires an `action:` operation template".to_string(),
             );
         };
-        let operations = vec![submit_wiring(name, args, ba.ctx.row(), text_param)];
+        let operations = vec![submit_wiring(name, args, ba.ctx.row(), text_param, id_param)];
 
         let mut __props = std::collections::HashMap::new();
         __props.insert("placeholder".to_string(), Value::String(placeholder));
@@ -90,6 +101,9 @@ holon_macros::widget_builder! {
         // only thing that empties it is a successful dispatch.
         ViewModel {
             draft: Some(futures_signals::signal::Mutable::new(String::new())),
+            send_state: Some(futures_signals::signal::Mutable::new(
+                crate::reactive_view_model::SendState::Idle,
+            )),
             data: ba.ctx.data_mutable(),
             operations,
             ..ViewModel::from_widget("input_box", __props)

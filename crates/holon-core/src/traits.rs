@@ -349,6 +349,8 @@ impl FieldDelta {
     }
 }
 
+pub use holon_api::operation_engine::Delivery;
+
 /// Result of an operation, containing changes for propagation and undo action.
 ///
 /// - `changes`: Field-level changes for propagation to cache/sync systems
@@ -361,6 +363,10 @@ impl FieldDelta {
 pub struct OperationResult {
     pub changes: Vec<FieldDelta>,
     pub undo: UndoAction,
+    /// Whether the effect is proven to have landed. Every local operation is
+    /// `Proven`; only a connector whose sidecar declares an outcome mapping
+    /// can report otherwise.
+    pub delivery: Delivery,
     /// Optional response payload from the operation (e.g. MCP tool call
     /// results). Non-MCP providers return `None`.
     pub response: Option<Value>,
@@ -379,6 +385,7 @@ impl OperationResult {
             undo: UndoAction::Undo(undo_operation),
             response: None,
             follow_ups: vec![],
+            delivery: Delivery::Proven,
         }
     }
 
@@ -398,6 +405,7 @@ impl OperationResult {
             undo: UndoAction::DeclaredIrreversible(reason),
             response: None,
             follow_ups: vec![],
+            delivery: Delivery::Proven,
         }
     }
 
@@ -410,6 +418,7 @@ impl OperationResult {
             undo,
             response: None,
             follow_ups: vec![],
+            delivery: Delivery::Proven,
         }
     }
 
@@ -1665,6 +1674,7 @@ where
             undo: inverse,
             response: Some(focus_response(&target_id, join_offset as i64)),
             follow_ups: vec![],
+            delivery: Delivery::Proven,
         })
     }
 

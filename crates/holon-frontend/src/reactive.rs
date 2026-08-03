@@ -275,14 +275,21 @@ pub trait BuilderServices: Send + Sync {
     /// Like [`Self::dispatch_intent`] but returns a `'static` future resolving
     /// to the op's result, so a caller (e.g. the GPUI editor) can await it and
     /// surface a BACKEND failure — template-not-found, missing bindings — as a
-    /// visible toast instead of only a log line. Default fire-and-forget + `Ok`
-    /// (stub/headless has no backend result to await).
+    /// visible toast instead of only a log line.
+    ///
+    /// The `Ok` arm carries [`holon_core::Delivery`] rather than `()`: an
+    /// external connector can succeed while telling us it cannot prove the
+    /// effect landed, and a caller that collapses that into `Ok(())` reports a
+    /// delivery that may never have happened. Default fire-and-forget +
+    /// `Proven` (stub/headless has no backend result to await).
     fn dispatch_intent_awaitable(
         &self,
         intent: crate::operations::OperationIntent,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'static>> {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<holon_core::Delivery>> + Send + 'static>,
+    > {
         self.dispatch_intent(intent);
-        Box::pin(std::future::ready(Ok(())))
+        Box::pin(std::future::ready(Ok(holon_core::Delivery::Proven)))
     }
 
     /// Follow a click on a *dangling* wiki-link — a `[[Name]]` mark whose
@@ -3124,7 +3131,12 @@ impl BuilderServices for ReactiveEngine {
                 .await
             {
                 Ok(response) => {
-                    apply_structural_focus(&focused_block, &caret_seed, &op_name, &response);
+                    apply_structural_focus(
+                        &focused_block,
+                        &caret_seed,
+                        &op_name,
+                        &response.response,
+                    );
                     // The delete succeeded: now it is safe to drop focus from the
                     // gone block (a refused delete never reaches this arm).
                     if let Some(target) = &clear_focus_target {
@@ -3248,7 +3260,12 @@ impl BuilderServices for ReactiveEngine {
                 "holon_latency",
             );
             // Same in-process structural-focus projection as `dispatch_intent`.
-            apply_structural_focus(&focused_block, &caret_seed, &intent.op_name, &response);
+            apply_structural_focus(
+                &focused_block,
+                &caret_seed,
+                &intent.op_name,
+                &response.response,
+            );
             if let Some(target) = &clear_focus_target {
                 clear_focus_after_delete(&focused_block, target);
             }
@@ -3259,7 +3276,9 @@ impl BuilderServices for ReactiveEngine {
     fn dispatch_intent_awaitable(
         &self,
         intent: crate::operations::OperationIntent,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'static>> {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<holon_core::Delivery>> + Send + 'static>,
+    > {
         maybe_mirror_navigation_focus(&self.ui_state, &intent);
         // Deferred to op success (the Err arm returns without clearing, so a
         // refused delete keeps focus).
@@ -3282,11 +3301,16 @@ impl BuilderServices for ReactiveEngine {
                 .await
             {
                 Ok(response) => {
-                    apply_structural_focus(&focused_block, &caret_seed, &op_name, &response);
+                    apply_structural_focus(
+                        &focused_block,
+                        &caret_seed,
+                        &op_name,
+                        &response.response,
+                    );
                     if let Some(target) = &clear_focus_target {
                         clear_focus_after_delete(&focused_block, target);
                     }
-                    Ok(())
+                    Ok(response.delivery)
                 }
                 Err(e) => {
                     // Disclose the failed write (same seam as `dispatch_intent`);
@@ -3959,7 +3983,7 @@ async fn create_page_and_navigate(
         .await
         .with_context(|| format!("create_page_from_link({target})"))?;
 
-    let (leaf, reset_scroll) = dangling_link_nav_target(&response, region)
+    let (leaf, reset_scroll) = dangling_link_nav_target(&response.response, region)
         .with_context(|| format!("create_page_from_link({target}) response"))?;
 
     // Last-writer guard: the page CREATE always happened (and the healed link

@@ -13,6 +13,7 @@ use holon_api::render_types::OperationDescriptor;
 use holon_api::render_types::ParamMapping;
 use holon_core::OperationProvider;
 use holon_core::storage::types::StorageEntity;
+use holon_core::traits::Delivery;
 use holon_core::traits::OperationResult;
 use holon_core::traits::Result;
 use holon_core::traits::UndoAction;
@@ -27,6 +28,7 @@ use tokio::process::Command;
 use tracing::info;
 
 use crate::mcp_schema_mapping::input_schema_to_params;
+use crate::mcp_sidecar::AckVerdict;
 use crate::mcp_sidecar::McpSidecar;
 use crate::mcp_sidecar::ToolEffect;
 use crate::mcp_sidecar::UndoConfig;
@@ -806,24 +808,43 @@ impl OperationProvider for McpOperationProvider {
                 let response_value = serde_json::from_str::<serde_json::Value>(&response_text)
                     .map(Value::from)
                     .unwrap_or_else(|_| Value::String(response_text));
+                // The sidecar's `outcome:` declaration is the authority on
+                // whether this ack proves the effect landed; without one, a
+                // transport ack IS the proof.
+                let delivery = match self
+                    .sidecar
+                    .tools
+                    .get(original_name)
+                    .and_then(|tc| tc.outcome.as_ref())
+                    .map(|oc| oc.classify(original_name, &response_value))
+                {
+                    None | Some(AckVerdict::Proven) => Delivery::Proven,
+                    Some(AckVerdict::Unproven { detail }) => Delivery::Unproven { detail },
+                };
                 Ok(OperationResult {
                     changes: vec![],
                     undo: undo_action,
                     response: Some(response_value),
                     follow_ups: vec![],
+                    delivery,
                 })
             }
         };
 
-        // Record the once_only outcome AFTER the call (amendment A): a positive
-        // ack -> `Sent`; ANY failure -> `OutcomeUnknown` (disclosed, never
-        // auto-retried).
+        // Record the once_only outcome AFTER the call (amendment A): a PROVEN
+        // ack -> `Sent`; a failure, or an ack the provider itself declares
+        // unproven, -> `OutcomeUnknown` (disclosed, never auto-retried).
         if effect == ToolEffect::OnceOnly {
             let key = intent_key
                 .as_deref()
                 .expect("once_only mints an intent key");
             match &call_result {
-                Ok(_) => self.pending.mark_sent(key),
+                Ok(r) => match &r.delivery {
+                    Delivery::Proven => self.pending.mark_sent(key),
+                    Delivery::Unproven { detail } => {
+                        self.pending.mark_outcome_unknown(key, detail.clone())
+                    }
+                },
                 Err(e) => self.pending.mark_outcome_unknown(key, e.to_string()),
             }
         }

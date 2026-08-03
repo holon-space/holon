@@ -66,6 +66,7 @@ pub use traits::CompletionStateInfo;
 pub use traits::CrudAuthority;
 pub use traits::CrudOperations;
 pub use traits::DataSource;
+pub use traits::Delivery;
 pub use traits::DeltaFingerprint;
 pub use traits::EventOrigin;
 pub use traits::FieldDelta;

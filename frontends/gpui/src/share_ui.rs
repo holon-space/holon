@@ -686,7 +686,7 @@ pub fn dispatch_share(
         let result = session
             .execute_operation(&EntityName::new("tree"), "share_subtree", params)
             .await;
-        let outcome = match result {
+        let outcome = match result.map(|out| out.response) {
             Ok(Some(v)) => ShareTicket::from_value(&v).map_err(|e| format!("{e:#}")),
             Ok(None) => Err("share_subtree returned no response".to_string()),
             Err(e) => Err(format!("{e:#}")),

@@ -837,7 +837,7 @@ impl<T> FrontendSession<T> {
         entity_name: &EntityName,
         op_name: &str,
         params: HashMap<String, Value>,
-    ) -> Result<Option<Value>> {
+    ) -> Result<holon_api::OpOutcome> {
         // A `FrontendSession` is, by construction, a user session: every op it
         // dispatches is a direct user gesture. System-authored ops (rule
         // firings, CRDT sync, org ingest) never route through here — they call

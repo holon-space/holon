@@ -2418,7 +2418,7 @@ async fn instantiate_template_deterministic_gate() {
         )
         .await
         .expect("instantiate_template");
-    let Some(Value::String(root_id)) = root_id else {
+    let Some(Value::String(root_id)) = root_id.response else {
         panic!("instantiate_template must return root id")
     };
 

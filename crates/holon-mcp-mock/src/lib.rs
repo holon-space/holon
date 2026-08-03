@@ -22,10 +22,17 @@ use tokio::sync::Mutex;
 pub const LIST_TOOL: &str = "list-items";
 /// The write tool the mock exposes for write scenarios.
 pub const WRITE_TOOL: &str = "write-item";
+/// The claude-history provider's message-sending tool, named exactly as the
+/// real provider names it so the SHIPPED sidecar's declaration binds.
+pub const SEND_TOOL: &str = "send_message";
+/// The claude-history provider's question-answering tool.
+pub const ANSWER_TOOL: &str = "answer_question";
 /// The single resource URI for resource-based sync scenarios.
 pub const RESOURCE_URI: &str = "mock://items";
 /// The live-fleet resource of the claude-history provider.
 pub const LIVE_URI: &str = "claude-history://live";
+/// The pending-questions resource of the claude-history provider.
+pub const QUESTIONS_URI: &str = "claude-history://live/questions";
 /// The projects resource of the claude-history provider. `LiveFleet` serves it
 /// empty: the claude-history sidecar syncs it alongside `live`, and an
 /// unhandled URI is a hard read_resource error.
@@ -59,6 +66,21 @@ pub enum Scenario {
     /// reads drop the background one — the provider omits a session once its
     /// job reaches a terminal state.
     LiveFleet,
+    /// `LiveFleet`'s resources PLUS the provider's `send_message` tool, which
+    /// bumps `applied_count` on every call. The counter is cumulative across
+    /// the connection, so a test proves "the effect fired exactly N times" by
+    /// reading it from the Nth response. Acks `outcome: delivered` — the
+    /// provider's word for "this provably landed in the session".
+    LiveFleetSend,
+    /// `LiveFleetSend`, except the tool acks `outcome: unconfirmed`: a
+    /// SUCCESSFUL MCP response that states delivery is not proven. The common
+    /// outcome for a busy session, and the one a client must not read as
+    /// delivery.
+    LiveFleetSendUnconfirmed,
+    /// `LiveFleet`'s resources PLUS the provider's `answer_question` tool. The
+    /// tool refuses a label the question does not offer (as the real provider
+    /// does) and otherwise bumps `applied_count` and echoes the recorded label.
+    LiveFleetAnswer,
     /// Write tool accepts the call and acks success (well-formed write).
     WriteHappy,
     /// Write tool dedups on the idempotency key: the first call with a key
@@ -91,6 +113,9 @@ impl Scenario {
             "stateful" => Self::Stateful,
             "subscribe_push" => Self::SubscribePush,
             "live_fleet" => Self::LiveFleet,
+            "live_fleet_send" => Self::LiveFleetSend,
+            "live_fleet_send_unconfirmed" => Self::LiveFleetSendUnconfirmed,
+            "live_fleet_answer" => Self::LiveFleetAnswer,
             "write_happy" => Self::WriteHappy,
             "write_duplicate_detected" => Self::WriteDuplicateDetected,
             "write_conflict" => Self::WriteConflict,
@@ -177,6 +202,54 @@ fn live_fleet(read_count: u64) -> Vec<serde_json::Value> {
     vec![background, foreground]
 }
 
+/// The claude-history `live/questions` listing: what the fleet is blocked on.
+/// `id` carries the provider's opaque `question_id`
+/// (`<job_id>:<question_index>:<fingerprint>`), and only the head question of a
+/// session is `answerable`.
+fn live_questions() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "id": "job-77:0:1a2b3c4d",
+            "session_id": "s-bg-1",
+            "job_id": "job-77",
+            "question_index": 0,
+            "question": "Which storage backend should the lane use?",
+            "multi_select": 0,
+            "options": [
+                {"label": "Turso", "description": "embedded, IVM available"},
+                {"label": "Plain SQLite", "description": "no incremental views"},
+            ],
+            "answerable": 1,
+            "asked_at": "2026-08-03T09:29:00Z",
+        }),
+        serde_json::json!({
+            "id": "job-77:1:99887766",
+            "session_id": "s-bg-1",
+            "job_id": "job-77",
+            "question_index": 1,
+            "question": "Ship behind a flag?",
+            "multi_select": 0,
+            "options": [{"label": "Yes"}, {"label": "No"}],
+            "answerable": 0,
+            "asked_at": "2026-08-03T09:29:30Z",
+        }),
+    ]
+}
+
+/// The labels `live_questions` offers for a given question id.
+fn offered_labels(question_id: &str) -> Option<Vec<String>> {
+    live_questions().into_iter().find_map(|q| {
+        (q["id"] == question_id).then(|| {
+            q["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| o["label"].as_str().unwrap().to_string())
+                .collect()
+        })
+    })
+}
+
 /// The mock server handler. `read_count`/`items` back the stateful and push
 /// scenarios; all others are pure functions of the request.
 pub struct MockServer {
@@ -215,6 +288,12 @@ impl ServerHandler for MockServer {
             Scenario::Stateful | Scenario::LiveFleet => {
                 ServerCapabilities::builder().enable_resources().build()
             }
+            Scenario::LiveFleetSend
+            | Scenario::LiveFleetSendUnconfirmed
+            | Scenario::LiveFleetAnswer => ServerCapabilities::builder()
+                .enable_resources()
+                .enable_tools()
+                .build(),
             _ => ServerCapabilities::builder().enable_tools().build(),
         };
         ServerInfo {
@@ -235,10 +314,13 @@ impl ServerHandler for MockServer {
         _: Option<PaginatedRequestParam>,
         _: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
-        let (name, description) = if self.scenario.is_write() {
-            (WRITE_TOOL, "Write a mock item")
-        } else {
-            (LIST_TOOL, "List mock items")
+        let (name, description) = match self.scenario {
+            Scenario::LiveFleetSend | Scenario::LiveFleetSendUnconfirmed => {
+                (SEND_TOOL, "Send a message to a live session")
+            }
+            Scenario::LiveFleetAnswer => (ANSWER_TOOL, "Answer a pending question"),
+            s if s.is_write() => (WRITE_TOOL, "Write a mock item"),
+            _ => (LIST_TOOL, "List mock items"),
         };
         let tool = Tool {
             name: name.into(),
@@ -262,6 +344,72 @@ impl ServerHandler for MockServer {
         let seen_keys = self.seen_keys.clone();
         let applied_count = self.applied_count.clone();
         async move {
+            if matches!(
+                scenario,
+                Scenario::LiveFleetSend | Scenario::LiveFleetSendUnconfirmed
+            ) {
+                if request.name != SEND_TOOL {
+                    return Err(McpError::invalid_params(
+                        format!("{scenario:?} serves no tool '{}'", request.name),
+                        None,
+                    ));
+                }
+                let outcome = if scenario == Scenario::LiveFleetSend {
+                    "delivered"
+                } else {
+                    "unconfirmed"
+                };
+                let mut c = applied_count.lock().await;
+                *c += 1;
+                return Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::json!({
+                        "ok": true,
+                        "outcome": outcome,
+                        "applied_count": *c,
+                    })
+                    .to_string(),
+                )]));
+            }
+            if scenario == Scenario::LiveFleetAnswer {
+                if request.name != ANSWER_TOOL {
+                    return Err(McpError::invalid_params(
+                        format!("LiveFleetAnswer serves no tool '{}'", request.name),
+                        None,
+                    ));
+                }
+                let args = request.arguments.as_ref().ok_or_else(|| {
+                    McpError::invalid_params("answer_question requires arguments", None)
+                })?;
+                let question_id = args
+                    .get("question_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        McpError::invalid_params("answer_question requires question_id", None)
+                    })?;
+                let label = args.get("label").and_then(|v| v.as_str()).ok_or_else(|| {
+                    McpError::invalid_params("answer_question requires label", None)
+                })?;
+                let Some(offered) = offered_labels(question_id) else {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "no pending question '{question_id}'"
+                    ))]));
+                };
+                if !offered.iter().any(|o| o == label) {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "'{label}' is not an offered option for '{question_id}'"
+                    ))]));
+                }
+                let mut c = applied_count.lock().await;
+                *c += 1;
+                return Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::json!({
+                        "outcome": "recorded",
+                        "recorded": label,
+                        "applied_count": *c,
+                    })
+                    .to_string(),
+                )]));
+            }
             if scenario.is_write() {
                 if request.name != WRITE_TOOL {
                     return Err(McpError::invalid_params(
@@ -323,9 +471,16 @@ impl ServerHandler for MockServer {
         let read_count = self.read_count.clone();
         let items = self.items.clone();
         async move {
-            if scenario == Scenario::LiveFleet {
+            if matches!(
+                scenario,
+                Scenario::LiveFleet
+                    | Scenario::LiveFleetSend
+                    | Scenario::LiveFleetSendUnconfirmed
+                    | Scenario::LiveFleetAnswer
+            ) {
                 let body = match request.uri.as_str() {
                     PROJECTS_URI => "[]".to_string(),
+                    QUESTIONS_URI => serde_json::to_string(&live_questions()).unwrap(),
                     LIVE_URI => {
                         let mut c = read_count.lock().await;
                         *c += 1;
@@ -333,7 +488,7 @@ impl ServerHandler for MockServer {
                     }
                     other => {
                         return Err(McpError::resource_not_found(
-                            format!("LiveFleet serves no resource '{other}'"),
+                            format!("{scenario:?} serves no resource '{other}'"),
                             None,
                         ));
                     }
@@ -431,6 +586,9 @@ fn tool_response(
         Scenario::Stateful
         | Scenario::SubscribePush
         | Scenario::LiveFleet
+        | Scenario::LiveFleetSend
+        | Scenario::LiveFleetSendUnconfirmed
+        | Scenario::LiveFleetAnswer
         | Scenario::WriteHappy
         | Scenario::WriteDuplicateDetected
         | Scenario::WriteConflict

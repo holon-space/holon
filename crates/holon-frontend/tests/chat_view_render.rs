@@ -145,9 +145,15 @@ fn interpret_with(
     services.interpret(&parsed, ctx)
 }
 
+/// The mirror stores the primary key scheme-qualified, exactly as the chat
+/// view reads it.
+const ROW_ID: &str = "cc-session:sess-1";
+/// What the provider will accept as the `send_message` target session.
+const SESSION_ID: &str = "sess-1";
+
 fn session_row() -> Arc<DataRow> {
     let mut row = DataRow::new();
-    row.insert("id".to_string(), Value::String("sess-1".to_string()));
+    row.insert("id".to_string(), Value::String(ROW_ID.to_string()));
     row.insert(
         "first_prompt".to_string(),
         Value::String("Fix the parser".to_string()),
@@ -182,6 +188,31 @@ fn expanded_chat_view(services: &ChatViewServices, entity: &str) -> Arc<Reactive
         .expect("an expanded chat view must materialise its content")
 }
 
+/// The first node in the tree rendering `widget`. The chat view nests the
+/// message stream and the compose box under one container, so a test about the
+/// stream must address it rather than the container.
+fn find(vm: &Arc<ReactiveViewModel>, widget: &str) -> Arc<ReactiveViewModel> {
+    if vm.widget_name().as_deref() == Some(widget) {
+        return vm.clone();
+    }
+    for child in &vm.children {
+        if let Some(hit) = find_opt(child, widget) {
+            return hit;
+        }
+    }
+    panic!(
+        "no `{widget}` node in the rendered chat view:\n{}",
+        vm.snapshot().pretty_print(0)
+    )
+}
+
+fn find_opt(vm: &Arc<ReactiveViewModel>, widget: &str) -> Option<Arc<ReactiveViewModel>> {
+    if vm.widget_name().as_deref() == Some(widget) {
+        return Some(vm.clone());
+    }
+    vm.children.iter().find_map(|c| find_opt(c, widget))
+}
+
 fn descendants(vm: &ReactiveViewModel, out: &mut Vec<String>) {
     if let Some(name) = vm.widget_name() {
         out.push(name);
@@ -210,7 +241,7 @@ async fn session_chat_view_materialises_its_message_query() {
         "the expanded session view must contain a live_query; got {names:?}"
     );
 
-    let query = content
+    let query = find(&content, "live_query")
         .prop_str("query")
         .expect("the live_query node must publish its query for the platform layer to subscribe");
     assert!(
@@ -241,7 +272,7 @@ async fn message_row_renders_as_a_chat_bubble_with_its_text() {
     let services = ChatViewServices::new(tokio::runtime::Handle::current());
     let content = expanded_chat_view(&services, "session");
 
-    let item_template = content
+    let item_template = find(&content, "live_query")
         .prop_str("render_expr")
         .expect("live_query must publish the item_template it renders rows with");
     let template: RenderExpr = serde_json::from_str(&item_template)
@@ -269,5 +300,72 @@ async fn message_row_renders_as_a_chat_bubble_with_its_text() {
     assert!(
         rendered.contains("HELLO-FROM-THE-TRANSCRIPT"),
         "the bubble must show the message text; got:\n{rendered}"
+    );
+}
+
+/// Every operation wiring in the tree, including collection items.
+fn wirings(vm: &ReactiveViewModel, out: &mut Vec<holon_api::render_types::OperationWiring>) {
+    out.extend(vm.operations.iter().cloned());
+    for child in &vm.children {
+        wirings(child, out);
+    }
+    if let Some(slot) = vm.slot.as_ref() {
+        wirings(&slot.content.get_cloned(), out);
+    }
+    if let Some(collection) = vm.collection.as_ref() {
+        for item in collection.children_snapshot() {
+            wirings(&item, out);
+        }
+    }
+}
+
+/// The chat view must offer a way to REPLY, and that compose box must target
+/// the session with the id the provider accepts.
+///
+/// The sidecar cache stores the primary key scheme-qualified
+/// (`cc-session:<id>`); the tool wants the bare id. A box that ships the
+/// prefixed value dispatches a send the provider rejects, so the unwrapping is
+/// part of the wiring contract, not a cosmetic detail.
+#[tokio::test]
+async fn session_chat_view_offers_a_compose_box_targeting_the_bare_session_id() {
+    let services = ChatViewServices::new(tokio::runtime::Handle::current());
+    let content = expanded_chat_view(&services, "session");
+
+    let mut names = Vec::new();
+    descendants(&content, &mut names);
+    assert!(
+        names.iter().any(|n| n == "input_box"),
+        "the expanded session view must carry a compose box; got {names:?}"
+    );
+
+    let mut found = Vec::new();
+    wirings(&content, &mut found);
+    let send: Vec<_> = found
+        .iter()
+        .filter(|w| w.descriptor.name == "send_message")
+        .collect();
+    assert_eq!(
+        send.len(),
+        1,
+        "exactly one send wiring under the chat view; got {:?}",
+        found
+            .iter()
+            .map(|w| format!("{}.{}", w.descriptor.entity_name, w.descriptor.name))
+            .collect::<Vec<_>>()
+    );
+    let wiring = send[0];
+    assert_eq!(
+        wiring.descriptor.entity_name,
+        holon_api::EntityName::from("session"),
+    );
+    assert_eq!(
+        wiring.descriptor.bound_params.get("id"),
+        Some(&Value::String(SESSION_ID.to_string())),
+        "the scheme-qualified row id must be unwrapped to the id the provider accepts; bound: {:?}",
+        wiring.descriptor.bound_params
+    );
+    assert!(
+        !wiring.modified_param.is_empty(),
+        "the typed message must ride in a named operation parameter"
     );
 }

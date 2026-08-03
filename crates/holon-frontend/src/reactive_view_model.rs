@@ -311,6 +311,95 @@ impl LazyReactiveSlot {
 /// This replaces the old snapshot-based `ReactiveViewModel` +
 /// `ReactiveViewKind` enum. Widget type is determined by the `expr` function
 /// name, not an enum tag.
+/// Where a node's wired operation stands. `Failed` keeps the reason so the
+/// view can surface the provider's own words rather than a generic "failed".
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum SendState {
+    #[default]
+    Idle,
+    InFlight,
+    /// Dispatched, delivery NOT proven. Distinct from both neighbours on
+    /// purpose: calling it success fabricates a message that may never have
+    /// arrived, and calling it failure invites the resend a `retry_safe:false`
+    /// transport cannot make safe.
+    Unconfirmed {
+        /// When the send happened, so a strip that stays on screen says how
+        /// stale it is.
+        at: String,
+        /// What was sent — the strip's own record, independent of the draft
+        /// the user may keep editing.
+        message: String,
+        /// The provider's wording for why delivery is unproven.
+        detail: String,
+    },
+    Failed {
+        message: String,
+    },
+}
+
+/// Which of the three send outcomes a strip reports. The view must render
+/// these differently — a user who cannot tell them apart cannot tell a
+/// delivered message from one that may not exist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SendStripKind {
+    Sending,
+    Unconfirmed,
+    Refused,
+}
+
+impl SendStripKind {
+    /// The tag the platform layer records for this strip, so a test can prove
+    /// WHICH state reached the screen rather than that something did.
+    pub fn widget_type(self) -> &'static str {
+        match self {
+            SendStripKind::Sending => "send_status_sending",
+            SendStripKind::Unconfirmed => "send_status_unconfirmed",
+            SendStripKind::Refused => "send_status_refused",
+        }
+    }
+}
+
+/// The pending-send strip: what a compose box shows above itself about its
+/// last submit. Deliberately not a chat bubble — an unproven message rendered
+/// as one is a fabricated record of a conversation that may not have happened.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SendStrip {
+    pub kind: SendStripKind,
+    /// Names the state in the user's words.
+    pub headline: String,
+    /// The provider's own text, or the message whose delivery is unproven.
+    /// Never paraphrased.
+    pub detail: String,
+}
+
+impl SendState {
+    /// What to show for this state; `Idle` shows nothing.
+    pub fn strip(&self) -> Option<SendStrip> {
+        match self {
+            SendState::Idle => None,
+            SendState::InFlight => Some(SendStrip {
+                kind: SendStripKind::Sending,
+                headline: "sending…".to_string(),
+                detail: String::new(),
+            }),
+            SendState::Unconfirmed {
+                at,
+                message,
+                detail,
+            } => Some(SendStrip {
+                kind: SendStripKind::Unconfirmed,
+                headline: format!("sent, not acknowledged — {at}"),
+                detail: format!("{message}\n{detail}"),
+            }),
+            SendState::Failed { message } => Some(SendStrip {
+                kind: SendStripKind::Refused,
+                headline: "not sent".to_string(),
+                detail: message.clone(),
+            }),
+        }
+    }
+}
+
 pub struct ReactiveViewModel {
     /// The render expression this node was built from.
     /// For leaf nodes: `text(...)`, `badge(...)`, etc.
@@ -361,6 +450,13 @@ pub struct ReactiveViewModel {
     /// list beneath it and is cleared only when its wired operation
     /// dispatches successfully.
     pub draft: Option<Mutable<String>>,
+
+    /// Whether this node's wired operation is in flight (`input_box`). Carried
+    /// across structural rebuilds exactly like `draft`, because a guard that
+    /// resets when the tree is rebuilt does not guard: the operation behind a
+    /// compose box is an irreversible external effect, and a second dispatch
+    /// of it cannot be taken back.
+    pub send_state: Option<Mutable<SendState>>,
 
     /// Operations available at this node.
     pub operations: Vec<OperationWiring>,
@@ -560,6 +656,7 @@ impl ReactiveViewModel {
             expanded: self.expanded.clone(),
             hovered: self.hovered.clone(),
             draft: self.draft.clone(),
+            send_state: self.send_state.clone(),
             operations: fresh.operations.clone(),
             triggers: fresh.triggers.clone(),
             layout_hint: fresh.layout_hint,
@@ -611,6 +708,7 @@ impl ReactiveViewModel {
                             expanded: old_child.expanded.clone(),
                             hovered: old_child.hovered.clone(),
                             draft: old_child.draft.clone(),
+                            send_state: old_child.send_state.clone(),
                             operations: fresh_child.operations.clone(),
                             triggers: fresh_child.triggers.clone(),
                             layout_hint: fresh_child.layout_hint,
@@ -1207,6 +1305,7 @@ impl Default for ReactiveViewModel {
             expanded: None,
             hovered: None,
             draft: None,
+            send_state: None,
             operations: vec![],
             triggers: vec![],
             layout_hint: LayoutHint::default(),

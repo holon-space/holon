@@ -211,14 +211,14 @@ impl HolonService {
 
     // ── Operation dispatch ────────────────────────────────────────────
 
-    /// Execute an operation on an entity, returning the optional response
-    /// value.
+    /// Execute an operation on an entity, returning its response value and
+    /// whether its effect is proven to have landed.
     pub async fn execute_operation(
         &self,
         entity_name: &EntityName,
         op_name: &str,
         params: StorageEntity,
-    ) -> Result<Option<Value>> {
+    ) -> Result<holon_api::OpOutcome> {
         // HolonService is a session facade (human web-worker/UI, or the MCP
         // server acting for an agent); its configured `origin` states which.
         // Rule/sync/ingest ops do not route through it.
