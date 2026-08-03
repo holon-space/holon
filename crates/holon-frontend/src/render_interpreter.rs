@@ -450,6 +450,40 @@ pub fn shared_col_build<W>(ba: &BuilderArgs<'_, W>) -> Vec<W> {
         .collect()
 }
 
+/// The hierarchy inputs a tree/outline build needs, lifted out of the caller's
+/// args before the build runs.
+///
+/// Passing these explicitly is what lets a widget declare them as typed
+/// `Expr` params: the helper never asks the untyped arg bag for a name, so
+/// templateness is decided by the calling widget, not by a global allowlist.
+#[derive(Clone, Copy)]
+pub struct TreeInputs<'a> {
+    /// Interpreted once per row to produce that row's node.
+    pub item_template: &'a RenderExpr,
+    /// Row column holding each row's parent id.
+    pub parent_id_col: &'a str,
+    /// Row column each sibling bucket is sorted by.
+    pub sort_col: &'a str,
+}
+
+impl<'a> TreeInputs<'a> {
+    /// Build from the widget's `item_template` / `parent_id` / `sortkey`
+    /// expressions. The two column args are authored as `col("x")`; anything
+    /// else (absent, or a non-column expression) means the conventional
+    /// column name.
+    pub fn new(
+        item_template: &'a RenderExpr,
+        parent_id: Option<&'a RenderExpr>,
+        sortkey: Option<&'a RenderExpr>,
+    ) -> Self {
+        Self {
+            item_template,
+            parent_id_col: parent_id.and_then(column_ref_name).unwrap_or("parent_id"),
+            sort_col: sortkey.and_then(column_ref_name).unwrap_or("sort_key"),
+        }
+    }
+}
+
 /// `tree` builder: interprets rows as a hierarchical tree using `parent_id` and
 /// `sortkey`.
 ///
@@ -461,32 +495,18 @@ pub fn shared_col_build<W>(ba: &BuilderArgs<'_, W>) -> Vec<W> {
 /// (show_bullet, show_chevron, ...).
 pub fn shared_tree_build<W: WithEntity>(
     ba: &BuilderArgs<'_, W>,
+    inputs: &TreeInputs<'_>,
 ) -> Vec<(W, usize, HashMap<String, holon_api::Value>)> {
-    let template = ba
-        .args
-        .get_template("item_template")
-        .or(ba.args.get_template("item"));
-
-    let Some(tmpl) = template else {
-        return vec![];
-    };
+    let TreeInputs {
+        item_template: tmpl,
+        parent_id_col,
+        sort_col,
+    } = *inputs;
 
     let rows = &ba.ctx.data_rows;
     if rows.is_empty() {
         return vec![((ba.interpret)(tmpl, ba.ctx), 0, HashMap::new())];
     }
-
-    let parent_id_col = ba
-        .args
-        .get_template("parent_id")
-        .and_then(column_ref_name)
-        .unwrap_or("parent_id");
-    let sort_col = ba
-        .args
-        .get_template("sortkey")
-        .or(ba.args.get_template("sort_key"))
-        .and_then(column_ref_name)
-        .unwrap_or("sort_key");
 
     // Optional `rules:` arg — see `crate::row_pipeline::parse_rules_arg`.
     // Tree's positional context injects `level` and `depth` (synonyms) so
@@ -590,7 +610,15 @@ pub struct LiveQueryResult<W> {
 ///
 /// Returns `Ok(LiveQueryResult)` on success or `Err(message)` for the frontend
 /// to render as error text.
-pub fn shared_live_query_build<W>(ba: &BuilderArgs<'_, W>) -> Result<LiveQueryResult<W>, String> {
+///
+/// `item_template` is the expression each result row is rendered through,
+/// supplied by the calling widget (`None` → `table()`). Passing it in rather
+/// than reading it off the arg bag keeps the name-to-templateness decision
+/// with the widget that declares the param.
+pub fn shared_live_query_build<W>(
+    ba: &BuilderArgs<'_, W>,
+    item_template: Option<&RenderExpr>,
+) -> Result<LiveQueryResult<W>, String> {
     use holon_api::QueryLanguage;
 
     if ba.ctx.query_depth >= MAX_QUERY_DEPTH {
@@ -649,17 +677,14 @@ pub fn shared_live_query_build<W>(ba: &BuilderArgs<'_, W>) -> Result<LiveQueryRe
     let deeper_ctx = ba.ctx.deeper_query();
 
     // The render expression for interpreting query results comes from the
-    // builder args (e.g., item_template), not from the query itself.
-    // Default to table() when no template is specified.
-    let live_query_render_expr = ba
-        .args
-        .get_template("item_template")
-        .or(ba.args.get_template("item"))
-        .cloned()
-        .unwrap_or_else(|| holon_api::render_types::RenderExpr::FunctionCall {
+    // caller's item template, not from the query itself. Default to table()
+    // when no template is specified.
+    let live_query_render_expr = item_template.cloned().unwrap_or_else(|| {
+        holon_api::render_types::RenderExpr::FunctionCall {
             name: "table".to_string(),
             args: vec![],
-        });
+        }
+    });
 
     // Resolve `virtual_parent: true` → `virtual_parent: "<context_id>"`.
     // The DSL author opts into virtual children by writing `virtual_parent: true`

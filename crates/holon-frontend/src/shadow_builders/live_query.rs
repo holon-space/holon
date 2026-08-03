@@ -3,7 +3,10 @@ use crate::render_interpreter::shared_live_query_build;
 
 holon_macros::widget_builder! {
     raw fn live_query(ba: BA<'_>) -> ViewModel {
-        match shared_live_query_build(&ba) {
+        // Becomes a typed `Expr` param when `live_query` migrates off `raw fn`.
+        let __item_template = ba.args.get_template("item_template")
+            .or(ba.args.get_template("item"));
+        match shared_live_query_build(&ba, __item_template) {
             Ok(result) => {
                 let mut __props = std::collections::HashMap::new();
                 __props.insert("query".to_string(), Value::String(result.query));

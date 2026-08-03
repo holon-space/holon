@@ -37,7 +37,7 @@ use super::prelude::*;
 // is also accepted when no `item_template` is supplied; the positional
 // children are interpreted as pre-built lanes.
 holon_macros::widget_builder! {
-    raw fn board(ba: BA<'_>) -> ViewModel {
+    fn board(item_template: Expr) -> ViewModel {
         tracing::info!(
             "[BOARD_INTERP] enter row_count={} positional_exprs={} named_keys={:?} data_source={}",
             ba.ctx.data_rows.len(),
@@ -45,7 +45,7 @@ holon_macros::widget_builder! {
             ba.args.named.keys().collect::<Vec<_>>(),
             ba.ctx.data_source.is_some(),
         );
-        let template = ba.args.get_template("item_template").cloned();
+        let template = item_template.cloned();
         let lane_field = ba
             .args
             .get_string("lane_field")

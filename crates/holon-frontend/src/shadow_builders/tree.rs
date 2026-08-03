@@ -1,4 +1,5 @@
 use super::prelude::*;
+use crate::render_interpreter::TreeInputs;
 use crate::render_interpreter::shared_tree_build;
 
 holon_macros::widget_builder! {
@@ -6,9 +7,14 @@ holon_macros::widget_builder! {
         tracing::debug!("[VIRTUAL_CHILD] tree::build dispatched! creation_slot={:?} virtual_parent={:?}",
             ba.args.get_bool("creation_slot"),
             ba.args.get_string("virtual_parent"));
+        // These three become typed `Expr` params when `tree` migrates off
+        // `raw fn`; the helpers they feed no longer read the arg bag.
         let __template = ba.args.get_template("item_template")
-            .or(ba.args.get_template("item"))
-            .cloned();
+            .or(ba.args.get_template("item"));
+        let __parent_id = ba.args.get_template("parent_id");
+        let __sortkey = ba.args.get_template("sortkey")
+            .or(ba.args.get_template("sort_key"));
+
         let __sort_key: Option<String> = holon_api::render_eval::sort_key_column(ba.args)
             .map(|s| s.to_string());
 
@@ -24,25 +30,26 @@ holon_macros::widget_builder! {
                 // focus exactly like the other rows.
                 let virtual_child = virtual_child_slot_from_arg(&ba);
                 let __rules = crate::row_pipeline::parse_rules_arg(ba.args.named.get("rules"));
-                ViewModel::streaming_collection("tree", tmpl, ds, 4.0, __sort_key, __parent_space, None, virtual_child, __rules)
+                ViewModel::streaming_collection("tree", tmpl.clone(), ds, 4.0, __sort_key, __parent_space, None, virtual_child, __rules)
             }
-            _ => {
+            (Some(tmpl), None) => {
                 let mut flat: Vec<(ViewModel, usize, std::collections::HashMap<String, Value>)> =
-                    shared_tree_build(&ba);
+                    shared_tree_build(&ba, &TreeInputs::new(tmpl, __parent_id, __sortkey));
                 // Push the creation slot BEFORE the empty check so it renders even
                 // for empty collections — the user needs to create the first child
                 // via the slot. Static/snapshot path only (live-query / MCP / PBT);
                 // the streaming path above injects it as a reactive row instead.
-                if let Some(tmpl) = ba.args.get_template("item_template").or(ba.args.get_template("item")) {
-                    if let Some(vc) = interpret_virtual_child(&ba, tmpl) {
-                        flat.push((vc, 0, std::collections::HashMap::new()));
-                    }
+                if let Some(vc) = interpret_virtual_child(&ba, tmpl) {
+                    flat.push((vc, 0, std::collections::HashMap::new()));
                 }
                 if flat.is_empty() {
                     return ViewModel::leaf("text", Value::String("[tree: no item_template]".into()));
                 }
                 let items = weave_advice_into_items(&ba, flat_tree_items(flat));
                 ViewModel::static_collection("tree", items, 4.0)
+            }
+            (None, _) => {
+                ViewModel::leaf("text", Value::String("[tree: no item_template]".into()))
             }
         }
     }
