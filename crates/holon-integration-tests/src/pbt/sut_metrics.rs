@@ -127,8 +127,11 @@ impl MetricsSut {
     /// N+1 list, flamegraph, detail, memory diagnosis), and return the budget
     /// pass/fail decision. Error violations are returned only when
     /// `HOLON_PERF_BUDGET` enforcement is on; otherwise they're logged as
-    /// `BUDGET OFF`. `last_transition` is owned by `E2ESut` (it's not a
-    /// metric) and passed in.
+    /// `BUDGET OFF`. Breaches of a PINNED ceiling
+    /// (`transition_budgets::Violation::PinnedError`) are returned
+    /// unconditionally and flip the report to enforced.
+    /// `last_transition` is owned by `E2ESut` (it's not a metric) and passed
+    /// in.
     #[cfg(feature = "otel-testing")]
     pub(super) fn sql_budget_report(
         &self,
@@ -232,7 +235,11 @@ impl MetricsSut {
             transition_budgets::diagnose_memory(&key);
         }
 
+        // A pinned breach fails the run on its own, so the report must declare
+        // itself enforced even when `HOLON_PERF_BUDGET` is off — otherwise
+        // `InvSqlBudget` would downgrade it to `Skipped`.
         let mut errors = Vec::new();
+        let mut pinned_breach = false;
         for v in &violations {
             match v {
                 transition_budgets::Violation::Warning(msg) => {
@@ -245,8 +252,14 @@ impl MetricsSut {
                         eprintln!("[inv-sql-budget BUDGET OFF] {msg}");
                     }
                 }
+                transition_budgets::Violation::PinnedError(msg) => {
+                    eprintln!("[inv-sql-budget PINNED] {msg}");
+                    pinned_breach = true;
+                    errors.push(msg.clone());
+                }
             }
         }
+        let enforce = enforce || pinned_breach;
 
         if !metrics.duplicate_sql.is_empty() {
             eprintln!(

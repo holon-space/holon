@@ -36,15 +36,17 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 #[cfg(feature = "otel-testing")]
+use crate::pbt::transition_budgets::CLICK_JITTER_TOLERANCE;
+#[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::JOURNAL_READS;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::NAV_DML_READS;
 #[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::REACTIVE_BASE;
+use crate::pbt::transition_budgets::PIN_BLOCK_CLICK_RESOLVE_READS;
 #[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::docs_tolerance;
+use crate::pbt::transition_budgets::REACTIVE_BASE;
 
 /// Pin a block to the right sidebar via shift+click semantics.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -150,15 +152,23 @@ crate::cap_transition! {
     |me, _state, sut| {
         sut.pin_block(me.region, &me.block_id).await;
     }
-    sql_budget: |_me, state| {
-        // focus_pin = SELECT (existence check) + INSERT or UPDATE.
-        // Two round-trips total — one read and one write. The reactive base
-        // captures the watcher activity; NAV_DML_READS covers the SELECT.
+    sql_budget: |_me, _state| {
+        // focus_pin = SELECT (existence check) + INSERT or UPDATE, on top of the
+        // reactive base. Shift+click enters through the rendered bullet, so the
+        // click-resolve snapshot is on the path too — hence the PINNED
+        // `PIN_BLOCK_CLICK_RESOLVE_READS` ceiling (17 reads), enforced
+        // regardless of `HOLON_PERF_BUDGET` (see `sql_reads_pinned`).
+        //
+        // NO per-watch term, unlike the document-mutating siblings: a pin
+        // mutates no block, so no CDC fires and no user watch re-evaluates.
+        // Measured 17 reads at watches=0, 1 and 2 alike — see the
+        // `watch-bearing-click-nav-sql-budget` hand-authored case, which keeps
+        // that regime sampled.
         ExpectedSql {
-            reads: REACTIVE_BASE + JOURNAL_READS + NAV_DML_READS,
+            reads: REACTIVE_BASE + JOURNAL_READS + NAV_DML_READS + PIN_BLOCK_CLICK_RESOLVE_READS,
             writes: 0,
             ddl: 0,
-            tolerance: docs_tolerance(state),
+            tolerance: CLICK_JITTER_TOLERANCE,
         }
     }
 }

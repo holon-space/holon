@@ -16,9 +16,10 @@ use std::time::Duration;
 // Budget formulas + inputs live in holon-pbt-core (Phase 1a Step 1); re-exported
 // so existing `crate::pbt::transition_budgets::…` import sites keep resolving.
 pub use holon_pbt_core::budget::{
-    CACHE_EVENT_READS, ExpectedSql, FIRST_VISIT_VIEW_DDL, FIRST_VISIT_VIEW_READS, JOURNAL_READS,
-    MutationKind, NAV_DML_READS, REACTIVE_BASE, READS_PER_WATCH, SqlBudget, cdc_tolerance,
-    docs_tolerance, expected_sql_for_kind,
+    CACHE_EVENT_READS, CLICK_JITTER_TOLERANCE, ExpectedSql, FIRST_VISIT_VIEW_DDL,
+    FIRST_VISIT_VIEW_READS, JOURNAL_READS, MutationKind, NAV_DML_READS,
+    OPEN_TAB_CLICK_RESOLVE_READS, PIN_BLOCK_CLICK_RESOLVE_READS, REACTIVE_BASE, READS_PER_WATCH,
+    SqlBudget, cdc_tolerance, docs_tolerance, expected_sql_for_kind,
 };
 use holon_pbt_core::types::Mutation;
 
@@ -134,6 +135,11 @@ pub fn transition_key(transition: &crate::pbt::transitions::E2ETransition) -> St
 pub enum Violation {
     Warning(String),
     Error(String),
+    /// A breach of a PINNED ceiling — a budget measured and fixed at the
+    /// observed maximum. Unlike [`Violation::Error`] this fails the run whether
+    /// or not `HOLON_PERF_BUDGET` enforces, so the pinned number is a real
+    /// upper limit rather than a logged note.
+    PinnedError(String),
 }
 
 // ── Generic NFR metric model (C2) ─────────────────────────────────
@@ -181,6 +187,21 @@ impl Metric {
 pub enum Severity {
     Warn,
     Error,
+    /// See [`Violation::PinnedError`].
+    Pinned,
+}
+
+/// Transitions whose SQL-read ceiling is PINNED at a measured maximum and
+/// therefore enforced unconditionally.
+///
+/// The click-driven navigation family: both reach navigation through the
+/// rendered widget tree, so both pay a click-resolve cost — but each is
+/// budgeted by its OWN measured constant, since a shared one would have to sit
+/// at the larger and leave the cheaper transition slack to hide in. Every other
+/// transition keeps the catalog-wide `HOLON_PERF_BUDGET` opt-in.
+fn sql_reads_pinned(transition: &crate::pbt::transitions::E2ETransition) -> bool {
+    use crate::pbt::transitions::E2ETransition as TV;
+    matches!(transition, TV::PinBlock(_) | TV::OpenTabViaModifierClick(_))
 }
 
 /// One metric's observed value for a transition, its absolute hard cap, and
@@ -212,7 +233,11 @@ pub fn build_samples(
         metric: Metric::SqlReads,
         actual: metrics.sql_read_count as f64,
         limit: reads_limit as f64,
-        severity: Severity::Error,
+        severity: if sql_reads_pinned(transition) {
+            Severity::Pinned
+        } else {
+            Severity::Error
+        },
         message: format!(
             "{key}.sql_reads: {actual} exceeds expected {expected} + tolerance {tol} = {limit} \
              (watches={w}, docs={d})",
@@ -343,6 +368,7 @@ pub fn evaluate(samples: &[MetricSample]) -> Vec<Violation> {
         .map(|s| match s.severity {
             Severity::Warn => Violation::Warning(s.message.clone()),
             Severity::Error => Violation::Error(s.message.clone()),
+            Severity::Pinned => Violation::PinnedError(s.message.clone()),
         })
         .collect()
 }

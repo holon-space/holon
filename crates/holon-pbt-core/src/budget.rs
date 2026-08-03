@@ -15,6 +15,68 @@ pub const NAV_DML_READS: usize = 5;
 pub const CACHE_EVENT_READS: usize = 3;
 pub const READS_PER_WATCH: usize = 2;
 
+// ── Click-driven navigation: PINNED, per-transition SQL read ceilings ──
+//
+// `PinBlock` and `OpenTabViaModifierClick` both reach navigation *through the
+// rendered widget tree*, so each resolves the clicked row against a
+// resolved-tree snapshot before navigating — reads the nav-drive constants
+// (`REACTIVE_BASE + JOURNAL_READS + NAV_DML_READS` = 12) do not model.
+//
+// The two constants below are that extra cost, PINNED AT THE MEASURED CEILING
+// (2026-08-03, ~290 samples over `hand-authored` + keystone at
+// 32/64/64/64/64/128/128 cases). They are upper limits taken from observation,
+// NOT derived formulas: a breach means the click path grew, and the number must
+// be re-measured deliberately, never nudged to make a run pass.
+//
+// They are SEPARATE because the two transitions measurably differ — one shared
+// constant would have to sit at the larger, leaving the cheaper transition
+// 5 reads of dead slack in which a regression could hide.
+//
+// Neither carries state-dependent terms, because every candidate term measured
+// ZERO (each was implemented, run, and refuted by telemetry):
+// - document count — reads never tracked `docs_tolerance` (which ranged 8–12
+//   across the corpus); a docs-scaled tolerance only hides breaches, and did:
+//   it swallowed the first teeth run.
+// - active user watches — identical reads at watches 0, 1 and 2, because
+//   neither transition mutates a block, so no CDC fires and no watch
+//   re-evaluates. (Contrast the document-mutating siblings, which correctly pay
+//   `watches * READS_PER_WATCH`.) Held sampled forever by the
+//   `watch-bearing-click-nav-sql-budget` hand-authored case.
+// - first visit to a root — `NavigateFocus` pays `FIRST_VISIT_VIEW_READS` +
+//   `FIRST_VISIT_VIEW_DDL`, but `open_tab` APPENDS a row instead of closing the
+//   region's others, so no matview is created: first-visit opens measured the
+//   same reads and 0 DDL as revisits. Adding the term would have opened an
+//   18-read hole in the ceiling.
+
+/// `PinBlock`'s click-resolve cost. Ceiling = 12 + 5 = **17 reads**, measured
+/// over 133 shallow-state samples. A pre-existing deep-state regime on main
+/// draws 137–141 reads (so far only in sequences already red on
+/// inv-focus-roots) — check the known-reds ledger (entry 14) before treating
+/// a large breach as a fresh regression.
+pub const PIN_BLOCK_CLICK_RESOLVE_READS: usize = 5;
+
+/// `OpenTabViaModifierClick`'s click-resolve cost. Ceiling = 12 + 10 =
+/// **22 reads**.
+///
+/// Sampling caveat worth heeding: a first pass over 39 samples saw a maximum of
+/// 21 and the ceiling was set there; the very next 64-case run produced 22 in
+/// 56 of 75 draws. A few dozen samples do NOT characterize this mode.
+pub const OPEN_TAB_CLICK_RESOLVE_READS: usize = 10;
+
+/// The reactive render coalesces nondeterministically, so a click-nav
+/// transition re-reads `focus_roots` / `current_focus` either 3 or 4 times for
+/// the same work — the 21-vs-22 bimodality in the corpus is exactly this one
+/// redundant read, and the N+1 report calls it out as "identical bindings —
+/// redundant".
+///
+/// A *fixed* one-read pad for that jitter, shared by both click transitions
+/// because it models the same coalescing mechanism. Deliberately NOT
+/// `docs_tolerance`: each ceiling stays hard and state-independent
+/// (`<transition>_CLICK_RESOLVE_READS` + 1), it just does not pretend a
+/// coalescing-dependent counter is exact. Widening this is not the fix for a
+/// breach — a breach means the click path grew.
+pub const CLICK_JITTER_TOLERANCE: usize = 1;
+
 /// First navigation to a root renders it for the first time: each watch
 /// matview takes `ensure_view`'s create path (2 sqlite_master existence
 /// checks + the initial view SELECT). Measured on the minimal
