@@ -289,18 +289,115 @@ fn live_questions() -> Vec<serde_json::Value> {
     ]
 }
 
-/// The labels `live_questions` offers for a given question id.
-fn offered_labels(question_id: &str) -> Option<Vec<String>> {
-    live_questions().into_iter().find_map(|q| {
-        (q["id"] == question_id).then(|| {
-            q["options"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|o| o["label"].as_str().unwrap().to_string())
-                .collect()
-        })
-    })
+/// The `live/questions` row a `question_id` names, or `None` when the id no
+/// longer resolves.
+fn pending_question(question_id: &str) -> Option<serde_json::Value> {
+    live_questions()
+        .into_iter()
+        .find(|q| q["id"] == question_id)
+}
+
+/// The provider's declared input schema for `answer_question`, transcribed from
+/// `list_tools` in the binary. `answers` is an ARRAY of labels — a caller that
+/// sends a scalar is rejected, so the schema is what a sidecar's param names
+/// AND shapes must agree with.
+fn answer_tool_schema() -> serde_json::Map<String, serde_json::Value> {
+    let serde_json::Value::Object(schema) = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "question_id": {
+                "type": "string",
+                "description": "pending_question id from claude-history://live/questions",
+            },
+            "answers": {
+                "type": "array",
+                "items": { "type": "string" },
+                "minItems": 1,
+                "description":
+                    "Chosen option labels, spelled exactly as offered; several for a \
+                     multi-select question",
+            },
+        },
+        "required": ["question_id", "answers"],
+    }) else {
+        unreachable!("the literal above is an object")
+    };
+    schema
+}
+
+/// The real `answer_question` contract, transcribed from the provider binary
+/// (`claude-code-history-mcp`: `server.rs::answer_question` +
+/// `steer::compose_answer`): a string `question_id` and an ARRAY of option
+/// labels, joined with `", "` — the join is what makes several labels parse as
+/// several selections.
+///
+/// `Ok` carries the composed answer text the provider would record. `Err`
+/// carries the provider's own rejection text verbatim, because a mock that
+/// rejects with wording of its own invention lets a caller pass here and die
+/// against the real binary. Extra arguments are ignored, as the real server
+/// ignores them.
+fn check_answer_contract(
+    args: &serde_json::Map<String, serde_json::Value>,
+) -> Result<String, String> {
+    let Some(question_id) = args.get("question_id").and_then(|v| v.as_str()) else {
+        return Err("cannot answer: question_id is required and must be a string".to_string());
+    };
+    let raw = args
+        .get("answers")
+        .and_then(|a| a.as_array())
+        .ok_or_else(|| "cannot answer: answers must be an array of option labels".to_string())?;
+    let mut answers: Vec<String> = Vec::with_capacity(raw.len());
+    for value in raw {
+        let label = value.as_str().ok_or_else(|| {
+            format!("cannot answer: every answer must be an option label; got {value}")
+        })?;
+        answers.push(label.to_string());
+    }
+
+    let question = pending_question(question_id).ok_or_else(|| {
+        format!(
+            "question {question_id} is no longer pending; it was answered or replaced. Re-read \
+             claude-history://live/questions and use the id it reports now"
+        )
+    })?;
+
+    if answers.is_empty() {
+        return Err("cannot answer: no options were chosen".to_string());
+    }
+    if question["answerable"] == 0 {
+        return Err(format!(
+            "cannot answer: question {} cannot be answered on its own: a reply lands in the first \
+             question's slot. Answer question 0, or use send_message to reply in prose",
+            question["question_index"]
+        ));
+    }
+
+    let offered: Vec<&str> = question["options"]
+        .as_array()
+        .expect("fixture options are an array")
+        .iter()
+        .map(|o| o["label"].as_str().expect("fixture labels are strings"))
+        .collect();
+    for answer in &answers {
+        if !offered.contains(&answer.as_str()) {
+            return Err(format!(
+                "cannot answer: {answer:?} is not one of {offered:?}"
+            ));
+        }
+        if answer.contains(", ") {
+            return Err(format!(
+                "cannot answer: label {answer:?} contains \", \", which the join cannot express"
+            ));
+        }
+    }
+    let mut seen = answers.clone();
+    seen.sort();
+    seen.dedup();
+    if seen.len() != answers.len() {
+        return Err("cannot answer: the same option was chosen twice".to_string());
+    }
+
+    Ok(answers.join(", "))
 }
 
 /// The mock server handler. `read_count`/`items` back the stateful and push
@@ -375,13 +472,13 @@ impl ServerHandler for MockServer {
             s if s.is_write() => (WRITE_TOOL, "Write a mock item"),
             _ => (LIST_TOOL, "List mock items"),
         };
-        // Only the send tool publishes a schema: it is the one the sidecar's
-        // param names must agree with, so the mock declares it exactly as the
-        // real provider does.
-        let input_schema = if name == SEND_TOOL {
-            send_tool_schema()
-        } else {
-            serde_json::Map::new()
+        // Only the steering tools publish a schema: they are the ones the
+        // sidecar's param names and shapes must agree with, so the mock declares
+        // them exactly as the real provider does.
+        let input_schema = match name {
+            SEND_TOOL => send_tool_schema(),
+            ANSWER_TOOL => answer_tool_schema(),
+            _ => serde_json::Map::new(),
         };
         let tool = Tool {
             name: name.into(),
@@ -451,32 +548,22 @@ impl ServerHandler for MockServer {
                 let args = request.arguments.as_ref().ok_or_else(|| {
                     McpError::invalid_params("answer_question requires arguments", None)
                 })?;
-                let question_id = args
-                    .get("question_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        McpError::invalid_params("answer_question requires question_id", None)
-                    })?;
-                let label = args.get("label").and_then(|v| v.as_str()).ok_or_else(|| {
-                    McpError::invalid_params("answer_question requires label", None)
-                })?;
-                let Some(offered) = offered_labels(question_id) else {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "no pending question '{question_id}'"
-                    ))]));
+                let composed = match check_answer_contract(args) {
+                    Ok(composed) => composed,
+                    Err(rejection) => {
+                        return Ok(CallToolResult::error(vec![Content::text(rejection)]));
+                    }
                 };
-                if !offered.iter().any(|o| o == label) {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "'{label}' is not an offered option for '{question_id}'"
-                    ))]));
-                }
                 let mut c = applied_count.lock().await;
                 *c += 1;
+                // `recorded` is the COMPOSED text, which for a multi-select is
+                // the `", "`-joined labels — what the dialog actually stores.
                 return Ok(CallToolResult::success(vec![Content::text(
                     serde_json::json!({
                         "outcome": "recorded",
-                        "recorded": label,
+                        "recorded": composed,
                         "applied_count": *c,
+                        "arguments": request.arguments,
                     })
                     .to_string(),
                 )]));

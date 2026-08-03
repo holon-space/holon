@@ -39,15 +39,22 @@ fn parse_offered(raw: &str) -> anyhow::Result<Vec<OfferedAnswer>> {
 }
 
 /// A click-triggered wiring answering the question with exactly `label`.
+///
+/// The provider takes the chosen labels as an ARRAY — several entries express a
+/// multi-select. One button is one selection, so it dispatches a one-element
+/// array; a scalar is refused by the tool.
 fn answer_wiring(
     entity_name: &str,
     op_name: &str,
     bound: &std::collections::HashMap<String, Value>,
-    label_param: &str,
+    answers_param: &str,
     label: &str,
 ) -> OperationWiring {
     let mut bound_params = bound.clone();
-    bound_params.insert(label_param.to_string(), Value::String(label.to_string()));
+    bound_params.insert(
+        answers_param.to_string(),
+        Value::Array(vec![Value::String(label.to_string())]),
+    );
     OperationWiring {
         modified_param: String::new(),
         descriptor: OperationDescriptor {
@@ -91,6 +98,18 @@ fn answer_button(question_id: &str, label: &str, wiring: OperationWiring) -> Vie
     }
 }
 
+/// The labels an explicitly bound `answers:` contributes to the offered-set
+/// check. The override is guard-input only: dispatch always sends the clicked
+/// button's own one-element array, never this value. Both the array and the
+/// scalar shape must face the check — an unchecked one is the only route by
+/// which a label the question never offered could reach dispatch.
+fn forced_labels(bound: &Value) -> Vec<String> {
+    match bound {
+        Value::Array(items) => items.iter().map(Value::to_display_string).collect(),
+        scalar => vec![scalar.to_display_string()],
+    }
+}
+
 fn dotted(name: &str) -> (&str, &str) {
     name.split_once('.').unwrap_or_else(|| {
         panic!(
@@ -110,7 +129,7 @@ holon_macros::widget_builder! {
     fn question_options(
         options: String,
         action: Expr,
-        #[default = "label"] label_param: String,
+        #[default = "answers"] answers_param: String,
         #[default = "question_id"] id_param: String,
     ) -> ViewModel {
         let Some(RenderExpr::FunctionCall { name, args, .. }) = action else {
@@ -135,18 +154,19 @@ holon_macros::widget_builder! {
         // An explicitly bound answer overrides what the widget would fill in —
         // the one route by which a label the question never offered could reach
         // dispatch. Refuse it visibly instead of wiring it up.
-        if let Some(forced) = resolved.named.get(&label_param) {
-            let forced = forced.to_display_string();
-            if !offered.iter().any(|o| o.label == forced) {
-                let offers: Vec<&str> = offered.iter().map(|o| o.label.as_str()).collect();
-                return ViewModel::error(
-                    "question_options",
-                    format!(
-                        "refusing to answer `{forced}`: the question does not offer it \
-                         (offered: {})",
-                        offers.join(", ")
-                    ),
-                );
+        if let Some(forced) = resolved.named.get(&answers_param) {
+            for label in forced_labels(forced) {
+                if !offered.iter().any(|o| o.label == label) {
+                    let offers: Vec<&str> = offered.iter().map(|o| o.label.as_str()).collect();
+                    return ViewModel::error(
+                        "question_options",
+                        format!(
+                            "refusing to answer `{label}`: the question does not offer it \
+                             (offered: {})",
+                            offers.join(", ")
+                        ),
+                    );
+                }
             }
         }
 
@@ -170,7 +190,7 @@ holon_macros::widget_builder! {
                 let mut bound = resolved.named.clone();
                 bound.insert(id_param.clone(), Value::String(question_id.clone()));
                 let wiring =
-                    answer_wiring(entity_name, op_name, &bound, &label_param, &answer.label);
+                    answer_wiring(entity_name, op_name, &bound, &answers_param, &answer.label);
                 answer_button(&question_id, &answer.label, wiring)
             })
             .collect();

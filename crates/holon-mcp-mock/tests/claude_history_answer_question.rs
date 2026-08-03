@@ -105,11 +105,21 @@ async fn connect_shipped_sidecar(db: &DbHandle) -> McpIntegration {
     }
 }
 
-fn answer_params(question_id: &str, label: &str) -> holon_api::StorageEntity {
+/// The arguments the provider declares: a `question_id` and the chosen labels
+/// as an ARRAY. One clicked button is a one-element array.
+fn answer_params(question_id: &str, labels: &[&str]) -> holon_api::StorageEntity {
     let mut params = holon_api::StorageEntity::new();
     params.insert("id".into(), Value::String(question_id.to_string()));
     params.insert("question_id".into(), Value::String(question_id.to_string()));
-    params.insert("label".into(), Value::String(label.to_string()));
+    params.insert(
+        "answers".into(),
+        Value::Array(
+            labels
+                .iter()
+                .map(|l| Value::String((*l).to_string()))
+                .collect(),
+        ),
+    );
     params
 }
 
@@ -190,7 +200,7 @@ async fn answer_is_queued_for_confirmation_not_dispatched() {
         .execute_operation(
             &EntityName::from(ENTITY),
             "answer_question",
-            answer_params(QUESTION_ID, "Turso"),
+            answer_params(QUESTION_ID, &["Turso"]),
         )
         .await
         .expect_err("confirm_manually must queue an answer, never fire it unattended");
@@ -232,7 +242,7 @@ async fn approved_answer_never_dispatches_twice() {
         .execute_operation(
             &EntityName::from(ENTITY),
             "answer_question",
-            answer_params(QUESTION_ID, "Turso"),
+            answer_params(QUESTION_ID, &["Turso"]),
         )
         .await
         .expect_err("first attempt is queued");
@@ -257,4 +267,58 @@ async fn approved_answer_never_dispatches_twice() {
         Some(PendingState::Sent),
         "the sent intent stays sent — no second dispatch was taken"
     );
+}
+
+/// (d) The chosen labels ride under `answers`, as an ARRAY. A scalar under any
+/// name is what the shipped build dispatched, and the provider refuses it — so
+/// every click died at the binary while every test here passed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scalar_label_is_refused_by_the_provider_contract() {
+    let db = setup_db().await;
+    let integration = connect_shipped_sidecar(&db).await;
+    let provider = &integration.operation_provider;
+
+    let mut params = holon_api::StorageEntity::new();
+    params.insert("id".into(), Value::String(QUESTION_ID.to_string()));
+    params.insert("question_id".into(), Value::String(QUESTION_ID.to_string()));
+    params.insert("label".into(), Value::String("Turso".to_string()));
+
+    provider
+        .execute_operation(&EntityName::from(ENTITY), "answer_question", params)
+        .await
+        .expect_err("queued for confirmation");
+    let key = provider.pending_writes()[0].intent_key.clone();
+
+    let err = provider
+        .approve(&key)
+        .await
+        .expect_err("a scalar label must be refused at the provider");
+    assert!(
+        err.to_string()
+            .contains("cannot answer: answers must be an array of option labels"),
+        "the refusal must be the provider's own, got: {err}"
+    );
+}
+
+/// (e) A multi-select answer is several labels in one array, and the provider
+/// records them `", "`-joined — the join is what makes them parse as several
+/// selections.
+#[tokio::test(flavor = "multi_thread")]
+async fn several_labels_are_recorded_comma_joined() {
+    let db = setup_db().await;
+    let integration = connect_shipped_sidecar(&db).await;
+    let provider = &integration.operation_provider;
+
+    provider
+        .execute_operation(
+            &EntityName::from(ENTITY),
+            "answer_question",
+            answer_params(QUESTION_ID, &["Turso", "Plain SQLite"]),
+        )
+        .await
+        .expect_err("queued for confirmation");
+    let key = provider.pending_writes()[0].intent_key.clone();
+
+    let approved = provider.approve(&key).await.expect("approve fires");
+    assert_eq!(recorded(&approved), "Turso, Plain SQLite");
 }

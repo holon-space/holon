@@ -193,7 +193,7 @@ fn texts(vm: &ReactiveViewModel, out: &mut Vec<String>) {
     }
 }
 
-fn bound(wiring: &OperationWiring, param: &str) -> String {
+fn bound(wiring: &OperationWiring, param: &str) -> Value {
     wiring
         .descriptor
         .bound_params
@@ -204,7 +204,16 @@ fn bound(wiring: &OperationWiring, param: &str) -> String {
                 wiring.descriptor.bound_params
             )
         })
-        .to_display_string()
+        .clone()
+}
+
+/// The labels a wiring would answer with. The provider takes an ARRAY, so a
+/// scalar here is the shipped bug, not a shorthand.
+fn answers(wiring: &OperationWiring) -> Vec<String> {
+    match bound(wiring, "answers") {
+        Value::Array(items) => items.iter().map(Value::to_display_string).collect(),
+        other => panic!("`answers` must be an array of labels, got {other:?}"),
+    }
 }
 
 /// (a) A pending question renders one button per offered option, each carrying
@@ -221,11 +230,12 @@ async fn pending_question_renders_one_button_per_offered_option() {
     let mut found = Vec::new();
     wirings(&vm, &mut found);
 
-    let labels: Vec<String> = found.iter().map(|w| bound(w, "label")).collect();
+    let chosen: Vec<Vec<String>> = found.iter().map(answers).collect();
     assert_eq!(
-        labels,
-        vec!["Turso".to_string(), "Plain SQLite".to_string()],
-        "one answer button per offered option, in offer order; tree:\n{}",
+        chosen,
+        vec![vec!["Turso".to_string()], vec!["Plain SQLite".to_string()]],
+        "one answer button per offered option, in offer order, each dispatching its \
+         own label as a ONE-ELEMENT array — the shape the provider declares; tree:\n{}",
         vm.snapshot().pretty_print(0)
     );
 
@@ -236,7 +246,7 @@ async fn pending_question_renders_one_button_per_offered_option() {
         );
         assert_eq!(wiring.descriptor.name, "answer_question");
         assert_eq!(
-            bound(wiring, "question_id"),
+            bound(wiring, "question_id").to_display_string(),
             QUESTION_ID,
             "the scheme-qualified row id must be unwrapped to the provider's opaque \
              question_id, read off the live row at build time"
@@ -264,7 +274,7 @@ async fn a_label_the_question_does_not_offer_is_refused_before_dispatch() {
     let services = QuestionViewServices::new(tokio::runtime::Handle::current());
     let dsl = r#"question_options(#{
         options: col("options"),
-        action: answer_question(#{question_id: col("id"), label: "Maybe"})
+        action: answer_question(#{question_id: col("id"), answers: "Maybe"})
     })"#;
     let vm = render(&services, dsl, OPTIONS_JSON);
 
