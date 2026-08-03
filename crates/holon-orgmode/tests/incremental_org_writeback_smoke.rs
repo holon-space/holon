@@ -643,6 +643,140 @@ async fn block_driven_writeback_writes_sanctioned_deletion() {
     );
 }
 
+/// A `DocumentManager` that resolves a de-inlined CHILD PAGE to its own file
+/// (`doc/Child.org`), alongside the document itself. The doc record outlives
+/// the block: `name_chain` keeps answering for the child id even after the
+/// block store has lost it, which is what makes the row-28 shape expressible.
+struct ChildPageDocManager {
+    doc: Block,
+    child_page: EntityUri,
+}
+
+#[async_trait]
+impl DocumentManager for ChildPageDocManager {
+    async fn find_by_parent_and_name(
+        &self,
+        _: &EntityUri,
+        _: &str,
+    ) -> anyhow::Result<Option<Block>> {
+        Ok(None)
+    }
+
+    async fn create(&self, doc: Block) -> anyhow::Result<Block> {
+        Ok(doc)
+    }
+
+    async fn get_by_id(&self, id: &EntityUri) -> anyhow::Result<Option<Block>> {
+        Ok((self.doc.id == *id).then(|| self.doc.clone()))
+    }
+
+    async fn update_metadata(&self, _: &Block) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn name_chain(&self, id: &EntityUri) -> anyhow::Result<Vec<String>> {
+        if *id == self.child_page {
+            Ok(vec!["doc".to_string(), "Child".to_string()])
+        } else {
+            Ok(vec!["doc".to_string()])
+        }
+    }
+}
+
+/// `n` leaf children plus a de-inlined child PAGE that owns `doc/Child.org`.
+fn build_harness_with_child_page(n: usize) -> (Harness, EntityUri) {
+    let (doc, mut blocks) = make_doc_and_n_blocks(n);
+    let child_page_id = EntityUri::block("child-page");
+    let mut child_page = Block::new_text(child_page_id.clone(), doc.id.clone(), "Child Page");
+    child_page.set_page(true);
+    blocks.push(child_page);
+
+    let reader = Arc::new(CountingBlockReader::new(doc.id.clone(), blocks));
+    let doc_manager = Arc::new(ChildPageDocManager {
+        doc: doc.clone(),
+        child_page: child_page_id.clone(),
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let fs = Arc::new(RealFileSystem);
+    let controller = new_org_sync_controller(
+        reader.clone(),
+        doc_manager,
+        root.clone(),
+        Arc::new(LiveOrderOrdering {
+            reader: reader.clone(),
+        }),
+        fs,
+    );
+    let path = holon_core::CanonicalPath::new(&root)
+        .into_path_buf()
+        .join("doc.org");
+    let h = Harness {
+        controller,
+        reader,
+        doc,
+        path,
+        _tmp: tmp,
+    };
+    (h, child_page_id)
+}
+
+/// **A PAGE block LOST from the authority still vetoes, even though its doc
+/// record resolves to a file.** The grounding witness for a cross-file move is
+/// "the authority places this block in another file" — but a doc/alias record
+/// can outlive the block itself (the row-28 shape: the store loses a de-inlined
+/// child page while its document row survives). Resolving a path must therefore
+/// never ground a removal on its own; the authority has to still HOLD the
+/// block. Otherwise this exact truncation writes the parent file with the
+/// child's heading silently deleted.
+#[tokio::test]
+async fn lost_child_page_with_surviving_doc_record_still_vetoes() {
+    let (mut h, child_page_id) = build_harness_with_child_page(3);
+    let all = h.reader.blocks.lock().unwrap().clone();
+    let b0 = all[0].clone();
+
+    h.controller
+        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b0.clone()))
+        .await
+        .unwrap();
+    let seeded = std::fs::read_to_string(&h.path).unwrap();
+    assert!(
+        seeded.contains("Child Page"),
+        "precondition: the child page heading is on disk; got {seeded:?}"
+    );
+
+    // The store loses the child page; its doc record still resolves a path.
+    let survivors: Vec<Block> = all
+        .iter()
+        .filter(|b| b.id != child_page_id)
+        .cloned()
+        .collect();
+    h.reader.set_blocks(survivors);
+    let mut b0_tagged = b0.clone();
+    b0_tagged.tags = reseed_lever_tags();
+    h.reader.set_block(b0_tagged.clone());
+
+    let veto = h
+        .controller
+        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b0_tagged))
+        .await;
+    assert!(
+        veto.is_err(),
+        "a page block absent from the AUTHORITY is a loss, not a move — it must veto"
+    );
+    let msg = format!("{:#}", veto.unwrap_err());
+    assert!(
+        msg.contains("UNGROUNDED WRITE-BACK REMOVAL"),
+        "veto error must name the removal guard; got {msg}"
+    );
+
+    let after = std::fs::read_to_string(&h.path).unwrap();
+    assert!(
+        after.contains("Child Page"),
+        "the vetoed write must leave the child heading on disk; got {after:?}"
+    );
+}
+
 /// A `DocumentManager` whose `name_chain` resolves the DOCUMENT (so
 /// `on_block_changed` can find the file to write back) but FAILS LOUD for every
 /// other id. This is the exact shape of the real-vault first-boot corruption

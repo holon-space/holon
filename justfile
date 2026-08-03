@@ -129,17 +129,7 @@ hand-authored *FLAGS:
     # failing suite exited 0 and every weave/land gate using this recipe was a
     # silent false green (observed 2026-07-25).
     set -euo pipefail
-    # QUARANTINED (2026-08-03): `indent-onto-deinlined-sibling-page-vetoes-writeback`
-    # is a DETERMINISTIC red against current main, not a flake. Indenting a block onto
-    # a de-inlined sibling page is a cross-FILE move, but the write-back grounding at
-    # file_sync_controller.rs:4897 resolves doc_id_to_path(block.id), which is Ok(None)
-    # for any non-page block, so the destination file is never read and ADR 0025 vetoes
-    # a legitimate move. A first fix walking get_block_authoritative was REFUTED as
-    # nondeterministic (read-your-own-write race with the reparent) — the destination
-    # must come from the move op/delta itself. Full setup notes: this case's comment
-    # in hand-authored-regressions/keystone.jsonl. Acceptance criterion for the fix
-    # lane: DELETE this name from the skip list and have the recipe stay green.
-    export HOLON_HAND_AUTHORED_SKIP=${HOLON_HAND_AUTHORED_SKIP-indent-onto-deinlined-sibling-page-vetoes-writeback}
+    export HOLON_HAND_AUTHORED_SKIP=${HOLON_HAND_AUTHORED_SKIP-}
     cargo test \
         -p holon-integration-tests --features pbt --test hand_authored_regressions \
         -- --nocapture {{FLAGS}} 2>&1 | tee /tmp/pbt-hand-authored.log

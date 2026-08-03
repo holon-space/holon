@@ -93,6 +93,10 @@ pub enum BlockDelta {
 /// progress-line granularity so every chunk boundary is also a liveness tick.
 const CREATE_CHUNK_BLOCKS: usize = ingest_progress::PROGRESS_EVERY_BLOCKS;
 
+/// Ancestor hops `owning_file_of` will walk before giving up. Matches the
+/// bound the block-feed's own doc resolution uses.
+const MAX_OWNING_PAGE_WALK: usize = 50;
+
 /// Disclosure sites for `failure_disclosed`. Two DISTINCT diagnoses of the same
 /// underlying condition, each worth one loud line: the identity-file pre-flight
 /// reports it via `authoritative_name_chain`, the write path via
@@ -206,7 +210,11 @@ async fn flush_pending_creates(
 /// the sibling files they may have de-inlined into.
 ///
 /// `siblings` is the surviving-projection union (each distinct sibling file's
-/// on-disk content). `unresolvable` is the id of every absent block whose
+/// on-disk content). `moved` is the id of every absent block the AUTHORITY now
+/// places in a different file — grounded by that verdict alone, because the
+/// destination's write-back may not have run yet and waiting on its bytes would
+/// make the guard's answer depend on which file converges first.
+/// `unresolvable` is the id of every absent block whose
 /// own-file path could NOT be resolved because `name_chain` failed loud (a
 /// prohibited page-under-non-page topology; BugFunnel row 23 / row 29). A
 /// non-empty `unresolvable` set means write-back genuinely CANNOT prove where
@@ -217,6 +225,7 @@ async fn flush_pending_creates(
 #[derive(Debug, Default)]
 struct SiblingGrounding {
     siblings: Vec<(PathBuf, String)>,
+    moved: HashSet<String>,
     unresolvable: Vec<String>,
 }
 
@@ -4848,26 +4857,84 @@ impl FileSyncController {
             .iter()
             .map(|(p, c)| (p.as_path(), c.as_str()))
             .collect();
+        let sanctioned: HashSet<String> = sanctioned_removals
+            .union(&grounding.moved)
+            .cloned()
+            .collect();
         let verdict = self.format.writeback_drops(
             path,
             source,
             rendered,
             &sibling_refs,
-            sanctioned_removals,
+            &sanctioned,
             &self.root_dir,
         )?;
         Ok((verdict, grounding.unresolvable))
     }
 
+    /// Which file owns an absent (drop-candidate) block now: its own page file
+    /// if it IS a page, else the file of the page it hangs under.
+    ///
+    /// Resolution is attempted FIRST so a `name_chain` that fails loud still
+    /// surfaces as UNRESOLVABLE (BugFunnel row 23/29) rather than being masked
+    /// by the checks after it. A resolved path is then only believed while the
+    /// authority still HOLDS the block: a document row (or alias) outlives the
+    /// block it names, so a path alone would let a page LOST from the store
+    /// (the row-28 truncation shape) pass as a move and be silently dropped
+    /// from its parent file.
+    async fn absent_block_owning_file(&self, id: &EntityUri) -> Result<Option<PathBuf>> {
+        let own_file = self.doc_id_to_path(id).await?;
+        if self
+            .block_reader
+            .get_block_authoritative(id)
+            .await?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        match own_file {
+            Some(p) => Ok(Some(p.into_path_buf())),
+            None => self.owning_file_of(id).await,
+        }
+    }
+
+    /// The file of the nearest `Page` at or above `id`, or `None` when that
+    /// chain names no page, or `id` is absent from the store — nothing is
+    /// proven then, so the write-back guard keeps vetoing.
+    ///
+    /// This reads the SAME authority the projection was rendered from, which is
+    /// what makes it a sound grounding witness: whenever that authority drops a
+    /// block from this file's render, the very same authority says which file
+    /// now owns it. Grounding against anything else (the delivered delta, the
+    /// destination file's bytes) races the render — the delta can carry a
+    /// pre-move parent, and the destination file may not be written yet.
+    async fn owning_file_of(&self, id: &EntityUri) -> Result<Option<PathBuf>> {
+        let mut current = id.clone();
+        for _ in 0..MAX_OWNING_PAGE_WALK {
+            let Some(block) = self.block_reader.get_block_authoritative(&current).await? else {
+                return Ok(None);
+            };
+            if block.is_page() {
+                return Ok(self
+                    .doc_id_to_path(&block.id)
+                    .await?
+                    .map(|p| p.into_path_buf()));
+            }
+            current = block.parent_id;
+        }
+        Ok(None)
+    }
+
     /// Collect the sibling-file grounding for the write-back guard: the on-disk
-    /// content of the own-file page that each block present in `source` but
-    /// absent from `rendered` (and not `sanctioned_removals`) de-inlined
-    /// into. A legitimate de-inline (a child page that moved to its own
-    /// materialized file) resolves to a DISTINCT sibling file whose content
-    /// grounds the absence; a genuine drop resolves to no distinct sibling
-    /// and stays ungrounded so the guard vetoes. Only absent blocks pay a
-    /// file read — the hot no-absence case (content edit, addition) does
-    /// none.
+    /// content of the file that now owns each block present in `source` but
+    /// absent from `rendered` (and not `sanctioned_removals`). Both legitimate
+    /// departures resolve to a DISTINCT sibling file whose content grounds the
+    /// absence — a child page that de-inlined into its own file, and a plain
+    /// block re-parented into another page's file (`owning_file_of` walks to
+    /// the owning page, so a NON-page block is resolvable too). A genuine drop
+    /// resolves to no distinct sibling and stays ungrounded, so the guard
+    /// vetoes. Only absent blocks pay a file read — the hot no-absence case
+    /// (content edit, addition) does none.
     async fn writeback_sibling_grounding(
         &self,
         path: &Path,
@@ -4892,8 +4959,8 @@ impl FileSyncController {
             if rendered_ids.contains(id) || sanctioned_removals.contains(id) {
                 continue;
             }
-            let sibling = match self.doc_id_to_path(&block.id).await {
-                Ok(Some(p)) => p.into_path_buf(),
+            let sibling = match self.absent_block_owning_file(&block.id).await {
+                Ok(Some(p)) => p,
                 Ok(None) => continue,
                 Err(e) => {
                     // §3.1 Finding A / R11 + BugFunnel row 23/29: this absent
@@ -4920,7 +4987,15 @@ impl FileSyncController {
                 }
             };
             let sibling_canonical = CanonicalPath::new(&sibling);
-            if sibling_canonical == self_canonical || !seen.insert(sibling_canonical) {
+            if sibling_canonical == self_canonical {
+                continue;
+            }
+            // The authority says another file owns this block now, so its
+            // absence HERE is a move. That verdict alone grounds it: requiring
+            // the destination's bytes to already contain it would race the
+            // order the two files' write-backs happen to run in.
+            grounding.moved.insert(block.id.as_str().to_string());
+            if !seen.insert(sibling_canonical) {
                 continue;
             }
             let content = read_disk_or_empty(&self.fs, &sibling).await?;
