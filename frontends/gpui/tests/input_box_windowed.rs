@@ -673,6 +673,104 @@ fn enter_on_an_empty_box_dispatches_nothing(cx: &mut TestAppContext) {
     );
 }
 
+// ── Per-submission compose id ──────────────────────────────────────────
+
+/// The param key a compose id travels under. Pinned as a literal on purpose:
+/// the `_` prefix is the wire contract that keeps it out of the remote call,
+/// so the test states it rather than importing whatever prod happens to use.
+const COMPOSE_PARAM: &str = "_compose_id";
+
+fn compose_id_of(intent: &OperationIntent) -> String {
+    match intent.params.get(COMPOSE_PARAM) {
+        Some(Value::String(s)) => s.clone(),
+        other => panic!(
+            "every submission must carry its own `{COMPOSE_PARAM}`; got {other:?} in {:?}",
+            intent.params
+        ),
+    }
+}
+
+/// PRIMARY (compose id). Sending the same words twice sends them twice. The
+/// intent key fingerprints the params, so without a per-submission id a repeat
+/// of "yes" / "ok" / "continue" is a byte-identical intent and the once-only
+/// machine refuses it forever — the user simply cannot answer an agent twice.
+#[gpui::test]
+fn a_new_submission_carries_a_fresh_compose_id(cx: &mut TestAppContext) {
+    let (rig, vcx) = mount(cx);
+    compose_and_submit(vcx, &rig, "yes");
+    assert_eq!(
+        draft(&rig),
+        Some(String::new()),
+        "precondition: the first send was proven and cleared the box"
+    );
+    compose_and_submit(vcx, &rig, "yes");
+
+    let dispatched = rig.services.dispatched();
+    assert_eq!(dispatched.len(), 2, "both submissions must dispatch");
+    assert_eq!(
+        dispatched[0].params.get("content"),
+        dispatched[1].params.get("content"),
+        "precondition: the two submissions carry identical text"
+    );
+    assert_ne!(
+        compose_id_of(&dispatched[0]),
+        compose_id_of(&dispatched[1]),
+        "a second submission of the same text must be a DIFFERENT submission"
+    );
+}
+
+/// The other half of the contract: a RETRY of one submission is the same
+/// submission. A compose id minted per dispatch would be a nonce, and a nonce
+/// destroys the at-most-once protection the deterministic key exists for.
+#[gpui::test]
+fn a_retry_of_one_submission_reuses_its_compose_id(cx: &mut TestAppContext) {
+    let (rig, vcx) = mount(cx);
+    rig.services.arm_failure();
+    compose_and_submit(vcx, &rig, TYPED);
+    assert_eq!(
+        draft(&rig),
+        Some(TYPED.to_string()),
+        "precondition: the failed send left the text in the box"
+    );
+
+    // Enter again on the SAME untouched draft — the same submission, retried.
+    press_enter(vcx);
+    settle(vcx, &rig);
+
+    let dispatched = rig.services.dispatched();
+    assert_eq!(dispatched.len(), 2, "the retry must reach dispatch");
+    assert_eq!(
+        compose_id_of(&dispatched[0]),
+        compose_id_of(&dispatched[1]),
+        "retrying one submission must not mint a new submission identity"
+    );
+}
+
+/// The in-flight guard CLEARS after a failure. A guard that latches turns one
+/// rejected send into a permanently dead compose box — the user types, presses
+/// Enter, and nothing ever happens again.
+#[gpui::test]
+fn the_in_flight_guard_clears_after_a_failed_dispatch(cx: &mut TestAppContext) {
+    let (rig, vcx) = mount(cx);
+    rig.services.arm_failure();
+    compose_and_submit(vcx, &rig, TYPED);
+    assert_eq!(
+        rig.services.dispatched().len(),
+        1,
+        "precondition: the first submit reached dispatch and failed"
+    );
+
+    press_enter(vcx);
+    settle(vcx, &rig);
+
+    assert_eq!(
+        rig.services.dispatched().len(),
+        2,
+        "after a failure the box must accept the next Enter; dispatched: {:?}",
+        rig.services.dispatched()
+    );
+}
+
 // ── Three-state send feedback ──────────────────────────────────────────
 
 /// Every send-status strip on screen, as (widget tag, painted text).
@@ -800,6 +898,41 @@ fn the_three_send_outcomes_render_distinctly(cx: &mut TestAppContext) {
         draft(&refused),
         Some(TYPED.to_string()),
         "a refusal must keep the typed text"
+    );
+}
+
+/// An unproven send raises NO toast. A toast fades; an unproven send stays
+/// unproven until the message shows up in the transcript, so the disclosure
+/// has to be the persistent strip. A toast here would also read as an error
+/// report for a send that may well have landed.
+#[gpui::test]
+fn an_unproven_ack_raises_no_toast(cx: &mut TestAppContext) {
+    let toasts: Arc<Mutex<Vec<holon_gpui::share_ui::DegradedToast>>> = Default::default();
+    cx.update(|cx| {
+        let sink = toasts.clone();
+        cx.set_global(holon_gpui::share_ui::DegradedToastSink::new(move |t, _| {
+            sink.lock().unwrap().push(t)
+        }));
+    });
+
+    let (rig, vcx) = mount(cx);
+    rig.services.arm_unproven();
+    compose_and_submit(vcx, &rig, TYPED);
+
+    assert_eq!(
+        rig.services.dispatched().len(),
+        1,
+        "precondition: the submit reached dispatch"
+    );
+    assert_eq!(
+        strips(&rig).len(),
+        1,
+        "precondition: the unproven state IS disclosed, by the persistent strip"
+    );
+    let got = toasts.lock().unwrap().clone();
+    assert!(
+        got.is_empty(),
+        "an unproven send must not be announced by a fading toast; got: {got:?}"
     );
 }
 

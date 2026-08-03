@@ -361,11 +361,15 @@ impl ServerHandler for MockServer {
                 };
                 let mut c = applied_count.lock().await;
                 *c += 1;
+                // The arguments are echoed so a test can assert WHAT crossed
+                // the connector boundary: a real provider declares its tool's
+                // arguments, and anything Holon-internal must not appear here.
                 return Ok(CallToolResult::success(vec![Content::text(
                     serde_json::json!({
                         "ok": true,
                         "outcome": outcome,
                         "applied_count": *c,
+                        "arguments": request.arguments,
                     })
                     .to_string(),
                 )]));

@@ -104,6 +104,12 @@ holon_macros::widget_builder! {
             send_state: Some(futures_signals::signal::Mutable::new(
                 crate::reactive_view_model::SendState::Idle,
             )),
+            // The empty draft this node starts with IS a submission slot, so
+            // it gets its identity now; the next one is minted when a proven
+            // delivery empties the box again.
+            compose_id: Some(futures_signals::signal::Mutable::new(
+                holon_api::effect_id::ComposeId::mint(),
+            )),
             data: ba.ctx.data_mutable(),
             operations,
             ..ViewModel::from_widget("input_box", __props)

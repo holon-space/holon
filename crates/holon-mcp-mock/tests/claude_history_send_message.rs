@@ -109,6 +109,22 @@ fn send_params(session_id: &str, message: &str) -> holon_api::StorageEntity {
     params
 }
 
+/// The params ONE compose-box submission produces: the target session, the
+/// typed text, and the submission's own identity.
+///
+/// The `_` prefix is the wire contract, pinned here as a literal: the compose
+/// id is Holon-internal, so it must reach the intent key without ever reaching
+/// the remote as a tool argument.
+fn submission_params(
+    session_id: &str,
+    message: &str,
+    compose_id: &str,
+) -> holon_api::StorageEntity {
+    let mut params = send_params(session_id, message);
+    params.insert("_compose_id".into(), Value::String(compose_id.to_string()));
+    params
+}
+
 fn applied_count(result: &holon_core::OperationResult) -> i64 {
     let resp = result.response.as_ref().expect("send response present");
     match resp {
@@ -301,6 +317,155 @@ async fn an_unproven_ack_is_not_recorded_as_delivered() {
     assert!(
         detail.contains("unconfirmed"),
         "the disclosure must carry the provider\'s own outcome word; got: {detail}"
+    );
+}
+
+/// (e) HEADLINE (compose id). Two DELIBERATE sends of the same words are two
+/// messages. "yes", "ok", "continue" are exactly what a user repeats at an
+/// agent; a key derived from the text alone collapses them onto one intent and
+/// refuses the second forever. The key must identify the SUBMISSION.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_submissions_of_identical_text_are_two_messages() {
+    let db = setup_db().await;
+    let integration = connect_shipped_sidecar(&db).await;
+    let provider = &integration.operation_provider;
+
+    provider
+        .execute_operation(
+            &EntityName::from(SESSION),
+            "send_message",
+            submission_params("s-bg-1", "yes", "compose-1"),
+        )
+        .await
+        .expect_err("the first submission is queued for confirmation");
+    let first_key = provider.pending_writes()[0].intent_key.clone();
+    assert_eq!(
+        applied_count(&provider.approve(&first_key).await.expect("approve fires")),
+        1,
+        "precondition: the first submission is the first remote effect"
+    );
+
+    // A SECOND, deliberate submission of the same text — a new compose id, so
+    // a new submission, not a re-dispatch of the first.
+    let err = provider
+        .execute_operation(
+            &EntityName::from(SESSION),
+            "send_message",
+            submission_params("s-bg-1", "yes", "compose-2"),
+        )
+        .await
+        .expect_err("a fresh submission is queued for confirmation like any other");
+    assert!(
+        err.to_string().contains("queued for confirmation"),
+        "a new submission must be QUEUED, not refused as a duplicate; got: {err}"
+    );
+
+    let second_key = provider
+        .pending_writes()
+        .into_iter()
+        .find(|w| w.state == PendingState::AwaitingConfirmation)
+        .expect(
+            "a second submission of identical text must produce its OWN queued intent — \
+             none is awaiting confirmation, so the two submissions collapsed onto one key",
+        )
+        .intent_key;
+    assert_ne!(
+        second_key, first_key,
+        "two submissions must mint two intent keys"
+    );
+
+    assert_eq!(
+        applied_count(&provider.approve(&second_key).await.expect("approve fires")),
+        2,
+        "the repeated message must reach the remote as a SECOND effect"
+    );
+}
+
+/// (f) The other direction, and the reason the compose id is not simply a
+/// nonce per dispatch: ONE submission re-dispatched is still ONE message. A
+/// retry carries the id it was minted with, so at-most-once survives intact.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_of_one_submission_never_fires_twice() {
+    let db = setup_db().await;
+    let integration = connect_shipped_sidecar(&db).await;
+    let provider = &integration.operation_provider;
+
+    let submission = || submission_params("s-bg-1", "yes", "compose-1");
+    provider
+        .execute_operation(&EntityName::from(SESSION), "send_message", submission())
+        .await
+        .expect_err("the submission is queued");
+    let key = provider.pending_writes()[0].intent_key.clone();
+    assert_eq!(
+        applied_count(&provider.approve(&key).await.expect("approve fires")),
+        1
+    );
+
+    provider
+        .execute_operation(&EntityName::from(SESSION), "send_message", submission())
+        .await
+        .expect_err("re-dispatching the SAME submission must not fire the effect again");
+    assert_eq!(
+        provider.pending_store().state_of(&key),
+        Some(PendingState::Sent),
+        "the sent intent stays sent — the retry took no second dispatch"
+    );
+
+    // The probe: a genuinely new submission reports the SECOND effect, so the
+    // retry above contributed none.
+    let next = submission_params("s-bg-1", "yes", "compose-2");
+    provider
+        .execute_operation(&EntityName::from(SESSION), "send_message", next)
+        .await
+        .expect_err("a new submission is queued");
+    let next_key = provider
+        .pending_writes()
+        .into_iter()
+        .find(|w| w.state == PendingState::AwaitingConfirmation)
+        .expect("the new submission is awaiting confirmation")
+        .intent_key;
+    assert_eq!(
+        applied_count(&provider.approve(&next_key).await.expect("approve fires")),
+        2,
+        "exactly two remote effects: one per SUBMISSION, not one per dispatch"
+    );
+}
+
+/// (g) The compose id never reaches the remote. It is Holon's own bookkeeping;
+/// forwarding it would hand the provider an argument its tool does not declare.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_compose_id_is_not_sent_to_the_remote() {
+    let db = setup_db().await;
+    let integration = connect_shipped_sidecar(&db).await;
+    let provider = &integration.operation_provider;
+
+    provider
+        .execute_operation(
+            &EntityName::from(SESSION),
+            "send_message",
+            submission_params("s-bg-1", "yes", "compose-1"),
+        )
+        .await
+        .expect_err("the submission is queued");
+    let key = provider.pending_writes()[0].intent_key.clone();
+    let approved = provider.approve(&key).await.expect("approve fires");
+
+    let Some(Value::Object(echo)) = approved.response.as_ref().map(Value::clone) else {
+        panic!("send response must be an object: {:?}", approved.response)
+    };
+    let args = echo
+        .get("arguments")
+        .unwrap_or_else(|| panic!("the mock must echo the arguments it received: {echo:?}"));
+    let Value::Object(args) = args else {
+        panic!("arguments must be an object: {args:?}")
+    };
+    assert!(
+        !args.contains_key("_compose_id"),
+        "Holon-internal params must not cross the connector boundary; got: {args:?}"
+    );
+    assert!(
+        args.contains_key("message"),
+        "precondition: the real arguments did reach the remote; got: {args:?}"
     );
 }
 

@@ -458,6 +458,15 @@ pub struct ReactiveViewModel {
     /// of it cannot be taken back.
     pub send_state: Option<Mutable<SendState>>,
 
+    /// Which SUBMISSION this node's compose buffer currently holds
+    /// (`input_box`). It rides into the wired operation's params, where it
+    /// becomes part of the connector's intent key, so "send `yes` again" is a
+    /// different intent from "re-send that `yes`". Re-minted exactly when the
+    /// draft is cleared by a proven delivery — and carried across structural
+    /// rebuilds like `draft` and `send_state`, because a submission identity
+    /// that resets with the tree would let one message be sent twice.
+    pub compose_id: Option<Mutable<holon_api::effect_id::ComposeId>>,
+
     /// Operations available at this node.
     pub operations: Vec<OperationWiring>,
 
@@ -657,6 +666,7 @@ impl ReactiveViewModel {
             hovered: self.hovered.clone(),
             draft: self.draft.clone(),
             send_state: self.send_state.clone(),
+            compose_id: self.compose_id.clone(),
             operations: fresh.operations.clone(),
             triggers: fresh.triggers.clone(),
             layout_hint: fresh.layout_hint,
@@ -709,6 +719,7 @@ impl ReactiveViewModel {
                             hovered: old_child.hovered.clone(),
                             draft: old_child.draft.clone(),
                             send_state: old_child.send_state.clone(),
+                            compose_id: old_child.compose_id.clone(),
                             operations: fresh_child.operations.clone(),
                             triggers: fresh_child.triggers.clone(),
                             layout_hint: fresh_child.layout_hint,
@@ -1306,6 +1317,7 @@ impl Default for ReactiveViewModel {
             hovered: None,
             draft: None,
             send_state: None,
+            compose_id: None,
             operations: vec![],
             triggers: vec![],
             layout_hint: LayoutHint::default(),

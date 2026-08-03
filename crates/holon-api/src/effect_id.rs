@@ -141,22 +141,72 @@ pub fn deterministic_proposal_id(
 /// collide with a rule effect, template instance, or proposal id.
 pub const HOLON_CONNECTOR_NAMESPACE: Uuid = Uuid::from_u128(0x2c1d0e4f_6a5b_4c3d_8e7f_0a1b2c3d4e5f);
 
+/// The identity of ONE user submission, as opposed to the identity of its
+/// text.
+///
+/// A [`FiringKey`] over the params answers "is this the same request?"; for a
+/// compose box that is the wrong question. Two deliberate sends of "yes" are
+/// byte-identical requests but two different messages, and a key that cannot
+/// tell them apart refuses the second one forever. A `ComposeId` is minted per
+/// submission and CARRIED across that submission's re-dispatches, so
+/// at-most-once still collapses a retry storm while a genuine repeat gets
+/// through.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ComposeId(String);
+
+impl ComposeId {
+    /// The params key a compose id travels under. `_`-prefixed, which is
+    /// already the marker for a Holon-internal column: [`FiringKey`] skips
+    /// those, and the connector boundary drops them rather than handing a
+    /// remote tool an argument it never declared.
+    pub const PARAM: &'static str = "_compose_id";
+
+    /// Mint a fresh submission identity.
+    pub fn mint() -> Self {
+        Self(Uuid::new_v4().to_string())
+    }
+
+    /// Adopt an id that came in on a param. Empty is rejected: an empty id
+    /// would silently behave like "no compose id at all", which is the exact
+    /// collision this type exists to prevent.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        if raw.is_empty() {
+            return Err(format!("`{}` must not be empty", Self::PARAM));
+        }
+        Ok(Self(raw.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Mint the deterministic idempotency key for one external-connector write
 /// (ADR 0024 P4: idempotent/keyed effects converge by naming discipline, never
 /// by an execution log). The same `(connector, tool, entity-id, intent
-/// fingerprint)` yields the same key on every re-dispatch, so a retry storm
-/// collapses to one remote effect at a server that dedups on the key.
+/// fingerprint, submission)` yields the same key on every re-dispatch, so a
+/// retry storm collapses to one remote effect at a server that dedups on the
+/// key.
 ///
 /// The `fingerprint` is a [`FiringKey`] over the write's params — a canonical,
 /// type-tagged, order-independent serialization — so two dispatches with the
 /// same intent produce the same key regardless of map iteration order.
+///
+/// `submission` is what makes the key name an ACT rather than a payload; see
+/// [`ComposeId`]. Callers with no notion of a submission (rule firings, agent
+/// dispatches) pass `None` and keep the pure payload-derived key.
 pub fn deterministic_intent_key(
     connector: &str,
     tool: &str,
     entity_id: &str,
     fingerprint: &FiringKey,
+    submission: Option<&ComposeId>,
 ) -> Uuid {
-    let name = format!("{connector}\x1f{tool}\x1f{entity_id}\x1f{}", fingerprint.0);
+    let submission = submission.map(ComposeId::as_str).unwrap_or("");
+    let name = format!(
+        "{connector}\x1f{tool}\x1f{entity_id}\x1f{}\x1f{submission}",
+        fingerprint.0
+    );
     Uuid::new_v5(&HOLON_CONNECTOR_NAMESPACE, name.as_bytes())
 }
 
@@ -293,26 +343,26 @@ mod tests {
             ("content", Value::String("buy milk".into())),
             ("id", Value::String("t1".into())),
         ]));
-        let k1 = deterministic_intent_key("todoist", "update-tasks", "t1", &fp_a);
-        let k2 = deterministic_intent_key("todoist", "update-tasks", "t1", &fp_b);
+        let k1 = deterministic_intent_key("todoist", "update-tasks", "t1", &fp_a, None);
+        let k2 = deterministic_intent_key("todoist", "update-tasks", "t1", &fp_b, None);
         assert_eq!(k1, k2, "same intent (any param order) → same key");
     }
 
     #[test]
     fn intent_key_distinct_across_components() {
         let fp = FiringKey::from_row(&row(&[("id", Value::String("t1".into()))]));
-        let base = deterministic_intent_key("todoist", "update-tasks", "t1", &fp);
+        let base = deterministic_intent_key("todoist", "update-tasks", "t1", &fp, None);
         assert_ne!(
             base,
-            deterministic_intent_key("gmail", "update-tasks", "t1", &fp)
+            deterministic_intent_key("gmail", "update-tasks", "t1", &fp, None)
         );
         assert_ne!(
             base,
-            deterministic_intent_key("todoist", "add-tasks", "t1", &fp)
+            deterministic_intent_key("todoist", "add-tasks", "t1", &fp, None)
         );
         assert_ne!(
             base,
-            deterministic_intent_key("todoist", "update-tasks", "t2", &fp)
+            deterministic_intent_key("todoist", "update-tasks", "t2", &fp, None)
         );
         let fp2 = FiringKey::from_row(&row(&[
             ("id", Value::String("t1".into())),
@@ -320,7 +370,45 @@ mod tests {
         ]));
         assert_ne!(
             base,
-            deterministic_intent_key("todoist", "update-tasks", "t1", &fp2)
+            deterministic_intent_key("todoist", "update-tasks", "t1", &fp2, None)
+        );
+    }
+
+    /// The compose id is a real component of the key: identical params under
+    /// two submissions must NOT collapse, and one submission must key the same
+    /// however often it is re-dispatched.
+    #[test]
+    fn intent_key_separates_submissions_but_not_retries() {
+        let fp = FiringKey::from_row(&row(&[
+            ("id", Value::String("sess-1".into())),
+            ("message", Value::String("yes".into())),
+        ]));
+        let first = ComposeId::parse("compose-1").unwrap();
+        let second = ComposeId::parse("compose-2").unwrap();
+
+        let k1 = deterministic_intent_key("cc", "send_message", "sess-1", &fp, Some(&first));
+        let retry = deterministic_intent_key("cc", "send_message", "sess-1", &fp, Some(&first));
+        let k2 = deterministic_intent_key("cc", "send_message", "sess-1", &fp, Some(&second));
+
+        assert_eq!(k1, retry, "a retry of ONE submission keeps its key");
+        assert_ne!(k1, k2, "two submissions of identical text are two keys");
+        assert_ne!(
+            k1,
+            deterministic_intent_key("cc", "send_message", "sess-1", &fp, None),
+            "a submission-scoped key is distinct from the payload-only key"
+        );
+    }
+
+    /// An empty compose id would key exactly like "no compose id", silently
+    /// restoring the collision. It is refused at the boundary instead.
+    #[test]
+    fn an_empty_compose_id_is_refused() {
+        assert!(ComposeId::parse("").is_err());
+        assert_eq!(ComposeId::parse("x").unwrap().as_str(), "x");
+        assert_ne!(
+            ComposeId::mint().as_str(),
+            ComposeId::mint().as_str(),
+            "each mint is a distinct submission"
         );
     }
 }

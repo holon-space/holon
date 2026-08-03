@@ -10,8 +10,9 @@ use gpui_component::input::Input;
 use gpui_component::input::InputEvent;
 use gpui_component::input::InputState;
 use holon_api::Value;
-use holon_core::Delivery;
+use holon_api::effect_id::ComposeId;
 use holon_api::render_types::OperationWiring;
+use holon_core::Delivery;
 use holon_frontend::ReactiveViewModel;
 use holon_frontend::operations::OperationIntent;
 use holon_frontend::reactive::BuilderServices;
@@ -31,6 +32,7 @@ pub struct InputBoxView {
     bounds: crate::geometry::BoundsRegistry,
     draft: Mutable<String>,
     send_state: Mutable<SendState>,
+    compose_id: Mutable<ComposeId>,
     wiring: OperationWiring,
     services: Arc<dyn BuilderServices>,
     submit_label: String,
@@ -46,6 +48,7 @@ impl InputBoxView {
         multiline: bool,
         draft: Mutable<String>,
         send_state: Mutable<SendState>,
+        compose_id: Mutable<ComposeId>,
         wiring: OperationWiring,
         services: Arc<dyn BuilderServices>,
         window: &mut Window,
@@ -84,6 +87,7 @@ impl InputBoxView {
             bounds,
             draft,
             send_state,
+            compose_id,
             wiring,
             services,
             submit_label,
@@ -108,6 +112,16 @@ impl InputBoxView {
             self.wiring.modified_param.clone(),
             Value::String(text.clone()),
         );
+        // WHICH submission this is. Held by the node, so every dispatch of the
+        // draft currently in the box — a retry after a refusal, an approval
+        // replayed later — carries the same one, while the next thing the user
+        // types carries a new one. Without it the connector's intent key is a
+        // function of the text alone, and a second "yes" is refused as a
+        // duplicate of the first.
+        params.insert(
+            ComposeId::PARAM.to_string(),
+            Value::String(self.compose_id.lock_ref().as_str().to_string()),
+        );
         let intent = OperationIntent::new(
             self.wiring.descriptor.entity_name.clone(),
             self.wiring.descriptor.name.clone(),
@@ -121,6 +135,7 @@ impl InputBoxView {
         let services = self.services.clone();
         let draft = self.draft.clone();
         let send_state = self.send_state.clone();
+        let compose_id = self.compose_id.clone();
         let input = self.input.clone();
         let rt = services.runtime_handle();
         let window_handle = window.window_handle();
@@ -139,6 +154,9 @@ impl InputBoxView {
                 Ok(Ok(Delivery::Proven)) => {
                     send_state.set(SendState::Idle);
                     draft.set(String::new());
+                    // The box is empty again, so whatever is typed next is a
+                    // NEW submission — including the same word as last time.
+                    compose_id.set(ComposeId::mint());
                     let _ = cx.update_window(window_handle, |_, window, cx| {
                         input.update(cx, |state, cx| state.set_value("", window, cx));
                     });
@@ -195,13 +213,18 @@ impl InputBoxView {
     fn status_strip(&self) -> Option<AnyElement> {
         let strip = self.send_state.lock_ref().strip()?;
         let (border, tint) = match strip.kind {
-            SendStripKind::Sending => (gpui::hsla(0.0, 0.0, 0.5, 0.5), gpui::hsla(0.0, 0.0, 0.5, 0.08)),
-            SendStripKind::Unconfirmed => {
-                (gpui::hsla(0.11, 0.9, 0.5, 0.9), gpui::hsla(0.11, 0.9, 0.5, 0.12))
-            }
-            SendStripKind::Refused => {
-                (gpui::hsla(0.0, 0.75, 0.5, 0.9), gpui::hsla(0.0, 0.75, 0.5, 0.12))
-            }
+            SendStripKind::Sending => (
+                gpui::hsla(0.0, 0.0, 0.5, 0.5),
+                gpui::hsla(0.0, 0.0, 0.5, 0.08),
+            ),
+            SendStripKind::Unconfirmed => (
+                gpui::hsla(0.11, 0.9, 0.5, 0.9),
+                gpui::hsla(0.11, 0.9, 0.5, 0.12),
+            ),
+            SendStripKind::Refused => (
+                gpui::hsla(0.0, 0.75, 0.5, 0.9),
+                gpui::hsla(0.0, 0.75, 0.5, 0.12),
+            ),
         };
         let painted = format!("{}\n{}", strip.headline, strip.detail);
         let el = div()
@@ -287,6 +310,10 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
         .send_state
         .clone()
         .expect("input_box node carries its send state");
+    let compose_id = node
+        .compose_id
+        .clone()
+        .expect("input_box node carries its submission identity");
     let wiring = node
         .operations
         .first()
@@ -318,6 +345,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
                     multiline,
                     draft,
                     send_state,
+                    compose_id,
                     wiring,
                     services,
                     window,

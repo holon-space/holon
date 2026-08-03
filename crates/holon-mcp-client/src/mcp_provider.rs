@@ -651,6 +651,27 @@ impl OperationProvider for McpOperationProvider {
             .into());
         }
 
+        // Which user submission this dispatch belongs to, when the caller is a
+        // surface that has submissions (a compose box). Parsed here, at the
+        // boundary, so a malformed id fails loudly instead of degrading into
+        // the payload-only key it is meant to replace.
+        let submission: Option<holon_api::effect_id::ComposeId> = match params
+            .get(holon_api::effect_id::ComposeId::PARAM)
+        {
+            None => None,
+            Some(Value::String(raw)) => Some(
+                holon_api::effect_id::ComposeId::parse(raw)
+                    .map_err(|e| format!("connector write rejected for '{original_name}': {e}"))?,
+            ),
+            Some(other) => {
+                return Err(format!(
+                        "connector write rejected for '{original_name}': `{}` must be a string, got {other:?}",
+                        holon_api::effect_id::ComposeId::PARAM
+                    )
+                    .into());
+            }
+        };
+
         // Deterministic idempotency/intent key for `keyed` and `once_only`
         // writes (ADR 0024 P4 naming discipline). Minted BEFORE params are
         // consumed so the fingerprint is stable across retries/re-dispatches.
@@ -678,6 +699,7 @@ impl OperationProvider for McpOperationProvider {
                         original_name,
                         entity_id,
                         &fingerprint,
+                        submission.as_ref(),
                     )
                     .to_string(),
                 )
@@ -773,8 +795,13 @@ impl OperationProvider for McpOperationProvider {
             .build_undo_action(original_name, entity_name.as_str(), &params)
             .await;
 
+        // `_`-prefixed params are Holon's own bookkeeping — the same columns
+        // `FiringKey` treats as non-semantic. They stop here: a remote tool
+        // declares its arguments, and handing it one it never declared is a
+        // call it is entitled to reject.
         let mut json_params: serde_json::Map<String, serde_json::Value> = params
             .into_iter()
+            .filter(|(k, _)| !k.starts_with('_'))
             .map(|(k, v)| (k.to_string(), to_json_value(v)))
             .collect();
         if let Some((param_name, key)) = inject {
