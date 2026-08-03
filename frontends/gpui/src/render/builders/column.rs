@@ -27,6 +27,10 @@ fn is_accordion(c: &ReactiveViewModel) -> bool {
     c.widget_name().as_deref() == Some("accordion")
 }
 
+fn is_live_query(c: &ReactiveViewModel) -> bool {
+    c.widget_name().as_deref() == Some("live_query")
+}
+
 /// True if `node` is a `column` with ≥1 direct `accordion` child — the trigger
 /// for the flow-panel split (plan §4). Detected by widget name at render time
 /// (the same mechanism as `holds_collection` / `is_drawer`); a column WITHOUT
@@ -145,7 +149,12 @@ fn push_main_child(container: Div, child: &ReactiveViewModel, ctx: &GpuiRenderCo
                 .child(super::view_mode_switcher::render_virtualized(child, ctx)),
         )
     } else {
-        container.child(div().flex_shrink_0().w_full().child(super::render(child, ctx)))
+        container.child(
+            div()
+                .flex_shrink_0()
+                .w_full()
+                .child(super::render(child, ctx)),
+        )
     }
 }
 
@@ -169,7 +178,23 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
         container = container.gap(px(gap));
     }
     for child in children {
-        container = push_content_child(container, child, ctx);
+        // This container is content-sized (`flex_col`, no height), so a
+        // `live_query` child's `Panel` shape — shell `size_full` plus
+        // `height: relative(1.0)` — has no definite height to resolve against
+        // and collapses to 0 px, taking the whole section with it (the shipped
+        // sidebar's Integrations rows). Render it content-height instead. The
+        // accordion body keeps the greedy shape: `render_bounded` gives ITS
+        // region a definite height first.
+        container = if is_live_query(child) {
+            container.child(super::tag_node(
+                ctx,
+                "live_query",
+                child,
+                super::live_query::render_content_height(child, ctx),
+            ))
+        } else {
+            push_content_child(container, child, ctx)
+        };
     }
     container
 }
@@ -215,10 +240,10 @@ pub(crate) fn render_children_content_height(
 ///
 /// `inner` is the definite-height `absolute size_full` div from
 /// `columns::panel_wrap`. We turn it into a `flex_col` whose:
-///   - MAIN region (`flex_1 min_h_0`) holds the column's non-accordion children;
-///     its outline collection renders VIRTUALIZED (`gpui::list` via the nested
-///     collection-mode `ReactiveShell`, only viewport rows/frame) and owns its
-///     own scroll — Inc 5 (`main_outline_virtualized_pbt`);
+///   - MAIN region (`flex_1 min_h_0`) holds the column's non-accordion
+///     children; its outline collection renders VIRTUALIZED (`gpui::list` via
+///     the nested collection-mode `ReactiveShell`, only viewport rows/frame)
+///     and owns its own scroll — Inc 5 (`main_outline_virtualized_pbt`);
 ///   - FOOTER(s) are the bounded accordion(s), `flex_shrink_0`, PINNED at the
 ///     panel bottom — they never scroll with the outline (Martin's ruling:
 ///     fixed sections pin, they do not scroll with the outline).

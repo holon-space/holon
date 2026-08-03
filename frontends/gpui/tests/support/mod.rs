@@ -400,6 +400,8 @@ impl BuilderServices for TestServices {
     ) -> (EntityUri, holon_frontend::LiveBlock) {
         let (prefix, key) = if query.contains("backlinks") {
             ("backlink", "query:canned-backlinks")
+        } else if query.contains("sync_states") {
+            ("sync", "query:canned-sync-states")
         } else {
             ("outline", "query:canned-outline")
         };

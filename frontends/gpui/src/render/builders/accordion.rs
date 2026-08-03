@@ -75,7 +75,7 @@ pub(crate) fn render_bounded(node: &ReactiveViewModel, ctx: &GpuiRenderContext) 
     let expanded = is_expanded(node);
 
     // A "greedy" child is a slot node (`live_query`/`live_block`) whose
-    // ReactiveShell is styled `height: relative(1.0)` (live_query.rs:72).
+    // ReactiveShell is styled `height: relative(1.0)` (live_query.rs).
     // A percentage height needs a DEFINITE parent — inside a shrink-to-content
     // (`max_h`) region it resolves to 0 and the rows VANISH (the seed's
     // backlinks). So when the expanded accordion holds a greedy child, fix the
