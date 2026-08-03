@@ -289,7 +289,9 @@ pub fn create_render_engine_with_names(widget_names: &[impl AsRef<str>]) -> Rhai
         "answer_question",
         "pending_question.answer_question",
     );
-    register_widget_fn_aliased(&mut engine, "send_message", "session.send_message");
+    // `live_session`, not `session`: the provider addresses a send by the
+    // background job id, which exists only on the live registry's rows.
+    register_widget_fn_aliased(&mut engine, "send_message", "live_session.send_message");
 
     engine
 }

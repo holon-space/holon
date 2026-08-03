@@ -102,10 +102,14 @@ async fn connect_scenario(db: &DbHandle, scenario: &str) -> McpIntegration {
     }
 }
 
-fn send_params(session_id: &str, message: &str) -> holon_api::StorageEntity {
+/// The provider's two declared arguments, spelled its way: the target is the
+/// background JOB id from the live listing, and the message rides under `text`.
+/// Neither name is Holon's to choose — the mock enforces the real binary's
+/// schema, so a rename here is a send that dies at the provider.
+fn send_params(job_id: &str, text: &str) -> holon_api::StorageEntity {
     let mut params = holon_api::StorageEntity::new();
-    params.insert("id".into(), Value::String(session_id.to_string()));
-    params.insert("message".into(), Value::String(message.to_string()));
+    params.insert("id".into(), Value::String(job_id.to_string()));
+    params.insert("text".into(), Value::String(text.to_string()));
     params
 }
 
@@ -136,7 +140,7 @@ fn applied_count(result: &holon_core::OperationResult) -> i64 {
     }
 }
 
-const SESSION: &str = "session";
+const LIVE_SESSION: &str = "live_session";
 
 /// (a) A send is QUEUED, not fired. The caller gets the disclosed
 /// "queued for confirmation" error, the intent sits in the pending-writes queue
@@ -151,9 +155,9 @@ async fn send_message_is_queued_for_confirmation_not_dispatched() {
 
     let err = provider
         .execute_operation(
-            &EntityName::from(SESSION),
+            &EntityName::from(LIVE_SESSION),
             "send_message",
-            send_params("s-bg-1", "ping"),
+            send_params("job-77", "ping"),
         )
         .await
         .expect_err("confirm_manually must queue a send, never fire it unattended");
@@ -195,9 +199,9 @@ async fn approved_send_never_dispatches_twice() {
 
     provider
         .execute_operation(
-            &EntityName::from(SESSION),
+            &EntityName::from(LIVE_SESSION),
             "send_message",
-            send_params("s-bg-1", "ping"),
+            send_params("job-77", "ping"),
         )
         .await
         .expect_err("first attempt is queued");
@@ -221,9 +225,9 @@ async fn approved_send_never_dispatches_twice() {
 
     let resend = provider
         .execute_operation(
-            &EntityName::from(SESSION),
+            &EntityName::from(LIVE_SESSION),
             "send_message",
-            send_params("s-bg-1", "ping"),
+            send_params("job-77", "ping"),
         )
         .await
         .expect_err("an identical re-send must not fire the effect again");
@@ -241,9 +245,9 @@ async fn approved_send_never_dispatches_twice() {
     // refused attempt above reached the remote.
     let other = provider
         .execute_operation(
-            &EntityName::from(SESSION),
+            &EntityName::from(LIVE_SESSION),
             "send_message",
-            send_params("s-bg-1", "a different message"),
+            send_params("job-77", "a different message"),
         )
         .await
         .expect_err("a distinct intent is itself queued for confirmation");
@@ -276,9 +280,9 @@ async fn an_unproven_ack_is_not_recorded_as_delivered() {
 
     provider
         .execute_operation(
-            &EntityName::from(SESSION),
+            &EntityName::from(LIVE_SESSION),
             "send_message",
-            send_params("s-bg-1", "ping"),
+            send_params("job-77", "ping"),
         )
         .await
         .expect_err("first attempt is queued for confirmation");
@@ -332,9 +336,9 @@ async fn two_submissions_of_identical_text_are_two_messages() {
 
     provider
         .execute_operation(
-            &EntityName::from(SESSION),
+            &EntityName::from(LIVE_SESSION),
             "send_message",
-            submission_params("s-bg-1", "yes", "compose-1"),
+            submission_params("job-77", "yes", "compose-1"),
         )
         .await
         .expect_err("the first submission is queued for confirmation");
@@ -349,9 +353,9 @@ async fn two_submissions_of_identical_text_are_two_messages() {
     // a new submission, not a re-dispatch of the first.
     let err = provider
         .execute_operation(
-            &EntityName::from(SESSION),
+            &EntityName::from(LIVE_SESSION),
             "send_message",
-            submission_params("s-bg-1", "yes", "compose-2"),
+            submission_params("job-77", "yes", "compose-2"),
         )
         .await
         .expect_err("a fresh submission is queued for confirmation like any other");
@@ -390,9 +394,13 @@ async fn a_retry_of_one_submission_never_fires_twice() {
     let integration = connect_shipped_sidecar(&db).await;
     let provider = &integration.operation_provider;
 
-    let submission = || submission_params("s-bg-1", "yes", "compose-1");
+    let submission = || submission_params("job-77", "yes", "compose-1");
     provider
-        .execute_operation(&EntityName::from(SESSION), "send_message", submission())
+        .execute_operation(
+            &EntityName::from(LIVE_SESSION),
+            "send_message",
+            submission(),
+        )
         .await
         .expect_err("the submission is queued");
     let key = provider.pending_writes()[0].intent_key.clone();
@@ -402,7 +410,11 @@ async fn a_retry_of_one_submission_never_fires_twice() {
     );
 
     provider
-        .execute_operation(&EntityName::from(SESSION), "send_message", submission())
+        .execute_operation(
+            &EntityName::from(LIVE_SESSION),
+            "send_message",
+            submission(),
+        )
         .await
         .expect_err("re-dispatching the SAME submission must not fire the effect again");
     assert_eq!(
@@ -413,9 +425,9 @@ async fn a_retry_of_one_submission_never_fires_twice() {
 
     // The probe: a genuinely new submission reports the SECOND effect, so the
     // retry above contributed none.
-    let next = submission_params("s-bg-1", "yes", "compose-2");
+    let next = submission_params("job-77", "yes", "compose-2");
     provider
-        .execute_operation(&EntityName::from(SESSION), "send_message", next)
+        .execute_operation(&EntityName::from(LIVE_SESSION), "send_message", next)
         .await
         .expect_err("a new submission is queued");
     let next_key = provider
@@ -441,9 +453,9 @@ async fn the_compose_id_is_not_sent_to_the_remote() {
 
     provider
         .execute_operation(
-            &EntityName::from(SESSION),
+            &EntityName::from(LIVE_SESSION),
             "send_message",
-            submission_params("s-bg-1", "yes", "compose-1"),
+            submission_params("job-77", "yes", "compose-1"),
         )
         .await
         .expect_err("the submission is queued");
@@ -464,7 +476,7 @@ async fn the_compose_id_is_not_sent_to_the_remote() {
         "Holon-internal params must not cross the connector boundary; got: {args:?}"
     );
     assert!(
-        args.contains_key("message"),
+        args.contains_key("text"),
         "precondition: the real arguments did reach the remote; got: {args:?}"
     );
 }
@@ -480,9 +492,9 @@ async fn a_proven_ack_is_recorded_as_delivered() {
 
     provider
         .execute_operation(
-            &EntityName::from(SESSION),
+            &EntityName::from(LIVE_SESSION),
             "send_message",
-            send_params("s-bg-1", "ping"),
+            send_params("job-77", "ping"),
         )
         .await
         .expect_err("first attempt is queued for confirmation");
@@ -498,5 +510,62 @@ async fn a_proven_ack_is_recorded_as_delivered() {
         provider.pending_store().state_of(&key),
         Some(PendingState::Sent),
         "an ack of `outcome: delivered` proves the message landed"
+    );
+}
+
+/// Approve and dispatch the given params, and return the provider's REFUSAL.
+/// The approved call is the only place a wire-contract violation can surface —
+/// the first attempt never leaves Holon, the confirmation gate holds it.
+async fn approved_send_refusal(
+    integration: &McpIntegration,
+    params: holon_api::StorageEntity,
+) -> String {
+    let provider = &integration.operation_provider;
+    provider
+        .execute_operation(&EntityName::from(LIVE_SESSION), "send_message", params)
+        .await
+        .expect_err("first attempt is queued for confirmation");
+    let key = provider.pending_writes()[0].intent_key.clone();
+    match provider.approve(&key).await {
+        Ok(_) => panic!("the provider must refuse a send its schema does not accept"),
+        Err(e) => e.to_string(),
+    }
+}
+
+/// (h) REGRESSION. The message must ride under `text`. Holon shipped it as
+/// `message` — a name that exists nowhere in the provider's schema — and every
+/// approved send died at the remote with the rejection asserted here. The mock
+/// speaks the real binary's schema, so this is the wire contract, not a mock
+/// convention.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_message_must_ride_under_text_not_message() {
+    let db = setup_db().await;
+    let integration = connect_shipped_sidecar(&db).await;
+
+    let mut params = holon_api::StorageEntity::new();
+    params.insert("id".into(), Value::String("job-77".into()));
+    params.insert("message".into(), Value::String("ping".into()));
+
+    let err = approved_send_refusal(&integration, params).await;
+    assert!(
+        err.contains("text is required and must be a string"),
+        "the provider must reject the send by name; got: {err}"
+    );
+}
+
+/// (i) REGRESSION, the second half. The target is the background JOB id, not
+/// the transcript uuid: the provider resolves `id` against the live listing by
+/// `live_session.id` or `job_id` and never looks at `session_id`, so the id a
+/// `cc_session` row is keyed on addresses nothing. Holon shipped that id and
+/// the send could not have landed even with `text` spelled right.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_send_addressed_by_transcript_id_reaches_no_session() {
+    let db = setup_db().await;
+    let integration = connect_shipped_sidecar(&db).await;
+
+    let err = approved_send_refusal(&integration, send_params("s-bg-1", "ping")).await;
+    assert!(
+        err.contains("is not known to the daemon"),
+        "the provider must refuse an unaddressable target; got: {err}"
     );
 }

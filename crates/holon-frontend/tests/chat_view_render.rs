@@ -148,8 +148,13 @@ fn interpret_with(
 /// The mirror stores the primary key scheme-qualified, exactly as the chat
 /// view reads it.
 const ROW_ID: &str = "cc-session:sess-1";
-/// What the provider will accept as the `send_message` target session.
-const SESSION_ID: &str = "sess-1";
+/// A live row's own key: the provider keys a backgrounded session by its job
+/// id.
+const LIVE_ROW_ID: &str = "cc-live-session:job-77";
+/// The ONLY value the provider accepts as a `send_message` target. It is
+/// deliberately unlike the transcript uuid on the same row — an id derived from
+/// anything but `job_id` would address nothing.
+const JOB_ID: &str = "job-77";
 
 fn session_row() -> Arc<DataRow> {
     let mut row = DataRow::new();
@@ -159,6 +164,19 @@ fn session_row() -> Arc<DataRow> {
         Value::String("Fix the parser".to_string()),
     );
     row.insert("message_count".to_string(), Value::Integer(2));
+    Arc::new(row)
+}
+
+fn live_session_row() -> Arc<DataRow> {
+    let mut row = DataRow::new();
+    row.insert("id".to_string(), Value::String(LIVE_ROW_ID.to_string()));
+    row.insert("job_id".to_string(), Value::String(JOB_ID.to_string()));
+    row.insert(
+        "session_id".to_string(),
+        Value::String("sess-1".to_string()),
+    );
+    row.insert("name".to_string(), Value::String("lane-1".to_string()));
+    row.insert("state".to_string(), Value::String("running".to_string()));
     Arc::new(row)
 }
 
@@ -175,7 +193,12 @@ fn expanded_chat_view(services: &ChatViewServices, entity: &str) -> Arc<Reactive
         dsl, profile,
         "the `{entity}` profile is expected to be an expand_toggle; got:\n{profile}"
     );
-    let ctx = RenderContext::default().with_row(session_row());
+    let row = if entity == "live_session" {
+        live_session_row()
+    } else {
+        session_row()
+    };
+    let ctx = RenderContext::default().with_row(row);
     let vm = interpret_with(services, &dsl, &ctx);
     assert_eq!(vm.widget_name().as_deref(), Some("expand_toggle"));
     vm.lazy_slot
@@ -319,23 +342,23 @@ fn wirings(vm: &ReactiveViewModel, out: &mut Vec<holon_api::render_types::Operat
     }
 }
 
-/// The chat view must offer a way to REPLY, and that compose box must target
-/// the session with the id the provider accepts.
+/// The chat view must offer a way to REPLY, and that compose box must dispatch
+/// arguments the provider actually declares.
 ///
-/// The sidecar cache stores the primary key scheme-qualified
-/// (`cc-session:<id>`); the tool wants the bare id. A box that ships the
-/// prefixed value dispatches a send the provider rejects, so the unwrapping is
-/// part of the wiring contract, not a cosmetic detail.
+/// Both halves were wrong at once and each was fatal on its own: the text rode
+/// under `message` where the tool declares `text`, and the target was the
+/// transcript uuid where the tool resolves only a live `id` / `job_id`. This
+/// asserts the wire names, not a Holon-side convention.
 #[tokio::test]
-async fn session_chat_view_offers_a_compose_box_targeting_the_bare_session_id() {
+async fn live_session_chat_view_composes_with_the_arguments_the_provider_declares() {
     let services = ChatViewServices::new(tokio::runtime::Handle::current());
-    let content = expanded_chat_view(&services, "session");
+    let content = expanded_chat_view(&services, "live_session");
 
     let mut names = Vec::new();
     descendants(&content, &mut names);
     assert!(
         names.iter().any(|n| n == "input_box"),
-        "the expanded session view must carry a compose box; got {names:?}"
+        "the expanded live-session view must carry a compose box; got {names:?}"
     );
 
     let mut found = Vec::new();
@@ -356,16 +379,33 @@ async fn session_chat_view_offers_a_compose_box_targeting_the_bare_session_id() 
     let wiring = send[0];
     assert_eq!(
         wiring.descriptor.entity_name,
-        holon_api::EntityName::from("session"),
+        holon_api::EntityName::from("live_session"),
     );
     assert_eq!(
         wiring.descriptor.bound_params.get("id"),
-        Some(&Value::String(SESSION_ID.to_string())),
-        "the scheme-qualified row id must be unwrapped to the id the provider accepts; bound: {:?}",
+        Some(&Value::String(JOB_ID.to_string())),
+        "the target must be the background job id, not the row key or the transcript uuid; \
+         bound: {:?}",
         wiring.descriptor.bound_params
     );
+    assert_eq!(
+        wiring.modified_param, "text",
+        "the typed message must ride under the argument the tool declares"
+    );
+}
+
+/// A transcript on disk is READ-ONLY: nothing on a `session` row can address a
+/// running process, so the profile must not offer a compose box that could only
+/// dispatch a send the provider refuses.
+#[tokio::test]
+async fn session_chat_view_offers_no_compose_box() {
+    let services = ChatViewServices::new(tokio::runtime::Handle::current());
+    let content = expanded_chat_view(&services, "session");
+
+    let mut names = Vec::new();
+    descendants(&content, &mut names);
     assert!(
-        !wiring.modified_param.is_empty(),
-        "the typed message must ride in a named operation parameter"
+        !names.iter().any(|n| n == "input_box"),
+        "a transcript view must not carry an unaddressable compose box; got {names:?}"
     );
 }

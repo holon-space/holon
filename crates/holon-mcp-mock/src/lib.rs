@@ -157,9 +157,14 @@ fn item(n: usize) -> serde_json::Value {
 
 /// The claude-history `live` listing as of read number `read_count`: the
 /// background session is present only on the first read.
+///
+/// `id` follows the real provider's two shapes rather than an invented one: a
+/// backgrounded session is keyed by its JOB id, an attached one by `pid-<pid>`.
+/// Nothing here is keyed by `session_id` — the transcript uuid is data on the
+/// row, never an address, and `send_message` cannot resolve it.
 fn live_fleet(read_count: u64) -> Vec<serde_json::Value> {
     let foreground = serde_json::json!({
-        "id": "live-fg-1",
+        "id": "pid-4242",
         "kind": "session",
         "session_id": "s-fg-1",
         "project_id": "p-holon",
@@ -181,7 +186,7 @@ fn live_fleet(read_count: u64) -> Vec<serde_json::Value> {
         return vec![foreground];
     }
     let background = serde_json::json!({
-        "id": "live-bg-1",
+        "id": "job-77",
         "kind": "bg",
         "session_id": "s-bg-1",
         "project_id": "p-holon",
@@ -194,12 +199,60 @@ fn live_fleet(read_count: u64) -> Vec<serde_json::Value> {
         "detail": "editing claude-history.yaml",
         "started_at": "2026-08-03T09:10:00Z",
         "updated_at": "2026-08-03T09:30:00Z",
-        "pid": 4243,
+        "pid": serde_json::Value::Null,
         "job_id": "job-77",
         "cli_version": "2.1.0",
         "tokens": 8192,
     });
     vec![background, foreground]
+}
+
+/// The provider's declared `send_message` input schema, argument-for-argument.
+fn send_tool_schema() -> serde_json::Map<String, serde_json::Value> {
+    let serde_json::Value::Object(schema) = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "id": {
+                "type": "string",
+                "description":
+                    "live_session id from claude-history://live (a background short id)",
+            },
+            "text": { "type": "string", "description": "The message to send" },
+        },
+        "required": ["id", "text"],
+    }) else {
+        unreachable!("the literal above is an object")
+    };
+    schema
+}
+
+/// The real `send_message` contract, transcribed from the provider binary
+/// (`claude-code-history-mcp`, `server.rs`): two required string arguments,
+/// `id` and `text`, with `id` resolved against the LIVE listing by `id` or
+/// `job_id` — never by `session_id`.
+///
+/// `Err` carries the provider's own rejection text verbatim, because a mock
+/// that rejects with a message of its own invention lets a caller pass here and
+/// fail against the real binary. Extra arguments are ignored, as the real
+/// server ignores them.
+fn check_send_contract(args: &serde_json::Map<String, serde_json::Value>) -> Result<(), String> {
+    for key in ["id", "text"] {
+        if !args.get(key).is_some_and(serde_json::Value::is_string) {
+            return Err(format!(
+                "cannot answer: {key} is required and must be a string"
+            ));
+        }
+    }
+    let id = args["id"].as_str().expect("checked above");
+    let addressable = live_fleet(1)
+        .iter()
+        .any(|s| s["id"] == id || s["job_id"] == id);
+    if !addressable {
+        return Err(format!(
+            "job {id} is not known to the daemon; it may have exited"
+        ));
+    }
+    Ok(())
 }
 
 /// The claude-history `live/questions` listing: what the fleet is blocked on.
@@ -322,11 +375,19 @@ impl ServerHandler for MockServer {
             s if s.is_write() => (WRITE_TOOL, "Write a mock item"),
             _ => (LIST_TOOL, "List mock items"),
         };
+        // Only the send tool publishes a schema: it is the one the sidecar's
+        // param names must agree with, so the mock declares it exactly as the
+        // real provider does.
+        let input_schema = if name == SEND_TOOL {
+            send_tool_schema()
+        } else {
+            serde_json::Map::new()
+        };
         let tool = Tool {
             name: name.into(),
             title: None,
             description: Some(description.into()),
-            input_schema: Arc::new(serde_json::Map::new()),
+            input_schema: Arc::new(input_schema),
             output_schema: None,
             annotations: None,
             icons: None,
@@ -353,6 +414,12 @@ impl ServerHandler for MockServer {
                         format!("{scenario:?} serves no tool '{}'", request.name),
                         None,
                     ));
+                }
+                let args = request.arguments.as_ref().ok_or_else(|| {
+                    McpError::invalid_params("send_message requires arguments", None)
+                })?;
+                if let Err(rejection) = check_send_contract(args) {
+                    return Ok(CallToolResult::error(vec![Content::text(rejection)]));
                 }
                 let outcome = if scenario == Scenario::LiveFleetSend {
                     "delivered"

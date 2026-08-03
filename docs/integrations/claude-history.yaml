@@ -48,10 +48,42 @@ entities:
   # each sync replaces the cache wholesale. A session the provider stops
   # listing (its job reached a terminal state) therefore DISAPPEARS from
   # `cc_live_session` — a stale row here would name a dead process.
+  # The chat view lives HERE, not on `session`, because `send_message` addresses
+  # a session by its background job id and `job_id` exists only on this entity —
+  # the provider resolves the target by `live_session.id` or `job_id` and never
+  # by the transcript uuid, so a compose box bound to a `session` row can only
+  # dispatch a send the provider rejects.
+  #
+  # `id` is the job id for a backgrounded session and `pid-<pid>` for an attached
+  # one; `job_id` is the one that is always the address, so the action binds it
+  # explicitly. A foreground row has none, and the send fails loudly at the
+  # provider rather than being silently swallowed here.
+  #
+  # The transcript is keyed by the TRANSCRIPT uuid, which this row carries as
+  # `session_id`. `live_query` cannot be handed that column directly — its
+  # `context:` arg is on the global template allowlist, so a `col()` there is
+  # captured unevaluated instead of resolved — so the correlation is done in
+  # SQL, against the local cache table, off the row id `$context_id` already
+  # supplies.
   live_session:
     profile_variants:
       - name: default
-        render: 'row(text(col("name")), spacer(8), text(col("state")))'
+        render: >-
+          expand_toggle(#{
+            header: row(text(col("name")), spacer(8), text(col("state"))),
+            content: column(
+              live_query(#{
+                sql: "SELECT uuid, role, content, timestamp AS ts FROM cc_message_fdw WHERE session_id = (SELECT ls.session_id FROM cc_live_session ls WHERE ls.id = $context_id) AND role IS NOT NULL ORDER BY timestamp",
+                item_template: chat_bubble(#{sender: col("role"), time: col("ts")}, text(col("content")))
+              }),
+              input_box(#{
+                placeholder: "Message this session",
+                submit_label: "Send",
+                text_param: "text",
+                action: send_message(#{id: col("job_id")})
+              })
+            )
+          })
     schema:
       - name: id
         sql_type: TEXT
@@ -162,24 +194,19 @@ entities:
     sync:
       list_resource: "claude-history://live/questions"
 
+  # Transcripts on disk: READ-ONLY. A session here may have exited months ago,
+  # and nothing on the row can address a running process, so this profile offers
+  # no compose box — replying is `live_session`'s affordance.
   session:
     profile_variants:
       - name: default
         render: >-
           expand_toggle(#{
             header: row(text(col("first_prompt")), spacer(8), text(col("message_count"))),
-            content: column(
-              live_query(#{
-                sql: "SELECT uuid, role, content, timestamp AS ts FROM cc_message_fdw WHERE session_id = $context_id AND role IS NOT NULL ORDER BY timestamp",
-                item_template: chat_bubble(#{sender: col("role"), time: col("ts")}, text(col("content")))
-              }),
-              input_box(#{
-                placeholder: "Message this session",
-                submit_label: "Send",
-                text_param: "message",
-                action: send_message()
-              })
-            )
+            content: live_query(#{
+              sql: "SELECT uuid, role, content, timestamp AS ts FROM cc_message_fdw WHERE session_id = $context_id AND role IS NOT NULL ORDER BY timestamp",
+              item_template: chat_bubble(#{sender: col("role"), time: col("ts")}, text(col("content")))
+            })
           })
     schema:
       - name: id
@@ -508,14 +535,15 @@ entities:
 # safe designation: every send is queued for explicit human approval and the
 # store's compare-and-take makes one intent fire at most once.
 #
-# No `precondition`: only backgrounded sessions are reachable, and that is a
-# property of `live_session` (`job_id`), not of the `session` entity this tool
-# targets — a Rhai check over `session`'s columns could not express it honestly.
+# The tool targets `live_session` because that is the only entity carrying the
+# address the provider accepts: it resolves `id` against a live listing by
+# `live_session.id` or `job_id`, and never by the transcript uuid a `session`
+# row is keyed on.
 writes: enabled
 once_only: confirm_manually
 tools:
   send_message:
-    entity: session
+    entity: live_session
     display_name: Send message
     effect: once_only
     # This provider acks a send it CANNOT prove landed: `unconfirmed` is a
