@@ -1216,6 +1216,17 @@ impl ReferenceState {
     ///
     /// Used by the "edit any visible block" transitions — JoinBlock today;
     /// SplitBlock and friends if/when the focus-only asymmetry is dropped.
+    ///
+    /// VISIBILITY is decided by the SAME traversal the main-panel query applies
+    /// (`descendant_within_stopping_at_pages`, the mirror of the compiled
+    /// recursive CTE), not by a bare parent-chain walk. The panel stops
+    /// descending at any NON-ROOT page and truncates at nesting depth
+    /// [`MAIN_PANEL_MAX_DEPTH`], so a plain ancestor check reports blocks the
+    /// panel legitimately does not render (`query::MAIN_PANEL_MAX_DEPTH`).
+    /// That mismatch had two costs: the
+    /// generator offered click targets no user could click (the driver then
+    /// spins its poll deadline and dispatches nothing), and
+    /// `inv-main-panel-rows-match-focus` demanded rows prod is right to omit.
     pub fn main_editable_descendants(&self) -> Vec<EntityUri> {
         let focus_roots = self.rendered_focus_root(Region::Main);
         let no_update = self.no_content_update_set();
@@ -1230,10 +1241,32 @@ impl ReferenceState {
                     && !self.domain.layout_blocks.contains(id)
                     && !peer_modified.contains(id.id())
                     && !no_update.contains(id)
-                    && self.is_descendant_of_any(id, &focus_roots)
+                    && self.main_panel_renders_within(id, &focus_roots)
             })
             .map(|(id, _)| id.clone())
             .collect()
+    }
+
+    /// Whether the main panel renders a row for `block_id` — the SAME traversal
+    /// the compiled panel query applies. See
+    /// [`RefBlockTree::main_panel_renders`] for why a bare ancestor walk is
+    /// not a visibility predicate.
+    pub fn main_panel_renders(&self, block_id: &EntityUri) -> bool {
+        let focus_roots = self.rendered_focus_root(Region::Main);
+        self.main_panel_renders_within(block_id, &focus_roots)
+    }
+
+    fn main_panel_renders_within(
+        &self,
+        block_id: &EntityUri,
+        focus_roots: &std::collections::BTreeSet<EntityUri>,
+    ) -> bool {
+        crate::pbt::query::descendant_within_stopping_at_pages(
+            &self.domain.block_state.blocks,
+            block_id,
+            focus_roots,
+            crate::pbt::query::MAIN_PANEL_MAX_DEPTH,
+        )
     }
 
     /// Whether a click on `uri` in `region` is predicted to dispatch
@@ -2340,12 +2373,13 @@ impl ReferenceState {
     /// `next_doc_id`, which already lives outside the snapshotted
     /// `block_state` for the same reason.
     pub fn pop_undo_to_redo(&mut self) {
-        self.action.redo_stack.push(self.domain.block_state.clone());
+        let pre_restore = self.domain.block_state.clone();
+        self.action.redo_stack.push(pre_restore.clone());
         let id_hwm = self.domain.block_state.next_id;
         let mut restored = self.action.undo_stack.pop().expect("undo stack is empty");
         restored.next_id = restored.next_id.max(id_hwm);
         self.domain.block_state = restored;
-        self.rematerialize_file_ingested_docs();
+        self.rematerialize_file_ingested(&pre_restore);
         self.recompute_derived();
     }
 
@@ -2353,12 +2387,19 @@ impl ReferenceState {
     /// Preserves the monotonic id-mint high-water mark — see
     /// [`Self::pop_undo_to_redo`].
     pub fn pop_redo_to_undo(&mut self) {
-        self.action.undo_stack.push(self.domain.block_state.clone());
+        let pre_restore = self.domain.block_state.clone();
+        self.action.undo_stack.push(pre_restore.clone());
         let id_hwm = self.domain.block_state.next_id;
         let mut restored = self.action.redo_stack.pop().expect("redo stack is empty");
         restored.next_id = restored.next_id.max(id_hwm);
         self.domain.block_state = restored;
-        self.rematerialize_file_ingested_docs();
+        // REDO-direction hazard: `pre_restore` still holds a block this redo is
+        // supposed to re-delete, so re-materialising blindly from it would
+        // RESURRECT a user-deleted block (spurious `only_in_ref`). What keeps it
+        // sound is that a removing mutation un-marks the id
+        // (`apply_content_mutation`), so a user-deleted block is no longer
+        // file-backed and never enters the loop.
+        self.rematerialize_file_ingested(&pre_restore);
         self.recompute_derived();
     }
 
@@ -2373,10 +2414,42 @@ impl ReferenceState {
     /// `inv-blocks-match-ref` spurious). `files.documents` lives OUTSIDE the
     /// snapshot (like `next_doc_id`, see `pop_undo_to_redo`), so it is the
     /// authority for which docs exist; re-materialise every doc page the
-    /// restore dropped, mirroring prod. Only the file-ingested ROOT page is
-    /// re-added (title = file stem, `no_parent`, `Page`) — exactly
-    /// `insert_document`'s block; any USER-origin children remain undone.
-    fn rematerialize_file_ingested_docs(&mut self) {
+    /// restore dropped, mirroring prod.
+    ///
+    /// The same argument covers the file's CONTENT blocks, not just its root:
+    /// what the watcher parses out of an org file is INGEST-origin too, so
+    /// `WriteOrgFile`/`BulkExternalAdd` blocks also survive prod's undo. They
+    /// are tracked in `files.ingest_origin_blocks` (also outside the
+    /// snapshot) and restored VERBATIM from `pre_restore` — the state just
+    /// before this undo — because that is exactly what prod's undo leaves
+    /// untouched. A block a user genuinely deleted is absent from
+    /// `pre_restore` and correctly stays gone, and one edited by a later
+    /// user op was re-snapshotted by that op, so it is in `restored`
+    /// already and never reaches this path.
+    ///
+    /// A doc root that is in `files.documents` but in NEITHER state is rebuilt
+    /// from the filename (title = file stem, `Page`) — the `insert_document`
+    /// shape, for docs whose block was dropped before this undo.
+    fn rematerialize_file_ingested(&mut self, pre_restore: &BlockState) {
+        for id in &self.files.ingest_origin_blocks {
+            if self.domain.block_state.blocks.contains_key(id) {
+                continue;
+            }
+            let Some(block) = pre_restore.blocks.get(id) else {
+                continue;
+            };
+            self.domain
+                .block_state
+                .blocks
+                .insert(id.clone(), block.clone());
+            if let Some(doc) = pre_restore.block_documents.get(id) {
+                self.domain
+                    .block_state
+                    .block_documents
+                    .insert(id.clone(), doc.clone());
+            }
+        }
+
         let docs: Vec<(EntityUri, String)> = self
             .files
             .documents
@@ -2723,6 +2796,138 @@ impl holon_frontend::reactive::BuilderServices for ReferenceState {
         >,
     > {
         Box::pin(async { anyhow::bail!("search_link_candidates not supported on ReferenceState") })
+    }
+}
+
+#[cfg(test)]
+mod main_panel_visibility_tests {
+    use holon_orgmode::models::OrgBlockExt;
+
+    use super::*;
+    use crate::pbt::composed::wide_e2e::wide_e2e_ref;
+
+    /// F5 `state-toggle-row-absent`: the main panel stops descending at a
+    /// NON-ROOT page, so a block behind one renders no row and is neither a
+    /// legal click target nor a row any invariant may demand. A bare ancestor
+    /// walk says the opposite — the two must not be confused.
+    ///
+    /// Locked as a unit test, not a keystone JSONL case: the fix is a
+    /// PRECONDITION / candidate-set narrowing, and the hand-authored runner
+    /// replays its sequence verbatim without evaluating preconditions, so a
+    /// composed case naming the unrenderable target reproduces the signature
+    /// but can never go green. Disclosed deviation, same shape as the
+    /// `org-render-echo-loop` lock.
+    #[test]
+    fn main_panel_visibility_stops_at_a_non_root_page() {
+        let mut state = wide_e2e_ref();
+        let roots = state.rendered_focus_root(Region::Main);
+        let root = roots
+            .iter()
+            .next()
+            .cloned()
+            .expect("the default layout gives Main a focus root");
+
+        let page = EntityUri::block("vis-mid-page");
+        let leaf = EntityUri::block("vis-leaf");
+        let mut page_block = Block::new_text(page.clone(), root.clone(), "a nested page");
+        page_block.set_page(true);
+        state
+            .domain
+            .block_state
+            .blocks
+            .insert(page.clone(), page_block);
+        state.domain.block_state.blocks.insert(
+            leaf.clone(),
+            Block::new_text(leaf.clone(), page.clone(), "leaf"),
+        );
+
+        assert!(
+            state.is_descendant_of_any(&leaf, &roots),
+            "precondition of the test: the bare ancestor walk DOES reach the leaf"
+        );
+        assert!(
+            !state.main_panel_renders(&leaf),
+            "a block behind a non-root page renders no main-panel row, so it must not be \
+             reported as visible"
+        );
+        assert!(
+            !state.main_editable_descendants().contains(&leaf),
+            "the candidate set must not offer a click target the panel does not paint"
+        );
+    }
+}
+
+#[cfg(test)]
+mod ingest_origin_undo_tests {
+    use holon_pbt_core::capabilities::RefApplyMutationMut;
+    use holon_pbt_core::capabilities::RefDocumentsMut;
+    use holon_pbt_core::types::Mutation;
+
+    use super::*;
+    use crate::pbt::composed::wide_e2e::wide_e2e_ref;
+
+    fn ingest_one_block(state: &mut ReferenceState, id: &EntityUri) {
+        let placeholder =
+            EntityUri::block(crate::pbt::transitions::write_org_file::GEN_PLACEHOLDER);
+        let block = Block::new_text(id.clone(), placeholder, "external alpha");
+        state.seed_org_file("ingest_doc.org", std::slice::from_ref(&block), None);
+    }
+
+    /// The F2 fix itself, at the ref model alone: a file-ingested block is
+    /// INGEST-origin, so an undo that restores a pre-file snapshot must NOT
+    /// drop it — prod's undo stack never held it.
+    #[test]
+    fn undo_keeps_file_ingested_block_the_snapshot_predates() {
+        let mut state = wide_e2e_ref();
+        let ext = EntityUri::block("ext-a");
+
+        // A User-origin op snapshots the pre-file state, THEN the file arrives.
+        state.push_undo_snapshot();
+        ingest_one_block(&mut state, &ext);
+        assert!(state.domain.block_state.blocks.contains_key(&ext));
+
+        state.pop_undo_to_redo();
+
+        assert!(
+            state.domain.block_state.blocks.contains_key(&ext),
+            "undo over-reverted a file-ingested block: prod's undo stack holds only \
+             User-origin ops, so the ingest survives `engine.undo()`"
+        );
+    }
+
+    /// The REDO-direction twin, and the reason a removing mutation must un-mark
+    /// its ids. Un-constructable as a composed keystone case: deleting a block
+    /// that lives on disk trips the ADR-0025 write-back removal guard
+    /// (`quarantine_writeback`,
+    /// `crates/holon-filesystem/src/file_sync_controller.rs`),
+    /// whose `tracing::error!` reds `inv-no-errors` first — the case would go
+    /// red for the quarantine's reason, not this one. So the lock is here.
+    #[test]
+    fn redo_does_not_resurrect_a_user_deleted_file_ingested_block() {
+        let mut state = wide_e2e_ref();
+        let ext = EntityUri::block("ext-a");
+
+        ingest_one_block(&mut state, &ext);
+        assert!(state.domain.block_state.blocks.contains_key(&ext));
+
+        // A User-origin delete of that ingested block: snapshot, then remove.
+        state.push_undo_snapshot();
+        state.apply_content_mutation(&Mutation::Delete { id: ext.clone() }, false);
+        assert!(!state.domain.block_state.blocks.contains_key(&ext));
+
+        state.pop_undo_to_redo();
+        assert!(
+            state.domain.block_state.blocks.contains_key(&ext),
+            "undo of the delete must bring the block back"
+        );
+
+        state.pop_redo_to_undo();
+        assert!(
+            !state.domain.block_state.blocks.contains_key(&ext),
+            "redo RESURRECTED a user-deleted file-ingested block — `rematerialize_file_ingested` \
+             re-added it from the pre-redo state because the delete never un-marked it as \
+             file-backed"
+        );
     }
 }
 

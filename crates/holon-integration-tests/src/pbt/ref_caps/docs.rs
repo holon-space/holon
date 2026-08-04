@@ -59,6 +59,7 @@ impl RefDocumentsMut for ReferenceState {
         self.files
             .documents
             .insert(doc_uri.clone(), file_name.to_string());
+        self.files.ingest_origin_blocks.insert(doc_uri.clone());
 
         let doc_name = std::path::Path::new(file_name)
             .file_stem()
@@ -134,6 +135,9 @@ impl RefDocumentsMut for ReferenceState {
 
         for id in &removed {
             self.clear_focus_if_deleted(id);
+            // The file is gone, so nothing here is file-backed any more — an undo
+            // must not resurrect it (`rematerialize_file_ingested`).
+            self.files.ingest_origin_blocks.remove(id);
         }
     }
 
@@ -205,7 +209,15 @@ impl RefDocumentsMut for ReferenceState {
             self.domain.block_state.block_documents.remove(id);
             self.domain.layout_blocks.remove(id);
             self.domain.render_expressions.remove(id);
+            // A re-write drops the previous parse; only the ids this pass
+            // re-inserts below are still file-backed. The doc root is re-added
+            // right after, so it stays in the set.
+            self.files.ingest_origin_blocks.remove(id);
         }
+        // The page block and every block this pass parses out of the file are
+        // INGEST-origin: prod never journals them for undo, so they must survive
+        // an oracle snapshot restore (see `rematerialize_file_ingested`).
+        self.files.ingest_origin_blocks.insert(doc_uri.clone());
 
         // Add the page block (tags ⊇ ["Page"]) for this org file.
         let mut doc_block =
@@ -286,6 +298,7 @@ impl RefDocumentsMut for ReferenceState {
                 .block_state
                 .block_documents
                 .insert(block_uri.clone(), doc_uri.clone());
+            self.files.ingest_origin_blocks.insert(block_uri.clone());
             self.domain.block_state.blocks.insert(block_uri, block);
         }
 

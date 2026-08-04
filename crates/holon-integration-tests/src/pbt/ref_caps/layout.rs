@@ -279,7 +279,11 @@ impl RefLayoutMutate for ReferenceState {
             self.domain
                 .block_state
                 .block_documents
-                .insert(id, doc_uri.clone());
+                .insert(id.clone(), doc_uri.clone());
+            // An external bulk add lands as an org-file rewrite the watcher
+            // re-ingests — INGEST-origin, so it survives prod's undo and must
+            // survive the oracle's snapshot restore too.
+            self.files.ingest_origin_blocks.insert(id);
         }
         let mut all_blocks: Vec<Block> = self.domain.block_state.blocks.values().cloned().collect();
         crate::org_utils::assign_reference_sequences_canonical(&mut all_blocks);
@@ -295,6 +299,20 @@ impl RefLayoutMutate for ReferenceState {
 
     fn create_block_under_with_id(&mut self, parent: &EntityUri, content: &str, id: EntityUri) {
         ReferenceState::create_block_under_with_id(self, parent, content, id);
+    }
+
+    fn seed_template_definition(&mut self, parent: &EntityUri, content: &str, id: EntityUri) {
+        ReferenceState::create_block_under_with_id(self, parent, content, id.clone());
+        // Re-classify as SEED. `insert_block_under_no_snapshot` derives the
+        // document from the parent, which for a definition CHILD is the
+        // definition root — a real document, so the child would start being
+        // compared as user content. `seed_block_ids` keys on a `no_parent`
+        // document, so writing the sentinel here restores the exclusion the
+        // definition blocks have always had, while `parent_id` stays truthful.
+        self.domain
+            .block_state
+            .block_documents
+            .insert(id, EntityUri::no_parent());
     }
 
     fn apply_instantiate_template(

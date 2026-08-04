@@ -115,6 +115,13 @@ impl RefBlockTree for ReferenceState {
         ReferenceState::is_descendant_of_any(self, &uri, &ancestor_uris)
     }
 
+    fn main_panel_renders(&self, id: &EntityUri) -> bool {
+        let Some(uri) = parse_id(id) else {
+            return false;
+        };
+        ReferenceState::main_panel_renders(self, &uri)
+    }
+
     fn is_layout_block(&self, id: &EntityUri) -> bool {
         let Some(uri) = parse_id(id) else {
             return false;
@@ -320,7 +327,17 @@ impl RefApplyMutationMut for ReferenceState {
         let mut blocks: Vec<Block> = self.domain.block_state.blocks.values().cloned().collect();
         mutation.apply_to(&mut blocks);
         crate::org_utils::assign_reference_sequences_canonical(&mut blocks);
-        self.domain.block_state.blocks = blocks.into_iter().map(|b| (b.id.clone(), b)).collect();
+        let surviving: std::collections::BTreeMap<EntityUri, Block> =
+            blocks.into_iter().map(|b| (b.id.clone(), b)).collect();
+        // A mutation that REMOVES a block (`Delete`, which cascades over
+        // descendants) ends that block's file-backing: prod's redo must leave it
+        // dead, so `rematerialize_file_ingested` must never resurrect it from the
+        // pre-undo state. Keyed on the before/after difference rather than on
+        // `Mutation::Delete`'s own id so the cascade is covered too.
+        self.files
+            .ingest_origin_blocks
+            .retain(|id| surviving.contains_key(id));
+        self.domain.block_state.blocks = surviving;
 
         // External (org-file) mutation: the created/updated block is written to
         // disk and RE-INGESTED, so a trailing `:tag:` group on its headline (e.g.

@@ -45,6 +45,15 @@ pub enum QueryTable {
     Blocks,
 }
 
+/// Nesting depth at which the compiled main-panel query truncates its
+/// recursion (`WHERE _vl2.depth < 20 … AND _vl2.depth <= 20`, pinned by
+/// `crates/holon/tests/turso_storage_repros/tabs_main_panel_delivery.rs`).
+/// A block deeper than this renders NO panel row, so it is neither a legal
+/// click target nor a row any invariant may demand. Single-sourced here
+/// because both the reference query evaluator and the reference's
+/// `main_editable_descendants` visibility predicate must agree with it.
+pub const MAIN_PANEL_MAX_DEPTH: u32 = 20;
+
 /// The traversal/source form a query reads from — the dimension that
 /// distinguishes a flat watched query (`AllBlocks`) from the LAYOUT queries
 /// that drive what the main panel renders.
@@ -67,6 +76,7 @@ pub enum QuerySource {
     /// GQL `MATCH (root:block)<-[:CHILD_OF*min..max]-(d:block) RETURN d` with
     /// an unbound root. Navigation-blind. `max_depth == 0` means unbounded.
     DescendantsOfAny { min_depth: u32, max_depth: u32 },
+
     /// Navigation-aware: descendants (including self, depth `0..=max_depth`) of
     /// the focus-root(s) for `region`. The default layout's panel form
     /// (`MATCH (fr:focus_root),(root:block)<-[:CHILD_OF*0..max]-(d:block)
@@ -119,7 +129,7 @@ impl QuerySource {
                 } else if q.starts_with("from focused_children") {
                     QuerySource::FocusRootDescendants {
                         region: "main".to_string(),
-                        max_depth: 20,
+                        max_depth: MAIN_PANEL_MAX_DEPTH,
                         stop_at_pages: false,
                     }
                 } else {
@@ -130,7 +140,7 @@ impl QuerySource {
                 if q.contains("focus_root") {
                     QuerySource::FocusRootDescendants {
                         region: gql_focus_region(q),
-                        max_depth: 20,
+                        max_depth: MAIN_PANEL_MAX_DEPTH,
                         stop_at_pages: false,
                     }
                 } else if let Some((min_depth, max_depth)) = gql_childof_star_bounds(q) {
@@ -161,7 +171,7 @@ impl QuerySource {
                     };
                     QuerySource::FocusRootDescendants {
                         region: region.as_str().to_string(),
-                        max_depth: 20,
+                        max_depth: MAIN_PANEL_MAX_DEPTH,
                         stop_at_pages: true,
                     }
                 } else if q.contains("parent_id") && q.contains("content_type") {
@@ -806,7 +816,7 @@ fn descendant_within(
 /// `LEFT JOIN block_tags ... WHERE fd._depth = 0 OR bt.block_id IS NULL`
 /// guard, which descends into children of the root (depth 0) unconditionally
 /// but into children of non-root nodes only if those nodes are not pages.
-fn descendant_within_stopping_at_pages(
+pub(crate) fn descendant_within_stopping_at_pages(
     blocks: &BTreeMap<EntityUri, Block>,
     id: &EntityUri,
     roots: &BTreeSet<EntityUri>,
@@ -821,15 +831,23 @@ fn descendant_within_stopping_at_pages(
             return false;
         };
         let parent = block.parent_id.clone();
+        // Descent out of the ROOT is unconditional (`fd._depth = 0`).
         if roots.contains(&parent) {
             return true;
         }
-        // If the current node is a non-root page, the SQL query stops
-        // descending here — so `id` (a descendant of this page) is excluded.
-        if block.is_page() {
+        if parent.is_no_parent() || parent.is_sentinel() {
             return false;
         }
-        if parent.is_no_parent() || parent.is_sentinel() {
+        // The guard is on the node being descended FROM — the PARENT — not on
+        // `current`. `current` being a page never excludes `current` itself; it
+        // excludes its children. Testing `current` instead skipped the stop
+        // entirely whenever the page was a direct child of the root (the walk
+        // reached the root from the page and returned early), which is exactly
+        // the shape `BlockToPage` creates.
+        let Some(parent_block) = blocks.get(&parent) else {
+            return false;
+        };
+        if parent_block.is_page() {
             return false;
         }
         current = parent;
