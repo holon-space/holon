@@ -4505,8 +4505,9 @@ impl FileSyncController {
         // renders NON-empty — its identity file exists.
         let children = self.block_reader.get_blocks(page_id).await?;
         let rendered = self
-            .format
-            .render_document(&page_block, &children, &path, &page_block.id);
+            .renderer
+            .render_document_block(&page_block, &children, &path)
+            .await?;
         if rendered.trim().is_empty() {
             return Ok(());
         }
