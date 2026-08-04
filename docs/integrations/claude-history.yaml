@@ -4,6 +4,26 @@ transport:
     env:
       CLAUDE_DATA_DIR: "/Users/martin/.claude"
 entity_prefix: "cc_"
+
+# Two rules every `live_query` here obeys, both load-bearing for the chat view:
+#
+#   1. Read the CACHE table (`cc_message`), never the `_fdw` one.
+#      `MatviewManager::prime_fdw_caches` keys on the cache name: it runs the
+#      watch SQL against `{table}_fdw` first to force the fetch + write_through,
+#      then builds the matview on the btree table. Naming `_fdw` directly
+#      matches nothing, so the cache stays empty AND the matview sits on a
+#      foreign table, which is a one-shot snapshot — a foreign source emits no
+#      deltas, so the IVM circuit never streams. See
+#      docs/Plans/turso-fdw-ivm-handoff-2026-08-04.md.
+#   2. Join child tables on `$context_local_id`, not `$context_id`. The mirror
+#      stores each entity's OWN key scheme-qualified (`cc-session:<uuid>`) and
+#      every other column verbatim, so `cc_message.session_id` holds the raw id.
+#      `$context_local_id` is `$context_id` with the scheme stripped, bound off
+#      the parsed EntityUri in BackendEngine::bind_context_params.
+#      This covers CONTEXT-param joins only. The `enumerate_from.where` clauses
+#      below still strip with `substr(cc_*.id, N)` and must: they are evaluated
+#      per candidate row of a table scan, where the schemed id is a COLUMN and
+#      no query context exists for a param to come from.
 entities:
   # Multi-project root. `claude-history://projects` lists every Claude Code
   # project the local `~/.claude` knows about. This entity is SYNC-only (a
@@ -73,7 +93,7 @@ entities:
             header: row(text(col("name")), spacer(8), text(col("state"))),
             content: column(
               live_query(#{
-                sql: "SELECT uuid, role, content, timestamp AS ts FROM cc_message_fdw WHERE session_id = (SELECT ls.session_id FROM cc_live_session ls WHERE ls.id = $context_id) AND role IS NOT NULL ORDER BY timestamp",
+                sql: "SELECT uuid, role, content, timestamp AS ts FROM cc_message WHERE session_id = (SELECT ls.session_id FROM cc_live_session ls WHERE ls.id = $context_id) AND role IS NOT NULL ORDER BY timestamp",
                 item_template: chat_bubble(#{sender: col("role"), time: col("ts")}, text(col("content")))
               }),
               input_box(#{
@@ -204,7 +224,7 @@ entities:
           expand_toggle(#{
             header: row(text(col("first_prompt")), spacer(8), text(col("message_count"))),
             content: live_query(#{
-              sql: "SELECT uuid, role, content, timestamp AS ts FROM cc_message_fdw WHERE session_id = $context_id AND role IS NOT NULL ORDER BY timestamp",
+              sql: "SELECT uuid, role, content, timestamp AS ts FROM cc_message WHERE session_id = $context_local_id AND role IS NOT NULL ORDER BY timestamp",
               item_template: chat_bubble(#{sender: col("role"), time: col("ts")}, text(col("content")))
             })
           })
@@ -334,7 +354,7 @@ entities:
           expand_toggle(#{
             header: row(text(col("agent_type")), spacer(8), text(col("description"))),
             content: live_query(#{
-              sql: "SELECT uuid, role, content, timestamp AS ts FROM cc_agent_message_fdw WHERE agent_id = $context_id AND role IS NOT NULL ORDER BY timestamp",
+              sql: "SELECT uuid, role, content, timestamp AS ts FROM cc_agent_message WHERE agent_id = $context_local_id AND role IS NOT NULL ORDER BY timestamp",
               item_template: chat_bubble(#{sender: col("role"), time: col("ts")}, text(col("content")))
             })
           })
@@ -388,8 +408,9 @@ entities:
 
   message:
     # ENABLED: unpinned fan-out over locally cached sessions. A pinned query
-    # (`SELECT ... FROM cc_message_fdw WHERE session_id = X`, e.g. the session
-    # render's live_query) still costs exactly one resource read. An unpinned
+    # (`SELECT ... FROM cc_message_fdw WHERE session_id = X`, which is what
+    # `prime_fdw_caches` issues on the session render's behalf) still costs
+    # exactly one resource read. An unpinned
     # query enumerates the `cc_session` cache table and fans out one read per
     # matching session — warming `cc_message` (and thus the session_status
     # views) without Martin opening each session by hand.

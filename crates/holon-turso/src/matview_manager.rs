@@ -670,8 +670,14 @@ impl MatviewManager {
         self.db_handle
             .execute_ddl_with_deps(&create_view_sql, provides, requires, priority::DDL_MATVIEW)
             .await
-            .with_context(|| {
-                format!("Failed to create materialized view {view_name}: {create_view_sql}")
+            // The inner error is spelled into the message, not only chained:
+            // every consumer of this Err logs it with `{}`, so a `.context()`
+            // source left the actual Turso/DDL-queue failure unrecorded and the
+            // ledger blamed the statement instead of the cause.
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to create materialized view {view_name}: {create_view_sql} — cause: {e}"
+                )
             })?;
 
         self.ddl_creates.fetch_add(1, Ordering::Relaxed);
