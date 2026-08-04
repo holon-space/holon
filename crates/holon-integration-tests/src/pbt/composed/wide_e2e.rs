@@ -1558,8 +1558,8 @@ impl ReferenceStateMachine for WideE2EMachine {
         // (`ApplyMutation` External / `BulkExternalAdd`). NOT actually rare by
         // default: the validity filter (`Wiring::validate` rejects
         // empty-storage and ActionEngine-without-Turso draws) reweights the raw
-        // 0.15 Turso inclusion to ≈35% of VALID draws, so a 16-case run misses
-        // Turso entirely with probability ≈0.1%. `HOLON_PBT_PIN_WIRING="
+        // 0.20 Turso inclusion to ≈0.39 of VALID draws, so a 16-case run misses
+        // Turso entirely with probability well under 0.1%. `HOLON_PBT_PIN_WIRING="
         // storage;sync;actors"` pins every draw to ONE exact
         // manifest (fail-loud on a typo or invalid manifest) — the external-supply seam
         // for bottom-up ladder runs and subset-wiring repros. Mutually exclusive with
@@ -1953,8 +1953,8 @@ mod tests {
             ..Config::default()
         });
         let mut seen: BTreeSet<WiringComponent> = BTreeSet::new();
-        // 2048 draws: at Turso's 0.15 inclusion prob the rarest arm still lands
-        // ~300× — the floor is deterministic, not flaky.
+        // 2048 draws: at Turso's 0.20 inclusion prob the rarest arm still lands
+        // hundreds of times — the floor is deterministic, not flaky.
         for _ in 0..2048 {
             if let Ok(tree) = strategy.new_tree(&mut runner) {
                 seen.extend(wiring_components(&tree.current()));
@@ -2017,6 +2017,63 @@ mod tests {
                  seed landed); ran: {ran:?}"
             );
         });
+    }
+
+    /// **Feed-driven write-back reachability** — the direct negation of the
+    /// holder design's §9.5 finding, which observed a keystone draw with ZERO
+    /// `[OrgMode]` / `FileSyncController` activity because `storage={Loro,
+    /// Org}` carries no `BlockFeed`.
+    ///
+    /// `org.on_block_feed` is entered ONLY from the `OrgRerender` drain, and
+    /// that drain's producer is spawned only inside `if let Some(feed) =
+    /// block_feed` (`holon-orgmode/src/di.rs`). So a non-zero count is
+    /// proof that a Turso-inclusive draw registers the `BlockFeed`, spawns
+    /// the write-back resolver, and actually delivers through it — the
+    /// layer Inc 2 makes the ONLY write-back path.
+    #[test]
+    fn turso_draw_reaches_the_feed_driven_writeback_path() {
+        // Touch the collector BEFORE the SUT boots so the subscriber is installed
+        // and the OTel layer records the span (an untouched collector captures
+        // nothing).
+        let collector = crate::test_tracing::SpanCollector::global();
+        let _scope = crate::test_tracing::ensure_test_scope();
+
+        let wiring = Wiring::custom(
+            vec![
+                StorageAdapter::Loro,
+                StorageAdapter::Org,
+                StorageAdapter::Turso,
+            ],
+            vec![],
+            vec![],
+        );
+        let ref_state = wide_e2e_ref_for(&wiring);
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("build multi-thread runtime");
+        rt.block_on(async {
+            let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+            let (_caps, _handle, _scaffold) = boot_and_seed_wide(&resolver, &ref_state).await;
+            // The resolver task drains asynchronously; poll rather than sleep a
+            // fixed amount so a fast machine doesn't pay for a slow one's margin.
+            for _ in 0..100 {
+                if collector.count_spans("org.on_block_feed") > 0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        });
+        let seen = collector.count_spans("org.on_block_feed");
+        eprintln!("[writeback-reachability] org.on_block_feed spans: {seen}");
+        assert!(
+            seen > 0,
+            "a Turso-inclusive draw must reach the feed-driven org write-back path, but \
+             `org.on_block_feed` never ran — either no `BlockFeed` was registered (no \
+             EventInfraModule / block matview watch) or the resolver task never delivered. This \
+             is the §9.5 ENVIRONMENT gap: with no feed, the group_by/home_by resolver and the \
+             FileSyncController delta drain are inert and the keystone tests write-back NOWHERE"
+        );
     }
 
     /// The SUT-side parameterization seam's behaviour-preservation anchor: the

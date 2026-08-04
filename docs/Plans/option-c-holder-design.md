@@ -1050,6 +1050,20 @@ to differ from).
    the ONLY write-back path — a keystone that never draws Turso would then
    test write-back nowhere. The wiring draw must include the feed-driven path
    before the hand-rolled one is deleted.
+   **ADDRESSED 2026-08-04.** The gate is TURSO ALONE, not Turso+Org: the
+   composed builder (`pbt/composed/builder.rs`) branches only on
+   `has_turso` / `has_loro` / `has_frontend` — there is no `has_org`, so a drawn
+   `StorageAdapter::Org` changes nothing the SUT boots (it only flips the
+   `org-writeback=on` text in `authority_routing_disclosure`). Measured share of
+   accepted draws carrying Turso was **0.312**; `QUERY_ADAPTER_INCLUSION_PROB`
+   0.15 → 0.20 lifts it to **0.388**, above the new
+   `MIN_QUERY_ADAPTER_DRAW_SHARE` = 1/3 floor that
+   `query_adapter_draw_share_meets_writeback_floor` now enforces. Reachability
+   is proven, not assumed: `turso_draw_reaches_the_feed_driven_writeback_path`
+   asserts `org.on_block_feed` spans fire on a Turso draw (observed 54), and a
+   Turso-drawing keystone case engages `inv-blocks-match-ref/org` on every tick
+   (19/19, 13/13, 28/28, 35/35 across the 2026-08-04 runs) while Turso-free
+   cases never select it at all.
 8. **BlockDelta test-callsite sweep** (§7): mechanical `mech-executor` job,
    listed test files.
 
