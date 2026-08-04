@@ -201,6 +201,12 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
         inner
     };
 
+    // The editor spans its row. Under the tracked-widget contract (see
+    // `crate::geometry`) that is the widget's own job, not the tracker's —
+    // `flex_col` puts width on the cross axis so the child stretches to the
+    // full row, matching `rendered_text`'s `w_full` read-mode counterpart.
+    let element = div().w_full().flex_col().child(element).into_any_element();
+
     crate::geometry::tracked(
         el_id,
         element,

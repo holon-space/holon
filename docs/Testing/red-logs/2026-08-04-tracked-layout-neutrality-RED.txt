@@ -1,0 +1,25 @@
+
+  --> crates/holon-integration-tests/src/pbt/reference_state.rs:24:5
+
+  --> crates/holon-integration-tests/src/pbt/reference_state.rs:39:5
+
+
+  --> crates/holon-integration-tests/src/pbt/composed/subsystem_seed.rs:81:15
+
+
+
+
+   Compiling holon-gpui v0.1.0 (/Users/martin/Workspaces/pkm/holon/.claude/worktrees/agent-a57bdf66fdbca4c4a/.claude/worktrees/agent-ae51184dc7f06a5ce/frontends/gpui)
+
+  = note: `#[warn(linker_messages)]` on by default
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 21m 50s
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/tracked_layout_neutrality.rs (target/debug/deps/tracked_layout_neutrality-44cb7e6972c8907a)
+proptest: FileFailurePersistence::SourceParallel set, but no source file known
+proptest: FileFailurePersistence::SourceParallel set, but no source file known
+
+thread 'tracked_wrapper_contributes_no_layout' (300372694) panicked at frontends/gpui/tests/tracked_layout_neutrality.rs:261:10:
+tracked() must be layout-neutral: Fail(Reason("[tracked-layout-neutral/interaction-region-content-sized] w=400 icon=8 content=\"A\": selectable is 199.0px wide but the bullet it wraps is only 12.0px — the wrapper contributed width of its own\n  icon#0                   @ (   0.0,   0.0)   12.0×8.0   \n  selectable#1             @ (   0.0,   0.0)  199.0×8.0   \n  rendered_text#2          @ ( 201.0,   0.0)  199.0×36.0  \n  row#3                    @ (   0.0,   0.0)  400.0×36.0  \n  selectable-block:row-under-test @ (   0.0,   0.0)  199.0×8.0   \n  rendered-text-block:row-under-test-content @ ( 201.0,   0.0)  199.0×36.0  \n"), (400.0, 8.0, "A"))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: test failed, to rerun pass `-p holon-gpui --test tracked_layout_neutrality`

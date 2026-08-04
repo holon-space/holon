@@ -30,13 +30,8 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
 
     let entity = get_or_create_live_block(&block_id, ctx);
 
-    // Note: we deliberately do NOT wrap in tracked() here. The BoundsTracker's
-    // forced style (width: 100%, flex_grow: 1) is calibrated for small content
-    // widgets inside column-flex lists; wrapping a whole region (row-flex child)
-    // causes the wrapper to collapse to height=0 and clips all region content.
-    //
     // For PANEL containers (`block:default-*` — the LeftSidebar / Main /
-    // RightSidebar wrappers), we ALSO wrap in a layout-transparent tracker
+    // RightSidebar wrappers), we wrap in a layout-transparent tracker
     // that binds the block_id as `entity_id`. This lets PBT region queries
     // locate the panel by URI in `BoundsRegistry`. We deliberately DON'T do
     // this for non-panel live_blocks because invariants like
