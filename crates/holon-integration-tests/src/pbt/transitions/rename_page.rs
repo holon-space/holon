@@ -45,6 +45,15 @@ pub struct RenamePage {
 /// Titles the generator draws from. A fixed, tiny pool keeps replay
 /// deterministic and shrinking meaningful; the property does not care WHAT the
 /// new title is, only that the old one is freed.
+///
+/// The pool is deliberately DOT-FREE. A dotted title is a real gap in this
+/// alphabet (BugFunnel 2026-08-02: `with_extension("org")` truncated dotted
+/// titles, and no title the generator could draw exposed it), but a dotted pool
+/// entry cannot be shown to be drawn: `RenamePage` only becomes eligible after
+/// a `BlockToPage` mints a page under a page, and no green keystone run prints
+/// the title it drew. The dotted coverage is therefore DETERMINISTIC — the
+/// hand-authored cases `page-renamed-to-a-dotted-title-rehomes` and
+/// `dotted-page-title-owns-its-own-file` — not a lucky draw.
 const TITLE_POOL: [&str; 4] = ["Renamed", "Retitled", "Moved", "Renamed2"];
 
 /// Pages that may be renamed:
