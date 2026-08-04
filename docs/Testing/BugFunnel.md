@@ -6,10 +6,10 @@ distribution steers QA investment.
 
 **Running distribution** (totals = archived baseline + sum of the increment log):
 
-- ENVIRONMENT: 133
-- COVERAGE: 85
-- PERCEPTION: 56
-- ORACLE: 46
+- ENVIRONMENT: 134
+- COVERAGE: 82
+- PERCEPTION: 59
+- ORACLE: 48
 
 Archived baseline (ENVIRONMENT 87 · COVERAGE 37 · PERCEPTION 35 · ORACLE 18 as of
 2026-07-22): the per-bug increment log below starts at commit e70c3a9245f2, which split
@@ -27,6 +27,10 @@ the archived baseline):
 - (+1 COVERAGE 2026-08-04: dogfood, left sidebar — a Page-tagged block with empty content renders as a completely BLANK sidebar row; the disclosed `(untitled)` placeholder can never appear because `empty` is not a declared param of the `text` widget_builder, so the kwarg is silently dropped before reaching the renderer)
 - (+1 ORACLE 2026-08-04: dogfood, template feature — undoing a template instantiation left a 19/20 partial instance: after instantiating a 20-child template one `undo` removed exactly ONE child and the stack then reported "Nothing to undo", with no route back to either the clean or the complete state; root cause UNRESOLVED — per-write undo granularity vs. origin/session-scoped undo filtering of the MCP-issued writes — needs a re-drive before any fix)
 - (+1 ORACLE 2026-08-04: dogfood — the live `latency-slo` oracle false-positives on a backgrounded window: two `navigate` interactions were reported at 150 s and 161 s end-to-end because GPUI does not paint while not frontmost, so the visible stage only lands when the window is re-fronted; the red ORACLE VIOLATION banner is indistinguishable from a genuine SLO breach)
+- (+1 ENVIRONMENT 2026-08-04: reconciliation — the Ledger TABLE ROWS are ground truth and were re-counted mechanically (`scripts/bugfunnel-check.sh`, which now counts the rows itself); the header and the log had drifted from them because rows were appended without a matching increment line. Measured against the file as it stood BEFORE the same-day dogfood-sweep lines above: ENVIRONMENT 131 · COVERAGE 81 · PERCEPTION 59 · ORACLE 46 rows, against a header of 130 · 84 · 56 · 44. This line and the three below carry the log to those counts; no earlier line is rewritten. Counting rule for the recount: one table row = one counted bug, `A→B` in the Primary-gap cell counts as the RE-TRIAGED class B, and the table continues BELOW the `## Deferred perf` heading that interrupts it — a naive scan that stops at that heading sees only 123 of the rows)
+- (-1 COVERAGE 2026-08-04: reconciliation, same recount — header 84 and log-sum 82 both exceeded the 81 COVERAGE rows actually present)
+- (+3 PERCEPTION 2026-08-04: reconciliation, same recount — 59 PERCEPTION rows present against a header of 56; includes the 2026-07-16 `holon_rule` row re-triaged COVERAGE→PERCEPTION, which the header still counted as COVERAGE)
+- (+2 ORACLE 2026-08-04: reconciliation, same recount — 46 ORACLE rows present against a header of 44)
 - (+1 COVERAGE 2026-08-03: verifier audit of the answer_question contract fix — the shipped `pending_question` profile renders a DISPATCHING answer button for EVERY question row, but the provider refuses any answer to a non-head question (`answerable = 0`, `compose_answer` refusal #2); clicking such a button always dies at the provider; no test renders more than one pending question or clicks a non-head button)
 - (+1 ENVIRONMENT 2026-08-03: verifier audit during the send-contract fix — the shipped answer buttons are broken identically: `question_options` binds a single scalar `label` param (`crates/holon-frontend/src/shadow_builders/question_options.rs:113,:50`) and the shipped `pending_question` profile ships `action: answer_question()` with no override, while the real binary requires `answers: array<string>` (`server.rs:509-514`, rejection `cannot answer: answers must be an array of option labels`); the mock encoded the sidecar's invented `label` contract, so no automated layer ever compared it to the binary)
 - (+1 ORACLE 2026-08-03: agent exploration, geometry-precision lane's live `describe_ui` dump — `BoundsTracker`, a pure-observability wrapper, MUTATES production layout: `request_layout` forces `width: relative(1.0)` + `flex_grow: 1.0` on a `Style::default()` (`display: Block`), so the two `tracked()` siblings of the shipped block row (`selectable` and `rendered_text`) each demand the full row width, flex-shrink splits them 420/420 of 844, the bullet's click/drag region claims the left half, the text is displaced to x=780, and the block wrapper collapses to height 0 — the exact failure mode `live_block.rs:33-37` already documents and works around at ONE of five call sites; the `expected-size-satisfied` oracle that would catch it is unarmed because `with_expected_size` has zero production call sites)
