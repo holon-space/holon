@@ -1903,4 +1903,427 @@ mod tests {
         let (real, expected) = scenario(Engine::Real, ops);
         assert_eq!(real, expected);
     }
+
+    // ---- DI-level supervision (Inc 2 prerequisite) -----------------------
+    //
+    // The combinator's terminal latch is correct and stays. These tests pin
+    // BOTH halves of the let-it-die ruling: unsupervised, a dead stream is
+    // permanently dead (and that is what the latch is *for*); supervised, the
+    // DI seam rebuilds it and the fold-equality contract holds again after the
+    // restart, because a fresh subscription re-seeds through the same
+    // `MapDiff::Replace` boot path.
+    mod supervision {
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::sync::atomic::AtomicI64;
+        use std::sync::atomic::Ordering as AtomicOrdering;
+
+        use tokio::sync::mpsc::UnboundedReceiver;
+
+        use super::*;
+        use crate::StorageEntity;
+        use crate::Value;
+        use crate::live_data::LiveData;
+        use crate::live_data::supervision::MAX_RESTARTS_IN_WINDOW;
+        use crate::live_data::supervision::Supervised;
+        use crate::live_data::supervision::run_supervised;
+        use crate::streaming::Change;
+        use crate::streaming::ChangeOrigin;
+
+        /// The reference authority behind an injectable fault gate.
+        ///
+        /// Every authority method passes the same gate, so a failure can be
+        /// armed mid-sequence without knowing which read the combinator will
+        /// issue next — which is the point: production faults are not
+        /// method-selective either.
+        struct FlakyAuthority {
+            inner: TestAuthority,
+            /// Calls still served normally before failing starts.
+            healthy_calls: AtomicI64,
+            /// Calls that fail once `healthy_calls` is spent.
+            failures_left: AtomicI64,
+        }
+
+        impl FlakyAuthority {
+            fn new(tree: Arc<Mutex<Tree>>) -> Self {
+                Self {
+                    inner: TestAuthority::new(tree),
+                    healthy_calls: AtomicI64::new(i64::MAX),
+                    failures_left: AtomicI64::new(0),
+                }
+            }
+
+            /// Serve `healthy` more calls, then fail the next `failures`.
+            fn arm(&self, healthy: i64, failures: i64) {
+                self.healthy_calls.store(healthy, AtomicOrdering::Relaxed);
+                self.failures_left.store(failures, AtomicOrdering::Relaxed);
+            }
+
+            fn gate(&self) -> Result<()> {
+                if self.healthy_calls.fetch_sub(1, AtomicOrdering::Relaxed) > 0 {
+                    return Ok(());
+                }
+                if self.failures_left.fetch_sub(1, AtomicOrdering::Relaxed) > 0 {
+                    anyhow::bail!("injected authority fault");
+                }
+                Ok(())
+            }
+        }
+
+        #[async_trait]
+        impl HomeAuthority<String> for FlakyAuthority {
+            async fn locate(&self, id: &str) -> Result<Option<Placement<String>>> {
+                self.gate()?;
+                self.inner.locate(id).await
+            }
+            async fn children_of(&self, parent: Option<&str>) -> Result<Vec<String>> {
+                self.gate()?;
+                self.inner.children_of(parent).await
+            }
+            async fn prev_sibling(&self, id: &str) -> Result<Option<String>> {
+                self.gate()?;
+                self.inner.prev_sibling(id).await
+            }
+            async fn subtree_of(&self, id: &str) -> Result<Vec<String>> {
+                self.gate()?;
+                self.inner.subtree_of(id).await
+            }
+            async fn locate_batch(
+                &self,
+                ids: &[String],
+            ) -> Result<BTreeMap<String, Placement<String>>> {
+                self.gate()?;
+                self.inner.locate_batch(ids).await
+            }
+        }
+
+        // ---- a real feed, so the restart re-seeds the way production does --
+
+        fn test_feed() -> Arc<LiveData<Item>> {
+            LiveData::new(
+                vec![],
+                |r: &StorageEntity| match r.get("id") {
+                    Some(Value::String(s)) => Ok(s.clone()),
+                    other => anyhow::bail!("test row has no string id: {other:?}"),
+                },
+                |r: &StorageEntity| match r.get("content") {
+                    Some(Value::Integer(i)) => Ok(Item { content: *i as u8 }),
+                    other => anyhow::bail!("test row has no integer content: {other:?}"),
+                },
+            )
+        }
+
+        fn feed_remove(feed: &LiveData<Item>, key: &str) {
+            feed.apply_changes(vec![Change::Deleted {
+                id: key.to_string(),
+                origin: ChangeOrigin::Local {
+                    operation_id: None,
+                    trace_id: None,
+                },
+            }]);
+        }
+
+        /// Mirror one generated `MapDiff` into the real feed.
+        ///
+        /// `Replace`/`Clear` are expressed as removals plus inserts — the feed
+        /// exposes no bulk swap, and the resulting *state* is identical. The
+        /// atomicity of a real `Replace` is pinned separately by
+        /// `replace_retracts_every_retained_entry_before_reseeding`.
+        fn apply_to_feed(feed: &LiveData<Item>, diff: MapDiff<String, Arc<Item>>) {
+            let live: Vec<String> = feed.read().keys().cloned().collect();
+            match diff {
+                MapDiff::Insert { key, value } | MapDiff::Update { key, value } => {
+                    feed.insert(key, value)
+                }
+                MapDiff::Remove { key } => feed_remove(feed, &key),
+                MapDiff::Clear {} => {
+                    for k in live {
+                        feed_remove(feed, &k);
+                    }
+                }
+                MapDiff::Replace { entries } => {
+                    let keep: BTreeSet<String> = entries.iter().map(|(k, _)| k.clone()).collect();
+                    for k in live {
+                        if !keep.contains(&k) {
+                            feed_remove(feed, &k);
+                        }
+                    }
+                    for (k, v) in entries {
+                        feed.insert(k, v);
+                    }
+                }
+            }
+        }
+
+        /// Drive the supervisor future as far as it can go synchronously.
+        ///
+        /// The synthetic authority and the unbounded channel are always ready,
+        /// so one poll drains everything the feed currently holds and returns
+        /// `Pending` exactly when the source is empty. `true` means the
+        /// supervisor finished — it gave up, or the source is gone.
+        fn pump<F: Future<Output = ()>>(fut: &mut Pin<Box<F>>) -> bool {
+            let waker = futures::task::noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            fut.as_mut().poll(&mut cx).is_ready()
+        }
+
+        type Emission = Supervised<HomedDiff<String, Item>>;
+
+        fn take(rx: &mut UnboundedReceiver<Emission>) -> Vec<Emission> {
+            let mut out = Vec::new();
+            while let Ok(item) = rx.try_recv() {
+                out.push(item);
+            }
+            out
+        }
+
+        /// Fold supervised emissions, honouring `Reset` as "drop all derived
+        /// state" — the consumer contract the DI seam implements.
+        fn fold_supervised(folded: &mut Folded, items: Vec<Emission>) -> usize {
+            let mut resets = 0;
+            for item in items {
+                match item {
+                    Supervised::Reset => {
+                        resets += 1;
+                        folded.clear();
+                    }
+                    Supervised::Diff(d) => fold_emitted(folded, vec![Ok(d)]),
+                }
+            }
+            resets
+        }
+
+        fn reference(tree: &Arc<Mutex<Tree>>) -> BTreeMap<String, Vec<String>> {
+            tree.lock().unwrap().naive_recompute()
+        }
+
+        fn observed(folded: &Folded, tree: &Arc<Mutex<Tree>>) -> BTreeMap<String, Vec<String>> {
+            let t = tree.lock().unwrap();
+            reconstruct(folded, &t)
+                .into_iter()
+                .filter(|(_, v)| !v.is_empty())
+                .collect()
+        }
+
+        /// Seed the root page into both the model and the feed.
+        fn seed_root(tree: &Arc<Mutex<Tree>>, feed: &LiveData<Item>) {
+            tree.lock().unwrap().live.insert(ROOT.into());
+            feed.insert(ROOT.into(), arc(0));
+        }
+
+        fn step(tree: &Arc<Mutex<Tree>>, feed: &LiveData<Item>, op: &Op) {
+            let diff = {
+                let mut t = tree.lock().unwrap();
+                to_diff(&mut t, op)
+            };
+            if let Some(diff) = diff {
+                apply_to_feed(feed, diff);
+            }
+        }
+
+        // ---- (b) the red premise: unsupervised, death is terminal ---------
+
+        /// Without supervision an authority fault kills the derived stream for
+        /// good: the `Err` surfaces, the stream ends, and every subsequent
+        /// edit is silently absent from the fold.
+        ///
+        /// This is the latch working as designed — and exactly why recovery
+        /// cannot live inside the combinator.
+        #[test]
+        fn unsupervised_stream_death_is_terminal() {
+            let tree = Arc::new(Mutex::new(Tree::new()));
+            let authority = Arc::new(FlakyAuthority::new(tree.clone()));
+            let (tx, rx) = futures::channel::mpsc::unbounded::<MapDiff<String, Arc<Item>>>();
+            let mut stream = Box::pin(home_diffs(rx, authority.clone()));
+
+            tree.lock().unwrap().live.insert(ROOT.into());
+            tx.unbounded_send(MapDiff::Insert {
+                key: ROOT.into(),
+                value: arc(0),
+            })
+            .unwrap();
+            let mut folded: Folded = BTreeMap::new();
+            fold_emitted(&mut folded, drain(&mut stream));
+
+            let before = vec![Op::Set {
+                k: 0,
+                parent: 0,
+                after: 0,
+                content: 0,
+            }];
+            for op in &before {
+                let diff = to_diff(&mut tree.lock().unwrap(), op).expect("op applies");
+                tx.unbounded_send(diff).unwrap();
+                fold_emitted(&mut folded, drain(&mut stream));
+            }
+            assert_eq!(observed(&folded, &tree), reference(&tree));
+
+            authority.arm(0, 1);
+            let killer = Op::Set {
+                k: 1,
+                parent: 0,
+                after: 1,
+                content: 0,
+            };
+            let diff = to_diff(&mut tree.lock().unwrap(), &killer).expect("op applies");
+            tx.unbounded_send(diff).unwrap();
+            let dying = drain(&mut stream);
+            assert!(
+                dying.iter().any(|d| d.is_err()),
+                "the authority fault must surface as an Err item, not be swallowed: {dying:?}"
+            );
+
+            // The stream is now *gone*, not merely idle: `drain` above consumed
+            // its terminal `None`, which drops the accumulator and with it the
+            // combinator's half of the feed. A post-mortem edit cannot even be
+            // delivered — strictly stronger than "emits nothing further".
+            let after = Op::Set {
+                k: 2,
+                parent: 0,
+                after: 2,
+                content: 0,
+            };
+            let diff = to_diff(&mut tree.lock().unwrap(), &after).expect("op applies");
+            assert!(
+                tx.unbounded_send(diff).is_err(),
+                "the dead combinator must have dropped the feed subscription"
+            );
+
+            assert_ne!(
+                observed(&folded, &tree),
+                reference(&tree),
+                "with no supervisor the holder is permanently behind the authority — this is \
+                 the gap the DI supervisor closes"
+            );
+        }
+
+        // ---- (c)+(d) the supervisor restarts and converges again ----------
+
+        /// A mid-sequence authority fault kills the stream; the supervisor
+        /// rebuilds it, the consumer drops its derived state on `Reset`, and
+        /// the fold matches the authority again — including the edits that
+        /// landed while the old stream was dying.
+        #[test]
+        fn supervisor_respawns_and_fold_equality_holds_after_restart() {
+            let tree = Arc::new(Mutex::new(Tree::new()));
+            let authority = Arc::new(FlakyAuthority::new(tree.clone()));
+            let feed = test_feed();
+            seed_root(&tree, &feed);
+
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Emission>();
+            let stream_feed = feed.clone();
+            let stream_authority = authority.clone();
+            let mut supervisor = Box::pin(run_supervised(
+                "test-home-by",
+                move || stream_feed.home_by(stream_authority.clone()),
+                tx,
+                |_, _, _| panic!("must not give up on a single transient fault"),
+            ));
+
+            let mut folded: Folded = BTreeMap::new();
+            assert!(!pump(&mut supervisor));
+            let boot_resets = fold_supervised(&mut folded, take(&mut rx));
+            assert_eq!(
+                boot_resets, 1,
+                "boot must go through the same Reset the restart does"
+            );
+
+            for op in &reorder_ops() {
+                step(&tree, &feed, op);
+                assert!(!pump(&mut supervisor));
+                fold_supervised(&mut folded, take(&mut rx));
+            }
+            assert_eq!(observed(&folded, &tree), reference(&tree));
+
+            // Kill it mid-sequence, then keep editing: the restart must pick up
+            // the state as it stands, not as it stood at the moment of death.
+            authority.arm(0, 1);
+            step(
+                &tree,
+                &feed,
+                &Op::Set {
+                    k: 3,
+                    parent: 0,
+                    after: 3,
+                    content: 1,
+                },
+            );
+            step(&tree, &feed, &Op::PageToggle { k: 1 });
+            assert!(!pump(&mut supervisor));
+            let restarts = fold_supervised(&mut folded, take(&mut rx));
+
+            assert_eq!(
+                restarts, 1,
+                "the dead stream must be respawned exactly once"
+            );
+            assert_eq!(
+                observed(&folded, &tree),
+                reference(&tree),
+                "after the restart the fold must equal the authority again — the fresh \
+                 subscription re-seeds through the same Replace the boot path uses"
+            );
+
+            // And it keeps converging afterwards: the restarted incarnation is
+            // a full participant, not a one-shot snapshot.
+            step(&tree, &feed, &Op::Reorder { k: 2, after: 0 });
+            assert!(!pump(&mut supervisor));
+            assert_eq!(fold_supervised(&mut folded, take(&mut rx)), 0);
+            assert_eq!(observed(&folded, &tree), reference(&tree));
+        }
+
+        // ---- (e) bounded restarts, then the give-up seam ------------------
+
+        /// An authority that never recovers must not be retried forever: after
+        /// `MAX_RESTARTS_IN_WINDOW` restarts the supervisor stops and calls the
+        /// give-up seam exactly once.
+        #[test]
+        fn persistent_failure_exhausts_the_restart_budget_and_escalates() {
+            let tree = Arc::new(Mutex::new(Tree::new()));
+            let authority = Arc::new(FlakyAuthority::new(tree.clone()));
+            let feed = test_feed();
+            seed_root(&tree, &feed);
+
+            let gave_up = Arc::new(Mutex::new(Vec::<(u32, String)>::new()));
+            let recorder = gave_up.clone();
+
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Emission>();
+            let stream_feed = feed.clone();
+            let stream_authority = authority.clone();
+            let mut supervisor = Box::pin(run_supervised(
+                "test-home-by",
+                move || stream_feed.home_by(stream_authority.clone()),
+                tx,
+                move |_, restarts, err| {
+                    recorder
+                        .lock()
+                        .unwrap()
+                        .push((restarts, format!("{err:#}")));
+                },
+            ));
+
+            // Every boot fails from here on.
+            authority.arm(0, i64::MAX);
+            assert!(
+                pump(&mut supervisor),
+                "a permanently failing authority must exhaust the budget and finish, not spin"
+            );
+
+            let calls = gave_up.lock().unwrap();
+            assert_eq!(calls.len(), 1, "the give-up seam fires exactly once");
+            assert_eq!(calls[0].0, MAX_RESTARTS_IN_WINDOW + 1);
+            assert!(
+                calls[0].1.contains("injected authority fault"),
+                "the give-up seam must carry the underlying cause: {}",
+                calls[0].1
+            );
+
+            // One Reset per incarnation: the boot plus each restart. After the
+            // budget is spent nothing further is emitted.
+            let resets = take(&mut rx)
+                .into_iter()
+                .filter(|e| matches!(e, Supervised::Reset))
+                .count();
+            assert_eq!(resets as u32, MAX_RESTARTS_IN_WINDOW + 1);
+        }
+    }
 }

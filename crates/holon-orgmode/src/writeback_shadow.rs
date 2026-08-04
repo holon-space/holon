@@ -35,6 +35,8 @@ use holon_api::EntityUri;
 use holon_api::block::Block;
 use holon_api::live_data::LiveData;
 use holon_api::live_data::home_by::HomedDiff;
+use holon_api::live_data::supervision::Supervised;
+use holon_api::live_data::supervision::spawn_supervised;
 use holon_core::block_ordering::BlockOrdering;
 use holon_filesystem::BlockReader;
 
@@ -45,11 +47,11 @@ use holon_filesystem::BlockReader;
 /// exceeds a streak of 1 (§9.8 of the Option C design doc).
 const MISMATCH_STREAK_LIMIT: u32 = 8;
 
-/// Arming policy. The shadow is DEFAULT-ON in debug builds so every debug run is
-/// a free differential surface. Suites whose oracles measure PROD read behaviour
-/// must opt out: the shadow issues authority reads of its own, and the
-/// read-budget oracle cannot tell measurement apparatus from production work.
-/// See the Option C design doc §9.8.
+/// Arming policy. The shadow is DEFAULT-ON in debug builds so every debug run
+/// is a free differential surface. Suites whose oracles measure PROD read
+/// behaviour must opt out: the shadow issues authority reads of its own, and
+/// the read-budget oracle cannot tell measurement apparatus from production
+/// work. See the Option C design doc §9.8.
 static SHADOW_ARMED: AtomicBool = AtomicBool::new(true);
 
 /// Comparisons that actually COMPLETED (system was quiescent). Liveness
@@ -98,6 +100,23 @@ pub fn divergence_detected() -> bool {
     DIVERGENCE_DETECTED.load(AtomicOrdering::Relaxed)
 }
 
+/// Restarts the supervisor had spent when it gave up, or `0` if it never did.
+/// Read only to name the cause when the shadow disarms — a stream that simply
+/// reached its end (shutdown) and one whose restart budget was spent are the
+/// same event to this holder, but not the same news to a reader.
+static GAVE_UP_RESTARTS: AtomicU64 = AtomicU64::new(0);
+
+/// Record that the supervisor abandoned the write-back stream. Called from the
+/// give-up seam.
+pub fn note_supervisor_gave_up(restarts: u32) {
+    GAVE_UP_RESTARTS.store(restarts as u64, AtomicOrdering::Relaxed);
+}
+
+/// Restarts spent before the supervisor gave up; `0` means it never gave up.
+pub fn supervisor_gave_up_after() -> u64 {
+    GAVE_UP_RESTARTS.load(AtomicOrdering::Relaxed)
+}
+
 use crate::home_authority::BlockHomeAuthority;
 use crate::home_authority::DocHome;
 
@@ -130,6 +149,11 @@ pub struct WritebackShadow {
     /// Proof-of-execution counters: a shadow that never ran is not evidence.
     checks_run: u64,
     docs_compared: u64,
+    /// Terminal: the supervised stream that fed this holder is gone, so the
+    /// holder is frozen while `doc_blocks` keeps moving. Comparing the two
+    /// would blame `home_by` for a supervision failure — the loudest possible
+    /// lie, and worse than saying nothing. Every further `check` is a no-op.
+    disarmed: bool,
 }
 
 impl Default for WritebackShadow {
@@ -147,45 +171,85 @@ impl WritebackShadow {
             last_tracked: None,
             checks_run: 0,
             docs_compared: 0,
+            disarmed: false,
         }
     }
 
-    /// Spawn the combinator, forwarding its emissions over a channel.
+    /// Spawn the combinator under DI-level supervision, forwarding its
+    /// emissions over a channel.
     ///
     /// Forwarding through a channel (rather than polling the stream inside the
     /// controller's `select!`) keeps the holder and the stream separately
     /// borrowable. A diff still in flight at check time simply shows up as
     /// activity on a later tick, which resets the streak — the two-check rule
     /// already tolerates it.
+    ///
+    /// The combinator keeps its terminal error latch ("let it die"); the
+    /// supervisor holds the *factory* and rebuilds combinator, accumulator and
+    /// stream from the same feed and authority handles. A fresh subscription
+    /// opens with the feed's `MapDiff::Replace`, so the restart re-seeds
+    /// through the boot path — and [`Supervised::Reset`] tells this holder to
+    /// drop the state the dead incarnation left behind.
     pub fn spawn(
         inputs: ShadowInputs,
-    ) -> tokio::sync::mpsc::UnboundedReceiver<HomedDiff<DocHome, Block>> {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        tokio::spawn(async move {
-            use futures::StreamExt as _;
-            let authority = Arc::new(BlockHomeAuthority::new(inputs.reader, inputs.ordering));
-            let mut stream = std::pin::pin!(inputs.feed.home_by(authority));
-            while let Some(item) = stream.next().await {
-                match item {
-                    Ok(diff) => {
-                        if tx.send(diff).is_err() {
-                            return;
-                        }
-                    }
-                    Err(e) => {
-                        // The combinator's error latch is terminal by design
-                        // ("let it die"): supervision is an Inc-2 concern. In a
-                        // debug build the shadow simply stops, loudly.
-                        tracing::error!(
-                            "[writeback-shadow] home_by stream errored and ENDED: {e:#} — the \
-                             shadow is now blind for the rest of this process"
-                        );
-                        return;
-                    }
-                }
-            }
-        });
-        rx
+    ) -> tokio::sync::mpsc::UnboundedReceiver<Supervised<HomedDiff<DocHome, Block>>> {
+        let authority = Arc::new(BlockHomeAuthority::new(inputs.reader, inputs.ordering));
+        let feed = inputs.feed;
+        spawn_supervised(
+            "writeback-shadow",
+            move || feed.home_by(authority.clone()),
+            |component, restarts, err| {
+                note_supervisor_gave_up(restarts);
+                // TODO(A1): emit the sticky `WritebackDegraded` reason on the
+                // `DegradedSignalBus` here — until then a spent restart budget
+                // is audible in the log only.
+                tracing::error!(
+                    "[{component}] gave up after {restarts} restarts ({err:#}) — the shadow is \
+                     blind for the rest of this process"
+                );
+            },
+        )
+    }
+
+    /// Drop all derived state: the stream that produced it is gone and a
+    /// complete re-seed follows. Same path at boot and at restart.
+    pub fn reset(&mut self) {
+        self.activity = true;
+        self.holder.clear();
+        self.mismatch_streak = 0;
+    }
+
+    /// Stop comparing, permanently: the supervised stream ended, so no re-seed
+    /// is coming and the holder can only fall further behind.
+    ///
+    /// One path serves both endings — a spent restart budget and a clean
+    /// shutdown — because a dead differential has nothing to compare either
+    /// way. Only the log line distinguishes them, and it must: "the shadow is
+    /// down" and "`home_by` is wrong" are different bugs for different people.
+    pub fn disarm(&mut self) {
+        if self.disarmed {
+            return;
+        }
+        self.disarmed = true;
+        match supervisor_gave_up_after() {
+            0 => tracing::info!(
+                "[writeback-shadow] the write-back stream ended — shadow DISARMED after {} \
+                 quiescent checks. No further differential comparison this process.",
+                self.checks_run
+            ),
+            restarts => tracing::error!(
+                "[writeback-shadow] SUPERVISION GAVE UP after {restarts} restarts — shadow \
+                 DISARMED after {} quiescent checks. This is a supervision failure, NOT a \
+                 home_by divergence; org write-back derived state is stale for the rest of \
+                 this process.",
+                self.checks_run
+            ),
+        }
+    }
+
+    /// Whether [`disarm`](Self::disarm) has fired.
+    pub fn is_disarmed(&self) -> bool {
+        self.disarmed
     }
 
     pub fn note_activity(&mut self) {
@@ -343,6 +407,11 @@ impl WritebackShadow {
     /// quiescent), so callers can prove the shadow executed rather than infer
     /// it from the absence of a panic.
     pub fn check(&mut self, tracked: &[(EntityUri, Vec<(EntityUri, EntityUri)>)]) -> bool {
+        // Nothing feeds this holder any more, so a mismatch measures the dead
+        // stream, not the combinator.
+        if self.disarmed {
+            return false;
+        }
         // Feed side moved?
         if self.activity {
             self.activity = false;
@@ -425,4 +494,60 @@ fn order_group(group: &[String], members: &BTreeMap<String, Member>) -> Vec<Stri
     leftovers.sort();
     out.extend(leftovers);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One tracked document with one child — enough to mismatch against an
+    /// empty holder, which is all the give-up scenario needs.
+    fn tracked_doc() -> Vec<(EntityUri, Vec<(EntityUri, EntityUri)>)> {
+        let doc = EntityUri::parse("block:doc1").expect("valid uri");
+        let child = EntityUri::parse("block:c1").expect("valid uri");
+        vec![(doc, vec![(child, EntityUri::no_parent())])]
+    }
+
+    /// The supervisor's give-up leaves the holder empty (its final `Reset`)
+    /// with no re-seed coming, while `doc_blocks` keeps its content. An
+    /// armed shadow reads that as a growing mismatch streak and panics with
+    /// NON-CONVERGENCE — naming `home_by` for a failure that is entirely
+    /// the supervisor's. Disarming is what keeps the loud message honest.
+    #[test]
+    fn a_disarmed_shadow_never_blames_home_by_for_a_supervision_failure() {
+        let mut shadow = WritebackShadow::new();
+        let tracked = tracked_doc();
+
+        // Exactly what the supervisor does on its way out.
+        shadow.reset();
+        shadow.disarm();
+        assert!(shadow.is_disarmed(), "the disarm flag must fire");
+
+        // Well past the streak limit. A still-armed shadow panics inside this
+        // loop with NON-CONVERGENCE — "a real divergence, not lag" — which is
+        // precisely the wrong diagnosis.
+        for _ in 0..(MISMATCH_STREAK_LIMIT * 3) {
+            shadow.check(&tracked);
+        }
+        assert!(
+            !divergence_detected(),
+            "a dead differential must not report divergence"
+        );
+        assert_eq!(
+            shadow.stats(),
+            (0, 0),
+            "a disarmed shadow must run no comparison at all"
+        );
+    }
+
+    /// Disarming is terminal and idempotent — the stream cannot come back, and
+    /// a second `None` from the channel must not re-log.
+    #[test]
+    fn disarm_is_idempotent() {
+        let mut shadow = WritebackShadow::new();
+        shadow.disarm();
+        shadow.disarm();
+        assert!(shadow.is_disarmed());
+        assert!(!shadow.check(&tracked_doc()));
+    }
 }

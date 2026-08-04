@@ -894,6 +894,10 @@ pub async fn run_file_sync_controller(
         }
         _ => (None, None),
     };
+    // Latched when the supervised stream ends, so the closed channel is never
+    // polled again — without the guard the arm would resolve with `None` on
+    // every loop iteration and spin.
+    let mut shadow_stream_ended = false;
     let mut shadow_tick: Option<tokio::time::Interval> = if cfg!(debug_assertions) {
         Some(tokio::time::interval(std::time::Duration::from_millis(250)))
     } else {
@@ -1246,13 +1250,29 @@ pub async fn run_file_sync_controller(
                 if let Some(s) = shadow.as_mut() { s.note_activity(); }
                 idle_signal_for_task.mark_progress();
             }
-            Some(diff) = async {
+            item = async {
                 match shadow_rx.as_mut() {
                     Some(rx) => rx.recv().await,
                     None => std::future::pending().await,
                 }
-            } => {
-                if let Some(s) = shadow.as_mut() { s.apply(diff); }
+            }, if !shadow_stream_ended => {
+                use holon_api::live_data::supervision::Supervised;
+                if let Some(s) = shadow.as_mut() {
+                    match item {
+                        Some(Supervised::Reset) => s.reset(),
+                        Some(Supervised::Diff(d)) => s.apply(d),
+                        // The supervisor is gone. Its last act was a `Reset`
+                        // that emptied the holder and no re-seed follows, so
+                        // every further comparison would report the supervision
+                        // failure as a `home_by` divergence.
+                        None => {
+                            shadow_stream_ended = true;
+                            s.disarm();
+                        }
+                    }
+                } else {
+                    shadow_stream_ended = true;
+                }
             }
             _ = async {
                 match shadow_tick.as_mut() {
