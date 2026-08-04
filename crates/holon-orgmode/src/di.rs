@@ -466,6 +466,9 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                 // read the `Page` tag from the write authority (`block_raw`), not
                 // the lagging matview-backed feed (see `resolve_doc_for_block`).
                 let feed_block_reader = block_reader.clone();
+                // Kept for the Inc 1 differential shadow, which reads sibling
+                // order from the same authority the controller does.
+                let shadow_ordering = ordering.clone();
 
                 let mut controller = FileSyncController::with_format(
                     block_reader,
@@ -678,6 +681,20 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                 }
                 drop(rerender_tx);
 
+                // Option C Inc 1 differential shadow. Constructed in debug
+                // builds only, so release never even builds the inputs.
+                let shadow_inputs = if cfg!(debug_assertions) && crate::writeback_shadow::is_armed() {
+                    block_feed.clone().map(|feed| {
+                        crate::writeback_shadow::ShadowInputs {
+                            feed,
+                            reader: feed_block_reader.clone(),
+                            ordering: shadow_ordering,
+                        }
+                    })
+                } else {
+                    None
+                };
+
                 tokio::spawn(run_file_sync_controller(
                     controller,
                     config.root_directory.clone(),
@@ -686,6 +703,7 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                     ready_sender,
                     fs,
                     change_source,
+                    shadow_inputs,
                 ));
 
                 Shared::new(FileSyncStarted)
@@ -851,10 +869,36 @@ pub async fn run_file_sync_controller(
     ready_sender: std::sync::Arc<std::sync::Mutex<Option<FileWatcherReadySender>>>,
     fs: Arc<dyn holon_filesystem::FileSystem>,
     change_source: Arc<dyn holon_filesystem::FileChangeSource>,
+    shadow_inputs: Option<crate::writeback_shadow::ShadowInputs>,
 ) {
     use tracing::Instrument;
     use tracing::error;
     use tracing::info;
+
+    // Option C Inc 1: run the `home_by` combinator alongside the hand-
+    // maintained `doc_blocks` cache and compare them at quiescence.
+    //
+    // Release neutrality is by DEAD-CODE ELIMINATION, not `#[cfg]`: the guard
+    // is `cfg!(debug_assertions)`, a const-false branch in release, so the
+    // shadow costs zero runtime work and both `select!` arms await
+    // `pending()`. The module itself REMAINS compiled and public in release
+    // (as does `FileSyncController::cached_doc_orders`) — it is inert, not
+    // absent. Inc 2 deletes it outright.
+    let (mut shadow, mut shadow_rx) = match shadow_inputs {
+        Some(inputs) if cfg!(debug_assertions) => {
+            let rx = crate::writeback_shadow::WritebackShadow::spawn(inputs);
+            (
+                Some(crate::writeback_shadow::WritebackShadow::new()),
+                Some(rx),
+            )
+        }
+        _ => (None, None),
+    };
+    let mut shadow_tick: Option<tokio::time::Interval> = if cfg!(debug_assertions) {
+        Some(tokio::time::interval(std::time::Duration::from_millis(250)))
+    } else {
+        None
+    };
 
     let init_result = async { controller.initialize().await }
         .instrument(tracing::info_span!("org.startup.controller_initialize"))
@@ -1197,7 +1241,35 @@ pub async fn run_file_sync_controller(
                         OrgRerender::All => { pending_full_rerender = true; }
                     }
                 }.instrument(span).await;
+                // Feed activity on the resolver subscription: whatever the
+                // shadow saw before this is a different feed prefix.
+                if let Some(s) = shadow.as_mut() { s.note_activity(); }
                 idle_signal_for_task.mark_progress();
+            }
+            Some(diff) = async {
+                match shadow_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(s) = shadow.as_mut() { s.apply(diff); }
+            }
+            _ = async {
+                match shadow_tick.as_mut() {
+                    Some(t) => { t.tick().await; }
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(s) = shadow.as_mut() {
+                    let tracked = controller.cached_doc_orders();
+                    if s.check(&tracked) {
+                        let (checks, docs) = s.stats();
+                        tracing::info!(
+                            "[writeback-shadow] quiescent check #{checks} ran; {docs} cumulative \
+                             doc-comparisons"
+                        );
+                    }
+                }
             }
             _ = rerender_flush_tick.tick(), if pending_full_rerender => {
                 pending_full_rerender = false;

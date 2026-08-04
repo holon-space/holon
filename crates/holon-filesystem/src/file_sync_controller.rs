@@ -3903,6 +3903,33 @@ impl FileSyncController {
         Ok((self.render_cached_doc(doc_id, path).await?, true))
     }
 
+    /// Every document this cache currently holds, as `(block id, parent id)`
+    /// in cache order — the comparison target for the Option C differential
+    /// shadow.
+    ///
+    /// The parent is returned because the cache's sequence is NOT a document
+    /// order: it comes from `get_blocks`' `ORDER BY sort_key, id`, a GLOBAL
+    /// sort over fractional indices minted PER SIBLING GROUP, so rows from
+    /// different parents interleave. Only the relative order WITHIN a parent
+    /// is meaningful, so a consumer must group by parent before comparing.
+    ///
+    /// Members are children of the document; the document root is not one of
+    /// them (`get_blocks` starts below it).
+    pub fn cached_doc_orders(&self) -> Vec<(EntityUri, Vec<(EntityUri, EntityUri)>)> {
+        self.doc_blocks
+            .iter()
+            .map(|(doc, blocks)| {
+                (
+                    doc.clone(),
+                    blocks
+                        .values()
+                        .map(|b| (b.id.clone(), b.parent_id.clone()))
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
     /// Reseed the per-doc block cache from the authoritative doc-scoped read
     /// (`get_blocks` over `block_raw`, ordered `sort_key, id`). The resulting
     /// `IndexMap` preserves that order for the renderer.

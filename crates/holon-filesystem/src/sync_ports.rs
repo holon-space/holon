@@ -20,6 +20,33 @@ use holon_api::block::Block;
 #[async_trait]
 pub trait BlockReader: Send + Sync {
     /// Get all blocks for a document by its ID.
+    ///
+    /// # Ordering guarantee: WITHIN-PARENT relative order ONLY
+    ///
+    /// The returned `Vec` is a **set with within-parent relative order**, NOT a
+    /// document sequence. Treating consecutive elements as adjacent in the
+    /// document is a bug — group by [`Block::parent_id`] first.
+    ///
+    /// The two implementations legitimately disagree on the overall sequence,
+    /// and both satisfy this contract:
+    /// - `LoroBlockReader::collect_subtree` — pre-order DFS, so its sequence
+    ///   *is* document order (incidentally, not by contract).
+    /// - `CacheBlockReader` (Turso) — `ORDER BY sort_key, id`, a GLOBAL sort.
+    ///   Fractional indices are minted **per sibling group**, so every group
+    ///   restarts at the same low key, rows from different parents tie, and the
+    ///   `id` tiebreak interleaves them. A depth-2 grandchild can sort ahead of
+    ///   its own grandparent's siblings.
+    ///
+    /// This is safe because the only consumer that reads order — the org
+    /// renderer (`render_entitys`) — re-nests by `parent_id` and reads just the
+    /// within-parent order, which both impls preserve. Rendering is
+    /// byte-identical from either sequence (proven by
+    /// `holon-org-format/tests/get_blocks_flat_order_is_not_document_order.
+    /// rs`).
+    ///
+    /// Per ADR 0005 the canonical order authority is
+    /// `BlockOrdering::children`; `sort_key` is a storage encoding chosen by
+    /// one adapter and is not a cross-parent ordering key.
     async fn get_blocks(&self, doc_id: &EntityUri) -> Result<Vec<Block>>;
 
     /// Authoritative single-block point read, fully edge-hydrated
