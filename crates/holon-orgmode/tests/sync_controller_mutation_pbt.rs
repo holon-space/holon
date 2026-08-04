@@ -3168,3 +3168,187 @@ mod atomic_rename_tests {
         assert_eq!(doc_after.content, "moved", "retitled to the new file stem");
     }
 }
+
+// ============================================================================
+// Residual write-back hole: an INTERMEDIATE-ancestor convert re-homes a DEEP
+// descendant whose own parent_id/tags never change, so the block-driven
+// write-back cheap path (file_sync_controller.rs render_with_cache:3855 gate +
+// :3872 authority re-check) cannot see that the descendant left this document.
+//
+// Documented at ~/.claude/plans/stale-delta-redesign-options-2026-08-04.md
+// §2.3. The gate and the authority re-check both compare the block's OWN
+// parent_id / tags against the doc's cached copy — neither verifies the block
+// still BELONGS to `doc_id`. When an intermediate ancestor (not X's direct
+// parent) gains the `Page` tag via `convert_block_to_page`, X re-homes to the
+// new page's document while X.parent_id and X.tags stay identical. A queued
+// delta for X, routed to the OLD document before the convert (T1), drains at T2
+// on the cheap path and re-renders X into the OLD file — an edit meant for the
+// new page lands in the wrong file. reseeded=false, so the removal veto is
+// skipped and last_projection is stamped over the divergence.
+//
+// Topology: P_a (page, file `test.org`) owns  A > M > N > X  (M is an
+// INTERMEDIATE, non-leaf ancestor of X; N sits between them). `convert_block_to
+// _page` on M mints page P_m under P_a, re-homes M's direct child N under P_m,
+// and X follows as N's child WITHOUT its own parent_id changing.
+mod intermediate_ancestor_writeback_hole {
+    use super::*;
+
+    fn text_block(id: &str, parent: &EntityUri, content: &str, level: i64, seq: i64) -> Block {
+        let uri = EntityUri::block(id);
+        let mut b = Block::new_text(uri.clone(), parent.clone(), content);
+        b.set_level(level);
+        b.set_sequence(seq);
+        b.set_property("ID", Value::String(id.to_string()));
+        b
+    }
+
+    /// Build `P_a { A > M > N > X }`, warm the controller's per-doc cache so X
+    /// is cached under `P_a`, then apply the `convert_block_to_page(M)`
+    /// EFFECT to the authority: N and X move into P_m's bucket (N.parent =
+    /// P_m, X.parent = N UNCHANGED), P_m becomes a page in both the block
+    /// authority and the doc manager, and P_m's file is materialized on
+    /// disk. Returns the ids and the EDITED X block whose (stale,
+    /// routed-to-P_a) delta the caller then drains.
+    async fn build_and_convert(fixture: &mut TestFixture) -> (EntityUri, EntityUri, Block) {
+        let p_a = fixture.doc_id.clone(); // fixture pre-seeds "test" page at doc_id
+        let a = text_block("la-a", &p_a, "la-a-outer", 1, 0);
+        let m = text_block("la-m", &a.id, "la-m-middle", 2, 0);
+        let n = text_block("la-n", &m.id, "la-n-inner", 3, 0);
+        let x = text_block("la-x", &n.id, "la-x-leaf", 4, 0);
+
+        fixture.seed_blocks(&[a.clone(), m.clone(), n.clone(), x.clone()]);
+        fixture
+            .controller
+            .initialize()
+            .await
+            .expect("initialize must succeed");
+
+        // WARM: a first block delta for X reseeds P_a's cache to {A,M,N,X} and
+        // writes `test.org` = A>M>N>X (X legitimately belongs to P_a here).
+        fixture
+            .controller
+            .on_block_changed(&p_a, &holon_filesystem::BlockDelta::Upsert(x.clone()))
+            .await
+            .expect("warm write must succeed");
+
+        // --- convert_block_to_page(M) EFFECT on the AUTHORITATIVE store ---
+        // P_a bucket keeps A and M (M becomes a link to P_m, modeled as a plain
+        // block that stays put — the point is N and X LEAVE). P_m bucket gains a
+        // Page block, N (re-parented to P_m), and X (parent UNCHANGED = N).
+        let p_m = EntityUri::block("la-pm");
+        let mut pm_page = Block::new_text(p_m.clone(), p_a.clone(), "Pm");
+        pm_page.set_page(true);
+        pm_page.set_property("ID", Value::String("la-pm".to_string()));
+
+        let n_moved = text_block("la-n", &p_m, "la-n-inner", 1, 0); // parent M -> P_m
+        // X's OWN parent_id (N) and tags are IDENTICAL to the cached copy; only
+        // the content carries the queued edit. This is the crux of the hole.
+        let x_edited = text_block("la-x", &n.id, "la-x-EDITED-after-rehome", 2, 0);
+
+        fixture
+            .store
+            .seed_blocks(p_a.as_str(), vec![a.clone(), m.clone()]);
+        fixture.store.seed_blocks(
+            p_m.as_str(),
+            vec![pm_page.clone(), n_moved.clone(), x_edited.clone()],
+        );
+        fixture.doc_manager.add_document(pm_page);
+
+        // Materialize P_m's identity file on disk (prod's convert does this).
+        let pm_path = fixture.root_dir.join("test").join("Pm.org");
+        tokio::fs::create_dir_all(pm_path.parent().unwrap())
+            .await
+            .unwrap();
+        let pm_body = OrgRenderer::render_entitys(&[n_moved, x_edited.clone()], &pm_path, &p_m);
+        tokio::fs::write(&pm_path, format!("#+ID: la-pm\n{pm_body}"))
+            .await
+            .unwrap();
+
+        (p_a, p_m, x_edited)
+    }
+
+    /// RED: after the convert, draining X's stale (routed-to-P_a) edit delta
+    /// takes the cheap path and re-renders X's EDITED content into
+    /// `test.org` — the OLD document's file — even though X now belongs to
+    /// P_m. The file that P_a owns must not carry X's subtree after the
+    /// re-home; it does → the hole is real.
+    #[ignore = "deliberate RED: Option-C evidence for the §2.3 write-back hole \
+(docs/Plans/option-c-holder-design.md); un-ignore at Inc 2 when the home_by \
+holder replaces the cheap-path qualification"]
+    #[tokio::test]
+    async fn convert_leaks_deep_descendant_edit_into_old_doc() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new(temp_dir.path());
+        let (p_a, _p_m, x_edited) = build_and_convert(&mut fixture).await;
+
+        // Drain X's queued delta, routed to the OLD doc P_a (stale T1 routing).
+        fixture
+            .controller
+            .on_block_changed(&p_a, &holon_filesystem::BlockDelta::Upsert(x_edited))
+            .await
+            .expect("stale delta drain returned an unexpected error");
+
+        let test_org = tokio::fs::read_to_string(fixture.file_path())
+            .await
+            .unwrap();
+
+        assert!(
+            !test_org.contains("la-x"),
+            "WRITE-BACK HOLE: P_a's file `test.org` still renders re-homed descendant \
+             `la-x` (it belongs to P_m now). An edit routed to the OLD document leaked \
+             into the OLD file via the cheap path (reseed skipped). On-disk `test.org`:\n{test_org}"
+        );
+    }
+
+    /// DURABILITY PROBE: once the intermediate ancestor N's OWN structural
+    /// delta drains, P_a is reseeded from the authority (get_blocks no
+    /// longer returns N/X) and the removal veto grounds their absence as a
+    /// MOVE (grounding reads the authority, which reflects X under P_m). So
+    /// the divergence SELF-HEALS — `test.org` drops X and P_m's file owns
+    /// it. This documents the verdict: TRANSIENT, not durable data loss
+    /// (matches the plan's own assessment).
+    #[tokio::test]
+    async fn divergence_self_heals_after_ancestor_reseed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new(temp_dir.path());
+        let (p_a, p_m, x_edited) = build_and_convert(&mut fixture).await;
+
+        // 1. Stale X edit drains first → transient leak into test.org.
+        fixture
+            .controller
+            .on_block_changed(&p_a, &holon_filesystem::BlockDelta::Upsert(x_edited))
+            .await
+            .expect("stale delta drain");
+        let leaked = tokio::fs::read_to_string(fixture.file_path())
+            .await
+            .unwrap();
+        assert!(
+            leaked.contains("la-x"),
+            "precondition: the transient leak must be present before the heal; test.org:\n{leaked}"
+        );
+
+        // 2. N's OWN structural delta (parent M -> P_m) drains → reseed P_a.
+        let n_moved = text_block("la-n", &p_m, "la-n-inner", 1, 0);
+        fixture
+            .controller
+            .on_block_changed(&p_a, &holon_filesystem::BlockDelta::Upsert(n_moved))
+            .await
+            .expect("ancestor reseed must succeed (removal grounded as a move, not vetoed)");
+
+        let healed = tokio::fs::read_to_string(fixture.file_path())
+            .await
+            .unwrap();
+        assert!(
+            !healed.contains("la-x"),
+            "self-heal expected: after N's reseed P_a's file must drop the re-homed \
+             descendant. test.org:\n{healed}"
+        );
+        let pm_file = tokio::fs::read_to_string(fixture.root_dir.join("test").join("Pm.org"))
+            .await
+            .unwrap();
+        assert!(
+            pm_file.contains("la-x"),
+            "after the heal X must live in exactly one document — P_m's file. Pm.org:\n{pm_file}"
+        );
+    }
+}
