@@ -183,7 +183,7 @@ is a typed, enumerable notion (parse-don’t-validate), not folklore. Blessed CI
 
 **The draw.** `wiring_axes()` defaults to storage `{Loro, Org, Turso}`, sync `{}`,
 actors `{MCPServer, ActionEngine}` (no `Actor::UI` — the windowed gpui harness is the
-sibling; no `Markdown`/`GCal`/`GMail`). Turso is included with probability 0.15
+sibling; no `Markdown`/`GCal`/`GMail`). Turso is included with probability 0.20
 (`QUERY_ADAPTER_INCLUSION_PROB`) so most cases stay on the cheap LoroMemory backend;
 shrinking removes components, i.e. walks DOWN the lattice toward Loro-only.
 `set_for_wiring(&Wiring) -> ComponentSet` normalizes a draw into the bootable headless
@@ -234,14 +234,25 @@ session’s diff, grow rung by rung; on failure delta-debug down to a minimal
 exact manifest (fail-loud on typo/invalid; mutually exclusive with FORCE_FULL) — the
 env-level face of the function-arg seam (`wide_e2e_ref_for(&Wiring)`).
 
-**Draw distribution (default axes, quantified).** The validity filter reweights the
-draw: raw Turso inclusion is 0.15, but `Wiring::validate` rejects empty-storage and
-ActionEngine-without-Turso draws, so P(Turso | valid) ≈ 0.35, P(ActionEngine | valid)
-≈ 0.17, P(MCPServer | valid) ≈ 0.39. Expected Turso (full BackendEngine + frontend)
-cases in a 16-case run ≈ 5.5; a default run misses Turso entirely with probability
-≈ 0.1%. The drawn universe has 22 valid raw grid points, collapsing to 20 distinct
-booted `ComponentSet`s under `set_for_wiring` normalization. The 0.15 bias therefore
-does NOT need reweighting for the default 16-case run.
+**Draw distribution (default axes, measured).** The validity filter reweights the
+draw: raw Turso inclusion is 0.20, but `Wiring::validate` rejects empty-storage and
+ActionEngine-without-Turso draws — both Turso-free — so the accepted share is higher.
+Measured over 40 000 draws of `any_valid_wiring()`: P(Turso | valid) = 0.388,
+P(Org | valid) = 0.545, P(ActionEngine | valid) = 0.164, P(MCPServer | valid) = 0.426.
+Expected Turso (full BackendEngine + frontend) cases in a 16-case run ≈ 6.2. The drawn
+universe has 22 valid raw grid points, collapsing to 20 distinct booted `ComponentSet`s
+under `set_for_wiring` normalization.
+
+**Why the Turso share is a floor, not a taste.** The whole feed-driven org write-back
+path — `BlockFeed` → the `group_by`/`home_by` doc resolver → the `FileSyncController`
+delta drain — exists ONLY under a query-capable adapter, and `SutOrgRead` (hence
+`inv-blocks-match-ref/org`) is registered only on the frontend arm. A Turso-free draw
+therefore tests write-back NOWHERE, which is why the earlier "the bias does not need
+reweighting" reading was wrong: it asked whether a RUN sees Turso at all, not what
+fraction of CASES can exercise write-back. `MIN_QUERY_ADAPTER_DRAW_SHARE` (1/3) pins
+that fraction and `query_adapter_draw_share_meets_writeback_floor` enforces it. After
+the Option-C Inc 2 cutover the holder is the only write-back path, so this floor is
+load-bearing (holder design §9.5 / §10.2.7).
 
 **Replay-mode caveat.** `stepper::run_sequence` is the ONLY cap-aware replayer
 (`ReplayMode::SkipGated` gates on `required_wiring().satisfied_by() &&
