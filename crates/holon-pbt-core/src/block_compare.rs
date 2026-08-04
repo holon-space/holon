@@ -156,11 +156,149 @@ pub fn compare_block_fields(
         return Ok(());
     }
     Err(format!(
-        "[{label}] fields diverge from reference\n  {label} (normalized, {} blocks): \
-         {actual_sorted:#?}\n  reference (normalized, {} blocks): {expected_sorted:#?}",
-        actual_sorted.len(),
-        expected_sorted.len(),
+        "[{label}] fields diverge from reference\n{}",
+        render_block_diff(label, &actual_sorted, &expected_sorted),
     ))
+}
+
+/// How many divergent ids / field deltas a diff spells out before summarising
+/// the rest as a count. A whole-snapshot dump of 30+ blocks is ~100 KB on one
+/// line and has to be decoded with a script before it says anything; a
+/// divergence wider than this is a wholesale mismatch, for which the exact
+/// membership of the tail adds nothing.
+const DIFF_LIST_CAP: usize = 12;
+
+fn id_list(ids: &[&str]) -> String {
+    if ids.len() <= DIFF_LIST_CAP {
+        return format!("{ids:?}");
+    }
+    format!(
+        "{:?} … and {} more",
+        &ids[..DIFF_LIST_CAP],
+        ids.len() - DIFF_LIST_CAP
+    )
+}
+
+/// Structured, human-readable divergence report: which ids only one side holds,
+/// then the per-field deltas for the ids both sides hold.
+///
+/// Both inputs must already be [`normalize_block`]-normalized and sorted by id.
+fn render_block_diff(label: &str, actual: &[Block], expected: &[Block]) -> String {
+    let actual_ids: Vec<&str> = actual.iter().map(|b| b.id.as_str()).collect();
+    let expected_ids: Vec<&str> = expected.iter().map(|b| b.id.as_str()).collect();
+
+    let only_actual: Vec<&str> = actual_ids
+        .iter()
+        .filter(|id| !expected_ids.contains(id))
+        .copied()
+        .collect();
+    let only_expected: Vec<&str> = expected_ids
+        .iter()
+        .filter(|id| !actual_ids.contains(id))
+        .copied()
+        .collect();
+
+    let mut out = format!(
+        "  {label}: {} blocks, reference: {} blocks\n  only in {label} ({}): {}\n  \
+         only in reference ({}): {}\n",
+        actual.len(),
+        expected.len(),
+        only_actual.len(),
+        id_list(&only_actual),
+        only_expected.len(),
+        id_list(&only_expected),
+    );
+
+    // A duplicate id makes `find` compare the wrong pair and can report "no
+    // deltas" for genuinely divergent snapshots. Ids are a primary key on both
+    // sides, so a repeat is a store/reference bug in its own right — say so
+    // instead of emitting a diff that silently understates the divergence.
+    let mut dup = String::new();
+    for (side, blocks) in [("actual", actual), ("reference", expected)] {
+        let ids: Vec<&str> = blocks.iter().map(|b| b.id.as_str()).collect();
+        let mut seen = std::collections::BTreeSet::new();
+        let repeats: Vec<&str> = ids
+            .iter()
+            .filter(|id| !seen.insert(**id))
+            .copied()
+            .collect();
+        if !repeats.is_empty() {
+            dup.push_str(&format!(
+                "  !! {side} holds DUPLICATE ids {} — the per-id deltas below \
+                 compare arbitrary pairs and may understate the divergence\n",
+                id_list(&repeats),
+            ));
+        }
+    }
+    out.push_str(&dup);
+
+    let mut deltas = Vec::new();
+    for a in actual {
+        let Some(e) = expected.iter().find(|e| e.id == a.id) else {
+            continue;
+        };
+        if a == e {
+            continue;
+        }
+        deltas.push(format!("    {}: {}", a.id.as_str(), field_deltas(a, e)));
+    }
+
+    out.push_str(&format!("  field deltas ({}):\n", deltas.len()));
+    for d in deltas.iter().take(DIFF_LIST_CAP) {
+        out.push_str(d);
+        out.push('\n');
+    }
+    if deltas.len() > DIFF_LIST_CAP {
+        out.push_str(&format!(
+            "    … and {} more\n",
+            deltas.len() - DIFF_LIST_CAP
+        ));
+    }
+    out
+}
+
+/// The per-field difference between two normalized blocks with the same id.
+///
+/// The named-field sweep is exhaustive over `Block` today. If a field is added
+/// and not listed here, two unequal blocks would report "no named field
+/// differs" — so that case falls back to dumping both sides rather than
+/// silently reporting an empty delta.
+fn field_deltas(a: &Block, e: &Block) -> String {
+    let mut parts = Vec::new();
+    macro_rules! delta {
+        ($field:ident) => {
+            if a.$field != e.$field {
+                parts.push(format!(
+                    "{}: sut={:?} ref={:?}",
+                    stringify!($field),
+                    a.$field,
+                    e.$field
+                ));
+            }
+        };
+    }
+    delta!(parent_id);
+    delta!(tags);
+    delta!(requires);
+    delta!(advice_suppressed);
+    delta!(content);
+    delta!(content_type);
+    delta!(source_language);
+    delta!(source_name);
+    delta!(properties);
+    delta!(marks);
+    delta!(collapsed);
+    delta!(widget_only);
+    delta!(created_at);
+    delta!(updated_at);
+
+    if parts.is_empty() {
+        return format!(
+            "blocks differ but no named field does — `field_deltas` is missing a \
+             `Block` field. sut={a:#?} ref={e:#?}"
+        );
+    }
+    parts.join("; ")
 }
 
 /// Ordering facet: per-parent sibling order under the renderer's canonical
@@ -332,6 +470,39 @@ mod tests {
             EntityUri::block(parent),
             content.to_string(),
         )
+    }
+
+    /// The diff must name the divergence, not merely report one. These assert
+    /// on the rendered text because that text IS the artifact a triager reads —
+    /// the whole point of the structured diff over a `{:#?}` dump.
+    #[test]
+    fn diff_names_missing_extra_and_changed_ids() {
+        let actual = vec![blk("1", "root", "hello"), blk("extra", "root", "x")];
+        let expected = vec![blk("1", "root", "CHANGED"), blk("only-ref", "root", "y")];
+        let msg = compare_block_fields("t", &actual, &expected).unwrap_err();
+
+        assert!(msg.contains("only in t (1): [\"block:extra\"]"), "{msg}");
+        assert!(
+            msg.contains("only in reference (1): [\"block:only-ref\"]"),
+            "{msg}"
+        );
+        assert!(msg.contains("field deltas (1)"), "{msg}");
+        assert!(
+            msg.contains("content: sut=\"hello\" ref=\"CHANGED\""),
+            "{msg}"
+        );
+    }
+
+    /// A repeated id would make the per-id pairing arbitrary, so it must be
+    /// called out rather than silently producing an understated diff.
+    #[test]
+    fn duplicate_ids_are_flagged() {
+        let actual = vec![blk("1", "root", "a"), blk("1", "root", "b")];
+        let expected = vec![blk("1", "root", "a")];
+        let msg = compare_block_fields("t", &actual, &expected).unwrap_err();
+
+        assert!(msg.contains("DUPLICATE ids"), "{msg}");
+        assert!(msg.contains("block:1"), "{msg}");
     }
 
     #[test]

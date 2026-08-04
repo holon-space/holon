@@ -170,8 +170,8 @@ where
                         // `block:root-layout` parent_id bug.
                         return InvariantResult::Fail(format!(
                             "CDC parent_id mismatch for {expected_id} in watch \
-                             '{query_id}'\nactual_ui_model={actual_parent:?}\\
-                             nexpected={expected_parent:?}"
+                             '{query_id}': actual_ui_model={actual_parent:?} \
+                             expected={expected_parent:?}"
                         ));
                     }
                 }

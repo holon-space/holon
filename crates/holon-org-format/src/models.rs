@@ -1245,6 +1245,13 @@ pub(crate) fn render_headline_block(block: &Block, identity: HeadlineIdentity) -
 
     // Body text (source blocks are child Block entities, rendered via tree
     // traversal)
+    // A blank line after the body is emitted only when it is load-bearing —
+    // i.e. when the body's last line starts a list item, which would otherwise
+    // swallow a following `#+BEGIN_SRC` child into the list and LOSE the block
+    // on re-parse. For every other body the blank line is presentational,
+    // `trim_blank_lines` drops it on the way back in, and emitting it makes the
+    // renderer permanently unequal to any hand-authored file (the echo-loop
+    // `inv-org-render-fixed-point` reports forever).
     if let Some(body) = body_str {
         let trimmed_body = trim_blank_lines(&body);
         if !trimmed_body.is_empty() {
@@ -1252,7 +1259,9 @@ pub(crate) fn render_headline_block(block: &Block, identity: HeadlineIdentity) -
             if !trimmed_body.ends_with('\n') {
                 result.push('\n');
             }
-            result.push('\n');
+            if body_needs_list_terminator(trimmed_body) {
+                result.push('\n');
+            }
         }
     }
 
@@ -1262,6 +1271,57 @@ pub(crate) fn render_headline_block(block: &Block, identity: HeadlineIdentity) -
     }
 
     result
+}
+
+/// Does this body need a trailing blank line to close an open list?
+///
+/// An org list item runs until a blank line or a heading, absorbing anything
+/// else that follows — including a `#+BEGIN_SRC` child, which then parses as
+/// list content and is silently LOST (the parser's `SOURCE_BLOCK` sweep over
+/// section children never sees it). A heading at column 0 terminates a list on
+/// its own, which is why only the source-block case is at risk.
+///
+/// Deliberately generous: emitting a blank line that org did not strictly need
+/// costs one byte of render-vs-disk churn, while omitting a needed one loses a
+/// block. Ambiguous shapes therefore resolve to `true`.
+fn body_needs_list_terminator(body: &str) -> bool {
+    let Some(last) = body.lines().rev().find(|l| !l.trim().is_empty()) else {
+        return false;
+    };
+    let trimmed = last.trim_start();
+    let is_indented = trimmed.len() != last.len();
+
+    let bullet_rest = trimmed
+        .strip_prefix('-')
+        .or_else(|| trimmed.strip_prefix('+'))
+        // `*` is a bullet only when indented — at column 0 it is a heading.
+        .or_else(|| is_indented.then(|| trimmed.strip_prefix('*')).flatten());
+    if let Some(rest) = bullet_rest {
+        return rest.is_empty() || rest.starts_with([' ', '\t']);
+    }
+
+    // Ordered counters: digits, or a single letter when org's alphabetical
+    // lists are in play, followed by `.` or `)`.
+    let digits = trimmed.chars().take_while(char::is_ascii_digit).count();
+    let counter_len = if digits > 0 {
+        digits
+    } else if trimmed
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic())
+    {
+        1
+    } else {
+        return false;
+    };
+    let after_counter = &trimmed[counter_len..];
+    let Some(rest) = after_counter
+        .strip_prefix('.')
+        .or_else(|| after_counter.strip_prefix(')'))
+    else {
+        return false;
+    };
+    rest.is_empty() || rest.starts_with([' ', '\t'])
 }
 
 /// Render a source-type Block as Org Mode #+BEGIN_SRC ... #+END_SRC

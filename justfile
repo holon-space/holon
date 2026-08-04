@@ -99,9 +99,17 @@ pbt name='general' cases='64' *FLAGS:
                 -- --nocapture {{FLAGS}} 2>&1 | tee /tmp/pbt-petri.log
             ;;
         orgmode)
+            # BOTH org round-trip binaries. `org_block_round_trip_pbt` drives the
+            # `FileFormatAdapter` seam write-back renders through, so it is the
+            # only gate that sees body+source-child data loss; it was in no `just`
+            # recipe until 2026-08-04, which is why a renderer regression reached
+            # a green report.
             PROPTEST_CASES={{cases}} cargo test \
                 -p holon-orgmode --test round_trip_pbt \
                 -- --nocapture {{FLAGS}} 2>&1 | tee /tmp/pbt-orgmode.log
+            PROPTEST_CASES={{cases}} cargo test \
+                -p holon-orgmode --test org_block_round_trip_pbt \
+                -- --nocapture {{FLAGS}} 2>&1 | tee -a /tmp/pbt-orgmode.log
             ;;
         loro)
             PROPTEST_CASES={{cases}} cargo test \
@@ -119,6 +127,13 @@ pbt name='general' cases='64' *FLAGS:
 # full sweep is the orchestrator's weave-time gate (keystone-full).
 keystone-smoke:
     just pbt general 1
+
+# Pattern-drift guard for the known-reds registry: replays the archived
+# 2026-07-31 full-depth corpus through the classifier and asserts its verdict is
+# unchanged. Cheap (no build) — run it after touching any assertion message that
+# docs/Testing/KeystoneKnownReds.md quotes in a `Match pattern`.
+known-reds-fixture *FLAGS:
+    scripts/keystone-known-reds-fixture.sh {{FLAGS}}
 
 # Replay hand-authored keystone regressions (concrete transition sequences from
 # docs/Testing/HandAuthoredRegressions.md) through the keystone harness. Same
