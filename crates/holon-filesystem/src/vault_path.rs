@@ -36,7 +36,8 @@ impl VaultPath {
             );
         }
         let mut path = root.to_path_buf();
-        for segment in chain {
+        let last = chain.len() - 1;
+        for (i, segment) in chain.iter().enumerate() {
             if segment.is_empty() || segment == "." || segment == ".." {
                 bail!(
                     "page-file derivation under vault root '{}': name-chain segment '{segment}' \
@@ -45,9 +46,17 @@ impl VaultPath {
                     root.display()
                 );
             }
-            path.push(segment);
+            // APPEND, never `with_extension`: that REPLACES whatever follows the
+            // leaf's last dot, so `citrix-STX.BROWSER_AGENT` filed itself as
+            // `citrix-STX.org` — a title that no longer round-trips, and one
+            // file two differently-titled pages both claim.
+            if i == last {
+                path.push(format!("{segment}.org"));
+            } else {
+                path.push(segment);
+            }
         }
-        Self::inside(root, path.with_extension("org"))
+        Self::inside(root, path)
     }
 
     /// Accept an already-built path only if it is a strict descendant of
@@ -114,6 +123,55 @@ mod tests {
             derived.as_path(),
             Path::new("/vault/Projects/Optimize RAG.org")
         );
+    }
+
+    /// `Path::with_extension` REPLACES the segment after the last dot, so a
+    /// dotted title lands in a TRUNCATED file and re-ingests under a different
+    /// title. Derivation must APPEND `.org` to the leaf, whatever it contains.
+    #[test]
+    fn a_dotted_leaf_title_keeps_its_dots() {
+        let root = Path::new("/vault");
+        for (leaf, expected) in [
+            ("citrix-STX.BROWSER_AGENT", "citrix-STX.BROWSER_AGENT.org"),
+            ("a.b", "a.b.org"),
+            ("Trailing.", "Trailing..org"),
+            ("x.y.z", "x.y.z.org"),
+        ] {
+            let derived = VaultPath::page_file_from_name_chain(root, &chain(&["Agents", leaf]))
+                .expect("a dotted title is a well-formed chain");
+            assert_eq!(
+                derived.as_path(),
+                Path::new("/vault/Agents").join(expected),
+                "title '{leaf}' must derive its own file"
+            );
+        }
+    }
+
+    /// A dotted title and the dotless title it truncates to must NOT share a
+    /// file — the truncation silently overwrote one page with the other.
+    #[test]
+    fn a_dotted_title_does_not_collide_with_its_truncation() {
+        let root = Path::new("/vault");
+        let dotted = VaultPath::page_file_from_name_chain(root, &chain(&["citrix-STX.BROWSER"]))
+            .expect("dotted title derives");
+        let truncated = VaultPath::page_file_from_name_chain(root, &chain(&["citrix-STX"]))
+            .expect("dotless title derives");
+        assert_ne!(
+            dotted, truncated,
+            "two distinct page titles must not derive the same file"
+        );
+    }
+
+    /// A dot in a NON-leaf segment names a directory; only the leaf gains
+    /// `.org`.
+    #[test]
+    fn a_dotted_interior_segment_stays_a_directory() {
+        let derived = VaultPath::page_file_from_name_chain(
+            Path::new("/vault"),
+            &chain(&["v1.2", "Optimize RAG"]),
+        )
+        .expect("a dotted directory segment derives");
+        assert_eq!(derived.as_path(), Path::new("/vault/v1.2/Optimize RAG.org"));
     }
 
     /// The live-vault husk shape: `join("")` would name the root's SIBLING.

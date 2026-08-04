@@ -547,11 +547,15 @@ async fn content_of(engine: &BackendEngine, id: &str) -> Option<String> {
 /// and the PBT model normalizes on it, so an emitted `#+TITLE:` would break
 /// correspondence).
 fn page_file_path(root: &Path, destination_segments: &[&str], page_title: &str) -> PathBuf {
-    let mut p = root.to_path_buf();
-    for seg in destination_segments {
-        p = p.join(seg);
-    }
-    p.join(page_title).with_extension("org")
+    // Call the PRODUCTION derivation, never a local re-implementation: a
+    // hand-rolled `with_extension("org")` here truncated dotted titles exactly
+    // as the prod seat did, so this round-trip oracle agreed with the bug
+    // instead of catching it.
+    let mut chain: Vec<String> = destination_segments.iter().map(|s| s.to_string()).collect();
+    chain.push(page_title.to_string());
+    holon_filesystem::VaultPath::page_file_from_name_chain(root, &chain)
+        .expect("a page title must derive a page file inside the vault")
+        .into_path_buf()
 }
 
 /// Round-trip invariant: convert → render the new page's own `.org` file →
@@ -618,6 +622,17 @@ async fn convert_title_round_trips_clean() {
 #[tokio::test(flavor = "multi_thread")]
 async fn convert_title_round_trips_trailing_slash() {
     assert_title_round_trips("Trailing Slash/").await;
+}
+
+/// A DOT in the title is the `with_extension("org")` truncation shape: the
+/// leaf's last dot-suffix was replaced by `org`, so `citrix-STX.BROWSER_AGENT`
+/// reingested as `citrix-STX`. Three dot placements, because the truncation
+/// point differs for each.
+#[tokio::test(flavor = "multi_thread")]
+async fn convert_title_round_trips_dotted() {
+    assert_title_round_trips("citrix-STX.BROWSER_AGENT").await;
+    assert_title_round_trips("x.y.z").await;
+    assert_title_round_trips("notes.org").await;
 }
 
 trait AssertApplied {
