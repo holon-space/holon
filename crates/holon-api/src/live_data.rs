@@ -23,6 +23,7 @@ use crate::Value;
 
 pub mod group_by;
 pub mod home_by;
+pub mod supervision;
 
 /// Pull `_rowid` (set by `process_cdc_event`) out of a row's data, if present.
 fn extract_rowid(data: &StorageEntity) -> Option<String> {
