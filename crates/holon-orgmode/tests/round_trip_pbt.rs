@@ -276,6 +276,107 @@ fn parse_org(org_text: &str) -> Result<holon_orgmode::parser::ParseResult, Strin
 }
 
 // ============================================================================
+// Disk fixed-point: render(parse(disk)) == disk
+// ============================================================================
+
+/// `test_render_string_stability` below proves render→parse→render converges.
+/// That is NOT the property the keystone's `inv-org-render-fixed-point` checks:
+/// it compares the renderer's output against a file that already exists on
+/// disk. A renderer that unconditionally adds presentational whitespace the
+/// parser drops is perfectly *stable* and still permanently unequal to any
+/// hand-authored (or externally written) file — write-back then churns the file
+/// and every render-vs-disk comparison reports drift forever.
+///
+/// The corpus payload: `fixture-logs-2026-07-31/keystone-nightly-20260731-\
+/// 083505-run2.log.zst`, disk 277 bytes vs rendered 278, differing only by a
+/// blank line between a multi-line body and the next heading.
+#[test]
+fn render_of_parsed_disk_text_is_byte_identical() {
+    let disk = "\
+#+ID: forward-edge-page
+* fe-parent
+:PROPERTIES:
+:ID: fe-parent
+:END:
+* fe-blocked
+:PROPERTIES:
+:ID: fe-blocked
+:REQUIRES: fe-target
+:END:
+** rlJWtK
+:PROPERTIES:
+:ID: block-4
+:column-priority: L
+:END:
+foVL623I188Qt
+dTL dC Nh8GfJ M
+* fe-target
+:PROPERTIES:
+:ID: fe-target
+:END:
+";
+
+    let parsed = parse_org(disk).expect("fixture must parse");
+    let rendered = build_org_text(&parsed.document, &parsed.blocks);
+
+    assert_eq!(
+        rendered,
+        disk,
+        "\n=== DISK ({} bytes) ===\n{disk}\n=== RENDERED ({} bytes) ===\n{rendered}",
+        disk.len(),
+        rendered.len(),
+    );
+}
+
+/// The other half of the fixed point: a blank line the renderer must KEEP.
+///
+/// When a body's last line starts a list item, the blank line is org syntax,
+/// not decoration — it closes the list. Without it the following
+/// `#+BEGIN_SRC` child parses as list content and the source block is silently
+/// LOST on write-back → ingest, which is real data loss on the production
+/// `FileFormatAdapter` seam. Counterexample supplied by adversarial
+/// verification of the first (unconditional-removal) attempt at this fix.
+#[test]
+fn blank_line_closing_a_list_body_survives_round_trip() {
+    let disk = "\
+#+ID: list-body-page
+* h
+:PROPERTIES:
+:ID: h
+:END:
+body line
+0.
+
+#+BEGIN_SRC holon_prql :id h::src::0
+x
+#+END_SRC
+";
+
+    let parsed = parse_org(disk).expect("fixture must parse");
+
+    let source_blocks: Vec<_> = parsed
+        .blocks
+        .iter()
+        .filter(|b| b.content_type == ContentType::Source)
+        .collect();
+    assert_eq!(
+        source_blocks.len(),
+        1,
+        "the source block must survive parsing — if it is 0 the list swallowed it\nblocks: {:#?}",
+        parsed.blocks,
+    );
+
+    let rendered = build_org_text(&parsed.document, &parsed.blocks);
+    assert_eq!(
+        rendered,
+        disk,
+        "\n=== DISK ({} bytes) ===\n{disk}\n=== RENDERED ({} bytes) ===\n{rendered}",
+        disk.len(),
+        rendered.len(),
+    );
+}
+
+// ============================================================================
 // PBT: Comprehensive round-trip test
 // ============================================================================
 
