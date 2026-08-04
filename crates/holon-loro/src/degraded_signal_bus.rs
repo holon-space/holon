@@ -8,6 +8,15 @@
 //!
 //! Producers emit and ignore lagged receivers — we prefer dropping
 //! stale notifications over blocking the save worker.
+//!
+//! EVERY degradation is a sticky CONDITION: it is raised, stays in effect, and
+//! is removed by [`DegradedSignalBus::clear`] at a named all-clear moment.
+//! There is no transient-event class, because a transient emit is silently lost
+//! whenever it wins the race against the subscriber — and the emitters that
+//! race hardest (boot DI, the detached `post_ready` org scan) are exactly the
+//! ones whose failures matter most. Each variant of [`ShareDegradedReason`]
+//! documents its all-clear; a variant that cannot name one does not belong on
+//! this bus.
 
 use tokio::sync::broadcast;
 
@@ -17,20 +26,32 @@ pub enum ShareDegradedReason {
     /// Writing `<shared_tree_id>.loro` failed. The in-memory doc still
     /// holds the edit; the next commit will retry. String carries the
     /// underlying error.
+    ///
+    /// All-clear: the next successful save of the same share.
     SnapshotSaveFailed(String),
     /// Reading `<shared_tree_id>.loro` failed at startup. The file has
     /// been renamed to `<path>.corrupt-<ts>` (carried in the string).
     /// The share is **not** registered — peer must re-accept to recover.
+    ///
+    /// All-clear: sticky until the share is registered again, which only a
+    /// re-accept can do. Load runs once per process, so in practice this
+    /// condition lives until restart — and it should: the share really is
+    /// missing for the whole session.
     SnapshotLoadFailed(String),
     /// Rehydration encountered an error after `load` succeeded — most
     /// commonly an advertiser-start failure on a non-idempotent code
     /// path. String carries the underlying error.
+    ///
+    /// All-clear: sticky until the share rehydrates successfully. Rehydration
+    /// runs once at startup and has no retry loop, so this holds until restart.
     RehydrationFailed(String),
     /// Projecting a shared doc's change into the SQL `block` table failed.
     /// Loro holds the change but SQL (which the UI reads) does not, so the
     /// two diverge until the next successful projection. The projection
     /// watermark is deliberately NOT advanced on failure, so the next
     /// commit retries the same diff. String carries the underlying error.
+    ///
+    /// All-clear: the next successful projection of the same share.
     SqlProjectionFailed(String),
     /// A shared doc tried to project a block whose id collides with a LIVE
     /// node in the recipient's global tree — i.e. it is trying to shadow a
@@ -38,6 +59,9 @@ pub enum ShareDegradedReason {
     /// The projection is refused so it cannot clobber the recipient's own SQL
     /// row; the watermark is NOT advanced, so an honest later diff still
     /// projects. String carries the colliding block id.
+    ///
+    /// All-clear: the next successful projection of the same share — that is
+    /// the moment an honest diff got through, so the refusal no longer holds.
     ForeignIdCollision(String),
     /// OrgMode initial-scan ingest failed for one or more vault files. The
     /// app stays up and the OTHER files keep syncing (the watch loop is
@@ -45,6 +69,13 @@ pub enum ShareDegradedReason {
     /// a visible degraded mode, not a silent sync death. String carries the
     /// aggregated per-file failure summary. `shared_tree_id` is the sentinel
     /// `"org-initial-scan"` (this is not tied to a shared doc).
+    ///
+    /// All-clear: the vault's write-back quarantine set going empty — the
+    /// `FileSyncController` already lifts a per-file quarantine on a clean
+    /// re-ingest, which is exactly the moment the aggregate summary stops being
+    /// true. That controller does not hold this bus yet, so the emitter of the
+    /// clear is still to be wired (task #22 follow-up); the condition is sticky
+    /// meanwhile, which is the honest state (the file really is still bad).
     OrgIngestFailed(String),
     /// A block inside a shared subtree was edited, but its content could NOT be
     /// materialized to a dedicated on-disk org file (the mount is not yet a
@@ -53,18 +84,35 @@ pub enum ShareDegradedReason {
     /// materialization is wired. Disclosed (not silently dropped) so the gap is
     /// visible. String carries the offending block id. `shared_tree_id` names
     /// the share.
+    ///
+    /// All-clear: the first successful org materialization of that share's
+    /// mount. Materialization is not built yet, so nothing can raise the
+    /// all-clear and the condition holds for the session — accurately, since
+    /// the disk projection stays stale for exactly that long.
     SharedSubtreeNotMaterialized(String),
+    /// The org write-back stream died and its supervisor could not keep it
+    /// alive — edits reach Loro + SQL but stop reaching disk. String carries
+    /// the supervisor's escalation summary (what died, how often).
+    /// `shared_tree_id` is the sentinel `"org-writeback"`.
+    ///
+    /// All-clear: a successful stream respawn. No emitter of either half yet —
+    /// the let-it-die supervisor owns both.
+    WritebackDegraded(String),
     /// An MCP integration provider did not come up at boot — its sidecar
     /// command is missing/dead, or its `${VAR}` credentials are unresolved. The
     /// integration's `cc_*` cache tables are never created, so every page that
     /// queries them renders blank; disclosed so that blankness is attributable
     /// instead of looking like a healthy empty result. `shared_tree_id` carries
     /// the integration name (this is not tied to a shared doc).
+    ///
+    /// All-clear: the provider connecting.
     IntegrationConnectFailed { integration: String, error: String },
     /// An MCP integration provider needs an OAuth grant before it can connect.
     /// Same blank-page consequence as `IntegrationConnectFailed`, but the fix
     /// is a user action, so it carries the authorization URL.
     /// `shared_tree_id` carries the integration name.
+    ///
+    /// All-clear: the grant completing, i.e. the provider connecting.
     IntegrationNeedsAuth {
         integration: String,
         auth_url: String,
@@ -72,21 +120,36 @@ pub enum ShareDegradedReason {
 }
 
 impl ShareDegradedReason {
-    /// A degradation that is an ongoing CONDITION (has a clearing path) rather
-    /// than a transient event. Conditions are kept sticky by the bus and
-    /// replayed to subscribers that arrive later; transient events are not,
-    /// because nothing would ever clear them.
-    pub fn condition_kind(&self) -> Option<&'static str> {
+    /// Kind constants, so an all-clear site names the condition it lifts
+    /// through the compiler instead of retyping the string.
+    pub const FOREIGN_ID_COLLISION: &'static str = "foreign-id-collision";
+    pub const INTEGRATION_CONNECT_FAILED: &'static str = "integration-connect-failed";
+    pub const INTEGRATION_NEEDS_AUTH: &'static str = "integration-needs-auth";
+    pub const ORG_INGEST_FAILED: &'static str = "org-ingest-failed";
+    pub const REHYDRATION_FAILED: &'static str = "rehydration-failed";
+    pub const SHARED_SUBTREE_NOT_MATERIALIZED: &'static str = "shared-subtree-not-materialized";
+    pub const SNAPSHOT_LOAD_FAILED: &'static str = "snapshot-load-failed";
+    pub const SNAPSHOT_SAVE_FAILED: &'static str = "snapshot-save-failed";
+    pub const SQL_PROJECTION_FAILED: &'static str = "sql-projection-failed";
+    pub const WRITEBACK_DEGRADED: &'static str = "writeback-degraded";
+
+    /// The condition's stable identity, paired with the subject to form a
+    /// [`DegradedConditionKey`]. Total: every degradation is a sticky
+    /// condition, so a new variant cannot opt out of replay by accident — it
+    /// can only fail to compile until it names its kind (and, per this enum's
+    /// doc contract, its all-clear).
+    pub fn condition_kind(&self) -> &'static str {
         match self {
-            Self::IntegrationConnectFailed { .. } => Some("integration-connect-failed"),
-            Self::IntegrationNeedsAuth { .. } => Some("integration-needs-auth"),
-            Self::SnapshotSaveFailed(_)
-            | Self::SnapshotLoadFailed(_)
-            | Self::RehydrationFailed(_)
-            | Self::SqlProjectionFailed(_)
-            | Self::ForeignIdCollision(_)
-            | Self::OrgIngestFailed(_)
-            | Self::SharedSubtreeNotMaterialized(_) => None,
+            Self::IntegrationConnectFailed { .. } => Self::INTEGRATION_CONNECT_FAILED,
+            Self::IntegrationNeedsAuth { .. } => Self::INTEGRATION_NEEDS_AUTH,
+            Self::SnapshotSaveFailed(_) => Self::SNAPSHOT_SAVE_FAILED,
+            Self::SnapshotLoadFailed(_) => Self::SNAPSHOT_LOAD_FAILED,
+            Self::RehydrationFailed(_) => Self::REHYDRATION_FAILED,
+            Self::SqlProjectionFailed(_) => Self::SQL_PROJECTION_FAILED,
+            Self::ForeignIdCollision(_) => Self::FOREIGN_ID_COLLISION,
+            Self::OrgIngestFailed(_) => Self::ORG_INGEST_FAILED,
+            Self::SharedSubtreeNotMaterialized(_) => Self::SHARED_SUBTREE_NOT_MATERIALIZED,
+            Self::WritebackDegraded(_) => Self::WRITEBACK_DEGRADED,
         }
     }
 }
@@ -98,14 +161,12 @@ pub struct ShareDegraded {
 }
 
 impl ShareDegraded {
-    /// The sticky identity of this degradation, if it is a condition.
-    pub fn condition_key(&self) -> Option<DegradedConditionKey> {
-        self.reason
-            .condition_kind()
-            .map(|kind| DegradedConditionKey {
-                subject: self.shared_tree_id.clone(),
-                kind,
-            })
+    /// The sticky identity of this degradation.
+    pub fn condition_key(&self) -> DegradedConditionKey {
+        DegradedConditionKey {
+            subject: self.shared_tree_id.clone(),
+            kind: self.reason.condition_kind(),
+        }
     }
 }
 
@@ -152,8 +213,9 @@ pub struct DegradedSubscription {
 /// their next `recv()` and must catch up — they do not stall producers.
 pub struct DegradedSignalBus {
     tx: broadcast::Sender<DegradedChange>,
-    /// Insertion order makes the replay in `subscribe` deterministic. N is one
-    /// per degraded integration, so linear search beats a map.
+    /// Insertion order makes the replay in `subscribe` deterministic. N is
+    /// bounded by degraded subjects times kinds — single digits in practice —
+    /// so linear search beats a map.
     conditions: std::sync::Mutex<Vec<ShareDegraded>>,
 }
 
@@ -171,15 +233,13 @@ impl DegradedSignalBus {
         }
     }
 
-    /// Emit an event. Conditions are recorded as current state (replacing any
-    /// prior entry with the same key); transient events are broadcast only.
+    /// Raise a condition: recorded as current state (replacing any prior entry
+    /// with the same key) and broadcast.
     pub fn emit(&self, event: ShareDegraded) {
-        if let Some(key) = event.condition_key() {
+        let key = event.condition_key();
+        {
             let mut conditions = self.conditions.lock().unwrap();
-            match conditions
-                .iter_mut()
-                .find(|c| c.condition_key().as_ref() == Some(&key))
-            {
+            match conditions.iter_mut().find(|c| c.condition_key() == key) {
                 Some(existing) => *existing = event.clone(),
                 None => conditions.push(event.clone()),
             }
@@ -192,7 +252,7 @@ impl DegradedSignalBus {
     pub fn clear(&self, key: &DegradedConditionKey) {
         let mut conditions = self.conditions.lock().unwrap();
         let before = conditions.len();
-        conditions.retain(|c| c.condition_key().as_ref() != Some(key));
+        conditions.retain(|c| &c.condition_key() != key);
         let removed = conditions.len() != before;
         drop(conditions);
         if removed {
@@ -245,14 +305,39 @@ mod tests {
         }
     }
 
+    /// Every condition names an all-clear, and clearing it works uniformly —
+    /// stickiness without a clearing path is a permanent banner.
     #[tokio::test(flavor = "current_thread")]
-    async fn transient_emit_without_subscribers_is_noop() {
+    async fn a_share_condition_clears_by_its_kind() {
         let bus = DegradedSignalBus::new();
         bus.emit(ShareDegraded {
             shared_tree_id: "s".into(),
             reason: ShareDegradedReason::SnapshotSaveFailed("disk full".into()),
         });
-        assert!(bus.subscribe().current.is_empty());
+        bus.clear(&DegradedConditionKey {
+            subject: "s".into(),
+            kind: ShareDegradedReason::SNAPSHOT_SAVE_FAILED,
+        });
+        assert!(
+            bus.subscribe().current.is_empty(),
+            "the next successful save must leave no banner behind"
+        );
+    }
+
+    /// Kinds are the sticky identity, so two different degradations of the
+    /// same subject must not overwrite each other.
+    #[tokio::test(flavor = "current_thread")]
+    async fn distinct_kinds_on_one_subject_coexist() {
+        let bus = DegradedSignalBus::new();
+        bus.emit(ShareDegraded {
+            shared_tree_id: "s".into(),
+            reason: ShareDegradedReason::SnapshotSaveFailed("disk full".into()),
+        });
+        bus.emit(ShareDegraded {
+            shared_tree_id: "s".into(),
+            reason: ShareDegradedReason::SqlProjectionFailed("table locked".into()),
+        });
+        assert_eq!(bus.subscribe().current.len(), 2);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -298,6 +383,43 @@ mod tests {
             vec!["github".to_string(), "linear".to_string()],
             "a subscriber that arrives after boot must still learn the current degraded conditions"
         );
+    }
+
+    /// The boot race the integration seam already fixed, for the OTHER
+    /// emitters: `wiring.rs`'s detached `post_ready` task emits
+    /// `OrgIngestFailed` while the window is still launching. A fast-failing
+    /// initial scan lands before the disclosure bridge subscribes; without
+    /// replay the banner is dropped and the vault silently half-syncs.
+    #[tokio::test(flavor = "current_thread")]
+    async fn every_degradation_reaches_a_subscriber_that_arrives_after_it_was_raised() {
+        let raised_before_anyone_listens = vec![
+            ShareDegradedReason::OrgIngestFailed("notes.org: unparseable".into()),
+            ShareDegradedReason::SnapshotSaveFailed("disk full".into()),
+            ShareDegradedReason::SnapshotLoadFailed("/v/s.loro.corrupt-1".into()),
+            ShareDegradedReason::RehydrationFailed("advertiser: port in use".into()),
+            ShareDegradedReason::SqlProjectionFailed("table locked".into()),
+            ShareDegradedReason::ForeignIdCollision("block:journals".into()),
+            ShareDegradedReason::SharedSubtreeNotMaterialized("block:abc".into()),
+            ShareDegradedReason::WritebackDegraded("stream died 3x".into()),
+        ];
+
+        for reason in raised_before_anyone_listens {
+            let bus = DegradedSignalBus::new();
+            bus.emit(ShareDegraded {
+                shared_tree_id: "subject".into(),
+                reason: reason.clone(),
+            });
+
+            // The window (the only consumer) launches strictly later.
+            let sub = bus.subscribe();
+
+            assert_eq!(
+                sub.current.len(),
+                1,
+                "a degradation raised before the disclosure bridge subscribed must still reach \
+                 it — otherwise the app boots looking healthy while {reason:?} is in effect"
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
