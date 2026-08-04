@@ -813,7 +813,21 @@ path is inert in that wiring.
 `BlockHomeAuthority::subtree_of` walks descendants breadth-first, issuing one
 `ordering.children()` per node, because `children` is the only ordered-descendant
 read the seams expose. After §9.3 this is the remaining per-descendant cost on a
-cross-document reparent. Replacing it with a single doc-scoped read trades
+cross-document reparent. **MEASURED 2026-08-04 (§10.2.5): keep BFS.** Real-Turso
+numbers (1000-block page; reads exact, ms ranges over runs): BFS n+1 reads is
+CHEAPER than the `locate_batch` that follows it at every size (n=10: ~3 vs ~9 ms;
+n=100: ~18 vs ~52 ms; n=998: ~230 vs ~700 ms), so it is the minority of
+`rehome_subtree`'s cost. The doc-scoped `get_blocks` fallback imagined below is
+REFUTED per-size: ~100x worse at n=10, ~18x at n=100, ~1.6x at n=998 (O(document)
++ full hydration) — and semantically wrong anyway: its CTE stops at Page-tagged
+blocks in both arms, while `subtree_of` must CROSS them (it is invoked on
+page-toggles, where Page-tagged descendants are exactly the blocks to re-home).
+An id-only subtree CTE wins ~2.4x at n=100 but collapses to parity (~1.03x) at
+n=998; revisit only via a new page-boundary-crossing seam, never `get_blocks`.
+Caveat: the locate_batch comparison is a best case for BFS (the test passes all
+subtree ids; production passes only live-accumulator descendants).
+The original framing follows for the record — replacing it with a single
+doc-scoped read trades
 O(subtree) reads for one O(document) read — better for large subtrees, worse for
 small ones in large documents. **Not fixed now; measure against real Turso at
 Inc 2 before choosing.**
@@ -1038,8 +1052,13 @@ to differ from).
    off-by-one (§9 header, item d) must be reconciled at the exact seam where
    `HomedDiff` replaces `doc_blocks` as the render input.
 5. **`subtree_of` measurement** (§9.6): one `children` read per node today;
-   measure against real Turso before cutover; single doc-scoped read is the
-   fallback if it dominates.
+   measure against real Turso before cutover. **DONE 2026-08-04: BFS does NOT
+   dominate — keep it (per-size numbers + Page-boundary semantics in §9.6);
+   the doc-scoped-read fallback is refuted as stated. Contract pinned by
+   `renderer_renests_by_parent.rs` (mutation-proven: flat-emit and
+   per-block-key-sort renderer mutations both caught; note the test pins
+   re-nesting + within-parent order consumption, NOT within-parent order
+   preservation under global input reversal).**
 6. **Keystone budget re-pin.** Under Inc 2 the holder's authority reads ARE
    prod reads: `inv-sql-budget` pins (PinBlock 17/OpenTab 22 etc.) will move
    and must be re-derived from the new steady state, not tolerated upward
