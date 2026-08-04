@@ -2557,7 +2557,15 @@ impl HolonMcpServer {
         };
 
         let rendered = match (params.source, params.scope) {
-            (_, RenderScope::Blocks) => renderer.render_body(&doc_uri, &file_path, &blocks),
+            (_, RenderScope::Blocks) => renderer
+                .render_body(&doc_uri, &file_path, &blocks)
+                .await
+                .map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("body render of `{doc_uri}` failed: {e:#}"),
+                    None,
+                )
+            })?,
             // The write-back path proper: the header comes from the document
             // store, exactly as the FileSyncController takes it.
             (RenderSource::Sql, RenderScope::Document) => renderer
@@ -2581,7 +2589,15 @@ impl HolonMcpServer {
                         None,
                     )
                 })?;
-                renderer.render_with_document_block(doc_block, &blocks, &file_path)
+                renderer
+                    .render_document_block(doc_block, &blocks, &file_path)
+                    .await
+                    .map_err(|e| {
+                        rmcp::ErrorData::internal_error(
+                            format!("loro-header render of `{doc_uri}` failed: {e:#}"),
+                            None,
+                        )
+                    })?
             }
         };
 

@@ -179,12 +179,12 @@ impl CacheBlockReader {
     /// Links increment 2 — org-writeback resolved-link substitution.
     ///
     /// Upgrades dangling `Name` link marks to `Internal` for blocks whose
-    /// `block_links` row has resolved, so the NEXT file render emits the
-    /// ratified `[[<id>][<label>]]` form; re-ingest of that file then carries
-    /// the `Internal` mark through the normal write path, upgrading every
-    /// store. Render-time only — the stored marks are untouched here, and an
+    /// `block_links` row has resolved, so the file render emits the ratified
+    /// `[[<id>][<label>]]` form; re-ingest of that file then carries the
+    /// `Internal` mark through the normal write path, upgrading every store.
+    /// Render-time only — the stored marks are untouched here, and an
     /// unresolved link keeps rendering as `[[<label>]]` (byte-stable).
-    async fn substitute_resolved_links(&self, blocks: &mut [Block]) -> anyhow::Result<()> {
+    async fn resolve_link_marks_impl(&self, blocks: &mut [Block]) -> anyhow::Result<()> {
         use holon_api::EntityRef;
         use holon_api::InlineMark;
         let sources: Vec<String> = blocks
@@ -305,7 +305,7 @@ impl BlockReader for CacheBlockReader {
         // Same Block::try_from path as load_all_blocks_with_hydration — the
         // derived TryFromEntity would silently leave `tags` empty because
         // of `#[serde(skip, default)]`. See block_two_deserializers memory.
-        let mut blocks: Vec<Block> = rows
+        let blocks: Vec<Block> = rows
             .into_iter()
             .map(|row| {
                 Block::try_from(row).map_err(|e| {
@@ -315,7 +315,6 @@ impl BlockReader for CacheBlockReader {
                 })
             })
             .collect::<anyhow::Result<Vec<Block>>>()?;
-        self.substitute_resolved_links(&mut blocks).await?;
         Ok(blocks)
     }
 
@@ -360,9 +359,6 @@ impl BlockReader for CacheBlockReader {
                          {e}"
                     )
                 })?;
-                let mut one = [block];
-                self.substitute_resolved_links(&mut one).await?;
-                let [block] = one;
                 Ok(Some(block))
             }
             // MISS: the id may have been merged away by `merge_blocks`. Consult
@@ -387,9 +383,12 @@ impl BlockReader for CacheBlockReader {
         }
     }
 
+    async fn resolve_link_marks(&self, blocks: &mut [Block]) -> anyhow::Result<()> {
+        self.resolve_link_marks_impl(blocks).await
+    }
+
     async fn iter_documents_with_blocks(&self) -> anyhow::Result<Vec<(EntityUri, Vec<Block>)>> {
-        let mut all_blocks = self.load_all_blocks_with_hydration().await?;
-        self.substitute_resolved_links(&mut all_blocks).await?;
+        let all_blocks = self.load_all_blocks_with_hydration().await?;
         Ok(blocks_by_document(&all_blocks))
     }
 
