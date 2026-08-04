@@ -993,3 +993,73 @@ single 2/2 run that later ran 3/6 red. Rules now: **every gate claim states its
 run count**; anything the shadow touches needs **≥3 consecutive green runs**, and
 `stale_rewrite_sibling_order` needs **6** (it burned us twice). No single-run
 claims.
+
+---
+
+## 10. Inc 2 — cutover plan, prerequisites, and gates (consolidated)
+
+Everything gating the cutover, in one place. §5's Inc-2 paragraph states the
+*scope*; this section states what must be true BEFORE that scope is safe, drawn
+from the Inc-0/Inc-1 findings (§9) and the session rulings.
+
+### 10.1 Scope (unchanged from §5)
+
+Controller renders from the holder. Delete `doc_blocks`, `render_with_cache`,
+`reseed_doc_blocks`, `render_cached_doc`, guard 1 (delta pre-filter), guard 3
+(`children` compare), guard 4 (the `reseeded` bool); `veto_ungrounded_removals`
+runs unconditionally on every doc the holder emits a `Remove` for. `di.rs` swaps
+`feed.group_by(resolve_doc)` → `feed.home_by(...)`. The shadow and
+`cached_doc_orders()` are DELETED (their job ends when there is no second holder
+to differ from).
+
+### 10.2 Prerequisites — each independently checkable
+
+1. **DI supervisor for stream death, red-first** (let-it-die ruling 2026-08-04).
+   The terminal error latch stays; recovery = DI respawns combinator +
+   accumulator + stream fresh, re-seeded via one atomic `Replace` (recovery
+   path == boot path). Bounded restarts, then escalate to degraded mode. The
+   supervisor lands with its own PBT: inject an authority failure
+   mid-sequence → stream dies loudly → respawn → fold-equality holds
+   post-restart.
+2. **Degraded-mode escalation must be audible end-to-end.** The bus +
+   unconditional bridge landed (`2a3db504`), but `OrgIngestFailed` and five
+   other reason kinds are NON-STICKY and can race window launch (task #22).
+   The supervisor's "kept dying" signal must be a sticky reason (or emitted
+   post-bridge) before cutover — otherwise let-it-die degrades to
+   die-quietly on exactly the persistent-failure path it exists to disclose.
+3. **Renderer re-nesting assertion.** `home_by` hands the renderer a genuine
+   document order; today's `doc_blocks` hands it a flat global sort. Byte-
+   identity across the two was PROVEN (§9.7) *because the renderer re-nests by
+   parent* — Inc 2 adds an explicit assertion/test pinning that re-nesting
+   contract so a future renderer "optimization" that starts trusting input
+   order fails loudly.
+4. **Root-membership mapping.** Holder emission is children-only (§9.2), same
+   convention as `get_blocks` — but the reference model's root-in-own-doc
+   off-by-one (§9 header, item d) must be reconciled at the exact seam where
+   `HomedDiff` replaces `doc_blocks` as the render input.
+5. **`subtree_of` measurement** (§9.6): one `children` read per node today;
+   measure against real Turso before cutover; single doc-scoped read is the
+   fallback if it dominates.
+6. **Keystone budget re-pin.** Under Inc 2 the holder's authority reads ARE
+   prod reads: `inv-sql-budget` pins (PinBlock 17/OpenTab 22 etc.) will move
+   and must be re-derived from the new steady state, not tolerated upward
+   (fix-cap-not-withhold). Also resolves the shadow arming exclusions (§9.8)
+   by deletion.
+7. **Keystone ENVIRONMENT gap** (§9.5): the composed keystone's default draw
+   never exercises the feed-driven write-back path. Inc 2 makes the holder
+   the ONLY write-back path — a keystone that never draws Turso would then
+   test write-back nowhere. The wiring draw must include the feed-driven path
+   before the hand-rolled one is deleted.
+8. **BlockDelta test-callsite sweep** (§7): mechanical `mech-executor` job,
+   listed test files.
+
+### 10.3 Gates at cutover
+
+- Fold-equality properties (both) + hand-rolled regressions, run-count
+  discipline per §9.8.
+- `inv-blocks-match-ref/org` end-to-end on the composed keystone WITH a
+  Turso-inclusive draw.
+- Byte-stability: render byte-identity harness (adopted §9.7 test) extended to
+  assert org output unchanged across the cutover commit on a real-vault copy.
+- Supervisor PBT (10.2.1) green; kill-component chaos transition follows as
+  the crash-resilience keystone extension (vault: Crash Resilience).
