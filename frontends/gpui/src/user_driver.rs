@@ -187,6 +187,8 @@ impl GpuiUserDriver {
     /// `selectable(row(...))` directly, with no outer `render_entity()`,
     /// so sidebar rows register under `selectable-{id}`. Without that
     /// second alias, `click_entity` on a sidebar item would always miss.
+    /// This is the SAME canonical-first chain `element_center_in_region`
+    /// uses for the region-scoped case; keep the two aligned.
     fn element_center(&self, entity_id: &str) -> Option<(f32, f32)> {
         // Block entity ids resolve via their `render-entity-`/`selectable-`
         // aliases or an entity_id scan. Non-block UI handles
@@ -197,6 +199,7 @@ impl GpuiUserDriver {
         // degenerate rect whose center sits on the clip edge — on top of a
         // DIFFERENT row. Resolving it would click the wrong block
         // (2026-06-11); treat it as unresolved so callers re-wait/scroll.
+        let mut degenerate_canonical: Option<String> = None;
         for el_id in [
             format!("render-entity-{entity_id}"),
             format!("selectable-{entity_id}"),
@@ -206,12 +209,39 @@ impl GpuiUserDriver {
                 if info.has_visible_area() {
                     return Some(info.center());
                 }
+                degenerate_canonical.get_or_insert(el_id);
             }
         }
         let resolved = self
             .geometry
             .find_by_entity_id_visible(entity_id)
             .map(|info| info.center());
+        // Surface the LAUNDERING case the visible-area gate would otherwise
+        // hide: a canonical alias is present but degenerate WHILE an
+        // entity-wide scan still finds a visible sibling. For the shipped row
+        // shapes a vertical scroll clips the interaction wrapper and its text
+        // together (both share the row's y-band, `align: start`), so a partial
+        // scroll yields either a visible wrapper (early return above) or no
+        // visible sibling at all (`resolved == None`, scroll-retry) — never
+        // this state. Reaching it means a wrapper collapsed on one axis while a
+        // sibling did not: a widget layout defect (the tracked-widget
+        // contract, `holon_gpui::geometry`), not a scroll-timing one.
+        //
+        // `debug_assert!`, matching the resolution-guard idiom just below:
+        // loud in every test / PBT build (where layout is validated and the
+        // fast-UI + windowed oracles already catch the collapse), but a release
+        // build degrades to the base behaviour — clicking the visible sibling,
+        // which for a block click is the correct content target anyway — rather
+        // than panicking a user's app on clip geometry the tests never saw.
+        debug_assert!(
+            !(degenerate_canonical.is_some() && resolved.is_some()),
+            "GpuiUserDriver::element_center: {entity_id:?} has a degenerate \
+             canonical element {:?} while an entity-wide scan finds a visible \
+             sibling. Driving the sibling would silently click a DIFFERENT \
+             widget than the caller asked for — see the tracked-widget \
+             contract in `holon_gpui::geometry`.",
+            degenerate_canonical.as_deref().unwrap_or_default(),
+        );
         // Guard intent (unchanged): a non-block id that resolves to nothing
         // looks identical to an un-rendered block. Block ids may legitimately
         // be absent (not yet rendered); a non-block id that resolves nowhere

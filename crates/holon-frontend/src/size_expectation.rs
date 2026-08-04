@@ -229,6 +229,18 @@ impl SizeBounds {
         }
     }
 
+    /// "A user can aim at this" — an interaction wrapper must be laid out with
+    /// real extent on both axes. A degenerate rect is unclickable AND its
+    /// centre resolves onto whatever is painted at the clip edge, so a driver
+    /// aiming here silently drives a neighbour instead.
+    ///
+    /// Deliberately 1px rather than a platform tap-target size: the defect
+    /// class is total collapse, and a larger floor would encode theme
+    /// decisions the geometry layer has no business asserting.
+    pub fn non_degenerate() -> Self {
+        Self::at_least(1.0, 1.0)
+    }
+
     /// "I'm allowed to collapse to nothing" — the live_block / spacer
     /// case. Same as [`Default`], named for clarity at call sites.
     pub fn collapsible() -> Self {

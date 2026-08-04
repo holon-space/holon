@@ -1,0 +1,36 @@
+Rigorous true-base A/B for the tracked()/BoundsTracker layout-neutrality fix
+(task #4, 2026-08-04). NOT env-probe based: the base is reconstructed by
+overwriting the 6 changed source files with `git show main:<path>` content
+(BoundsTracker present, no oracle arming, original driver), building, running,
+then restoring. Gate scope is the SANCTIONED `--features pbt`, with the 7
+`harness = false` binaries filtered out (they run their body at nextest
+`--list` and cannot be collected).
+
+Command:
+  cargo nextest run -p holon-gpui --features pbt --no-fail-fast \
+    -E 'not (binary(gpui_gherkin_replay) + binary(gpui_sim_replay_capture)
+             + binary(gpui_capture_replay) + binary(reactive_vm_realwindow_test)
+             + binary(reactive_vm_test) + binary(gpui_windowed_minimize)
+             + binary(executor_bridge_test))'
+
+TRUE BASE (my diff reverted):  252 tests, 245 passed, 7 failed
+  FAIL tracked_layout_neutrality::tracked_wrapper_contributes_no_layout   <- the bug is present
+  FAIL gpui_window_slice::capmap_hosts_windowed_sutlayout_over_real_geometry
+  FAIL gpui_compose_sut_windowed::windowed_split_then_clickblock_resolves_minted_id
+  FAIL gpui_compose_sut_windowed::windowed_composed_sut_replays_a_fixture_via_replay_steps_green
+  FAIL gpui_compose_sut_windowed::windowed_composed_sut_drives_a_click_gesture_sequence_green
+  FAIL gpui_composed_windowed_loop::benchmark_windowed_per_case_boot_cost
+  FAIL gpui_composed_windowed_loop::general_e2e_composed_pbt_windowed
+
+HEAD (my fix):                 252 tests, 246 passed, 6 failed
+  PASS tracked_layout_neutrality::tracked_wrapper_contributes_no_layout   <- bug fixed
+  (the other 6 failures are identical to true base)
+
+DELTA = exactly tracked_layout_neutrality flipping RED -> GREEN.
+The 6 composed-windowed reds are PRE-EXISTING (identical at base and head).
+Signatures of the 5 non-capmap reds (also reproduced red at true base by
+running the `gpui_gherkin_replay` binary directly):
+  [ClickBlock] focus did not propagate for block:c1        (driver_input.rs:408)
+  [SplitBlock/keystroke] home ... GPUI keystroke not consumed (op_write_cap.rs:214)
+capmap_hosts_windowed_sutlayout_over_real_geometry is documented pre-existing
+in its own test (phantom entity ids / root-layout ghost row).
