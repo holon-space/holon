@@ -49,10 +49,19 @@ pub const READS_PER_WATCH: usize = 2;
 //   18-read hole in the ceiling.
 
 /// `PinBlock`'s click-resolve cost. Ceiling = 12 + 5 = **17 reads**, measured
-/// over 133 shallow-state samples. A pre-existing deep-state regime on main
-/// draws 137–141 reads (so far only in sequences already red on
-/// inv-focus-roots) — check the known-reds ledger (entry 14) before treating
-/// a large breach as a fresh regression.
+/// over 133 shallow-state samples.
+///
+/// A breach into the ~90–141 read regime is NOT a cost-model gap and must not
+/// be absorbed by widening this constant. Measured cause (2026-08-04,
+/// known-reds entry 14): reads elevate iff the target's NESTING DEPTH exceeds
+/// the main-panel query's depth-20 recursion cap. Past that cap the panel
+/// renders no row for the target, so `click_entity_with_modifiers` spins its 2s
+/// poll deadline (~41 redundant re-snapshots of the same two `watch_view`
+/// SELECTs) and the pin never dispatches.
+///
+/// Reads track the poll deadline, not state size. Depth 12 → 17 reads; depth
+/// 21 → 89; depth 22 → 101. Panel WIDTH is irrelevant: a 40-block FLAT panel
+/// renders all 40 rows and pins the 40th for 17 reads.
 pub const PIN_BLOCK_CLICK_RESOLVE_READS: usize = 5;
 
 /// `OpenTabViaModifierClick`'s click-resolve cost. Ceiling = 12 + 10 =

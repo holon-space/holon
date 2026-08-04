@@ -17,9 +17,20 @@
 //! Cursor is untouched (pins are not part of back/forward navigation).
 //!
 //! Generator restricted to `Region::RightSidebar` — the only place the bullet's
-//! shift-click handler dispatches `focus_pin` in the default layout. Targets
-//! are `focusable_rendered_block_ids(Region::Main)` (visible blocks in the
-//! main panel — the user can only shift-click on a rendered bullet).
+//! shift-click handler dispatches `focus_pin` in the default layout.
+//!
+//! KNOWN GAP (known-reds entry 14, measured 2026-08-04): targets come from
+//! `main_editable_descendants()`, which has NO depth filter, while the compiled
+//! main-panel matview truncates its recursion at nesting depth 20
+//! (`WHERE _vl2.depth < 20 … AND _vl2.depth <= 20`; see
+//! `crates/holon/tests/turso_storage_repros/tabs_main_panel_delivery.rs:130`).
+//! So the generator can shift-click a bullet nested deeper than 20, which the
+//! panel never renders and no user could hit. Panel WIDTH is irrelevant — a
+//! 40-block flat panel renders all 40 rows and pins the 40th for 17 reads.
+//! Such a draw burns the driver's 2s click-resolve poll, dispatches no pin,
+//! and reds `inv-focus-roots` / `inv-main-panel-rows-match-focus` / the pinned
+//! `PinBlock` read budget at once. The fix is to teach the candidate set the
+//! same depth cap the panel query applies.
 
 use holon_api::EntityUri;
 use holon_api::Region;
