@@ -460,16 +460,28 @@ impl BackendEngine {
     /// allowing us to create the view first and then query it for initial
     /// data. Bind context parameters to the parameter map
     ///
-    /// Adds `$context_id`, `$context_parent_id`, and `$context_path_prefix`
-    /// parameters based on QueryContext. None values are bound as
-    /// Value::Null.
+    /// Adds `$context_id`, `$context_local_id`, `$context_parent_id`, and
+    /// `$context_path_prefix` parameters based on QueryContext. None values are
+    /// bound as Value::Null.
+    ///
+    /// `$context_local_id` is the same id with its URI scheme stripped
+    /// (`cc-session:abc` -> `abc`). Connector mirrors store the entity's own
+    /// key scheme-qualified but every foreign key verbatim, so a child
+    /// table joins against the local part. Stripping happens HERE, off the
+    /// parsed `EntityUri`, so no query has to re-derive it with a `substr`
+    /// and a hand-counted offset.
     fn bind_context_params(&self, params: &mut HashMap<String, Value>, context: &QueryContext) {
         match &context.current_block_id {
             Some(id) => {
                 params.insert("context_id".into(), Value::String(id.as_str().to_string()));
+                params.insert(
+                    "context_local_id".into(),
+                    Value::String(id.id().to_string()),
+                );
             }
             None => {
                 params.insert("context_id".into(), Value::Null);
+                params.insert("context_local_id".into(), Value::Null);
             }
         }
         match &context.context_parent_id {
@@ -1167,6 +1179,31 @@ mod tests {
         assert!(
             inlined.to_lowercase().contains("parent_id"),
             "expected parent_id predicate, got:\n{inlined}"
+        );
+    }
+
+    /// `$context_local_id` is the same id with its scheme stripped, so a
+    /// connector's child table (whose foreign keys are the provider's raw ids)
+    /// can join without a hand-counted `substr` offset.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn context_local_id_is_the_context_id_without_its_scheme() {
+        let engine = create_test_engine().await.unwrap();
+        let context = QueryContext::for_block(
+            &EntityUri::parse("cc-session:5969a71e").expect("valid entity URI"),
+            None,
+        );
+        let mut params = HashMap::new();
+        engine.bind_context_params(&mut params, &context);
+
+        let inlined = BackendEngine::inline_parameters(
+            "SELECT 1 FROM cc_message WHERE session_id = $context_local_id AND owner = \
+             $context_id",
+            &params,
+        );
+        assert_eq!(
+            inlined,
+            "SELECT 1 FROM cc_message WHERE session_id = '5969a71e' AND owner = \
+             'cc-session:5969a71e'"
         );
     }
 
