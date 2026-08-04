@@ -40,6 +40,7 @@ use crate::debounced_commit_worker::DebouncedCommitWorkerHandle;
 use crate::debounced_commit_worker::any_commit;
 use crate::debounced_commit_worker::local_only;
 use crate::debounced_commit_worker::{self};
+use crate::degraded_signal_bus::DegradedConditionKey;
 use crate::degraded_signal_bus::DegradedSignalBus;
 use crate::degraded_signal_bus::ShareDegraded;
 use crate::degraded_signal_bus::ShareDegradedReason;
@@ -185,6 +186,12 @@ fn spawn_save_worker(
                         "snapshot save for {id} failed: {e:#}"
                     )));
                 }
+                // The save condition's all-clear: the snapshot is on disk, so a
+                // banner from a previous failure is no longer true.
+                bus.clear(&DegradedConditionKey {
+                    subject: id.clone(),
+                    kind: ShareDegradedReason::SNAPSHOT_SAVE_FAILED,
+                });
                 Ok(())
             }
         },
@@ -432,6 +439,18 @@ fn spawn_projection_worker(
                             "shared doc projection for {stid} failed: {e:#}"
                         )));
                     }
+                }
+
+                // Reaching here means the collision guard passed AND SQL took
+                // the batch — the all-clear for both projection conditions.
+                for kind in [
+                    ShareDegradedReason::SQL_PROJECTION_FAILED,
+                    ShareDegradedReason::FOREIGN_ID_COLLISION,
+                ] {
+                    bus.clear(&DegradedConditionKey {
+                        subject: stid.clone(),
+                        kind,
+                    });
                 }
 
                 if after_settled {

@@ -105,8 +105,10 @@ pub struct DegradedToast {
     pub kind: DegradedKind,
     pub shared_tree_id: String,
     pub detail: String,
-    /// Set when this toast reflects an ongoing degraded CONDITION rather than a
-    /// transient failure — it is upserted on re-raise and removed on clear.
+    /// Set for toasts sourced from the degraded bus, where every degradation is
+    /// a sticky condition — upserted on re-raise, removed on clear. `None` for
+    /// UI-local toasts (undo/command/preference failures, info) that have no
+    /// bus condition behind them.
     pub condition: Option<DegradedConditionKey>,
 }
 
@@ -156,6 +158,10 @@ pub enum DegradedKind {
     /// Disclosed degrade per the share write-back track (inc 1): the edit is
     /// NOT lost, only the file projection lags.
     SharedSubtreeNotMaterialized,
+    /// Red — the org write-back stream died and its supervisor could not keep
+    /// it alive. Edits still reach Loro + SQL, but they stop reaching disk, so
+    /// the vault on disk silently falls behind the app until this clears.
+    WritebackDegraded,
     /// Red — an MCP integration provider failed to connect at boot. Its cache
     /// tables were never created, so dependent pages render blank; this names
     /// the integration and the connect error so the blankness is attributable.
@@ -238,7 +244,7 @@ impl ShareUiState {
                     kind: DegradedKind::SnapshotSaveFailed,
                     shared_tree_id: event.shared_tree_id,
                     detail,
-                    condition: condition.clone(),
+                    condition: Some(condition.clone()),
                 });
             }
             ShareDegradedReason::RehydrationFailed(detail) => {
@@ -246,7 +252,7 @@ impl ShareUiState {
                     kind: DegradedKind::RehydrationFailed,
                     shared_tree_id: event.shared_tree_id,
                     detail,
-                    condition: condition.clone(),
+                    condition: Some(condition.clone()),
                 });
             }
             ShareDegradedReason::SqlProjectionFailed(detail) => {
@@ -254,7 +260,7 @@ impl ShareUiState {
                     kind: DegradedKind::SqlProjectionFailed,
                     shared_tree_id: event.shared_tree_id,
                     detail,
-                    condition: condition.clone(),
+                    condition: Some(condition.clone()),
                 });
             }
             ShareDegradedReason::ForeignIdCollision(block_id) => {
@@ -262,21 +268,41 @@ impl ShareUiState {
                     kind: DegradedKind::ForeignIdCollision,
                     shared_tree_id: event.shared_tree_id,
                     detail: block_id,
-                    condition: condition.clone(),
+                    condition: Some(condition.clone()),
                 });
             }
             ShareDegradedReason::SnapshotLoadFailed(path) => {
-                self.quarantines.push(QuarantineEvent {
+                // Upsert, like `push_toast`: a sticky condition can arrive
+                // twice (once replayed in `current`, once live), and two
+                // identical full-screen quarantine modals for one share is a
+                // dismissal treadmill.
+                let quarantine = QuarantineEvent {
                     shared_tree_id: event.shared_tree_id,
                     quarantine_path: path,
-                });
+                };
+                match self
+                    .quarantines
+                    .iter_mut()
+                    .find(|q| q.shared_tree_id == quarantine.shared_tree_id)
+                {
+                    Some(existing) => *existing = quarantine,
+                    None => self.quarantines.push(quarantine),
+                }
             }
             ShareDegradedReason::OrgIngestFailed(summary) => {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::OrgIngestFailed,
                     shared_tree_id: event.shared_tree_id,
                     detail: summary,
-                    condition: condition.clone(),
+                    condition: Some(condition.clone()),
+                });
+            }
+            ShareDegradedReason::WritebackDegraded(detail) => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::WritebackDegraded,
+                    shared_tree_id: event.shared_tree_id,
+                    detail,
+                    condition: Some(condition.clone()),
                 });
             }
             ShareDegradedReason::SharedSubtreeNotMaterialized(detail) => {
@@ -284,7 +310,7 @@ impl ShareUiState {
                     kind: DegradedKind::SharedSubtreeNotMaterialized,
                     shared_tree_id: event.shared_tree_id,
                     detail,
-                    condition: condition.clone(),
+                    condition: Some(condition.clone()),
                 });
             }
             // The toast body truncates `detail` at 80 chars, so both of these
@@ -294,7 +320,7 @@ impl ShareUiState {
                     kind: DegradedKind::IntegrationConnectFailed,
                     shared_tree_id: event.shared_tree_id,
                     detail: format!("{integration}: {error}"),
-                    condition: condition.clone(),
+                    condition: Some(condition.clone()),
                 });
             }
             ShareDegradedReason::IntegrationNeedsAuth {
@@ -305,7 +331,7 @@ impl ShareUiState {
                     kind: DegradedKind::IntegrationNeedsAuth,
                     shared_tree_id: event.shared_tree_id,
                     detail: format!("{integration}: authorize at {auth_url}"),
-                    condition: condition.clone(),
+                    condition: Some(condition.clone()),
                 });
             }
         }
@@ -1607,6 +1633,11 @@ fn render_toast_stack(
                 "⚠",
                 "Shared edit saved — org file pending",
             ),
+            DegradedKind::WritebackDegraded => (
+                gpui::rgba(0xef4444ff),
+                crate::icon("⛔"),
+                "Edits are not reaching disk",
+            ),
             DegradedKind::IntegrationConnectFailed => (
                 gpui::rgba(0xef4444ff),
                 crate::icon("⛔"),
@@ -1749,6 +1780,39 @@ mod tests {
         assert!(s.toasts.is_empty());
         assert_eq!(s.quarantines.len(), 1);
         assert_eq!(s.quarantines[0].quarantine_path, "/tmp/x.corrupt-1");
+    }
+
+    /// Every degradation is now a sticky condition, so the bridge can deliver
+    /// one twice — replayed in `subscription.current` and again as the live
+    /// `Raised`. The quarantine modal must not stack.
+    #[test]
+    fn a_double_delivered_quarantine_stays_one_modal() {
+        let mut s = ShareUiState::new();
+        let event = ShareDegraded {
+            shared_tree_id: "xyz".into(),
+            reason: ShareDegradedReason::SnapshotLoadFailed("/tmp/x.corrupt-1".into()),
+        };
+        s.apply_degraded(event.clone());
+        s.apply_degraded(event);
+        assert_eq!(s.quarantines.len(), 1);
+    }
+
+    /// A boot-race degradation that a late window learns about via replay must
+    /// still render — and must be clearable by key like any other condition.
+    #[test]
+    fn org_ingest_failed_is_a_clearable_condition() {
+        let mut s = ShareUiState::new();
+        s.apply_degraded(ShareDegraded {
+            shared_tree_id: "org-initial-scan".into(),
+            reason: ShareDegradedReason::OrgIngestFailed("notes.org: unparseable".into()),
+        });
+        assert_eq!(s.toasts.len(), 1);
+        let key = s.toasts[0]
+            .condition
+            .clone()
+            .expect("every bus-sourced toast carries its condition key");
+        s.apply_degraded_cleared(&key);
+        assert!(s.toasts.is_empty());
     }
 
     #[test]
