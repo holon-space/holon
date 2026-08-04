@@ -139,6 +139,7 @@ fn rebind_reset_smoke() {
                 nav,
                 bounds.clone(),
                 Some(debug.clone()),
+                None,
                 "Holon-Rebind-Smoke",
                 cx,
             )

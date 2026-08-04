@@ -364,13 +364,10 @@ fn register_subtree_share(injector: &Injector) {
         let key = resolver.resolve::<Arc<SecretKey>>();
         Shared::new(Arc::new(IrohAdvertiser::new_with_key((**key).clone())))
     }));
-    injector.provide::<Arc<crate::sync::degraded_signal_bus::DegradedSignalBus>>(Provider::root(
-        |_| {
-            Shared::new(Arc::new(
-                crate::sync::degraded_signal_bus::DegradedSignalBus::new(),
-            ))
-        },
-    ));
+    // `Arc<DegradedSignalBus>` is NOT registered here. Disclosure must exist in
+    // every container, not only the Loro one, so the composition root
+    // (`holon-app`'s `add_frontend`) owns it; resolving it below therefore also
+    // asserts this module was configured by a root that provides it.
     injector.provide::<Arc<crate::sync::shared_snapshot_store::SharedSnapshotStore>>(
         Provider::root(|resolver| {
             let config = resolver.resolve::<LoroConfig>();

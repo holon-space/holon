@@ -151,6 +151,7 @@ pub fn with_windowed_wide_sut(
                 nav,
                 bounds.clone(),
                 Some(debug.clone()),
+                None,
                 "Holon-ComposeSut-Windowed-Loop",
                 cx,
             )

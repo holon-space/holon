@@ -71,6 +71,7 @@ fn blur_commits_pending_text() {
                 nav,
                 bounds.clone(),
                 None,
+                None,
                 "Holon-Blur-Test",
                 app,
             )

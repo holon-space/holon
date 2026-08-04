@@ -409,8 +409,12 @@ impl gpui::Global for DegradedToastSink {}
 /// received `ShareDegraded` is forwarded through an unbounded `mpsc` channel
 /// to a pump running on GPUI's executor, which calls `cx.update_window` to
 /// mutate the `ShareUiState`.
+/// Takes the bus itself, NOT the share backend: degraded conditions are raised
+/// by MCP integrations and org ingest as well as by shares, so the subscriber
+/// must exist in every consolidator mode — keying it off a Loro-only handle
+/// left the shipped SqlOnly build raising conditions nobody listened to.
 pub fn spawn_degraded_bus_bridge(
-    backend: Arc<holon::sync::loro_share_backend::LoroShareBackend>,
+    bus: Arc<holon::sync::DegradedSignalBus>,
     rt_handle: tokio::runtime::Handle,
     share_state: Entity<ShareUiState>,
     window_handle: AnyWindowHandle,
@@ -418,11 +422,15 @@ pub fn spawn_degraded_bus_bridge(
 ) {
     let (tx, mut rx) = futures::channel::mpsc::unbounded::<DegradedChange>();
 
+    // Subscribe SYNCHRONOUSLY, before the pump task is scheduled: a condition
+    // raised between this call and the task's first poll would otherwise be
+    // lost, and "is anyone listening?" must be true the moment wiring returns.
+    let subscription = bus.subscribe();
+
     // Tokio side: replay the conditions already in effect (they may have been
     // raised during boot DI, long before this window existed), then pump live
     // changes.
     rt_handle.spawn(async move {
-        let subscription = backend.degraded_bus().subscribe();
         let mut bus_rx = subscription.changes;
         for event in subscription.current {
             if tx.unbounded_send(DegradedChange::Raised(event)).is_err() {

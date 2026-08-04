@@ -1424,21 +1424,33 @@ pub fn launch_holon_window_with_engine(
     session: Arc<FrontendSession>,
     engine: Arc<ReactiveEngine>,
     debug: Arc<holon_mcp::server::DebugServices>,
+    degraded_bus: Arc<holon::sync::DegradedSignalBus>,
     rt_handle: tokio::runtime::Handle,
     cx: &mut App,
 ) -> BoundsRegistry {
-    launch_holon_window_with_engine_and_share(session, engine, debug, None, rt_handle, cx)
+    launch_holon_window_with_engine_and_share(
+        session,
+        engine,
+        debug,
+        None,
+        degraded_bus,
+        rt_handle,
+        cx,
+    )
 }
 
-/// Variant of `launch_holon_window_with_engine` that also wires the
-/// subtree-share UI's degraded-bus bridge. `share_backend` is resolved from
-/// the DI injector at top-level (see `main.rs`) and is `None` when the
-/// `iroh-sync` feature is disabled.
+/// Variant of `launch_holon_window_with_engine` that also wires the subtree
+/// SHARE actions. `share_backend` is resolved from the DI injector at
+/// top-level (see `main.rs`) and is `None` when the `iroh-sync` feature is
+/// disabled — it gates the share context menu only. `degraded_bus` is
+/// required and NOT optional: the disclosure bridge must exist in every
+/// consolidator mode.
 pub fn launch_holon_window_with_engine_and_share(
     session: Arc<FrontendSession>,
     engine: Arc<ReactiveEngine>,
     debug: Arc<holon_mcp::server::DebugServices>,
     share_backend: Option<Arc<holon::sync::loro_share_backend::LoroShareBackend>>,
+    degraded_bus: Arc<holon::sync::DegradedSignalBus>,
     rt_handle: tokio::runtime::Handle,
     cx: &mut App,
 ) -> BoundsRegistry {
@@ -1450,6 +1462,7 @@ pub fn launch_holon_window_with_engine_and_share(
         Some(engine),
         Some(debug),
         share_backend,
+        Some(degraded_bus),
         rt_handle,
         nav,
         bounds_registry.clone(),
@@ -1480,6 +1493,7 @@ pub fn launch_holon_window_with_title(
         session,
         Some(engine),
         debug,
+        None,
         None,
         rt_handle,
         nav,
@@ -1552,6 +1566,7 @@ pub fn launch_holon_window_rebindable(
     nav: NavigationState,
     bounds_registry: BoundsRegistry,
     debug: Option<Arc<holon_mcp::server::DebugServices>>,
+    degraded_bus: Option<Arc<holon::sync::DegradedSignalBus>>,
     title: &str,
     cx: &mut App,
 ) -> Option<RebindHandle> {
@@ -1560,6 +1575,7 @@ pub fn launch_holon_window_rebindable(
         Some(engine),
         debug,
         None,
+        degraded_bus,
         rt_handle,
         nav,
         bounds_registry,
@@ -1589,6 +1605,7 @@ pub fn launch_holon_window_with_engine_and_registry(
         Some(engine),
         None,
         None,
+        None,
         rt_handle,
         nav,
         bounds_registry,
@@ -1607,6 +1624,7 @@ pub fn launch_holon_window_with_registry(
 ) {
     launch_holon_window_impl(
         session,
+        None,
         None,
         None,
         None,
@@ -1675,13 +1693,17 @@ fn spawn_root_layout_signal(
 ///
 /// If `existing_engine` is `Some`, reuses it (shared with MCP server).
 /// Otherwise creates a fresh `ReactiveEngine` inside the window callback.
-/// `share_backend` is resolved from the DI injector in `main.rs`; pass
-/// `None` to skip wiring the degraded-bus bridge (PBT / mobile paths).
+/// `share_backend` gates the share context menu (`ShareTrigger`) only.
+/// `degraded_bus` gates the disclosure bridge and is independent of it: every
+/// production entry point supplies the bus, so the bridge is wired in every
+/// consolidator mode. `None` only in PBT launchers with no container behind
+/// them.
 fn launch_holon_window_impl(
     session: Arc<FrontendSession>,
     existing_engine: Option<Arc<ReactiveEngine>>,
     debug: Option<Arc<holon_mcp::server::DebugServices>>,
     share_backend: Option<Arc<holon::sync::loro_share_backend::LoroShareBackend>>,
+    degraded_bus: Option<Arc<holon::sync::DegradedSignalBus>>,
     rt_handle: tokio::runtime::Handle,
     nav: NavigationState,
     bounds_registry: BoundsRegistry,
@@ -2393,24 +2415,31 @@ fn launch_holon_window_impl(
         );
     }
 
-    // Wire the share-subtree degraded-bus bridge + ShareTrigger global. If
-    // `share_backend` is `None` (iroh-sync disabled or PBT) no bridge is
-    // spawned and ShareTrigger is not installed — the share context menu
-    // silently no-ops with a warning.
-    if let Some(backend) = share_backend {
+    // Wire the degraded-disclosure bridge. Deliberately NOT keyed off
+    // `share_backend`: MCP integrations and org ingest raise conditions in
+    // every consolidator mode, and gating the only subscriber on a Loro-only
+    // handle is what made the shipped SqlOnly build render blank pages with no
+    // banner.
+    if let Some(bus) = degraded_bus {
         let async_cx = cx.to_async();
         let share_ui_entity = app_model.read(cx).share_ui.clone();
         share_ui::spawn_degraded_bus_bridge(
-            backend,
+            bus,
             rt_handle.clone(),
-            share_ui_entity.clone(),
+            share_ui_entity,
             window_handle.into(),
             &async_cx,
         );
+    }
 
+    // Wire the ShareTrigger global. `share_backend` is `None` when iroh-sync
+    // is disabled or Loro is off — then the share context menu silently
+    // no-ops with a warning.
+    if share_backend.is_some() {
         // Install the ShareTrigger global so block right-click handlers can
         // dispatch `share_subtree` without plumbing session/rt_handle/async_cx
         // through every intermediate builder.
+        let share_ui_entity = app_model.read(cx).share_ui.clone();
         let session_for_trigger = app_model.read(cx).session.clone();
         let rt_handle_for_trigger = rt_handle.clone();
         let window_handle_for_trigger: AnyWindowHandle = window_handle.into();

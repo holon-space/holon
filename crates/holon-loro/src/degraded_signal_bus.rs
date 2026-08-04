@@ -200,6 +200,14 @@ impl DegradedSignalBus {
         }
     }
 
+    /// Live subscriber count. A bus that conditions are raised on with zero
+    /// subscribers discloses to nobody — the frontend wiring is then mute even
+    /// though every producer looks correctly wired, so this is the observable
+    /// that makes "someone is listening" assertable.
+    pub fn subscriber_count(&self) -> usize {
+        self.tx.receiver_count()
+    }
+
     pub fn subscribe(&self) -> DegradedSubscription {
         // Hold the conditions lock across `tx.subscribe()` so snapshot and
         // subscription are atomic against `emit`, which takes the same lock:

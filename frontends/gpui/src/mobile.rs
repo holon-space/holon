@@ -127,7 +127,7 @@ fn open_holon_window(
     });
     let rt_handle = rt.handle().clone();
 
-    let (session, engine, debug, app) = rt.block_on(async {
+    let (session, engine, debug, degraded_bus, app) = rt.block_on(async {
         let widgets = crate::render_supported_widgets();
         let ui_info = holon_api::UiInfo {
             available_widgets: widgets,
@@ -212,7 +212,10 @@ fn open_holon_window(
                 };
         }
 
-        (session, engine, debug, app)
+        let degraded_bus =
+            (*injector.resolve::<std::sync::Arc<holon::sync::DegradedSignalBus>>()).clone();
+
+        (session, engine, debug, degraded_bus, app)
     });
 
     // Keep the runtime AND the DI application alive for the process lifetime:
@@ -239,6 +242,7 @@ fn open_holon_window(
         nav,
         bounds_registry,
         Some(debug.clone()),
+        Some(degraded_bus),
         "Holon",
         cx,
     )

@@ -175,21 +175,22 @@ impl Module for McpIntegrationsModule {
                 let sync_gate: SyncGate = (*resolver.resolve::<SyncGate>()).clone();
 
                 // Every non-connected integration is disclosed on this bus so
-                // the resulting blank pages are attributable. The bus is only
-                // registered by `LoroModule`, so a SqlOnly container has none —
-                // say so loudly instead of degrading invisibly.
-                let degraded_bus =
-                    match resolver.try_resolve_async::<Arc<DegradedSignalBus>>().await {
-                        Ok(bus) => Some((*bus).clone()),
-                        Err(e) => {
-                            tracing::error!(
-                                "[McpIntegrationsModule] No DegradedSignalBus in this container \
-                             ({e}) — integration connect failures will be LOG-ONLY and their \
-                             pages will render blank with no banner"
-                            );
-                            None
-                        }
-                    };
+                // the resulting blank pages are attributable. A container that
+                // registers integrations but no bus can never tell the user
+                // anything is wrong, so its absence is a wiring bug, not a mode
+                // — fail the boot rather than ship a mute build.
+                let degraded_bus: Arc<DegradedSignalBus> = (*resolver
+                    .try_resolve_async::<Arc<DegradedSignalBus>>()
+                    .await
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "[McpIntegrationsModule] No DegradedSignalBus in this container ({e}) \
+                             — integration connect failures would have no disclosure channel at \
+                             all and their pages would render blank. Register it in the \
+                             composition root (holon-app `add_frontend`)."
+                        )
+                    }))
+                .clone();
 
                 // Layered `${VAR}` resolver: environment variable wins, then a
                 // settings value whose key matches case-insensitively with `.`/`_`
@@ -233,9 +234,7 @@ impl Module for McpIntegrationsModule {
                                  skipping: {e}",
                                 name
                             );
-                            if let Some(bus) = &degraded_bus {
-                                disclose_connect_failure(name, &e, bus);
-                            }
+                            disclose_connect_failure(name, &e, &degraded_bus);
                             continue;
                         }
                         Err(e) => {
@@ -295,18 +294,14 @@ impl Module for McpIntegrationsModule {
                                 "[McpIntegrationsModule] Provider '{}' needs OAuth — auth_url: {}",
                                 provider_name, auth_url
                             );
-                            if let Some(bus) = &degraded_bus {
-                                disclose_needs_auth(&provider_name, &auth_url, bus);
-                            }
+                            disclose_needs_auth(&provider_name, &auth_url, &degraded_bus);
                         }
                         Err(e) => {
                             warn!(
                                 "[McpIntegrationsModule] Failed to connect provider '{}': {e}",
                                 name
                             );
-                            if let Some(bus) = &degraded_bus {
-                                disclose_connect_failure(name, &e, bus);
-                            }
+                            disclose_connect_failure(name, &e, &degraded_bus);
                         }
                     }
                 }
