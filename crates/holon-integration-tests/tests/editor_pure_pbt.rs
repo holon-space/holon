@@ -245,6 +245,11 @@ impl RefBlockTree for EditorPureRef {
             }
         }
     }
+    fn main_panel_renders(&self, id: &EntityUri) -> bool {
+        // The editor-pure slice has no panel query and no pages: every block
+        // under the single root is rendered.
+        self.is_descendant_of_any(id, &BTreeSet::from([self.root_id.clone()]))
+    }
     fn is_layout_block(&self, _: &EntityUri) -> bool {
         false
     }

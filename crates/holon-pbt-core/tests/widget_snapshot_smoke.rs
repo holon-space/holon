@@ -89,6 +89,9 @@ impl RefBlockTree for ToyRef {
     ) -> bool {
         false
     }
+    fn main_panel_renders(&self, _: &EntityUri) -> bool {
+        false
+    }
     fn is_layout_block(&self, _: &EntityUri) -> bool {
         false
     }

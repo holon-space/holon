@@ -63,7 +63,7 @@ where
         Self::ID
     }
 
-    async fn check(&self, ref_: &R, _sut: &S) -> InvariantResult {
+    async fn check(&self, ref_: &R, _: &S) -> InvariantResult {
         let mut violations: Vec<String> = Vec::new();
 
         for page in ref_.all_non_seed_block_ids() {
@@ -195,6 +195,9 @@ mod tests {
             Vec::new()
         }
         fn is_descendant_of_any(&self, _: &EntityUri, _: &BTreeSet<EntityUri>) -> bool {
+            false
+        }
+        fn main_panel_renders(&self, _: &EntityUri) -> bool {
             false
         }
         fn is_layout_block(&self, _: &EntityUri) -> bool {

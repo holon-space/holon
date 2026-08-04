@@ -165,6 +165,9 @@ mod tests {
         fn is_descendant_of_any(&self, _: &EntityUri, _: &BTreeSet<EntityUri>) -> bool {
             false
         }
+        fn main_panel_renders(&self, _: &EntityUri) -> bool {
+            false
+        }
         fn is_layout_block(&self, _: &EntityUri) -> bool {
             false
         }

@@ -179,7 +179,21 @@ pub trait RefBlockTree {
     fn sorted_children(&self, parent: &EntityUri) -> Vec<EntityUri>;
 
     /// True if `id` is a descendant of any ancestor in `ancestors`.
+    ///
+    /// A BARE parent-chain walk — it does NOT decide main-panel visibility. Use
+    /// [`Self::main_panel_renders`] for that: the panel query stops descending
+    /// at non-root pages and truncates at a depth cap, so this walk reports
+    /// blocks the panel does not show.
     fn is_descendant_of_any(&self, id: &EntityUri, ancestors: &BTreeSet<EntityUri>) -> bool;
+
+    /// Whether the main panel actually renders a row for `id`, under the SAME
+    /// traversal the compiled main-panel query applies: descend from the Main
+    /// focus root(s), stop at any NON-ROOT page, truncate at the panel's depth
+    /// cap. The one predicate for "a user could click this row" and for "an
+    /// invariant may demand this row"; a bare ancestor check over-approximates
+    /// both and produces click targets that never bind and required rows prod
+    /// is right to omit.
+    fn main_panel_renders(&self, id: &EntityUri) -> bool;
 
     /// Layout blocks (the layout scaffolding the user can't focus into).
     /// Wide PBT: `layout_blocks` set; pure slice: empty.
@@ -2159,12 +2173,13 @@ pub trait RefNavHistoryMut: RefNavHistory {
     /// budget flag, set the block as global focus, clear region focus,
     /// blur.
     fn nav_focus(&mut self, region: holon_api::Region, block_id: &EntityUri);
-    /// `OpenTabViaModifierClick`: `open_tab(region, block_id)` — APPEND an open row
-    /// for `block_id` if the region has none (never closing or reordering the
-    /// others, unlike `nav_focus`), then move the cursor onto it. When a row is
-    /// already open for that block, prod's `open_tab` delegates to `activate`:
-    /// cursor-only, no new row. The appended row is a BACKGROUND tab until the
-    /// cursor lands on it — open in `focus_roots`, unrendered by the panel.
+    /// `OpenTabViaModifierClick`: `open_tab(region, block_id)` — APPEND an open
+    /// row for `block_id` if the region has none (never closing or
+    /// reordering the others, unlike `nav_focus`), then move the cursor
+    /// onto it. When a row is already open for that block, prod's
+    /// `open_tab` delegates to `activate`: cursor-only, no new row. The
+    /// appended row is a BACKGROUND tab until the cursor lands on it — open
+    /// in `focus_roots`, unrendered by the panel.
     fn nav_open_tab(&mut self, region: holon_api::Region, block_id: &EntityUri);
 }
 
@@ -2452,6 +2467,18 @@ pub trait RefLayoutMutate {
     /// SUT dispatches the same id, so both sides born-equal — no
     /// synthetic→real reconcile.
     fn create_block_under_with_id(&mut self, parent: &EntityUri, content: &str, id: EntityUri);
+
+    /// `InstantiateTemplate`: seed one template-DEFINITION block, mirroring the
+    /// driver's idempotent `block.create`. `parent` is the block's REAL parent
+    /// (the definition root for a definition child), so `parent_id` agrees with
+    /// the SUT everywhere it is observed — including watch rows, which apply no
+    /// seed filter. The block is nevertheless classified as SEED (its
+    /// `block_documents` entry is forced to `no_parent`), which is what keeps
+    /// template-engine internals out of the block-comparison invariants. Parent
+    /// truthfulness and seed classification are independent axes; conflating
+    /// them by parenting definitions at `no_parent` made every definition child
+    /// report the document-root sentinel to `inv-watch-rows-match-ref`.
+    fn seed_template_definition(&mut self, parent: &EntityUri, content: &str, id: EntityUri);
 
     /// `InstantiateTemplate`: mint the instance subtree (root + child) under
     /// `target_parent` as ONE undoable unit, so a single `UndoLastMutation`

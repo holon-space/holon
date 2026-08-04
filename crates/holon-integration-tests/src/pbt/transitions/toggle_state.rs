@@ -161,7 +161,6 @@ impl<R: RefLifecycle + RefFocus + RefFocusRoots + RefBlockTree + RefLayout + Ref
     type Reason = Reason;
 
     fn preconditions(&self, state: &R) -> Validated<(), Reason> {
-        let focus_roots = state.rendered_focus_root_ids(CapRegion::Main);
         let checks: Vec<Validated<(), Reason>> = vec![
             check(state.app_started(), Reason::AppNotStarted),
             // `state_toggle` only exists when the block renders interactively
@@ -175,17 +174,18 @@ impl<R: RefLifecycle + RefFocus + RefFocusRoots + RefBlockTree + RefLayout + Ref
                 state.current_focus(CapRegion::Main).is_some(),
                 Reason::NoFocusInMain,
             ),
-            // The toggled row must be VISIBLE in Main — i.e. the block is a
-            // focus root OR a descendant of one (production renders every row
-            // under the focused page, and a user can click the `state_toggle`
-            // on any such interactive row). Requiring the block to BE a focus
-            // root was stricter than prod (there is no block-zoom gesture that
-            // makes a child block a focus root), which made ToggleState vacuous
-            // (only pages can be focus roots, and pages aren't task rows). The
-            // `is_descendant_of_any` self-or-descendant walk is the same faithful
-            // visibility predicate `main_editable_descendants` uses.
+            // The toggled row must be VISIBLE in Main — a user can only click a
+            // `state_toggle` the panel actually paints. Visibility is the panel
+            // query's traversal, not a bare ancestor walk: it stops at non-root
+            // pages and truncates at a depth cap, so a descendant of the focus
+            // root can still render NO row (e.g. after `BlockToPage` re-homes it
+            // behind a new page). Gating on the ancestor walk offered targets
+            // whose intent never binds, and `cycle_state_toggle` then burned its
+            // full 2s poll for nothing. Same predicate as
+            // `main_editable_descendants`, which is what keeps this transition
+            // and `inv-main-panel-rows-match-focus` agreeing.
             check(
-                state.is_descendant_of_any(&self.block_id, &focus_roots),
+                state.main_panel_renders(&self.block_id),
                 Reason::FocusedNotDescendantOfFocusRoot,
             ),
             // Layout headlines (in `layout_blocks.headline_ids`) define

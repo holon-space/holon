@@ -21,6 +21,7 @@
 //!   adapter concern, not domain identity.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use holon_api::entity_uri::EntityUri;
 
@@ -36,6 +37,14 @@ pub struct FileAdapterState {
     /// Created documents (doc_uri -> file_name).
     /// `BTreeMap` for deterministic iteration (see `BlockState::blocks`).
     pub documents: BTreeMap<EntityUri, String>,
+
+    /// Blocks that exist because a FILE was ingested — the doc root page plus
+    /// every block the watcher parsed out of it. Prod's undo stack holds only
+    /// User-origin ops (`operation_engine.rs:1220`), so `engine.undo()` never
+    /// removes these; the oracle's whole-`block_state` snapshot would, which is
+    /// why this set lives OUTSIDE the snapshot next to `documents` (see
+    /// `ReferenceState::rematerialize_file_ingested`).
+    pub ingest_origin_blocks: BTreeSet<EntityUri>,
 
     /// Pre-startup directories created (relative paths).
     pub pre_startup_directories: Vec<String>,

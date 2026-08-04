@@ -132,26 +132,22 @@ impl<R: RefLifecycle + RefBlockTree + RefBlockTreeMut + RefLayoutMutate> Transit
         //
         // These two fixed-id blocks are template-library scaffolding, not user
         // content — template-engine internals the reference deliberately does not
-        // reproduce. Parenting BOTH under `no_parent` classifies them as SEED, which
-        // excludes them from every block/children comparison on both sides. A
-        // documented seed-exclusion, chosen over faithful field modeling because
-        // importing template mechanics into the oracle is disproportionate to what
-        // this transition verifies: the INSTANCE fan-out below. The driver seeds root
-        // and child via two INDEPENDENT idempotent `block.create`s, so guard each on
-        // ITS OWN existence (a shared root-only guard skips re-seeding the child when
-        // only the child's create was undone). Each create snapshots to stay 1:1 with
-        // the driver's separate User-origin create ops.
+        // reproduce. `seed_template_definition` classifies them as SEED, which
+        // excludes them from every block/children comparison on both sides, while
+        // keeping `parent_id` truthful: the driver seeds the child UNDER the root,
+        // and invariants that apply no seed filter (`inv-watch-rows-match-ref`, whose
+        // AllBlocks watch returns every block) read that field directly. The driver
+        // seeds root and child via two INDEPENDENT idempotent `block.create`s, so
+        // guard each on ITS OWN existence (a shared root-only guard skips re-seeding
+        // the child when only the child's create was undone). Each create snapshots
+        // to stay 1:1 with the driver's separate User-origin create ops.
         let tpl_root = EntityUri::from_raw(TPL_ROOT);
         let tpl_child = EntityUri::from_raw(TPL_CHILD);
         if state.block_content(&tpl_root).is_none() {
-            state.create_block_under_with_id(&EntityUri::no_parent(), "{{date}}", tpl_root);
+            state.seed_template_definition(&EntityUri::no_parent(), "{{date}}", tpl_root.clone());
         }
         if state.block_content(&tpl_child).is_none() {
-            state.create_block_under_with_id(
-                &EntityUri::no_parent(),
-                "see {{date}} now",
-                tpl_child,
-            );
+            state.seed_template_definition(&tpl_root, "see {{date}} now", tpl_child);
         }
 
         // The SUT's `plan_instantiation` mints deterministic instance ids from
