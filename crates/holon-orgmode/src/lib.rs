@@ -44,8 +44,10 @@ pub mod file_io;
 #[cfg(feature = "di")]
 pub mod file_sync_controller;
 pub mod file_watcher;
+pub mod home_authority;
 pub mod orgmode_sync_provider;
 pub mod writeback_guard;
+pub mod writeback_shadow;
 
 // Re-export key types
 // build_block_params for seeding default layouts (no di feature needed)

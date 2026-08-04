@@ -747,3 +747,72 @@ fn stability_multiple_rapid_ui_updates_converge() {
         );
     });
 }
+
+/// Option C Inc 1 shadow LIVENESS gate.
+///
+/// The differential shadow is default-ON in debug builds, and budget-asserting
+/// suites opt out (design doc §9.8). That "enumerate the exclusions" policy can
+/// rot silently — an exclusion added elsewhere, or a quiescence rule the suite's
+/// cadence never satisfies, would leave the shadow armed but never comparing,
+/// and a green run would prove nothing. So this suite asserts the shadow
+/// actually COMPLETED a comparison.
+///
+/// The settle below is deliberate environment strengthening, not a weakened
+/// rule: quiescence requires both the feed and the controller to stop moving
+/// for consecutive 250 ms ticks, which a fast test never reaches on its own.
+#[test]
+fn shadow_completes_at_least_one_quiescent_comparison() {
+    let rt = runtime();
+    rt.block_on(async {
+        let env = TestEnvironmentBuilder::new()
+            // NESTED deliberately: two sibling groups (the document's child,
+            // and that child's own child). A single-group fixture makes a flat
+            // sequence and a per-parent grouping identical by construction, so
+            // it cannot witness the flat-vs-per-parent oracle defect (§9.7).
+            .with_org_file(
+                "shadow.org",
+                "* Shadow Liveness\n:PROPERTIES:\n:ID: shadow-1\n:END:\n\
+                 ** Nested Child\n:PROPERTIES:\n:ID: shadow-2\n:END:\n\
+                 ** Second Child\n:PROPERTIES:\n:ID: shadow-3\n:END:\n",
+            )
+            .build(rt.clone())
+            .await
+            .expect("Failed to build environment");
+
+        assert!(
+            env.wait_for_block("shadow-1", SYNC_TIMEOUT).await,
+            "block must sync before the shadow can be quiescent"
+        );
+
+        // Let both sides go still long enough for consecutive quiescent ticks.
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+
+        assert!(
+            env.wait_for_block("shadow-2", SYNC_TIMEOUT).await,
+            "nested child must sync so the fixture has >=2 sibling groups"
+        );
+
+        assert!(
+            !holon_orgmode::writeback_shadow::divergence_detected(),
+            "the write-back differential shadow reported NON-CONVERGENCE — the home_by holder \
+             disagrees with doc_blocks (panic detail is on the sync task's log line)"
+        );
+
+        let completed = holon_orgmode::writeback_shadow::completed_comparisons();
+        let docs = holon_orgmode::writeback_shadow::docs_compared();
+        assert!(
+            completed >= 1,
+            "the write-back differential shadow completed {completed} quiescent checks — it is \
+             armed but the tick loop never reached quiescence (design doc §9.8)"
+        );
+        // The load-bearing half: `completed` counts tick-loop iterations and
+        // rises even on an empty tracked slice, so it alone does NOT prove any
+        // document was checked. This does.
+        assert!(
+            docs >= 1,
+            "the shadow ran {completed} quiescent checks but compared {docs} DOCUMENTS — no \
+             holder content was ever checked against doc_blocks, so this suite's green proves \
+             nothing about the home_by holder (design doc §9.8 shadow-liveness gate)"
+        );
+    });
+}

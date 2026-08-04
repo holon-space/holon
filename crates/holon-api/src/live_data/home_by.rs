@@ -344,18 +344,24 @@ where
     // addition pass 2 emits, which is Law 2 across the whole fan-out.
     let mut affected: std::collections::BTreeSet<Option<String>> =
         std::collections::BTreeSet::new();
-    for id in &descendants {
-        if !acc.contains_key(id) {
-            continue;
-        }
-        let Some(placement) = authority
-            .locate(id)
-            .await
-            .with_context(|| format!("home_by locate({id}) during subtree re-home failed"))?
-        else {
+
+    // One batched placement for the whole subtree, never a point read per
+    // descendant: a per-descendant `locate` re-walks the ancestor chain for
+    // every one of them, so an N-descendant reparent costs N*(1+depth) reads
+    // instead of N. `locate_batch` resolves documents top-down in one pass.
+    let live: Vec<String> = descendants
+        .into_iter()
+        .filter(|id| acc.contains_key(id))
+        .collect();
+    let placements = authority
+        .locate_batch(&live)
+        .await
+        .with_context(|| format!("home_by locate_batch during subtree re-home of {root} failed"))?;
+    for id in &live {
+        let Some(placement) = placements.get(id).cloned() else {
             continue;
         };
-        let entry = acc.get_mut(id).expect("checked present above");
+        let entry = acc.get_mut(id).expect("filtered to present above");
         if entry.home.doc != placement.doc {
             pending.push_back(Ok(HomedDiff::Remove {
                 doc: entry.home.doc.clone(),
@@ -726,21 +732,57 @@ mod tests {
         fn naive_recompute(&self) -> BTreeMap<String, Vec<String>> {
             let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
             for id in self.preorder() {
-                if self.live.contains(&id) {
-                    out.entry(self.resolve_doc(&id)).or_default().push(id);
+                if !self.live.contains(&id) {
+                    continue;
                 }
+                let doc = self.resolve_doc(&id);
+                // Children-only convention: a page is not a member of the list
+                // its own document exposes, matching `get_blocks`/`doc_blocks`.
+                if doc == id {
+                    continue;
+                }
+                out.entry(doc).or_default().push(id);
             }
             out
         }
     }
 
+    #[derive(Default)]
+    struct Calls {
+        locate: std::sync::atomic::AtomicU64,
+        children: std::sync::atomic::AtomicU64,
+        subtree: std::sync::atomic::AtomicU64,
+        batch: std::sync::atomic::AtomicU64,
+        prev_sibling: std::sync::atomic::AtomicU64,
+    }
+
+    impl Calls {
+        fn bump(c: &std::sync::atomic::AtomicU64) {
+            c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        fn get(c: &std::sync::atomic::AtomicU64) -> u64 {
+            c.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
     struct TestAuthority {
         tree: Arc<Mutex<Tree>>,
+        calls: Arc<Calls>,
+    }
+
+    impl TestAuthority {
+        fn new(tree: Arc<Mutex<Tree>>) -> Self {
+            Self {
+                tree,
+                calls: Arc::new(Calls::default()),
+            }
+        }
     }
 
     #[async_trait]
     impl HomeAuthority<String> for TestAuthority {
         async fn locate(&self, id: &str) -> Result<Option<Placement<String>>> {
+            Calls::bump(&self.calls.locate);
             let t = self.tree.lock().unwrap();
             if !t.exists(id) {
                 return Ok(None);
@@ -752,6 +794,7 @@ mod tests {
         }
 
         async fn children_of(&self, parent: Option<&str>) -> Result<Vec<String>> {
+            Calls::bump(&self.calls.children);
             let t = self.tree.lock().unwrap();
             Ok(t.order
                 .get(&parent.map(|p| p.to_string()))
@@ -760,13 +803,40 @@ mod tests {
         }
 
         async fn prev_sibling(&self, id: &str) -> Result<Option<String>> {
+            Calls::bump(&self.calls.prev_sibling);
             let t = self.tree.lock().unwrap();
             Ok(t.prev_of(id))
         }
 
         async fn subtree_of(&self, id: &str) -> Result<Vec<String>> {
+            Calls::bump(&self.calls.subtree);
             let t = self.tree.lock().unwrap();
             Ok(t.descendants(id))
+        }
+
+        /// Mirrors the production adapter's amortized shape: one batched pass,
+        /// not a point read per id, so the benchmark measures what production
+        /// will actually pay.
+        async fn locate_batch(
+            &self,
+            ids: &[String],
+        ) -> Result<BTreeMap<String, Placement<String>>> {
+            Calls::bump(&self.calls.batch);
+            let t = self.tree.lock().unwrap();
+            let mut out = BTreeMap::new();
+            for id in ids {
+                if !t.exists(id) {
+                    continue;
+                }
+                out.insert(
+                    id.clone(),
+                    Placement {
+                        doc: t.resolve_doc(id),
+                        parent: t.parent.get(id).and_then(|p| p.clone()),
+                    },
+                );
+            }
+            Ok(out)
         }
     }
 
@@ -903,6 +973,9 @@ mod tests {
             }
             let mut ordered = Vec::new();
             walk(None, &by_parent, &prev, &mut ordered, 0);
+            // Same children-only convention as `naive_recompute`: nest using
+            // the root, then drop it from the exposed list.
+            ordered.retain(|id| id != doc);
             out.insert(doc.clone(), ordered);
         }
         out
@@ -1259,7 +1332,7 @@ mod tests {
     /// them.
     fn run_convergence(ops: Vec<Op>, engine: Engine) -> std::result::Result<(), TestCaseError> {
         let tree = Arc::new(Mutex::new(Tree::new()));
-        let authority = Arc::new(TestAuthority { tree: tree.clone() });
+        let authority = Arc::new(TestAuthority::new(tree.clone()));
 
         let (tx, rx) = futures::channel::mpsc::unbounded::<MapDiff<String, Arc<Item>>>();
         let mut real;
@@ -1375,6 +1448,187 @@ mod tests {
         }
     }
 
+    // ---- orphan-prefix convergence ---------------------------------------
+
+    /// Deliver every live block in an ancestry-ignoring order, so a child can
+    /// arrive before its parent while the AUTHORITY stays closed.
+    ///
+    /// Mid-flight the holder is legitimately ambiguous — a block whose parent
+    /// has not arrived has no in-document ancestor to nest under, so two
+    /// blocks can both be "first in their group" with nothing to order them
+    /// against. The contract is convergence *at quiescence*, not equality at
+    /// every intermediate step, so the equality is asserted once the feed has
+    /// caught up with the authority.
+    fn run_orphan_prefix(ops: Vec<Op>, seed: u64) -> std::result::Result<(), TestCaseError> {
+        let tree = Arc::new(Mutex::new(Tree::new()));
+        let authority = Arc::new(TestAuthority::new(tree.clone()));
+
+        // Build the authority tree; the feed has seen nothing yet.
+        {
+            let mut t = tree.lock().unwrap();
+            for op in &ops {
+                let _ = to_diff(&mut t, op);
+            }
+        }
+
+        let mut ids: Vec<String> = tree.lock().unwrap().live.iter().cloned().collect();
+        ids.sort_by_key(|id| {
+            let mut h = seed;
+            for b in id.as_bytes() {
+                h = h.wrapping_mul(1099511628211).wrapping_add(u64::from(*b));
+            }
+            h
+        });
+
+        let (tx, rx) = futures::channel::mpsc::unbounded::<MapDiff<String, Arc<Item>>>();
+        let mut stream = Box::pin(home_diffs(rx, authority.clone()));
+        let mut folded: Folded = BTreeMap::new();
+        for id in &ids {
+            tx.unbounded_send(MapDiff::Insert {
+                key: id.clone(),
+                value: arc(0),
+            })
+            .expect("channel open");
+            fold_emitted(&mut folded, drain(&mut stream));
+        }
+
+        let t = tree.lock().unwrap();
+        let expected = t.naive_recompute();
+        let actual: BTreeMap<String, Vec<String>> = reconstruct(&folded, &t)
+            .into_iter()
+            .filter(|(_, v)| !v.is_empty())
+            .collect();
+        prop_assert_eq!(
+            &actual,
+            &expected,
+            "orphan-prefix delivery did not converge at quiescence: once the feed mirrors the \
+             authority the holder must equal a naive recompute, whatever order blocks arrived in"
+        );
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 256,
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        })]
+
+        /// A child delivered before its parent still converges once the feed
+        /// catches up.
+        #[test]
+        fn prop_orphan_prefix_converges_at_quiescence(
+            ops in prop::collection::vec(op_strategy(), 0..30),
+            seed in any::<u64>(),
+        ) {
+            run_orphan_prefix(ops, seed)?;
+        }
+    }
+
+    // ---- fan-out cost ----------------------------------------------------
+
+    /// Authority-read cost of a cross-document reparent, which fans out over
+    /// the moved block's whole subtree. Reported per descendant count so the
+    /// growth law is visible; the absolute wall time here is against an
+    /// in-memory authority and is NOT a backend latency figure — the read
+    /// COUNT is the backend-independent quantity.
+    #[test]
+    fn reparent_fanout_cost() {
+        for n in [10usize, 100, 1000] {
+            let tree = Arc::new(Mutex::new(Tree::new()));
+            let authority = Arc::new(TestAuthority::new(tree.clone()));
+            let mut order = vec![ROOT.to_string(), "pageB".to_string(), "host".to_string()];
+            {
+                let mut t = tree.lock().unwrap();
+                t.attach("pageB", Some(ROOT.into()), None);
+                t.is_page.insert("pageB".into());
+                t.live.insert("pageB".into());
+                t.attach("host", Some(ROOT.into()), Some("pageB".into()));
+                t.live.insert("host".into());
+                let mut prev = None;
+                for i in 0..n {
+                    let id = format!("d{i}");
+                    t.attach(&id, Some("host".into()), prev.clone());
+                    t.live.insert(id.clone());
+                    order.push(id.clone());
+                    prev = Some(id);
+                }
+            }
+
+            let (tx, rx) = futures::channel::mpsc::unbounded::<MapDiff<String, Arc<Item>>>();
+            let mut stream = Box::pin(home_diffs(rx, authority.clone()));
+            let mut folded: Folded = BTreeMap::new();
+            for id in &order {
+                tx.unbounded_send(MapDiff::Insert {
+                    key: id.clone(),
+                    value: arc(0),
+                })
+                .unwrap();
+                fold_emitted(&mut folded, drain(&mut stream));
+            }
+
+            // Steady state reached; measure ONLY the reparent.
+            authority
+                .calls
+                .locate
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            authority
+                .calls
+                .children
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            authority
+                .calls
+                .subtree
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            authority
+                .calls
+                .batch
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            authority
+                .calls
+                .prev_sibling
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+
+            {
+                let mut t = tree.lock().unwrap();
+                t.detach("host");
+                t.attach("host", Some("pageB".into()), None);
+            }
+            let started = std::time::Instant::now();
+            tx.unbounded_send(MapDiff::Update {
+                key: "host".into(),
+                value: arc(1),
+            })
+            .unwrap();
+            fold_emitted(&mut folded, drain(&mut stream));
+            let elapsed = started.elapsed();
+
+            let locate = Calls::get(&authority.calls.locate);
+            let children = Calls::get(&authority.calls.children);
+            let subtree = Calls::get(&authority.calls.subtree);
+            let batch = Calls::get(&authority.calls.batch);
+            let prev_sib = Calls::get(&authority.calls.prev_sibling);
+            println!(
+                "REPARENT_FANOUT n={n} locate={locate} locate_batch={batch} children={children} \
+                 subtree={subtree} prev_sibling={prev_sib} total_calls={} in_memory_elapsed={:?}",
+                locate + children + subtree + prev_sib + batch,
+                elapsed
+            );
+
+            // The fan-out is correct as well as costly.
+            let t = tree.lock().unwrap();
+            let expected = t.naive_recompute();
+            let actual: BTreeMap<String, Vec<String>> = reconstruct(&folded, &t)
+                .into_iter()
+                .filter(|(_, v)| !v.is_empty())
+                .collect();
+            assert_eq!(
+                actual, expected,
+                "reparent fan-out must stay correct at n={n}"
+            );
+        }
+    }
+
     // ---- teeth: the two defect classes, isolated -------------------------
 
     /// Drive one scenario through one engine and return the final
@@ -1384,7 +1638,7 @@ mod tests {
         ops: Vec<Op>,
     ) -> (BTreeMap<String, Vec<String>>, BTreeMap<String, Vec<String>>) {
         let tree = Arc::new(Mutex::new(Tree::new()));
-        let authority = Arc::new(TestAuthority { tree: tree.clone() });
+        let authority = Arc::new(TestAuthority::new(tree.clone()));
         let (tx, rx) = futures::channel::mpsc::unbounded::<MapDiff<String, Arc<Item>>>();
         let mut real;
         let mut straw;
@@ -1416,7 +1670,14 @@ mod tests {
             fold_emitted(&mut folded, drain(stream));
         }
         let t = tree.lock().unwrap();
-        (reconstruct(&folded, &t), t.naive_recompute())
+        // Same pruning as the property: under the children-only convention a
+        // document whose only member was its own root exposes nothing, and an
+        // absent entry and an empty one mean the same thing.
+        let actual: BTreeMap<String, Vec<String>> = reconstruct(&folded, &t)
+            .into_iter()
+            .filter(|(_, v)| !v.is_empty())
+            .collect();
+        (actual, t.naive_recompute())
     }
 
     /// Build: root page p0 -> b1 -> b2, then toggle b1 into a page. Only b1's

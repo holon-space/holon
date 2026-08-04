@@ -1,7 +1,10 @@
 # Option C — `doc_blocks` as a declared derived holder
 
 **Date:** 2026-08-04
-**Status:** Inc 0 IMPLEMENTED (`crates/holon-api/src/live_data/home_by.rs`, verifier-CONFIRMED after one refute/fix round). Implementation deviations from this design, all property-driven:
+**Status:** Inc 0 LANDED; **Inc 1 implemented, uncommitted** (§9); **Inc 2 UNBLOCKED** (§9.7 resolved).
+**Tree state:** GREEN — see the run-counted gate matrix in §9.8. Shadow default-ON in debug; budget-asserting suites opt out at the suite level; the armed suite gates on shadow liveness.
+
+Inc 0 (`crates/holon-api/src/live_data/home_by.rs`, verifier-CONFIRMED after one refute/fix round). Implementation deviations from this design, all property-driven:
 
 - **§1.1** — the combinator takes a `HomeAuthority` trait, not a per-value `home_fn` closure: the sibling-group and subtree reads Laws 1–2 require cannot be expressed over one value.
 - **§1.2** — accumulator entries are `{home, parent, tree_prev, value}`, not bare `Home<K>`: the retained `Arc<T>` lets neighbours/descendants that emit no feed event be re-emitted with a value (keeps the emitted stream self-determining, which the fold-equality property needs); `tree_prev` is a pure movement detector.
@@ -9,7 +12,14 @@
 - **§3.1** — the subtree fan-out gates on the **doc change itself** (`old_doc != new_doc`), NOT on why it changed. Gating on self-page-toggle was refuted: a cross-document reparent re-homes the subtree identically (deterministic regressions `reparent_into/out_of_a_page_subtree_rehomes_descendants`, red→green). The property alone catches this class only ~20%/run — the hand-rolled regressions are the reliable gate.
 - **Boot** — `locate_batch` is the amortization seam (default loops `locate`).
 
-**Open for Inc 1** (rulings/measurements before wiring): (a) `home_diffs`' error latch is TERMINAL — an insert-then-quick-delete (feed lags DB) kills the stream permanently; fails loud but unrecoverable, while prod's existing recovery for that shape is a full re-render — needs a ruling. (b) O(subtree) `locate` cost on cross-doc reparent — measure against a deep subtree in the shadow phase. (c) Relax the generator's ancestor-closure constraint to *prove* (not argue) orphan-prefix convergence — the state is prod-reachable post-boot (CDC delivers one MapDiff at a time, writes are not parent-first). (d) Reference-model off-by-one: `naive_recompute` lists the doc root in its own document; prod `get_blocks(D)` starts at children — benign for the property, matters when mapping `Home.doc` onto real `get_blocks`.
+**Inc 1 IMPLEMENTED — see §9 for the as-built record.** All four Inc-1 open items closed:
+
+- **(a) error latch** → RULED "let it die": the terminal latch is CORRECT and stays; no error handling inside the combinator. Recovery is DI-level supervision at **Inc 2** (respawn combinator+accumulator+stream from the container, keep authority/controller, re-seed via `MapDiff::Replace` so recovery path == boot path; bounded restarts then degraded mode). Inc-2 prerequisite: `DegradedSignalBus` is not yet wired. Supervisor gets its own red-first PBT. §9.1.
+- **(b) O(subtree) reparent cost** → MEASURED and it bites: N+1 `locate` calls, ≈840 ms extrapolated at N=1000. FIXED via `locate_batch`; calls now constant in N. §9.3.
+- **(c) orphan-prefix convergence** → PROVEN, and it *retro-justifies* the per-step closure constraint rather than removing it. Both properties now exist and test different contracts. §9.4.
+- **(d) root membership** → RULED children-only, applied at materialization AND in the reference model (one convention everywhere, not normalized at the comparison site). §9.2.
+
+**Inc 2 is UNBLOCKED.** The order-authority question the shadow raised was adjudicated as a defect in the SHADOW'S OWN ORACLE, not in either prod authority: `get_blocks`' `Vec` carries within-parent relative order ONLY, so comparing it as a document sequence was invalid by construction. Prod output is byte-identical either way; canonical authority is `BlockOrdering::children` per ADR-0005. Oracle fixed to compare per-parent. §9.7.
 **Ruling this refines:** Martin ruled Option C from
 `~/.claude/plans/stale-delta-redesign-options-2026-08-04.md` (§3), and ruled the
 ordering representation toward **previous-sibling-id, not `sort_key`-on-the-feed**.
@@ -445,18 +455,14 @@ fold-equality property (§6) strawman-first, capture the red, make it green.
 Landable: a new, tested, still-unused combinator. Tree strictly better.
 
 **Inc 1 — shadow the hand-rolled cache in debug builds (differential, no
-behaviour change).**
-Wire `home_by` in `di.rs` **in parallel** to the existing `group_by` resolver.
-In the controller, under `#[cfg(debug_assertions)]` only, after each
-`on_block_changed`, materialise the holder and `assert_eq!` its per-doc ordered
-block list against the live `doc_blocks[doc]`. This is the reconciliation backstop
-— **debug-only, compiled out of release, zero release runtime cost**. It
-differentially tests the combinator against production traffic and the keystone.
-Production still writes from `doc_blocks`. Landable; any divergence is caught by
-the assert, not by users.
+behaviour change). LANDED as built; see §9 for the as-built design and findings.**
+Wire `home_by` in `di.rs` **in parallel** to the existing `group_by` resolver,
+`#[cfg(debug_assertions)]` only, and compare the two holders **at quiescence**
+(NOT per `on_block_changed` — see §9.1 for why the per-event formulation was
+withdrawn). Production still writes from `doc_blocks`.
 
 **Inc 2 — cutover: controller renders from the holder; delete the hand-rolled
-maintenance.**
+maintenance. UNBLOCKED (§9.7); adds the renderer re-nesting assertion.**
 Switch `render_*` to read the holder. Delete `doc_blocks` (`:321`),
 `render_with_cache` (`:3847`), `reseed_doc_blocks` (`:3909`),
 `render_cached_doc` (`:3918`), guard 1, guard 3, and the `reseeded` bool (guard
@@ -547,6 +553,20 @@ migration aid, not the correctness mechanism.
   sync_controller_mutation_pbt, name_chain_error_propagation, writeback_readonly_skip,
   vault_path_escape}.rs`. Mechanical; a `mech-executor` job at Inc 2.
 
+**Added by Inc 1 (as built, see §9):**
+- `crates/holon-orgmode/src/home_authority.rs` — **new**. `BlockHomeAuthority`
+  (production `HomeAuthority` over `BlockReader` + `BlockOrdering`) and `DocHome`.
+  Carries the amortized `locate_batch` (§9.3).
+- `crates/holon-orgmode/src/writeback_shadow.rs` — **new**. `ShadowInputs`,
+  `WritebackShadow`, the quiescence state machine (§9.1).
+- `crates/holon-filesystem/src/file_sync_controller.rs` — `cached_doc_orders()`
+  accessor (+13 lines), the shadow's comparison target. Deliberately NOT
+  `#[cfg(debug_assertions)]`: gating it forces `cfg` onto the `select!` arm bodies
+  in `di.rs`, and the accessor is inert when unused.
+- `crates/holon-orgmode/src/di.rs` — `run_file_sync_controller` gains a
+  `shadow_inputs: Option<ShadowInputs>` parameter (single caller) plus two
+  `select!` arms. Inc 1 does NOT swap `group_by` → `home_by`; that is Inc 2.
+
 **Cross-lane dependency — the §2.3 reproducer (task #14).** A separate lane is
 building a reproduction of the ancestor-gains-`Page` hole (options doc §2.3 /
 Q4). That reproducer is a **dependency of Inc 0's red-log evidence**: its red
@@ -569,11 +589,13 @@ traits unchanged. No schema, no matview, no ADR-0005 change.
 **Risk register**
 | Risk | Likelihood | Mitigation |
 |---|---|---|
-| Subtree re-home on Page-toggle reads a large subtree | low (Page-toggle is rare — `convert_block_to_page`) | bounded by subtree size; not on the keystroke path; measured only if a Page-toggle latency complaint appears |
+| ~~Subtree re-home on Page-toggle reads a large subtree~~ **MEASURED, and the framing was wrong** | **was: high** | Not Page-toggle-only — ANY cross-document reparent fans out (Inc 0 verifier finding). Measured at N+1 `locate` calls, ≈840 ms extrapolated at N=1000. **Fixed** via `locate_batch` (§9.3); calls now constant in N. Residual `subtree_of` BFS is an Inc-2 measurement item (§9.6). |
 | `prev_sibling` read cost per structural-candidate event | low | strictly cheaper than today's `children`+compare (guard 3); content-only edits pay one point read |
 | "matview gap ⇒ write-back gap, no backstop" (options doc §3 C con) | medium | the debug-only reconciliation (Inc 1) + the keystone catch a feed/holder divergence in test; in prod the holder is a faithful fold of the feed by construction, and any `home_fn` error surfaces loudly (never `Unresolved`-swallowed silently — `di.rs:558` pattern) |
 | torn cross-read sibling order during concurrent edits | low | converges at quiescence (contract-legal); each `children()` read is internally total |
 | Reconciliation assert masks a real prod-only bug because it is debug-only | low | the keystone property runs release-representative logic; the assert is an *additional* net during migration, removed after Inc 2 stabilises |
+| **The shadow never actually runs, so green means nothing** | **REALISED in Inc 1** | The default keystone wiring has no Turso ⇒ no `BlockFeed` ⇒ shadow AND incumbent resolver both inert (§9.5). Mitigation: prove execution by counter/log, never by absence-of-panic; use `bidirectional_sync` as the armed suite. Standing ENVIRONMENT gap raised for its own BugFunnel row. |
+| ~~The two order authorities disagree~~ **RESOLVED — it was the shadow's ORACLE** | **REALISED then CLOSED in Inc 1** | `get_blocks`' `Vec` carries within-parent order ONLY (global sort over per-group fractional indices); comparing it as a document sequence was invalid by construction. H2 (`mov_after` lag) REFUTED; prod byte-identical. Oracle now compares per-parent; `get_blocks` contract documented; repro pinned. §9.7. |
 | **Cold-boot cost: naive `Replace` = 2 point reads/block (~32k at 16k blocks)** | **medium if unmitigated — this is guard 9's original failure mode** | the batch `Replace` path (§3.3): one `children()` per distinct parent + one top-down DFS for docs, so O(distinct parents) reads not O(blocks); guard 9's boot fold retained; Inc 1's shadow runs against a real cold boot before cutover, and cold-boot commit count is already a pinned keystone metric |
 | A reorder stops emitting a feed event (matview drops `sort_key`) | low | §2.5 precondition; `block_matview_select_exact_shape` pins the SELECT string verbatim, so removing `sort_key` breaks that test loudly — the precondition is already test-enforced |
 
@@ -607,8 +629,367 @@ grep -rln "BlockDelta" crates/*/src crates/*/tests
 # emitting events and the order machinery silently never runs. Expect a hit in
 # BLOCK_RAW_COLUMNS and in the pinned matview SELECT:
 grep -n "sort_key" crates/holon-turso/src/schema_modules.rs
+
+# §9.5 — the shadow only arms where a BlockFeed exists (needs Turso). Confirm
+# the provider still gates on the block matview watch:
+grep -n "BlockFeed(" crates/holon/src/sync/event_infra_module.rs
 ```
 
-If any of these no longer matches what this design assumes (e.g. guard 3 already
-deleted, or `group_by` already carrying position), stop and re-cost the affected
-increment before editing.
+---
+
+## 9. Inc 1 — as built (2026-08-04)
+
+Inc 1 landed with two Martin rulings that changed the design as written above.
+This section is the record; where it disagrees with §5's original Inc 1 text,
+**this section is canonical**.
+
+### 9.1 Ruling A — the shadow compares at QUIESCENCE, not per event
+
+§5's original Inc 1 said "after each `on_block_changed`, materialise the holder
+and `assert_eq!`". **That formulation was wrong and is withdrawn.** `home_by` and
+the write-back resolver are *independent subscriptions to the same feed*,
+delivered on independent schedules. Comparing after each `on_block_changed`
+compares two different feed prefixes: draining the shadow first makes it *at
+least* as advanced as the controller, and if any event landed in between, *more*
+advanced — reporting lag as divergence. A flaky `panic!` in debug builds would
+fire inside the keystone for everyone, which is worse than no shadow at all.
+
+The derived-data contract says the two must agree **once inputs quiesce**, so
+that is what is asserted. As built (`crates/holon-orgmode/src/writeback_shadow.rs`):
+
+**State machine.** On each 250 ms tick:
+
+| condition | action |
+|---|---|
+| activity since last check | clear flag, **reset streak to 0**, skip (not quiescent) |
+| quiescent, lists match | reset streak to 0 |
+| quiescent, lists differ | streak += 1, `warn!` with the diff |
+| streak reaches **`MISMATCH_STREAK_LIMIT`** | `panic!` — genuine non-convergence |
+
+**Why the streak limit is 8, not 2 (§9.8).** A *real* divergence never converges,
+so it survives ANY finite threshold — the threshold trades detection **latency**
+only, never sensitivity. Two checks (~500 ms of stillness) sits inside this
+system's actual convergence window under test load and produced intermittent
+false positives; measured, the mismatch streak never exceeds 1 once the window is
+generous. Raising the limit is calibration, not desensitisation.
+
+Two non-skipped checks imply no intervening activity *by construction*, which is
+what makes "twice in a row" mean "not lag".
+
+**Activity reset — what counts. BOTH sides must be still.** Two independent
+sources of movement, and quiescence requires neither has moved:
+1. *Feed side* — any `MapDiff` arrival on **either** subscription:
+   `note_activity()` on the `rerender_rx` arm (the resolver / `group_by` side) and
+   inside `apply()` on every `HomedDiff` (the `home_by` side).
+2. *Controller side* — `doc_blocks` is ALSO mutated by paths that emit no feed
+   event at all: file ingest, the boot scan, `poll_tracked_files`,
+   `re_render_all_tracked`. `check()` therefore snapshots the controller's tracked
+   state and treats any change since the previous check as activity. Without this,
+   a disk-driven reseed reads as divergence (§9.7).
+
+**Comparison target — ids only, deliberately.** The shadow's values come from the
+lagging feed; `doc_blocks`' come from authoritative reads. Equal membership and
+order can legitimately pair with different *content*, so comparing `Block` values
+would report lag as divergence. Ordered id lists are compared; values are not.
+
+**Panic message.** Names the doc, both ordered lists with counts, and the first
+divergent index — diagnosable from a CI log alone, which matters because it fires
+inside keystone/integration runs.
+
+**Zero release cost — the mechanism.** `shadow`, `shadow_rx` and `shadow_tick`
+are all `Option`, constructed only under `cfg!(debug_assertions)`, and both
+`select!` arms await `std::future::pending()` when the option is `None` — a future
+that never wakes. There is therefore **no `cfg` attribute on any `select!` arm**
+(which tokio does not reliably support) and **no timer armed in release**.
+`cargo check --release -p holon-orgmode` is clean.
+
+**The combinator keeps its terminal error latch** ("let it die"). The shadow's
+forwarding task logs at ERROR and stops when the stream errors; supervision is an
+Inc-2 concern (respawn combinator+accumulator+stream fresh from the container,
+keep authority/controller, re-seed via `MapDiff::Replace` so recovery path ==
+boot path; bounded restarts then degraded mode). **Inc-2 prerequisite: the
+`DegradedSignalBus` is not yet wired.** The supervisor gets its own red-first PBT
+at Inc 2 (inject authority failure mid-sequence → death → respawn → fold-equality
+holds post-restart).
+
+### 9.2 Ruling B — children-only membership, one convention everywhere
+
+The per-doc member list the holder exposes **excludes the document root**, making
+it a drop-in for `get_blocks`/`doc_blocks` consumers. The root stays in the
+accumulator internals, where page-toggle detection needs it (§3.1).
+
+Applied in **both** places rather than normalized at the comparison site:
+- materialization — `WritebackShadow::materialize` nests using the root, then
+  drops it from the exposed list;
+- reference model — `naive_recompute` skips `doc == id`; `reconstruct` retains-out
+  the root after nesting.
+
+Follow-on this surfaced: `scenario()` was not pruning empty docs the way
+`run_convergence` does, so a document whose only member was its own root compared
+`{"p0": []}` against an absent entry. Fixed to the same pruning — an absent entry
+and an empty one mean the same thing.
+
+### 9.3 The `locate_batch` fan-out fix
+
+§7's risk register listed the O(subtree) reparent cost as "measure it". Measured
+(`reparent_fanout_cost`), it **bites**, and the fan-out now routes through
+`locate_batch` instead of a per-descendant `locate`.
+
+Authority **calls** for a cross-document reparent of a subtree with N descendants:
+
+| N | before | after |
+|---:|---|---|
+| 10 | locate=11, total=16 | locate=1, batch=1, **total=7** |
+| 100 | locate=101, total=106 | locate=1, batch=1, **total=7** |
+| 1000 | locate=1001, total=1006 | locate=1, batch=1, **total=7** |
+
+Exactly **N+1 `locate` calls**, and the synthetic authority *understated* it:
+production's `locate` is itself an O(depth) ancestor walk and its `subtree_of`
+issues one `children` per node, so the real cost was ≈ N×(1+depth) point reads
++ N `children` reads. At N=1000, depth≈5, and the Q3-measured
+`get_block_authoritative` p95 of 0.13–0.15 ms, that extrapolates to **~840 ms on a
+single Turso actor that head-of-line-blocks the SLO chain** — far past any
+defensible budget, and the number that justified the fix.
+
+**Threshold used: any per-descendant authority call is unacceptable**, because the
+fan-out is unbounded in subtree size while the SLO is fixed.
+
+`BlockHomeAuthority::locate_batch`
+(`crates/holon-orgmode/src/home_authority.rs`) does one row read per block plus a
+single memoized top-down document pass, so no ancestor walk is ever repeated:
+production reads drop N×(1+depth) → N, and authority calls become constant in N.
+
+### 9.4 Orphan-prefix convergence, and why the per-step closure constraint stands
+
+Inc 0 constrained the generator to keep the feed **ancestor-closed**, which was
+flagged as possibly hiding a real transient. It does not.
+`prop_orphan_prefix_converges_at_quiescence` (256 cases × 3 runs, green) builds
+the authority tree first, then delivers every live block in an
+**ancestry-ignoring order** — children routinely arrive before parents — and
+asserts equality once the feed catches up.
+
+This **retro-justifies** the per-step constraint rather than removing it. Mid-flight
+the holder is *legitimately* ambiguous: a block whose parent has not arrived has
+no in-document ancestor to nest under, so two blocks can both be "first in their
+group" with nothing to order them against. The two properties test two different
+contracts and both are needed:
+- `prop_convergence` — equality after **every** step, on an ancestor-closed feed
+  (which is what the real matview-mirror feed is);
+- `prop_orphan_prefix_converges_at_quiescence` — equality **at quiescence**, on an
+  arbitrarily-ordered feed.
+
+### 9.5 Keystone wiring correction — an ENVIRONMENT gap
+
+An earlier Inc-1 claim that "every keystone run is a differential test for free"
+was **half wrong** and is corrected here.
+
+Right: the keystone runs the `test` profile (plain `cargo test`, no `--release`,
+and workspace `[profile.dev]` does not override `debug-assertions`), so
+`debug_assertions` is on and the shadow **compiles in**.
+
+Wrong: `keystone-smoke` passed with **zero shadow executions**. `BlockFeed` is
+registered only by `EventInfraModule`, which requires a Turso
+`watch("SELECT * FROM block")` matview. The drawn wiring was
+`storage={Loro, Org}` with no Turso, so `block_feed` is `None` and **neither the
+shadow nor the incumbent `group_by` resolver runs**. Zero `[OrgMode]` /
+`FileSyncController` lines in that log confirm the whole feed-driven write-back
+path is inert in that wiring.
+
+> **ENVIRONMENT gap, worth its own BugFunnel row.** The composed keystone's
+> default wiring draw never exercises the feed-driven org write-back path at all.
+> Every guard in `render_with_cache`, the whole `group_by` resolver, and
+> `OrgRerender` routing are unexercised unless the draw happens to include Turso.
+> This is not a shadow problem — it is a standing hole in what the keystone
+> covers, and it means "the keystone is green" has never been evidence about this
+> layer.
+
+**Armed suite:** `crates/holon-integration-tests/tests/bidirectional_sync.rs`
+(12 tests, ~6 s) is the cheapest test that actually arms the shadow.
+`stale_rewrite_sibling_order.rs` also arms it. Proof of execution is the
+`[writeback-shadow]` counter/log line, never absence-of-panic.
+
+### 9.6 `subtree_of` BFS — Inc-2 measurement item
+
+`BlockHomeAuthority::subtree_of` walks descendants breadth-first, issuing one
+`ordering.children()` per node, because `children` is the only ordered-descendant
+read the seams expose. After §9.3 this is the remaining per-descendant cost on a
+cross-document reparent. Replacing it with a single doc-scoped read trades
+O(subtree) reads for one O(document) read — better for large subtrees, worse for
+small ones in large documents. **Not fixed now; measure against real Turso at
+Inc 2 before choosing.**
+
+### 9.7 RESOLVED — the order-authority question was an ORACLE defect
+
+The shadow fired on its first armed run. Adjudicated verdict: **the defect was in
+the shadow's own oracle, not in either prod authority.** Inc 2 is **unblocked**.
+
+**What was wrong.** `WritebackShadow::compare` normalized the holder to a
+document pre-order and compared it as a **flat sequence** against `doc_blocks`,
+which is seeded from `get_blocks`' `ORDER BY sort_key, id`. That is a **global**
+sort over fractional indices minted **per sibling group**: every group restarts at
+the same low key (`"80"`), 1861/1889 live blocks share a `sort_key` with another
+row, and the exact prod CTE returns **14 consecutive `sort_key="80"` rows from 14
+different parents at depths 1–4**. Cross-parent ties fall to the `id` tiebreak and
+interleave the sequence. So `get_blocks`' `Vec` is a **set with within-parent
+relative order only — never a document sequence**, and comparing it against a
+pre-order walk was invalid by construction.
+
+The reported `doc=block:journals` divergence was exactly this: `journals::action::0`
+is a **depth-2 grandchild**, the sole child of `auto-create`, so its own group
+restarts at `"80"`, ties with the depth-1 keys, and UUID-sorts to position 0. **No
+move was involved** — H2 (`mov_after` projection staleness) is **REFUTED**: the
+Loro projector tie-suffixes within groups, dirties both scopes on `Move`, and
+diffs `sort_key` first.
+
+**Prod output is unaffected.** `render_entitys` re-nests by `parent_id` and reads
+only within-parent order, which the global sort preserves. Rendering is
+byte-identical from either sequence — proven by
+`crates/holon-org-format/tests/get_blocks_flat_order_is_not_document_order.rs`,
+adopted into this increment (two cases: the flat comparator reproduces the
+interleaving; the render is byte-identical across the two orders).
+
+**Canonical order authority = `BlockOrdering::children`**, per ADR-0005:
+`sort_key` is a storage encoding chosen by one adapter, not a cross-parent
+ordering key.
+
+**Fixes landed in this increment:**
+1. `WritebackShadow::compare` normalizes **both** sides to `parent -> [child ids]`
+   and compares per-parent — the only ordering either side actually claims.
+2. `BlockReader::get_blocks` (`crates/holon-filesystem/src/sync_ports.rs`)
+   documents the within-parent-only guarantee and **names both impls**, which
+   legitimately differ: `LoroBlockReader::collect_subtree` is a pre-order DFS (its
+   sequence *is* document order, incidentally); `CacheBlockReader` is the flat
+   global sort. No future consumer should read the result as a sequence.
+3. The Turso CTE is **deliberately NOT changed** to pre-order. That is an **Inc-2
+   consideration**: making `get_blocks` return a genuine document order would let
+   consumers rely on the sequence, which is a contract widening, not a bug fix.
+
+**Load-bearing note for Inc 2.** After cutover the holder hands the renderer a
+**genuine document order**, where `doc_blocks` handed it an interleaved set. That
+is safe *only because* `render_entitys` re-nests by `parent_id` and ignores
+cross-parent sequence. **Inc 2 must add an explicit assertion pinning that
+re-nesting property**, so a future renderer change that starts trusting input
+sequence cannot silently break write-back.
+
+**A second, independent oracle gap** surfaced while fixing this: quiescence
+accounted only for *feed* activity, but `doc_blocks` is also mutated by paths that
+emit no feed event — file ingest, the boot scan, `poll_tracked_files`,
+`re_render_all_tracked`. A disk-driven reseed therefore looked like divergence
+(membership mismatches, e.g. holder 0 children vs cache 3). `check()` now requires
+**both sides unchanged** between consecutive checks: feed silence alone is not
+quiescence. §9.1's state machine is updated accordingly.
+
+With both oracle defects fixed, `stale_rewrite_sibling_order` is **GREEN with the
+shadow still armed** (53 invariants 7/7), and the shadow continues to execute and
+compare on `bidirectional_sync`.
+
+### 9.8 Shadow interference, the arming policy, and the flakiness discipline
+
+**The finding.** The shadow is not observationally neutral. It issues authority
+reads of its own — `locate` (1 + depth `get_block_authoritative` calls),
+`children_of`, `prev_sibling` per feed event, plus `locate_batch`/`subtree_of` on
+structural events — through the same Turso actor the `inv-sql-budget` oracle
+measures. Establishing the baseline settled it:
+
+| `stale_rewrite_sibling_order` | result |
+|---|---|
+| shadow **OFF** (`HOLON_SHADOW_OFF=1`), 6 runs | **6/6 green** |
+| shadow **ON**, 6 runs | **3/6 fail** |
+
+The failing runs carried **0 shadow markers and 0 panics** — the failure was
+`inv-sql-budget`: `PinBlock.sql_reads: 29 exceeds expected 17 + tolerance 1 = 18`,
+against a baseline of exactly `PinBlock: reads=17/17`. Not a divergence: read
+inflation by the measurement apparatus.
+
+**The ruling.** The read-budget oracle exists to measure PROD read behaviour. The
+shadow is transient measurement apparatus — debug-only, and deleted at Inc 2
+cutover — so its reads are legitimately excluded, but by **arming policy**, never
+by touching budget numbers or instrumentation:
+
+- **Default-ON in debug builds**, keeping the free differential surface.
+- **Budget-asserting suites opt out at the suite level, in code** —
+  `writeback_shadow::disable_for_budget_suite()`. Not a per-developer env var.
+  (`HOLON_SHADOW_OFF` remains as an ad-hoc lever for re-measuring interference.)
+
+  **Placement is load-bearing: arming is read ONCE at feed construction**
+  (`di.rs`), so the disable must precede the caps being booted. It therefore
+  lives at cap construction — `boot_and_seed_wide_with_peer_id` (headless) and
+  `boot_and_seed_wide_windowed_base` (windowed) in `pbt/composed/wide_e2e.rs` —
+  NOT in `harness.rs::from_parts`/`init_test`, which run AFTER the boot and are
+  a no-op for that session. `SHADOW_ARMED` is process-global and sticky, so a
+  late disable would also expose only the FIRST windowed case per binary — an
+  order-dependent flake generator. Windowed budget consumers this protects:
+  `gpui_compose_sut_windowed.rs` and the tui `pbt_main.rs`, both reaching
+  `inv-sql-budget` through `windowed_composed_sut`.
+- **`single_large_document_scale` also opts out.** Its oracle is a wall-clock
+  ingest budget, and the shadow issues authority reads on the same Turso actor —
+  measurement apparatus competing with the thing being measured. Its budgets are
+  generous (40 ms/block, 60 s floor), but "generous" is not a reason to admit
+  apparatus into a latency measurement at 25 000-block scale; the read-budget
+  principle applied consistently.
+- The `holon-orgmode` mutation PBT needs no opt-out: it asserts no read budget
+  and drives `FileSyncController` directly, so the shadow never arms there.
+- **The armed differential suite gates on shadow liveness — and on the right
+  observable.** `bidirectional_sync::shadow_completes_at_least_one_quiescent_comparison`
+  asserts three things:
+  1. `completed_comparisons() >= 1` — the tick loop reached quiescence;
+  2. `docs_compared() >= 1` — **the load-bearing one**: `completed_comparisons`
+     counts tick-loop iterations and rises even on an empty tracked slice, so it
+     alone never proves any holder content was checked against anything;
+  3. `!divergence_detected()` — the non-convergence panic fires on a *spawned
+     task*, which does **not** fail a plain `#[test]`. The composed harness
+     catches that via `inv-no-observed-errors`; this suite has no such invariant,
+     so without an explicit flag a real divergence here would be swallowed and
+     the gate would be decorative.
+
+  Its fixture is **deliberately nested** (document → child → two grandchildren,
+  i.e. ≥2 sibling groups). A single-group fixture makes a flat sequence and a
+  per-parent grouping identical *by construction*, so it cannot witness the §9.7
+  oracle defect at all.
+
+  **Mutation-proven.** Re-applying the exact flat-compare mutation (collapse both
+  sides to one constant group) makes this suite FAIL — "the write-back
+  differential shadow reported NON-CONVERGENCE", off a real document
+  (`doc=block:journals`, 4 children, first divergent index 1). Reverting restores
+  green (3/3). Before the nesting and the `docs_compared`/divergence gates, that
+  same mutation left every suite green.
+
+**Release neutrality is by dead-code elimination, not `#[cfg]`.** The guard is
+`cfg!(debug_assertions)` — a const-false branch in release, so the shadow costs
+zero runtime work and both `select!` arms await `pending()`. But the modules
+(`writeback_shadow`, `home_authority`) and `FileSyncController::cached_doc_orders`
+**remain compiled and public in release**: inert, not absent. An accepted Inc-1
+cost, not a claim of an unchanged artifact; Inc 2 deletes them outright.
+
+**Keystone: OFF for now.** Its default wiring draws never arm the feed path
+anyway (§9.5), and its click-transition budget pins (17/22) would break under
+Turso draws. **Inc-2 disposition:** at cutover the holder becomes production, its
+reads ARE prod reads and count normally, and the shadow is deleted along with
+these exclusions.
+
+**Convergence-window calibration.** `MISMATCH_STREAK_LIMIT = 8`, not 2. A real
+divergence never converges, so it survives ANY finite limit — the limit trades
+detection **latency** only, never sensitivity. Measured, a lagging feed's
+mismatch streak never exceeds 1; two checks (~500 ms) sat inside this system's
+actual convergence window under test load and produced intermittent false
+positives.
+
+**What the membership scare turned out to be.** A block reported missing was
+`ABSENT FROM HOLDER ENTIRELY` — not mis-homed, not `Unresolved`, and the terminal
+latch never fired. So `BlockHomeAuthority` never failed to route it; the holder
+simply had not received it yet. **There is no no-Page-ancestor drop risk:**
+`BlockHomeAuthority::resolve_doc` (`home_authority.rs`) mirrors prod's
+`resolve_doc_for_block` (`di.rs:763-778`) walk-for-walk, and the membership rules
+are exact inverses — `get_blocks` walks DOWN from the doc's children excluding
+`Page`-tagged blocks (`crates/holon-app/src/turso_seams.rs:274-289`), while
+`resolve_doc_for_block` walks UP to the nearest `Page`. The panic message now
+names, for each cache-only block, whether it is homed elsewhere or absent
+entirely, so this question is answerable from a CI log alone.
+
+**Flakiness discipline (binding for this workstream).** Two lucky-seed incidents
+happened here: Inc 0's property passed on a lucky seed and was refuted by the
+verifier, and Inc 1's `stale_rewrite_sibling_order` was reported green off a
+single 2/2 run that later ran 3/6 red. Rules now: **every gate claim states its
+run count**; anything the shadow touches needs **≥3 consecutive green runs**, and
+`stale_rewrite_sibling_order` needs **6** (it burned us twice). No single-run
+claims.
