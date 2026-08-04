@@ -115,6 +115,16 @@ impl FrontendInjectorExt for Injector {
             move |_| Shared::new(gate.clone())
         }));
 
+        // Degraded-state disclosure bus. Registered UNCONDITIONALLY, before any
+        // conditional module: it is the only channel through which a frontend
+        // learns that something degraded (dead MCP integration, failed org
+        // ingest, share write-back gap), and a container without it degrades
+        // invisibly — blank pages, no banner. It is a plain broadcast channel
+        // with no Loro/iroh dependency, so mode has no say in whether it exists.
+        self.provide::<Arc<holon::sync::DegradedSignalBus>>(Provider::root(|_| {
+            Shared::new(Arc::new(holon::sync::DegradedSignalBus::new()))
+        }));
+
         // ThemeRegistry + PreferenceDefs
         let post_write_hook = holon_config.hooks.post_org_write.clone();
 
@@ -221,11 +231,11 @@ impl FrontendInjectorExt for Injector {
             }));
 
             // Shared-subtree write-back disclosure (Inc 1). Forwards a
-            // not-yet-materialized shared edit to the DegradedSignalBus (provided
-            // by the Loro module in this branch) so the frontend banners it
-            // instead of the edit silently failing to reach disk. Only wired in
-            // Loro mode — shares don't exist in SqlOnly, so its absence there
-            // (di.rs WARN-logs) is correct.
+            // not-yet-materialized shared edit to the `DegradedSignalBus` (which
+            // the composition root provides in every mode) so the frontend
+            // banners it instead of the edit silently failing to reach disk.
+            // Only wired in Loro mode — shares don't exist in SqlOnly, so its
+            // absence there (di.rs WARN-logs) is correct.
             self.provide::<dyn holon_filesystem::ShareWritebackDisclosure>(Provider::root(
                 |resolver| {
                     let bus = resolver.resolve::<Arc<holon::sync::DegradedSignalBus>>();
@@ -534,17 +544,15 @@ impl FrontendInjectorExt for Injector {
                                     "OrgMode initial scan degraded — some vault files were not \
                                      ingested; other files continue syncing: {msg}"
                                 );
-                                if let Ok(bus) = resolver_bg
-                                    .try_resolve_async::<Arc<holon::sync::DegradedSignalBus>>()
+                                resolver_bg
+                                    .resolve_async::<Arc<holon::sync::DegradedSignalBus>>()
                                     .await
-                                {
-                                    bus.emit(holon::sync::ShareDegraded {
+                                    .emit(holon::sync::ShareDegraded {
                                         shared_tree_id: "org-initial-scan".to_string(),
                                         reason: holon::sync::ShareDegradedReason::OrgIngestFailed(
                                             msg.clone(),
                                         ),
                                     });
-                                }
                             }
                         }
                         // Org initial scan is done (success, degraded, or no

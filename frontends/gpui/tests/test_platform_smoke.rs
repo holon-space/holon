@@ -126,6 +126,7 @@ fn holon_renders_under_test_platform() {
                 nav,
                 bounds.clone(),
                 Some(debug_services.clone()),
+                None,
                 "Holon-TestPlatform-Spike",
                 cx,
             )

@@ -164,6 +164,7 @@ fn window_renders_compose_sut_base_and_base_hosts_backend() {
                 nav,
                 bounds.clone(),
                 None,
+                None,
                 "Holon-ComposeSut-Windowed",
                 cx,
             )
@@ -254,6 +255,7 @@ fn overlay_windowed_caps_composes_layout_backend_and_driver_over_a_live_window()
                 nav,
                 bounds.clone(),
                 Some(debug.clone()),
+                None,
                 "Holon-ComposeSut-Overlay",
                 cx,
             )

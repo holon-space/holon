@@ -181,6 +181,7 @@ fn boot_and_snapshot(runtime: &Arc<tokio::runtime::Runtime>) -> Snap {
                 nav,
                 bounds.clone(),
                 Some(debug_services.clone()),
+                None,
                 "Holon-TestPlatform-Determinism",
                 cx,
             )

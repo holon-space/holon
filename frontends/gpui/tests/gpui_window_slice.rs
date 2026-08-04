@@ -162,6 +162,7 @@ fn capmap_hosts_windowed_sutlayout_over_real_geometry() {
                 nav,
                 bounds.clone(),
                 Some(debug_services.clone()),
+                None,
                 "Holon-Windowed-Slice",
                 cx,
             )
@@ -567,6 +568,7 @@ fn nested_live_block_paints_the_rows_its_model_holds() {
                 nav,
                 bounds.clone(),
                 Some(debug_services.clone()),
+                None,
                 "Holon-Nested-LiveBlock-Slice",
                 cx,
             )
@@ -757,6 +759,7 @@ fn boot_band_page(app: &mut TestApp, post_count: usize) -> BandPage {
                 nav,
                 bounds.clone(),
                 Some(debug_services.clone()),
+                None,
                 "Holon-Band-Geometry-Slice",
                 cx,
             )

@@ -114,6 +114,7 @@ fn undo_redo_chords_resolve_without_editor_focus() {
                 nav,
                 bounds.clone(),
                 Some(debug_services.clone()),
+                None,
                 "Holon-TestPlatform-UndoRedo",
                 cx,
             )
