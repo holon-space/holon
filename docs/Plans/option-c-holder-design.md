@@ -1,7 +1,15 @@
 # Option C — `doc_blocks` as a declared derived holder
 
 **Date:** 2026-08-04
-**Status:** DESIGN — for senior review. Nothing implemented, no code changed.
+**Status:** Inc 0 IMPLEMENTED (`crates/holon-api/src/live_data/home_by.rs`, verifier-CONFIRMED after one refute/fix round). Implementation deviations from this design, all property-driven:
+
+- **§1.1** — the combinator takes a `HomeAuthority` trait, not a per-value `home_fn` closure: the sibling-group and subtree reads Laws 1–2 require cannot be expressed over one value.
+- **§1.2** — accumulator entries are `{home, parent, tree_prev, value}`, not bare `Home<K>`: the retained `Arc<T>` lets neighbours/descendants that emit no feed event be re-emitted with a value (keeps the emitted stream self-determining, which the fold-equality property needs); `tree_prev` is a pure movement detector.
+- **§2.2/§1.3** — `prev` is **document-relative** (skips siblings owning their own document; a cross-document pointer is unresolvable by a per-document consumer). Emitted order comes from `children_of` with a per-document cursor; `prev_sibling` only detects movement. Verified right-by-design against prod: `get_blocks` drops Page children in both CTE arms, `loro_seams` skips them pre-recursion, the renderer adds no link/stub for them.
+- **§3.1** — the subtree fan-out gates on the **doc change itself** (`old_doc != new_doc`), NOT on why it changed. Gating on self-page-toggle was refuted: a cross-document reparent re-homes the subtree identically (deterministic regressions `reparent_into/out_of_a_page_subtree_rehomes_descendants`, red→green). The property alone catches this class only ~20%/run — the hand-rolled regressions are the reliable gate.
+- **Boot** — `locate_batch` is the amortization seam (default loops `locate`).
+
+**Open for Inc 1** (rulings/measurements before wiring): (a) `home_diffs`' error latch is TERMINAL — an insert-then-quick-delete (feed lags DB) kills the stream permanently; fails loud but unrecoverable, while prod's existing recovery for that shape is a full re-render — needs a ruling. (b) O(subtree) `locate` cost on cross-doc reparent — measure against a deep subtree in the shadow phase. (c) Relax the generator's ancestor-closure constraint to *prove* (not argue) orphan-prefix convergence — the state is prod-reachable post-boot (CDC delivers one MapDiff at a time, writes are not parent-first). (d) Reference-model off-by-one: `naive_recompute` lists the doc root in its own document; prod `get_blocks(D)` starts at children — benign for the property, matters when mapping `Home.doc` onto real `get_blocks`.
 **Ruling this refines:** Martin ruled Option C from
 `~/.claude/plans/stale-delta-redesign-options-2026-08-04.md` (§3), and ruled the
 ordering representation toward **previous-sibling-id, not `sort_key`-on-the-feed**.
