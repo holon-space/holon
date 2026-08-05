@@ -462,15 +462,16 @@ Wire `home_by` in `di.rs` **in parallel** to the existing `group_by` resolver,
 withdrawn). Production still writes from `doc_blocks`.
 
 **Inc 2 — cutover: controller renders from the holder; delete the hand-rolled
-maintenance. UNBLOCKED (§9.7); adds the renderer re-nesting assertion.**
-Switch `render_*` to read the holder. Delete `doc_blocks` (`:321`),
-`render_with_cache` (`:3847`), `reseed_doc_blocks` (`:3909`),
-`render_cached_doc` (`:3918`), guard 1, guard 3, and the `reseeded` bool (guard
-4); make `veto_ungrounded_removals` run on every doc the holder emits a `Remove`
-for. Replace `di.rs`'s `feed.group_by(resolve_doc)` with
-`feed.home_by(resolve_doc_and_prev)` and forward `HomedDiff` → `OrgRerender`.
-Keep the debug-only reconciliation from Inc 1 pointed at a naive recompute (no
-`doc_blocks` left to compare against). Landable; deletes code.
+maintenance. EXECUTED — see §10.4 for what was actually built.**
+Switch `render_*` to read the holder. Delete `doc_blocks`, `render_with_cache`,
+`reseed_doc_blocks`, `render_cached_doc`, guard 1, guard 3, and the `reseeded`
+bool (guard 4); make `veto_ungrounded_removals` run on every doc the holder
+emits a `Remove` for. Replace `di.rs`'s `feed.group_by(resolve_doc)` with a
+SUPERVISED `feed.home_by(BlockHomeAuthority)` and forward `HomedDiff` →
+`OrgRerender`. The Inc-1 shadow is deleted outright rather than re-pointed at a
+naive recompute: with one holder there is no second one to differ from, and the
+fold-equality property (§6) already locks the combinator per event at zero
+runtime cost. Landable; deletes code.
 
 **Inc 3 — docs/ADR.**
 Add `docs/Architecture/WriteBack.md` stating the holder contract (options doc §1.1
@@ -1085,6 +1086,86 @@ to differ from).
    cases never select it at all.
 8. **BlockDelta test-callsite sweep** (§7): mechanical `mech-executor` job,
    listed test files.
+
+### 10.3a As-built (Inc 2 cutover)
+
+What the cutover actually built, where it departed from §10.1, and why.
+
+**The holder lives in the controller, keyed by document.** `doc_blocks:
+HashMap<EntityUri, IndexMap<EntityUri, Block>>` became `holder:
+HashMap<EntityUri, DocOrder>`, where `DocOrder` maps block id → `HeldBlock {
+block, prev }`. `prev` is the combinator's document-relative previous sibling
+and is the ONLY order carrier — `IndexMap`'s insertion-order trick is gone, and
+with it the class of bug where a reposition kept its old slot because
+`IndexMap::insert` preserves the position of an existing key.
+
+**Render order is reconstructed, never stored.** `DocOrder::document_order` does
+a depth-first walk from the document root, linearising each sibling group by
+following its `prev` chain from the `None`-rooted head. Two deliberate
+non-failures: a chain that forks or cycles terminates and appends the
+unreachable rest in id order, and members the root cannot reach at all (an
+orphan whose parent left the document without the child being retracted) are
+appended rather than dropped. Dropping either would be indistinguishable from a
+sanctioned deletion by the time the removal guard sees the render — the loss
+would pass the guard that exists to catch it.
+
+**Root membership (§10.2.4) is reconciled at the render seam.** `home_by` homes
+a page to its OWN document (that is what makes a page-ness toggle observable as
+a document change on the toggled block), so the document root IS a holder
+member. `document_order` skips it, matching `get_blocks`' children-only
+convention. Pinned by `document_root_is_not_rendered_as_its_own_child`.
+
+**The API split.** `apply_block_delta` (fold only, sync, no I/O) is separated
+from `on_block_changed` (fold + write back). The split is what lets the boot
+snapshot seed the holder without rendering: the initial `Replace` fans out one
+`Upsert` per block, and rendering each one is the per-block boot work already
+known to destabilise the cold-boot matview. `OrgRerender` gained `Seed` (fold,
+do not write) and `Reset` (drop all derived state) for exactly this.
+
+**`BlockDelta::Upsert` gained `prev`.** §7 predicted `BlockDelta` would stay
+as-is; it could not. The holder's order comes from `prev`, and a variant that
+cannot carry it would force the controller to re-derive order from a second
+authority — reintroducing the two-holder problem the increment exists to
+remove. `Upsert(Block)` → `Upsert { block, prev }`; the §7 test-callsite sweep
+is the cost.
+
+**The unconditional veto is strictly stronger than guard 4.** `veto_
+ungrounded_removals` now runs on every holder-path write, not only on reseeds.
+Guard 4's exemption rested on the deleted cheap path provably preserving the id
+set (it re-read the one block it wrote and touched nothing else); the holder is
+a fold of a lagging feed, so no write carries that proof any more. Grounding is
+`pending_removals[doc]` — the ids the holder retracted since that document's
+last successful write — accumulated rather than read from the triggering delta,
+because one write can follow several retractions (a subtree re-home emits one
+`Remove` per descendant and only the last of them renders). It is drained on a
+successful write and cleared wholesale on `Reset`: a sanction the new
+incarnation cannot re-derive must not survive to authorise a deletion it never
+saw.
+
+**`WritebackDegraded` needed a port, not a one-liner (§10.2.6 check).** The
+dependency direction is wrong for a direct emit: `ShareDegradedReason` lives in
+holon-loro, the supervisor lives in holon-orgmode, and holon-orgmode does not
+depend on holon-loro. Implemented as `holon_filesystem::WritebackDisclosure`
+(the `ShareWritebackDisclosure` precedent), bridged in
+`holon-app/src/loro_seams.rs::WritebackDegradedDisclosure`. Registered
+UNCONDITIONALLY in `wiring.rs`, unlike the share disclosure: org write-back runs
+in every mode, so the one signal saying "your edits stopped reaching disk" must
+not be reachable only in Loro mode.
+
+**The shadow is deleted, its liveness question is not.** `writeback_shadow.rs`,
+`cached_doc_orders()`, the §9.8 arming machinery and all three budget-suite
+opt-outs are gone. `bidirectional_sync`'s three-part shadow gate is replaced by
+`holon_orgmode::di::docs_written_from_holder() >= 1`: with one write-back path,
+"did the holder converge with the other holder" is meaningless but "did
+write-back run at all" is more load-bearing than before — on-disk org content
+can equally arrive from the ingest direction or the authoritative bulk pass, and
+both leave that counter at zero.
+
+**`on_file_changed` no longer invalidates the mirror.** The old
+`doc_blocks.clear()` forced the next edit to reseed from `block_raw` after an
+external ingest. The holder has no equivalent: it converges through the feed,
+and the accepted consequence (risk register, "matview gap ⇒ write-back gap") is
+now backstopped by the unconditional veto rather than by a cache invalidation.
 
 ### 10.3 Gates at cutover
 

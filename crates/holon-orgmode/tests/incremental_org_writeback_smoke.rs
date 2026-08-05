@@ -45,6 +45,10 @@ struct CountingBlockReader {
     /// Ordered children of the doc, exactly as `get_blocks` would return them.
     blocks: Mutex<Vec<Block>>,
     get_blocks_calls: AtomicUsize,
+    /// Counted SEPARATELY from `get_blocks`: the fold-completeness gate's
+    /// id-only membership read is a different seam with a different cost, and
+    /// folding it into `get_blocks_calls` would silently retire that pin.
+    doc_block_topology_calls: AtomicUsize,
     point_read_calls: AtomicUsize,
 }
 
@@ -54,6 +58,7 @@ impl CountingBlockReader {
             doc_id,
             blocks: Mutex::new(blocks),
             get_blocks_calls: AtomicUsize::new(0),
+            doc_block_topology_calls: AtomicUsize::new(0),
             point_read_calls: AtomicUsize::new(0),
         }
     }
@@ -76,6 +81,9 @@ impl CountingBlockReader {
     fn get_blocks_calls(&self) -> usize {
         self.get_blocks_calls.load(Ordering::SeqCst)
     }
+    fn doc_block_topology_calls(&self) -> usize {
+        self.doc_block_topology_calls.load(Ordering::SeqCst)
+    }
     fn point_read_calls(&self) -> usize {
         self.point_read_calls.load(Ordering::SeqCst)
     }
@@ -87,6 +95,21 @@ impl BlockReader for CountingBlockReader {
         self.get_blocks_calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(doc_id, &self.doc_id, "test wiring: unexpected doc id");
         Ok(self.blocks.lock().unwrap().clone())
+    }
+
+    async fn doc_block_topology(
+        &self,
+        doc_id: &EntityUri,
+    ) -> anyhow::Result<Vec<(EntityUri, EntityUri)>> {
+        self.doc_block_topology_calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(doc_id, &self.doc_id, "test wiring: unexpected doc id");
+        Ok(self
+            .blocks
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|b| (b.id.clone(), b.parent_id.clone()))
+            .collect())
     }
 
     async fn get_block_authoritative(&self, id: &EntityUri) -> anyhow::Result<Option<Block>> {
@@ -294,54 +317,78 @@ fn reseed_lever_tags() -> Tags {
     tags
 }
 
-#[tokio::test]
-async fn content_only_edit_serves_from_cache_and_fires_zero_get_blocks() {
-    let mut h = build_harness();
-    let upsert = |b: &Block| BlockDelta::Upsert(b.clone());
-
-    // First edit to this doc: cold cache → one authoritative reseed (get_blocks).
-    let b1_v1 = h.reader.blocks.lock().unwrap()[0].clone();
+/// Seed the write-back holder the way production does at boot: production folds
+/// the block feed's initial snapshot through `home_by`, a controller-level test
+/// folds the same content from the authority. Every test that drives
+/// `on_block_changed` must do this first — the holder IS the render input now,
+/// and an unseeded document renders as an empty one.
+async fn seed(h: &mut Harness) {
     h.controller
-        .on_block_changed(&h.doc.id, &upsert(&b1_v1))
+        .seed_holder_from_authority(&h.doc.id)
         .await
         .unwrap();
-    assert_eq!(
-        h.reader.get_blocks_calls(),
-        1,
-        "cold doc must seed the cache with exactly one get_blocks"
-    );
+}
 
-    // Content-only edit of an already-cached block: MUST NOT call get_blocks.
+/// The `Upsert` `home_by` would emit for `block`: its value plus the previous
+/// sibling the authority currently gives it. Derived rather than hardcoded so a
+/// fixture reorder cannot silently desynchronise the delta from the oracle.
+fn upsert(h: &Harness, block: &Block) -> BlockDelta {
+    let blocks = h.reader.blocks.lock().unwrap();
+    let prev = blocks
+        .iter()
+        .take_while(|b| b.id != block.id)
+        .filter(|b| b.parent_id == block.parent_id)
+        .last()
+        .map(|b| b.id.clone());
+    BlockDelta::Upsert {
+        block: block.clone(),
+        prev,
+    }
+}
+
+/// The write-back path issues NO document read of its own. Under the deleted
+/// cache this was true only for the "cheap" content-only branch and had to be
+/// defended by a three-part guard; the holder makes it unconditional, because
+/// the combinator — not the controller — decides what the document contains.
+#[tokio::test]
+async fn edits_render_from_the_holder_and_fire_zero_get_blocks() {
+    let mut h = build_harness();
+    seed(&mut h).await;
+    let after_seed = h.reader.get_blocks_calls();
+    let topo_after_seed = h.reader.doc_block_topology_calls();
+
     let mut b2_v2 = h.reader.blocks.lock().unwrap()[1].clone();
     b2_v2.content = "Second heading EDITED".to_string();
     h.reader.set_block(b2_v2.clone());
 
-    let get_blocks_before = h.reader.get_blocks_calls();
-    let point_reads_before = h.reader.point_read_calls();
+    let delta = upsert(&h, &b2_v2);
     h.controller
-        .on_block_changed(&h.doc.id, &upsert(&b2_v2))
+        .on_block_changed(&h.doc.id, &delta)
         .await
         .unwrap();
 
     assert_eq!(
         h.reader.get_blocks_calls(),
-        get_blocks_before,
-        "content-only edit fired a recursive-CTE get_blocks — incremental cache path did not run"
+        after_seed,
+        "the holder path re-read the document — write-back must render from folded feed state, \
+         never from a document-scoped authority read"
     );
+    // The fold-completeness gate's membership read, pinned EXACTLY. Zero would
+    // mean the gate stopped checking and a partially-folded holder can reach
+    // disk again; more than one would mean a render costs several doc-scoped
+    // round-trips, which is the cost this whole seam exists to avoid.
     assert_eq!(
-        h.reader.point_read_calls(),
-        point_reads_before + 2,
-        "content-only edit does two O(1) point reads: the page-identity \
-         is_page pre-check (2026-07-19 daily-note ruling, on_block_changed) \
-         + the cache-refresh read — still ZERO recursive-CTE get_blocks"
+        h.reader.doc_block_topology_calls() - topo_after_seed,
+        1,
+        "one edit must cost EXACTLY one topology read: the gate compares the holder against \
+         the authority once per render"
     );
 
-    // Byte-identical to the full-read oracle.
     let written = std::fs::read_to_string(&h.path).unwrap();
     assert_eq!(
         written,
         full_render_oracle(&h),
-        "incremental render diverged from the full-get_blocks render"
+        "holder render diverged from the full-get_blocks render"
     );
     assert!(
         written.contains("Second heading EDITED"),
@@ -349,103 +396,102 @@ async fn content_only_edit_serves_from_cache_and_fires_zero_get_blocks() {
     );
 }
 
+/// A `tags` change is no longer a reason to re-read anything — it is one upsert
+/// like any other. What must hold is that the new tags reach disk.
 #[tokio::test]
-async fn tags_change_takes_full_reseed() {
+async fn a_tags_change_reaches_the_file() {
     let mut h = build_harness();
-    let b1 = h.reader.blocks.lock().unwrap()[0].clone();
-    h.controller
-        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b1.clone()))
-        .await
-        .unwrap();
-    let baseline = h.reader.get_blocks_calls();
+    seed(&mut h).await;
+    let after_seed = h.reader.get_blocks_calls();
 
-    // Toggle a tag on a cached block — H4: a Page/tag change can re-partition
-    // the doc's subtree, so it must reseed rather than upsert in place.
-    let mut b1_tagged = b1.clone();
+    let mut b1_tagged = h.reader.blocks.lock().unwrap()[0].clone();
     b1_tagged.tags = reseed_lever_tags();
     h.reader.set_block(b1_tagged.clone());
 
+    let delta = upsert(&h, &b1_tagged);
     h.controller
-        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b1_tagged))
+        .on_block_changed(&h.doc.id, &delta)
         .await
         .unwrap();
 
     assert_eq!(
         h.reader.get_blocks_calls(),
-        baseline + 1,
-        "a tags change must take the full reseed (get_blocks)"
+        after_seed,
+        "a tags change must not re-read the document"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&h.path).unwrap(),
+        full_render_oracle(&h),
+        "the tags change did not reach the file"
     );
 }
 
+/// A re-parent renders the block under its new parent. The old cache could only
+/// discover this by re-reading the whole document ("position is unknowable from
+/// the delta alone"); the homed delta states it outright.
 #[tokio::test]
-async fn move_takes_full_reseed() {
+async fn a_reparent_delta_renders_under_the_new_parent() {
     let mut h = build_harness();
-    let b3 = h.reader.blocks.lock().unwrap()[2].clone();
-    h.controller
-        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b3.clone()))
-        .await
-        .unwrap();
-    let baseline = h.reader.get_blocks_calls();
+    seed(&mut h).await;
 
-    // Re-parent the block (structural move) — position is unknowable from the
-    // delta alone, so reseed.
+    let b3 = h.reader.blocks.lock().unwrap()[2].clone();
     let mut moved = b3.clone();
     moved.parent_id = EntityUri::block("b1");
     h.reader.set_block(moved.clone());
 
+    // Re-parenting empties b3's old sibling slot, so the authority now gives it
+    // no predecessor under b1.
+    let delta = BlockDelta::Upsert {
+        block: moved,
+        prev: None,
+    };
     h.controller
-        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(moved))
+        .on_block_changed(&h.doc.id, &delta)
         .await
         .unwrap();
 
     assert_eq!(
-        h.reader.get_blocks_calls(),
-        baseline + 1,
-        "a parent_id move must take the full reseed (get_blocks)"
+        std::fs::read_to_string(&h.path).unwrap(),
+        full_render_oracle(&h),
+        "the re-parented block did not render under its new parent"
     );
 }
 
-/// Regression for the disk-sibling-order bug: a same-parent reorder (the
-/// sort_key sequence changes but `parent_id`/`tags` do not) must NOT take the
-/// cheap content-only path — the cache would otherwise keep the pre-reorder
-/// `IndexMap` position forever, so the written file's sibling order would
-/// diverge from the live (SQL/`sort_key`-authoritative) order even though the
-/// delta's own content looks unchanged.
+/// Regression for the disk-sibling-order bug. Under the deleted cache a
+/// same-parent reorder was invisible to a `parent_id`/`tags` comparison, so the
+/// file kept the pre-reorder order forever unless a `children()` cross-read
+/// caught it (guard 3). The holder carries position IN the delta, so the same
+/// scenario is now pinned directly on the order rather than on the read that
+/// used to detect it: `home_by` re-emits every neighbour whose predecessor
+/// moved, and the render must follow that chain.
 #[tokio::test]
-async fn reorder_within_parent_takes_full_reseed() {
+async fn a_reorder_delta_reorders_the_written_file() {
     let mut h = build_harness();
+    seed(&mut h).await;
+
     let (b1, b2, b3) = {
         let blocks = h.reader.blocks.lock().unwrap();
         (blocks[0].clone(), blocks[1].clone(), blocks[2].clone())
     };
-    h.controller
-        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b1.clone()))
-        .await
-        .unwrap();
-    let baseline = h.reader.get_blocks_calls();
-
-    // Same parent, same tags, same content — only the sibling order changes
-    // (b2 now sorts before b1).
+    // b2 now sorts before b1; b3 keeps the tail.
     h.reader
         .set_blocks(vec![b2.clone(), b1.clone(), b3.clone()]);
 
-    h.controller
-        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b1))
-        .await
-        .unwrap();
-
-    assert_eq!(
-        h.reader.get_blocks_calls(),
-        baseline + 1,
-        "a same-parent reorder must take the full reseed (get_blocks), not the cheap content-only \
-         path"
-    );
+    // The three diffs the combinator emits for this move: the new head, the
+    // moved block, and the neighbour whose predecessor changed.
+    for block in [&b2, &b1, &b3] {
+        let delta = upsert(&h, block);
+        h.controller
+            .on_block_changed(&h.doc.id, &delta)
+            .await
+            .unwrap();
+    }
 
     let written = std::fs::read_to_string(&h.path).unwrap();
     assert_eq!(
         written,
         full_render_oracle(&h),
-        "written file must reflect the new (post-reorder) sibling order, not the stale cached one"
+        "written file must reflect the new sibling order, not the stale holder one"
     );
     assert!(
         written.find("Second heading").unwrap() < written.find("First heading").unwrap(),
@@ -453,26 +499,45 @@ async fn reorder_within_parent_takes_full_reseed() {
     );
 }
 
+/// A sanctioned `Remove` drops the block from the file — and does NOT trip the
+/// now-unconditional removal guard, because the holder's own retraction is what
+/// grounds it.
 #[tokio::test]
-async fn remove_takes_full_reseed() {
+async fn a_remove_delta_drops_the_block_from_the_file() {
     let mut h = build_harness();
+    seed(&mut h).await;
+
     let b1 = h.reader.blocks.lock().unwrap()[0].clone();
+    let delta = upsert(&h, &b1);
     h.controller
-        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b1))
+        .on_block_changed(&h.doc.id, &delta)
         .await
         .unwrap();
-    let baseline = h.reader.get_blocks_calls();
 
-    // A Remove delta can never be served incrementally.
+    let surviving: Vec<Block> = h
+        .reader
+        .blocks
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|b| b.id != EntityUri::block("b2"))
+        .cloned()
+        .collect();
+    h.reader.set_blocks(surviving);
     h.controller
         .on_block_changed(&h.doc.id, &BlockDelta::Remove(EntityUri::block("b2")))
         .await
         .unwrap();
 
+    let written = std::fs::read_to_string(&h.path).unwrap();
+    assert!(
+        !written.contains("Second heading"),
+        "the removed block is still on disk: {written:?}"
+    );
     assert_eq!(
-        h.reader.get_blocks_calls(),
-        baseline + 1,
-        "a Remove must take the full reseed (get_blocks)"
+        written,
+        full_render_oracle(&h),
+        "the post-removal file diverged from the full-read render"
     );
 }
 
@@ -491,8 +556,16 @@ async fn block_driven_writeback_vetoes_single_ungrounded_drop() {
     let (b1, b3) = (all[0].clone(), all[2].clone());
 
     // Seed disk with the full doc (b1/b2/b3).
+    // Production seeds the holder from the block feed's snapshot; a
+    // controller-level driver seeds the same content from the authority,
+    // so the delta's position and the render input share one source.
     h.controller
-        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b1.clone()))
+        .seed_holder_from_authority(&h.doc.id)
+        .await
+        .unwrap();
+    let delta = upsert(&h, &b1);
+    h.controller
+        .on_block_changed(&h.doc.id, &delta)
         .await
         .unwrap();
     let on_disk = std::fs::read_to_string(&h.path).unwrap();
@@ -509,10 +582,16 @@ async fn block_driven_writeback_vetoes_single_ungrounded_drop() {
     b1_tagged.tags = reseed_lever_tags();
     h.reader.set_block(b1_tagged.clone());
 
-    let veto = h
-        .controller
-        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b1_tagged))
-        .await;
+    // Re-seed from the authority the way a fresh combinator
+    // subscription would: the block that vanished from the store is
+    // gone from the holder too, so the render shrinks and the removal
+    // guard sees an absence nothing sanctioned.
+    h.controller
+        .seed_holder_from_authority(&h.doc.id)
+        .await
+        .unwrap();
+    let delta = upsert(&h, &b1_tagged);
+    let veto = h.controller.on_block_changed(&h.doc.id, &delta).await;
     assert!(
         veto.is_err(),
         "an ungrounded drop must VETO the write-back (Err), however small"
@@ -534,8 +613,16 @@ async fn block_driven_writeback_vetoes_single_ungrounded_drop() {
     let mut b1_v2 = b1.clone();
     b1_v2.content = "First heading edited".to_string();
     h.reader.set_blocks(vec![b1_v2.clone(), b3.clone()]);
+    // Production seeds the holder from the block feed's snapshot; a
+    // controller-level driver seeds the same content from the authority,
+    // so the delta's position and the render input share one source.
     h.controller
-        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b1_v2))
+        .seed_holder_from_authority(&h.doc.id)
+        .await
+        .unwrap();
+    let delta = upsert(&h, &b1_v2);
+    h.controller
+        .on_block_changed(&h.doc.id, &delta)
         .await
         .expect("a quarantined file's later edit is skipped (Ok), not an error");
     let after_edit = std::fs::read_to_string(&h.path).unwrap();
@@ -560,8 +647,16 @@ async fn block_driven_writeback_vetoes_mass_truncation() {
     let b0 = all[0].clone();
 
     // Seed disk with all 20 blocks.
+    // Production seeds the holder from the block feed's snapshot; a
+    // controller-level driver seeds the same content from the authority,
+    // so the delta's position and the render input share one source.
     h.controller
-        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b0.clone()))
+        .seed_holder_from_authority(&h.doc.id)
+        .await
+        .unwrap();
+    let delta = upsert(&h, &b0);
+    h.controller
+        .on_block_changed(&h.doc.id, &delta)
         .await
         .unwrap();
     let seeded = std::fs::read_to_string(&h.path).unwrap();
@@ -578,10 +673,16 @@ async fn block_driven_writeback_vetoes_mass_truncation() {
     b0_tagged.tags = reseed_lever_tags();
     h.reader.set_block(b0_tagged.clone());
 
-    let veto = h
-        .controller
-        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b0_tagged))
-        .await;
+    // Re-seed from the authority the way a fresh combinator
+    // subscription would: the block that vanished from the store is
+    // gone from the holder too, so the render shrinks and the removal
+    // guard sees an absence nothing sanctioned.
+    h.controller
+        .seed_holder_from_authority(&h.doc.id)
+        .await
+        .unwrap();
+    let delta = upsert(&h, &b0_tagged);
+    let veto = h.controller.on_block_changed(&h.doc.id, &delta).await;
     assert!(
         veto.is_err(),
         "a 15-of-20 mass truncation must VETO the write-back (Err), not write 5 blocks"
@@ -600,8 +701,16 @@ async fn block_driven_writeback_vetoes_mass_truncation() {
     );
 
     // Quarantined: a subsequent benign edit is skipped (no write over disk).
+    // Production seeds the holder from the block feed's snapshot; a
+    // controller-level driver seeds the same content from the authority,
+    // so the delta's position and the render input share one source.
     h.controller
-        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b0))
+        .seed_holder_from_authority(&h.doc.id)
+        .await
+        .unwrap();
+    let delta = upsert(&h, &b0);
+    h.controller
+        .on_block_changed(&h.doc.id, &delta)
         .await
         .expect("a quarantined file's later edit is skipped (Ok), not an error");
     let after_second = std::fs::read_to_string(&h.path).unwrap();
@@ -625,8 +734,16 @@ async fn block_driven_writeback_writes_sanctioned_deletion() {
     let all = h.reader.blocks.lock().unwrap().clone();
     let (b1, b3) = (all[0].clone(), all[2].clone());
 
+    // Production seeds the holder from the block feed's snapshot; a
+    // controller-level driver seeds the same content from the authority,
+    // so the delta's position and the render input share one source.
     h.controller
-        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b1.clone()))
+        .seed_holder_from_authority(&h.doc.id)
+        .await
+        .unwrap();
+    let delta = upsert(&h, &b1);
+    h.controller
+        .on_block_changed(&h.doc.id, &delta)
         .await
         .unwrap();
 
@@ -740,8 +857,16 @@ async fn lost_child_page_with_surviving_doc_record_still_vetoes() {
     let all = h.reader.blocks.lock().unwrap().clone();
     let b0 = all[0].clone();
 
+    // Production seeds the holder from the block feed's snapshot; a
+    // controller-level driver seeds the same content from the authority,
+    // so the delta's position and the render input share one source.
     h.controller
-        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b0.clone()))
+        .seed_holder_from_authority(&h.doc.id)
+        .await
+        .unwrap();
+    let delta = upsert(&h, &b0);
+    h.controller
+        .on_block_changed(&h.doc.id, &delta)
         .await
         .unwrap();
     let seeded = std::fs::read_to_string(&h.path).unwrap();
@@ -761,10 +886,16 @@ async fn lost_child_page_with_surviving_doc_record_still_vetoes() {
     b0_tagged.tags = reseed_lever_tags();
     h.reader.set_block(b0_tagged.clone());
 
-    let veto = h
-        .controller
-        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b0_tagged))
-        .await;
+    // Re-seed from the authority the way a fresh combinator
+    // subscription would: the block that vanished from the store is
+    // gone from the holder too, so the render shrinks and the removal
+    // guard sees an absence nothing sanctioned.
+    h.controller
+        .seed_holder_from_authority(&h.doc.id)
+        .await
+        .unwrap();
+    let delta = upsert(&h, &b0_tagged);
+    let veto = h.controller.on_block_changed(&h.doc.id, &delta).await;
     assert!(
         veto.is_err(),
         "a page block absent from the AUTHORITY is a loss, not a move — it must veto"
@@ -872,8 +1003,16 @@ async fn name_chain_failed_ungrounded_drop_hard_vetoes() {
     let b0 = all[0].clone();
 
     // Seed disk with all 8 blocks.
+    // Production seeds the holder from the block feed's snapshot; a
+    // controller-level driver seeds the same content from the authority,
+    // so the delta's position and the render input share one source.
     h.controller
-        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b0.clone()))
+        .seed_holder_from_authority(&h.doc.id)
+        .await
+        .unwrap();
+    let delta = upsert(&h, &b0);
+    h.controller
+        .on_block_changed(&h.doc.id, &delta)
         .await
         .unwrap();
     let seeded = std::fs::read_to_string(&h.path).unwrap();
@@ -891,10 +1030,16 @@ async fn name_chain_failed_ungrounded_drop_hard_vetoes() {
     b0_tagged.tags = reseed_lever_tags();
     h.reader.set_block(b0_tagged.clone());
 
-    let veto = h
-        .controller
-        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b0_tagged))
-        .await;
+    // Re-seed from the authority the way a fresh combinator
+    // subscription would: the block that vanished from the store is
+    // gone from the holder too, so the render shrinks and the removal
+    // guard sees an absence nothing sanctioned.
+    h.controller
+        .seed_holder_from_authority(&h.doc.id)
+        .await
+        .unwrap();
+    let delta = upsert(&h, &b0_tagged);
+    let veto = h.controller.on_block_changed(&h.doc.id, &delta).await;
     assert!(
         veto.is_err(),
         "a name_chain-failed ungrounded drop must HARD-VETO the write (Err)"
@@ -913,8 +1058,16 @@ async fn name_chain_failed_ungrounded_drop_hard_vetoes() {
     );
 
     // Quarantined: a subsequent benign edit is skipped (no truncated write).
+    // Production seeds the holder from the block feed's snapshot; a
+    // controller-level driver seeds the same content from the authority,
+    // so the delta's position and the render input share one source.
     h.controller
-        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b0))
+        .seed_holder_from_authority(&h.doc.id)
+        .await
+        .unwrap();
+    let delta = upsert(&h, &b0);
+    h.controller
+        .on_block_changed(&h.doc.id, &delta)
         .await
         .expect("a quarantined file's later edit is skipped (Ok), not an error");
     let after_second = std::fs::read_to_string(&h.path).unwrap();
@@ -945,6 +1098,14 @@ struct ChildlessPageReader {
 #[async_trait]
 impl BlockReader for ChildlessPageReader {
     async fn get_blocks(&self, _: &EntityUri) -> anyhow::Result<Vec<Block>> {
+        Ok(vec![])
+    }
+    /// Empty is the TRUTH for this double, not a stub: it models a page with no
+    /// children, which the gate must treat as complete and render.
+    async fn doc_block_topology(
+        &self,
+        _: &EntityUri,
+    ) -> anyhow::Result<Vec<(EntityUri, EntityUri)>> {
         Ok(vec![])
     }
     async fn get_block_authoritative(&self, id: &EntityUri) -> anyhow::Result<Option<Block>> {
@@ -1025,7 +1186,19 @@ async fn childless_runtime_page_materializes_its_identity_file() {
 
     // The reactive per-block writeback fires with the page as the upserted block.
     controller
-        .on_block_changed(&page_id, &BlockDelta::Upsert(page.clone()))
+        .seed_holder_from_authority(&page_id)
+        .await
+        .expect("seeding the holder must not error");
+    controller
+        .on_block_changed(
+            &page_id,
+            // A childless page is the only member of its own document, so it
+            // has no previous sibling.
+            &BlockDelta::Upsert {
+                block: page.clone(),
+                prev: None,
+            },
+        )
         .await
         .expect("on_block_changed must not error");
 
@@ -1155,14 +1328,18 @@ async fn user_edit_materializes_virtual_seed_doc_copy_on_write() {
     );
 
     let mut h = build_seed_harness();
-    let upsert = |b: &Block| BlockDelta::Upsert(b.clone());
 
     // 1) BOOT seed write (`boot_seeding` = true, the ctor default): seeding the
     //    default layout into the store must NOT materialize the vault file. The
     //    gate records the pristine asset render and skips the write.
     let b1_pristine = h.reader.blocks.lock().unwrap()[0].clone();
     h.controller
-        .on_block_changed(&h.doc.id, &upsert(&b1_pristine))
+        .seed_holder_from_authority(&h.doc.id)
+        .await
+        .unwrap();
+    let delta = upsert(&h, &b1_pristine);
+    h.controller
+        .on_block_changed(&h.doc.id, &delta)
         .await
         .unwrap();
     assert!(
@@ -1179,7 +1356,12 @@ async fn user_edit_materializes_virtual_seed_doc_copy_on_write() {
     //    still renders == pristine, so it is NOT mistaken for a user edit — the doc
     //    stays virtual (no file).
     h.controller
-        .on_block_changed(&h.doc.id, &upsert(&b1_pristine))
+        .seed_holder_from_authority(&h.doc.id)
+        .await
+        .unwrap();
+    let delta = upsert(&h, &b1_pristine);
+    h.controller
+        .on_block_changed(&h.doc.id, &delta)
         .await
         .unwrap();
     assert!(
@@ -1195,7 +1377,12 @@ async fn user_edit_materializes_virtual_seed_doc_copy_on_write() {
     b2_edited.content = "Layout B EDITED BY USER".to_string();
     h.reader.set_block(b2_edited.clone());
     h.controller
-        .on_block_changed(&h.doc.id, &upsert(&b2_edited))
+        .seed_holder_from_authority(&h.doc.id)
+        .await
+        .unwrap();
+    let delta = upsert(&h, &b2_edited);
+    h.controller
+        .on_block_changed(&h.doc.id, &delta)
         .await
         .unwrap();
 
@@ -1212,7 +1399,12 @@ async fn user_edit_materializes_virtual_seed_doc_copy_on_write() {
     //    clobber). Its presence is the `default_org_exists` marker the seed
     //    boundary reads to suppress re-seeding.
     h.controller
-        .on_block_changed(&h.doc.id, &upsert(&b2_edited))
+        .seed_holder_from_authority(&h.doc.id)
+        .await
+        .unwrap();
+    let delta = upsert(&h, &b2_edited);
+    h.controller
+        .on_block_changed(&h.doc.id, &delta)
         .await
         .unwrap();
     assert!(

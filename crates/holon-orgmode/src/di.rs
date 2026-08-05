@@ -26,7 +26,27 @@ use holon_filesystem::FileSyncController;
 
 use crate::file_watcher::FileEvent;
 use crate::file_watcher::OrgFileWatcher;
+use crate::home_authority::DocHome;
 use crate::org_renderer::OrgRenderer;
+
+/// Documents written back from the write-back holder in this process.
+///
+/// Liveness evidence, not a metric. The holder is the ONLY write-back path
+/// now, so a suite that asserts on-disk org content while this stays at zero
+/// proved nothing about it — the content it checked came from the ingest
+/// direction or from the authoritative bulk pass. Suites that mean to exercise
+/// write-back gate on this being non-zero.
+static DOCS_WRITTEN_FROM_HOLDER: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn note_doc_written_from_holder() {
+    DOCS_WRITTEN_FROM_HOLDER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// How many documents this process wrote back from the holder.
+pub fn docs_written_from_holder() -> u64 {
+    DOCS_WRITTEN_FROM_HOLDER.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Signal that indicates the FileWatcher is ready to receive file change
 /// events.
@@ -451,6 +471,13 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                     .optional_resolve_async::<dyn holon_filesystem::ShareWritebackDisclosure>()
                     .await;
 
+                // Disclosure seam for the write-back supervisor giving up.
+                // Absent in test/no-Turso containers → a spent restart budget is
+                // audible in the log only.
+                let writeback_disclosure = resolver
+                    .optional_resolve_async::<dyn holon_filesystem::WritebackDisclosure>()
+                    .await;
+
                 // Authoritative mount registry (Inc 3): lets the ingest guard
                 // skip a shared-subtree projection file only when its page id is
                 // a real mount node (not a user-authored `share-role` drawer).
@@ -466,9 +493,10 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                 // read the `Page` tag from the write authority (`block_raw`), not
                 // the lagging matview-backed feed (see `resolve_doc_for_block`).
                 let feed_block_reader = block_reader.clone();
-                // Kept for the Inc 1 differential shadow, which reads sibling
-                // order from the same authority the controller does.
-                let shadow_ordering = ordering.clone();
+                // The write-back holder's order authority. The same handle the
+                // controller writes through, so `prev` and the rendered sibling
+                // order can never come from two different stores.
+                let home_ordering = ordering.clone();
 
                 let mut controller = FileSyncController::with_format(
                     block_reader,
@@ -492,6 +520,13 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                 }
                 if let Some(registry) = mount_registry {
                     controller = controller.with_mount_registry(registry);
+                }
+                // The same seam the supervisor's give-up uses. The controller
+                // raises it for a different persistent failure with the same
+                // consequence: one document's fold stops converging, so its
+                // edits stop reaching disk while everything else keeps working.
+                if let Some(disclosure) = writeback_disclosure.clone() {
+                    controller = controller.with_writeback_disclosure(disclosure);
                 }
 
                 // Image bytes for `[[file:…]]` blocks, so an image synced from a
@@ -525,154 +560,141 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                     tokio::sync::mpsc::unbounded_channel::<OrgRerender>();
                 if let Some(feed) = block_feed.clone() {
                     let tx = rerender_tx.clone();
-                    let feed_reader = feed_block_reader.clone();
                     let disclosure = share_disclosure.clone();
                     let disclosed: Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
                         Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
-                    tokio::spawn(async move {
-                        use futures::StreamExt as _;
+                    let authority = Arc::new(crate::home_authority::BlockHomeAuthority::new(
+                        feed_block_reader.clone(),
+                        home_ordering,
+                    ));
+                    let degraded = writeback_disclosure.clone();
+                    let feed_for_stream = feed.clone();
 
-                        // Re-group the block feed by owning document via the STATEFUL
-                        // `LiveData::group_by` combinator (its accumulator maps each
-                        // block -> its last-routed document). When a block re-homes to
-                        // another document (runtime `convert_block_to_page`) the stream
-                        // emits `Remove{old doc}` STRICTLY BEFORE `Upsert{new doc}`, so
-                        // the source document's render cache drops the departed block and
-                        // re-renders WITHOUT it. The previous stateless per-diff loop
-                        // grouped only by the new value's document, so the source doc
-                        // never saw a departure and its org file retained the block
-                        // forever (the cross-doc-move source-convergence defect).
-                        let key_reader = feed_reader.clone();
-                        let mut stream = std::pin::pin!(feed.group_by(move |value: Arc<Block>| {
-                            let reader = key_reader.clone();
-                            async move {
-                                // Resolve the owning document off the WRITE authority.
-                                // Both non-fatal fallbacks — no `Page` ancestor
-                                // (`Ok(None)`) and a transient authoritative point-read
-                                // fault (`Err`) — are encoded in the key as `Unresolved`
-                                // rather than surfaced as a `group_by` `Err`: an `Err`
-                                // item ENDS the stream, which for a transient store fault
-                                // would kill org write-back for the whole session. The
-                                // error is still surfaced loudly; only the stream
-                                // survives. `Unresolved` drives a full re-render at the
-                                // consumer, exactly as the stateless loop's `Ok(None)` /
-                                // `Err` arms did.
-                                let group =
-                                    match resolve_doc_for_block(reader.as_ref(), &value).await {
-                                        Ok(Some(doc)) => DocGroup::Resolved(doc),
-                                        Ok(None) => DocGroup::Unresolved,
-                                        Err(e) => {
-                                            tracing::error!(
-                                                "[OrgMode] authoritative doc resolution failed for \
-                                             block {}: {e:#} — falling back to full re-render",
-                                                value.id
-                                            );
-                                            DocGroup::Unresolved
-                                        }
-                                    };
-                                Ok::<DocGroup, anyhow::Error>(group)
+                    // The write-back document mirror IS the `home_by`
+                    // combinator's output, under let-it-die supervision: the
+                    // supervisor holds the stream FACTORY, so a dead
+                    // incarnation is replaced by a fresh subscription that
+                    // re-seeds itself from the feed's `MapDiff::Replace`. Boot
+                    // and recovery are structurally the same path — `Reset`
+                    // precedes every incarnation, including the first.
+                    let mut supervised = holon_api::live_data::supervision::spawn_supervised(
+                        "org-writeback",
+                        move || feed_for_stream.home_by(authority.clone()),
+                        move |component, restarts, err| {
+                            // A spent restart budget means edits stop reaching
+                            // disk for the rest of the process — exactly the
+                            // persistent-failure case let-it-die exists to
+                            // disclose, so it must be audible outside the log.
+                            match degraded.as_deref() {
+                                Some(d) => d.writeback_degraded(&format!(
+                                    "{component} gave up after {restarts} restarts: {err:#}"
+                                )),
+                                None => tracing::error!(
+                                    "[{component}] gave up after {restarts} restarts ({err:#}) — \
+                                     org write-back is DOWN for the rest of this process and no \
+                                     disclosure seam is wired in this container"
+                                ),
                             }
-                        }));
+                        },
+                    );
 
-                        // The initial feed snapshot (`MapDiff::Replace`) rendered as ONE
-                        // debounced bulk pass in the pre-`group_by` resolver
-                        // (`Replace -> OrgRerender::All`); `group_by` instead fans it into
-                        // one `Upsert` per seeded block. Per-block boot renders
-                        // destabilize the cold-boot matview — the frontend's creation slot
-                        // then resolves NO parent (0 live rows). So capture the snapshot's
-                        // block ids and FOLD their fanned `Upsert`s into that single bulk
-                        // render, exactly as before; only POST-boot changes route per
-                        // block (where the cross-doc departure fix lives). The set drains
-                        // as the snapshot is consumed, after which every item routes
-                        // incrementally.
+                    tokio::spawn(async move {
+                        use holon_api::live_data::home_by::HomedDiff;
+                        use holon_api::live_data::supervision::Supervised;
+
+                        // The initial snapshot fans out one `Upsert` per block.
+                        // Rendering each of them would be N per-block boot
+                        // renders, which destabilises the cold-boot matview (the
+                        // frontend's creation slot then resolves NO parent). So
+                        // snapshot blocks SEED the holder and one debounced bulk
+                        // pass renders them together; the set drains as the
+                        // snapshot is consumed, after which everything routes
+                        // per block.
                         let mut snapshot_pending: std::collections::HashSet<String> =
-                            feed.read().keys().cloned().collect();
-                        let _ = tx.send(OrgRerender::All);
+                            std::collections::HashSet::new();
 
-                        while let Some(item) = stream.next().await {
+                        while let Some(item) = supervised.recv().await {
                             let msg = match item {
-                                Ok(holon_api::live_data::group_by::GroupedDiff::Upsert {
-                                    group,
+                                Supervised::Reset => {
+                                    snapshot_pending = feed.read().keys().cloned().collect();
+                                    // Drop the dead incarnation's derived state,
+                                    // then cover the incoming seed with one bulk
+                                    // render off the authority.
+                                    let _ = tx.send(OrgRerender::Reset);
+                                    OrgRerender::All
+                                }
+                                Supervised::Diff(HomedDiff::Upsert {
+                                    doc,
                                     key,
+                                    prev,
                                     value,
                                 }) => {
-                                    if snapshot_pending.remove(&key) {
-                                        // Initial-snapshot block — already covered by the
-                                        // boot bulk render above. Matches the old `Replace`
-                                        // path, which likewise did not disclose per block.
-                                        continue;
+                                    let seeding = snapshot_pending.remove(&key);
+                                    if !seeding {
+                                        // Boot-snapshot blocks do not disclose:
+                                        // the gap is a property of the share's
+                                        // wiring, not of any one edit, and
+                                        // announcing it once per pre-existing
+                                        // block at startup is banner spam.
+                                        disclose_unmaterialized_share(
+                                            &feed,
+                                            &value,
+                                            disclosure.as_deref(),
+                                            &disclosed,
+                                        );
                                     }
-                                    // Inc 1: disclose a shared-subtree write-back gap on
-                                    // every upserted value (mount not yet a page-file).
-                                    // Deduped once per share per session — safe in Loro +
-                                    // SQL, only on-disk org is stale.
-                                    disclose_unmaterialized_share(
-                                        &feed,
-                                        &value,
-                                        disclosure.as_deref(),
-                                        &disclosed,
-                                    );
-                                    match group {
-                                        DocGroup::Resolved(doc) => OrgRerender::Block {
-                                            doc,
-                                            delta: Box::new(BlockDelta::Upsert(
-                                                (*value).clone(),
-                                            )),
-                                        },
-                                        // Unresolved (block/parent absent, or point-read
-                                        // fault) → full re-render via the authoritative
-                                        // `get_blocks` CTE.
-                                        DocGroup::Unresolved => OrgRerender::All,
+                                    match (doc, parse_prev(prev.as_deref())) {
+                                        (DocHome::Resolved(doc), Ok(prev)) => {
+                                            let delta = Box::new(BlockDelta::Upsert {
+                                                block: (*value).clone(),
+                                                prev,
+                                            });
+                                            if seeding {
+                                                OrgRerender::Seed { doc, delta }
+                                            } else {
+                                                OrgRerender::Block { doc, delta }
+                                            }
+                                        }
+                                        // No `Page` ancestor, or the authority
+                                        // faulted: the block belongs to no
+                                        // document we can write, so recover
+                                        // through the authoritative bulk pass.
+                                        (DocHome::Unresolved, _) => OrgRerender::All,
+                                        (DocHome::Resolved(doc), Err(e)) => {
+                                            tracing::error!(
+                                                "[OrgMode] home_by homed block {key} to {doc} with \
+                                                 an unparseable previous sibling: {e} — falling \
+                                                 back to full re-render"
+                                            );
+                                            OrgRerender::All
+                                        }
                                     }
                                 }
-                                Ok(holon_api::live_data::group_by::GroupedDiff::Remove {
-                                    group,
-                                    key,
-                                }) => {
-                                    // A snapshot block removed before its snapshot `Upsert`
-                                    // was folded away — keep the set consistent.
+                                Supervised::Diff(HomedDiff::Remove { doc, key }) => {
+                                    // The DEPARTURE. A retraction always lands
+                                    // before the matching `Upsert` at the new
+                                    // document, so the source document
+                                    // re-renders WITHOUT the block whether it
+                                    // was deleted or merely re-homed — one
+                                    // uniform path, and no authoritative
+                                    // presence-check that would short-circuit a
+                                    // move.
                                     snapshot_pending.remove(&key);
-                                    match group {
-                                    // The DEPARTURE delta — the entire point of the
-                                    // increment. Route a Remove-shaped `BlockDelta` to the
-                                    // SOURCE document `group_by` supplies from its
-                                    // accumulator; `on_block_changed` drops the block from
-                                    // that doc's cache and re-renders without it. This is
-                                    // NOT `on_block_removed`: a moved block STILL EXISTS
-                                    // (under its new page), so `on_block_removed`'s
-                                    // authoritative-presence moot-check would short-circuit
-                                    // and leave the source file stale. A genuine deletion
-                                    // routes the same way (the block is gone everywhere, so
-                                    // the source re-renders without it) — one uniform path.
-                                    DocGroup::Resolved(doc) => match EntityUri::parse(&key) {
-                                        Ok(id) => OrgRerender::Block {
+                                    match (doc, EntityUri::parse(&key)) {
+                                        (DocHome::Resolved(doc), Ok(id)) => OrgRerender::Block {
                                             doc,
                                             delta: Box::new(BlockDelta::Remove(id)),
                                         },
-                                        Err(e) => {
+                                        (DocHome::Unresolved, _) => OrgRerender::All,
+                                        (DocHome::Resolved(_), Err(e)) => {
                                             tracing::error!(
-                                                "[OrgMode] block feed Remove key {key:?} is not \
-                                                 a valid EntityUri: {e} — falling back to full \
+                                                "[OrgMode] block feed Remove key {key:?} is not a \
+                                                 valid EntityUri: {e} — falling back to full \
                                                  re-render"
                                             );
                                             OrgRerender::All
                                         }
-                                    },
-                                    // The block was last grouped `Unresolved` (never had a
-                                    // resolvable document) → recovery re-render.
-                                    DocGroup::Unresolved => OrgRerender::All,
                                     }
-                                }
-                                // `group_by` yields `Err` only if the key fn returns `Err`;
-                                // ours never does (fallbacks are encoded in the key). If it
-                                // ever surfaces, the stream has ENDED — surface it loudly
-                                // and take a final recovery pass before the task winds down.
-                                Err(e) => {
-                                    tracing::error!(
-                                        "[OrgMode] block-feed group_by stream errored: {e:#} — \
-                                         final full re-render before the resolver task ends"
-                                    );
-                                    OrgRerender::All
                                 }
                             };
                             let _ = tx.send(msg);
@@ -680,20 +702,6 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                     });
                 }
                 drop(rerender_tx);
-
-                // Option C Inc 1 differential shadow. Constructed in debug
-                // builds only, so release never even builds the inputs.
-                let shadow_inputs = if cfg!(debug_assertions) && crate::writeback_shadow::is_armed() {
-                    block_feed.clone().map(|feed| {
-                        crate::writeback_shadow::ShadowInputs {
-                            feed,
-                            reader: feed_block_reader.clone(),
-                            ordering: shadow_ordering,
-                        }
-                    })
-                } else {
-                    None
-                };
 
                 tokio::spawn(run_file_sync_controller(
                     controller,
@@ -703,7 +711,6 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                     ready_sender,
                     fs,
                     change_source,
-                    shadow_inputs,
                 ));
 
                 Shared::new(FileSyncStarted)
@@ -727,72 +734,40 @@ pub struct FileSyncStarted;
 /// org controller's single-owner `select!` loop (Phase 5: replaces the EventBus
 /// `Consumer::ORG` block-event path).
 pub enum OrgRerender {
-    /// Re-render exactly this document (resolved to its `Page` root), carrying
-    /// the single block change so the controller can update just that block in
-    /// its per-doc cache instead of re-reading the whole document.
+    /// Fold this homed diff into the document's holder entry, then write the
+    /// document back.
     Block {
         doc: EntityUri,
         delta: Box<holon_filesystem::BlockDelta>,
     },
-    /// Document could not be resolved (matview lag, bulk feed reset, etc.) —
-    /// reseed via a debounced re-render of every tracked file.
+    /// Fold into the holder WITHOUT writing: this diff belongs to a fresh
+    /// subscription's initial snapshot, and the `All` that accompanies the
+    /// snapshot renders every one of them in a single bulk pass. Per-block boot
+    /// renders destabilise the cold-boot matview.
+    Seed {
+        doc: EntityUri,
+        delta: Box<holon_filesystem::BlockDelta>,
+    },
+    /// The supervised stream restarted (or booted): drop all derived state. A
+    /// complete re-seed follows on the next incarnation.
+    Reset,
+    /// No document could be resolved for a change, or a re-seed just landed —
+    /// converge via a debounced re-render of every tracked file, read from the
+    /// authority rather than the holder.
     All,
 }
 
-/// Grouping key for the block-feed resolver's [`LiveData::group_by`]: the
-/// owning document, or `Unresolved` when no `Page` ancestor could be resolved
-/// (block/ancestor absent) or an authoritative point-read faulted.
+/// Parse the combinator's document-relative previous-sibling id.
 ///
-/// Encoding BOTH fallbacks as a key value — rather than surfacing a `group_by`
-/// `Err`, which ends the stream — keeps the resolver task alive across
-/// transient store faults. The `Unresolved` group drives a full re-render at
-/// the consumer, exactly as the previous stateless loop's `Ok(None)` / `Err`
-/// arms did (the error is still logged loudly at the key fn).
-///
-/// [`LiveData::group_by`]: holon_api::live_data::LiveData::group_by
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum DocGroup {
-    Resolved(EntityUri),
-    Unresolved,
-}
-
-/// Resolve the owning document URI for a changed `Block` by walking `parent_id`
-/// up to the nearest `Page`-tagged ancestor (the block itself included).
-///
-/// The walk reads the **write authority** (`block_raw` under Turso / the Loro
-/// tree) via [`BlockReader::get_block_authoritative`], NOT the matview-backed
-/// feed. The feed lags: a day-page created `Page`-tagged by the auto-create
-/// rule can appear in the feed with its `Page` tag not yet applied, so a feed
-/// walk sees the day-page as a plain heading, steps THROUGH it, and mis-routes
-/// the child's write-back to the folder-companion (`block:journals`) — the
-/// child then inlines into `Journals.org` instead of materializing under its
-/// own day-page file (`inv-blocks-match-ref/org` divergence, ForkB §1.3). The
-/// authoritative point read carries the truthful `Page` tag the instant the
-/// block exists (the feed is strictly downstream of `block_raw`), so the SAME
-/// predicate — `is_page()` — decides the boundary, just read from the source
-/// that cannot lag. This is not a second predicate (OQ1): the tag stays the
-/// sole authority; only its read site moves to the write store.
-///
-/// Depth-bounded at 50. Returns `Ok(None)` when the chain ends without a
-/// `Page` — the block or an ancestor is absent from the authority (deleted /
-/// mid-bulk) — and the caller falls back to a full re-render (which re-reads
-/// via the authoritative `get_blocks` CTE). `Err` is a genuine store fault and
-/// is propagated, never swallowed.
-async fn resolve_doc_for_block(
-    reader: &dyn BlockReader,
-    block: &Block,
-) -> anyhow::Result<Option<EntityUri>> {
-    let mut id = block.id.clone();
-    for _ in 0..50 {
-        let Some(current) = reader.get_block_authoritative(&id).await? else {
-            return Ok(None);
-        };
-        if current.is_page() {
-            return Ok(Some(current.id));
-        }
-        id = current.parent_id;
+/// `home_by` carries ids as strings; the holder keys on [`EntityUri`]. An
+/// unparseable id is a genuine defect in whatever minted it, so it surfaces as
+/// an `Err` the caller escalates to a full re-render — never silently as
+/// "first in its sibling group", which would reorder the document.
+fn parse_prev(prev: Option<&str>) -> anyhow::Result<Option<EntityUri>> {
+    match prev {
+        None => Ok(None),
+        Some(p) => Ok(Some(EntityUri::parse(p)?)),
     }
-    Ok(None)
 }
 
 /// Inc 1 — loud disclosure of a shared-subtree write-back gap.
@@ -869,40 +844,10 @@ pub async fn run_file_sync_controller(
     ready_sender: std::sync::Arc<std::sync::Mutex<Option<FileWatcherReadySender>>>,
     fs: Arc<dyn holon_filesystem::FileSystem>,
     change_source: Arc<dyn holon_filesystem::FileChangeSource>,
-    shadow_inputs: Option<crate::writeback_shadow::ShadowInputs>,
 ) {
     use tracing::Instrument;
     use tracing::error;
     use tracing::info;
-
-    // Option C Inc 1: run the `home_by` combinator alongside the hand-
-    // maintained `doc_blocks` cache and compare them at quiescence.
-    //
-    // Release neutrality is by DEAD-CODE ELIMINATION, not `#[cfg]`: the guard
-    // is `cfg!(debug_assertions)`, a const-false branch in release, so the
-    // shadow costs zero runtime work and both `select!` arms await
-    // `pending()`. The module itself REMAINS compiled and public in release
-    // (as does `FileSyncController::cached_doc_orders`) — it is inert, not
-    // absent. Inc 2 deletes it outright.
-    let (mut shadow, mut shadow_rx) = match shadow_inputs {
-        Some(inputs) if cfg!(debug_assertions) => {
-            let rx = crate::writeback_shadow::WritebackShadow::spawn(inputs);
-            (
-                Some(crate::writeback_shadow::WritebackShadow::new()),
-                Some(rx),
-            )
-        }
-        _ => (None, None),
-    };
-    // Latched when the supervised stream ends, so the closed channel is never
-    // polled again — without the guard the arm would resolve with `None` on
-    // every loop iteration and spin.
-    let mut shadow_stream_ended = false;
-    let mut shadow_tick: Option<tokio::time::Interval> = if cfg!(debug_assertions) {
-        Some(tokio::time::interval(std::time::Duration::from_millis(250)))
-    } else {
-        None
-    };
 
     let init_result = async { controller.initialize().await }
         .instrument(tracing::info_span!("org.startup.controller_initialize"))
@@ -1228,10 +1173,46 @@ pub async fn run_file_sync_controller(
             Some(rerender) = rerender_rx.recv() => {
                 let span = tracing::info_span!("org.on_block_feed");
                 async {
-                    match rerender {
-                        OrgRerender::Block { doc, delta } => {
-                            match controller.on_block_changed(&doc, &delta).await {
-                                Ok(true) => {}
+                    // Drain everything the channel already holds before doing any
+                    // I/O. The feed fans one message per member, so a single page
+                    // toggle or re-home arrives as a burst that is fully queued by
+                    // the time the first message wakes this loop. Rendering per
+                    // message made that burst cost one render per member; draining
+                    // first lets `on_block_changed_coalesced` spend one render per
+                    // DOCUMENT. Pure latency win — nothing waits for a timer, and a
+                    // lone message drains to a batch of one.
+                    let mut drained = vec![rerender];
+                    while let Ok(next) = rerender_rx.try_recv() {
+                        drained.push(next);
+                    }
+
+                    // Order is preserved and `Reset` is a barrier: it means the
+                    // stream that produced everything before it is gone, so any
+                    // fold accumulated earlier in this batch must be discarded
+                    // with the holder rather than rendered after the reset.
+                    let mut pending_blocks: Vec<(EntityUri, BlockDelta)> = Vec::new();
+                    for msg in drained {
+                        match msg {
+                            OrgRerender::Block { doc, delta } => {
+                                pending_blocks.push((doc, *delta));
+                            }
+                            OrgRerender::Seed { doc, delta } => {
+                                controller.apply_block_delta(&doc, &delta);
+                            }
+                            OrgRerender::Reset => {
+                                pending_blocks.clear();
+                                controller.reset_holder();
+                            }
+                            OrgRerender::All => { pending_full_rerender = true; }
+                        }
+                    }
+
+                    if !pending_blocks.is_empty() {
+                        for (doc, verdict) in
+                            controller.on_block_changed_coalesced(&pending_blocks).await
+                        {
+                            match verdict {
+                                Ok(true) => { note_doc_written_from_holder(); }
                                 // ALLOW(fallback): doc resolved to no tracked file → full re-render
                                 Ok(false) => { pending_full_rerender = true; }
                                 Err(e) => {
@@ -1242,54 +1223,9 @@ pub async fn run_file_sync_controller(
                                 }
                             }
                         }
-                        OrgRerender::All => { pending_full_rerender = true; }
                     }
                 }.instrument(span).await;
-                // Feed activity on the resolver subscription: whatever the
-                // shadow saw before this is a different feed prefix.
-                if let Some(s) = shadow.as_mut() { s.note_activity(); }
                 idle_signal_for_task.mark_progress();
-            }
-            item = async {
-                match shadow_rx.as_mut() {
-                    Some(rx) => rx.recv().await,
-                    None => std::future::pending().await,
-                }
-            }, if !shadow_stream_ended => {
-                use holon_api::live_data::supervision::Supervised;
-                if let Some(s) = shadow.as_mut() {
-                    match item {
-                        Some(Supervised::Reset) => s.reset(),
-                        Some(Supervised::Diff(d)) => s.apply(d),
-                        // The supervisor is gone. Its last act was a `Reset`
-                        // that emptied the holder and no re-seed follows, so
-                        // every further comparison would report the supervision
-                        // failure as a `home_by` divergence.
-                        None => {
-                            shadow_stream_ended = true;
-                            s.disarm();
-                        }
-                    }
-                } else {
-                    shadow_stream_ended = true;
-                }
-            }
-            _ = async {
-                match shadow_tick.as_mut() {
-                    Some(t) => { t.tick().await; }
-                    None => std::future::pending().await,
-                }
-            } => {
-                if let Some(s) = shadow.as_mut() {
-                    let tracked = controller.cached_doc_orders();
-                    if s.check(&tracked) {
-                        let (checks, docs) = s.stats();
-                        tracing::info!(
-                            "[writeback-shadow] quiescent check #{checks} ran; {docs} cumulative \
-                             doc-comparisons"
-                        );
-                    }
-                }
             }
             _ = rerender_flush_tick.tick(), if pending_full_rerender => {
                 pending_full_rerender = false;

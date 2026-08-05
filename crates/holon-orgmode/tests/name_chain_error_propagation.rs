@@ -85,6 +85,21 @@ impl BlockReader for FixtureReader {
         Ok(self.children.get(doc_id).cloned().unwrap_or_default())
     }
 
+    /// Delegates to `get_blocks`: this double has no cheaper projection.
+    /// Never an empty stub — an empty shape would let the write-back
+    /// fold-completeness gate PASS on an incomplete document.
+    async fn doc_block_topology(
+        &self,
+        doc_id: &EntityUri,
+    ) -> anyhow::Result<Vec<(EntityUri, EntityUri)>> {
+        Ok(self
+            .get_blocks(doc_id)
+            .await?
+            .into_iter()
+            .map(|b| (b.id, b.parent_id))
+            .collect())
+    }
+
     async fn get_block_authoritative(&self, id: &EntityUri) -> anyhow::Result<Option<Block>> {
         Ok(self.by_id.get(id).cloned())
     }
@@ -320,6 +335,40 @@ fn build_controller(
     )
 }
 
+/// Previous sibling of `block` in the authoritative sequence: the last block
+/// before it that shares its parent, `None` if it is first in its group.
+fn prev_sibling(blocks: &[Block], block: &Block) -> Option<EntityUri> {
+    blocks
+        .iter()
+        .take_while(|b| b.id != block.id)
+        .filter(|b| b.parent_id == block.parent_id)
+        .last()
+        .map(|b| b.id.clone())
+}
+
+/// Drive one block edit the way production does: the holder is seeded from the
+/// authority (production seeds it from the block feed's initial snapshot), then
+/// the edit is applied at the position the authority already gives the block.
+async fn write_back(
+    controller: &mut holon_filesystem::FileSyncController,
+    f: &Fixtures,
+    doc: &EntityUri,
+    block: &Block,
+) -> anyhow::Result<bool> {
+    controller.seed_holder_from_authority(doc).await?;
+    let siblings = f.children.get(doc).cloned().unwrap_or_default();
+    let prev = prev_sibling(&siblings, block);
+    controller
+        .on_block_changed(
+            doc,
+            &BlockDelta::Upsert {
+                block: block.clone(),
+                prev,
+            },
+        )
+        .await
+}
+
 // ---------------------------------------------------------------------------
 // Tests.
 // ---------------------------------------------------------------------------
@@ -338,8 +387,7 @@ async fn on_block_changed_prohibited_topology_logs_error_and_skips_write() {
     let mut controller = build_controller(&f, vec![], root.clone());
 
     let prohibited_block = f.by_id[&f.prohibited_id].clone();
-    let result = controller
-        .on_block_changed(&f.prohibited_id, &BlockDelta::Upsert(prohibited_block))
+    let result = write_back(&mut controller, &f, &f.prohibited_id, &prohibited_block)
         .await
         .expect(
             "a prohibited topology must be a bounded skip, never propagate an Err that crashes \
@@ -442,8 +490,7 @@ async fn writeback_drop_of_prohibited_subtree_hard_vetoes_prod_name_chain() {
     let full = container_fixtures(false);
     let leaf1 = full.by_id[&EntityUri::block("leaf1")].clone();
     let mut seeder = build_controller(&full, vec![], root.clone());
-    seeder
-        .on_block_changed(&container, &BlockDelta::Upsert(leaf1.clone()))
+    write_back(&mut seeder, &full, &container, &leaf1)
         .await
         .expect("seeding the full Container.org must succeed (no drop)");
     let seeded = std::fs::read_to_string(&path).expect("Container.org must exist after seed");
@@ -458,9 +505,7 @@ async fn writeback_drop_of_prohibited_subtree_hard_vetoes_prod_name_chain() {
     //    (prohibited page under non-page `b1`) → UNRESOLVABLE → HARD VETO.
     let truncated = container_fixtures(true);
     let mut controller = build_controller(&truncated, vec![], root.clone());
-    let veto = controller
-        .on_block_changed(&container, &BlockDelta::Upsert(leaf1))
-        .await;
+    let veto = write_back(&mut controller, &truncated, &container, &leaf1).await;
     assert!(
         veto.is_err(),
         "a write-back dropping a prohibited-topology subtree (name_chain fails loud) must \
@@ -575,8 +620,20 @@ async fn companion_deinline_of_child_page_content_is_not_vetoed_prod_page_only_s
 
     // The de-inline is legitimate — the child subtree is preserved in the
     // sibling file — so the write must PROCEED, not hard-veto.
+    controller
+        .seed_holder_from_authority(&container)
+        .await
+        .expect("seeding the holder must not fail");
+    // `children[container]` is empty — the child subtree is de-inlined — so the
+    // container page has no preceding sibling inside its own document.
     let result = controller
-        .on_block_changed(&container, &BlockDelta::Upsert(container_page.clone()))
+        .on_block_changed(
+            &container,
+            &BlockDelta::Upsert {
+                block: container_page.clone(),
+                prev: None,
+            },
+        )
         .await;
     assert!(
         result.is_ok(),

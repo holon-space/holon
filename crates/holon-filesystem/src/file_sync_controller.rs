@@ -36,7 +36,6 @@ use holon_core::block_ordering::BlockOrdering;
 use holon_core::file_format::FileFormatAdapter;
 use holon_core::file_format::WritebackDropVerdict;
 use holon_core::fractional_index::default_sort_key;
-use indexmap::IndexMap;
 use tracing::debug;
 use tracing::info;
 use tracing::warn;
@@ -59,6 +58,7 @@ use crate::sync_ports::MatchSituation;
 use crate::sync_ports::MatchVerdict;
 use crate::sync_ports::MountRegistry;
 use crate::sync_ports::ThreeWayTextMerge;
+use crate::sync_ports::WritebackDisclosure;
 use crate::vault_path::VaultPath;
 
 /// Bump when the org renderer changes in a way that alters the canonical
@@ -67,14 +67,13 @@ use crate::vault_path::VaultPath;
 /// `file.content_hash` snaps to the new canonical form.
 pub const RENDERER_VERSION: &str = "1";
 
-/// A single block change carried from the CDC block feed to the org controller,
-/// so a per-edit re-render can update just the changed block instead of
-/// re-reading the whole document (the O(N) recursive-CTE `get_blocks`).
+/// One block's membership change in a document, as the `home_by` combinator
+/// derived it from the CDC block feed.
 ///
-/// `Upsert` carries the feed's (matview-derived) block only for classification
-/// — the controller refreshes the block's authoritative content via
-/// [`BlockReader::get_block_authoritative`] before writing, so seed and refresh
-/// share one authority (`block_raw`).
+/// This is the ONLY input that maintains the controller's per-document holder.
+/// The controller no longer decides when to re-read a document — the combinator
+/// owns that, and every change arrives here already attributed to a document
+/// and a position.
 // The size difference IS the payload: `Upsert` carries the block the re-render
 // needs and `Remove` only its id. The delta is built once per feed event and
 // then passed by reference, so boxing would buy an allocation per event
@@ -82,11 +81,155 @@ pub const RENDERER_VERSION: &str = "1";
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum BlockDelta {
-    /// A block was inserted or updated.
-    Upsert(Block),
-    /// A block was removed (id only — its document is no longer resolvable
-    /// from the feed, so the controller takes the full re-render path).
+    /// A block was inserted, updated, or repositioned within this document.
+    ///
+    /// `prev` is the **document-relative** previous sibling — the nearest
+    /// preceding sibling that belongs to the SAME document, skipping siblings
+    /// de-inlined into their own files. `None` means first in its sibling
+    /// group. It is the holder's only order carrier: `Block` has no `sort_key`
+    /// (ADR 0005), so position is what the authority homed it after, nothing
+    /// re-derived.
+    Upsert {
+        block: Block,
+        prev: Option<EntityUri>,
+    },
+    /// A block left this document — deleted outright, or re-homed to another
+    /// document (in which case a matching `Upsert` at the new document follows
+    /// immediately; the retraction always lands first).
     Remove(EntityUri),
+}
+
+/// One block as the holder knows it: the value, plus the document-relative
+/// previous sibling that fixes its position in its sibling group.
+#[derive(Debug, Clone)]
+struct HeldBlock {
+    block: Block,
+    prev: Option<EntityUri>,
+}
+
+/// One document's derived membership, folded from the `home_by` stream.
+///
+/// Children-only, matching `get_blocks`: the document root is NOT a member of
+/// its own document. The combinator DOES home a page to itself (that is what
+/// makes a page-ness toggle observable as a document change on the toggled
+/// block), so the root is filtered at the render seam, not on the way in.
+#[derive(Debug, Default)]
+struct DocOrder {
+    blocks: HashMap<EntityUri, HeldBlock>,
+}
+
+impl DocOrder {
+    /// The document's members in document order: depth-first from `root`, each
+    /// sibling group linearised by its `prev` chain.
+    ///
+    /// Order is reconstructed here, never stored — `prev` is the only order
+    /// the authority states, and a linked list has no meaningful storage order.
+    /// `root` is skipped: `home_by` homes a page to its own document (that is
+    /// what makes a page-ness toggle observable as a document change on the
+    /// toggled block), while a document's file renders only its children,
+    /// exactly as `get_blocks` returns them.
+    ///
+    /// Members unreachable from the root are EXCLUDED. An orphan — a block
+    /// whose parent has left this document but whose own retraction has not
+    /// landed yet — is not part of the document's tree, and the renderer
+    /// refuses a slice that is not one (its dangling-parent invariant). This
+    /// hides no loss: the removal guard compares the render against DISK, so an
+    /// excluded block still on disk reads as an ungrounded removal and vetoes
+    /// the write. A `prev` chain that forked or cycled is a different case —
+    /// those members ARE reachable, and `order_group` keeps every one.
+    fn document_order(&self, root: &EntityUri) -> Vec<Block> {
+        let mut by_parent: HashMap<&EntityUri, Vec<&EntityUri>> = HashMap::new();
+        for (id, held) in &self.blocks {
+            if id == root {
+                continue;
+            }
+            by_parent.entry(&held.block.parent_id).or_default().push(id);
+        }
+        for group in by_parent.values_mut() {
+            let ordered = self.order_group(group);
+            *group = ordered;
+        }
+
+        let mut out = Vec::with_capacity(self.blocks.len());
+        let mut emitted: HashSet<&EntityUri> = HashSet::new();
+        let mut stack: Vec<&EntityUri> = by_parent.get(root).cloned().unwrap_or_default();
+        stack.reverse();
+        while let Some(id) = stack.pop() {
+            if !emitted.insert(id) {
+                continue;
+            }
+            out.push(self.blocks[id].block.clone());
+            if let Some(children) = by_parent.get(id) {
+                for child in children.iter().rev() {
+                    stack.push(child);
+                }
+            }
+        }
+
+        // Derived from the orphan set itself, never from a count: the root is a
+        // holder member only once its own `Upsert` has landed, so any arithmetic
+        // that budgets for it goes silent on exactly the documents whose root is
+        // still in flight — a silent exclusion, which is the one outcome this
+        // WARN exists to prevent.
+        let mut orphans: Vec<&str> = self
+            .blocks
+            .keys()
+            .filter(|id| *id != root && !emitted.contains(id))
+            .map(|id| id.as_str())
+            .collect();
+        if !orphans.is_empty() {
+            orphans.sort_unstable();
+            tracing::warn!(
+                doc = %root,
+                ?orphans,
+                "[FileSyncController] holder members are unreachable from the document root — \
+                 their parent left this document but their own retraction has not arrived. They \
+                 are excluded from this render; if they are still on disk the removal guard \
+                 vetoes the write rather than deleting them."
+            );
+        }
+        out
+    }
+
+    /// Linearise one sibling group by following its previous-sibling chain from
+    /// the `None`-rooted head.
+    ///
+    /// A chain that forks or cycles stops there and the unreachable rest is
+    /// appended in id order: a defect must surface as a visible order change,
+    /// never as a hang or a vanished block.
+    fn order_group<'a>(&'a self, group: &[&'a EntityUri]) -> Vec<&'a EntityUri> {
+        let members: HashSet<&EntityUri> = group.iter().copied().collect();
+        let mut successors: HashMap<Option<&EntityUri>, Vec<&EntityUri>> = HashMap::new();
+        for id in group {
+            let prev = self.blocks[*id]
+                .prev
+                .as_ref()
+                .filter(|p| members.contains(p));
+            successors.entry(prev).or_default().push(id);
+        }
+        for successor in successors.values_mut() {
+            successor.sort();
+        }
+
+        let mut out = Vec::with_capacity(group.len());
+        let mut seen: HashSet<&EntityUri> = HashSet::new();
+        let mut cursor: Option<&EntityUri> = None;
+        while let Some(next) = successors.get(&cursor).and_then(|s| s.first()).copied() {
+            if !seen.insert(next) {
+                break;
+            }
+            out.push(next);
+            cursor = Some(next);
+        }
+        let mut leftovers: Vec<&EntityUri> = group
+            .iter()
+            .copied()
+            .filter(|id| !seen.contains(id))
+            .collect();
+        leftovers.sort();
+        out.extend(leftovers);
+        out
+    }
 }
 
 /// How many creates the ingest hands the authority per batch. Matches the
@@ -206,6 +349,98 @@ async fn flush_pending_creates(
     Ok(())
 }
 
+/// Where an absent (drop-candidate) block lives now, as far as the AUTHORITY
+/// can say.
+///
+/// The three answers were once one `Option<PathBuf>`, and collapsing them is
+/// what turned a benign condition into a data-loss veto: "the authority has no
+/// record of this block" and "the authority knows exactly where it is, but that
+/// owner names no file" are opposite findings that both used to read as `None`.
+enum AbsentOwner {
+    /// The authority holds the block and this file owns it now.
+    File(PathBuf),
+    /// The authority does not hold this block AT ALL. Nothing proves it
+    /// survived anywhere — the row-28 truncation shape, and the one case that
+    /// must veto.
+    AuthorityLost,
+    /// The authority holds the block, but the page owning it names no file — a
+    /// virtual seed/layout doc, or an ancestor chain containing no page. The
+    /// block is accounted for; there is simply no sibling file whose bytes
+    /// could ground it, so this is not evidence of loss.
+    OwnerHasNoFile,
+}
+
+/// Why a file is quarantined from write-back.
+///
+/// The two causes are disproven by different evidence, which is the whole
+/// reason the tag exists: an ingest failure is a claim about the DB holding a
+/// truncated PREFIX, and only a clean re-ingest can retire it. A write-back
+/// veto is a claim about ONE render being lossy, and the removal guard — the
+/// very check that raised it — retires it directly the next time it passes
+/// fully grounded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuarantineCause {
+    /// `ingest_file` returned `Err`. Clears only on a fully-successful ingest.
+    Ingest,
+    /// The ADR 0025 removal guard vetoed a render. Clears when a later render
+    /// of the same file passes the guard with every absence grounded.
+    WritebackVeto,
+}
+
+/// Consecutive gate skips showing the SAME holder-vs-authority difference
+/// before write-back for that document is disclosed as degraded.
+///
+/// Counted on an unchanged difference, never on skips alone: a legitimate fold
+/// moves one member per diff, so its difference shrinks on every skip and the
+/// run never reaches 1. A difference that repeats is a holder that has stopped
+/// converging — the dropped-CDC-row case — which no amount of waiting fixes.
+/// That makes the threshold independent of burst size and machine load, so it
+/// cannot become a load-dependent flake.
+const GATE_SKIPS_BEFORE_DEGRADED: u32 = 8;
+
+/// Consecutive gate skips showing the same difference before the document is
+/// re-synced from the AUTHORITY instead of waited on any longer.
+///
+/// Separate from [`GATE_SKIPS_BEFORE_DEGRADED`] and counted differently — this
+/// one does NOT require the trigger to carry new content, because the failure
+/// it exists for is precisely the one where no further content arrives: a
+/// dropped feed delta (a panicked fold worker) leaves the holder permanently
+/// short, and a gate that only ever waits then turns a transient upstream
+/// glitch into a file that is silently stale forever.
+const GATE_SKIPS_BEFORE_AUTHORITY_RESYNC: u32 = 8;
+
+/// What the fold-completeness gate decided about one render attempt.
+enum FoldVerdict {
+    /// Holder and authority agree; render.
+    Complete,
+    /// Mid-fold. Skip — the diff that resolves it is in flight.
+    Incomplete,
+    /// The SAME difference has survived long enough that nothing is in flight
+    /// any more. Waiting is no longer safe, so hand the document to the
+    /// authority-sourced recovery pass rather than leave disk stale.
+    Stalled,
+}
+
+/// One document's fold-completeness gate history.
+#[derive(Debug)]
+struct GateSkipState {
+    /// The symmetric difference between holder and authority, rendered as a
+    /// stable string so "the same difference again" is a cheap comparison.
+    difference: String,
+    consecutive: u32,
+    /// Same-difference skips counted UNCONDITIONALLY (see
+    /// [`GATE_SKIPS_BEFORE_AUTHORITY_RESYNC`]).
+    consecutive_any: u32,
+    /// The authority re-sync has already been asked for this episode; asking
+    /// again on every subsequent event would re-arm the debounced bulk pass
+    /// forever.
+    resync_requested: bool,
+    /// One WARN per skip EPISODE, not per skip: a 100-block homing burst
+    /// gate-skips ~99 times for one document and each skip is normal.
+    warned: bool,
+    escalated: bool,
+}
+
 /// Outcome of grounding a write-back's absent (drop-candidate) blocks against
 /// the sibling files they may have de-inlined into.
 ///
@@ -222,11 +457,18 @@ async fn flush_pending_creates(
 /// the VERDICT; it is kept separate because a grounding failure and a plain
 /// removal need different diagnoses — this one names a prohibited topology
 /// (the first-boot 6,245-line Projects.org destruction was a storm of them).
+/// `authority_lost` is the id of every absent block the authority no longer
+/// holds at all: nothing places it anywhere, so nothing can prove it survived.
+/// It is tracked rather than skipped because the `siblings` byte union would
+/// otherwise re-ground it from a stale destination file — grounding a block the
+/// authority has LOST against bytes written before it was lost is exactly the
+/// row-28 truncation shape the resolution check exists to refuse.
 #[derive(Debug, Default)]
 struct SiblingGrounding {
     siblings: Vec<(PathBuf, String)>,
     moved: HashSet<String>,
     unresolvable: Vec<String>,
+    authority_lost: Vec<String>,
 }
 
 pub struct FileSyncController {
@@ -311,14 +553,26 @@ pub struct FileSyncController {
     /// Disk access port (ADR 0011). Real fs in production; in-memory in tests.
     fs: Arc<dyn FileSystem>,
 
-    /// Per-doc incrementally-maintained block cache, seeded from `get_blocks`
-    /// (authoritative `block_raw`, ordered `sort_key, id`) and mutated in place
-    /// on content-only edits. `IndexMap` preserves the seed's insertion order —
-    /// the order the renderer relies on for sibling layout (`Block` carries no
-    /// `sort_key`, so order is trusted from the seed, never re-derived). Keyed
-    /// by doc id; evicted implicitly by never being seeded until first edited.
-    /// Structural changes (insert/remove/move/`tags`) reseed the whole doc.
-    doc_blocks: HashMap<EntityUri, IndexMap<EntityUri, Block>>,
+    /// Per-document membership, folded from the `home_by` combinator's
+    /// [`BlockDelta`] stream. Declared derived data: the controller applies the
+    /// diffs and reads the result, and maintains nothing itself.
+    ///
+    /// Seeded in production by a fresh combinator subscription (`MapDiff::
+    /// Replace` fans out one `Upsert` per block), at boot and at every
+    /// supervisor restart alike. Drivers with no block feed seed it through
+    /// [`seed_holder_from_authority`](Self::seed_holder_from_authority).
+    holder: HashMap<EntityUri, DocOrder>,
+
+    /// Per-document ids the holder has retracted since that document's last
+    /// successful write-back — the grounding
+    /// [`veto_ungrounded_removals`](Self::veto_ungrounded_removals) needs to
+    /// tell a sanctioned departure from data loss. Drained when the write
+    /// lands.
+    ///
+    /// Accumulated rather than read from the triggering delta because one
+    /// write-back can follow several retractions (a subtree re-home emits one
+    /// `Remove` per descendant, and only the last of them renders).
+    pending_removals: HashMap<EntityUri, HashSet<String>>,
 
     /// 3-way text-content merger for the no-store conflict path. Present only
     /// when wired (production, via a transient LoroText impl). Consulted only
@@ -379,10 +633,21 @@ pub struct FileSyncController {
     /// DB. The DB holds only a PREFIX of the file's blocks after a partial
     /// ingest, so rendering it would overwrite the on-disk file with a
     /// truncated view — silent data loss. A quarantined file is skipped by
-    /// every write-back until a later ingest of it SUCCEEDS (`ingest_file`
-    /// returns `Ok`), which clears the entry. Keyed by
-    /// the same `CanonicalPath` as `last_projection`.
-    quarantined: HashSet<CanonicalPath>,
+    /// every write-back until its cause is disproven (see [`QuarantineCause`]).
+    /// Keyed by the same `CanonicalPath` as `last_projection`.
+    quarantined: HashMap<CanonicalPath, QuarantineCause>,
+
+    /// Per-document fold-completeness gate history. Present only while a
+    /// document is mid-skip; the entry is dropped the moment its holder matches
+    /// the authority, and the whole map is dropped on a supervisor `Reset`
+    /// (the holder it describes is gone, so its skip run means nothing).
+    gate_skips: HashMap<EntityUri, GateSkipState>,
+
+    /// Disclosure seam for write-back being degraded. The gate uses it to
+    /// escalate a document whose holder has permanently stopped converging;
+    /// absent in test/no-Turso containers, where the escalation is audible in
+    /// the log only.
+    writeback_disclosure: Option<Arc<dyn WritebackDisclosure>>,
     /// Quarantined files whose write-back skip has already been logged at
     /// ERROR once. Repeat skips log at `debug` — one loud disclosure per
     /// quarantine episode, not an ERROR flood on every subsequent write-back
@@ -490,14 +755,17 @@ impl FileSyncController {
             ordering,
             downstream: None,
             fs,
-            doc_blocks: HashMap::new(),
+            holder: HashMap::new(),
+            pending_removals: HashMap::new(),
             text_merge: None,
             block_matcher: Arc::new(TieredMatcher),
             mount_registry: None,
             history: None,
             clock: Arc::new(holon_api::SystemClock),
             scan_feed_ids: None,
-            quarantined: HashSet::new(),
+            quarantined: HashMap::new(),
+            gate_skips: HashMap::new(),
+            writeback_disclosure: None,
             quarantine_skip_logged: std::sync::Mutex::new(HashSet::new()),
             failure_disclosed: std::sync::Mutex::new(HashSet::new()),
             boot_seeding: true,
@@ -751,6 +1019,14 @@ impl FileSyncController {
     /// determinism).
     pub fn with_clock(mut self, clock: Arc<dyn holon_api::Clock>) -> Self {
         self.clock = clock;
+        self
+    }
+
+    /// Wire the write-back degraded-disclosure seam. Without it, a document
+    /// whose holder permanently stops converging escalates to ERROR in the log
+    /// but raises no user-visible banner.
+    pub fn with_writeback_disclosure(mut self, disclosure: Arc<dyn WritebackDisclosure>) -> Self {
+        self.writeback_disclosure = Some(disclosure);
         self
     }
 
@@ -1344,8 +1620,8 @@ impl FileSyncController {
         if let Some(v) = self.seed_pristine.remove(from) {
             self.seed_pristine.insert(to.clone(), v);
         }
-        if self.quarantined.remove(from) {
-            self.quarantined.insert(to.clone());
+        if let Some(cause) = self.quarantined.remove(from) {
+            self.quarantined.insert(to.clone(), cause);
         }
         if self.writeback_readonly.remove(from) {
             self.writeback_readonly.insert(to.clone());
@@ -1532,7 +1808,10 @@ impl FileSyncController {
         }
         match self.ingest_file(path).await {
             Ok(()) => {
-                if self.quarantined.remove(&canonical) {
+                // Clears EITHER cause: an ingest that fully succeeded proves
+                // the DB matches the file, which is strictly stronger evidence
+                // than the grounded render that retires a veto entry.
+                if self.quarantined.remove(&canonical).is_some() {
                     self.quarantine_skip_logged
                         .lock()
                         .expect("quarantine_skip_logged poisoned")
@@ -1549,7 +1828,11 @@ impl FileSyncController {
                 // Partial ingest: the DB now holds only a PREFIX of this file's
                 // blocks. Quarantine it so write-back never renders that prefix
                 // over the intact on-disk file. Loud + disclosed.
-                if self.quarantined.insert(canonical.clone()) {
+                let already_ingest_caused = self
+                    .quarantined
+                    .insert(canonical.clone(), QuarantineCause::Ingest)
+                    == Some(QuarantineCause::Ingest);
+                if !already_ingest_caused {
                     // New quarantine episode: re-arm the once-per-episode
                     // skip-log so the first write-back skip is loud again.
                     self.quarantine_skip_logged
@@ -1576,31 +1859,56 @@ impl FileSyncController {
     /// [`quarantined`](Self::quarantined).
     fn is_quarantined(&self, path: &Path) -> bool {
         let canonical = CanonicalPath::new(path);
-        if self.quarantined.contains(&canonical) {
-            let first_skip = self
-                .quarantine_skip_logged
-                .lock()
-                .expect("quarantine_skip_logged poisoned")
-                .insert(canonical);
-            if first_skip {
-                tracing::error!(
-                    path = %path.display(),
-                    "[FileSyncController] SKIPPING write-back for quarantined file — its last \
-                     ingest failed partway, so the DB holds only a truncated prefix of its \
-                     blocks; rendering it over disk would DESTROY the un-ingested lines. \
-                     The on-disk file is left intact until a clean re-ingest clears the \
-                     quarantine. (Further skips of this file log at debug.)",
-                );
-            } else {
-                tracing::debug!(
-                    path = %path.display(),
-                    "[FileSyncController] write-back skipped again for quarantined file",
-                );
-            }
+        if self.quarantined.contains_key(&canonical) {
+            self.note_quarantine_skip(path);
             true
         } else {
             false
         }
+    }
+
+    /// Disclose one write-back skip of an already-quarantined file: ERROR the
+    /// first time per episode, `debug` afterwards. Separate from
+    /// [`is_quarantined`](Self::is_quarantined) because the cause-aware trigger
+    /// path decides whether to skip by probing the guard, and still owes the
+    /// reader the same one-loud-line-per-episode disclosure when it does.
+    fn note_quarantine_skip(&self, path: &Path) {
+        let first_skip = self
+            .quarantine_skip_logged
+            .lock()
+            .expect("quarantine_skip_logged poisoned")
+            .insert(CanonicalPath::new(path));
+        if first_skip {
+            tracing::error!(
+                path = %path.display(),
+                "[FileSyncController] SKIPPING write-back for quarantined file — rendering the \
+                 DB's view over disk would DESTROY on-disk lines it cannot account for. The \
+                 on-disk file is left intact until the quarantine's cause is disproven (a clean \
+                 re-ingest, or a fully-grounded render for a veto-caused entry). (Further skips \
+                 of this file log at debug.)",
+            );
+        } else {
+            tracing::debug!(
+                path = %path.display(),
+                "[FileSyncController] write-back skipped again for quarantined file",
+            );
+        }
+    }
+
+    /// Lift a veto-caused quarantine after a render passed the removal guard
+    /// fully grounded.
+    fn clear_writeback_quarantine(&mut self, canonical: &CanonicalPath, path: &Path) {
+        self.quarantined.remove(canonical);
+        self.quarantine_skip_logged
+            .lock()
+            .expect("quarantine_skip_logged poisoned")
+            .remove(canonical);
+        info!(
+            "[FileSyncController] write-back quarantine CLEARED for {} (a later render passed the \
+             removal guard with every absence grounded, so the veto that raised it no longer \
+             holds)",
+            path.display()
+        );
     }
 
     /// Split-doc-root guard. A mint is only sound when the anchor the ID-less
@@ -2025,16 +2333,6 @@ impl FileSyncController {
         // `boot_feed_wait` split this file's cost; `boot_file` (per-file total) is
         // emitted by the scan driver in `run_file_sync_controller`.
         let t_ingest = std::time::Instant::now();
-
-        // An external ingest mutates `block_raw` for arbitrary blocks of this
-        // file's document — invalidate the incremental block cache so the next
-        // `on_block_changed` reseeds from authority rather than rendering stale
-        // cached content. Reached only past echo-suppression and the cold-boot
-        // fast path, so our own write-back echo never clears it. Coarse (whole
-        // map) because external ingests are rare relative to block edits and
-        // resolving this path's doc id here would cost an extra lookup; the only
-        // effect is a one-time reseed on each doc's next edit.
-        self.doc_blocks.clear();
 
         let rel_path = path.strip_prefix(&self.root_dir).map_err(|e| {
             anyhow::anyhow!(
@@ -3607,31 +3905,24 @@ impl FileSyncController {
         }
     }
 
-    /// Handle a block change notification (from EventBus or Loro).
+    /// A page starts its OWN document. When THIS delta upserts a block
+    /// that is authoritatively a `Page`, ensure its identity file exists even
+    /// if childless — INDEPENDENT of which document `resolve_doc_for_block`
+    /// routed this delta to. That router reads the block-feed, whose
+    /// `is_page` can lag the authoritative store (matview enrich), so a
+    /// just-minted page can be routed to its PARENT document (de-inlined
+    /// there) and its own file never written. The authoritative re-check +
+    /// registry-free materialization below closes that gap generally
+    /// (rule-minted journal dates, `convert_block_to_page` on a childless
+    /// block). Idempotent (see the method). Failures here are the SAME R11
+    /// class the doc-resolution guard below absorbs (a prohibited topology
+    /// fails loud inside the name chain): log and fall through so this
+    /// pre-flight cannot re-propagate what the guard exists to bound.
     ///
-    /// Re-renders the affected file and writes if content changed.
-    /// Returns `true` if a matching document file was found and re-rendered,
-    /// `false` if the doc_id didn't map to any known file.
-    #[tracing::instrument(skip(self, delta), name = "org.on_block_changed", fields(doc_id = %doc_id))]
-    pub async fn on_block_changed(
-        &mut self,
-        doc_id: &EntityUri,
-        delta: &BlockDelta,
-    ) -> Result<bool> {
-        // Fork B: a page starts its OWN document. When THIS delta upserts a block
-        // that is authoritatively a `Page`, ensure its identity file exists even if
-        // childless — INDEPENDENT of which document `resolve_doc_for_block` routed
-        // this delta to. That router reads the block-feed, whose `is_page` can lag
-        // the authoritative store (matview enrich), so a just-minted page can be
-        // routed to its PARENT document (de-inlined there) and its own file never
-        // written. The authoritative re-check + registry-free materialization below
-        // closes that gap generally (rule-minted journal dates,
-        // `convert_block_to_page` on a childless block). Idempotent (see the method).
-        // Failures here are the SAME R11 class the doc-resolution guard below
-        // absorbs (a prohibited topology fails loud inside the name chain): log
-        // and fall through so this pre-flight cannot re-propagate what the guard
-        // exists to bound.
-        if let BlockDelta::Upsert(b) = delta {
+    /// Runs for EVERY delta, including the ones a coalesced batch folds without
+    /// rendering: any of them can be the upsert that mints the page.
+    async fn page_identity_preflight(&mut self, doc_id: &EntityUri, delta: &BlockDelta) {
+        if let BlockDelta::Upsert { block: b, .. } = delta {
             match self.block_reader.get_block_authoritative(&b.id).await {
                 Ok(Some(auth)) if auth.is_page() => {
                     // The mark is keyed on `auth.id` — the page whose identity
@@ -3677,6 +3968,111 @@ impl FileSyncController {
                 }
             }
         }
+    }
+
+    /// Fold a whole burst of block deltas and render each affected document
+    /// EXACTLY ONCE, in first-seen document order.
+    ///
+    /// The feed fans one diff per member: a page toggle re-homes a subtree and
+    /// emits a `Remove`@old + `Upsert`@new per descendant, so processing one
+    /// message per render made a single interaction cost N renders — and, with
+    /// the fold-completeness gate in front, N-1 of those renders were skips
+    /// that still paid a topology read each. Coalescing collapses the burst to
+    /// one read and one render per document.
+    ///
+    /// Every delta still gets its per-delta side effects (the holder fold and
+    /// the page identity pre-flight); only the RENDER is coalesced, because
+    /// only the render is idempotent over a fold.
+    ///
+    /// Returns one verdict per document, in the order the documents were first
+    /// seen, so the caller's bookkeeping is unchanged from the per-message
+    /// loop.
+    pub async fn on_block_changed_coalesced(
+        &mut self,
+        batch: &[(EntityUri, BlockDelta)],
+    ) -> Vec<(EntityUri, Result<bool>)> {
+        let mut order: Vec<EntityUri> = Vec::new();
+        let mut by_doc: HashMap<EntityUri, Vec<&BlockDelta>> = HashMap::new();
+        for (doc, delta) in batch {
+            if !by_doc.contains_key(doc) {
+                order.push(doc.clone());
+            }
+            by_doc.entry(doc.clone()).or_default().push(delta);
+        }
+
+        let mut out = Vec::with_capacity(order.len());
+        for doc in order {
+            let deltas = by_doc.remove(&doc).expect("doc came from this map");
+            let (last, earlier) = deltas.split_last().expect("no doc is queued empty");
+
+            // Fold the earlier deltas without rendering. `on_block_changed`
+            // folds `last` itself, so it is deliberately not folded here.
+            let mut earlier_image = false;
+            for delta in earlier {
+                self.page_identity_preflight(&doc, delta).await;
+                self.apply_block_delta(&doc, delta);
+                if let BlockDelta::Upsert { block, .. } = delta {
+                    earlier_image |= block.is_image_block();
+                }
+            }
+
+            let verdict = self.on_block_changed(&doc, last).await;
+            // `on_block_changed` only re-materializes images for the delta it
+            // was handed; an image folded earlier in this burst would otherwise
+            // never reach disk.
+            if earlier_image && matches!(verdict, Ok(true)) {
+                if let Err(e) = self.materialize_images(&doc).await {
+                    tracing::error!(
+                        doc = %doc,
+                        error = %format!("{e:#}"),
+                        "[FileSyncController] materialize_images failed for an image folded \
+                         earlier in a coalesced burst",
+                    );
+                }
+            }
+            out.push((doc, verdict));
+        }
+        out
+    }
+
+    /// Handle a block change notification (from EventBus or Loro).
+    ///
+    /// Re-renders the affected file and writes if content changed.
+    /// Returns `true` if a matching document file was found and re-rendered,
+    /// `false` if the doc_id didn't map to any known file.
+    #[tracing::instrument(skip(self, delta), name = "org.on_block_changed", fields(doc_id = %doc_id))]
+    pub async fn on_block_changed(
+        &mut self,
+        doc_id: &EntityUri,
+        delta: &BlockDelta,
+    ) -> Result<bool> {
+        // Did this delta actually bring something new? Computed BEFORE the fold,
+        // because afterwards the holder already agrees with it.
+        //
+        // Only the fold-completeness gate's escalation reads this, and only to
+        // answer "is a write being BLOCKED, or is this a retry with nothing to
+        // write?". A periodic tick that re-delivers a block the holder already
+        // holds verbatim is the latter: whatever the gate then refuses to
+        // render, no edit is failing to reach disk, so it must not count toward
+        // a `WritebackDegraded` banner that says one is.
+        let delta_brings_new_content = match delta {
+            BlockDelta::Upsert { block, prev } => self
+                .holder
+                .get(doc_id)
+                .and_then(|entry| entry.blocks.get(&block.id))
+                .map(|held| held.block != *block || held.prev != *prev)
+                .unwrap_or(true),
+            BlockDelta::Remove(id) => self
+                .holder
+                .get(doc_id)
+                .is_some_and(|entry| entry.blocks.contains_key(id)),
+        };
+
+        // Derived state first: the holder is what everything below renders from,
+        // so it must reflect this delta before any path can read it.
+        self.apply_block_delta(doc_id, delta);
+
+        self.page_identity_preflight(doc_id, delta).await;
 
         let vault_path = match self.doc_id_to_path(doc_id).await {
             Ok(Some(p)) => p,
@@ -3722,7 +4118,24 @@ impl FileSyncController {
             self.on_file_changed(&path).await?;
         }
 
-        let (rendered, reseeded) = self.render_with_cache(doc_id, &path, delta).await?;
+        // Fold-completeness gate. Deliberately AFTER the pending-external-change
+        // ingest above: that ingest writes blocks into the authority which the
+        // CDC-fed holder cannot know yet, so a gate reading the authority before
+        // it would compare the holder against a pre-ingest snapshot and wave
+        // through exactly the render that drops the just-ingested blocks.
+        match self
+            .holder_fold_is_complete(doc_id, delta_brings_new_content)
+            .await?
+        {
+            FoldVerdict::Complete => {}
+            FoldVerdict::Incomplete => return Ok(true),
+            // `Ok(false)` is the established "this document needs the bulk
+            // pass" signal (di.rs sets `pending_full_rerender`), so a stalled
+            // fold reuses it rather than inventing a second recovery route.
+            FoldVerdict::Stalled => return Ok(false),
+        }
+
+        let rendered = self.render_doc_from_holder(doc_id, &path).await?;
 
         let current_last = self
             .last_projection
@@ -3760,24 +4173,62 @@ impl FileSyncController {
             return Ok(true);
         }
 
-        if self.is_quarantined(&path) {
-            return Ok(true);
-        }
+        // ADR 0025 removal guard on the block-driven path — UNCONDITIONAL.
+        //
+        // The holder is a fold of a feed that lags its authority, so ANY render
+        // can under-report a document, not only a structural one: there is no
+        // longer a class of write whose id set is provably preserved. That proof
+        // belonged to the deleted content-only cache path, which re-read the one
+        // block it was about to write and left the rest of the set untouched by
+        // construction. Grounding = the ids the holder RETRACTED for this
+        // document since its last successful write, UNION the sibling files a
+        // de-inlined child page moved into; anything else the render drops is
+        // loss and vetoes. On veto the file is quarantined and the Err
+        // propagates to `on_block_feed` (di.rs), which logs it.
+        let sanctioned_removals = self
+            .pending_removals
+            .get(doc_id)
+            .cloned()
+            .unwrap_or_default();
 
-        // ADR 0025 removal guard on the block-driven path. Only a reseed can
-        // shrink the block set, so the cheap content-only path skips the check
-        // (no per-keystroke re-parse). Grounding = the delta's `Remove` id (a
-        // sanctioned deletion) UNION the sibling files a de-inlined child page
-        // moved into; anything else the render drops is loss and vetoes. On veto
-        // the file is quarantined and the Err propagates to `on_block_feed`
-        // (di.rs), which logs it.
-        if reseeded {
-            let sanctioned_removals = match delta {
-                BlockDelta::Remove(id) => HashSet::from([id.as_str().to_string()]),
-                BlockDelta::Upsert(_) => HashSet::new(),
-            };
-            self.veto_ungrounded_removals(&path, &disk_at_write, &rendered, &sanctioned_removals)
+        // Quarantine, cause-aware — and deliberately AFTER the guard is
+        // reachable rather than before it. An ingest-caused entry is opaque to
+        // write-back: nothing a render can show disproves "the DB holds a
+        // truncated prefix", so it still short-circuits. A veto-caused entry is
+        // a claim the guard itself made about one render, so probe the guard
+        // and let a fully-grounded render retire it. The old unconditional
+        // early-return here is what made auto-clear unreachable: a file
+        // quarantined by a transient partial fold never got to prove itself
+        // again, so one bad render killed its write-back for the session.
+        match self.quarantined.get(&canonical).copied() {
+            Some(QuarantineCause::Ingest) => {
+                self.note_quarantine_skip(&path);
+                return Ok(true);
+            }
+            Some(QuarantineCause::WritebackVeto) => {
+                if !self
+                    .writeback_render_is_grounded(
+                        &path,
+                        &disk_at_write,
+                        &rendered,
+                        &sanctioned_removals,
+                    )
+                    .await?
+                {
+                    self.note_quarantine_skip(&path);
+                    return Ok(true);
+                }
+                self.clear_writeback_quarantine(&canonical, &path);
+            }
+            None => {
+                self.veto_ungrounded_removals(
+                    &path,
+                    &disk_at_write,
+                    &rendered,
+                    &sanctioned_removals,
+                )
                 .await?;
+            }
         }
 
         // EROFS row 346: skip-with-one-loud-error for a doc whose path has no
@@ -3796,12 +4247,15 @@ impl FileSyncController {
         // recursive-CTE `get_blocks`). Content-only keystrokes never add images,
         // so only pay it when THIS delta upserts an image block. Image edits are
         // rare and can afford the full read.
-        if let BlockDelta::Upsert(b) = delta {
+        if let BlockDelta::Upsert { block: b, .. } = delta {
             if b.is_image_block() {
                 self.materialize_images(doc_id).await?;
             }
         }
         self.last_projection.insert(canonical, rendered);
+        // The retractions this write accounted for are spent. Anything the
+        // holder drops from here on must ground itself again.
+        self.pending_removals.remove(doc_id);
 
         info!(
             "[FileSyncController] Wrote block changes to {}",
@@ -3811,145 +4265,270 @@ impl FileSyncController {
         Ok(true)
     }
 
-    /// Render `doc_id`'s file, serving the block list from the per-doc
-    /// incremental cache (`doc_blocks`) and updating that cache from `delta`.
+    /// Fold one homed diff into `doc`'s holder entry.
     ///
-    /// Hot path (content-only upsert of a block already cached with unchanged
-    /// structure AND unchanged sibling position): refresh just that block via
-    /// an authoritative `block_raw` point read (`get_block_authoritative`,
-    /// O(1), no recursive CTE) and replace it in place, preserving sibling
-    /// order. Everything else — cold doc, `Remove`, an id not yet cached
-    /// (structural insert), a `parent_id` move, a `tags` change (H4: a `Page`
-    /// toggle re-partitions the doc's subtree), or a same-parent REORDER
-    /// (sort_key moved among unchanged siblings) — reseeds the whole doc via
-    /// `get_blocks` (authoritative, `sort_key, id`-ordered). Structural intent
-    /// is decided from the AUTHORITATIVE row, not the (matview-lagged) feed
-    /// delta, so a structural change the delta didn't yet reflect still
-    /// reseeds.
-    ///
-    /// The domain `Block` doesn't carry `sort_key` (ADR 0005), so a
-    /// same-parent reorder is invisible to a `parent_id`/`tags` comparison
-    /// alone — a block can change sibling position without either changing.
-    /// Left unguarded, `IndexMap::insert` on an existing key keeps its OLD
-    /// position, so the file would keep rendering the pre-reorder sibling
-    /// order forever even though SQL/live reads already show the new one
-    /// (bug: disk sibling order stale after a same-parent move). The live
-    /// `ordering.children(parent)` read (O(siblings), not O(doc)) is compared
-    /// against the cached sibling order to detect this before trusting the
-    /// cheap path.
-    /// Returns `(rendered, reseeded)`. `reseeded` is `true` when this render
-    /// took the authoritative full-doc reseed (`get_blocks`) — the only
-    /// path whose block set can SHRINK relative to disk (a de-inline, a
-    /// delete, a `Page` re-partition). The cheap content-only path
-    /// (`false`) refreshes one block in place and provably preserves the id
-    /// set, so the write-back guard can skip it (Fork B B1' latency gate:
-    /// no per-keystroke re-parse of disk).
-    async fn render_with_cache(
-        &mut self,
-        doc_id: &EntityUri,
-        path: &Path,
-        delta: &BlockDelta,
-    ) -> Result<(String, bool)> {
-        let cheap_incremental_candidate = match delta {
-            BlockDelta::Upsert(b) => self
-                .doc_blocks
-                .get(doc_id)
-                .and_then(|c| c.get(&b.id))
-                .is_some_and(|cached| cached.parent_id == b.parent_id && cached.tags == b.tags),
-            BlockDelta::Remove(_) => false,
-        };
-
-        if cheap_incremental_candidate {
-            let BlockDelta::Upsert(b) = delta else {
-                unreachable!("cheap_incremental_candidate implies Upsert")
-            };
-            if let Some(auth) = self.block_reader.get_block_authoritative(&b.id).await? {
-                let cached = self
-                    .doc_blocks
-                    .get(doc_id)
-                    .and_then(|c| c.get(&b.id))
-                    .expect("warm + present by cheap_incremental_candidate");
-                if auth.parent_id == cached.parent_id && auth.tags == cached.tags {
-                    let cached_siblings: Vec<EntityUri> = self
-                        .doc_blocks
-                        .get(doc_id)
-                        .expect("warm by cheap_incremental_candidate")
-                        .values()
-                        .filter(|blk| blk.parent_id == auth.parent_id)
-                        .map(|blk| blk.id.clone())
-                        .collect();
-                    let live_siblings = self
-                        .ordering
-                        .children(&auth.parent_id)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("ordering.children failed: {e}"))?;
-                    if live_siblings == cached_siblings {
-                        // Content-only, position-unchanged: `IndexMap::insert`
-                        // on an existing key keeps its position, so sibling
-                        // order is unchanged.
-                        self.doc_blocks
-                            .get_mut(doc_id)
-                            .expect("warm by cheap_incremental_candidate")
-                            .insert(auth.id.clone(), auth);
-                        return Ok((self.render_cached_doc(doc_id, path).await?, false));
-                    }
-                    // Sibling order moved (a same-parent reorder) — fall
-                    // through to the full reseed below.
+    /// Pure derived-state maintenance — no I/O, and no decision about WHEN to
+    /// re-read a document: the combinator already made that one. A `Remove` is
+    /// remembered until this document's next successful write-back, which is
+    /// what grounds it for the removal guard.
+    pub fn apply_block_delta(&mut self, doc: &EntityUri, delta: &BlockDelta) {
+        let entry = self.holder.entry(doc.clone()).or_default();
+        match delta {
+            BlockDelta::Upsert { block, prev } => {
+                entry.blocks.insert(
+                    block.id.clone(),
+                    HeldBlock {
+                        block: block.clone(),
+                        prev: prev.clone(),
+                    },
+                );
+                // A block landing back in the document it was retracted from
+                // was never lost, so it needs no sanction. Keeping the tightest
+                // possible sanctioned set is what makes the guard strict.
+                if let Some(pending) = self.pending_removals.get_mut(doc) {
+                    pending.remove(block.id.as_str());
                 }
             }
+            BlockDelta::Remove(id) => {
+                entry.blocks.remove(id);
+                self.pending_removals
+                    .entry(doc.clone())
+                    .or_default()
+                    .insert(id.as_str().to_string());
+            }
         }
-
-        self.reseed_doc_blocks(doc_id).await?;
-        Ok((self.render_cached_doc(doc_id, path).await?, true))
     }
 
-    /// Every document this cache currently holds, as `(block id, parent id)`
-    /// in cache order — the comparison target for the Option C differential
-    /// shadow.
+    /// Drop every document's derived membership.
     ///
-    /// The parent is returned because the cache's sequence is NOT a document
-    /// order: it comes from `get_blocks`' `ORDER BY sort_key, id`, a GLOBAL
-    /// sort over fractional indices minted PER SIBLING GROUP, so rows from
-    /// different parents interleave. Only the relative order WITHIN a parent
-    /// is meaningful, so a consumer must group by parent before comparing.
-    ///
-    /// Members are children of the document; the document root is not one of
-    /// them (`get_blocks` starts below it).
-    pub fn cached_doc_orders(&self) -> Vec<(EntityUri, Vec<(EntityUri, EntityUri)>)> {
-        self.doc_blocks
-            .iter()
-            .map(|(doc, blocks)| {
-                (
-                    doc.clone(),
-                    blocks
-                        .values()
-                        .map(|b| (b.id.clone(), b.parent_id.clone()))
-                        .collect(),
-                )
-            })
-            .collect()
+    /// The supervisor's `Reset`: the stream that produced this state is gone
+    /// and a complete re-seed follows on the next incarnation. Boot and restart
+    /// take the same path — there is no recovery-only branch. Un-written
+    /// retractions are dropped with it: a sanction the new incarnation cannot
+    /// re-derive must not survive to authorise a deletion it never saw.
+    pub fn reset_holder(&mut self) {
+        self.holder.clear();
+        self.pending_removals.clear();
+        // A skip run describes a holder that no longer exists. Carrying it
+        // across the re-seed would escalate documents whose only crime is
+        // being folded again from scratch.
+        self.gate_skips.clear();
     }
 
-    /// Reseed the per-doc block cache from the authoritative doc-scoped read
-    /// (`get_blocks` over `block_raw`, ordered `sort_key, id`). The resulting
-    /// `IndexMap` preserves that order for the renderer.
-    async fn reseed_doc_blocks(&mut self, doc_id: &EntityUri) -> Result<()> {
-        let blocks = self.block_reader.get_blocks(doc_id).await?;
-        let map: IndexMap<EntityUri, Block> =
-            blocks.into_iter().map(|b| (b.id.clone(), b)).collect();
-        self.doc_blocks.insert(doc_id.clone(), map);
+    /// Seed `doc`'s holder entry from the authoritative doc-scoped read.
+    ///
+    /// The feed-less cold start. **Production never calls this**: a fresh
+    /// `home_by` subscription opens with `MapDiff::Replace` and fans out one
+    /// `Upsert` per block, so the holder seeds itself at boot and at every
+    /// supervisor restart. Drivers that own no block feed — the controller's
+    /// own tests — need the same starting point, and `get_blocks` already
+    /// supplies it: its `ORDER BY sort_key, id` is a global sort over
+    /// per-sibling-group fractional indices, so the sequence WITHIN one parent
+    /// is the authoritative sibling order and `prev` is simply each block's
+    /// predecessor in its own parent group. One read, no extra round-trips.
+    pub async fn seed_holder_from_authority(&mut self, doc: &EntityUri) -> Result<()> {
+        let blocks = self.block_reader.get_blocks(doc).await?;
+        let mut last_in_parent: HashMap<EntityUri, EntityUri> = HashMap::new();
+        let mut entry = DocOrder::default();
+        for block in blocks {
+            let prev = last_in_parent.insert(block.parent_id.clone(), block.id.clone());
+            entry
+                .blocks
+                .insert(block.id.clone(), HeldBlock { block, prev });
+        }
+        self.holder.insert(doc.clone(), entry);
+        self.pending_removals.remove(doc);
         Ok(())
     }
 
-    /// Render `doc_id` from its (already-seeded) cache values, in cache order.
-    async fn render_cached_doc(&self, doc_id: &EntityUri, path: &Path) -> Result<String> {
-        let blocks: Vec<Block> = self
-            .doc_blocks
-            .get(doc_id)
-            .expect("render_cached_doc requires a seeded doc cache")
-            .values()
-            .cloned()
+    /// Fold-completeness gate: does `doc`'s holder have the same SHAPE — the
+    /// same `(id, parent)` pairs — as the authority? Renders are allowed only
+    /// when it does.
+    ///
+    /// The holder folds a feed that lags its authority one member at a time, so
+    /// the render triggered by the first diff of a burst sees a partial
+    /// document — in the measured case a root-only holder, which projects an
+    /// EMPTY file over a populated one. Equality (not merely "nothing
+    /// missing") is the condition because the other direction matters too: a
+    /// holder still holding a block the authority has dropped would re-write
+    /// that block to disk after the user deleted it.
+    ///
+    /// PAIRS, not ids: membership equality is not completeness. A holder can
+    /// hold exactly the right ids while one member still carries its PRE-MOVE
+    /// parent — that member is then unreachable from the document root,
+    /// `document_order` excludes it, and the removal guard vetoes a block that
+    /// genuinely belongs to the file. That was 55% of runs on one keystone
+    /// case; the parent is what makes "the fold finished" checkable.
+    ///
+    /// Skipping cannot cost liveness. Whichever event resolves the difference —
+    /// the missing member's `Upsert`, the extra member's `Remove` — is already
+    /// in flight and is itself a render trigger, so the document renders once
+    /// its fold settles instead of once per intermediate state.
+    ///
+    /// Children-only on both sides: `get_blocks` never returns the document
+    /// root, while `home_by` homes a page to its own document, so the root is
+    /// excluded from the holder side to compare like with like.
+    ///
+    /// `delta_brings_new_content` says whether the trigger carried something
+    /// the holder did not already have. It gates ESCALATION only, never the
+    /// skip: the banner this can raise says "edits are not reaching disk",
+    /// and that sentence is only true when an edit actually arrived and was
+    /// refused.
+    async fn holder_fold_is_complete(
+        &mut self,
+        doc: &EntityUri,
+        delta_brings_new_content: bool,
+    ) -> Result<FoldVerdict> {
+        let authority: HashSet<(String, String)> = self
+            .block_reader
+            .doc_block_topology(doc)
+            .await?
+            .into_iter()
+            .map(|(id, parent)| (id.as_str().to_string(), parent.as_str().to_string()))
             .collect();
+        let held: HashSet<(String, String)> = self
+            .holder
+            .get(doc)
+            .map(|entry| {
+                entry
+                    .blocks
+                    .iter()
+                    .filter(|(id, _)| *id != doc)
+                    .map(|(id, held)| {
+                        (
+                            id.as_str().to_string(),
+                            held.block.parent_id.as_str().to_string(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if held == authority {
+            // A childless document is equal on both sides (∅ == ∅) and renders
+            // its header-only file — the gate must not mistake "nothing to
+            // render" for "not ready".
+            self.gate_skips.remove(doc);
+            return Ok(FoldVerdict::Complete);
+        }
+
+        // Reported as `id@parent` so the reader can tell the two shapes of
+        // disagreement apart at a glance: an id appearing once is a membership
+        // difference, an id appearing TWICE with different parents is the
+        // stale-parent case that motivated comparing pairs at all.
+        let mut differing: Vec<String> = held
+            .symmetric_difference(&authority)
+            .map(|(id, parent)| format!("{id}@{parent}"))
+            .collect();
+        differing.sort_unstable();
+        let difference = differing.join(",");
+        let differing_ids: HashSet<&str> = held
+            .symmetric_difference(&authority)
+            .map(|(id, _)| id.as_str())
+            .collect();
+
+        // Ids whose own path derivation already failed loud are NOT evidence of
+        // a stalled fold: they are permanently unrenderable for a reason that
+        // has its own single disclosure (an untitled page names no path
+        // segment). No fold will ever resolve them, so counting them would turn
+        // a correctly-disclosed benign condition into a degraded-write-back
+        // banner that repeats every tick.
+        let unexplained = {
+            let disclosed = self
+                .failure_disclosed
+                .lock()
+                .expect("failure_disclosed poisoned");
+            differing_ids
+                .iter()
+                .filter(|id| !disclosed.iter().any(|(entity, _)| entity.as_str() == **id))
+                .count()
+        };
+
+        let entry = self
+            .gate_skips
+            .entry(doc.clone())
+            .or_insert_with(|| GateSkipState {
+                difference: difference.clone(),
+                consecutive: 0,
+                consecutive_any: 0,
+                warned: false,
+                escalated: false,
+                resync_requested: false,
+            });
+        // Counting is deliberately narrow — see the two guards' comments above
+        // and on `delta_brings_new_content`. A run only accumulates while the
+        // SAME unexplained difference keeps blocking genuinely new content.
+        if entry.difference == difference {
+            entry.consecutive_any += 1;
+            if delta_brings_new_content && unexplained > 0 {
+                entry.consecutive += 1;
+            }
+        } else {
+            entry.difference = difference.clone();
+            entry.consecutive_any = 1;
+            entry.consecutive = u32::from(delta_brings_new_content && unexplained > 0);
+            entry.resync_requested = false;
+        }
+
+        if !entry.warned {
+            entry.warned = true;
+            tracing::warn!(
+                doc = %doc,
+                %difference,
+                held = held.len(),
+                authority = authority.len(),
+                "[FileSyncController] write-back SKIPPED: the holder's membership does not match \
+                 the authority's, so this render would project a partially-folded document over \
+                 disk. The diff that resolves it is already in flight and will re-trigger the \
+                 render. (Further skips of this document log at debug until it settles.)"
+            );
+        } else {
+            tracing::debug!(doc = %doc, %difference, "[FileSyncController] write-back skipped again");
+        }
+
+        if entry.consecutive >= GATE_SKIPS_BEFORE_DEGRADED && !entry.escalated {
+            entry.escalated = true;
+            let detail = format!(
+                "org write-back for {doc} is stalled: its holder has shown the SAME unresolved \
+                 difference from the authority ({difference}) across \
+                 {GATE_SKIPS_BEFORE_DEGRADED} consecutive edits it could not write, so the fold \
+                 has stopped converging (a dropped CDC row is the known cause). Edits to this \
+                 document reach Loro and SQL but STOP REACHING DISK."
+            );
+            tracing::error!(doc = %doc, %difference, "[FileSyncController] {detail}");
+            if let Some(disclosure) = &self.writeback_disclosure {
+                disclosure.writeback_degraded(&detail);
+            }
+        }
+
+        // The fold has stopped moving. Every event since the difference last
+        // changed found the holder in the identical shape, so no diff is in
+        // flight to resolve it and waiting longer just keeps disk stale. Hand
+        // the document to the recovery pass, which renders from the AUTHORITY
+        // rather than the holder and therefore does not need the fold at all.
+        if entry.consecutive_any >= GATE_SKIPS_BEFORE_AUTHORITY_RESYNC && !entry.resync_requested {
+            entry.resync_requested = true;
+            tracing::warn!(
+                doc = %doc,
+                %difference,
+                "[FileSyncController] the holder for this document has stopped converging —                  re-syncing it from the authority instead of waiting for a fold that is no                  longer in flight."
+            );
+            return Ok(FoldVerdict::Stalled);
+        }
+        Ok(FoldVerdict::Incomplete)
+    }
+
+    /// Render `doc_id` from its holder entry, in document order.
+    async fn render_doc_from_holder(&self, doc_id: &EntityUri, path: &Path) -> Result<String> {
+        let held = self.holder.get(doc_id).ok_or_else(|| {
+            anyhow::anyhow!(
+                "render_doc_from_holder: no holder entry for {doc_id}. The write-back holder is \
+                 seeded by the block feed's initial snapshot, so an unseeded document here means \
+                 either the feed never delivered it or a supervisor Reset was not followed by a \
+                 re-seed — rendering it now would write a document with no blocks."
+            )
+        })?;
+        let blocks = held.document_order(doc_id);
         self.render_doc_blocks(doc_id, path, &blocks).await
     }
 
@@ -4889,7 +5468,7 @@ impl FileSyncController {
             .union(&grounding.moved)
             .cloned()
             .collect();
-        let verdict = self.format.writeback_drops(
+        let mut verdict = self.format.writeback_drops(
             path,
             source,
             rendered,
@@ -4897,6 +5476,16 @@ impl FileSyncController {
             &sanctioned,
             &self.root_dir,
         )?;
+        // The format grounds an absence against the sibling BYTE union, which
+        // knows nothing about which blocks the authority still holds. A block
+        // the authority has lost is unprovable no matter whose bytes still
+        // mention it, so it re-enters the drop set here rather than being
+        // rescued by a destination file written before the loss.
+        for id in &grounding.authority_lost {
+            verdict
+                .dropped
+                .push(format!("{id}: the authority no longer holds this block"));
+        }
         Ok((verdict, grounding.unresolvable))
     }
 
@@ -4910,7 +5499,7 @@ impl FileSyncController {
     /// block it names, so a path alone would let a page LOST from the store
     /// (the row-28 truncation shape) pass as a move and be silently dropped
     /// from its parent file.
-    async fn absent_block_owning_file(&self, id: &EntityUri) -> Result<Option<PathBuf>> {
+    async fn absent_block_owning_file(&self, id: &EntityUri) -> Result<AbsentOwner> {
         let own_file = self.doc_id_to_path(id).await?;
         if self
             .block_reader
@@ -4918,11 +5507,14 @@ impl FileSyncController {
             .await?
             .is_none()
         {
-            return Ok(None);
+            return Ok(AbsentOwner::AuthorityLost);
         }
         match own_file {
-            Some(p) => Ok(Some(p.into_path_buf())),
-            None => self.owning_file_of(id).await,
+            Some(p) => Ok(AbsentOwner::File(p.into_path_buf())),
+            None => match self.owning_file_of(id).await? {
+                Some(p) => Ok(AbsentOwner::File(p)),
+                None => Ok(AbsentOwner::OwnerHasNoFile),
+            },
         }
     }
 
@@ -4988,8 +5580,25 @@ impl FileSyncController {
                 continue;
             }
             let sibling = match self.absent_block_owning_file(&block.id).await {
-                Ok(Some(p)) => p,
-                Ok(None) => continue,
+                Ok(AbsentOwner::File(p)) => p,
+                Ok(AbsentOwner::AuthorityLost) => {
+                    grounding.authority_lost.push(block.id.as_str().to_string());
+                    continue;
+                }
+                Ok(AbsentOwner::OwnerHasNoFile) => {
+                    // Not a drop: the authority accounts for this block, its
+                    // owner just has no file of its own. Vetoing here would
+                    // refuse every write to a document whose disk content
+                    // includes a block homed to a virtual doc.
+                    tracing::warn!(
+                        block_id = %block.id,
+                        path = %path.display(),
+                        "[FileSyncController] on-disk block is absent from this render and the \
+                         authority homes it to a document that owns no file — not counted as a \
+                         removal, because nothing was lost."
+                    );
+                    continue;
+                }
                 Err(e) => {
                     // §3.1 Finding A / R11 + BugFunnel row 23/29: this absent
                     // (drop-candidate) block's own-file path could NOT be
@@ -5049,6 +5658,26 @@ impl FileSyncController {
     /// Returns `Ok(())` to proceed with the write, `Err` (after quarantining)
     /// to refuse it. Real parse/IO defects propagate as `Err` WITHOUT
     /// quarantining (they are bugs to surface, not removals).
+    /// Would this render pass the removal guard? Same computation as
+    /// [`veto_ungrounded_removals`](Self::veto_ungrounded_removals) with no
+    /// side effects — no quarantine, no ERROR, no `Err`.
+    ///
+    /// This is how a veto-caused quarantine gets disproven. The entry says "one
+    /// render of this file was lossy"; only the guard can say that a later one
+    /// is not, and it cannot say so from behind an early-return that skips it.
+    async fn writeback_render_is_grounded(
+        &self,
+        path: &Path,
+        source: &str,
+        rendered: &str,
+        sanctioned_removals: &HashSet<String>,
+    ) -> Result<bool> {
+        let (verdict, unresolvable) = self
+            .writeback_drops(path, source, rendered, sanctioned_removals)
+            .await?;
+        Ok(verdict.dropped.is_empty() && unresolvable.is_empty())
+    }
+
     async fn veto_ungrounded_removals(
         &mut self,
         path: &Path,
@@ -5101,7 +5730,11 @@ impl FileSyncController {
     /// sharing the ingest quarantine's wording so one disclosure family covers
     /// both refusal paths.
     fn quarantine_writeback(&mut self, path: &Path, err: &anyhow::Error) {
-        if self.quarantined.insert(CanonicalPath::new(path)) {
+        if self
+            .quarantined
+            .insert(CanonicalPath::new(path), QuarantineCause::WritebackVeto)
+            .is_none()
+        {
             self.quarantine_skip_logged
                 .lock()
                 .expect("quarantine_skip_logged poisoned")
@@ -6509,5 +7142,145 @@ mod three_way_text_tests {
         let (content, merged) = three_way_text_content("abc", "abZ", "abZ", &StubMerge).unwrap();
         assert!(!merged, "theirs == mine → no merge");
         assert_eq!(content, "abZ");
+    }
+}
+#[cfg(test)]
+mod holder_order_tests {
+    use holon_api::EntityUri;
+    use holon_api::block::Block;
+
+    use super::DocOrder;
+    use super::HeldBlock;
+
+    fn uri(id: &str) -> EntityUri {
+        EntityUri::block(id)
+    }
+
+    /// Fold `(id, parent, prev)` triples into a holder entry, exactly as
+    /// `apply_block_delta` would from a `home_by` `Upsert` stream.
+    fn holder(members: &[(&str, &str, Option<&str>)]) -> DocOrder {
+        let mut doc = DocOrder::default();
+        for (id, parent, prev) in members {
+            let block = Block::new_text(uri(id), uri(parent), *id);
+            doc.blocks.insert(
+                uri(id),
+                HeldBlock {
+                    block,
+                    prev: prev.map(uri),
+                },
+            );
+        }
+        doc
+    }
+
+    /// Rendered ids with the `block:` scheme stripped, so an expectation reads
+    /// as the fixture names the test wrote.
+    fn ids(blocks: &[Block]) -> Vec<String> {
+        blocks
+            .iter()
+            .map(|b| {
+                b.id.as_str()
+                    .strip_prefix("block:")
+                    .expect("fixture ids are block uris")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// §10.2.4 root membership. `home_by` homes a page to its OWN document —
+    /// that is what makes a page-ness toggle observable as a document change on
+    /// the toggled block — so the document root IS a holder member. The render
+    /// seam must drop it: a document's file renders only its children (the
+    /// convention `get_blocks` already follows), and emitting the root would
+    /// render the page as a child of itself.
+    #[test]
+    fn document_root_is_not_rendered_as_its_own_child() {
+        let doc = holder(&[
+            ("doc", "no_parent", None),
+            ("a", "doc", None),
+            ("b", "doc", Some("a")),
+        ]);
+        assert_eq!(ids(&doc.document_order(&uri("doc"))), vec!["a", "b"]);
+    }
+
+    /// Order comes from the `prev` chain, not from any storage order: the
+    /// holder is a `HashMap`, so a render that trusted iteration order would
+    /// be nondeterministic. Reversing the chain must reverse the render.
+    #[test]
+    fn sibling_order_follows_the_prev_chain() {
+        let forward = holder(&[
+            ("doc", "no_parent", None),
+            ("a", "doc", None),
+            ("b", "doc", Some("a")),
+            ("c", "doc", Some("b")),
+        ]);
+        assert_eq!(
+            ids(&forward.document_order(&uri("doc"))),
+            vec!["a", "b", "c"]
+        );
+
+        let reversed = holder(&[
+            ("doc", "no_parent", None),
+            ("c", "doc", None),
+            ("b", "doc", Some("c")),
+            ("a", "doc", Some("b")),
+        ]);
+        assert_eq!(
+            ids(&reversed.document_order(&uri("doc"))),
+            vec!["c", "b", "a"]
+        );
+    }
+
+    /// Nesting is depth-first: a child group renders immediately after its
+    /// parent, so the flat slice handed to the renderer is a genuine document
+    /// order rather than the global `sort_key, id` sort the deleted cache
+    /// produced.
+    #[test]
+    fn children_render_depth_first_under_their_parent() {
+        let doc = holder(&[
+            ("doc", "no_parent", None),
+            ("a", "doc", None),
+            ("a1", "a", None),
+            ("a2", "a", Some("a1")),
+            ("b", "doc", Some("a")),
+        ]);
+        assert_eq!(
+            ids(&doc.document_order(&uri("doc"))),
+            vec!["a", "a1", "a2", "b"]
+        );
+    }
+
+    /// A member the root cannot reach — its parent left this document, its own
+    /// retraction has not arrived — is EXCLUDED. The renderer requires a
+    /// connected slice and panics on a dangling parent, and the block is no
+    /// longer part of this document's tree. Loss stays visible because the
+    /// removal guard compares the render against DISK: an excluded block that
+    /// is still on disk vetoes the write instead of being deleted by it.
+    #[test]
+    fn unreachable_members_are_excluded_from_the_render() {
+        let doc = holder(&[
+            ("doc", "no_parent", None),
+            ("a", "doc", None),
+            ("orphan", "departed-parent", None),
+        ]);
+        assert_eq!(
+            ids(&doc.document_order(&uri("doc"))),
+            vec!["a"],
+            "an orphan must not be rendered into a tree it no longer belongs to"
+        );
+    }
+
+    /// A `prev` cycle must terminate and surface as an order change, never as
+    /// a hang or a vanished block.
+    #[test]
+    fn a_cyclic_prev_chain_terminates_and_keeps_every_block() {
+        let doc = holder(&[
+            ("doc", "no_parent", None),
+            ("a", "doc", Some("b")),
+            ("b", "doc", Some("a")),
+        ]);
+        let rendered = ids(&doc.document_order(&uri("doc")));
+        assert_eq!(rendered.len(), 2, "no block may be lost to a cycle");
+        assert!(rendered.contains(&"a".to_string()) && rendered.contains(&"b".to_string()));
     }
 }

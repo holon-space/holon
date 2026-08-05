@@ -94,6 +94,21 @@ impl BlockReader for EmptyReader {
     async fn get_blocks(&self, _: &EntityUri) -> anyhow::Result<Vec<Block>> {
         Ok(Vec::new())
     }
+    /// Delegates to `get_blocks`: this double has no cheaper projection.
+    /// Never an empty stub — an empty shape would let the write-back
+    /// fold-completeness gate PASS on an incomplete document.
+    async fn doc_block_topology(
+        &self,
+        doc_id: &EntityUri,
+    ) -> anyhow::Result<Vec<(EntityUri, EntityUri)>> {
+        Ok(self
+            .get_blocks(doc_id)
+            .await?
+            .into_iter()
+            .map(|b| (b.id, b.parent_id))
+            .collect())
+    }
+
     async fn get_block_authoritative(&self, _: &EntityUri) -> anyhow::Result<Option<Block>> {
         Ok(None)
     }

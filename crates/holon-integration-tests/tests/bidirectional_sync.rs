@@ -792,27 +792,19 @@ fn shadow_completes_at_least_one_quiescent_comparison() {
             "nested child must sync so the fixture has >=2 sibling groups"
         );
 
+        // Holder-path liveness. The `home_by` holder is now the ONLY write-back
+        // path, so the differential shadow that used to guard this suite has
+        // nothing left to differ from — but its liveness question survives
+        // intact and matters more: an assertion about on-disk org content is
+        // only evidence about write-back if write-back actually ran. Content
+        // can equally arrive from the ingest direction or from the
+        // authoritative bulk pass, and both would leave this at zero.
+        let written = holon_orgmode::di::docs_written_from_holder();
         assert!(
-            !holon_orgmode::writeback_shadow::divergence_detected(),
-            "the write-back differential shadow reported NON-CONVERGENCE — the home_by holder \
-             disagrees with doc_blocks (panic detail is on the sync task's log line)"
-        );
-
-        let completed = holon_orgmode::writeback_shadow::completed_comparisons();
-        let docs = holon_orgmode::writeback_shadow::docs_compared();
-        assert!(
-            completed >= 1,
-            "the write-back differential shadow completed {completed} quiescent checks — it is \
-             armed but the tick loop never reached quiescence (design doc §9.8)"
-        );
-        // The load-bearing half: `completed` counts tick-loop iterations and
-        // rises even on an empty tracked slice, so it alone does NOT prove any
-        // document was checked. This does.
-        assert!(
-            docs >= 1,
-            "the shadow ran {completed} quiescent checks but compared {docs} DOCUMENTS — no \
-             holder content was ever checked against doc_blocks, so this suite's green proves \
-             nothing about the home_by holder (design doc §9.8 shadow-liveness gate)"
+            written >= 1,
+            "this suite asserted on-disk org content while ZERO documents were written back from \
+             the home_by holder — the feed-driven write-back path never ran, so the green proves \
+             nothing about it (Option C Inc 2 holder-liveness gate, design doc §10.3)"
         );
     });
 }

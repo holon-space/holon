@@ -108,12 +108,6 @@ fn single_large_document_leaves_the_actor_responsive() {
     // needs more than this is the wedge, not slowness.
     let budget = Duration::from_millis((expected as u64 * 40).max(60_000));
 
-    // This suite's oracle is WALL-CLOCK ingest budget, and the shadow issues
-    // authority reads on the same Turso actor — measurement apparatus competing
-    // with the thing being measured (design doc §9.8, same principle as the
-    // read-budget suites). Must precede the TestEnvironmentBuilder boot.
-    holon_orgmode::writeback_shadow::disable_for_budget_suite();
-
     // Installs the RUST_LOG-driven subscriber, so HOLON_ACTOR_STATS reports
     // reach the test output.
     holon_integration_tests::test_tracing::SpanCollector::global();

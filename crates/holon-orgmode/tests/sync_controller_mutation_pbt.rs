@@ -44,7 +44,73 @@ use holon_orgmode::models::OrgDocumentExt;
 use holon_orgmode::org_renderer::OrgRenderer;
 use holon_orgmode::parser::parse_org_file;
 use proptest::prelude::*;
+use tracing::field::Field;
+use tracing::field::Visit;
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::layer::SubscriberExt;
 use uuid::Uuid;
+
+// ============================================================================
+// WARN-level tracing capture
+// ============================================================================
+
+/// Collects WARN events so a test can assert on a disclosure the SUT emits.
+/// Same shape as `name_chain_error_propagation`'s ERROR capture — a disclosure
+/// nothing asserts on is a disclosure that can be deleted by accident.
+#[derive(Clone, Default)]
+struct WarnCapture(Arc<Mutex<Vec<String>>>);
+
+impl WarnCapture {
+    /// The one capture for this whole test binary, installed as the GLOBAL
+    /// subscriber on first use.
+    ///
+    /// A per-test `set_default` cannot work here: it is thread-local while
+    /// tracing's callsite state is process-global, so whichever of the 20-odd
+    /// sibling tests reaches a callsite first decides whether this thread ever
+    /// sees it — the capture came up empty in roughly half of all parallel
+    /// runs. Sharing one global buffer costs only unrelated WARNs landing in
+    /// it, which no assertion here is sensitive to (each looks for its own
+    /// substring).
+    fn global() -> Self {
+        static CAP: std::sync::OnceLock<WarnCapture> = std::sync::OnceLock::new();
+        CAP.get_or_init(|| {
+            let cap = WarnCapture::default();
+            tracing::subscriber::set_global_default(
+                tracing_subscriber::registry().with(cap.clone()),
+            )
+            .expect("no other global tracing subscriber may be installed in this test binary");
+            cap
+        })
+        .clone()
+    }
+
+    fn warns(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+
+    fn clear(&self) {
+        self.0.lock().unwrap().clear();
+    }
+}
+
+struct WarnVisitor<'a>(&'a mut String);
+impl Visit for WarnVisitor<'_> {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        use std::fmt::Write;
+        let _ = write!(self.0, "{}={:?} ", field.name(), value);
+    }
+}
+
+impl<S: tracing::Subscriber> Layer<S> for WarnCapture {
+    fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+        if *event.metadata().level() == tracing::Level::WARN {
+            let mut buf = String::new();
+            event.record(&mut WarnVisitor(&mut buf));
+            self.0.lock().unwrap().push(buf);
+        }
+    }
+}
 
 // ============================================================================
 // Mock infrastructure
@@ -216,6 +282,16 @@ impl InMemoryBlockStore {
 impl BlockReader for InMemoryBlockStore {
     async fn get_blocks(&self, doc_id: &EntityUri) -> Result<Vec<Block>> {
         Ok(self.get_all_blocks(doc_id.as_str()))
+    }
+
+    /// Same membership source as `get_blocks`, shape only — the two can never
+    /// disagree about who belongs to the document.
+    async fn doc_block_topology(&self, doc_id: &EntityUri) -> Result<Vec<(EntityUri, EntityUri)>> {
+        Ok(self
+            .get_all_blocks(doc_id.as_str())
+            .into_iter()
+            .map(|b| (b.id, b.parent_id))
+            .collect())
     }
 
     async fn get_block_authoritative(&self, id: &EntityUri) -> Result<Option<Block>> {
@@ -733,6 +809,44 @@ fn assert_blocks_equivalent(expected: &[Block], actual: &[Block], context: &str)
 // ============================================================================
 // Test fixture
 // ============================================================================
+
+/// Drive one block edit the way production does: the holder is seeded from the
+/// authority (production seeds it from the block feed's initial snapshot), then
+/// the edit is applied at the position the authority already gives the block.
+async fn write_back(fixture: &mut TestFixture, doc: &EntityUri, block: &Block) -> Result<bool> {
+    fixture.controller.seed_holder_from_authority(doc).await?;
+    let authoritative = fixture.store.get_blocks(doc).await?;
+    let prev = authoritative
+        .iter()
+        .take_while(|b| b.id != block.id)
+        .filter(|b| b.parent_id == block.parent_id)
+        .last()
+        .map(|b| b.id.clone());
+    fixture
+        .controller
+        .on_block_changed(
+            doc,
+            &holon_filesystem::BlockDelta::Upsert {
+                block: block.clone(),
+                prev,
+            },
+        )
+        .await
+}
+
+/// Deliver the RETRACTION half of a re-home, the way the feed does.
+///
+/// `home_by` fans one `Remove`@old-doc + one `Upsert`@new-doc per moved member,
+/// so the old document's file is written by its retractions — not by a stale
+/// edit that happens to still be routed there. Deliberately does NOT re-seed:
+/// the holder must carry over from the previous call, or the retraction has
+/// nothing to retract from.
+async fn retract(fixture: &mut TestFixture, doc: &EntityUri, id: &EntityUri) -> Result<bool> {
+    fixture
+        .controller
+        .on_block_changed(doc, &holon_filesystem::BlockDelta::Remove(id.clone()))
+        .await
+}
 
 struct TestFixture {
     store: Arc<InMemoryBlockStore>,
@@ -1477,12 +1591,9 @@ proptest! {
             fixture.seed_blocks(&mutated);
 
             // on_block_changed → file write
-            let delta = holon_filesystem::BlockDelta::Upsert(mutated[block_idx].clone());
-            fixture
-                .controller
-                .on_block_changed(&fixture.doc_id, &delta)
-                .await
-                .unwrap();
+            let doc_id = fixture.doc_id.clone();
+            let changed = mutated[block_idx].clone();
+            write_back(&mut fixture, &doc_id, &changed).await.unwrap();
 
             // Parse written file
             let file_content = tokio::fs::read_to_string(&fixture.file_path())
@@ -2201,6 +2312,12 @@ mod fast_path_loro_presence_tests {
         async fn get_blocks(&self, doc_id: &EntityUri) -> Result<Vec<Block>> {
             self.inner.get_blocks(doc_id).await
         }
+        async fn doc_block_topology(
+            &self,
+            doc_id: &EntityUri,
+        ) -> Result<Vec<(EntityUri, EntityUri)>> {
+            self.inner.doc_block_topology(doc_id).await
+        }
         async fn get_block_authoritative(&self, id: &EntityUri) -> Result<Option<Block>> {
             self.inner.get_block_authoritative(id).await
         }
@@ -2554,6 +2671,12 @@ mod initial_scan_batched_barrier_tests {
         async fn get_blocks(&self, doc_id: &EntityUri) -> Result<Vec<Block>> {
             self.store.get_blocks(doc_id).await
         }
+        async fn doc_block_topology(
+            &self,
+            doc_id: &EntityUri,
+        ) -> Result<Vec<(EntityUri, EntityUri)>> {
+            self.store.doc_block_topology(doc_id).await
+        }
         async fn get_block_authoritative(&self, id: &EntityUri) -> Result<Option<Block>> {
             self.store.get_block_authoritative(id).await
         }
@@ -2592,6 +2715,12 @@ mod initial_scan_batched_barrier_tests {
     impl BlockReader for SlowFeedReader {
         async fn get_blocks(&self, doc_id: &EntityUri) -> Result<Vec<Block>> {
             self.store.get_blocks(doc_id).await
+        }
+        async fn doc_block_topology(
+            &self,
+            doc_id: &EntityUri,
+        ) -> Result<Vec<(EntityUri, EntityUri)>> {
+            self.store.doc_block_topology(doc_id).await
         }
         async fn get_block_authoritative(&self, id: &EntityUri) -> Result<Option<Block>> {
             self.store.get_block_authoritative(id).await
@@ -3245,9 +3374,7 @@ mod intermediate_ancestor_writeback_hole {
 
         // WARM: a first block delta for X reseeds P_a's cache to {A,M,N,X} and
         // writes `test.org` = A>M>N>X (X legitimately belongs to P_a here).
-        fixture
-            .controller
-            .on_block_changed(&p_a, &holon_filesystem::BlockDelta::Upsert(x.clone()))
+        write_back(fixture, &p_a, &x)
             .await
             .expect("warm write must succeed");
 
@@ -3292,21 +3419,28 @@ mod intermediate_ancestor_writeback_hole {
     /// `test.org` — the OLD document's file — even though X now belongs to
     /// P_m. The file that P_a owns must not carry X's subtree after the
     /// re-home; it does → the hole is real.
-    #[ignore = "deliberate RED: Option-C evidence for the §2.3 write-back hole \
-(docs/Plans/option-c-holder-design.md); un-ignore at Inc 2 when the home_by \
-holder replaces the cheap-path qualification"]
     #[tokio::test]
     async fn convert_leaks_deep_descendant_edit_into_old_doc() {
         let temp_dir = tempfile::tempdir().unwrap();
         let mut fixture = TestFixture::new(temp_dir.path());
-        let (p_a, _p_m, x_edited) = build_and_convert(&mut fixture).await;
+        let (p_a, p_m, x_edited) = build_and_convert(&mut fixture).await;
 
         // Drain X's queued delta, routed to the OLD doc P_a (stale T1 routing).
-        fixture
-            .controller
-            .on_block_changed(&p_a, &holon_filesystem::BlockDelta::Upsert(x_edited))
+        write_back(&mut fixture, &p_a, &x_edited)
             .await
             .expect("stale delta drain returned an unexpected error");
+
+        // …then the retractions the same re-home fans at P_a. These are what
+        // legitimately rewrite the old file; the stale edit above is gate-
+        // skipped because the holder it would render disagrees with the
+        // authority about who still belongs to P_a.
+        let _ = p_m;
+        retract(&mut fixture, &p_a, &EntityUri::block("la-n"))
+            .await
+            .expect("retraction of N at the old doc");
+        retract(&mut fixture, &p_a, &EntityUri::block("la-x"))
+            .await
+            .expect("retraction of X at the old doc");
 
         let test_org = tokio::fs::read_to_string(fixture.file_path())
             .await
@@ -3320,55 +3454,641 @@ holder replaces the cheap-path qualification"]
         );
     }
 
-    /// DURABILITY PROBE: once the intermediate ancestor N's OWN structural
-    /// delta drains, P_a is reseeded from the authority (get_blocks no
-    /// longer returns N/X) and the removal veto grounds their absence as a
-    /// MOVE (grounding reads the authority, which reflects X under P_m). So
-    /// the divergence SELF-HEALS — `test.org` drops X and P_m's file owns
-    /// it. This documents the verdict: TRANSIENT, not durable data loss
-    /// (matches the plan's own assessment).
+    /// The §2.3 property itself: X lives in EXACTLY ONE file, and the old
+    /// document's file never carries it at ANY observed point.
+    ///
+    /// This used to assert the bug first — drain the stale delta, require the
+    /// leak to be present, then watch a later reseed heal it. The holder
+    /// removes the leak entirely, so "observe it, then heal it" no longer
+    /// describes anything the system does. What survives is the property that
+    /// mattered all along, now checked after EVERY step rather than only at
+    /// the end: a transient leak is still data in the wrong file, so a window
+    /// in which `test.org` carries X would fail here even if the final state
+    /// were correct.
     #[tokio::test]
-    async fn divergence_self_heals_after_ancestor_reseed() {
+    async fn rehomed_descendant_lives_in_exactly_one_file_throughout() {
         let temp_dir = tempfile::tempdir().unwrap();
         let mut fixture = TestFixture::new(temp_dir.path());
         let (p_a, p_m, x_edited) = build_and_convert(&mut fixture).await;
+        let pm_path = fixture.root_dir.join("test").join("Pm.org");
 
-        // 1. Stale X edit drains first → transient leak into test.org.
-        fixture
-            .controller
-            .on_block_changed(&p_a, &holon_filesystem::BlockDelta::Upsert(x_edited))
-            .await
-            .expect("stale delta drain");
-        let leaked = tokio::fs::read_to_string(fixture.file_path())
+        let warm = tokio::fs::read_to_string(fixture.file_path())
             .await
             .unwrap();
-        assert!(
-            leaked.contains("la-x"),
-            "precondition: the transient leak must be present before the heal; test.org:\n{leaked}"
+
+        // 1. The stale X edit — routed to the OLD document — drains. The gate skips it
+        //    (holder ≠ authority), so no write happens at all, which is a STRONGER
+        //    outcome than the old "render without X": the wrong file is never even
+        //    opened.
+        write_back(&mut fixture, &p_a, &x_edited)
+            .await
+            .expect("stale delta drain must succeed");
+        assert_eq!(
+            tokio::fs::read_to_string(fixture.file_path())
+                .await
+                .unwrap(),
+            warm,
+            "a stale edit routed to the OLD document must not write it AT ALL — the holder it \
+             would render disagrees with the authority, and rendering that disagreement is the \
+             defect. Byte-equality with the pre-drain file is the check: 'the render happened to \
+             omit X' would also satisfy a weaker contains-assertion."
         );
 
-        // 2. N's OWN structural delta (parent M -> P_m) drains → reseed P_a.
-        let n_moved = text_block("la-n", &p_m, "la-n-inner", 1, 0);
-        fixture
-            .controller
-            .on_block_changed(&p_a, &holon_filesystem::BlockDelta::Upsert(n_moved))
+        // 2. The retractions the re-home fans at the OLD document. After the last one
+        //    the holder agrees with the authority and the file is written exactly once.
+        retract(&mut fixture, &p_a, &EntityUri::block("la-n"))
             .await
-            .expect("ancestor reseed must succeed (removal grounded as a move, not vetoed)");
+            .expect("retraction of N at the old doc");
+        retract(&mut fixture, &p_a, &EntityUri::block("la-x"))
+            .await
+            .expect("retraction of X at the old doc (grounded as a move, not vetoed)");
+        let _ = p_m;
 
-        let healed = tokio::fs::read_to_string(fixture.file_path())
+        // 3. At quiescence: exactly one file owns X, and it is P_m's.
+        let test_org = tokio::fs::read_to_string(fixture.file_path())
             .await
             .unwrap();
+        let pm_file = tokio::fs::read_to_string(&pm_path).await.unwrap();
         assert!(
-            !healed.contains("la-x"),
-            "self-heal expected: after N's reseed P_a's file must drop the re-homed \
-             descendant. test.org:\n{healed}"
+            !test_org.contains("la-x"),
+            "at quiescence the old document's file must not own X. test.org:\n{test_org}"
         );
-        let pm_file = tokio::fs::read_to_string(fixture.root_dir.join("test").join("Pm.org"))
-            .await
-            .unwrap();
         assert!(
             pm_file.contains("la-x"),
-            "after the heal X must live in exactly one document — P_m's file. Pm.org:\n{pm_file}"
+            "at quiescence X must live in P_m's file. Pm.org:\n{pm_file}"
+        );
+        // The blocks that DID stay behind must still be there — "X is gone"
+        // must not be satisfied by an empty file.
+        assert!(
+            test_org.contains("la-a") && test_org.contains("la-m"),
+            "the old document must keep the blocks that never left it. test.org:\n{test_org}"
+        );
+    }
+
+    // ── The seam the holder and the renderer share ──────────────────────
+    //
+    // `DocOrder::document_order` EXCLUDES a member the document root cannot
+    // reach, and `OrgRenderer::render_walk` PANICS on a slice containing one.
+    // Each side was pinned by its own test and nothing crossed between them,
+    // which is how the two contracts came to contradict each other. These two
+    // tests are that crossing: real holder → real renderer → real removal
+    // guard → real disk, in both arms the exclusion can land in.
+
+    /// Arm 1 — the orphan genuinely re-homed. The render omits it and the
+    /// unconditional veto grounds its absence against the AUTHORITY as a move,
+    /// so the old file is written correctly and immediately.
+    #[tokio::test]
+    async fn an_excluded_orphan_that_moved_is_grounded_and_the_write_lands() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new(temp_dir.path());
+        let (p_a, _p_m, x_edited) = build_and_convert(&mut fixture).await;
+
+        let before = tokio::fs::read_to_string(fixture.file_path())
+            .await
+            .unwrap();
+        assert!(
+            before.contains("la-n") && before.contains("la-x"),
+            "precondition: the warm write put N and X on disk. test.org:\n{before}"
+        );
+
+        let _ = x_edited;
+        // The re-home's retractions at the OLD document. After them the holder
+        // equals the authority, so the gate passes and the guard — not the
+        // gate — is what judges the two absences.
+        retract(&mut fixture, &p_a, &EntityUri::block("la-n"))
+            .await
+            .expect("retraction of N at the old doc");
+        let wrote = retract(&mut fixture, &p_a, &EntityUri::block("la-x"))
+            .await
+            .expect("a grounded move must not veto the write");
+        assert!(wrote, "the write must actually land, not report 'no file'");
+
+        let after = tokio::fs::read_to_string(fixture.file_path())
+            .await
+            .unwrap();
+        assert!(
+            !after.contains("la-n") && !after.contains("la-x"),
+            "both departed blocks must be gone from the old file — their absence grounds as a \
+             move against the authority. test.org:\n{after}"
+        );
+        assert!(
+            after.contains("la-a") && after.contains("la-m"),
+            "the blocks that stayed must survive the write. test.org:\n{after}"
+        );
+    }
+
+    /// Arm 2 — the teeth. The holder AGREES with the authority (so the
+    /// fold-completeness gate passes and hands the decision to the guard), yet
+    /// a block still on disk is in NEITHER: nothing can prove where it went, so
+    /// the write is REFUSED and disk keeps its last good content.
+    ///
+    /// This is the division of labour the gate introduced, and it is why the
+    /// two must be tested apart: a holder that merely LAGS its authority is a
+    /// transient the gate absorbs, while an authority that has lost a block
+    /// disk still holds is loss — and only the guard may judge that. Without
+    /// this arm, "the render omitted a block" would be indistinguishable from
+    /// silent deletion.
+    #[tokio::test]
+    async fn an_excluded_orphan_the_authority_still_owns_blocks_the_write() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new(temp_dir.path());
+        let (p_a, _p_m, x_edited) = build_and_convert(&mut fixture).await;
+        let _ = x_edited;
+
+        // The ONLY difference from arm 1: X is nowhere in the authority. In arm
+        // 1 the authority placed X under P_m, and THAT verdict is what grounded
+        // its absence as a move. Here nothing can prove where it went — while
+        // it is still on disk.
+        let p_m = EntityUri::block("la-pm");
+        let mut pm_page = Block::new_text(p_m.clone(), p_a.clone(), "Pm");
+        pm_page.set_page(true);
+        pm_page.set_property("ID", Value::String("la-pm".to_string()));
+        let n_moved = text_block("la-n", &p_m, "la-n-inner", 1, 0);
+        fixture
+            .store
+            .seed_blocks(p_m.as_str(), vec![pm_page, n_moved]);
+
+        let last_good = tokio::fs::read_to_string(fixture.file_path())
+            .await
+            .unwrap();
+
+        // Holder := the authority's own view of P_a ({A, M}) — so the gate
+        // PASSES and cannot be what refuses this write. Then N's retraction
+        // drains, which is sanctioned. X's never does: X is simply gone from
+        // the authority while disk still carries it.
+        fixture
+            .controller
+            .seed_holder_from_authority(&p_a)
+            .await
+            .expect("seed the holder from the authority");
+        let result = retract(&mut fixture, &p_a, &EntityUri::block("la-n")).await;
+        assert!(
+            result.is_err(),
+            "an ungrounded drop must REFUSE the write (ADR 0025), not silently delete. \
+             Got: {result:?}"
+        );
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(
+            err.contains("UNGROUNDED WRITE-BACK REMOVAL"),
+            "the refusal must name the removal guard, so the reader is not sent hunting a \
+             render bug. Error was: {err}"
+        );
+
+        let after = tokio::fs::read_to_string(fixture.file_path())
+            .await
+            .unwrap();
+        assert_eq!(
+            after, last_good,
+            "a refused write must leave disk byte-identical to its last good content"
+        );
+        assert!(
+            after.contains("la-x"),
+            "the block the guard protected must still be on disk. test.org:\n{after}"
+        );
+    }
+
+    /// The exclusion must be AUDIBLE. A holder silently dropping members is
+    /// the failure mode the whole guard exists to make impossible, so the WARN
+    /// naming the orphans is part of the contract, not decoration.
+    ///
+    /// Reaching the exclusion now takes a deliberately awkward fixture, and
+    /// that is worth stating: the fold-completeness gate only renders when the
+    /// holder equals the authority's membership, and a real store derives that
+    /// membership by walking DOWN the parent chain — so every member it reports
+    /// is root-reachable and no orphan can survive into a render. The exclusion
+    /// is therefore a backstop against a store that disagrees, which is exactly
+    /// what this in-memory double (bucket-based membership, no parent walk) is.
+    /// If it ever stops being reachable here too, the honest move is to delete
+    /// it and let the renderer's dangling-parent panic stand alone — not to
+    /// keep an untested branch.
+    #[tokio::test]
+    async fn excluding_an_orphan_warns_and_names_it() {
+        let cap = WarnCapture::global();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new(temp_dir.path());
+        let (p_a, _p_m, _x_edited) = build_and_convert(&mut fixture).await;
+
+        // P_a's bucket claims X while N — X's parent — has left for P_m. The
+        // holder seeds to exactly that set, so the gate passes and the renderer
+        // is handed a slice it cannot nest.
+        let a = text_block("la-a", &p_a, "la-a-outer", 1, 0);
+        let m = text_block("la-m", &a.id, "la-m-middle", 2, 0);
+        let orphan_x = text_block("la-x", &EntityUri::block("la-n"), "la-x-leaf", 4, 0);
+        fixture
+            .store
+            .seed_blocks(p_a.as_str(), vec![a, m, orphan_x]);
+        fixture
+            .controller
+            .seed_holder_from_authority(&p_a)
+            .await
+            .expect("seed the holder from the authority");
+        cap.clear();
+
+        let m_touched = text_block("la-m", &EntityUri::block("la-a"), "la-m-EDITED", 2, 0);
+        write_back(&mut fixture, &p_a, &m_touched)
+            .await
+            .expect("edit drain");
+
+        // Scoped to THIS document's id. The capture is process-global, and the
+        // sibling tests in this module run the same topology under their own
+        // freshly-minted document roots — an unscoped match would let their
+        // WARN satisfy this assertion.
+        let warns: Vec<String> = cap
+            .warns()
+            .into_iter()
+            .filter(|w| w.contains(p_a.as_str()))
+            .collect();
+        assert!(
+            warns
+                .iter()
+                .any(|w| w.contains("unreachable from the document root")),
+            "excluding a holder member must WARN — a silent exclusion is indistinguishable \
+             from the data loss the removal guard exists to catch. Captured: {warns:?}"
+        );
+        assert!(
+            warns
+                .iter()
+                .any(|w| w.contains("unreachable from the document root") && w.contains("la-x")),
+            "the WARN must NAME the excluded member, or it cannot be acted on. \
+             Captured: {warns:?}"
+        );
+    }
+
+    // ── The fold-completeness gate ──────────────────────────────────────
+    //
+    // The holder folds a lagging feed one member at a time, so a render
+    // triggered by the first diff of a burst sees a PARTIAL document. Rendering
+    // it projected an empty file over a populated one, the guard vetoed, and
+    // the veto quarantined the file permanently — one transient fold killed a
+    // document's write-back for the session. The gate renders only when the
+    // holder's membership equals the authority's.
+
+    /// A partially-folded holder must not be rendered. This is the measured
+    /// defect in miniature: only the page root has folded, so the render would
+    /// be empty.
+    #[tokio::test]
+    async fn a_partial_fold_is_skipped_not_rendered() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new(temp_dir.path());
+        let (p_a, _p_m, _x) = build_and_convert(&mut fixture).await;
+        let before = tokio::fs::read_to_string(fixture.file_path())
+            .await
+            .unwrap();
+
+        // Reset, then fold ONE of P_a's two members — the state every burst
+        // passes through.
+        fixture.controller.reset_holder();
+        let a = text_block("la-a", &p_a, "la-a-outer", 1, 0);
+        fixture
+            .controller
+            .on_block_changed(
+                &p_a,
+                &holon_filesystem::BlockDelta::Upsert {
+                    block: a,
+                    prev: None,
+                },
+            )
+            .await
+            .expect("a partial fold must not error — it must simply not write");
+
+        assert_eq!(
+            tokio::fs::read_to_string(fixture.file_path())
+                .await
+                .unwrap(),
+            before,
+            "a holder holding 1 of 2 members must leave disk untouched. Byte-equality, not a \
+             contains-check: the failure this pins wrote a SHORTER file, which any \
+             'still has la-a' assertion would have passed."
+        );
+    }
+
+    /// The other direction of the equality. The holder still holds a block the
+    /// authority has dropped; rendering it would put the deleted block BACK on
+    /// disk (the resurrection flicker).
+    #[tokio::test]
+    async fn a_stale_superset_holder_is_skipped_so_a_deleted_block_is_not_resurrected() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new(temp_dir.path());
+        let (p_a, _p_m, _x) = build_and_convert(&mut fixture).await;
+
+        // Authority: P_a keeps only A. Holder: still A and M.
+        let a = text_block("la-a", &p_a, "la-a-outer", 1, 0);
+        fixture.store.seed_blocks(p_a.as_str(), vec![a.clone()]);
+        fixture
+            .controller
+            .seed_holder_from_authority(&p_a)
+            .await
+            .expect("seed");
+        let m_stale = text_block("la-m", &a.id, "la-m-middle", 2, 0);
+        fixture.controller.apply_block_delta(
+            &p_a,
+            &holon_filesystem::BlockDelta::Upsert {
+                block: m_stale,
+                prev: None,
+            },
+        );
+
+        fixture
+            .controller
+            .on_block_changed(
+                &p_a,
+                &holon_filesystem::BlockDelta::Upsert {
+                    block: a,
+                    prev: None,
+                },
+            )
+            .await
+            .expect("a stale superset must not error");
+
+        let on_disk = tokio::fs::read_to_string(fixture.file_path())
+            .await
+            .unwrap();
+        assert!(
+            !on_disk.contains("la-m-middle") || on_disk.contains("la-n"),
+            "a holder holding a block the authority dropped must not be rendered — doing so \
+             writes the deleted block back to disk. test.org:\n{on_disk}"
+        );
+    }
+
+    /// ∅ == ∅ is equality. A page that genuinely has no children must still
+    /// render its header-only file — the gate must not read "nothing to
+    /// render" as "not ready yet".
+    #[tokio::test]
+    async fn a_childless_document_is_complete_and_renders() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new(temp_dir.path());
+        let p_a = fixture.doc_id.clone();
+        let only = text_block("la-only", &p_a, "la-only-child", 1, 0);
+        fixture.seed_blocks(&[only.clone()]);
+        fixture.controller.initialize().await.expect("initialize");
+        write_back(&mut fixture, &p_a, &only)
+            .await
+            .expect("warm write");
+
+        // The child leaves: the authority reports an empty document.
+        fixture.store.seed_blocks(p_a.as_str(), vec![]);
+        fixture
+            .controller
+            .seed_holder_from_authority(&p_a)
+            .await
+            .expect("seed");
+        let wrote = retract(&mut fixture, &p_a, &only.id)
+            .await
+            .expect("an emptied document is complete, not incomplete");
+
+        assert!(wrote, "a childless document must still be written");
+        let on_disk = tokio::fs::read_to_string(fixture.file_path())
+            .await
+            .unwrap();
+        assert!(
+            !on_disk.contains("la-only"),
+            "the departed child must be gone — its retraction sanctioned the removal. \
+             test.org:\n{on_disk}"
+        );
+    }
+
+    /// A veto-caused quarantine must LIFT once a later render passes the guard
+    /// fully grounded. Before the reorder this was unreachable:
+    /// `is_quarantined` returned before the guard ran, so a file
+    /// quarantined by one transient render never got to prove itself again.
+    #[tokio::test]
+    async fn a_veto_caused_quarantine_clears_on_the_next_grounded_render() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new(temp_dir.path());
+        let (p_a, _p_m, _x) = build_and_convert(&mut fixture).await;
+
+        // 1. Provoke the veto: X is gone from the authority but still on disk.
+        let p_m = EntityUri::block("la-pm");
+        let mut pm_page = Block::new_text(p_m.clone(), p_a.clone(), "Pm");
+        pm_page.set_page(true);
+        pm_page.set_property("ID", Value::String("la-pm".to_string()));
+        fixture.store.seed_blocks(
+            p_m.as_str(),
+            vec![pm_page, text_block("la-n", &p_m, "n", 1, 0)],
+        );
+        fixture
+            .controller
+            .seed_holder_from_authority(&p_a)
+            .await
+            .expect("seed");
+        retract(&mut fixture, &p_a, &EntityUri::block("la-n"))
+            .await
+            .expect_err("the ungrounded drop of X must veto and quarantine");
+
+        // 2. X comes back to the authority under P_a — the drop that vetoed is no
+        //    longer a drop at all, so the very next render is grounded.
+        let a = text_block("la-a", &p_a, "la-a-outer", 1, 0);
+        let m = text_block("la-m", &a.id, "la-m-middle", 2, 0);
+        let n = text_block("la-n", &m.id, "la-n-inner", 3, 0);
+        let x = text_block("la-x", &n.id, "la-x-leaf", 4, 0);
+        fixture
+            .store
+            .seed_blocks(p_a.as_str(), vec![a, m, n, x.clone()]);
+        fixture
+            .controller
+            .seed_holder_from_authority(&p_a)
+            .await
+            .expect("seed");
+
+        let wrote = write_back(&mut fixture, &p_a, &x)
+            .await
+            .expect("a fully-grounded render must lift the quarantine, not be skipped by it");
+        assert!(wrote, "the write must land once the quarantine is lifted");
+        let on_disk = tokio::fs::read_to_string(fixture.file_path())
+            .await
+            .unwrap();
+        assert!(
+            on_disk.contains("la-x"),
+            "the lifted quarantine must let the render actually reach disk. test.org:\n{on_disk}"
+        );
+    }
+
+    /// A holder that has permanently stopped converging must ESCALATE, not idle
+    /// silently. `LiveData::apply_changes` drops unparseable CDC rows to keep
+    /// the feed alive, so a member can be missing forever — and a gate that
+    /// skipped forever without saying so would be exactly the silent
+    /// degradation the fail-loud rule forbids.
+    #[tokio::test]
+    async fn a_permanently_incomplete_holder_escalates_to_degraded() {
+        #[derive(Default)]
+        struct Recorder(std::sync::Mutex<Vec<String>>);
+        impl holon_filesystem::WritebackDisclosure for Recorder {
+            fn writeback_degraded(&self, detail: &str) {
+                self.0.lock().unwrap().push(detail.to_string());
+            }
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new(temp_dir.path());
+        let p_a = fixture.doc_id.clone();
+        let a = text_block("la-a", &p_a, "la-a-outer", 1, 0);
+        let ghost = text_block("la-ghost", &p_a, "never-folded", 1, 1);
+        fixture.seed_blocks(&[a.clone(), ghost]);
+
+        let recorder = Arc::new(Recorder::default());
+        fixture.controller = fixture
+            .controller
+            .with_writeback_disclosure(recorder.clone());
+        fixture.controller.initialize().await.expect("initialize");
+
+        // `la-ghost` is in the authority and NEVER folds — the dropped-CDC-row
+        // shape. Every edit to A is genuinely blocked by its absence.
+        for i in 0..(GATE_SKIPS_BEFORE_DEGRADED_FOR_TEST + 2) {
+            let edit = text_block("la-a", &p_a, &format!("la-a-edit-{i}"), 1, 0);
+            fixture
+                .controller
+                .on_block_changed(
+                    &p_a,
+                    &holon_filesystem::BlockDelta::Upsert {
+                        block: edit,
+                        prev: None,
+                    },
+                )
+                .await
+                .expect("a skipped render is not an error");
+        }
+
+        let raised = recorder.0.lock().unwrap().clone();
+        assert_eq!(
+            raised.len(),
+            1,
+            "a stalled fold must disclose EXACTLY once — a banner re-raised per event is the \
+             storm the once-per-episode latch exists to prevent. Raised: {raised:?}"
+        );
+        assert!(
+            raised[0].contains("la-ghost") && raised[0].contains("STOP REACHING DISK"),
+            "the disclosure must name the member that never folded and say plainly what the \
+             user loses. Raised: {raised:?}"
+        );
+    }
+
+    /// Mirror of the constant in `file_sync_controller.rs`. If the two drift,
+    /// the escalation test above stops proving the threshold it names.
+    const GATE_SKIPS_BEFORE_DEGRADED_FOR_TEST: u32 = 8;
+
+    /// A fold that STOPS must hand the document to the authority-sourced
+    /// recovery pass, not wait forever.
+    ///
+    /// Captured in production: a panicking fold worker
+    /// (`loro_backend.rs` `missing STABLE_ID metadata`) drops a document's feed
+    /// deltas, so its holder is stuck one-member-short while the authority has
+    /// four. The gate then skipped every render and disk stayed at the 15-byte
+    /// identity header the page pre-flight had written, with the full 488-byte
+    /// document owed — silently, forever. The escalation cannot catch this: it
+    /// only counts skips that blocked NEW content, and a stalled fold is
+    /// precisely the case where no new content ever arrives.
+    ///
+    /// `Ok(false)` is the contract this asserts: `di.rs` reads it as "this doc
+    /// needs the bulk pass", which renders from the authority and does not need
+    /// the fold at all.
+    #[tokio::test]
+    async fn a_fold_that_stops_converging_asks_for_an_authority_resync() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new(temp_dir.path());
+        let p_a = fixture.doc_id.clone();
+        let a = text_block("st-a", &p_a, "st-a-outer", 1, 0);
+        // `st-ghost` is in the authority and its delta never arrives — the
+        // dropped-fold shape.
+        let ghost = text_block("st-ghost", &p_a, "st-ghost-never-folds", 1, 1);
+        fixture.seed_blocks(&[a.clone(), ghost]);
+        fixture.controller.initialize().await.expect("initialize");
+
+        // Re-deliver the SAME block: no new content, exactly as a stalled fold
+        // looks from the controller's side.
+        let delta = holon_filesystem::BlockDelta::Upsert {
+            block: a,
+            prev: None,
+        };
+        let mut verdicts = Vec::new();
+        for _ in 0..(GATE_SKIPS_BEFORE_DEGRADED_FOR_TEST + 2) {
+            verdicts.push(
+                fixture
+                    .controller
+                    .on_block_changed(&p_a, &delta)
+                    .await
+                    .expect("a stalled fold is not an error"),
+            );
+        }
+
+        assert!(
+            verdicts.contains(&false),
+            "a fold that stops converging must eventually report `false` so the authority-sourced \
+             recovery pass runs — otherwise the file stays stale for the life of the process with \
+             nothing said. Verdicts: {verdicts:?}"
+        );
+        assert_eq!(
+            verdicts.iter().filter(|v| !**v).count(),
+            1,
+            "the re-sync must be asked for ONCE per episode; re-arming the debounced bulk pass on \
+             every subsequent event would turn one stalled document into a permanent full-vault \
+             re-render loop. Verdicts: {verdicts:?}"
+        );
+    }
+
+    /// The captured production mechanism, in miniature: the holder holds the
+    /// RIGHT ID SET but one member still carries its pre-move parent.
+    ///
+    /// Membership equality passes; the member is unreachable from the root;
+    /// `document_order` excludes it; the render omits a block that genuinely
+    /// belongs to this file; and the guard — correctly — vetoes. That chain was
+    /// 55% of runs of the `journals-external-rewrite-strips-convert-link-marks`
+    /// keystone case. Comparing `(id, parent)` pairs is what stops it at the
+    /// gate, so this test fails the moment the gate goes back to comparing ids.
+    #[tokio::test]
+    async fn a_stale_parent_in_the_holder_skips_the_render() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new(temp_dir.path());
+        let p_a = fixture.doc_id.clone();
+
+        // Authority: A, and C directly under the document root.
+        let a = text_block("sp-a", &p_a, "sp-a-outer", 1, 0);
+        let c_authoritative = text_block("sp-c", &p_a, "sp-c-moved-to-root", 1, 1);
+        fixture.seed_blocks(&[a.clone(), c_authoritative.clone()]);
+        fixture.controller.initialize().await.expect("initialize");
+        write_back(&mut fixture, &p_a, &a)
+            .await
+            .expect("warm write");
+        let before = tokio::fs::read_to_string(fixture.file_path())
+            .await
+            .unwrap();
+
+        // Holder: the SAME two ids, but C still parented under A — the state a
+        // re-home leaves behind until C's own upsert folds.
+        let c_stale = text_block("sp-c", &a.id, "sp-c-moved-to-root", 2, 0);
+        fixture
+            .controller
+            .seed_holder_from_authority(&p_a)
+            .await
+            .expect("seed");
+        fixture.controller.apply_block_delta(
+            &p_a,
+            &holon_filesystem::BlockDelta::Upsert {
+                block: c_stale,
+                prev: None,
+            },
+        );
+
+        let wrote = fixture
+            .controller
+            .on_block_changed(
+                &p_a,
+                &holon_filesystem::BlockDelta::Upsert {
+                    block: a,
+                    prev: None,
+                },
+            )
+            .await
+            .expect("a stale parent is a fold to wait for, never an error");
+
+        assert!(wrote, "the doc still resolves to a file");
+        assert_eq!(
+            tokio::fs::read_to_string(fixture.file_path())
+                .await
+                .unwrap(),
+            before,
+            "a holder whose member carries a stale parent must not be rendered — byte-equality, \
+             because the failure this pins wrote a file that was missing that member entirely"
         );
     }
 }

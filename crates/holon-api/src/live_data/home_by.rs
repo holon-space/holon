@@ -2325,5 +2325,118 @@ mod tests {
                 .count();
             assert_eq!(resets as u32, MAX_RESTARTS_IN_WINDOW + 1);
         }
+
+        // ---- (f) recovery at EVERY fault position -------------------------
+
+        /// Boot, then replay `ops` through a supervised `home_by`, optionally
+        /// arming a single transient authority fault at the given
+        /// authority-call index. Every authority method shares the gate, so the
+        /// index selects a position in the call sequence without naming a
+        /// method — the accumulator state at that position is whatever the
+        /// combinator happened to be doing.
+        ///
+        /// Returns the number of authority calls the gate let through, the
+        /// number of `Reset` markers the consumer saw, and the folded holder
+        /// beside the model it must equal.
+        fn drive_supervised(
+            ops: &[Op],
+            fault_at: Option<usize>,
+        ) -> (usize, usize, Folded, Arc<Mutex<Tree>>) {
+            let tree = Arc::new(Mutex::new(Tree::new()));
+            let authority = Arc::new(FlakyAuthority::new(tree.clone()));
+            let feed = test_feed();
+            seed_root(&tree, &feed);
+            if let Some(at) = fault_at {
+                authority.arm(at as i64, 1);
+            }
+
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Emission>();
+            let stream_feed = feed.clone();
+            let stream_authority = authority.clone();
+            let mut supervisor = Box::pin(run_supervised(
+                "test-home-by",
+                move || stream_feed.home_by(stream_authority.clone()),
+                tx,
+                |_, restarts, err| {
+                    panic!(
+                        "one transient fault must never exhaust the restart budget — gave up \
+                         after {restarts} restarts: {err:#}"
+                    )
+                },
+            ));
+
+            let mut folded: Folded = BTreeMap::new();
+            let mut resets = 0;
+            assert!(!pump(&mut supervisor), "the supervisor died during boot");
+            resets += fold_supervised(&mut folded, take(&mut rx));
+
+            for op in ops {
+                step(&tree, &feed, op);
+                assert!(
+                    !pump(&mut supervisor),
+                    "the supervisor stopped mid-sequence at {op:?}"
+                );
+                resets += fold_supervised(&mut folded, take(&mut rx));
+            }
+            assert!(
+                !pump(&mut supervisor),
+                "the supervisor stopped at quiescence"
+            );
+            resets += fold_supervised(&mut folded, take(&mut rx));
+
+            let c = &authority.inner.calls;
+            let calls = (Calls::get(&c.locate)
+                + Calls::get(&c.children)
+                + Calls::get(&c.prev_sibling)
+                + Calls::get(&c.subtree)
+                + Calls::get(&c.batch)) as usize;
+            (calls, resets, folded, tree)
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig {
+                cases: 256,
+                ..ProptestConfig::default()
+            })]
+
+            /// Fold-equality after recovery must hold for EVERY fault position,
+            /// not just the one a hand-written test happens to pick.
+            ///
+            /// The position is generated as a fraction of the run's own
+            /// fault-free authority-call count — measured by an unarmed dry run
+            /// of the same op sequence — so the fault always lands somewhere
+            /// inside this case's call sequence instead of falling off the end
+            /// of a fixed range. That covers every phase the fault-free run has:
+            /// the boot `Replace`, each op's fan-out, the `locate_batch` of a
+            /// re-seed after a `Replace`/`Clear` op, and a `subtree_of` inside a
+            /// page-toggle rehome.
+            #[test]
+            fn prop_supervised_recovers_from_a_fault_at_any_authority_call(
+                ops in prop::collection::vec(op_strategy(), 0..24),
+                fault_pick in 0usize..100_000,
+            ) {
+                let (calls, _, _, _) = drive_supervised(&ops, None);
+                prop_assert!(calls > 0, "boot alone must read the authority");
+                let fault_at = fault_pick % calls;
+
+                let (_, resets, folded, tree) = drive_supervised(&ops, Some(fault_at));
+
+                // The dry run's prefix is identical up to the fault, so a
+                // position inside it always fires: boot Reset plus a restart.
+                prop_assert_eq!(
+                    resets, 2,
+                    "the fault at authority call {} of {} must kill the stream exactly once \
+                     and be respawned exactly once",
+                    fault_at, calls
+                );
+                prop_assert_eq!(
+                    observed(&folded, &tree),
+                    reference(&tree),
+                    "fold diverged from the authority after recovering from a fault at \
+                     authority call {} of {}; ops = {:?}",
+                    fault_at, calls, ops
+                );
+            }
+        }
     }
 }
