@@ -199,10 +199,29 @@ impl MetricsSut {
             metrics.mark_processed_total.as_millis(),
             metrics.mark_processed_count,
         );
+        // `state=` carries the cardinalities every budget formula is a function
+        // of, so a breach can be re-derived from the log alone instead of
+        // re-instrumenting the run.
+        //
+        // NOT free and not output-inert: this recomputes
+        // `main_rendered_block_ids()` on EVERY transition, armed or not, and
+        // every budget line gains the tag. Accepted — without these
+        // cardinalities a breach cannot be told from a bigger draw, which is
+        // the confusion that left this gate unarmed and unexamined.
+        let state_summary = {
+            use holon_pbt_core::capabilities::RefSqlCardinality;
+            format!(
+                " state=b{}/d{}/w{}/r{}",
+                ref_state.block_count(),
+                ref_state.document_count(),
+                ref_state.active_watch_count(),
+                ref_state.main_rendered_block_ids().len(),
+            )
+        };
         eprintln!(
             "[inv-sql-budget] {key}: reads={}/{} writes={}/{} ddl={}/{} tol={} max_q={}ms \
              wall={}ms spans={} rss={delta:+.1}MB \
-             (cum={cum:+.1}MB){render_summary}{cdc_summary}{perf_summary}",
+             (cum={cum:+.1}MB){state_summary}{render_summary}{cdc_summary}{perf_summary}",
             metrics.sql_read_count,
             expected.reads,
             metrics.sql_write_count,
@@ -276,7 +295,14 @@ impl MetricsSut {
                 } else {
                     format!("{} distinct bindings — fan-out", dup.distinct_bindings)
                 };
-                eprintln!("  {}x ({bindings}): {}", dup.count, dup.sql);
+                // The fan is only legitimate if each binding ran once; anything
+                // above that is the same consumer re-asking.
+                let verdict = if dup.max_repeat_per_binding <= 1 {
+                    "LEGITIMATE".to_string()
+                } else {
+                    format!("REDUNDANT x{}/binding", dup.max_repeat_per_binding)
+                };
+                eprintln!("  {}x ({bindings}) [{verdict}]: {}", dup.count, dup.sql);
             }
         }
 

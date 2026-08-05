@@ -36,13 +36,11 @@ const LEFT_SIDEBAR_PANEL: &str = "block:default-left-sidebar";
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::FIRST_VISIT_VIEW_DDL;
-#[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::FIRST_VISIT_VIEW_READS;
-#[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::JOURNAL_READS;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::NAV_DML_READS;
+#[cfg(feature = "otel-testing")]
+use crate::pbt::transition_budgets::NAV_RENDER_FAN_READS;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::REACTIVE_BASE;
 #[cfg(feature = "otel-testing")]
@@ -203,17 +201,26 @@ crate::cap_transition! {
         sut.apply_navigate_focus(region, &me.block_id).await;
     }
     sql_budget: |_me, state| {
-        // First navigation to a root creates its watch matviews (see
-        // FIRST_VISIT_VIEW_READS); revisits reuse the known-views cache.
-        let (first_visit_reads, first_visit_ddl) = if state.last_navigate_first_visit() {
-            (FIRST_VISIT_VIEW_READS, FIRST_VISIT_VIEW_DDL)
-        } else {
-            (0, 0)
-        };
+        // A navigation costs the same whether or not the root has been visited
+        // before: matview creation has moved off this path entirely. Over 98
+        // samples the reads are 26 (×85), 27 (×10), 20 (×3) — a 20..27 spread,
+        // not a constant — and BOTH arms of `last_navigate_first_visit()` draw
+        // from that same distribution. The first-visit arm's predicted 6
+        // CREATEs never materialise: ddl=0 in 98/98, including all 43
+        // first-visit samples. So the branch, `FIRST_VISIT_VIEW_READS` and
+        // `FIRST_VISIT_VIEW_DDL` are fiction here and the budget is one
+        // expression.
+        //
+        // 12 of the 26 are named: REACTIVE_BASE (5) + JOURNAL_READS (2) +
+        // NAV_DML_READS (5). The remaining 14 are the post-navigation
+        // re-render's projection + block lookups. Modelled as a constant
+        // because the spread does not track state size (r=1..7 in the 25
+        // samples carrying it), NOT because it is invariant. Max observed 27
+        // against a limit of 26 + docs_tolerance.
         ExpectedSql {
-            reads: REACTIVE_BASE + JOURNAL_READS + NAV_DML_READS + first_visit_reads,
+            reads: REACTIVE_BASE + JOURNAL_READS + NAV_DML_READS + NAV_RENDER_FAN_READS,
             writes: 0,
-            ddl: first_visit_ddl,
+            ddl: 0,
             tolerance: docs_tolerance(state),
         }
     }
