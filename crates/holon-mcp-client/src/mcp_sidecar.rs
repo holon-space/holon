@@ -104,6 +104,33 @@ impl EntityConfig {
     pub fn id_column_or_default(&self) -> String {
         self.id_column.clone().unwrap_or_else(|| "id".to_string())
     }
+
+    /// The columns carrying this entity's row identity, most authoritative
+    /// declaration first: schema columns marked `primary_key`, else an
+    /// explicitly declared `id_column`, else a column literally named `id`.
+    ///
+    /// Empty means the entity declares no identity at all — distinct from
+    /// [`Self::id_column_or_default`], whose `"id"` is an answer to a question
+    /// the entity never asked and therefore cannot be read as a declaration.
+    pub fn identity_columns(&self) -> Vec<String> {
+        let primary_keys: Vec<String> = self
+            .schema
+            .iter()
+            .filter(|f| f.primary_key)
+            .map(|f| f.name.clone())
+            .collect();
+        if !primary_keys.is_empty() {
+            return primary_keys;
+        }
+        if let Some(ref col) = self.id_column {
+            return vec![col.clone()];
+        }
+        self.schema
+            .iter()
+            .filter(|f| f.name == "id")
+            .map(|f| f.name.clone())
+            .collect()
+    }
 }
 
 /// Declarative sync recipe: either tool-based or resource-based.

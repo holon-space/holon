@@ -687,6 +687,7 @@ async fn finish_integration(
                 vtable_config,
                 Arc::new(peer.clone()),
                 id_scheme,
+                &entity_config.identity_columns(),
                 cache_table,
                 tokio::runtime::Handle::current(),
                 sidecar.entity_prefix.as_deref(),

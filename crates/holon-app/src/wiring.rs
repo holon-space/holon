@@ -356,10 +356,15 @@ impl FrontendInjectorExt for Injector {
                         for table in mcp_registry.fdw_backed_tables() {
                             engine.register_fdw_table(&table).await;
                         }
-                        if let Some(integration) = mcp_registry.integrations().first() {
-                            engine
-                                .set_matview_hook(integration.sync_engine.clone())
-                                .await;
+                        let hooks = mcp_registry
+                            .integrations()
+                            .iter()
+                            .map(|i| {
+                                i.sync_engine.clone() as std::sync::Arc<dyn holon_core::MatviewHook>
+                            })
+                            .collect();
+                        if let Some(hook) = holon_core::combine_matview_hooks(hooks) {
+                            engine.set_matview_hook(hook).await;
                         }
                     }
                 }
