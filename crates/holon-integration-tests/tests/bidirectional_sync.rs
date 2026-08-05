@@ -752,10 +752,10 @@ fn stability_multiple_rapid_ui_updates_converge() {
 ///
 /// The differential shadow is default-ON in debug builds, and budget-asserting
 /// suites opt out (design doc §9.8). That "enumerate the exclusions" policy can
-/// rot silently — an exclusion added elsewhere, or a quiescence rule the suite's
-/// cadence never satisfies, would leave the shadow armed but never comparing,
-/// and a green run would prove nothing. So this suite asserts the shadow
-/// actually COMPLETED a comparison.
+/// rot silently — an exclusion added elsewhere, or a quiescence rule the
+/// suite's cadence never satisfies, would leave the shadow armed but never
+/// comparing, and a green run would prove nothing. So this suite asserts the
+/// shadow actually COMPLETED a comparison.
 ///
 /// The settle below is deliberate environment strengthening, not a weakened
 /// rule: quiescence requires both the feed and the controller to stop moving

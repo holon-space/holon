@@ -1573,7 +1573,7 @@ mod tests {
             "left_sidebar",
             holon_api::ClickModifiers::none(),
         )
-            .expect("left_sidebar click on block:foo should yield an intent");
+        .expect("left_sidebar click on block:foo should yield an intent");
         assert_eq!(left_intent.entity_name.as_str(), "navigation");
         assert_eq!(left_intent.op_name, "focus");
 
@@ -1592,21 +1592,25 @@ mod tests {
         );
 
         // Unknown region → None (defensive).
-        assert!(find_click_intent_in_region(
-            &root,
-            &uri("block:foo"),
-            "bogus_region",
-            holon_api::ClickModifiers::none()
-        )
-        .is_none());
+        assert!(
+            find_click_intent_in_region(
+                &root,
+                &uri("block:foo"),
+                "bogus_region",
+                holon_api::ClickModifiers::none()
+            )
+            .is_none()
+        );
 
         // Entity not in any panel's subtree → None.
-        assert!(find_click_intent_in_region(
-            &root,
-            &uri("block:never"),
-            "left_sidebar",
-            holon_api::ClickModifiers::none()
-        )
-        .is_none());
+        assert!(
+            find_click_intent_in_region(
+                &root,
+                &uri("block:never"),
+                "left_sidebar",
+                holon_api::ClickModifiers::none()
+            )
+            .is_none()
+        );
     }
 }
