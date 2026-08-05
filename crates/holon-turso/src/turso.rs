@@ -78,6 +78,7 @@ use crate::matview_lease::ViewWaiter;
 use crate::sql_parser::extract_created_tables;
 use crate::sql_parser::extract_table_refs;
 use crate::sql_parser::parse_sql;
+use crate::sql_utils::rewrite_named_params;
 
 // ============================================================================
 // Types moved from turso_actor.rs
@@ -956,46 +957,35 @@ pub(crate) fn value_to_turso_param(value: &Value) -> turso::Value {
     }
 }
 
-/// Bind named parameters ($param_name) to positional placeholders (?)
+/// Bind named parameters (`$name`, `:name`, `@name`) to positional
+/// placeholders (`?`).
+///
+/// A placeholder with no bound value is an error, never a pass-through: SQLite
+/// happily accepts the unbound name and evaluates it as NULL, so the statement
+/// succeeds and quietly matches nothing.
 fn bind_parameters(
     sql: &str,
     params: &HashMap<String, Value>,
 ) -> Result<(String, Vec<turso::Value>)> {
-    let mut result_sql = String::with_capacity(sql.len());
     let mut param_values = Vec::new();
-    let mut chars = sql.chars().peekable();
+    let mut unbound: Vec<String> = Vec::new();
 
-    while let Some(ch) = chars.next() {
-        if ch == '$' {
-            if let Some(&next_ch) = chars.peek() {
-                if next_ch.is_alphanumeric() || next_ch == '_' {
-                    let mut param_name = String::new();
-                    while let Some(&next_ch) = chars.peek() {
-                        if next_ch.is_alphanumeric() || next_ch == '_' {
-                            param_name.push(chars.next().unwrap());
-                        } else {
-                            break;
-                        }
-                    }
-
-                    if let Some(value) = params.get(&param_name) {
-                        result_sql.push('?');
-                        param_values.push(value_to_turso_param(value));
-                    } else {
-                        return Err(StorageError::QueryError(format!(
-                            "Parameter ${} not found",
-                            param_name
-                        )));
-                    }
-                } else {
-                    result_sql.push('$');
-                }
-            } else {
-                result_sql.push('$');
-            }
-        } else {
-            result_sql.push(ch);
+    let result_sql = rewrite_named_params(sql, &mut |name| match params.get(name) {
+        Some(value) => {
+            param_values.push(value_to_turso_param(value));
+            Some("?".to_string())
         }
+        None => {
+            unbound.push(name.to_string());
+            None
+        }
+    });
+
+    if !unbound.is_empty() {
+        return Err(StorageError::QueryError(format!(
+            "Parameters {unbound:?} appear in the query but have no bound value; an unbound \
+             placeholder evaluates to NULL and would silently match nothing. Query: {sql}"
+        )));
     }
 
     Ok((result_sql, param_values))
@@ -3223,6 +3213,51 @@ mod tests {
         assert!(vals.is_empty());
     }
 
+    // `:name` is the style an agent (and the MCP `params` map) writes. Leaving
+    // it unbound is not inert: SQLite reads the unbound placeholder as NULL, so
+    // the query succeeds and returns nothing.
+    #[test]
+    fn bind_parameters_binds_colon_and_at_styles() {
+        for sigil in [':', '@'] {
+            let mut params = HashMap::new();
+            params.insert("pid".to_string(), Value::String("block:1820f890".into()));
+            let (sql, vals) = bind_parameters(
+                &format!("SELECT * FROM block WHERE parent_id = {sigil}pid"),
+                &params,
+            )
+            .expect("bind");
+            assert_eq!(
+                sql, "SELECT * FROM block WHERE parent_id = ?",
+                "sigil {sigil}"
+            );
+            assert!(
+                matches!(vals.as_slice(), [turso::Value::Text(t)] if t == "block:1820f890"),
+                "sigil {sigil} bound {vals:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bind_parameters_unbound_colon_param_is_an_error_not_an_empty_result() {
+        let err = bind_parameters(
+            "SELECT * FROM block WHERE parent_id = :pid",
+            &HashMap::new(),
+        )
+        .expect_err("an unbound placeholder must fail loud");
+        let msg = format!("{err}");
+        assert!(msg.contains("pid"), "error must name the parameter: {msg}");
+    }
+
+    // Schemed ids are colon-bearing, so the literal form of the very query the
+    // named form failed on must keep working — and bind nothing.
+    #[test]
+    fn bind_parameters_schemed_id_literal_is_not_a_placeholder() {
+        let sql = "SELECT * FROM block WHERE parent_id = 'block:1820f890-aaaa'";
+        let (out, vals) = bind_parameters(sql, &HashMap::new()).expect("bind");
+        assert_eq!(out, sql);
+        assert!(vals.is_empty());
+    }
+
     #[test]
     fn test_parse_json_object_object() {
         let mut obj = HashMap::new();
@@ -3533,6 +3568,66 @@ mod integration_tests {
         std::mem::forget(temp_dir);
 
         Ok((Arc::new(RwLock::new(backend)), handle))
+    }
+
+    /// The live defect, end to end: the same filter written as a `:name`
+    /// parameter and as an inline literal must select the same rows. Before the
+    /// fix the parameterised form returned zero rows and no error, because
+    /// `:pid` reached SQLite unbound and compared as NULL.
+    #[tokio::test]
+    async fn colon_named_parameter_selects_the_same_rows_as_the_literal() {
+        let (_backend, handle) = create_test_backend().await.unwrap();
+        handle
+            .execute_ddl("CREATE TABLE b (id TEXT PRIMARY KEY, parent_id TEXT)")
+            .await
+            .unwrap();
+
+        const PARENT: &str = "block:1820f890-aaaa-bbbb-cccc-ddddeeeeffff";
+        for i in 0..5 {
+            handle
+                .execute(
+                    "INSERT INTO b (id, parent_id) VALUES (?, ?)",
+                    vec![
+                        turso::Value::Text(format!("block:child-{i}")),
+                        turso::Value::Text(PARENT.to_string()),
+                    ],
+                )
+                .await
+                .unwrap();
+        }
+        handle
+            .execute(
+                "INSERT INTO b (id, parent_id) VALUES (?, ?)",
+                vec![
+                    turso::Value::Text("block:elsewhere".to_string()),
+                    turso::Value::Text("block:other-parent".to_string()),
+                ],
+            )
+            .await
+            .unwrap();
+
+        let literal = handle
+            .query(
+                &format!("SELECT * FROM b WHERE parent_id = '{PARENT}'"),
+                HashMap::new(),
+            )
+            .await
+            .expect("literal query");
+        assert_eq!(literal.len(), 5, "fixture: the literal form selects 5 rows");
+
+        let mut params = HashMap::new();
+        params.insert("pid".to_string(), Value::String(PARENT.to_string()));
+        let bound = handle
+            .query("SELECT * FROM b WHERE parent_id = :pid", params)
+            .await
+            .expect("named-parameter query");
+        assert_eq!(
+            bound.len(),
+            literal.len(),
+            "`:pid` must select what the literal selects, not silently nothing"
+        );
+
+        handle.shutdown().await.unwrap();
     }
 
     /// Test that DDL operations work and are properly serialized

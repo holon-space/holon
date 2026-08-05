@@ -42,6 +42,145 @@ fn json_to_holon_value(v: serde_json::Value) -> Value {
     Value::from_json_value(v)
 }
 
+/// Parse a `doc_id` tool argument into the block URI the stores key on.
+///
+/// Agents get ids from both directions — `list_loro_documents` publishes them
+/// SCHEMED (`block:<uuid>`), org files and the UI hand out BARE uuids — so the
+/// boundary must accept either. `from_raw` is idempotent, which
+/// `EntityUri::block` is not: it re-schemes an already-schemed id into
+/// `block:block:<uuid>`, matching no row in either store.
+fn doc_uri_from_arg(doc_id: &str) -> String {
+    // ALLOW(entity_uri_from_raw): doc_id is a raw MCP argument of unknown form
+    holon_api::EntityUri::from_raw(doc_id).to_string()
+}
+
+/// The two facts the Loro↔SQL diff needs about a block to decide whether it
+/// belongs to a document. Both stores are reduced to this shape so a membership
+/// difference can only come from the data, never from two walks disagreeing
+/// about what "in the document" means.
+#[derive(Debug)]
+struct DiffNode {
+    parent_id: String,
+    is_page: bool,
+}
+
+/// The ids of `doc_uri`'s document subtree, keyed out of `nodes` (block id →
+/// node).
+///
+/// Descends from the doc and stops at any Page-tagged block without emitting
+/// it: a Page is a sub-document root, so its blocks belong to that page's
+/// document. This mirrors `LoroBlockReader::collect_subtree` and the Turso
+/// recursive CTE that excludes `block_tags.tag = 'Page'`.
+///
+/// The seed uses `starts_with` rather than equality to keep covering legacy
+/// hierarchical ids, whose parent is a `<doc_uri>/...` path rather than the doc
+/// itself.
+fn doc_subtree_ids(
+    doc_uri: &str,
+    nodes: &HashMap<String, DiffNode>,
+) -> Result<HashSet<String>, String> {
+    let mut children_of: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (id, node) in nodes {
+        children_of
+            .entry(node.parent_id.as_str())
+            .or_default()
+            .push(id.as_str());
+    }
+
+    let mut frontier: Vec<&str> = nodes
+        .iter()
+        .filter(|(_, node)| node.parent_id.starts_with(doc_uri))
+        .map(|(id, _)| id.as_str())
+        .collect();
+
+    let mut members = HashSet::new();
+    while let Some(id) = frontier.pop() {
+        if nodes[id].is_page {
+            continue;
+        }
+        // A legacy hierarchical id can be seeded AND reached as a child of
+        // another seed; only the descent below must not repeat.
+        if !members.insert(id.to_string()) {
+            continue;
+        }
+        if let Some(kids) = children_of.get(id) {
+            frontier.extend(kids);
+        }
+    }
+    Ok(members)
+}
+
+/// `doc_subtree_ids` plus the acyclicity check, tagged with which store the
+/// failure came from.
+fn subtree_or_error(
+    doc_uri: &str,
+    nodes: &HashMap<String, DiffNode>,
+    store: &str,
+) -> Result<HashSet<String>, rmcp::ErrorData> {
+    let fail = |e: String| {
+        rmcp::ErrorData::internal_error(
+            format!("{store} block graph for '{doc_uri}': {e}"),
+            Some(serde_json::json!({"store": store, "doc_uri": doc_uri})),
+        )
+    };
+    reject_parent_cycles(nodes).map_err(fail)?;
+    doc_subtree_ids(doc_uri, nodes).map_err(fail)
+}
+
+/// Reduce a `block` row to the diff's node shape.
+///
+/// `tags` is a JSON string array column, so anything else is a schema break
+/// rather than a tagless block — and reading it as tagless would silently pull
+/// whole Page subtrees into the wrong document's diff.
+fn sql_row_node(row: &StorageEntity, id: &str) -> Result<DiffNode, String> {
+    let parent_id = match row.get("parent_id") {
+        Some(Value::String(p)) => p.clone(),
+        None | Some(Value::Null) => EntityUri::no_parent().to_string(),
+        Some(other) => return Err(format!("block {id}: parent_id is not text: {other:?}")),
+    };
+    let tags: Vec<String> = match row.get("tags") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|v| match v {
+                Value::String(s) => Ok(s.clone()),
+                other => Err(format!("block {id}: non-string tag {other:?}")),
+            })
+            .collect::<Result<_, _>>()?,
+        Some(Value::String(s) | Value::Json(s)) => serde_json::from_str(s)
+            .map_err(|e| format!("block {id}: tags is not a JSON string array ({s:?}): {e}"))?,
+        other => {
+            return Err(format!(
+                "block {id}: column 'tags' must be a JSON string array, got {other:?}"
+            ));
+        }
+    };
+    Ok(DiffNode {
+        parent_id,
+        is_page: tags.iter().any(|t| t == holon_api::block::PAGE_TAG),
+    })
+}
+
+/// Reject a `parent_id` graph that is not a forest. A cycle is invisible to the
+/// downward subtree walk — nothing in it is reachable from the doc — so the
+/// diff would quietly report every cyclic block as missing from this store
+/// instead of naming the corruption.
+fn reject_parent_cycles(nodes: &HashMap<String, DiffNode>) -> Result<(), String> {
+    for id in nodes.keys() {
+        let mut seen: HashSet<&str> = HashSet::from([id.as_str()]);
+        let mut current = id.as_str();
+        while let Some(node) = nodes.get(current) {
+            if !seen.insert(node.parent_id.as_str()) {
+                return Err(format!(
+                    "parent_id cycle detected at block '{}' (reached from '{id}')",
+                    node.parent_id
+                ));
+            }
+            current = node.parent_id.as_str();
+        }
+    }
+    Ok(())
+}
+
 /// A SUT retired by `reset_vault` (Phase 1 Option A, plan F). Holds its Arcs +
 /// temp dirs so nothing Drops: the retired engine's watchers/consolidator idle
 /// against still-existing but abandoned fresh paths. `_`-prefixed because the
@@ -2331,19 +2470,35 @@ impl HolonMcpServer {
         &self,
         Parameters(params): Parameters<DiffLoroSqlParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let loro_blocks = self.get_loro_blocks(&params.doc_id).await?;
-
-        // Build a map of Loro blocks by ID
-        let loro_map: HashMap<String, &Block> =
-            loro_blocks.iter().map(|b| (b.id.to_string(), b)).collect();
-
-        // Get the document URI for SQL query
         let doc_uri = self.resolve_doc_uri(&params.doc_id).await?;
 
-        // Fetch ALL blocks, then select the doc's full subtree by walking
-        // parent chains in Rust. A `parent_id LIKE '<doc_uri>%'` filter only
-        // finds direct children: nested blocks have another block's UUID as
-        // parent_id and would be falsely reported as only_in_loro.
+        // Loro stores the whole vault as ONE document, so `get_loro_blocks`
+        // returns every block there is. Scope it to the doc with the same walk
+        // the SQL side uses below — an unscoped Loro side reports the rest of
+        // the vault as only_in_loro.
+        let all_loro_blocks = self.get_loro_blocks(&params.doc_id).await?;
+        let loro_nodes: HashMap<String, DiffNode> = all_loro_blocks
+            .iter()
+            .map(|b| {
+                (
+                    b.id.to_string(),
+                    DiffNode {
+                        parent_id: b.parent_id.to_string(),
+                        is_page: b.is_page(),
+                    },
+                )
+            })
+            .collect();
+        let loro_ids = subtree_or_error(&doc_uri, &loro_nodes, "Loro")?;
+        let loro_map: HashMap<String, &Block> = all_loro_blocks
+            .iter()
+            .filter(|b| loro_ids.contains(&b.id.to_string()))
+            .map(|b| (b.id.to_string(), b))
+            .collect();
+
+        // Fetch ALL blocks and scope them in Rust: a `parent_id LIKE
+        // '<doc_uri>%'` filter finds only direct children, so nested blocks
+        // would be falsely reported as only_in_loro.
         // task_state lives inside the properties JSON, so surface it as a
         // column for the field comparison below.
         let sql = format!(
@@ -2368,33 +2523,23 @@ impl HolonMcpServer {
             }
         }
 
-        let parent_of = |id: &str| -> Option<String> {
-            match rows_by_id.get(id)?.get("parent_id") {
-                Some(Value::String(p)) => Some(p.clone()),
-                _ => None,
-            }
-        };
-
-        // Build SQL block map: every block whose parent chain reaches the doc.
-        // The starts_with covers legacy hierarchical ids (old `LIKE '<doc_uri>%'`).
-        let mut sql_map: HashMap<String, &holon_api::StorageEntity> = HashMap::new();
+        let mut sql_nodes: HashMap<String, DiffNode> = HashMap::with_capacity(rows_by_id.len());
         for (id, row) in &rows_by_id {
-            let mut current = id.clone();
-            let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
-            while let Some(parent) = parent_of(&current) {
-                if parent.starts_with(&doc_uri) {
-                    sql_map.insert(id.clone(), *row);
-                    break;
-                }
-                if !visited.insert(parent.clone()) {
-                    return Err(rmcp::ErrorData::internal_error(
-                        format!("parent_id cycle detected at block '{}'", parent),
-                        Some(serde_json::json!({"block_id": id})),
-                    ));
-                }
-                current = parent;
-            }
+            sql_nodes.insert(
+                id.clone(),
+                sql_row_node(row, id).map_err(|e| {
+                    rmcp::ErrorData::internal_error(
+                        format!("SQL block row is not diffable: {e}"),
+                        None,
+                    )
+                })?,
+            );
         }
+        let sql_ids = subtree_or_error(&doc_uri, &sql_nodes, "SQL")?;
+        let sql_map: HashMap<String, &holon_api::StorageEntity> = sql_ids
+            .iter()
+            .map(|id| (id.clone(), rows_by_id[id]))
+            .collect();
 
         // Compare
         let mut only_in_loro = Vec::new();
@@ -2454,7 +2599,7 @@ impl HolonMcpServer {
 
         let result = serde_json::json!({
             "doc_id": params.doc_id,
-            "loro_block_count": loro_blocks.len(),
+            "loro_block_count": loro_map.len(),
             "sql_block_count": sql_map.len(),
             "only_in_loro": only_in_loro,
             "only_in_sql": only_in_sql,
@@ -4011,12 +4156,7 @@ impl HolonMcpServer {
 
     /// Resolve a doc_id to its block URI.
     async fn resolve_doc_uri(&self, doc_id: &str) -> Result<String, rmcp::ErrorData> {
-        // ALLOW(entity_uri_from_raw): resolve_doc_uri raw MCP arg before sentinel check
-        let uri = holon_api::EntityUri::from_raw(doc_id);
-        if uri.is_sentinel() {
-            return Ok(uri.to_string());
-        }
-        Ok(holon_api::EntityUri::block(doc_id).to_string())
+        Ok(doc_uri_from_arg(doc_id))
     }
 
     /// Resolve a doc_id (UUID or path) to a file path on disk.
@@ -4145,6 +4285,137 @@ mod window_select_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── diff_loro_sql doc scoping (BugFunnel: schemed/bare + unscoped Loro) ──
+
+    const DOC: &str = "block:1820f890-aaaa-bbbb-cccc-ddddeeeeffff";
+
+    /// Build the same tree in the shape each arm supplies it, so the two
+    /// extraction paths — `Block::is_page` and the `tags` column — are compared
+    /// against each other rather than against a restatement of one of them.
+    ///
+    /// Shape: doc → {a → a1, page (Page) → page_kid}, plus a block under a
+    /// different document.
+    fn fixture() -> Vec<(&'static str, &'static str, bool)> {
+        vec![
+            ("block:a", DOC, false),
+            ("block:a1", "block:a", false),
+            ("block:page", DOC, true),
+            ("block:page-kid", "block:page", false),
+            ("block:foreign", "block:other-doc", false),
+        ]
+    }
+
+    fn loro_nodes() -> HashMap<String, DiffNode> {
+        fixture()
+            .into_iter()
+            .map(|(id, parent, page)| {
+                // ALLOW(entity_uri_from_raw): test literals
+                let (id_uri, parent_uri) = (EntityUri::from_raw(id), EntityUri::from_raw(parent));
+                let mut b = Block::new_text(id_uri, parent_uri, "content");
+                b.set_page(page);
+                (
+                    b.id.to_string(),
+                    DiffNode {
+                        parent_id: b.parent_id.to_string(),
+                        is_page: b.is_page(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn sql_nodes() -> HashMap<String, DiffNode> {
+        fixture()
+            .into_iter()
+            .map(|(id, parent, page)| {
+                let mut row = StorageEntity::new();
+                row.insert(Arc::from("id"), Value::String(id.to_string()));
+                row.insert(Arc::from("parent_id"), Value::String(parent.to_string()));
+                row.insert(
+                    Arc::from("tags"),
+                    Value::String(if page { r#"["Page"]"# } else { "[]" }.to_string()),
+                );
+                (
+                    id.to_string(),
+                    sql_row_node(&row, id).expect("row is diffable"),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn doc_uri_from_arg_accepts_schemed_and_bare_alike() {
+        let bare = "1820f890-aaaa-bbbb-cccc-ddddeeeeffff";
+        assert_eq!(doc_uri_from_arg(bare), DOC);
+        assert_eq!(
+            doc_uri_from_arg(DOC),
+            DOC,
+            "a schemed id must not re-scheme"
+        );
+    }
+
+    #[test]
+    fn doc_subtree_reaches_nested_blocks() {
+        let ids = doc_subtree_ids(DOC, &sql_nodes()).expect("acyclic");
+        assert!(ids.contains("block:a"));
+        assert!(
+            ids.contains("block:a1"),
+            "nested block must be in the subtree"
+        );
+    }
+
+    // A Page is a sub-document root: its blocks belong to that page's document,
+    // so counting them here would compare two different documents.
+    #[test]
+    fn doc_subtree_excludes_a_page_child_and_its_subtree() {
+        let ids = doc_subtree_ids(DOC, &sql_nodes()).expect("acyclic");
+        assert!(!ids.contains("block:page"), "Page child leaked in: {ids:?}");
+        assert!(
+            !ids.contains("block:page-kid"),
+            "Page subtree leaked in: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn doc_subtree_excludes_another_documents_blocks() {
+        let ids = doc_subtree_ids(DOC, &sql_nodes()).expect("acyclic");
+        assert!(!ids.contains("block:foreign"));
+    }
+
+    /// The diff's core honesty property: both arms answer "is this block in the
+    /// document?" identically, so a converged store diffs to nothing.
+    #[test]
+    fn both_arms_agree_on_membership_for_schemed_and_bare_ids() {
+        let bare = "1820f890-aaaa-bbbb-cccc-ddddeeeeffff";
+        for arg in [DOC, bare] {
+            let uri = doc_uri_from_arg(arg);
+            let loro = doc_subtree_ids(&uri, &loro_nodes()).expect("acyclic");
+            let sql = doc_subtree_ids(&uri, &sql_nodes()).expect("acyclic");
+            assert_eq!(loro, sql, "arms disagree for doc_id {arg:?}");
+            assert_eq!(
+                loro,
+                HashSet::from(["block:a".to_string(), "block:a1".to_string()]),
+                "doc_id {arg:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_parent_cycle_is_named_rather_than_silently_dropped() {
+        let mut nodes = sql_nodes();
+        nodes.get_mut("block:a").expect("fixture").parent_id = "block:a1".to_string();
+        let err = reject_parent_cycles(&nodes).expect_err("cycle must be rejected");
+        assert!(err.contains("block:a"), "error must name the cycle: {err}");
+    }
+
+    #[test]
+    fn sql_row_without_a_usable_tags_column_is_an_error() {
+        let mut row = StorageEntity::new();
+        row.insert(Arc::from("parent_id"), Value::String(DOC.to_string()));
+        let err = sql_row_node(&row, "block:a").expect_err("missing tags must fail loud");
+        assert!(err.contains("tags"), "got: {err}");
+    }
 
     #[test]
     fn json_to_holon_string() {
