@@ -717,24 +717,30 @@ fn sql_attr(span: &SpanData) -> Option<String> {
 /// - `distinct_bindings > 1`: a parameterized statement fanned out over
 ///   different bindings (e.g. one render per sidebar) — possibly a real N+1,
 ///   possibly legitimate; judge by the count.
+/// `max_repeat_per_binding` is the adjudicator `distinct_bindings` alone cannot
+/// be: it is the largest number of times any ONE binding-set re-ran. At 1 the
+/// fan is fully legitimate (every execution served a distinct consumer); above
+/// 1 that many executions were the same consumer asking the same question, and
+/// the excess is redundant work a coalescing fix would remove.
 #[derive(Debug, Clone)]
 pub struct DuplicateSql {
     pub sql: String,
     pub count: usize,
     pub distinct_bindings: usize,
+    pub max_repeat_per_binding: usize,
 }
 
 /// Find SQL texts that appear more than once (potential N+1 pattern),
 /// sorted by count descending.
 fn find_duplicate_sql<'a>(sql_spans: impl Iterator<Item = &'a SpanData>) -> Vec<DuplicateSql> {
-    let mut counts: HashMap<String, (usize, std::collections::HashSet<String>)> = HashMap::new();
+    let mut counts: HashMap<String, (usize, HashMap<String, usize>)> = HashMap::new();
     for span in sql_spans {
         if let Some(sql) = sql_attr(span) {
             let entry = counts.entry(sql).or_default();
             entry.0 += 1;
             // DDL spans don't carry params_fp; treat them as one binding.
             let fp = span_attr(span, "params_fp").unwrap_or_else(|| "-".into());
-            entry.1.insert(fp);
+            *entry.1.entry(fp).or_default() += 1;
         }
     }
     let mut duplicates: Vec<DuplicateSql> = counts
@@ -744,6 +750,7 @@ fn find_duplicate_sql<'a>(sql_spans: impl Iterator<Item = &'a SpanData>) -> Vec<
             sql,
             count,
             distinct_bindings: fps.len(),
+            max_repeat_per_binding: fps.values().copied().max().unwrap_or(0),
         })
         .collect();
     duplicates.sort_by(|a, b| b.count.cmp(&a.count));

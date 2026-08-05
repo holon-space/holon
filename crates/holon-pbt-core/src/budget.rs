@@ -12,6 +12,16 @@ use crate::capabilities::RefSqlCardinality;
 pub const REACTIVE_BASE: usize = 5;
 pub const JOURNAL_READS: usize = 2;
 pub const NAV_DML_READS: usize = 5;
+
+/// The post-navigation re-render's projection + block lookups — the part of a
+/// navigate that the DML/journal/reactive constants do not name.
+///
+/// A measured constant, not a formula: across 63 `NavigateFocus` samples
+/// spanning b=27..50 and r=4..6 the total sat flat at 26 reads, so the fan is
+/// bounded by the focus root's own scope rather than by vault size. A breach
+/// means the navigate render started scaling with the vault, which is the
+/// regression this budget exists to catch.
+pub const NAV_RENDER_FAN_READS: usize = 14;
 pub const CACHE_EVENT_READS: usize = 3;
 pub const READS_PER_WATCH: usize = 2;
 
@@ -42,11 +52,10 @@ pub const READS_PER_WATCH: usize = 2;
 //   re-evaluates. (Contrast the document-mutating siblings, which correctly pay
 //   `watches * READS_PER_WATCH`.) Held sampled forever by the
 //   `watch-bearing-click-nav-sql-budget` hand-authored case.
-// - first visit to a root — `NavigateFocus` pays `FIRST_VISIT_VIEW_READS` +
-//   `FIRST_VISIT_VIEW_DDL`, but `open_tab` APPENDS a row instead of closing the
-//   region's others, so no matview is created: first-visit opens measured the
-//   same reads and 0 DDL as revisits. Adding the term would have opened an
-//   18-read hole in the ceiling.
+// - first visit to a root — first-visit opens measured the same reads and 0 DDL
+//   as revisits, so adding the term would have opened a hole in the ceiling.
+//   `NavigateFocus` has since been measured the same way and no longer carries
+//   a first-visit term either: matview creation is not on the navigate path.
 
 /// `PinBlock`'s click-resolve cost. Ceiling = 12 + 5 = **17 reads**, measured
 /// over 133 shallow-state samples.
@@ -85,14 +94,6 @@ pub const OPEN_TAB_CLICK_RESOLVE_READS: usize = 10;
 /// coalescing-dependent counter is exact. Widening this is not the fix for a
 /// breach — a breach means the click path grew.
 pub const CLICK_JITTER_TOLERANCE: usize = 1;
-
-/// First navigation to a root renders it for the first time: each watch
-/// matview takes `ensure_view`'s create path (2 sqlite_master existence
-/// checks + the initial view SELECT). Measured on the minimal
-/// WriteOrgFile×2 → StartApp → NavigateFocus capture: 6 new views ⇒ ~18
-/// reads + 6 CREATEs.
-pub const FIRST_VISIT_VIEW_READS: usize = 18;
-pub const FIRST_VISIT_VIEW_DDL: usize = 6;
 
 /// Per-variant budget files share this tolerance helper. Base jitter (4)
 /// plus extra matview checks (~2 reads per extra doc) for restarts reusing

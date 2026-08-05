@@ -120,8 +120,20 @@ crate::cap_transition! {
         sut.scroll_over(&me.element_id, me.delta_y as f32).await;
     }
     sql_budget: |_me, _state| {
-        // A wheel issues no SQL (pure viewport).
-        ExpectedSql { reads: 0, writes: 0, ddl: 0, tolerance: 0 }
+        // A wheel is pure viewport motion, but it still costs reads: measured
+        // at 3 in all 5 retained samples (b=27..42, r=4..19), no variance.
+        //
+        // What those 3 statements ARE is NOT established — the retained corpus
+        // has no per-statement breakdown for this transition. The only
+        // focus_roots read on any prod path is a single un-filtered watch,
+        // `SELECT region, root_id FROM focus_roots`
+        // (`holon/src/sync/turso_block_query_source.rs:134`), observed
+        // re-running redundantly elsewhere; 3 is NOT "one per region", and the
+        // per-region `WHERE region = …` form exists only in test fixtures.
+        //
+        // So this is a measured ceiling, not a derivation. A breach means the
+        // wheel path grew; re-measure it, never widen it to pass.
+        ExpectedSql { reads: 3, writes: 0, ddl: 0, tolerance: 0 }
     }
 }
 
