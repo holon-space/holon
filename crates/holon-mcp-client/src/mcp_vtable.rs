@@ -35,6 +35,31 @@ use crate::mcp_call_surface::McpCallSurface;
 // YAML sidecar config types
 // ============================================================================
 
+/// What a source honestly promises about a fetch — the property that decides
+/// which maintenance mechanism is SOUND for an entity, declared rather than
+/// inferred (RULED 2026-08-06).
+///
+/// The one thing a fetch response cannot tell you is what it did NOT return,
+/// and every mechanism below differs only in how much absence it may read as
+/// deletion. Guessing has exactly one failure mode, and it is silent mass data
+/// loss, so the author states it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FetchContract {
+    /// Every fetch returns the ENTIRE collection. Absence is deletion, so a
+    /// full REFRESH is sound and its sweep retracts what vanished.
+    Snapshot,
+    /// Every fetch returns the entire collection WITHIN a scope the fetch
+    /// itself chose (here: the `enumerate_from` watermark). Absence carries no
+    /// information — an unreturned row may be deleted or merely out of scope —
+    /// so the live path may only UPSERT, and deletions are reconciled by a
+    /// (scoped) REFRESH.
+    ScopedSnapshot,
+    /// The provider sends upserts AND tombstones, so absence never has to be
+    /// interpreted at all. No claude-history entity offers this today.
+    Delta,
+}
+
 /// Virtual table configuration for an entity in the YAML sidecar.
 ///
 /// Supports two fetch modes:
@@ -46,6 +71,12 @@ use crate::mcp_call_surface::McpCallSurface;
 /// Exactly one of `search_tool` or `list_resource` must be set.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct VtableConfig {
+    /// What this entity's source promises about a fetch. Required before the
+    /// table may be subscribed to for streaming push: without it the driver
+    /// would have to guess how much absence means, which is the one guess with
+    /// a silent-data-loss failure mode.
+    #[serde(default)]
+    pub fetch_contract: Option<FetchContract>,
     /// MCP tool name for search/list queries (tool-based mode).
     #[serde(default)]
     pub search_tool: Option<String>,
@@ -392,22 +423,20 @@ type FetchedChildRows = (
 );
 
 /// Live subscription state shared between the wrapper and every cursor it
-/// opens: the snapshot is what a push diffs against, and it is only exact if
-/// the scan that built the engine's mirror is the scan that built it.
+/// opens. The push path is stateless beyond this: it holds no snapshot of the
+/// mirror, because it never needs to know what the mirror used to contain.
 #[derive(Debug, Default)]
 struct StreamState {
     sender: Option<mpsc::Sender<FdwChange>>,
     /// Constraints the subscription was opened with — replayed on every
     /// re-fetch so the pushed rows stay predicate-scoped like the mirror.
     constraints: Vec<PushedConstraint>,
-    /// identity-key → full row, as of the last successful scan.
-    snapshot: Option<HashMap<String, Vec<Value>>>,
 }
 
 /// Canonical, total, injective-per-type rendering of a row's identity values.
-/// `Value` is neither `Hash` nor `Eq`, so the snapshot keys on this instead;
-/// the type tag and the length prefix keep `Text("1")` and `Integer(1)`, and
-/// `["a", "b"]` and `["a|b"]`, distinct.
+/// `Value` is neither `Hash` nor `Eq`, so within-scan duplicate detection keys
+/// on this instead; the type tag and the length prefix keep `Text("1")` and
+/// `Integer(1)`, and `["a", "b"]` and `["a|b"]`, distinct.
 fn identity_key(row: &[Value], identity_columns: &[u32]) -> String {
     use turso_core::Numeric;
     let mut key = String::new();
@@ -456,7 +485,10 @@ pub struct McpForeignDataWrapper {
     /// entity declared no identity, so matviews over it keep snapshot
     /// semantics and no mirror is built.
     identity_columns: Option<Vec<u32>>,
-    /// Subscription + snapshot shared with every cursor this wrapper opens.
+    /// What the source promises about a fetch (see [`FetchContract`]).
+    /// `None` = undeclared, which forbids streaming push.
+    fetch_contract: Option<FetchContract>,
+    /// Subscription shared with every cursor this wrapper opens.
     stream: Arc<Mutex<StreamState>>,
     /// If set, fetched rows are written to this cache table via INSERT OR
     /// REPLACE.
@@ -713,6 +745,7 @@ impl McpForeignDataWrapper {
             column_names,
             id_scheme,
             identity_columns,
+            fetch_contract: vtable_config.fetch_contract,
             stream: Arc::new(Mutex::new(StreamState::default())),
             cache_table,
             column_configs: vtable_config.columns.clone(),
@@ -749,12 +782,11 @@ impl ForeignDataWrapper for McpForeignDataWrapper {
             column_names: self.column_names.clone(),
             column_configs: self.column_configs.clone(),
             id_scheme: self.id_scheme.clone(),
-            identity_columns: self.identity_columns.clone(),
-            stream: self.stream.clone(),
             max_fan_out: self.max_fan_out,
             runtime: self.runtime.clone(),
             conn,
             writeback,
+            fan_out_groups: Vec::new(),
             rows: Vec::new(),
             index: 0,
             started: false,
@@ -777,13 +809,23 @@ impl McpForeignDataWrapper {
                 self.table_name
             )));
         }
+        if self.fetch_contract.is_none() {
+            return Err(LimboError::ExtensionError(format!(
+                "[McpForeignDataWrapper] table '{}' declares no `fetch_contract`, so what its \
+                 source promises about a fetch is unknown — and that is precisely what decides \
+                 whether a row missing from a re-fetch was deleted or merely out of scope. \
+                 Declare `vtable.fetch_contract` (snapshot | scoped_snapshot | delta) on the \
+                 entity.",
+                self.table_name
+            )));
+        }
         let (tx, rx) = mpsc::channel();
         let mut state = self.stream.lock().unwrap();
         if state.sender.is_some() {
             return Err(LimboError::ExtensionError(format!(
                 "[McpForeignDataWrapper] table '{}' already has a subscriber; a second \
-                 subscription would orphan the first receiver while the snapshot keeps \
-                 advancing past it, leaving its mirror permanently and silently stale",
+                 subscription would orphan the first receiver, leaving its mirror permanently \
+                 and silently stale",
                 self.table_name
             )));
         }
@@ -812,13 +854,22 @@ impl McpForeignDataWrapper {
     }
 
     /// Translate one `resources/updated` notification into `FdwChange`s and
-    /// hand them to the subscriber. Returns the number of changes emitted.
+    /// hand them to the subscriber. Returns the number of upserts emitted.
     ///
-    /// MCP notifications carry a URI and nothing else — no row data, no
-    /// per-row weight — so the only honest translation is the baseline the
-    /// engine guide sanctions: re-fetch through the ordinary cursor and diff
-    /// against the snapshot that same cursor path recorded. `uri` is therefore
-    /// diagnostic only.
+    /// UPSERT-ONLY, and it never retracts (RULED 2026-08-06). An MCP
+    /// notification carries a URI and nothing else, so the re-fetch is the only
+    /// source of truth available — and the re-fetch is watermark-SCOPED, which
+    /// means it structurally cannot witness a deletion: a row absent from a
+    /// scoped scan may be gone, or may simply belong to a parent the scope
+    /// excluded, and nothing in the response distinguishes those. The driver
+    /// therefore says only what it can prove: these rows exist, with these
+    /// values.
+    ///
+    /// Convergence comes from the engine, not from a diff here: mirror upserts
+    /// are identity-keyed and value-guarded, so re-pushing an unchanged row is
+    /// a zero-delta no-op. Deletions are reconciled by a full REFRESH /
+    /// `full_sync`, which sweeps with the guards a driver-side diff would have
+    /// had to re-derive. `uri` is diagnostic only.
     pub fn push_resource_update(
         &self,
         conn: &Arc<CoreConnection>,
@@ -827,34 +878,26 @@ impl McpForeignDataWrapper {
         let identity = self.identity_columns.as_deref().ok_or_else(|| {
             LimboError::ExtensionError(format!(
                 "[McpForeignDataWrapper] table '{}' declares no row identity; a resource update \
-                 cannot be diffed into row-level changes",
+                 cannot be turned into identity-keyed upserts",
                 self.table_name
             ))
         })?;
 
-        let (previous, constraints) = {
-            let state = self.stream.lock().unwrap();
-            (
-                state.snapshot.clone().unwrap_or_default(),
-                state.constraints.clone(),
-            )
-        };
+        let constraints = self.stream.lock().unwrap().constraints.clone();
 
         debug!(
             "[McpForeignDataWrapper] re-fetching '{}' after resources/updated for {uri}",
             self.table_name
         );
-        // `current` is built from the cursor this call just ran, never read
-        // back out of the snapshot: after seeding, the push path is the snapshot's
-        // only writer, so reading it back would compare a map against itself.
         let mut cursor = self.open_cursor(conn.clone())?;
-        let mut current: HashMap<String, Vec<Value>> = HashMap::new();
+        let mut seen: HashMap<String, Vec<Value>> = HashMap::new();
+        let mut upserts: Vec<FdwChange> = Vec::new();
         if cursor.filter(&constraints)? {
             loop {
                 let row = (0..self.column_names.len())
                     .map(|i| cursor.column(i))
                     .collect::<Result<Vec<Value>, LimboError>>()?;
-                // Guard before any change is staged, mirroring the engine's
+                // Guards run before anything is staged, mirroring the engine's
                 // REFRESH guard: a driver that pushes what REFRESH would refuse
                 // creates an inconsistency the engine cannot catch.
                 if identity.iter().any(|i| row[*i as usize] == Value::Null) {
@@ -866,7 +909,7 @@ impl McpForeignDataWrapper {
                     )));
                 }
                 let key = identity_key(&row, identity);
-                if current.contains_key(&key) {
+                if seen.contains_key(&key) {
                     return Err(LimboError::Constraint(format!(
                         "foreign table '{}' returned more than one row with the same identity \
                          ({} = {}); a declared identity must identify a row uniquely within a scan",
@@ -875,45 +918,20 @@ impl McpForeignDataWrapper {
                         self.identity_values(&row, identity)
                     )));
                 }
-                current.insert(key, row);
+                seen.insert(key, row.clone());
+                upserts.push(FdwChange {
+                    values: row,
+                    weight: 1,
+                });
                 if !cursor.next()? {
                     break;
                 }
             }
         }
 
-        let mut changes: Vec<FdwChange> = Vec::new();
-        for (key, old_row) in &previous {
-            match current.get(key) {
-                None => changes.push(FdwChange {
-                    values: old_row.clone(),
-                    weight: -1,
-                }),
-                Some(new_row) if new_row != old_row => {
-                    changes.push(FdwChange {
-                        values: old_row.clone(),
-                        weight: -1,
-                    });
-                    changes.push(FdwChange {
-                        values: new_row.clone(),
-                        weight: 1,
-                    });
-                }
-                Some(_) => {}
-            }
-        }
-        for (key, new_row) in &current {
-            if !previous.contains_key(key) {
-                changes.push(FdwChange {
-                    values: new_row.clone(),
-                    weight: 1,
-                });
-            }
-        }
-
-        let count = changes.len();
+        let count = upserts.len();
         if count > 0 {
-            let mut state = self.stream.lock().unwrap();
+            let state = self.stream.lock().unwrap();
             let sender = state.sender.clone().ok_or_else(|| {
                 LimboError::ExtensionError(format!(
                     "[McpForeignDataWrapper] table '{}' has {count} pending changes but no \
@@ -921,7 +939,7 @@ impl McpForeignDataWrapper {
                     self.table_name
                 ))
             })?;
-            for change in changes {
+            for change in upserts {
                 sender.send(change).map_err(|e| {
                     LimboError::ExtensionError(format!(
                         "[McpForeignDataWrapper] table '{}' lost its subscriber mid-batch, {count} \
@@ -930,13 +948,10 @@ impl McpForeignDataWrapper {
                     ))
                 })?;
             }
-            // Advanced only by the changes actually handed to the subscriber,
-            // which is what keeps the snapshot tracking the mirror.
-            state.snapshot = Some(current);
         }
 
         debug!(
-            "[McpForeignDataWrapper] '{}' emitted {count} change(s) over identity {identity:?}",
+            "[McpForeignDataWrapper] '{}' upserted {count} row(s) over identity {identity:?}",
             self.table_name
         );
         Ok(count)
@@ -1025,13 +1040,15 @@ struct McpCursor {
     column_names: Vec<String>,
     column_configs: HashMap<String, ColumnConfig>,
     id_scheme: Option<(String, String)>,
-    identity_columns: Option<Vec<u32>>,
-    stream: Arc<Mutex<StreamState>>,
     max_fan_out: Option<u64>,
     runtime: tokio::runtime::Handle,
     /// Database connection for enumeration enumeration queries.
     conn: Arc<CoreConnection>,
     writeback: Option<WritebackTarget>,
+    /// Which parents the last `filter()` actually fetched, in row order:
+    /// (enumeration param map, record count). Scopes per-parent stale-row
+    /// deletion in the write-through cache.
+    fan_out_groups: Vec<(HashMap<String, String>, usize)>,
     rows: Vec<Vec<Value>>,
     index: usize,
     started: bool,
@@ -1337,9 +1354,6 @@ const FAN_OUT_CONCURRENCY: usize = 4;
 
 impl ForeignCursor for McpCursor {
     fn filter(&mut self, constraints: &[PushedConstraint]) -> Result<bool, LimboError> {
-        // Per-parent record counts from enumeration fan-out, in writeback row
-        // order: (enumeration param map, record count). Drives per-parent
-        // stale-row deletion after writeback.
         let mut fan_out_groups: Vec<(HashMap<String, String>, usize)> = Vec::new();
         let records = match &self.fetch_mode {
             FetchMode::Tool {
@@ -1539,35 +1553,18 @@ impl ForeignCursor for McpCursor {
         self.index = 0;
         self.started = true;
 
-        // SEED ONCE. A later ad-hoc `SELECT` re-reads upstream but writes no
-        // mirror; letting it advance the snapshot would make the next push diff
-        // current against current, emit nothing, and strand the view stale.
-        // The seeding scan itself may be one that built no mirror (a `SELECT`
-        // before `CREATE MATERIALIZED VIEW`), so the snapshot may LEAD the
-        // mirror; that converges rather than corrupts because mirror upserts
-        // are identity-keyed and idempotent.
-        if let Some(ref identity) = self.identity_columns {
-            let mut state = self.stream.lock().unwrap();
-            if state.snapshot.is_none() {
-                state.snapshot = Some(
-                    self.rows
-                        .iter()
-                        .map(|row| (identity_key(row, identity), row.clone()))
-                        .collect(),
-                );
-            }
-        }
-
         info!(
             "[McpCursor] Got {} records via {:?}",
             self.rows.len(),
             self.fetch_mode
         );
 
+        self.fan_out_groups = fan_out_groups;
+
         if let Some(ref wb) = self.writeback {
             wb.write_rows(&self.rows)?;
-            if !fan_out_groups.is_empty() {
-                self.delete_stale_children(wb, &fan_out_groups)?;
+            if !self.fan_out_groups.is_empty() {
+                self.delete_stale_children(wb, &self.fan_out_groups)?;
             }
         }
 

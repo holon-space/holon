@@ -648,6 +648,8 @@ async fn finish_integration(
         .map(|(name, cfg)| (name.clone(), cfg.id_column_or_default()))
         .collect();
     let mut fdw_backed_tables = Vec::new();
+    let mut identity_less_fdw_tables: Vec<String> = Vec::new();
+    let mut contractless_fdw_tables: Vec<String> = Vec::new();
     for (entity_name, entity_config) in &sidecar.entities {
         if let Some(ref vtable_config) = entity_config.vtable {
             let table_name = sidecar.prefixed_name(entity_name).table_name();
@@ -664,6 +666,12 @@ async fn finish_integration(
                     entity_name
                 );
                 continue;
+            }
+            if entity_config.identity_columns().is_empty() {
+                identity_less_fdw_tables.push(format!("{table_name}_fdw"));
+            }
+            if vtable_config.fetch_contract.is_none() {
+                contractless_fdw_tables.push(format!("{table_name}_fdw"));
             }
 
             // ID scheme: prefix ID column values with "{scheme}:" to match McpSyncEngine.
@@ -713,6 +721,13 @@ async fn finish_integration(
             }
         }
     }
+
+    reject_unmaintainable_fdw_queries(
+        &sidecar,
+        &identity_less_fdw_tables,
+        &contractless_fdw_tables,
+        &provider_name,
+    )?;
 
     // Sidecar-declared derived views (generic): the cache tables they select
     // from were just created by the CacheFactory above.
@@ -843,6 +858,93 @@ async fn build_entity_caches(
         }
     }
     Ok((caches, entity_readers))
+}
+
+/// Refuse a sidecar whose SQL reads an `_fdw` table that cannot be maintained.
+///
+/// Reading the foreign table directly is what puts a view on the mirror, and
+/// two declarations decide whether that mirror can be kept correct: a row
+/// IDENTITY (without it the engine keeps snapshot semantics and builds no
+/// mirror, so the view fills once and is then silently frozen) and a FETCH
+/// CONTRACT (without it nothing states how much of a re-fetch's absence means
+/// deletion, which is the one unknown whose wrong guess loses data silently).
+/// Both are fully known at connect, so both fail here.
+///
+/// INERT against the shipped sidecars today: every `live_query` and view reads
+/// a CACHE table, and the only `_fdw` mentions in `claude-history.yaml` are
+/// comments, which never reach this scan. It is a guard for the retarget,
+/// proven by fixtures rather than by production config. It also sees sidecar
+/// SQL only — a `live_query` authored in the user's vault is out of its reach,
+/// which is the likeliest place a real `_fdw` reader would appear first.
+fn reject_unmaintainable_fdw_queries(
+    sidecar: &McpSidecar,
+    identity_less: &[String],
+    contractless: &[String],
+    provider_name: &str,
+) -> anyhow::Result<()> {
+    if identity_less.is_empty() && contractless.is_empty() {
+        return Ok(());
+    }
+    // Render DSL and view SQL both carry table names as plain identifiers, so
+    // one token scan covers both without a dialect parser.
+    let mut sources: Vec<(String, &str)> = sidecar
+        .views
+        .iter()
+        .map(|v| (format!("view '{}'", v.name), v.sql.as_str()))
+        .collect();
+    for (entity_name, entity) in &sidecar.entities {
+        for variant in &entity.profile_variants {
+            sources.push((
+                format!("entity '{entity_name}' render '{}'", variant.name),
+                variant.render.as_str(),
+            ));
+        }
+    }
+
+    for (origin, text) in sources {
+        for table in identity_less {
+            if names_identifier(text, table) {
+                anyhow::bail!(
+                    "provider '{provider_name}': {origin} queries foreign table '{table}', whose \
+                     entity declares no row identity (no `primary_key` column, no `id_column`, no \
+                     column named `id`). The engine keeps such a table on snapshot semantics and \
+                     builds no mirror, so this query's view would fill once and then silently \
+                     never update. Declare the entity's key column `primary_key: true`, or read \
+                     the cache table instead."
+                );
+            }
+        }
+        for table in contractless {
+            if names_identifier(text, table) {
+                anyhow::bail!(
+                    "provider '{provider_name}': {origin} queries foreign table '{table}', whose \
+                     entity declares no `vtable.fetch_contract`. A view on the mirror is \
+                     maintained from re-fetches, and what a re-fetch's ABSENCE means — deleted, \
+                     or merely outside the scope this fetch chose — is a property of the source \
+                     that cannot be inferred, only declared. Set `fetch_contract` to `snapshot`, \
+                     `scoped_snapshot`, or `delta`."
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether `text` mentions `identifier` as a whole SQL identifier rather than
+/// as part of a longer name.
+fn names_identifier(text: &str, identifier: &str) -> bool {
+    let is_ident_char = |c: char| c.is_alphanumeric() || c == '_';
+    text.match_indices(identifier).any(|(at, _)| {
+        let before_ok = text[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !is_ident_char(c));
+        let after_ok = text[at + identifier.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !is_ident_char(c));
+        before_ok && after_ok
+    })
 }
 
 /// Reconcile every sidecar-declared derived view into a materialized view. A

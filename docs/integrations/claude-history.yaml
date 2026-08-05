@@ -289,6 +289,7 @@ entities:
             order_by: last_activity DESC
             limit: 50
       write_through: true
+      fetch_contract: scoped_snapshot
       max_fan_out: 50
 
   task:
@@ -335,6 +336,7 @@ entities:
             order_by: last_activity DESC
             limit: 50
       write_through: true
+      fetch_contract: scoped_snapshot
       max_fan_out: 50
 
   # Agent-grain attribution: one row per subagent invocation, so a Holon task
@@ -359,11 +361,24 @@ entities:
             })
           })
     schema:
-      # NOT a globally unique id: resume/fork copies the subagents/ directory
-      # byte-identically, so one agent id can sit under several (session_id,
-      # project_id) pairs. The provider dedups per listing, attributing the row
-      # to the lexicographic min (session_id, project_id); cross-project dedup
-      # is Deferred, so a duplicate spanning projects still lands fan-out-order.
+      # `id` is NOT globally unique: resume/fork copies the subagents/
+      # directory byte-identically, so one agent id can sit under several
+      # (session_id, project_id) pairs. The provider dedups per listing;
+      # cross-project dedup is Deferred, so a duplicate spanning projects still
+      # lands fan-out-order.
+      #
+      # The row identity is therefore the COMPOSITE (id, project_id) — measured
+      # unique and non-NULL over a full 42-project fan-out (1990 rows, 3 ids
+      # duplicated across projects), see crates/holon-mcp-mock/tests/
+      # claude_history_identity.rs. `id` alone is refused by the mirror's
+      # PRIMARY KEY, by the REFRESH sweep, and by the push path.
+      #
+      # `project_id` drops `nullable: true` DELIBERATELY, not incidentally: an
+      # identity column that may be NULL is not an identity (a NULL can never be
+      # matched across scans, and both the REFRESH sweep and the push refuse
+      # it). Fresh cache tables therefore get `project_id TEXT NOT NULL` and a
+      # 2-column `PRIMARY KEY (id, project_id)`; existing ones keep their old
+      # single-column PK, since the DDL is CREATE TABLE IF NOT EXISTS.
       - name: id
         sql_type: TEXT
         primary_key: true
@@ -372,7 +387,7 @@ entities:
         indexed: true
       - name: project_id
         sql_type: TEXT
-        nullable: true
+        primary_key: true
       - name: agent_type
         sql_type: TEXT
         nullable: true
@@ -404,6 +419,7 @@ entities:
             order_by: last_activity DESC
             limit: 50
       write_through: true
+      fetch_contract: scoped_snapshot
       max_fan_out: 50
 
   message:
@@ -438,6 +454,7 @@ entities:
             order_by: modified DESC
             limit: 20
       write_through: true
+      fetch_contract: scoped_snapshot
       max_fan_out: 50
     profile_variants:
       - name: default
@@ -510,6 +527,7 @@ entities:
             order_by: ended_at DESC
             limit: 20
       write_through: true
+      fetch_contract: scoped_snapshot
       max_fan_out: 50
     profile_variants:
       - name: default

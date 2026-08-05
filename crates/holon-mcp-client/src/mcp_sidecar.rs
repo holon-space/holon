@@ -546,6 +546,13 @@ impl EntityConfig {
     /// Sets `graph_label` (PascalCase of table name) and `primary_key` so
     /// `GraphSchemaRegistry` can build GQL schema directly from the result.
     /// Returns `None` if no schema fields are declared.
+    ///
+    /// `td.primary_key` is a SCALAR — the entity's GQL node key — and is not
+    /// the table's primary key when the schema declares a composite one (see
+    /// `claude-history` `agent`, keyed on `(id, project_id)`). The table's real
+    /// key is carried by the fields' `primary_key` flags, which the DDL
+    /// generator reads; [`Self::identity_columns`] is the authority for row
+    /// identity. Do not read this scalar as the table key.
     pub fn to_type_definition(&self, table_name: &str) -> Option<TypeDefinition> {
         if self.schema.is_empty() {
             return None;

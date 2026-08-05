@@ -1,0 +1,458 @@
+{
+  "recorded_from": "claude-code-history-mcp (real provider binary), CLAUDE_DATA_DIR=~/.claude",
+  "recorded_on": "2026-08-05",
+  "why": "Increment 2 of the mirror-as-storage plan measures whether each claude-history entity's DECLARED identity is actually a key over an unpinned fan-out. This file is the recorded double for environments without the provider binary: the counts are the full measurement, sample_identities preserves the measured structure (every duplicate-bearing tuple plus 20 clean ones per entity).",
+  "entities": {
+    "session": {
+      "identity": [
+        "id"
+      ],
+      "measured": {
+        "fan_out_parents": 42,
+        "rows": 274,
+        "distinct_identities": 274,
+        "duplicate_identities": 0,
+        "rows_under_a_duplicate_identity": 0,
+        "rows_with_a_null_identity_component": 0
+      },
+      "sample_identities": [
+        [
+          "469f480a-6fa2-4100-aea3-2eaaad7d2a6a"
+        ],
+        [
+          "ea81c00a-dcc2-4b46-93f6-40b45a444e56"
+        ],
+        [
+          "b5628752-6fe6-48cd-a53e-c53fc39fb1ed"
+        ],
+        [
+          "0bcf2b35-b6e5-43a0-b988-98ea3f4b40d4"
+        ],
+        [
+          "563ad464-8a9b-4af4-807e-c468f94bbdd1"
+        ],
+        [
+          "22b55aa5-dc0a-414f-97d2-93ffea5ac2d0"
+        ],
+        [
+          "fce375a0-0e71-46fb-b061-645983f6faae"
+        ],
+        [
+          "d482e273-718b-4556-b0b9-3939685f22de"
+        ],
+        [
+          "d0f0c52a-bdda-4be9-9388-c6d2a51fe6df"
+        ],
+        [
+          "c2407af3-e05a-4391-8703-75121b860044"
+        ],
+        [
+          "d29387f6-4b57-486f-97c0-838430976f61"
+        ],
+        [
+          "2214301b-45be-4c6f-af9c-b6d96f277f47"
+        ],
+        [
+          "db1a8eb3-170a-4bb4-9158-9be2ed72bda0"
+        ],
+        [
+          "fe1a037d-17b3-4628-8e17-b7d30d56e72c"
+        ],
+        [
+          "c9dac4c4-51bc-469c-b14b-6d5ba11a99c9"
+        ],
+        [
+          "50a22d80-b274-407f-b352-fb80ec249697"
+        ],
+        [
+          "c75238c2-de9d-4180-91fd-542093a67f00"
+        ],
+        [
+          "4915b57e-0368-4db2-9fb0-bda65998291b"
+        ],
+        [
+          "82ddfa3c-7169-4a13-8d6a-b664a027a283"
+        ],
+        [
+          "b009d8cf-d43c-4bc2-b0c2-9a46088a22dc"
+        ]
+      ]
+    },
+    "agent_single_column_id": {
+      "identity": [
+        "id"
+      ],
+      "measured": {
+        "fan_out_parents": 42,
+        "rows": 1998,
+        "distinct_identities": 1995,
+        "duplicate_identities": 3,
+        "rows_under_a_duplicate_identity": 6,
+        "rows_with_a_null_identity_component": 0
+      },
+      "sample_identities": [
+        [
+          "a71ff585ac0c61c49"
+        ],
+        [
+          "aefd8d22a9ec329d4"
+        ],
+        [
+          "a06db80352ffc2a0f"
+        ],
+        [
+          "a21cd11c1215767f6"
+        ],
+        [
+          "aaac9e4e26f37a412"
+        ],
+        [
+          "a7ef133537a800b25"
+        ],
+        [
+          "a7f2d51240db29e20"
+        ],
+        [
+          "a29d343ef219b71ee"
+        ],
+        [
+          "af510ec67bc7cf2ce"
+        ],
+        [
+          "a8206a2b2ea9537f0"
+        ],
+        [
+          "a0195a72189f63046"
+        ],
+        [
+          "ad44a5722527d28d7"
+        ],
+        [
+          "a572e2ff9048e5591"
+        ],
+        [
+          "afdece3d97f8d4be2"
+        ],
+        [
+          "a44e601834579592b"
+        ],
+        [
+          "a2df33dfe4ad35e32"
+        ],
+        [
+          "a7eb50c70664ca27b"
+        ],
+        [
+          "a51b7a1bb9fb686b9"
+        ],
+        [
+          "a1b6f81cc95d4c4f7"
+        ],
+        [
+          "aea8a48d5b892a0c6"
+        ],
+        [
+          "ae5e69031562b0afd"
+        ],
+        [
+          "aa49f44cdaf61f115"
+        ],
+        [
+          "afceb7610700a60dd"
+        ],
+        [
+          "afceb7610700a60dd"
+        ],
+        [
+          "aa49f44cdaf61f115"
+        ],
+        [
+          "ae5e69031562b0afd"
+        ]
+      ]
+    },
+    "agent": {
+      "identity": [
+        "id",
+        "project_id"
+      ],
+      "measured": {
+        "fan_out_parents": 42,
+        "rows": 1998,
+        "distinct_identities": 1998,
+        "duplicate_identities": 0,
+        "rows_under_a_duplicate_identity": 0,
+        "rows_with_a_null_identity_component": 0
+      },
+      "sample_identities": [
+        [
+          "a71ff585ac0c61c49",
+          "-Users-martin-Workspaces-pkm-holon"
+        ],
+        [
+          "aefd8d22a9ec329d4",
+          "-Users-martin-Workspaces-pkm-holon"
+        ],
+        [
+          "a06db80352ffc2a0f",
+          "-Users-martin-Workspaces-pkm-holon"
+        ],
+        [
+          "a21cd11c1215767f6",
+          "-Users-martin-Workspaces-pkm-holon"
+        ],
+        [
+          "aaac9e4e26f37a412",
+          "-Users-martin-Workspaces-pkm-holon"
+        ],
+        [
+          "a7ef133537a800b25",
+          "-Users-martin-Workspaces-pkm-holon"
+        ],
+        [
+          "a7f2d51240db29e20",
+          "-Users-martin-Workspaces-pkm-holon"
+        ],
+        [
+          "a29d343ef219b71ee",
+          "-Users-martin-Workspaces-pkm-holon"
+        ],
+        [
+          "af510ec67bc7cf2ce",
+          "-Users-martin-Workspaces-pkm-holon"
+        ],
+        [
+          "a8206a2b2ea9537f0",
+          "-Users-martin-Workspaces-pkm-holon"
+        ],
+        [
+          "a0195a72189f63046",
+          "-Users-martin-Workspaces-pkm-holon"
+        ],
+        [
+          "ad44a5722527d28d7",
+          "-Users-martin-Workspaces-pkm-holon"
+        ],
+        [
+          "a572e2ff9048e5591",
+          "-Users-martin-Workspaces-pkm-holon"
+        ],
+        [
+          "afdece3d97f8d4be2",
+          "-Users-martin-Workspaces-pkm-holon"
+        ],
+        [
+          "a44e601834579592b",
+          "-Users-martin-Workspaces-pkm-holon"
+        ],
+        [
+          "a2df33dfe4ad35e32",
+          "-Users-martin-Workspaces-pkm-holon"
+        ],
+        [
+          "a7eb50c70664ca27b",
+          "-Users-martin-Workspaces-pkm-holon"
+        ],
+        [
+          "a51b7a1bb9fb686b9",
+          "-Users-martin-Workspaces-pkm-holon"
+        ],
+        [
+          "a1b6f81cc95d4c4f7",
+          "-Users-martin-Workspaces-pkm-holon"
+        ],
+        [
+          "aea8a48d5b892a0c6",
+          "-Users-martin-Workspaces-pkm-holon"
+        ],
+        [
+          "ae5e69031562b0afd",
+          "-Users-martin-Workspaces-pkm-holon"
+        ],
+        [
+          "aa49f44cdaf61f115",
+          "-Users-martin-Workspaces-pkm-holon"
+        ],
+        [
+          "afceb7610700a60dd",
+          "-Users-martin-Workspaces-pkm-holon"
+        ],
+        [
+          "afceb7610700a60dd",
+          "-Users-martin-Workspaces-pkm-holon--claude-worktrees-orch-9908"
+        ],
+        [
+          "aa49f44cdaf61f115",
+          "-Users-martin-Workspaces-pkm-holon--claude-worktrees-orch-9908"
+        ],
+        [
+          "ae5e69031562b0afd",
+          "-Users-martin-Workspaces-pkm-holon--claude-worktrees-orch-9908"
+        ]
+      ]
+    },
+    "message": {
+      "identity": [
+        "uuid"
+      ],
+      "measured": {
+        "fan_out_parents": 20,
+        "rows": 21298,
+        "distinct_identities": 13064,
+        "duplicate_identities": 1,
+        "rows_under_a_duplicate_identity": 8235,
+        "rows_with_a_null_identity_component": 0
+      },
+      "sample_identities": [
+        [
+          ""
+        ],
+        [
+          "b3bcae05-ecc0-4a39-a09c-871bdaa2f4db"
+        ],
+        [
+          "be96bb42-a6c1-4401-b133-be389d1e177c"
+        ],
+        [
+          "8255c831-aa7e-4593-bb7b-90cd2a38bc62"
+        ],
+        [
+          "6c68a833-27db-46f6-9484-c778337f341f"
+        ],
+        [
+          "3d55d96d-2182-4434-b522-40261e9c50d9"
+        ],
+        [
+          "78beb400-09a7-4bba-bb54-83060fefd92f"
+        ],
+        [
+          "e90f5365-31b2-47c2-acef-04b3fc1f4fc7"
+        ],
+        [
+          "7e91a088-80df-485a-909e-c8e7fac87bf7"
+        ],
+        [
+          "0bf585bc-5495-42bc-8f19-cc88efc40af0"
+        ],
+        [
+          ""
+        ],
+        [
+          ""
+        ],
+        [
+          ""
+        ],
+        [
+          "ffaa825f-6c2a-4e90-8bba-a85f0a40e81f"
+        ],
+        [
+          "fc644bbf-736d-4026-88a4-e33aa22c9d2b"
+        ],
+        [
+          "bfc7c2d3-704b-480f-9430-139fe217c991"
+        ],
+        [
+          "7000975b-36a8-455f-bd74-1fbd4ee59bc6"
+        ],
+        [
+          "dddf8c1d-6cfd-423f-9426-750372a35177"
+        ],
+        [
+          "4e16b2eb-75ef-4add-866d-fc0376c38f1b"
+        ],
+        [
+          "669d3c86-5e7f-4fb4-9aef-f1f7b777d77a"
+        ],
+        [
+          "7bbde7a3-35e3-411c-b3ce-3f107f8c68be"
+        ],
+        [
+          "aeaf1193-e1f2-4e0c-af96-b7cd5e5a5fb1"
+        ],
+        [
+          "8d8eecca-e70c-4fb2-9c16-81dca2a63c4b"
+        ],
+        [
+          "3261786d-daa4-48cf-bd08-1ad7f970010b"
+        ]
+      ]
+    },
+    "agent_message": {
+      "identity": [
+        "uuid"
+      ],
+      "measured": {
+        "fan_out_parents": 20,
+        "rows": 3920,
+        "distinct_identities": 3920,
+        "duplicate_identities": 0,
+        "rows_under_a_duplicate_identity": 0,
+        "rows_with_a_null_identity_component": 0
+      },
+      "sample_identities": [
+        [
+          "3ca14e36-d3cb-4d59-ae0c-06557855e080"
+        ],
+        [
+          "05c86b3e-b668-456a-9dc7-a44e2bbe973b"
+        ],
+        [
+          "d48b8620-4421-4632-bca9-8b445a499105"
+        ],
+        [
+          "e6e9b0ac-e36e-401c-b0cb-108312b4ca70"
+        ],
+        [
+          "93e14b4a-bddf-43ce-b0c5-7cf055fa982f"
+        ],
+        [
+          "6dd1b657-f368-4e1d-9a1a-1dd6e2c785a0"
+        ],
+        [
+          "aa25c759-e35f-4146-8c1e-41f1c08eea5d"
+        ],
+        [
+          "da8cea11-9265-4b4c-ad56-21d49b5ba6e5"
+        ],
+        [
+          "0886f8ed-0fa9-49f1-a29e-8327b988e81f"
+        ],
+        [
+          "78719994-286d-4df2-8175-dc9033385c3f"
+        ],
+        [
+          "ea9b1b1e-96e1-479b-8e89-c3f786f05161"
+        ],
+        [
+          "95a9faf5-b3bd-4ccd-8f9a-2a7fd1986950"
+        ],
+        [
+          "40b15cfa-70e8-4247-92de-679914925307"
+        ],
+        [
+          "01338b82-24e9-4105-bc5e-169979d0235b"
+        ],
+        [
+          "c5b13cc8-3a01-4a4c-82da-bf1a53c44ab0"
+        ],
+        [
+          "2b37a3af-ba0a-4247-9711-4a59efe93196"
+        ],
+        [
+          "917250a2-b38b-4be9-beeb-becceef5c2ec"
+        ],
+        [
+          "c4307487-fc21-4ed1-b4cc-17fa5cb24b04"
+        ],
+        [
+          "e7e5cf0c-cc8c-4c8d-b39f-d9fbd627edf4"
+        ],
+        [
+          "02c685fa-5d50-48b6-bb6a-d93cdb0a2939"
+        ]
+      ]
+    }
+  },
+  "sample_note": "sample_identities keeps EVERY row involved in a duplicate under either the single-column or the composite identity, plus up to 20 clean rows per entity. For `agent` that is load-bearing: the composite entry must contain the very rows `id` alone collides, or 'the composite is a key' is proved over rows that never collided. For `message`, at most 4 copies of the repeated empty uuid are kept \u2014 the class is 'this identity repeats', not how many times. `measured` holds the real counts over the full fan-out."
+}
