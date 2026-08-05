@@ -17,6 +17,7 @@ use crate::api::operation_engine::DispatchingOperationEngine;
 use crate::api::operation_engine::OperationEngine as _;
 use crate::storage::DbHandle;
 use crate::storage::SqlTransformer;
+use crate::storage::sql_utils::rewrite_named_params;
 use crate::storage::sql_utils::value_to_sql_literal;
 use crate::storage::turso::RowChange;
 use crate::storage::turso::RowChangeStream;
@@ -417,41 +418,12 @@ impl BackendEngine {
     /// - Numbers: literal
     /// - Null: NULL
     /// - Bool: 1/0
+    ///
+    /// Shares its placeholder scanner with the execute path's
+    /// `bind_parameters`, so the two cannot come to recognize different
+    /// placeholder styles for the same query.
     fn inline_parameters(sql: &str, params: &HashMap<String, Value>) -> String {
-        let mut result = String::with_capacity(sql.len());
-        let mut chars = sql.chars().peekable();
-
-        while let Some(ch) = chars.next() {
-            if ch == '$' {
-                if let Some(&next_ch) = chars.peek() {
-                    if next_ch.is_alphanumeric() || next_ch == '_' {
-                        let mut param_name = String::new();
-                        while let Some(&next_ch) = chars.peek() {
-                            if next_ch.is_alphanumeric() || next_ch == '_' {
-                                param_name.push(chars.next().unwrap());
-                            } else {
-                                break;
-                            }
-                        }
-
-                        if let Some(value) = params.get(&param_name) {
-                            result.push_str(&value_to_sql_literal(value));
-                        } else {
-                            result.push('$');
-                            result.push_str(&param_name);
-                        }
-                    } else {
-                        result.push('$');
-                    }
-                } else {
-                    result.push('$');
-                }
-            } else {
-                result.push(ch);
-            }
-        }
-
-        result
+        rewrite_named_params(sql, &mut |name| params.get(name).map(value_to_sql_literal))
     }
 
     /// Compute a deterministic view name for a given SQL query and parameters.
