@@ -2622,11 +2622,94 @@ pub trait MatviewHook: Send + Sync {
     async fn on_fdw_primed(&self, cache_table: &str, fdw_sql: &str);
 }
 
+/// Fans one FDW-primed notification out to every member hook. Members that do
+/// not own the primed table are expected to no-op.
+struct FanOutMatviewHook {
+    hooks: Vec<std::sync::Arc<dyn MatviewHook>>,
+}
+
+#[async_trait]
+impl MatviewHook for FanOutMatviewHook {
+    async fn on_fdw_primed(&self, cache_table: &str, fdw_sql: &str) {
+        for hook in &self.hooks {
+            hook.on_fdw_primed(cache_table, fdw_sql).await;
+        }
+    }
+}
+
+/// Combine the per-provider hooks into the single hook the matview manager
+/// holds. `None` for no providers means nothing is installed.
+pub fn combine_matview_hooks(
+    hooks: Vec<std::sync::Arc<dyn MatviewHook>>,
+) -> Option<std::sync::Arc<dyn MatviewHook>> {
+    if hooks.is_empty() {
+        return None;
+    }
+    Some(std::sync::Arc::new(FanOutMatviewHook { hooks }))
+}
+
 #[cfg(test)]
 mod trait_unit_tests {
     use holon_api::block::Block;
 
     use super::*;
+
+    struct CountingHook {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl MatviewHook for CountingHook {
+        async fn on_fdw_primed(&self, _: &str, _: &str) {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn counting_hook() -> (
+        std::sync::Arc<dyn MatviewHook>,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        (
+            std::sync::Arc::new(CountingHook {
+                calls: calls.clone(),
+            }),
+            calls,
+        )
+    }
+
+    #[tokio::test]
+    async fn every_installed_hook_sees_each_fdw_prime() {
+        let (first, first_calls) = counting_hook();
+        let (second, second_calls) = counting_hook();
+
+        let combined = combine_matview_hooks(vec![first, second]).expect("two hooks combine");
+        combined
+            .on_fdw_primed("cc_message", "SELECT * FROM cc_message_fdw")
+            .await;
+
+        assert_eq!(first_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            second_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "second integration's hook never ran — its resource subscriptions are never set up"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_single_hook_still_sees_each_fdw_prime() {
+        let (only, only_calls) = counting_hook();
+
+        let combined = combine_matview_hooks(vec![only]).expect("one hook combines");
+        combined.on_fdw_primed("cc_message", "SELECT 1").await;
+
+        assert_eq!(only_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn no_hooks_installs_nothing() {
+        assert!(combine_matview_hooks(vec![]).is_none());
+    }
 
     #[test]
     fn event_origin_round_trips_through_str() {

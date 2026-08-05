@@ -203,6 +203,7 @@ fn build_fdw(
         &config,
         peer,
         None,
+        &[],
         None,
         tokio::runtime::Handle::current(),
         entity_prefix,
@@ -938,12 +939,14 @@ fn build_fdw_writeback(
         .iter()
         .map(|(n, t)| (n.to_string(), t.to_string()))
         .collect();
+    let identity: Vec<String> = id_scheme.iter().map(|(col, _)| col.clone()).collect();
     McpForeignDataWrapper::new(
         table_name,
         &columns,
         &config,
         peer,
         id_scheme,
+        &identity,
         cache_table,
         tokio::runtime::Handle::current(),
         entity_prefix,

@@ -206,6 +206,7 @@ async fn exercise_entity(
         vtable,
         peer.clone(),
         None,
+        &entity.identity_columns(),
         None,
         tokio::runtime::Handle::current(),
         Some(prefix),
