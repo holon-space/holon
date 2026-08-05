@@ -70,6 +70,21 @@ impl BlockReader for JunctionReader {
         Ok(self.blocks.lock().unwrap().clone())
     }
 
+    /// Delegates to `get_blocks`: this double has no cheaper projection.
+    /// Never an empty stub — an empty shape would let the write-back
+    /// fold-completeness gate PASS on an incomplete document.
+    async fn doc_block_topology(
+        &self,
+        doc_id: &EntityUri,
+    ) -> anyhow::Result<Vec<(EntityUri, EntityUri)>> {
+        Ok(self
+            .get_blocks(doc_id)
+            .await?
+            .into_iter()
+            .map(|b| (b.id, b.parent_id))
+            .collect())
+    }
+
     async fn get_block_authoritative(&self, id: &EntityUri) -> anyhow::Result<Option<Block>> {
         Ok(self
             .blocks
@@ -184,8 +199,20 @@ impl BlockOrdering for LiveOrderOrdering {
     }
 }
 
+/// Previous sibling of `block` in the authoritative sequence: the last block
+/// before it that shares its parent, `None` if it is first in its group.
+fn prev_sibling(blocks: &[Block], block: &Block) -> Option<EntityUri> {
+    blocks
+        .iter()
+        .take_while(|b| b.id != block.id)
+        .filter(|b| b.parent_id == block.parent_id)
+        .last()
+        .map(|b| b.id.clone())
+}
+
 struct Harness {
     controller: holon_filesystem::FileSyncController,
+    reader: Arc<JunctionReader>,
     doc: Block,
     linker: Block,
     path: std::path::PathBuf,
@@ -219,6 +246,7 @@ fn build_harness(resolves: bool) -> Harness {
         .join("doc.org");
     Harness {
         controller,
+        reader,
         doc,
         linker,
         path,
@@ -226,10 +254,25 @@ fn build_harness(resolves: bool) -> Harness {
     }
 }
 
+/// Drive one block edit the way production does: the holder is seeded from the
+/// authority (production seeds it from the block feed's initial snapshot), then
+/// the edit is applied at the position the authority already gives the block.
 async fn write_back(h: &mut Harness) -> String {
+    h.controller
+        .seed_holder_from_authority(&h.doc.id)
+        .await
+        .expect("seeding the holder must not fail");
+    let blocks = h.reader.get_blocks(&h.doc.id).await.unwrap();
+    let prev = prev_sibling(&blocks, &h.linker);
     let wrote = h
         .controller
-        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(h.linker.clone()))
+        .on_block_changed(
+            &h.doc.id,
+            &BlockDelta::Upsert {
+                block: h.linker.clone(),
+                prev,
+            },
+        )
         .await
         .expect("write-back must not fail");
     assert!(wrote, "the doc must resolve to a tracked file");

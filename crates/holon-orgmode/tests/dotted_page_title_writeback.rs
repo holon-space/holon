@@ -51,6 +51,21 @@ impl BlockReader for FixtureReader {
         Ok(self.children.get(doc_id).cloned().unwrap_or_default())
     }
 
+    /// Delegates to `get_blocks`: this double has no cheaper projection.
+    /// Never an empty stub — an empty shape would let the write-back
+    /// fold-completeness gate PASS on an incomplete document.
+    async fn doc_block_topology(
+        &self,
+        doc_id: &EntityUri,
+    ) -> anyhow::Result<Vec<(EntityUri, EntityUri)>> {
+        Ok(self
+            .get_blocks(doc_id)
+            .await?
+            .into_iter()
+            .map(|b| (b.id, b.parent_id))
+            .collect())
+    }
+
     async fn get_block_authoritative(&self, id: &EntityUri) -> anyhow::Result<Option<Block>> {
         Ok(self.by_id.get(id).cloned())
     }
@@ -223,6 +238,34 @@ fn build_controller(
     .with_alias_registrar(registrar)
 }
 
+/// Drive one block edit the way production does: the holder is seeded from the
+/// authority (production seeds it from the block feed's initial snapshot), then
+/// the edit is applied at the position the authority already gives the block.
+async fn write_back(
+    controller: &mut holon_filesystem::FileSyncController,
+    f: &Fixtures,
+    doc: &EntityUri,
+    block: &Block,
+) -> anyhow::Result<bool> {
+    controller.seed_holder_from_authority(doc).await?;
+    let siblings = f.children.get(doc).cloned().unwrap_or_default();
+    let prev = siblings
+        .iter()
+        .take_while(|b| b.id != block.id)
+        .filter(|b| b.parent_id == block.parent_id)
+        .last()
+        .map(|b| b.id.clone());
+    controller
+        .on_block_changed(
+            doc,
+            &BlockDelta::Upsert {
+                block: block.clone(),
+                prev,
+            },
+        )
+        .await
+}
+
 /// Write-back lands in the file the TITLE names — dots and all.
 #[tokio::test]
 async fn a_dotted_page_title_writes_back_to_its_own_file() {
@@ -233,8 +276,7 @@ async fn a_dotted_page_title_writes_back_to_its_own_file() {
     let mut controller = build_controller(&f, root.clone(), registrar.clone());
 
     let dotted = f.by_id[&f.dotted_id].clone();
-    controller
-        .on_block_changed(&f.dotted_id, &BlockDelta::Upsert(dotted))
+    write_back(&mut controller, &f, &f.dotted_id, &dotted)
         .await
         .expect("a well-formed dotted page must write back");
 
@@ -273,8 +315,7 @@ async fn a_page_homed_at_the_truncated_file_is_relocated_on_the_next_write() {
     let mut controller = build_controller(&f, root.clone(), registrar.clone());
 
     let dotted = f.by_id[&f.dotted_id].clone();
-    controller
-        .on_block_changed(&f.dotted_id, &BlockDelta::Upsert(dotted))
+    write_back(&mut controller, &f, &f.dotted_id, &dotted)
         .await
         .expect("re-homing a mis-filed page must not crash the sync loop");
 

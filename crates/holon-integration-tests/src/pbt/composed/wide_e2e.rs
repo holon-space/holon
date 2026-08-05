@@ -811,10 +811,6 @@ pub async fn boot_and_seed_wide_with_peer_id(
     ref_state: &ReferenceState,
     peer_id: Option<u64>,
 ) -> (CapMap, WideHandle, BTreeSet<EntityUri>) {
-    // The read-budget oracle measures PROD reads; the shadow is transient
-    // measurement apparatus (design doc §9.8). Arming is read ONCE at feed
-    // construction, so this MUST happen before the caps are booted.
-    holon_orgmode::writeback_shadow::disable_for_budget_suite();
     // SUT-side parameterization seam: the booted set follows the oracle's DRAWN
     // wiring (`init_state` draws `any_valid_wiring()`; `HOLON_PBT_FORCE_FULL=1`
     // pins `full_headless`). Disclose the draw per case so a run log yields
@@ -1116,10 +1112,6 @@ pub async fn boot_and_seed_wide_windowed_base(
     crate::pbt::composed::builder::ComposedSut,
     BTreeSet<EntityUri>,
 ) {
-    // The read-budget oracle measures PROD reads; the shadow is transient
-    // measurement apparatus (design doc §9.8). Arming is read ONCE at feed
-    // construction, so this MUST happen before the caps are booted.
-    holon_orgmode::writeback_shadow::disable_for_budget_suite();
     let set = set_for_wiring(&ref_state.harness.wiring);
     assert!(
         set.has_projection(Projection::ViewModel),

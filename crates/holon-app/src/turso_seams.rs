@@ -318,6 +318,63 @@ impl BlockReader for CacheBlockReader {
         Ok(blocks)
     }
 
+    async fn doc_block_topology(
+        &self,
+        doc_id: &EntityUri,
+    ) -> anyhow::Result<Vec<(EntityUri, EntityUri)>> {
+        // The SAME membership CTE as `get_blocks` — identical `Page`-boundary
+        // exclusion and identical depth bound, so the two can never disagree
+        // about who belongs to a document — with every hydrated column, every
+        // edge subquery and the ORDER BY dropped. Only `parent_id` is carried
+        // beyond the id, because the gate compares shape and nothing else.
+        let sql = format!(
+            "WITH RECURSIVE descendants(id, depth_acc) AS ( SELECT b.id, 0 FROM {table} b LEFT \
+             JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' WHERE b.parent_id = \
+             $doc_id AND bt.block_id IS NULL UNION ALL SELECT b.id, d.depth_acc + 1 FROM {table} \
+             b JOIN descendants d ON b.parent_id = d.id LEFT JOIN block_tags bt ON bt.block_id = \
+             b.id AND bt.tag = 'Page' WHERE bt.block_id IS NULL AND d.depth_acc < 100 ) SELECT \
+             b.id, b.parent_id FROM {table} b JOIN descendants d ON d.id = b.id",
+            table = BLOCK_WRITE_TABLE,
+        );
+
+        let mut params = std::collections::HashMap::new();
+        params.insert(
+            "doc_id".to_string(),
+            holon_api::Value::String(doc_id.to_string()),
+        );
+
+        let rows = self
+            .cache
+            .db_handle()
+            .query(&sql, params)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("[CacheBlockReader::doc_block_topology] CTE query failed: {e}")
+            })?;
+
+        rows.into_iter()
+            .map(|row| {
+                let field = |name: &str| match row.get(name) {
+                    Some(holon_api::Value::String(s)) => Ok(s.clone()),
+                    other => anyhow::bail!(
+                        "[CacheBlockReader::doc_block_topology] topology row for {doc_id} carried \
+                         no string `{name}` (got {other:?}) — refusing to report a partial shape, \
+                         which would let the write-back gate pass on an incomplete document"
+                    ),
+                };
+                let parse = |raw: String| {
+                    EntityUri::parse(&raw).map_err(|e| {
+                        anyhow::anyhow!(
+                            "[CacheBlockReader::doc_block_topology] topology row for {doc_id} \
+                             carried an unparseable uri {raw:?}: {e}"
+                        )
+                    })
+                };
+                Ok((parse(field("id")?)?, parse(field("parent_id")?)?))
+            })
+            .collect()
+    }
+
     async fn get_block_authoritative(&self, id: &EntityUri) -> anyhow::Result<Option<Block>> {
         // Single-block point read on the write authority (`block_raw`), edge-
         // hydrated identically to `get_blocks` (same COALESCE(json_group_array)

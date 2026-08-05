@@ -125,6 +125,17 @@ impl FrontendInjectorExt for Injector {
             Shared::new(Arc::new(holon::sync::DegradedSignalBus::new()))
         }));
 
+        // Write-back supervision disclosure. Registered UNCONDITIONALLY for the
+        // same reason as the bus itself: org write-back runs in every mode, so
+        // the one signal saying "your edits stopped reaching disk" must not be
+        // reachable only in Loro mode.
+        self.provide::<dyn holon_filesystem::WritebackDisclosure>(Provider::root(|resolver| {
+            let bus = resolver.resolve::<Arc<holon::sync::DegradedSignalBus>>();
+            Arc::new(crate::loro_seams::WritebackDegradedDisclosure {
+                bus: (*bus).clone(),
+            }) as Arc<dyn holon_filesystem::WritebackDisclosure>
+        }));
+
         // ThemeRegistry + PreferenceDefs
         let post_write_hook = holon_config.hooks.post_org_write.clone();
 

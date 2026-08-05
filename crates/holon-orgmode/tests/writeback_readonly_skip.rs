@@ -54,8 +54,23 @@ impl StubReader {
 
 #[async_trait]
 impl BlockReader for StubReader {
-    async fn get_blocks(&self, _doc_id: &EntityUri) -> anyhow::Result<Vec<Block>> {
+    async fn get_blocks(&self, _: &EntityUri) -> anyhow::Result<Vec<Block>> {
         Ok(self.blocks.lock().unwrap().clone())
+    }
+
+    /// Delegates to `get_blocks`: this double has no cheaper projection.
+    /// Never an empty stub — an empty shape would let the write-back
+    /// fold-completeness gate PASS on an incomplete document.
+    async fn doc_block_topology(
+        &self,
+        doc_id: &EntityUri,
+    ) -> anyhow::Result<Vec<(EntityUri, EntityUri)>> {
+        Ok(self
+            .get_blocks(doc_id)
+            .await?
+            .into_iter()
+            .map(|b| (b.id, b.parent_id))
+            .collect())
     }
 
     async fn get_block_authoritative(&self, id: &EntityUri) -> anyhow::Result<Option<Block>> {
@@ -238,6 +253,36 @@ fn make_doc_and_blocks() -> (Block, Vec<Block>) {
     (doc, vec![b1, b2])
 }
 
+/// Drive one block edit the way production does: the holder is seeded from the
+/// authority (production seeds it from the block feed's initial snapshot), then
+/// the edit is applied at the position the authority already gives the block.
+async fn write_back(
+    controller: &mut holon_filesystem::FileSyncController,
+    reader: &StubReader,
+    doc: &EntityUri,
+    block: &Block,
+) -> anyhow::Result<bool> {
+    controller.seed_holder_from_authority(doc).await?;
+    let prev = reader
+        .blocks
+        .lock()
+        .unwrap()
+        .iter()
+        .take_while(|b| b.id != block.id)
+        .filter(|b| b.parent_id == block.parent_id)
+        .last()
+        .map(|b| b.id.clone());
+    controller
+        .on_block_changed(
+            doc,
+            &BlockDelta::Upsert {
+                block: block.clone(),
+                prev,
+            },
+        )
+        .await
+}
+
 /// N CDC content edits against a doc whose backing path is on a read-only
 /// filesystem must issue EXACTLY ONE write syscall (skip-with-one-loud-error),
 /// not one per event, and no event may propagate the EROFS error (the sync
@@ -271,9 +316,7 @@ async fn readonly_writeback_logs_once_then_skips_no_per_cdc_retry() {
         let mut edited = reader.blocks.lock().unwrap()[0].clone();
         edited.content = format!("First heading edit {i}");
         reader.set_block(&edited);
-        let r = controller
-            .on_block_changed(&doc.id, &BlockDelta::Upsert(edited))
-            .await;
+        let r = write_back(&mut controller, &reader, &doc.id, &edited).await;
         all_ok &= r.is_ok();
     }
 
@@ -327,8 +370,7 @@ async fn readonly_writeback_resumes_after_reingest_clears_the_mark() {
     let mut edited = reader.blocks.lock().unwrap()[0].clone();
     edited.content = "First heading edit A".to_string();
     reader.set_block(&edited);
-    controller
-        .on_block_changed(&doc.id, &BlockDelta::Upsert(edited))
+    write_back(&mut controller, &reader, &doc.id, &edited)
         .await
         .unwrap();
     assert_eq!(
@@ -354,9 +396,7 @@ async fn readonly_writeback_resumes_after_reingest_clears_the_mark() {
     let mut edited2 = reader.blocks.lock().unwrap()[0].clone();
     edited2.content = "RESUMED-MARKER-XYZ".to_string();
     reader.set_block(&edited2);
-    let r = controller
-        .on_block_changed(&doc.id, &BlockDelta::Upsert(edited2))
-        .await;
+    let r = write_back(&mut controller, &reader, &doc.id, &edited2).await;
     assert!(r.is_ok(), "resumed write-back must return Ok");
     assert!(
         fs.write_attempts() > base_attempts,
@@ -373,8 +413,7 @@ async fn readonly_writeback_resumes_after_reingest_clears_the_mark() {
     //     renders == last and issues NO further write.
     let after_resume = fs.write_attempts();
     let same = reader.blocks.lock().unwrap()[0].clone();
-    controller
-        .on_block_changed(&doc.id, &BlockDelta::Upsert(same))
+    write_back(&mut controller, &reader, &doc.id, &same)
         .await
         .unwrap();
     assert_eq!(

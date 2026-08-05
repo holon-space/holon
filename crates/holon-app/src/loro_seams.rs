@@ -132,6 +132,20 @@ impl BlockReader for LoroBlockReader {
         Ok(out)
     }
 
+    async fn doc_block_topology(
+        &self,
+        doc_id: &EntityUri,
+    ) -> AnyhowResult<Vec<(EntityUri, EntityUri)>> {
+        // Honest, not a stub: the same subtree walk `get_blocks` does, reporting
+        // each node's real tree parent. The Loro tree has no projection to
+        // exploit — nodes carry their content inline — so this costs what
+        // `get_blocks` costs and simply drops the bodies. The saving that
+        // motivates this method is Turso-side.
+        let mut out = Vec::new();
+        self.collect_subtree(doc_id, &mut out).await?;
+        Ok(out.into_iter().map(|b| (b.id, b.parent_id)).collect())
+    }
+
     async fn get_block_authoritative(&self, id: &EntityUri) -> AnyhowResult<Option<Block>> {
         // The Loro tree is the write authority (no matview/`block_raw` split);
         // a direct node read is the authoritative O(1) point lookup used by the
@@ -652,6 +666,26 @@ impl holon_filesystem::ShareWritebackDisclosure for ShareDegradedDisclosure {
             reason: holon::sync::ShareDegradedReason::SharedSubtreeNotMaterialized(
                 block_id.to_string(),
             ),
+        });
+    }
+}
+
+/// `WritebackDisclosure` that turns the write-back supervisor's give-up into
+/// the `WritebackDegraded` banner. Same bridging role as
+/// [`ShareDegradedDisclosure`]: the supervisor lives in holon-orgmode, which
+/// has no view of the concrete bus.
+pub struct WritebackDegradedDisclosure {
+    pub bus: Arc<holon::sync::DegradedSignalBus>,
+}
+
+impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
+    fn writeback_degraded(&self, detail: &str) {
+        self.bus.emit(holon::sync::ShareDegraded {
+            // Not a share condition; the sentinel subject the
+            // `WritebackDegraded` variant documents keeps one process-wide
+            // banner instead of one per share.
+            shared_tree_id: "org-writeback".to_string(),
+            reason: holon::sync::ShareDegradedReason::WritebackDegraded(detail.to_string()),
         });
     }
 }

@@ -49,6 +49,34 @@ pub trait BlockReader: Send + Sync {
     /// one adapter and is not a cross-parent ordering key.
     async fn get_blocks(&self, doc_id: &EntityUri) -> Result<Vec<Block>>;
 
+    /// The document's SHAPE: one `(id, parent_id)` pair per block
+    /// `get_blocks(doc_id)` would return, children-only, WITHOUT hydrating a
+    /// single block body.
+    ///
+    /// Exists for the write-back fold-completeness gate, which runs on every
+    /// block delta. Routing it through `get_blocks` would put full edge
+    /// hydration back on the per-edit path — the cost Option C removed and
+    /// `edits_render_from_the_holder_and_fire_zero_get_blocks` pins at zero.
+    ///
+    /// # Why parents, not just ids
+    ///
+    /// Membership equality is NOT fold-completeness. A holder can hold exactly
+    /// the right id set while one member still carries its PRE-MOVE parent —
+    /// and that member is then unreachable from the document root, gets
+    /// excluded from the render, and the removal guard vetoes a block that
+    /// genuinely belongs to the file. Measured at 55% of runs on one keystone
+    /// case before the parent was compared. The parent is what makes "the fold
+    /// finished" checkable.
+    ///
+    /// # No default implementation, deliberately
+    ///
+    /// A defaulted `Ok(vec![])` would make the gate compare an empty holder
+    /// against an empty authority, PASS, and render an empty document over a
+    /// populated file — silently reintroducing the data-loss shape the gate
+    /// exists to prevent. An implementation that genuinely cannot answer must
+    /// return `Err`, never an empty set.
+    async fn doc_block_topology(&self, doc_id: &EntityUri) -> Result<Vec<(EntityUri, EntityUri)>>;
+
     /// Authoritative single-block point read, fully edge-hydrated
     /// (`tags`/`requires`/`advice_suppressed`). Reads the **write-authority**
     /// store — `block_raw` under Turso, the Loro tree under Loro — NOT the
@@ -441,6 +469,23 @@ pub trait ShareWritebackDisclosure: Send + Sync {
     /// but could not be materialized to a dedicated on-disk org file. Emit a
     /// user-visible degraded banner; the edit itself is safe in Loro + SQL.
     fn shared_subtree_not_materialized(&self, block_id: &EntityUri, shared_tree_id: &str);
+}
+
+/// Disclosure seam for the write-back stream giving up entirely.
+///
+/// Its own port rather than a call onto the degraded-signal bus, because the
+/// bus type lives downstream (holon-loro) of everything that can raise this:
+/// the supervisor sits in holon-orgmode, which must not learn about a concrete
+/// bus to be able to shout. Same shape and same reason as
+/// [`ShareWritebackDisclosure`]; the wiring crate bridges both.
+pub trait WritebackDisclosure: Send + Sync {
+    /// Signal that org write-back is DOWN — the supervised stream died more
+    /// often than its restart budget allows, so edits reach Loro + SQL but stop
+    /// reaching disk. `detail` carries the supervisor's escalation summary
+    /// (what died, how many restarts it spent). Sticky: nothing lifts it but a
+    /// successful respawn, which is accurate — the disk projection stays stale
+    /// for exactly that long.
+    fn writeback_degraded(&self, detail: &str);
 }
 
 /// Authoritative "is this block id a registered shared-subtree mount?" seam.

@@ -89,6 +89,21 @@ impl BlockReader for FixtureReader {
         Ok(self.children.get(doc_id).cloned().unwrap_or_default())
     }
 
+    /// Delegates to `get_blocks`: this double has no cheaper projection.
+    /// Never an empty stub — an empty shape would let the write-back
+    /// fold-completeness gate PASS on an incomplete document.
+    async fn doc_block_topology(
+        &self,
+        doc_id: &EntityUri,
+    ) -> anyhow::Result<Vec<(EntityUri, EntityUri)>> {
+        Ok(self
+            .get_blocks(doc_id)
+            .await?
+            .into_iter()
+            .map(|b| (b.id, b.parent_id))
+            .collect())
+    }
+
     async fn get_block_authoritative(&self, id: &EntityUri) -> anyhow::Result<Option<Block>> {
         Ok(self.by_id.get(id).cloned())
     }
@@ -220,6 +235,36 @@ fn fixtures() -> Fixtures {
     }
 }
 
+/// Drive one block edit the way production does: the holder is seeded from the
+/// authority (production seeds it from the block feed's initial snapshot), then
+/// the edit is applied at the position the authority already gives the block.
+async fn write_back(
+    controller: &mut holon_filesystem::FileSyncController,
+    f: &Fixtures,
+    doc: &EntityUri,
+    block: &Block,
+) -> anyhow::Result<bool> {
+    controller.seed_holder_from_authority(doc).await?;
+    let prev = f
+        .children
+        .get(doc)
+        .into_iter()
+        .flatten()
+        .take_while(|b| b.id != block.id)
+        .filter(|b| b.parent_id == block.parent_id)
+        .last()
+        .map(|b| b.id.clone());
+    controller
+        .on_block_changed(
+            doc,
+            &BlockDelta::Upsert {
+                block: block.clone(),
+                prev,
+            },
+        )
+        .await
+}
+
 fn build_controller(
     f: &Fixtures,
     documents: Vec<EntityUri>,
@@ -298,8 +343,7 @@ async fn husk_writeback_never_writes_outside_the_vault_root() {
 
     let mut controller = build_controller(&f, vec![], root.clone());
     let husk_block = f.by_id[&f.husk_id].clone();
-    let result = controller
-        .on_block_changed(&f.husk_id, &BlockDelta::Upsert(husk_block))
+    let result = write_back(&mut controller, &f, &f.husk_id, &husk_block)
         .await
         .expect("an underivable path must be a bounded skip, never crash the sync loop");
 
@@ -335,8 +379,7 @@ async fn child_of_husk_writeback_is_refused_with_containment_disclosure() {
 
     let mut controller = build_controller(&f, vec![], root.clone());
     let child_block = f.by_id[&f.child_page_id].clone();
-    let result = controller
-        .on_block_changed(&f.child_page_id, &BlockDelta::Upsert(child_block))
+    let result = write_back(&mut controller, &f, &f.child_page_id, &child_block)
         .await
         .expect("an underivable path must be a bounded skip, never crash the sync loop");
 
@@ -382,8 +425,7 @@ async fn errors_after(
     let doc = routed_doc(&f);
     let block = f.by_id[&delta_block(&f)].clone();
     for _ in 0..ticks {
-        controller
-            .on_block_changed(&doc, &BlockDelta::Upsert(block.clone()))
+        write_back(&mut controller, &f, &doc, &block)
             .await
             .expect("an underivable path must be a bounded skip, never crash the sync loop");
     }
@@ -506,9 +548,7 @@ async fn rename_cleanup_never_deletes_outside_the_vault_root() {
     // `legit` is a well-formed page, so everything except the alias is healthy:
     // the ONLY unproven input is the prior path fed to the delete.
     let legit_block = f.by_id[&f.legit_id].clone();
-    let _ = controller
-        .on_block_changed(&f.legit_id, &BlockDelta::Upsert(legit_block))
-        .await;
+    let _ = write_back(&mut controller, &f, &f.legit_id, &legit_block).await;
 
     assert!(
         victim.exists(),
@@ -623,8 +663,7 @@ async fn materialize_image_with_content(
     let content = image.content.clone();
     let mut controller = build_controller(&f, vec![f.legit_id.clone()], root.to_path_buf())
         .with_image_data(Arc::new(PeerImageBytes));
-    controller
-        .on_block_changed(&f.legit_id, &BlockDelta::Upsert(image))
+    write_back(&mut controller, &f, &f.legit_id, &image)
         .await
         .expect("a refused image path must be a bounded skip, never abort write-back");
     (root.join("Legit Page.org").exists(), content)
