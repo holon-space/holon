@@ -181,6 +181,7 @@ fn build_message_fdw(peer: Arc<dyn McpCallSurface>) -> McpForeignDataWrapper {
     let yaml = format!(
         r#"
 list_resource: "{MESSAGES_URI}"
+fetch_contract: snapshot
 "#
     );
     let config: VtableConfig = serde_yaml::from_str(&yaml).expect("vtable yaml parses");
@@ -242,6 +243,7 @@ vtable:
         entity: session
         field: id
   write_through: true
+  fetch_contract: scoped_snapshot
 schema:
   - name: uuid
     sql_type: TEXT
@@ -498,11 +500,12 @@ async fn a_null_identity_is_refused() {
     );
 }
 
-/// The snapshot models what the MIRROR holds, not what the last scan returned.
-/// An ordinary `SELECT` over the foreign table re-scans upstream but leaves the
-/// mirror alone, so letting it advance the snapshot would make the next
-/// notification diff current-against-current, emit nothing, and strand the
-/// matview stale with no error at all.
+/// TRIPWIRE. An ordinary `SELECT` over the foreign table re-scans upstream but
+/// writes no mirror; when the push path carried a snapshot, that scan could
+/// advance it past the mirror and strand the matview stale forever with nothing
+/// logged. Upsert-only push holds no such state, so this should now pass
+/// trivially — and it is kept precisely because the day someone reintroduces
+/// cross-call state in the driver, this is what fails.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_interleaved_scan_does_not_swallow_the_next_update() {
     let conn = open_memory_conn();
@@ -541,8 +544,8 @@ async fn an_interleaved_scan_does_not_swallow_the_next_update() {
         .expect("translating the notification must not fail");
     assert!(
         pushed > 0,
-        "an interleaved scan must not swallow the update: the mirror still holds the OLD rows, \
-         so the notification still has real changes to carry"
+        "an interleaved scan must not swallow the update: the push re-fetches and re-announces \
+         what it found, regardless of what any other scan read in between"
     );
 
     conn.drain_fdw_stream("cc_message_fdw", &changes)
@@ -556,4 +559,254 @@ async fn an_interleaved_scan_does_not_swallow_the_next_update() {
     );
     assert_eq!(text(&after[0][1]), "edited");
     assert_eq!(text(&after[1][1]), "new");
+}
+
+// ---------------------------------------------------------------------------
+// Upsert-only push: a watermarked scan cannot witness a deletion
+// ---------------------------------------------------------------------------
+
+/// A fan-out message table shaped like the shipped `claude-history` `message`
+/// entity: one resource read per enumerated session, and an `enumerate_from`
+/// watermark that deliberately SKIPS sessions whose messages are already
+/// cached. `uuid` is the identity, `session_id` the parent key.
+fn build_fanned_out_message_fdw(peer: Arc<dyn McpCallSurface>) -> McpForeignDataWrapper {
+    let yaml = r#"
+list_resource: "claude://sessions/{session_id}/messages"
+uri_params:
+  session_id:
+    enumerate_from:
+      entity: session
+      field: id
+      where: >-
+        modified > COALESCE((SELECT MAX(m.ts) FROM cc_message m
+                             WHERE m.session_id = substr(cc_session.id, 12)), '')
+      order_by: modified DESC
+write_through: true
+fetch_contract: scoped_snapshot
+"#;
+    let config: VtableConfig = serde_yaml::from_str(yaml).expect("vtable yaml parses");
+    let columns = vec![
+        ("uuid".to_string(), "TEXT".to_string()),
+        ("session_id".to_string(), "TEXT".to_string()),
+        ("ts".to_string(), "TEXT".to_string()),
+        ("body".to_string(), "TEXT".to_string()),
+    ];
+    McpForeignDataWrapper::new(
+        "cc_message_fdw",
+        &columns,
+        &config,
+        peer,
+        Some(("uuid".to_string(), "cc-message".to_string())),
+        &["uuid".to_string()],
+        Some("cc_message".to_string()),
+        tokio::runtime::Handle::current(),
+        Some("cc_"),
+        &std::collections::HashMap::new(),
+    )
+}
+
+fn session_uri(session: &str) -> String {
+    format!("claude://sessions/{session}/messages")
+}
+
+/// Two sessions, one message each; `s1` is modified after its cached message
+/// and `s2` is not, so the watermark re-fetches `s1` ALONE on the next scan.
+fn seeded_two_session_table(
+    peer: &Arc<ScriptedPeer>,
+) -> (
+    Arc<CoreConnection>,
+    Arc<McpForeignDataWrapper>,
+    std::sync::mpsc::Receiver<turso_core::foreign::FdwChange>,
+) {
+    let conn = open_memory_conn();
+    execute_sql(
+        &conn,
+        "CREATE TABLE cc_session (id TEXT PRIMARY KEY, modified TEXT)",
+    );
+    execute_sql(
+        &conn,
+        "CREATE TABLE cc_message (uuid TEXT PRIMARY KEY, session_id TEXT, ts TEXT, body TEXT)",
+    );
+    // s1's own mtime is newer than its cached message; s2's is not.
+    execute_sql(
+        &conn,
+        "INSERT INTO cc_session VALUES ('cc-session:s1', '2026-01-03'), ('cc-session:s2', \
+         '2026-01-01')",
+    );
+    peer.set_resource_response(
+        &session_uri("s1"),
+        serde_json::json!([{"uuid": "m1", "session_id": "s1", "ts": "2026-01-01", "body": "one"}]),
+    );
+    peer.set_resource_response(
+        &session_uri("s2"),
+        serde_json::json!([{"uuid": "m2", "session_id": "s2", "ts": "2026-01-01", "body": "two"}]),
+    );
+
+    let fdw = Arc::new(build_fanned_out_message_fdw(peer.clone()));
+    conn.register_foreign_table("cc_message_fdw", fdw.clone())
+        .expect("register foreign table");
+    // The priming scan sees an empty cache, so the watermark admits BOTH
+    // sessions and the mirror is filled with both messages.
+    execute_sql(
+        &conn,
+        "CREATE MATERIALIZED VIEW cc_message_mv AS SELECT uuid, body FROM cc_message_fdw",
+    );
+    let seeded = query_rows(&conn, "SELECT uuid FROM cc_message_mv ORDER BY uuid");
+    assert_eq!(
+        seeded.len(),
+        2,
+        "the priming scan must see both sessions (the cache is empty, so the watermark excludes \
+         nothing) — otherwise the tests below are vacuous"
+    );
+
+    let changes = fdw.subscribe(&[]).expect("subscription");
+    (conn, fdw, changes)
+}
+
+/// THE CONTRACT (RULED 2026-08-06): a notification never retracts.
+///
+/// The re-fetch behind a notification is watermark-SCOPED, so a row missing
+/// from it may be deleted upstream or may simply belong to a parent the scope
+/// excluded — and the response cannot tell those apart. Rather than guess (the
+/// wrong guess silently deletes a user's chat history), the driver says only
+/// what it can prove. The row below survives a push that saw its parent come
+/// back EMPTY; `full_sync`/REFRESH is what reconciles it, pinned by
+/// `a_full_refresh_reconciles_an_upstream_deletion`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_notification_never_retracts_a_row_that_vanished_upstream() {
+    let peer = Arc::new(ScriptedPeer::new());
+    let (conn, fdw, changes) = seeded_two_session_table(&peer);
+
+    // s1's only message is gone upstream; s2 is untouched and out of scope.
+    peer.set_resource_response(&session_uri("s1"), serde_json::json!([]));
+
+    let pushed = fdw
+        .push_resource_update(&conn, &session_uri("s1"))
+        .expect("translating the notification must not fail");
+    assert_eq!(
+        pushed, 0,
+        "the scan returned no rows, so there is nothing to upsert and nothing may be retracted"
+    );
+
+    conn.drain_fdw_stream("cc_message_fdw", &changes)
+        .expect("draining the batch");
+    let after = query_rows(&conn, "SELECT uuid FROM cc_message_mv ORDER BY uuid");
+    assert_eq!(
+        after.len(),
+        2,
+        "BOTH rows survive: s1's because a scoped fetch cannot witness a deletion, s2's because \
+         the watermark never even asked about it. Deletions are REFRESH's job. Got: {after:?}"
+    );
+}
+
+/// The other half of the contract, on a `snapshot`-contract table: the deletion
+/// the live path deliberately did not act on IS reconciled by a full REFRESH,
+/// whose sweep sees the whole collection and so may retract. Without this, the
+/// pin above would just be documenting a leak.
+///
+/// The `scoped_snapshot` tables cannot be reconciled by a bare REFRESH. Their
+/// `enumerate_from` watermark reads the write-through cache that EARLIER scans
+/// already filled, so by the time a REFRESH starts, parents whose children are
+/// cached are ALREADY out of scope — the loss happens on the sweep's first
+/// pass, with no self-narrowing needed. The result is not an emptied view
+/// (which would at least look wrong): it is the watermark's scoped SUBSET, a
+/// partial, entirely plausible-looking result in which live rows have silently
+/// vanished. Their reconciliation is `full_sync`, which CLEARS the cache tables
+/// and drops stale views first (`operation_dispatcher.rs` steps 2-3); the
+/// general fix is the scoped REFRESH primitive requested from the engine.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_refresh_reconciles_an_upstream_deletion() {
+    let peer = Arc::new(ScriptedPeer::new());
+    let (conn, fdw, changes) = seeded_message_table(&peer);
+
+    peer.set_resource_response(MESSAGES_URI, serde_json::json!([]));
+    let pushed = fdw
+        .push_resource_update(&conn, MESSAGES_URI)
+        .expect("the notification is a no-op by contract");
+    assert_eq!(
+        pushed, 0,
+        "the live path never retracts, whatever the contract"
+    );
+    conn.drain_fdw_stream("cc_message_fdw", &changes)
+        .expect("draining");
+    assert_eq!(
+        query_rows(&conn, "SELECT id FROM cc_message_mv").len(),
+        1,
+        "the row outlives the notification"
+    );
+
+    execute_sql(&conn, "REFRESH MATERIALIZED VIEW cc_message_mv");
+
+    assert!(
+        query_rows(&conn, "SELECT id FROM cc_message_mv").is_empty(),
+        "the sweep saw the whole collection, so the deleted row is finally retracted"
+    );
+}
+
+/// Re-pushing rows the mirror already holds must be a no-op in the VIEW, not a
+/// duplication: convergence is the engine's identity-keyed, value-guarded
+/// upsert, which is the whole reason the driver is allowed to be diff-free.
+#[tokio::test(flavor = "multi_thread")]
+async fn re_upserting_unchanged_rows_does_not_duplicate_them() {
+    let peer = Arc::new(ScriptedPeer::new());
+    let (conn, fdw, changes) = seeded_two_session_table(&peer);
+
+    // Let the watermark admit both sessions again with their content unchanged.
+    execute_sql(&conn, "UPDATE cc_session SET modified = '2026-01-09'");
+
+    let pushed = fdw
+        .push_resource_update(&conn, &session_uri("s1"))
+        .expect("push");
+    assert_eq!(
+        pushed, 2,
+        "both rows are re-fetched and re-announced as upserts"
+    );
+
+    conn.drain_fdw_stream("cc_message_fdw", &changes)
+        .expect("draining the batch");
+    let after = query_rows(&conn, "SELECT uuid, body FROM cc_message_mv ORDER BY uuid");
+    assert_eq!(
+        after.len(),
+        2,
+        "re-upserting identical rows must leave the view unchanged, got: {after:?}"
+    );
+    assert_eq!(text(&after[0][1]), "one");
+    assert_eq!(text(&after[1][1]), "two");
+}
+
+/// A subscription is a request for streaming push, and streaming push is only
+/// sound if somebody has said what the source promises about a fetch. Left
+/// undeclared, a future maintainer's reasonable-looking "absence means
+/// deletion" is the silent-data-loss bug this whole increment exists to close.
+#[tokio::test(flavor = "multi_thread")]
+async fn subscribing_without_a_declared_fetch_contract_is_refused() {
+    let peer = Arc::new(ScriptedPeer::new());
+    let config: VtableConfig =
+        serde_yaml::from_str(&format!("list_resource: \"{MESSAGES_URI}\"\n"))
+            .expect("vtable yaml parses");
+    let columns = vec![
+        ("id".to_string(), "TEXT".to_string()),
+        ("body".to_string(), "TEXT".to_string()),
+    ];
+    let fdw = McpForeignDataWrapper::new(
+        "cc_message_fdw",
+        &columns,
+        &config,
+        peer,
+        Some(("id".to_string(), "cc-message".to_string())),
+        &["id".to_string()],
+        None,
+        tokio::runtime::Handle::current(),
+        Some("cc_"),
+        &std::collections::HashMap::new(),
+    );
+
+    let err = fdw
+        .subscribe(&[])
+        .expect_err("an undeclared fetch contract must refuse the subscription")
+        .to_string();
+    assert!(
+        err.contains("cc_message_fdw") && err.contains("fetch_contract"),
+        "the refusal must name the table and the missing declaration, got: {err}"
+    );
 }

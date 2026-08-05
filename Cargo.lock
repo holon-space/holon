@@ -5544,6 +5544,7 @@ dependencies = [
  "serde_yaml",
  "tempfile",
  "tokio",
+ "turso_core",
  "workspace-hack 0.1.0",
 ]
 
