@@ -455,10 +455,14 @@ clippy:
 test:
     cargo nextest run --workspace 2>&1 | tee /tmp/holon-test.log
 
-# Check the wasi worker frontend compiles (mirrors the CI rust-checks step).
+# Rot guard for the out-of-workspace wasi worker: `cargo check --workspace`
+# cannot see it, so an API change in holon-api compiles clean and breaks the
+# worker silently. Mirrors the CI rust-checks step; wired into `precommit`.
 # EMNAPI_LINK_DIR: napi-build's wasi shim demands it, but `cargo check` never
 # links, so an empty stub dir is safe — the real dir comes from `napi build`
-# (frontends/holon-worker/scripts/build.sh).
+# (frontends/holon-worker/scripts/build.sh). The native `--no-default-features`
+# run is what actually EXECUTES the worker's serde-glue tests (`browser` pulls
+# wasm-only Turso IO, and the wasm target has no test harness).
 check-worker-wasm:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -467,6 +471,10 @@ check-worker-wasm:
         --manifest-path frontends/holon-worker/Cargo.toml \
         --target wasm32-wasip1-threads --features browser \
         2>&1 | tee /tmp/holon-worker-wasm-check.log
+    cargo test \
+        --manifest-path frontends/holon-worker/Cargo.toml \
+        --lib --no-default-features \
+        2>&1 | tee /tmp/holon-worker-native-test.log
 
 # --- Code Quality -----------------------------------------------------------
 
@@ -753,10 +761,12 @@ coverage-flutter:
 precommit:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "== Tier 1 [1/2]: defensive-code ratchet =="
+    echo "== Tier 1 [1/3]: defensive-code ratchet =="
     ./scripts/defensive-ratchet.sh
-    echo "== Tier 1 [2/2]: cargo check --workspace =="
+    echo "== Tier 1 [2/3]: cargo check --workspace =="
     cargo check --workspace 2>&1 | tee /tmp/precommit-check.log
+    echo "== Tier 1 [3/3]: out-of-workspace worker =="
+    just check-worker-wasm
     echo "== Tier 1 PASS =="
 
 # Tier 2 pre-push gate: full keystone at default PROPTEST_CASES=16 (includes the

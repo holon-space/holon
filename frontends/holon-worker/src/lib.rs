@@ -639,7 +639,8 @@ mod backend {
             .block_on(async { session.execute_operation(&entity_name, &op, params).await })
             .map_err(|e| super::nerr("execute_operation", e))?;
 
-        serde_json::to_string(&result).map_err(|e| super::nerr("serialize result", e))
+        let response = super::op_wire_response("execute_operation", &result);
+        serde_json::to_string(response).map_err(|e| super::nerr("serialize result", e))
     }
 
     /// Dispatch a chain of operation intents through the ReactiveEngine —
@@ -1288,7 +1289,10 @@ mod backend {
                     &command_name,
                     storage_entity,
                 ))?;
-                Ok(serde_json::to_value(&result)?)
+                Ok(serde_json::to_value(super::op_wire_response(
+                    "execute_command",
+                    &result,
+                ))?)
             }
 
             "click" => {
@@ -1787,6 +1791,24 @@ fn nerr(label: &str, e: impl std::fmt::Display) -> napi::Error {
     napi::Error::from_reason(format!("{label}: {e}"))
 }
 
+/// The wire value of an `OpOutcome` leaving the worker: the operation's raw
+/// response, `null` when there is none.
+///
+/// The projection — rather than serializing `OpOutcome` whole — is what the
+/// consumers already expect: the page's JS reads the operation's own result,
+/// and the native MCP `execute_command` tool projects the same field
+/// (`frontends/mcp/src/tools.rs`). `delivery` therefore cannot ride the wire,
+/// so an unproven delivery is disclosed here instead of dropped silently.
+fn op_wire_response<'a>(
+    label: &str,
+    outcome: &'a holon_api::OpOutcome,
+) -> &'a Option<holon_api::Value> {
+    if let holon_api::Delivery::Unproven { detail } = &outcome.delivery {
+        tracing::warn!("[{label}] delivery NOT proven: {detail}");
+    }
+    &outcome.response
+}
+
 /// Open (or create) a Turso database at `path` backed by the OPFS IO shim.
 /// Re-opening replaces any existing handle. Phase 2 does not yet support
 /// multiple databases.
@@ -1864,9 +1886,10 @@ pub fn db_query(sql: String) -> napi::Result<String> {
 // Tests
 // ──────────────────────────────────────────────────────────────────────────
 //
-// Native-only tests. The wasm build has no test harness; these exist so
-// `cargo test -p holon-worker` catches regressions in the serde glue
-// before hitting the worker build.
+// Native-only tests. The wasm build has no test harness; these catch
+// regressions in the serde glue before they reach the worker build. Run by
+// `just check-worker-wasm` — `--no-default-features` is required because
+// `browser` pulls the wasm-only Turso IO shim.
 
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
@@ -1898,6 +1921,41 @@ mod tests {
         assert_eq!(parsed["priority"], Value::Integer(3));
         assert_eq!(parsed["done"], Value::Boolean(true));
         assert_eq!(parsed["ratio"], Value::Float(0.5));
+    }
+
+    /// The worker returns the operation's own response, never the `OpOutcome`
+    /// envelope. Serializing the envelope instead would hand JS
+    /// `{"response":…,"delivery":…}` and break every caller that reads the
+    /// result directly.
+    #[test]
+    fn op_outcome_serializes_as_the_bare_response() {
+        let with_value = holon_api::OpOutcome::proven(Some(Value::String("ok".into())));
+        assert_eq!(
+            serde_json::to_string(super::op_wire_response("t", &with_value)).unwrap(),
+            r#""ok""#
+        );
+
+        let empty = holon_api::OpOutcome::proven(None);
+        assert_eq!(
+            serde_json::to_string(super::op_wire_response("t", &empty)).unwrap(),
+            "null"
+        );
+    }
+
+    /// An unproven delivery still yields the bare response — it is disclosed
+    /// via WARN, not encoded into the wire value.
+    #[test]
+    fn unproven_delivery_does_not_change_the_wire_value() {
+        let outcome = holon_api::OpOutcome {
+            response: Some(Value::String("sent".into())),
+            delivery: holon_api::Delivery::Unproven {
+                detail: "provider could not confirm".into(),
+            },
+        };
+        assert_eq!(
+            serde_json::to_string(super::op_wire_response("t", &outcome)).unwrap(),
+            r#""sent""#
+        );
     }
 
     /// A null JS value should map to `Value::Null`, not deserialize-fail.
