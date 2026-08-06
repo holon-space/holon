@@ -15,10 +15,12 @@ use std::sync::atomic::Ordering as AtomicOrdering;
 use anyhow::Result;
 use async_trait::async_trait;
 use holon_api::EntityUri;
+use holon_api::block::Block;
 use holon_api::live_data::home_by::HomeAuthority;
 use holon_api::live_data::home_by::Placement;
 use holon_core::block_ordering::BlockOrdering;
 use holon_filesystem::BlockReader;
+use holon_filesystem::nearest_page_ancestor;
 
 /// The document a block belongs to, or the absence of one.
 ///
@@ -31,9 +33,6 @@ pub enum DocHome {
     Resolved(EntityUri),
     Unresolved,
 }
-
-/// Depth bound on the ancestor walk, matching `resolve_doc_for_block`.
-const MAX_ANCESTOR_WALK: usize = 50;
 
 pub struct BlockHomeAuthority {
     reader: Arc<dyn BlockReader>,
@@ -61,39 +60,35 @@ impl BlockHomeAuthority {
         self.locate_reads.store(0, AtomicOrdering::Relaxed);
     }
 
-    /// Walk from `id` upward to the nearest `Page`, which is the document that
-    /// owns it. A page is its own document — the walk starts at the block
-    /// itself, which is what makes a page-ness toggle observable as a document
-    /// change on the toggled block.
-    async fn resolve_doc(&self, id: &EntityUri) -> Result<(DocHome, Option<EntityUri>)> {
-        let mut cur = id.clone();
-        let mut own_parent = None;
-        for step in 0..MAX_ANCESTOR_WALK {
-            self.locate_reads.fetch_add(1, AtomicOrdering::Relaxed);
-            let Some(block) = self.reader.get_block_authoritative(&cur).await? else {
-                return Ok((DocHome::Unresolved, own_parent));
-            };
-            if step == 0 {
-                own_parent = Some(block.parent_id.clone());
-            }
-            if block.is_page() {
-                return Ok((DocHome::Resolved(block.id), own_parent));
-            }
-            cur = block.parent_id;
-        }
-        Ok((DocHome::Unresolved, own_parent))
+    /// The document that owns `id`: the nearest `Page` at or above it. A page
+    /// is its own document — the walk starts at the block itself, which is what
+    /// makes a page-ness toggle observable as a document change on the toggled
+    /// block.
+    ///
+    /// `first` is the row for `id` when the caller already read it, so `locate`
+    /// does not pay a second point read for the block it just fetched.
+    #[tracing::instrument(skip_all, name = "home.resolve_doc")]
+    async fn resolve_doc(&self, id: &EntityUri, first: Option<Block>) -> Result<DocHome> {
+        Ok(
+            match nearest_page_ancestor(self.reader.as_ref(), id, first, Some(&self.locate_reads))
+                .await?
+            {
+                Some(page) => DocHome::Resolved(page.id),
+                None => DocHome::Unresolved,
+            },
+        )
     }
 }
 
 #[async_trait]
 impl HomeAuthority<DocHome> for BlockHomeAuthority {
+    #[tracing::instrument(skip_all, name = "home.locate")]
     async fn locate(&self, id: &str) -> Result<Option<Placement<DocHome>>> {
         let uri = EntityUri::parse(id)?;
         self.locate_reads.fetch_add(1, AtomicOrdering::Relaxed);
         let Some(block) = self.reader.get_block_authoritative(&uri).await? else {
             return Ok(None);
         };
-        let (doc, _) = self.resolve_doc(&uri).await?;
         // `no_parent` is the tree's root sentinel, expressed to the combinator
         // as "no parent" so the root group is keyed uniformly with `None`.
         let parent = if block.parent_id == EntityUri::no_parent() {
@@ -101,9 +96,11 @@ impl HomeAuthority<DocHome> for BlockHomeAuthority {
         } else {
             Some(block.parent_id.as_str().to_string())
         };
+        let doc = self.resolve_doc(&uri, Some(block)).await?;
         Ok(Some(Placement { doc, parent }))
     }
 
+    #[tracing::instrument(skip_all, name = "home.children_of")]
     async fn children_of(&self, parent: Option<&str>) -> Result<Vec<String>> {
         let parent_uri = match parent {
             Some(p) => EntityUri::parse(p)?,
@@ -117,6 +114,7 @@ impl HomeAuthority<DocHome> for BlockHomeAuthority {
         Ok(kids.into_iter().map(|k| k.as_str().to_string()).collect())
     }
 
+    #[tracing::instrument(skip_all, name = "home.prev_sibling")]
     async fn prev_sibling(&self, id: &str) -> Result<Option<String>> {
         let uri = EntityUri::parse(id)?;
         let prev = self
@@ -127,6 +125,7 @@ impl HomeAuthority<DocHome> for BlockHomeAuthority {
         Ok(prev.map(|p| p.as_str().to_string()))
     }
 
+    #[tracing::instrument(skip_all, name = "home.subtree_of")]
     async fn subtree_of(&self, id: &str) -> Result<Vec<String>> {
         // Breadth-first over `children`, which is the only ordered-descendant
         // read the seams expose. This is the O(subtree) cost a cross-document
@@ -154,6 +153,7 @@ impl HomeAuthority<DocHome> for BlockHomeAuthority {
     ///
     /// The default would issue two point reads per block, which at cold-boot
     /// scale is the per-block boot work already known to destabilise startup.
+    #[tracing::instrument(skip_all, name = "home.locate_batch")]
     async fn locate_batch(&self, ids: &[String]) -> Result<BTreeMap<String, Placement<DocHome>>> {
         // One read per block for its own row (parent + page-ness); the ancestor
         // walk is then replaced by the top-down pass below.
@@ -193,7 +193,7 @@ impl HomeAuthority<DocHome> for BlockHomeAuthority {
                 }
                 let Some(parent) = parent_of.get(&cur) else {
                     // Chain left the snapshot — pay one authoritative walk.
-                    break self.resolve_doc(&EntityUri::parse(&cur)?).await?.0;
+                    break self.resolve_doc(&EntityUri::parse(&cur)?, None).await?;
                 };
                 let Some(parent) = parent.clone() else {
                     break DocHome::Unresolved;

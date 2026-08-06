@@ -56,6 +56,10 @@ struct FrozenCheckMetrics {
     metrics: crate::test_tracing::TransitionMetrics,
     wall: Duration,
     rss_after: usize,
+    /// Frozen for the same reason as `metrics`: sampled live these would
+    /// attribute the invariant bodies' own reads, which dwarf the transition's.
+    origin: crate::test_tracing::QueryOriginBreakdown,
+    breakdown: crate::test_tracing::SqlBreakdown,
 }
 
 impl MetricsSut {
@@ -94,10 +98,14 @@ impl MetricsSut {
             .map(|t| t.elapsed())
             .unwrap_or_default();
         let rss_after = crate::test_tracing::current_rss_bytes();
+        let origin = self.span_collector.queries_by_origin();
+        let breakdown = self.span_collector.sql_breakdown();
         *self.frozen_at_check.borrow_mut() = Some(FrozenCheckMetrics {
             metrics,
             wall,
             rss_after,
+            origin,
+            breakdown,
         });
     }
 
@@ -147,6 +155,8 @@ impl MetricsSut {
             metrics,
             wall: wall_time,
             rss_after,
+            origin,
+            breakdown,
         } = self
             .frozen_at_check
             .borrow_mut()
@@ -308,8 +318,10 @@ impl MetricsSut {
 
         crate::test_tracing::maybe_write_flamegraph(&self.span_collector, &key);
         if std::env::var("HOLON_PERF_DETAIL").is_ok() {
-            let breakdown = self.span_collector.sql_breakdown();
             eprintln!("[inv-sql-budget DETAIL] {key}:\n{breakdown}");
+            // Which subsystem entered the SQL path: the only thing that turns
+            // "this text ran 146 times" into an actionable caller.
+            eprintln!("[inv-sql-budget ORIGIN] {key}:\n{origin}");
         }
 
         SqlBudgetReport { enforce, errors }

@@ -236,10 +236,6 @@ impl DocOrder {
 /// progress-line granularity so every chunk boundary is also a liveness tick.
 const CREATE_CHUNK_BLOCKS: usize = ingest_progress::PROGRESS_EVERY_BLOCKS;
 
-/// Ancestor hops `owning_file_of` will walk before giving up. Matches the
-/// bound the block-feed's own doc resolution uses.
-const MAX_OWNING_PAGE_WALK: usize = 50;
-
 /// Disclosure sites for `failure_disclosed`. Two DISTINCT diagnoses of the same
 /// underlying condition, each worth one loud line: the identity-file pre-flight
 /// reports it via `authoritative_name_chain`, the write path via
@@ -2111,17 +2107,11 @@ impl FileSyncController {
     /// ancestor) is absent from the authority: a brand-new / id-less / unknown
     /// block, which is normal ingest and must be left untouched. Depth-bounded.
     async fn resolve_authoritative_doc(&self, id: &EntityUri) -> Result<Option<EntityUri>> {
-        let mut cursor = id.clone();
-        for _ in 0..50 {
-            let Some(block) = self.block_reader.get_block_authoritative(&cursor).await? else {
-                return Ok(None);
-            };
-            if block.is_page() {
-                return Ok(Some(block.id));
-            }
-            cursor = block.parent_id;
-        }
-        Ok(None)
+        Ok(
+            crate::sync_ports::nearest_page_ancestor(self.block_reader.as_ref(), id, None, None)
+                .await?
+                .map(|page| page.id),
+        )
     }
 
     /// Read `path`, or `Ok(None)` when it has vanished (an external deletion —
@@ -5529,20 +5519,16 @@ impl FileSyncController {
     /// destination file's bytes) races the render — the delta can carry a
     /// pre-move parent, and the destination file may not be written yet.
     async fn owning_file_of(&self, id: &EntityUri) -> Result<Option<PathBuf>> {
-        let mut current = id.clone();
-        for _ in 0..MAX_OWNING_PAGE_WALK {
-            let Some(block) = self.block_reader.get_block_authoritative(&current).await? else {
-                return Ok(None);
-            };
-            if block.is_page() {
-                return Ok(self
-                    .doc_id_to_path(&block.id)
-                    .await?
-                    .map(|p| p.into_path_buf()));
-            }
-            current = block.parent_id;
-        }
-        Ok(None)
+        let Some(page) =
+            crate::sync_ports::nearest_page_ancestor(self.block_reader.as_ref(), id, None, None)
+                .await?
+        else {
+            return Ok(None);
+        };
+        Ok(self
+            .doc_id_to_path(&page.id)
+            .await?
+            .map(|p| p.into_path_buf()))
     }
 
     /// Collect the sibling-file grounding for the write-back guard: the on-disk
