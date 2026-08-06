@@ -202,10 +202,12 @@ holon_pbt_core::cap_transition! {
     |me, _state, sut| {
         sut.apply_peer_edit(me.peer_idx, &me.op).await;
     }
-    sql_budget: |_me, _state| {
-        // PeerEdit: async CDC drain from previous transitions can land here.
+    sql_budget: |_me, state| {
+        // Peer edits touch only the peer's Loro doc, so the whole read cost is
+        // the shared CDC drain: 136 samples, exactly 0 at d=1 (n=130) and
+        // exactly 3 at d=3 (n=6).
         ExpectedSql {
-            reads: 5,
+            reads: holon_pbt_core::budget::cdc_drain_floor(state.document_count()),
             writes: 0,
             ddl: 0,
             tolerance: 5,

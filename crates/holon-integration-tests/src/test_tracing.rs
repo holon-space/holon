@@ -604,6 +604,10 @@ impl SpanCollector {
         // The `sql` attribute is set by turso.rs #[tracing::instrument(fields(sql =
         // ...))].
         let duplicate_sql = find_duplicate_sql(sql_spans);
+        // Reads only — the budget gate subtracts redundant *read* re-executions
+        // from `sql_read_count`, so it must not see write/DDL duplicates.
+        let duplicate_reads =
+            find_duplicate_sql(spans.iter().filter(|s| s.name.as_ref() == "query"));
 
         // ── Render metrics ───────────────────────────────────────
         let render_spans: Vec<_> = spans
@@ -668,6 +672,7 @@ impl SpanCollector {
             total_query_duration,
             total_span_count: spans.len(),
             duplicate_sql,
+            duplicate_reads,
             render_count,
             render_by_component,
             max_render_duration,
@@ -776,6 +781,9 @@ pub struct TransitionMetrics {
     /// [`DuplicateSql`] for how `distinct_bindings` separates redundant
     /// re-execution from parameterized fan-out.
     pub duplicate_sql: Vec<DuplicateSql>,
+    /// [`Self::duplicate_sql`] restricted to `"query"` spans — the input to
+    /// the budget gate's dedup arithmetic and to the redundancy ratchet.
+    pub duplicate_reads: Vec<DuplicateSql>,
 
     // ── Render metrics (from "frontend.render" spans) ────────────
     /// Total frontend render spans
@@ -832,6 +840,37 @@ impl TransitionMetrics {
     /// Total SQL operations (reads + writes + DDL).
     pub fn sql_total(&self) -> usize {
         self.sql_read_count + self.sql_write_count + self.sql_ddl_count
+    }
+
+    /// Read executions that re-asked a question already asked in this window:
+    /// per statement, everything beyond one execution per distinct binding-set.
+    ///
+    /// One execution per binding is what a correct consumer needs, so this is
+    /// exactly the work a coalescing fix would remove.
+    pub fn redundant_read_excess(&self) -> usize {
+        self.duplicate_reads
+            .iter()
+            .map(|d| d.count.saturating_sub(d.distinct_bindings))
+            .sum()
+    }
+
+    /// `sql_read_count` with [`Self::redundant_read_excess`] removed — the
+    /// number the per-transition budgets are derived against, so a budget
+    /// models the reads the transition legitimately needs rather than the
+    /// re-execution defect layered on top (ruling (c), 2026-08-06).
+    pub fn dedup_read_count(&self) -> usize {
+        self.sql_read_count - self.redundant_read_excess()
+    }
+
+    /// The worst read re-execution in this window: `(fingerprint, repeats)` for
+    /// the statement whose single binding-set re-ran the most times. Drives the
+    /// redundancy ratchet; `None` when every read binding ran exactly once.
+    pub fn worst_read_repeat(&self) -> Option<(&str, usize)> {
+        self.duplicate_reads
+            .iter()
+            .filter(|d| d.max_repeat_per_binding > 1)
+            .max_by_key(|d| d.max_repeat_per_binding)
+            .map(|d| (d.sql.as_str(), d.max_repeat_per_binding))
     }
 }
 

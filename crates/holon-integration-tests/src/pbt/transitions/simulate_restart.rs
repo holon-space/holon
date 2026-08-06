@@ -87,8 +87,13 @@ crate::cap_transition! {
         sut.simulate_restart().await;
     }
     sql_budget: |_me, state| {
+        // A restart re-ingests the vault from disk, so `REACTIVE_BASE + 4`
+        // was an order out. Dedup reads 28/34/43 (d=3) — every one of them
+        // `org.ingest_file`, which is 144 of the 149 raw queries in the
+        // worst sample. THIN: n=3, so the 43 ceiling is not characterized;
+        // re-measure before reading anything into a breach just above it.
         ExpectedSql {
-            reads: REACTIVE_BASE + 4,
+            reads: REACTIVE_BASE + 38,
             writes: 2,
             ddl: 0,
             tolerance: 3 + docs_tolerance(state),

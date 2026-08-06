@@ -58,9 +58,12 @@ crate::cap_transition! {
 use holon_pbt_core::capabilities::RefSqlCardinality;
 #[cfg(feature = "otel-testing")]
 impl crate::pbt::transition_budgets::SqlBudget for Nothing {
-    fn expected_sql<R: RefSqlCardinality>(&self, _: &R) -> ExpectedSql {
+    fn expected_sql<R: RefSqlCardinality>(&self, state: &R) -> ExpectedSql {
+        // A no-op still absorbs the shared CDC drain: 210 samples, 0 at d=1
+        // (n=209) and exactly 3 at d=3 (n=1). Tolerance stays 0 — nothing else
+        // may land in a transition that does nothing.
         ExpectedSql {
-            reads: 0,
+            reads: holon_pbt_core::budget::cdc_drain_floor(state.document_count()),
             writes: 0,
             ddl: 0,
             tolerance: 0,

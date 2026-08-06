@@ -92,12 +92,14 @@ holon_pbt_core::cap_transition! {
     |me, _state, sut| {
         sut.apply_sync_with_peer(me.peer_idx).await;
     }
-    sql_budget: |_me, _state| {
-        // SyncWithPeer: async CDC drain from previous transitions can land here.
-        // In production, fires Loro's `subscribe_root` callback, which wakes
+    sql_budget: |_me, state| {
+        // Pushing the primary's state at a peer touches no SQL: 297 samples,
+        // all 0 reads (all at d=1 — the multi-doc arm is unsampled, so the
+        // shared CDC drain is carried on the same terms as its siblings). In
+        // production this fires Loro's `subscribe_root` callback, which wakes
         // `LoroSyncController` to reconcile the diff into the command/event bus.
         ExpectedSql {
-            reads: 5,
+            reads: holon_pbt_core::budget::cdc_drain_floor(state.document_count()),
             writes: 0,
             ddl: 0,
             tolerance: 5,

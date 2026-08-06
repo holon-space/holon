@@ -229,10 +229,11 @@ impl MetricsSut {
             )
         };
         eprintln!(
-            "[inv-sql-budget] {key}: reads={}/{} writes={}/{} ddl={}/{} tol={} max_q={}ms \
-             wall={}ms spans={} rss={delta:+.1}MB \
+            "[inv-sql-budget] {key}: reads={} (dedup {})/{} writes={}/{} ddl={}/{} tol={} \
+             max_q={}ms wall={}ms spans={} rss={delta:+.1}MB \
              (cum={cum:+.1}MB){state_summary}{render_summary}{cdc_summary}{perf_summary}",
             metrics.sql_read_count,
+            metrics.dedup_read_count(),
             expected.reads,
             metrics.sql_write_count,
             expected.writes,

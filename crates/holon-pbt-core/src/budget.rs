@@ -95,6 +95,25 @@ pub const OPEN_TAB_CLICK_RESOLVE_READS: usize = 10;
 /// breach — a breach means the click path grew.
 pub const CLICK_JITTER_TOLERANCE: usize = 1;
 
+/// The CDC drain that lands in a transition window even when the transition
+/// itself issues no SQL of its own.
+///
+/// Exactly three reads, identified from their SQL text (2026-08-06): one
+/// `block_raw` content read, the advice-rule cache subscriber
+/// (`content_type='source' AND source_language='holon_advice_rule_yaml'`) and
+/// the block-feed projection (`block_raw WHERE id != 'sentinel:no_parent'`);
+/// origins `execute_query` ×2 + `<no-parent>` ×1. It is NOT the `focus_roots`
+/// re-read it was long assumed to be — `focus_roots` never appears in it.
+///
+/// Conditional on the vault holding more than one document: measured 0 reads
+/// at d=1 (AddPeer n=123, PeerEdit n=130, Nothing n=209, SyncWithPeer n=297,
+/// all exactly 0) and exactly 3 at d=3 (AddPeer n=6, PeerEdit n=6, Nothing
+/// n=1). Shared rather than folded into each transition's constant so the one
+/// mechanism has one name.
+pub fn cdc_drain_floor(docs: usize) -> usize {
+    if docs > 1 { 3 } else { 0 }
+}
+
 /// Per-variant budget files share this tolerance helper. Base jitter (4)
 /// plus extra matview checks (~2 reads per extra doc) for restarts reusing
 /// matviews via `ensure_view`.

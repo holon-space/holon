@@ -74,11 +74,13 @@ holon_pbt_core::cap_transition! {
     |_me, _state, sut| {
         sut.apply_add_peer().await;
     }
-    sql_budget: |_me, _state| {
-        // AddPeer: export_snapshot triggers ~5 SQL reads (store persistence).
-        // Others: async CDC drain from previous transitions can land here.
+    sql_budget: |_me, state| {
+        // AddPeer issues no SQL of its own — the earlier "export_snapshot
+        // triggers ~5 reads" model is refuted: 129 samples split exactly
+        // 0 at d=1 (n=123) / 3 at d=3 (n=6), i.e. the whole cost is the
+        // shared CDC drain (execute_query ×2 + <no-parent> ×1).
         ExpectedSql {
-            reads: 5,
+            reads: holon_pbt_core::budget::cdc_drain_floor(state.document_count()),
             writes: 0,
             ddl: 0,
             tolerance: 5,

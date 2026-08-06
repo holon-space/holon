@@ -244,12 +244,18 @@ crate::cap_transition! {
         };
         sut.write_org_file(&me.filename, &content).await;
     }
-    sql_budget: |_me, _state| {
+    sql_budget: |_me, state| {
+        // A budget of 0 was fiction: an external file write is ingested, so it
+        // pays a full parse + home-resolution + CDC pass. Dedup reads 9-25
+        // over 9 samples (9 ×6, 16, 18, 25; all d=4), composed of
+        // `org.ingest_file`, `home.locate` (+ `home.resolve_doc`),
+        // `home.prev_sibling`, `org.on_block_feed ▸ org.on_block_changed` and
+        // `query_and_watch ▸ query_view ▸ query_view_ordered`.
         ExpectedSql {
-            reads: 0,
+            reads: holon_pbt_core::budget::cdc_drain_floor(state.document_count()) + 22,
             writes: 0,
             ddl: 0,
-            tolerance: 0,
+            tolerance: 5,
         }
     }
 }
