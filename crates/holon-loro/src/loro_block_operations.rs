@@ -32,7 +32,6 @@ use holon_api::block::BlockContent;
 use holon_api::repository::CoreOperations;
 use holon_api::repository::Traversal;
 use holon_core::BlockDataSourceHelpers;
-use holon_core::BlockMaintenanceHelpers;
 use holon_core::BlockOperations;
 use holon_core::BlockQueryHelpers;
 use holon_core::CompletionStateInfo;
@@ -342,7 +341,6 @@ impl BlockQueryHelpers<Block> for LoroBlockOperations {
         Ok(blocks)
     }
 }
-impl BlockMaintenanceHelpers<Block> for LoroBlockOperations {}
 impl BlockDataSourceHelpers<Block> for LoroBlockOperations {}
 impl BlockOperations<Block> for LoroBlockOperations {}
 

@@ -141,7 +141,7 @@ impl CacheBlockReader {
     /// `block_raw`); see devlog/2026-05-05-110315.md.
     async fn load_all_blocks_with_hydration(&self) -> anyhow::Result<Vec<Block>> {
         let sql = format!(
-            "SELECT b.id, b.parent_id, b.depth, b.sort_key, b.content, b.content_type, \
+            "SELECT b.id, b.parent_id, b.sort_key, b.content, b.content_type, \
              b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.widget_only, \
              b.completed, \
              b.block_type, b.created_at, b.updated_at, COALESCE((SELECT json_group_array(tag) \
@@ -277,7 +277,7 @@ impl BlockReader for CacheBlockReader {
              $doc_id AND bt.block_id IS NULL UNION ALL SELECT b.id, d.depth_acc + 1 FROM {table} \
              b JOIN descendants d ON b.parent_id = d.id LEFT JOIN block_tags bt ON bt.block_id = \
              b.id AND bt.tag = 'Page' WHERE bt.block_id IS NULL AND d.depth_acc < 100 ) SELECT \
-             b.id, b.parent_id, b.depth, b.sort_key, b.content, b.content_type, \
+             b.id, b.parent_id, b.sort_key, b.content, b.content_type, \
              b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.widget_only, \
              b.completed, \
              b.block_type, b.created_at, b.updated_at, COALESCE((SELECT json_group_array(tag) \
@@ -383,7 +383,7 @@ impl BlockReader for CacheBlockReader {
         // per-edit refresh for the org-writeback incremental cache; it shares
         // `block_raw` authority with the cache's `get_blocks` seed.
         let sql = format!(
-            "SELECT b.id, b.parent_id, b.depth, b.sort_key, b.content, b.content_type, \
+            "SELECT b.id, b.parent_id, b.sort_key, b.content, b.content_type, \
              b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.widget_only, \
              b.completed, \
              b.block_type, b.created_at, b.updated_at, COALESCE((SELECT json_group_array(tag) \

@@ -489,7 +489,6 @@ pub trait BlockEntity: MaybeSendSync {
     fn id(&self) -> &EntityUri;
 
     fn parent_id(&self) -> Option<&EntityUri>;
-    fn depth(&self) -> i64;
 
     /// Get the block content (text content of the block)
     fn content(&self) -> &str;
@@ -718,45 +717,9 @@ where
     }
 }
 
-/// Mutating maintenance operations on block hierarchies (depth updates,
-/// rebalancing)
+/// Read + write helper surface every block store opts into.
 #[async_trait]
-pub trait BlockMaintenanceHelpers<T>: CrudOperations<T> + DataSource<T>
-where
-    T: BlockEntity + MaybeSendSync + 'static,
-{
-    /// Recursively update depths of all descendants when a parent's depth
-    /// changes
-    async fn update_descendant_depths(
-        &self,
-        parent_id: &EntityUri,
-        depth_delta: i64,
-    ) -> Result<()> {
-        if depth_delta == 0 {
-            return Ok(());
-        }
-
-        let mut queue = vec![parent_id.clone()];
-
-        while let Some(current_parent_id) = queue.pop() {
-            let children: Vec<T> = self.get_children(&current_parent_id).await?;
-
-            for child in children {
-                let current_depth = child.depth();
-                let new_depth = current_depth + depth_delta;
-                self.set_field(child.id().as_str(), "depth", Value::Integer(new_depth))
-                    .await?;
-                queue.push(child.id().clone());
-            }
-        }
-
-        Ok(())
-    }
-}
-
-/// Backward-compatible alias combining both query and maintenance helpers
-#[async_trait]
-pub trait BlockDataSourceHelpers<T>: BlockQueryHelpers<T> + BlockMaintenanceHelpers<T>
+pub trait BlockDataSourceHelpers<T>: BlockQueryHelpers<T> + CrudOperations<T>
 where
     T: BlockEntity + MaybeSendSync + 'static,
 {
@@ -917,13 +880,13 @@ fn subtree_ranked_deepest_first<'a, T: BlockEntity>(
 /// the "not a root block" check the caller must already have made.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct MovePrefetch {
-    /// `(parent_id, depth, is_page)` of the block being moved.
-    pub block: Option<(EntityUri, i64, bool)>,
+    /// `(parent_id, is_page)` of the block being moved.
+    pub block: Option<(EntityUri, bool)>,
     /// The block's previous sibling BEFORE the move. `Some(None)` means
     /// "prefetched, and there is none".
     pub old_predecessor: Option<Option<EntityUri>>,
-    /// `(depth, is_page)` of the destination parent.
-    pub new_parent: Option<(i64, bool)>,
+    /// Whether the destination parent is a page.
+    pub new_parent: Option<bool>,
 }
 
 /// Hierarchical structure operations (for any block-like entity)
@@ -981,9 +944,8 @@ where
     /// UI watcher subscribes to — pressing Tab would land in the DB but the
     /// tree never re-rendered. `outdent` already routes through `move_block`
     /// and works correctly; mirroring that path here yields the same CDC
-    /// propagation, plus the recursive-depth-update for descendants that the
-    /// inline implementation was missing.
-    #[holon_macros::affects("parent_id", "depth", "sort_key")]
+    /// propagation.
+    #[holon_macros::affects("parent_id", "sort_key")]
     #[holon_macros::menu_exposure(listed)]
     #[holon_macros::boundary_behavior(crossing_widens)]
     async fn indent(&self, id: &EntityUri) -> Result<OperationResult> {
@@ -998,7 +960,7 @@ where
             .parent_id()
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Cannot indent root block"))?;
-        let moved = (old_parent, block.depth(), block.is_page());
+        let moved = (old_parent, block.is_page());
 
         let prev_sibling = self.get_prev_sibling(id).await?.ok_or_else(|| {
             anyhow::anyhow!("Cannot indent: no previous sibling to become parent")
@@ -1010,7 +972,7 @@ where
         let prefetch = MovePrefetch {
             block: Some(moved),
             old_predecessor: Some(Some(new_parent_uri.clone())),
-            new_parent: Some((prev_sibling.depth(), prev_sibling.is_page())),
+            new_parent: Some(prev_sibling.is_page()),
         };
 
         // Indent semantics: the indented block becomes the LAST child of the
@@ -1063,7 +1025,7 @@ where
     /// * `parent_id` - Target parent ID (must always have a parent)
     /// * `after_block_id` - Optional anchor block (move after this block, or
     ///   beginning if None)
-    #[holon_macros::affects("parent_id", "depth", "sort_key")]
+    #[holon_macros::affects("parent_id", "sort_key")]
     #[holon_macros::triggered_by(availability_of = "tree_position", providing = ["parent_id", "after_block_id"])]
     #[holon_macros::triggered_by(availability_of = "selected_id", providing = ["parent_id"])]
     #[holon_macros::menu_exposure(pointer_gesture)]
@@ -1079,7 +1041,7 @@ where
     }
 
     /// Move block out to parent's level (decrease indentation)
-    #[holon_macros::affects("parent_id", "depth", "sort_key")]
+    #[holon_macros::affects("parent_id", "sort_key")]
     #[holon_macros::menu_exposure(listed)]
     #[holon_macros::boundary_behavior(forbidden_at_page_boundary)]
     async fn outdent(&self, id: &EntityUri) -> Result<OperationResult> {
@@ -1130,7 +1092,7 @@ where
         let grandparent_uri = grandparent_id.clone();
         let parent_uri = old_parent_uri.clone();
         let prefetch = MovePrefetch {
-            block: Some((old_parent_uri.clone(), block.depth(), block.is_page())),
+            block: Some((old_parent_uri.clone(), block.is_page())),
             old_predecessor: Some(old_predecessor.clone()),
             new_parent: None,
         };
@@ -1365,7 +1327,6 @@ where
                     Value::Null
                 }
             });
-            new_block_fields.insert("depth".into(), Value::Integer(block.depth()));
             new_block_fields.insert("sort_key".into(), Value::String(new_sort_key));
             // Positional intent for Full (Loro) mode. The literal key here
             // must match `event_bus::POSITION_AFTER_BLOCK_ID_PARAM` over in the
@@ -1661,7 +1622,6 @@ where
                 id,
                 block_content.clone(),
                 &block_parent,
-                block.depth(),
                 after.as_ref(),
             ))
         } else {
@@ -1700,8 +1660,6 @@ where
     /// which for a deterministic minter reproduces the original `sort_key`
     /// byte-for-byte between the same neighbours.
     // Undo of a block split has to restore both sides plus their positions;
-    // a params struct here is a public trait-API change for one lint.
-    #[allow(clippy::too_many_arguments)]
     #[holon_macros::affects("content", "parent_id", "sort_key")]
     #[holon_macros::boundary_behavior(private_only)]
     async fn restore_split(
@@ -1711,7 +1669,6 @@ where
         block_id: &EntityUri,
         block_content: String,
         block_parent: &EntityUri,
-        block_depth: i64,
         after_id: Option<&EntityUri>,
     ) -> Result<OperationResult> {
         // Capture the target's current content so the returned inverse can put
@@ -1760,7 +1717,6 @@ where
                 Value::String(block_parent.as_str().to_string()),
             );
             fields.insert("sort_key".into(), Value::String(new_sort_key));
-            fields.insert("depth".into(), Value::Integer(block_depth));
             let (_new_id, create_result) = self.create(fields).await?;
             changes.extend(create_result.changes);
         }
@@ -1834,7 +1790,6 @@ where
             .parent_id()
             .cloned()
             .unwrap_or_else(EntityUri::no_parent);
-        let block_depth = block.depth();
         let after = self
             .get_prev_sibling(deleted_id)
             .await?
@@ -1881,7 +1836,6 @@ where
                 deleted_id,
                 block_content,
                 &block_parent,
-                block_depth,
                 after.as_ref(),
             ),
         ))
@@ -2072,10 +2026,7 @@ where
         // Deepest-first: a node is deleted only after all of its descendants,
         // so each `self.delete` operates on a leaf and the fail-closed non-leaf
         // guard is never tripped. The rank is derived from `parent_id` WITHIN
-        // the returned set, not from `BlockEntity::depth()`: `depth` is a stored
-        // column with no authoritative writer (neither the org ingest nor the
-        // Loro projector writes it — `block_cell_registry` calls it "derived
-        // from the tree structure"), so sorting by it ordered nothing.
+        // the returned set — the tree is the only authority on depth.
         let mut ranked = subtree_ranked_deepest_first(id, &descendants)?;
         ranked.sort_by_key(|(rank, _)| std::cmp::Reverse(*rank));
         for (_, d) in &ranked {
@@ -2102,7 +2053,7 @@ where
     ///
     /// Declared irreversible: the reparent + delete pair has no exact single
     /// inverse (mirrors `join_block`'s with-children case).
-    #[holon_macros::affects("parent_id", "depth", "sort_key")]
+    #[holon_macros::affects("parent_id", "sort_key")]
     #[holon_macros::menu_exposure(listed)]
     #[holon_macros::boundary_behavior(crossing_widens)]
     async fn delete_keep_children(&self, id: &EntityUri) -> Result<OperationResult> {
@@ -2180,7 +2131,7 @@ where
     ) -> Result<OperationResult> {
         let id_str = id.as_str();
         // Capture old state before mutation
-        let (old_parent_uri, old_depth, moved_is_page) = match prefetch.block {
+        let (old_parent_uri, moved_is_page) = match prefetch.block {
             Some(facts) => facts,
             None => {
                 let maybe_block: Option<T> = self.get_by_id(id_str).await?;
@@ -2189,7 +2140,7 @@ where
                     .parent_id()
                     .cloned()
                     .ok_or_else(|| anyhow::anyhow!("Cannot move root block"))?;
-                (old_parent_uri, block.depth(), block.is_page())
+                (old_parent_uri, block.is_page())
             }
         };
         let old_predecessor: Option<EntityUri> = match prefetch.old_predecessor {
@@ -2200,13 +2151,13 @@ where
                 .map(|pred| pred.id().clone()),
         };
 
-        // Compute new depth for descendants' delta-update.
-        let (parent_depth, parent_is_page) = match prefetch.new_parent {
-            Some(facts) => facts,
+        // The destination's page-ness — the only fact the move needs about it.
+        let parent_is_page = match prefetch.new_parent {
+            Some(is_page) => is_page,
             None => {
                 let maybe_parent: Option<T> = self.get_by_id(parent_id.as_str()).await?;
                 let parent: T = maybe_parent.ok_or_else(|| anyhow::anyhow!("Parent not found"))?;
-                (parent.depth(), parent.is_page())
+                parent.is_page()
             }
         };
 
@@ -2233,10 +2184,6 @@ where
             .into());
         }
 
-        let new_depth = parent_depth + 1;
-        let depth_delta = new_depth - old_depth;
-
-        // Position + depth update.
         let mut changes = self.move_to_position(id, parent_id, after_block_id).await?;
         // Disclose the reparent itself: `move_to_position` reports no deltas
         // (ordering-internal), but parent_id DID change — propagation consumers
@@ -2247,19 +2194,6 @@ where
             Value::String(old_parent_uri.as_str().to_string()),
             Value::String(parent_id.as_str().to_string()),
         ));
-        let depth_result = self
-            .set_field(id_str, "depth", Value::Integer(new_depth))
-            .await?;
-        changes.extend(depth_result.changes);
-
-        // Recursively update all descendants' depths by the same delta
-        // Note: update_descendant_depths calls set_field internally, so it will also
-        // return FieldDeltas For now, we'll skip collecting those to avoid
-        // complexity
-        if depth_delta != 0 {
-            self.update_descendant_depths(id, depth_delta).await?;
-        }
-
         // Return inverse operation using macro-generated helper
         use crate::__operations_block_operations;
 
@@ -2320,7 +2254,7 @@ where
     /// * `parent_id` - Target parent ID
     /// * `after_id` - Optional anchor entity (move after this entity, or
     ///   beginning if None)
-    #[holon_macros::affects("parent_id", "depth", "sort_key")]
+    #[holon_macros::affects("parent_id", "sort_key")]
     #[holon_macros::boundary_behavior(crossing_widens)]
     async fn move_entity(
         &self,
@@ -2524,11 +2458,6 @@ impl BlockEntity for holon_api::block::Block {
         // outdent root block" — that's the right behavior for headings
         // directly under a document.
         self.parent_id.is_block().then_some(&self.parent_id)
-    }
-
-    fn depth(&self) -> i64 {
-        // Depth not stored in flattened entity - would need to compute from hierarchy
-        0
     }
 
     fn content(&self) -> &str {
@@ -2925,11 +2854,6 @@ mod trait_unit_tests {
         );
         assert_eq!(BlockEntity::content(&block), "hello world");
         assert!(BlockEntity::tags(&block).contains("foo"));
-        assert_eq!(
-            BlockEntity::depth(&block),
-            0,
-            "flattened entity depth is always 0"
-        );
         assert!(!block.is_page());
 
         let mut page = test_block();
@@ -2974,5 +2898,95 @@ mod trait_unit_tests {
         assert_eq!(<Block as OperationRegistry>::entity_name(), "block");
         assert_eq!(<Block as OperationRegistry>::short_name(), Some("block"));
         assert!(<Block as OperationRegistry>::all_operations().is_empty());
+    }
+
+    // ---- subtree_ranked_deepest_first ---------------------------------------
+    //
+    // The rank is `delete_subtree`'s whole ordering authority now that no depth
+    // column exists. Each Err arm below is a CORRUPT-HIERARCHY shape that would
+    // otherwise yield an arbitrary order and let a non-leaf delete through the
+    // fail-closed cascade guard.
+
+    /// `uuid`-shaped ids so `EntityUri::block` accepts them.
+    fn uri(n: u8) -> EntityUri {
+        EntityUri::block(&format!("{n:08}-1111-1111-1111-111111111111"))
+    }
+
+    fn child(id: u8, parent: &EntityUri) -> Block {
+        Block::new_text(uri(id), parent.clone(), "x")
+    }
+
+    #[test]
+    fn subtree_rank_is_the_hop_count_to_the_walk_root() {
+        let root = uri(0);
+        let a = child(1, &root);
+        let b = child(2, a.id());
+        let c = child(3, b.id());
+        let descendants = vec![a, b, c];
+
+        let ranked = subtree_ranked_deepest_first(&root, &descendants)
+            .expect("a well-formed subtree ranks without error");
+        let by_rank: Vec<(usize, String)> = ranked
+            .iter()
+            .map(|(r, d)| (*r, d.id().as_str().to_string()))
+            .collect();
+        assert_eq!(
+            by_rank,
+            vec![
+                (0, uri(1).as_str().to_string()),
+                (1, uri(2).as_str().to_string()),
+                (2, uri(3).as_str().to_string()),
+            ],
+            "rank counts hops to the root: direct child 0, grandchild 1, ..."
+        );
+    }
+
+    #[test]
+    fn subtree_rank_refuses_a_descendant_whose_parent_left_the_set() {
+        let root = uri(0);
+        // `b`'s parent `a` is NOT in the descendant set — the chain escapes it.
+        let a = child(1, &root);
+        let b = child(2, a.id());
+        let descendants = vec![b];
+
+        let err = subtree_ranked_deepest_first(&root, &descendants)
+            .expect_err("a chain leaving the subtree must not rank silently");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("outside the returned subtree") && msg.contains(uri(1).as_str()),
+            "error must name the escaping parent, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn subtree_rank_refuses_a_descendant_with_no_block_parent() {
+        let root = uri(0);
+        let mut orphan = child(1, &root);
+        // ALLOW(entity_uri_from_raw): doc-scheme parent fixture — reads as "no
+        // block parent" through `BlockEntity::parent_id`.
+        orphan.parent_id = EntityUri::from_raw("doc:some-file");
+        let descendants = vec![orphan];
+
+        let err = subtree_ranked_deepest_first(&root, &descendants)
+            .expect_err("a descendant with no block parent must be refused");
+        assert!(
+            err.to_string().contains("has no block parent"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn subtree_rank_refuses_a_cycle_among_the_descendants() {
+        let root = uri(0);
+        let a = child(1, &uri(2));
+        let b = child(2, &uri(1));
+        let descendants = vec![a, b];
+
+        let err = subtree_ranked_deepest_first(&root, &descendants)
+            .expect_err("a cycle never reaches the root and must be refused");
+        assert!(
+            err.to_string().contains("cycles inside the subtree"),
+            "got: {err}"
+        );
     }
 }

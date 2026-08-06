@@ -59,7 +59,6 @@ pub use operation_subset::OperationSubset;
 pub use operation_wrapper::OperationWrapper;
 pub use traits::BlockDataSourceHelpers;
 pub use traits::BlockEntity;
-pub use traits::BlockMaintenanceHelpers;
 pub use traits::BlockOperations;
 pub use traits::BlockQueryHelpers;
 pub use traits::CompletionStateInfo;

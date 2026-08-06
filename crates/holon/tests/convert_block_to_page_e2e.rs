@@ -82,24 +82,11 @@ async fn block_engine() -> Arc<BackendEngine> {
     .expect("test engine with block provider")
 }
 
-async fn create(
-    engine: &BackendEngine,
-    id: &str,
-    parent_id: &str,
-    content: &str,
-    depth: i64,
-    is_page: bool,
-) {
+async fn create(engine: &BackendEngine, id: &str, parent_id: &str, content: &str, is_page: bool) {
     let mut params: StorageEntity = HashMap::new();
     params.insert("id".into(), Value::String(id.to_string()));
     params.insert("content".into(), Value::String(content.to_string()));
     params.insert("parent_id".into(), Value::String(parent_id.to_string()));
-    // Blocks carry a `depth` = parent.depth + 1. `move_block` RECOMPUTES it, and
-    // the undo/redo staleness fingerprint compares the stored value against that
-    // recompute — so a fixture with an inconsistent `depth` (e.g. a child stored
-    // at 0 under a depth-1 parent) makes redo drop as stale. Production blocks
-    // are projector-consistent; the test fixtures must be too.
-    params.insert("depth".into(), Value::Integer(depth));
     if is_page {
         params.insert(
             "tags".into(),
@@ -191,13 +178,7 @@ async fn convert(engine: &BackendEngine, origin: &str, destination_path: &str) -
 
 /// A block linking to `target` — its marks carry a full-span internal link, so
 /// the create derives a `block_links` row resolved to `target`.
-async fn create_linker(
-    engine: &BackendEngine,
-    id: &str,
-    parent_id: &str,
-    depth: i64,
-    target: &str,
-) {
+async fn create_linker(engine: &BackendEngine, id: &str, parent_id: &str, target: &str) {
     let label = "see".to_string();
     let span = MarkSpan::new(
         0,
@@ -211,7 +192,6 @@ async fn create_linker(
     params.insert("id".into(), Value::String(id.to_string()));
     params.insert("content".into(), Value::String(label));
     params.insert("parent_id".into(), Value::String(parent_id.to_string()));
-    params.insert("depth".into(), Value::Integer(depth));
     params.insert("marks".into(), Value::String(marks_to_json(&[span])));
     engine
         .execute_operation(&EntityName::new(BLOCK), "create", params, OpOrigin::Sync)
@@ -224,13 +204,13 @@ async fn convert_then_undo_round_trip_restores_everything() {
     let engine = block_engine().await;
 
     let home = PageId::for_path("Home").unwrap().as_str().to_string();
-    create(&engine, &home, "sentinel:no_parent", "Home", 0, true).await;
+    create(&engine, &home, "sentinel:no_parent", "Home", true).await;
     let origin = "block:origin";
-    create(&engine, origin, &home, "Rust rewrite", 1, false).await;
-    create(&engine, "block:c1", origin, "child one", 2, false).await;
-    create(&engine, "block:c2", origin, "child two", 2, false).await;
+    create(&engine, origin, &home, "Rust rewrite", false).await;
+    create(&engine, "block:c1", origin, "child one", false).await;
+    create(&engine, "block:c2", origin, "child two", false).await;
     // An inbound reference to the origin — its resolved_id must follow to P.
-    create_linker(&engine, "block:linker", &home, 1, origin).await;
+    create_linker(&engine, "block:linker", &home, origin).await;
     assert_eq!(
         resolved_id_of(&engine, "block:linker").await.as_deref(),
         Some(origin),
@@ -338,9 +318,9 @@ async fn convert_creates_missing_destination_hierarchy_reversibly() {
     let engine = block_engine().await;
 
     let home = PageId::for_path("Home").unwrap().as_str().to_string();
-    create(&engine, &home, "sentinel:no_parent", "Home", 0, true).await;
+    create(&engine, &home, "sentinel:no_parent", "Home", true).await;
     let origin = "block:origin2";
-    create(&engine, origin, &home, "Widget", 1, false).await;
+    create(&engine, origin, &home, "Widget", false).await;
 
     // "Home/NewSub" — NewSub does not exist yet: the transform mints it.
     let new_sub = PageId::for_path("Home/NewSub")
@@ -383,15 +363,7 @@ async fn convert_creates_missing_destination_hierarchy_reversibly() {
 async fn convert_at_vault_root_is_allowed() {
     let engine = block_engine().await;
     let origin = "block:root-origin";
-    create(
-        &engine,
-        origin,
-        "sentinel:no_parent",
-        "Loose note",
-        0,
-        false,
-    )
-    .await;
+    create(&engine, origin, "sentinel:no_parent", "Loose note", false).await;
 
     let page = convert(&engine, origin, "").await;
     assert_eq!(page, PageId::for_path("Loose note").unwrap().as_str());
@@ -413,10 +385,10 @@ async fn convert_without_destination_defaults_to_nearest_page_ancestor() {
         .unwrap()
         .as_str()
         .to_string();
-    create(&engine, &home, "sentinel:no_parent", "Home", 0, true).await;
-    create(&engine, &section, &home, "Section", 1, true).await;
+    create(&engine, &home, "sentinel:no_parent", "Home", true).await;
+    create(&engine, &section, &home, "Section", true).await;
     let origin = "block:nested-origin";
-    create(&engine, origin, &section, "Deep note", 2, false).await;
+    create(&engine, origin, &section, "Deep note", false).await;
 
     // No destination_path param at all.
     let mut params: StorageEntity = HashMap::new();
@@ -452,12 +424,12 @@ async fn convert_without_destination_defaults_to_nearest_page_ancestor() {
 async fn convert_rejects_an_already_page_origin() {
     let engine = block_engine().await;
     let home = PageId::for_path("Home").unwrap().as_str().to_string();
-    create(&engine, &home, "sentinel:no_parent", "Home", 0, true).await;
+    create(&engine, &home, "sentinel:no_parent", "Home", true).await;
     let already = PageId::for_path("Home/Existing")
         .unwrap()
         .as_str()
         .to_string();
-    create(&engine, &already, &home, "Existing", 1, true).await;
+    create(&engine, &already, &home, "Existing", true).await;
 
     let mut params: StorageEntity = HashMap::new();
     params.insert("target".into(), Value::String(already.clone()));
@@ -496,7 +468,6 @@ async fn convert_treats_slash_in_content_as_title_not_path() {
         origin,
         "sentinel:no_parent",
         "Promote me to page/",
-        0,
         false,
     )
     .await;
@@ -515,9 +486,9 @@ async fn convert_treats_slash_in_content_as_title_not_path() {
 
     // Case 2 — embedded-slash content under a page ancestor stays ONE leaf.
     let home = PageId::for_path("Home").unwrap().as_str().to_string();
-    create(&engine, &home, "sentinel:no_parent", "Home", 0, true).await;
+    create(&engine, &home, "sentinel:no_parent", "Home", true).await;
     let origin2 = "block:embedded-slash";
-    create(&engine, origin2, &home, "buy milk/eggs", 1, false).await;
+    create(&engine, origin2, &home, "buy milk/eggs", false).await;
     let page2 = convert(&engine, origin2, "Home").await;
     assert_eq!(
         page2,
@@ -567,15 +538,7 @@ fn page_file_path(root: &Path, destination_segments: &[&str], page_title: &str) 
 async fn assert_title_round_trips(origin_content: &str) {
     let engine = block_engine().await;
     let origin = "block:rt-origin";
-    create(
-        &engine,
-        origin,
-        "sentinel:no_parent",
-        origin_content,
-        0,
-        false,
-    )
-    .await;
+    create(&engine, origin, "sentinel:no_parent", origin_content, false).await;
     let page = convert(&engine, origin, "").await;
 
     // The authoritative title the writeback must persist.

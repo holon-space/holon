@@ -31,7 +31,6 @@ mod tests {
         id: EntityUri,
         parent_id: Option<EntityUri>,
         sort_key: String,
-        depth: i64,
         content: String,
         tags: holon_api::Tags,
     }
@@ -42,9 +41,6 @@ mod tests {
         }
         fn parent_id(&self) -> Option<&EntityUri> {
             self.parent_id.as_ref()
-        }
-        fn depth(&self) -> i64 {
-            self.depth
         }
         fn content(&self) -> &str {
             &self.content
@@ -123,7 +119,6 @@ mod tests {
                     .as_ref()
                     .map_or(Value::Null, |v| Value::String(v.as_str().to_string())),
                 "sort_key" => Value::String(block.sort_key.clone()),
-                "depth" => Value::Integer(block.depth),
                 "content" => Value::String(block.content.clone()),
                 _ => Value::Null,
             };
@@ -132,7 +127,6 @@ mod tests {
                 // a raw string.
                 "parent_id" => block.parent_id = value.as_string().map(EntityUri::from_raw),
                 "sort_key" => block.sort_key = value.as_string().unwrap().to_string(),
-                "depth" => block.depth = value.as_i64().unwrap(),
                 "content" => block.content = value.as_string().unwrap().to_string(),
                 _ => {}
             }
@@ -165,7 +159,6 @@ mod tests {
                     .and_then(|v| v.as_string())
                     .unwrap_or("A0")
                     .to_string(),
-                depth: fields.get("depth").and_then(|v| v.as_i64()).unwrap_or(0),
                 content: fields
                     .get("content")
                     .and_then(|v| v.as_string())
@@ -230,7 +223,6 @@ mod tests {
             }
         }
     }
-    impl BlockMaintenanceHelpers<TestBlock> for MemStore {}
     impl BlockDataSourceHelpers<TestBlock> for MemStore {}
     impl BlockOperations<TestBlock> for MemStore {
         fn ordering(&self) -> Option<&dyn BlockOrdering> {
@@ -364,7 +356,6 @@ mod tests {
                             // above.
                             .map(EntityUri::from_raw),
                         sort_key: gen_key_between(None, None).map_err(|e| format!("{e:#}"))?,
-                        depth: 0,
                         content: params
                             .get("content")
                             .and_then(|v| v.as_string())
@@ -399,12 +390,10 @@ mod tests {
 
     fn insert_block(store: &MemStore, id: &str, parent_id: Option<&str>, prev_key: Option<&str>) {
         let sort_key = gen_key_between(prev_key, None).unwrap();
-        let depth: i64 = if parent_id.is_some() { 1 } else { 0 };
         store.insert(TestBlock {
             id: EntityUri::block(id),
             parent_id: parent_id.map(EntityUri::block),
             sort_key,
-            depth,
             content: format!("Content {}", id),
             tags: holon_api::Tags::default(),
         });
@@ -413,14 +402,12 @@ mod tests {
     /// Insert a `Page`-tagged block (an org-file root) at `parent_id`.
     fn insert_page(store: &MemStore, id: &str, parent_id: Option<&str>) {
         let sort_key = gen_key_between(None, None).unwrap();
-        let depth: i64 = if parent_id.is_some() { 1 } else { 0 };
         let mut tags = holon_api::Tags::default();
         tags.insert(holon_api::PAGE_TAG);
         store.insert(TestBlock {
             id: EntityUri::block(id),
             parent_id: parent_id.map(EntityUri::block),
             sort_key,
-            depth,
             content: format!("Page {}", id),
             tags,
         });
@@ -496,7 +483,6 @@ mod tests {
 
         let b = store.get("B").unwrap();
         assert_eq!(b.parent_id, Some(EntityUri::block("A")));
-        assert_eq!(b.depth, 2); // A is depth 1, so B becomes depth 2
     }
 
     #[tokio::test]
@@ -505,12 +491,10 @@ mod tests {
         insert_block(&store, "GP", None, None);
         insert_block(&store, "P", Some("GP"), None);
 
-        // B is child of P, depth 2
         let b = TestBlock {
             id: EntityUri::block("B"),
             parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(None, None).unwrap(),
-            depth: 2,
             content: "Content B".to_string(),
             tags: holon_api::Tags::default(),
         };
@@ -521,7 +505,6 @@ mod tests {
 
         let b = store.get("B").unwrap();
         assert_eq!(b.parent_id, Some(EntityUri::block("GP")));
-        assert_eq!(b.depth, 1); // GP is depth 0, so B becomes depth 1
     }
 
     #[tokio::test]
@@ -615,7 +598,6 @@ mod tests {
             id: EntityUri::block("B"),
             parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(None, None).unwrap(),
-            depth: 2,
             content: "Content B".to_string(),
             tags: holon_api::Tags::default(),
         };
@@ -692,7 +674,6 @@ mod tests {
             id: EntityUri::block("A"),
             parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(None, None).unwrap(),
-            depth: 1,
             content: "Hello World".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -720,7 +701,6 @@ mod tests {
             id: EntityUri::block("A"),
             parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(None, None).unwrap(),
-            depth: 1,
             content: "Hello".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -748,7 +728,6 @@ mod tests {
             id: EntityUri::block("A"),
             parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(None, None).unwrap(),
-            depth: 1,
             content: "Hello".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -774,7 +753,6 @@ mod tests {
             id: EntityUri::block("A"),
             parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(None, None).unwrap(),
-            depth: 1,
             content: "Hi".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -794,7 +772,6 @@ mod tests {
             id: EntityUri::block("A"),
             parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(None, None).unwrap(),
-            depth: 1,
             content: "foo".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -803,7 +780,6 @@ mod tests {
             id: EntityUri::block("B"),
             parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(Some(&key_a), None).unwrap(),
-            depth: 1,
             content: "bar".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -834,7 +810,6 @@ mod tests {
             id: EntityUri::block("P"),
             parent_id: None,
             sort_key: gen_key_between(None, None).unwrap(),
-            depth: 0,
             content: "parent ".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -842,7 +817,6 @@ mod tests {
             id: EntityUri::block("A"),
             parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(None, None).unwrap(),
-            depth: 1,
             content: "child".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -851,7 +825,6 @@ mod tests {
             id: EntityUri::block("B"),
             parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(Some(&key_a), None).unwrap(),
-            depth: 1,
             content: "sib1".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -860,7 +833,6 @@ mod tests {
             id: EntityUri::block("C"),
             parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(Some(&key_b), None).unwrap(),
-            depth: 1,
             content: "sib2".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -895,7 +867,6 @@ mod tests {
             id: EntityUri::block("P"),
             parent_id: None,
             sort_key: gen_key_between(None, None).unwrap(),
-            depth: 0,
             content: "parent ".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -903,7 +874,6 @@ mod tests {
             id: EntityUri::block("A"),
             parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(None, None).unwrap(),
-            depth: 1,
             content: "child".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -912,7 +882,6 @@ mod tests {
             id: EntityUri::block("B"),
             parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(Some(&key_a), None).unwrap(),
-            depth: 1,
             content: "sib".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -920,7 +889,6 @@ mod tests {
             id: EntityUri::block("X"),
             parent_id: Some(EntityUri::block("A")),
             sort_key: gen_key_between(None, None).unwrap(),
-            depth: 2,
             content: "x".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -929,7 +897,6 @@ mod tests {
             id: EntityUri::block("Y"),
             parent_id: Some(EntityUri::block("A")),
             sort_key: gen_key_between(Some(&key_x), None).unwrap(),
-            depth: 2,
             content: "y".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -963,7 +930,6 @@ mod tests {
             id: EntityUri::block("Root"),
             parent_id: None,
             sort_key: gen_key_between(None, None).unwrap(),
-            depth: 0,
             content: "alone".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -1002,45 +968,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn descendant_depth_update_on_move() {
-        let store = MemStore::new();
-        insert_block(&store, "P1", None, None); // depth 0
-        insert_block(&store, "P2", None, None); // depth 0
-
-        // A is child of P1, depth 1
-        store.insert(TestBlock {
-            id: EntityUri::block("A"),
-            parent_id: Some(EntityUri::block("P1")),
-            sort_key: gen_key_between(None, None).unwrap(),
-            depth: 1,
-            content: "A".to_string(),
-            tags: holon_api::Tags::default(),
-        });
-        // B is child of A, depth 2
-        store.insert(TestBlock {
-            id: EntityUri::block("B"),
-            parent_id: Some(EntityUri::block("A")),
-            sort_key: gen_key_between(None, None).unwrap(),
-            depth: 2,
-            content: "B".to_string(),
-            tags: holon_api::Tags::default(),
-        });
-
-        // Move A under P2 (depth doesn't change since both parents are depth 0)
-        store
-            .move_block(&EntityUri::block("A"), &EntityUri::block("P2"), None)
-            .await
-            .unwrap();
-
-        let a = store.get("A").unwrap();
-        assert_eq!(a.parent_id, Some(EntityUri::block("P2")));
-        assert_eq!(a.depth, 1);
-
-        let b = store.get("B").unwrap();
-        assert_eq!(b.depth, 2); // unchanged since depth delta is 0
-    }
-
-    #[tokio::test]
     async fn join_block_with_children_reparents_them_in_order_into_prev_sibling() {
         // Case A (prev sibling exists) with children: B's children X, Y must
         // be appended under A AFTER A's existing child W, in document order.
@@ -1057,7 +984,6 @@ mod tests {
             id: EntityUri::block("A"),
             parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(None, None).unwrap(),
-            depth: 1,
             content: "foo".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -1066,7 +992,6 @@ mod tests {
             id: EntityUri::block("B"),
             parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(Some(&key_a), None).unwrap(),
-            depth: 1,
             content: "bar".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -1074,7 +999,6 @@ mod tests {
             id: EntityUri::block("W"),
             parent_id: Some(EntityUri::block("A")),
             sort_key: gen_key_between(None, None).unwrap(),
-            depth: 2,
             content: "w".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -1082,7 +1006,6 @@ mod tests {
             id: EntityUri::block("X"),
             parent_id: Some(EntityUri::block("B")),
             sort_key: gen_key_between(None, None).unwrap(),
-            depth: 2,
             content: "x".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -1091,7 +1014,6 @@ mod tests {
             id: EntityUri::block("Y"),
             parent_id: Some(EntityUri::block("B")),
             sort_key: gen_key_between(Some(&key_x), None).unwrap(),
-            depth: 2,
             content: "y".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -1107,68 +1029,6 @@ mod tests {
             vec!["block:W", "block:X", "block:Y"],
             "B's children append after A's existing child, in order"
         );
-    }
-
-    #[tokio::test]
-    async fn move_block_deeper_updates_descendant_depths_exactly() {
-        // Moving A (depth 1, subtree B depth 2, C depth 3) under E (depth 2)
-        // gives depth_delta = +2: A -> 3, B -> 4, C -> 5. Exact values kill
-        // the +/- and +/* arithmetic mutations and the delta != 0 gate flip.
-        let store = MemStore::new();
-        insert_block(&store, "P1", None, None); // depth 0
-        insert_block(&store, "P2", None, None); // depth 0
-        store.insert(TestBlock {
-            id: EntityUri::block("A"),
-            parent_id: Some(EntityUri::block("P1")),
-            sort_key: gen_key_between(None, None).unwrap(),
-            depth: 1,
-            content: "A".to_string(),
-            tags: holon_api::Tags::default(),
-        });
-        store.insert(TestBlock {
-            id: EntityUri::block("B"),
-            parent_id: Some(EntityUri::block("A")),
-            sort_key: gen_key_between(None, None).unwrap(),
-            depth: 2,
-            content: "B".to_string(),
-            tags: holon_api::Tags::default(),
-        });
-        store.insert(TestBlock {
-            id: EntityUri::block("C"),
-            parent_id: Some(EntityUri::block("B")),
-            sort_key: gen_key_between(None, None).unwrap(),
-            depth: 3,
-            content: "C".to_string(),
-            tags: holon_api::Tags::default(),
-        });
-        store.insert(TestBlock {
-            id: EntityUri::block("D"),
-            parent_id: Some(EntityUri::block("P2")),
-            sort_key: gen_key_between(None, None).unwrap(),
-            depth: 1,
-            content: "D".to_string(),
-            tags: holon_api::Tags::default(),
-        });
-        store.insert(TestBlock {
-            id: EntityUri::block("E"),
-            parent_id: Some(EntityUri::block("D")),
-            sort_key: gen_key_between(None, None).unwrap(),
-            depth: 2,
-            content: "E".to_string(),
-            tags: holon_api::Tags::default(),
-        });
-
-        store
-            .move_block(&EntityUri::block("A"), &EntityUri::block("E"), None)
-            .await
-            .unwrap();
-
-        assert_eq!(store.get("A").unwrap().depth, 3);
-        assert_eq!(store.get("B").unwrap().depth, 4);
-        assert_eq!(store.get("C").unwrap().depth, 5);
-        // Blocks outside the moved subtree are untouched.
-        assert_eq!(store.get("D").unwrap().depth, 1);
-        assert_eq!(store.get("E").unwrap().depth, 2);
     }
 
     // ---- No-pages-under-non-pages op guard (interim ruling 2026-07-13) -------
@@ -1246,9 +1106,9 @@ mod tests {
     // ---- U4: split_block / join_block compound inverses ---------------------
 
     /// A byte-comparable snapshot of the whole block table: every block's
-    /// (id, parent_id, sort_key, depth, content), sorted by id. Undo must
+    /// (id, parent_id, sort_key, content), sorted by id. Undo must
     /// restore this EXACTLY (the U4 contract).
-    fn snapshot(store: &MemStore) -> Vec<(String, Option<String>, String, i64, String)> {
+    fn snapshot(store: &MemStore) -> Vec<(String, Option<String>, String, String)> {
         let mut rows: Vec<_> = store
             .blocks
             .lock()
@@ -1259,7 +1119,6 @@ mod tests {
                     b.id.as_str().to_string(),
                     b.parent_id.as_ref().map(|p| p.as_str().to_string()),
                     b.sort_key.clone(),
-                    b.depth,
                     b.content.clone(),
                 )
             })
@@ -1300,7 +1159,6 @@ mod tests {
             id: EntityUri::block("A"),
             parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(None, None).unwrap(),
-            depth: 1,
             // Whitespace at the split point that the trim discards — the undo
             // must still restore the UNtrimmed original, proving the inverse
             // uses the recorded pre-split content, not `content_before`.
@@ -1344,7 +1202,6 @@ mod tests {
             id: EntityUri::block("A"),
             parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(None, None).unwrap(),
-            depth: 1,
             content: "Hello".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -1365,7 +1222,6 @@ mod tests {
             id: EntityUri::block("A"),
             parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(None, None).unwrap(),
-            depth: 1,
             content: "foo".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -1377,7 +1233,6 @@ mod tests {
             // byte-identical (deterministic fractional index).
             parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(Some(&key_a), None).unwrap(),
-            depth: 1,
             content: "bar".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -1419,7 +1274,6 @@ mod tests {
             id: EntityUri::block("B"),
             parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(None, None).unwrap(),
-            depth: 1,
             content: "child".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -1428,7 +1282,6 @@ mod tests {
             id: EntityUri::block("C"),
             parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(Some(&key_b), None).unwrap(),
-            depth: 1,
             content: "sib".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -1464,7 +1317,6 @@ mod tests {
                 ("block:C".to_string(), "sib".to_string()),
             ]
         );
-        assert_eq!(store.get("B").unwrap().depth, 1);
         assert_eq!(
             store.get("B").unwrap().parent_id,
             Some(EntityUri::block("P"))
@@ -1482,7 +1334,6 @@ mod tests {
             id: EntityUri::block("A"),
             parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(None, None).unwrap(),
-            depth: 1,
             content: "foo".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -1491,7 +1342,6 @@ mod tests {
             id: EntityUri::block("B"),
             parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(Some(&key_a), None).unwrap(),
-            depth: 1,
             content: "bar".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -1499,7 +1349,6 @@ mod tests {
             id: EntityUri::block("B1"),
             parent_id: Some(EntityUri::block("B")),
             sort_key: gen_key_between(None, None).unwrap(),
-            depth: 2,
             content: "grandchild".to_string(),
             tags: holon_api::Tags::default(),
         });
@@ -1549,21 +1398,20 @@ mod tests {
         //     A1
         //   B
         //   C
-        let mk = |id: &str, parent: Option<&str>, key: &str, depth: i64| TestBlock {
+        let mk = |id: &str, parent: Option<&str>, key: &str| TestBlock {
             id: EntityUri::block(id),
             parent_id: parent.map(EntityUri::block),
             sort_key: key.to_string(),
-            depth,
             content: format!("Content {id}"),
             tags: holon_api::Tags::default(),
         };
         DefaultHelpersStore {
             blocks: vec![
-                mk("P", None, "A0", 0),
-                mk("A", Some("P"), "A1", 1),
-                mk("A1", Some("A"), "A1", 2),
-                mk("B", Some("P"), "A2", 1),
-                mk("C", Some("P"), "A3", 1),
+                mk("P", None, "A0"),
+                mk("A", Some("P"), "A1"),
+                mk("A1", Some("A"), "A1"),
+                mk("B", Some("P"), "A2"),
+                mk("C", Some("P"), "A3"),
             ],
         }
     }

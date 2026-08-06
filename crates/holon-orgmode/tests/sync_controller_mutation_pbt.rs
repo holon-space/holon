@@ -556,7 +556,6 @@ fn simulate_sql_round_trip(
     const BLOCKS_KNOWN_COLUMNS: &[&str] = &[
         "id",
         "parent_id",
-        "depth",
         "sort_key",
         "content",
         "content_type",

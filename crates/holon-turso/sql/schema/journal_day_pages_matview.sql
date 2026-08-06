@@ -16,7 +16,6 @@
 SELECT
     b.id,
     b.parent_id,
-    b.depth,
     b.sort_key,
     b.content,
     b.content_type,

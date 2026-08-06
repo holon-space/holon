@@ -193,7 +193,6 @@ fn sql_literal_equals_value(sql_literal: &str, db_val: Option<&Value>) -> bool {
 const BLOCKS_KNOWN_COLUMNS: &[&str] = &[
     "id",
     "parent_id",
-    "depth",
     "sort_key",
     "content",
     "content_type",
@@ -557,9 +556,9 @@ impl SqlOperationProvider {
     /// cascade. A block has exactly ONE parent, so any cycle among `root`'s
     /// descendants must pass through `root` itself — `root` returning as its
     /// own descendant is therefore the complete test, not a heuristic.
-    /// Excluding it silently instead would leave callers shifting depths over
-    /// a corrupt tree; `move_block` has no reparent-under-own-descendant guard
-    /// and is dispatchable, so this state is reachable.
+    /// Excluding it silently instead would leave callers walking a corrupt
+    /// tree; `move_block` has no reparent-under-own-descendant guard and is
+    /// dispatchable, so this state is reachable.
     ///
     /// Reads the write table, so a descendant written earlier in this same
     /// operation is visible — the matview-backed BFS could miss it.
@@ -591,34 +590,6 @@ impl SqlOperationProvider {
             .into());
         }
         Ok(ids)
-    }
-
-    /// Shift `depth` by `delta` on every row in `ids`, batched.
-    ///
-    /// Depth is derived state that carries no undo inverse — `move_block`'s
-    /// inverse re-runs the move and re-derives every descendant depth — so the
-    /// bulk UPDATE is the whole write, not a shortcut past one.
-    pub async fn shift_depths(&self, ids: &[String], delta: i64) -> Result<()> {
-        /// Ids per statement. Bounds the SQL text; the count of statements is
-        /// what the read budget sees.
-        const CHUNK: usize = 400;
-        for chunk in ids.chunks(CHUNK) {
-            let list = chunk
-                .iter()
-                .map(|id| format!("'{}'", id.replace('\'', "''")))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let sql = format!(
-                "UPDATE {table} SET {depth} = {depth} + {delta} WHERE id IN ({list})",
-                table = self.table_name,
-                depth = Self::quote_identifier("depth"),
-            );
-            self.db_handle
-                .execute(&sql, vec![])
-                .await
-                .map_err(|e| format!("shift_depths({} ids, {delta}): {e}", chunk.len()))?;
-        }
-        Ok(())
     }
 
     /// Whether `id` has any DIRECT child carrying the `Page` tag — the
@@ -1181,20 +1152,6 @@ impl SqlOperationProvider {
             .collect())
     }
 
-    /// The block's stored `depth` (tree level; a top-level page is 0). A
-    /// missing or NULL depth reads as 0 — the root level — rather than
-    /// failing, matching how a freshly-seeded page with no explicit depth
-    /// behaves.
-    async fn read_block_depth(&self, id: &str) -> Result<i64> {
-        match self.read_field_old_value(id, "depth").await? {
-            Value::Integer(d) => Ok(d),
-            Value::Null => Ok(0),
-            other => {
-                Err(format!("read_block_depth({id}): depth is not an integer: {other:?}").into())
-            }
-        }
-    }
-
     /// The nearest ancestor of `id` that carries the `Page` tag, walking the
     /// real parent chain upward. `None` when the chain reaches the root with no
     /// page — the block→page transform then defaults to the vault root.
@@ -1252,27 +1209,19 @@ impl SqlOperationProvider {
     ///
     /// An empty `destination_path` targets the vault root
     /// (`sentinel:no_parent`).
-    /// Returns `(destination_parent_id, destination_parent_depth, missing)`.
-    /// A top-level page has `depth = 0`, so the vault-root base depth is `-1`
-    /// (its first child page is `-1 + 1 = 0`). Each created segment and the
-    /// final new page thus get a tree-consistent `depth = parent.depth + 1`.
+    /// Returns `(destination_parent_id, missing)`.
     async fn resolve_destination_chain(
         &self,
         destination_path: &str,
-    ) -> Result<(
-        String,
-        i64,
-        Vec<crate::core::block_to_page_plan::PlanSegment>,
-    )> {
+    ) -> Result<(String, Vec<crate::core::block_to_page_plan::PlanSegment>)> {
         use crate::core::block_to_page_plan::PlanSegment;
 
         let trimmed_path = destination_path.trim();
         if trimmed_path.is_empty() {
-            return Ok((EntityUri::no_parent().as_str().to_string(), -1, Vec::new()));
+            return Ok((EntityUri::no_parent().as_str().to_string(), Vec::new()));
         }
 
         let mut parent_id = EntityUri::no_parent().as_str().to_string();
-        let mut parent_depth: i64 = -1;
         let mut accumulated = String::new();
         let mut missing: Vec<PlanSegment> = Vec::new();
 
@@ -1296,27 +1245,23 @@ impl SqlOperationProvider {
             };
             match self.resolve_page_name(&hint).await? {
                 Some(existing) => {
-                    parent_depth = self.read_block_depth(&existing).await?;
                     parent_id = existing;
                 }
                 None => {
                     let id = holon_api::link_parser::PageId::for_path(&seg_path)?
                         .as_str()
                         .to_string();
-                    let depth = parent_depth + 1;
                     missing.push(PlanSegment {
                         id: id.clone(),
                         name: name.to_string(),
                         parent_id: parent_id.clone(),
-                        depth,
                     });
                     parent_id = id;
-                    parent_depth = depth;
                 }
             }
             accumulated = seg_path;
         }
-        Ok((parent_id, parent_depth, missing))
+        Ok((parent_id, missing))
     }
 
     /// The dangling→resolved trigger: when a Page-tagged block is written,
@@ -3496,7 +3441,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                         },
                     };
 
-                let (destination_parent_id, destination_parent_depth, missing_segments) =
+                let (destination_parent_id, missing_segments) =
                     self.resolve_destination_chain(&destination_path).await?;
 
                 // The origin's content is the page TITLE — a single leaf
@@ -3511,7 +3456,6 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     holon_api::link_parser::PageId::for_page_under(&destination_path, &page_title)?
                         .as_str()
                         .to_string();
-                let page_depth = destination_parent_depth + 1;
 
                 let child_ids = self.read_ordered_children(&origin_id).await?;
 
@@ -3520,7 +3464,6 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     origin_content: page_title,
                     origin_marks,
                     page_id,
-                    page_depth,
                     destination_parent_id,
                     missing_segments,
                     child_ids,
@@ -4498,7 +4441,7 @@ mod tag_op_tests {
             .expect("in-memory turso");
         db.execute(
             "CREATE TABLE block_raw (id TEXT PRIMARY KEY, parent_id TEXT, content TEXT, sort_key \
-             TEXT, depth INTEGER, properties TEXT, created_at INTEGER, updated_at INTEGER)",
+             TEXT, properties TEXT, created_at INTEGER, updated_at INTEGER)",
             vec![],
         )
         .await
