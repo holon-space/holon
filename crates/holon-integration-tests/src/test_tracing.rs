@@ -585,12 +585,12 @@ impl SpanCollector {
             })
             .count();
 
-        let sql_spans = spans.iter().filter(|s| {
-            matches!(
-                s.name.as_ref(),
-                "query" | "execute" | "execute_ddl" | "execute_ddl_with_deps"
-            )
-        });
+        const SQL_SPAN_NAMES: &[&str] =
+            &["query", "execute", "execute_ddl", "execute_ddl_with_deps"];
+
+        let sql_spans = spans
+            .iter()
+            .filter(|s| SQL_SPAN_NAMES.contains(&s.name.as_ref()));
 
         let max_query_duration = sql_spans
             .clone()
@@ -603,11 +603,10 @@ impl SpanCollector {
         // Duplicate SQL detection: count identical SQL texts fired multiple times.
         // The `sql` attribute is set by turso.rs #[tracing::instrument(fields(sql =
         // ...))].
-        let duplicate_sql = find_duplicate_sql(sql_spans);
+        let duplicate_sql = find_duplicate_sql(&spans, SQL_SPAN_NAMES);
         // Reads only — the budget gate subtracts redundant *read* re-executions
         // from `sql_read_count`, so it must not see write/DDL duplicates.
-        let duplicate_reads =
-            find_duplicate_sql(spans.iter().filter(|s| s.name.as_ref() == "query"));
+        let duplicate_reads = find_duplicate_sql(&spans, &["query"]);
 
         // ── Render metrics ───────────────────────────────────────
         let render_spans: Vec<_> = spans
@@ -713,6 +712,47 @@ fn sql_attr(span: &SpanData) -> Option<String> {
     span_attr(span, "sql")
 }
 
+/// Span lookup by id, for walking `parent_span_id` chains.
+fn span_index(spans: &[SpanData]) -> HashMap<opentelemetry::trace::SpanId, &SpanData> {
+    spans
+        .iter()
+        .map(|s| (s.span_context.span_id(), s))
+        .collect()
+}
+
+/// The caller chain that led to `span`, rendered `outermost ▸ … ▸ caller`.
+///
+/// The span's own name is excluded — every consumer already knows what kind of
+/// span it is asking about. `<no-parent>` means the span fired with no
+/// enclosing instrumented span at all (a background task started without
+/// `.instrument(..)`); `<unknown-parent>` means the chain left this window.
+fn origin_chain(
+    span: &SpanData,
+    by_id: &HashMap<opentelemetry::trace::SpanId, &SpanData>,
+) -> String {
+    use opentelemetry::trace::SpanId;
+
+    let mut chain: Vec<&str> = Vec::new();
+    let mut current = span;
+    while current.parent_span_id != SpanId::INVALID {
+        match by_id.get(&current.parent_span_id) {
+            Some(parent) => {
+                chain.push(parent.name.as_ref());
+                current = parent;
+            }
+            None => {
+                chain.push("<unknown-parent>");
+                break;
+            }
+        }
+    }
+    if chain.is_empty() {
+        return "<no-parent>".to_string();
+    }
+    chain.reverse();
+    chain.join(" ▸ ")
+}
+
 /// One SQL text fired more than once in a transition window.
 ///
 /// `distinct_bindings` (from the `params_fp` span attribute) separates the
@@ -733,29 +773,57 @@ pub struct DuplicateSql {
     pub count: usize,
     pub distinct_bindings: usize,
     pub max_repeat_per_binding: usize,
+    /// Which callers issued these executions: `(ancestor chain, subcount)`,
+    /// descending by subcount then chain. The chain is the same
+    /// `outermost ▸ … ▸ caller` string [`QueryOriginRow`] uses, so a row's
+    /// redundancy is attributed DIRECTLY instead of being inferred by
+    /// co-occurrence with a separate origin table. A statement issued from
+    /// several subsystems keeps them split — that split is what says whether
+    /// the excess belongs to the op path or to a CDC/projection fold.
+    pub by_origin: Vec<(String, usize)>,
 }
 
 /// Find SQL texts that appear more than once (potential N+1 pattern),
 /// sorted by count descending.
-fn find_duplicate_sql<'a>(sql_spans: impl Iterator<Item = &'a SpanData>) -> Vec<DuplicateSql> {
-    let mut counts: HashMap<String, (usize, HashMap<String, usize>)> = HashMap::new();
-    for span in sql_spans {
+///
+/// `all_spans` is the whole window (not just the SQL spans) because origin
+/// attribution walks `parent_span_id` through non-SQL ancestors.
+fn find_duplicate_sql(all_spans: &[SpanData], names: &[&str]) -> Vec<DuplicateSql> {
+    #[derive(Default)]
+    struct Acc {
+        count: usize,
+        bindings: HashMap<String, usize>,
+        origins: HashMap<String, usize>,
+    }
+
+    let by_id = span_index(all_spans);
+    let mut counts: HashMap<String, Acc> = HashMap::new();
+    for span in all_spans
+        .iter()
+        .filter(|s| names.contains(&s.name.as_ref()))
+    {
         if let Some(sql) = sql_attr(span) {
             let entry = counts.entry(sql).or_default();
-            entry.0 += 1;
+            entry.count += 1;
             // DDL spans don't carry params_fp; treat them as one binding.
             let fp = span_attr(span, "params_fp").unwrap_or_else(|| "-".into());
-            *entry.1.entry(fp).or_default() += 1;
+            *entry.bindings.entry(fp).or_default() += 1;
+            *entry.origins.entry(origin_chain(span, &by_id)).or_default() += 1;
         }
     }
     let mut duplicates: Vec<DuplicateSql> = counts
         .into_iter()
-        .filter(|(_, (count, _))| *count > 1)
-        .map(|(sql, (count, fps))| DuplicateSql {
-            sql,
-            count,
-            distinct_bindings: fps.len(),
-            max_repeat_per_binding: fps.values().copied().max().unwrap_or(0),
+        .filter(|(_, acc)| acc.count > 1)
+        .map(|(sql, acc)| {
+            let mut by_origin: Vec<(String, usize)> = acc.origins.into_iter().collect();
+            by_origin.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            DuplicateSql {
+                sql,
+                count: acc.count,
+                distinct_bindings: acc.bindings.len(),
+                max_repeat_per_binding: acc.bindings.values().copied().max().unwrap_or(0),
+                by_origin,
+            }
         })
         .collect();
     duplicates.sort_by(|a, b| b.count.cmp(&a.count));
@@ -919,13 +987,13 @@ impl SpanCollector {
     }
 }
 
-/// One entry in a `QueryOriginBreakdown`: a span ancestor chain and the
-/// number of `query` spans whose call path matches it (plus their cumulative
-/// wall-clock cost). Chains are stored leaf-last (`outermost ▸ … ▸ query`)
-/// so the output reads top-down.
+/// One entry in a `QueryOriginBreakdown`: a caller chain (rendered
+/// `outermost ▸ … ▸ caller` by [`origin_chain`], the same string
+/// [`DuplicateSql::by_origin`] keys by) and the number of `query` spans that
+/// took it, plus their cumulative wall-clock cost.
 #[derive(Debug, Clone)]
 pub struct QueryOriginRow {
-    pub chain: Vec<String>,
+    pub chain: String,
     pub count: usize,
     pub total_duration: Duration,
 }
@@ -954,39 +1022,15 @@ impl SpanCollector {
     /// pair under that chain. Rows are sorted by descending total duration —
     /// the top entries are the highest-leverage targets for follow-up 5.
     pub fn queries_by_origin(&self) -> QueryOriginBreakdown {
-        use opentelemetry::trace::SpanId;
-
         let spans = self.finished_spans();
-        let by_id: HashMap<SpanId, &SpanData> = spans
-            .iter()
-            .map(|s| (s.span_context.span_id(), s))
-            .collect();
+        let by_id = span_index(&spans);
 
-        let mut buckets: HashMap<Vec<String>, (usize, Duration)> = HashMap::new();
+        let mut buckets: HashMap<String, (usize, Duration)> = HashMap::new();
         let mut total_queries = 0usize;
         let mut total_duration = Duration::ZERO;
 
         for span in spans.iter().filter(|s| s.name.as_ref() == "query") {
-            // Walk to the root (or an unknown parent) building the chain.
-            // Skip the leaf "query" itself — every row in the breakdown
-            // corresponds to query spans, so it's redundant.
-            let mut chain: Vec<String> = Vec::new();
-            let mut current = span;
-            while current.parent_span_id != SpanId::INVALID {
-                if let Some(parent) = by_id.get(&current.parent_span_id) {
-                    chain.push(parent.name.as_ref().to_string());
-                    current = parent;
-                } else {
-                    chain.push("<unknown-parent>".into());
-                    break;
-                }
-            }
-            // chain is currently leaf-first; reverse to outermost-first.
-            chain.reverse();
-            if chain.is_empty() {
-                chain.push("<no-parent>".into());
-            }
-
+            let chain = origin_chain(span, &by_id);
             let duration = span_duration(span);
             total_queries += 1;
             total_duration += duration;
@@ -1027,17 +1071,12 @@ impl std::fmt::Display for QueryOriginBreakdown {
             self.total_duration
         )?;
         for row in &self.rows {
-            let chain = if row.chain.is_empty() {
-                "<empty-chain>".to_string()
-            } else {
-                row.chain.join(" ▸ ")
-            };
             writeln!(
                 f,
                 "    {count:>4}× ({dur:>9.2?})  {chain}",
                 count = row.count,
                 dur = row.total_duration,
-                chain = chain,
+                chain = row.chain,
             )?;
         }
         Ok(())
@@ -1181,6 +1220,96 @@ pub fn maybe_write_flamegraph(collector: &SpanCollector, transition_key: &str) {
         perf_spans.len(),
         path.display()
     );
+}
+
+#[cfg(test)]
+mod duplicate_sql_origin_tests {
+    use opentelemetry::trace::TracerProvider as _;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    use super::*;
+
+    /// Run `f` under a THREAD-LOCAL subscriber with its own OTel exporter, so
+    /// the synthesized spans never mix with a concurrent test's or with the
+    /// process-global collector.
+    fn collect(f: impl FnOnce()) -> Vec<SpanData> {
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_opentelemetry::OpenTelemetryLayer::new(provider.tracer("dup-origin-test")),
+        );
+        tracing::subscriber::with_default(subscriber, f);
+        provider.force_flush().expect("flush the test provider");
+        exporter.get_finished_spans().expect("finished spans")
+    }
+
+    fn emit_query(sql: &str, params_fp: &str) {
+        let span = tracing::info_span!("query", sql = sql, params_fp = params_fp);
+        let _entered = span.enter();
+    }
+
+    /// The same statement issued from two different subsystems must report
+    /// per-origin subcounts, not one collapsed row — a collapsed row is exactly
+    /// what forced redundancy attribution to be inferred by co-occurrence
+    /// against a separate `queries_by_origin` table.
+    #[test]
+    fn duplicate_sql_reports_per_origin_subcounts() {
+        let spans = collect(|| {
+            {
+                let outer = tracing::info_span!("home.locate");
+                let _o = outer.enter();
+                let inner = tracing::info_span!("resolve_doc");
+                let _i = inner.enter();
+                emit_query("SELECT * FROM blocks", "aa");
+                emit_query("SELECT * FROM blocks", "bb");
+                emit_query("SELECT * FROM blocks", "cc");
+            }
+            {
+                let outer = tracing::info_span!("org.on_block_feed");
+                let _o = outer.enter();
+                let inner = tracing::info_span!("on_block_changed");
+                let _i = inner.enter();
+                emit_query("SELECT * FROM blocks", "dd");
+            }
+            // No enclosing instrumented span at all.
+            emit_query("SELECT * FROM blocks", "ee");
+        });
+
+        let dups = find_duplicate_sql(&spans, &["query"]);
+        assert_eq!(dups.len(), 1, "one statement text; got {dups:?}");
+        let dup = &dups[0];
+        assert_eq!(dup.count, 5);
+        assert_eq!(
+            dup.by_origin,
+            vec![
+                ("home.locate ▸ resolve_doc".to_string(), 3),
+                ("<no-parent>".to_string(), 1),
+                ("org.on_block_feed ▸ on_block_changed".to_string(), 1),
+            ],
+            "per-origin subcounts, descending by count then chain"
+        );
+    }
+
+    /// Two distinct statements from the same origin stay separate rows, each
+    /// carrying that single origin.
+    #[test]
+    fn a_single_origin_statement_reports_exactly_one_origin() {
+        let spans = collect(|| {
+            let outer = tracing::info_span!("org.on_block_feed");
+            let _o = outer.enter();
+            emit_query("SELECT a", "aa");
+            emit_query("SELECT a", "aa");
+        });
+        let dups = find_duplicate_sql(&spans, &["query"]);
+        assert_eq!(dups.len(), 1);
+        assert_eq!(
+            dups[0].by_origin,
+            vec![("org.on_block_feed".to_string(), 2)]
+        );
+        assert_eq!(dups[0].max_repeat_per_binding, 2);
+    }
 }
 
 #[cfg(test)]

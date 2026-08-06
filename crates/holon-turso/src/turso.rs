@@ -338,7 +338,17 @@ fn named_params_fingerprint(params: &HashMap<String, Value>) -> String {
 /// single-block point read share ~900 characters of column list and differ only
 /// in the trailing FROM/WHERE, so prefix-bucketing merged three consumers into
 /// one and misattributed which of them was re-querying.
+///
+/// Head+tail alone still MERGES statements that differ only in the elided
+/// middle (the recursive-descendants family: bare parent-chain vs full
+/// descendants row). Merging always LOOSENS the dedup gate — two statements in
+/// one bucket over-subtract their combined excess — so a truncated fingerprint
+/// carries a hash of the FULL text, making it injective in the SQL while the
+/// readable head/tail survives for the reader.
 fn sql_fingerprint(sql: &str) -> String {
+    use std::hash::Hash;
+    use std::hash::Hasher;
+
     const HEAD: usize = 200;
     // The block queries' last edge subquery alone is ~150 characters, so a
     // shorter tail stops before the FROM/WHERE that tells them apart.
@@ -349,7 +359,9 @@ fn sql_fingerprint(sql: &str) -> String {
     }
     let head: String = chars[..HEAD].iter().collect();
     let tail: String = chars[chars.len() - TAIL..].iter().collect();
-    format!("{head} … {tail}")
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    sql.hash(&mut hasher);
+    format!("{head} …#{:016x}… {tail}", hasher.finish())
 }
 
 /// Positional-parameter sibling of [`named_params_fingerprint`], for
@@ -3195,6 +3207,51 @@ mod tests {
             named_params_fingerprint(&a),
             named_params_fingerprint(&a.clone())
         );
+    }
+
+    // Head+tail truncation MERGES: two statements sharing a long prefix and a
+    // long suffix but differing only in the middle collapsed into one bucket,
+    // and the dedup gate then over-subtracted their combined excess. The
+    // identity suffix makes the fingerprint injective in the SQL text, so
+    // distinct statements can never share a bucket.
+    #[test]
+    fn sql_fingerprint_splits_statements_that_share_head_and_tail() {
+        let head = format!(
+            "WITH RECURSIVE d(id, parent_id, depth) AS ({})",
+            "x".repeat(300)
+        );
+        let tail = format!("{} ORDER BY depth, sort_key", "y".repeat(300));
+        let bare = format!("{head} SELECT id, parent_id FROM blocks {tail}");
+        let full = format!("{head} SELECT id, parent_id, content, refs FROM blocks {tail}");
+
+        assert_ne!(bare, full);
+        assert_ne!(
+            sql_fingerprint(&bare),
+            sql_fingerprint(&full),
+            "statements differing only in the truncated middle must not share a bucket"
+        );
+        assert_eq!(
+            sql_fingerprint(&bare),
+            sql_fingerprint(&bare.clone()),
+            "the fingerprint is stable for one text"
+        );
+        assert!(
+            sql_fingerprint(&bare).contains("WITH RECURSIVE"),
+            "the readable head survives: {}",
+            sql_fingerprint(&bare)
+        );
+    }
+
+    // Same length, same head, same tail — only the middle bytes differ. A
+    // length-only discriminator would still merge these.
+    #[test]
+    fn sql_fingerprint_splits_equal_length_statements() {
+        let head = format!("SELECT {}", "a".repeat(300));
+        let tail = "z".repeat(300);
+        let left = format!("{head} FROM lhs_table_name {tail}");
+        let right = format!("{head} FROM rhs_table_name {tail}");
+        assert_eq!(left.len(), right.len());
+        assert_ne!(sql_fingerprint(&left), sql_fingerprint(&right));
     }
 
     #[test]
