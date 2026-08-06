@@ -488,6 +488,17 @@ fn read_stable_id(meta: &loro::LoroMap) -> Option<String> {
     meta.get_typed(STABLE_ID, |val| val.as_string().map(|s| s.to_string()))
 }
 
+/// Disclose a child withheld from a `list_children` answer because its
+/// `STABLE_ID` had not landed yet.
+fn warn_half_born(node: loro::TreeID, parent_id: &str) {
+    tracing::warn!(
+        ?node,
+        parent_id,
+        "list_children: live child has no STABLE_ID yet (in-flight create, meta not landed); \
+         withholding it from this answer — callers re-read until it appears"
+    );
+}
+
 /// Build an EntityUri from a node's stable ID metadata.
 /// Panics if the node has no STABLE_ID — all nodes must have one.
 fn block_uri_from_meta(meta: &loro::LoroMap, node: loro::TreeID) -> EntityUri {
@@ -3829,12 +3840,30 @@ impl CoreOperations for LoroBackend {
                         let shared_tree = shared_doc.get_tree(TREE_NAME);
                         for shared_root in shared_tree.roots() {
                             let meta = shared_tree.get_meta(shared_root)?;
-                            result.push(block_uri_from_meta(&meta, shared_root).to_string());
+                            let Some(sid) = read_stable_id(&meta) else {
+                                warn_half_born(shared_root, parent_id);
+                                continue;
+                            };
+                            result.push(EntityUri::block(&sid).to_string());
                         }
                         continue;
                     }
                     let meta = tree.get_meta(*tid)?;
-                    result.push(block_uri_from_meta(&meta, *tid).to_string());
+                    // A live child with no `STABLE_ID` is an in-flight create,
+                    // not a corrupt node: `tree.create()` and the meta insert
+                    // are two doc-state steps and `with_write` does not exclude
+                    // `with_read` (the same window
+                    // `snapshot_blocks_from_doc_settled` withholds for). Panic
+                    // here and the tokio worker that owns the org-writeback
+                    // fold dies, leaving the file stale for the life of the
+                    // process. Callers poll `children` until the ids they
+                    // expect appear, so withholding is recoverable — an `Err`
+                    // would abort their ingest instead.
+                    let Some(sid) = read_stable_id(&meta) else {
+                        warn_half_born(*tid, parent_id);
+                        continue;
+                    };
+                    result.push(EntityUri::block(&sid).to_string());
                 }
                 Ok(result)
             })
@@ -5281,5 +5310,60 @@ mod legacy_link_mark_payloads {
             let back = mark_from_loro_value("link", &value).expect("round trips");
             assert_eq!(back, mark, "loro round trip altered {target}");
         }
+    }
+}
+
+#[cfg(test)]
+mod half_born_node_tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::LoroDocument;
+
+    async fn create(backend: &LoroBackend, parent: EntityUri, id: &str) {
+        backend
+            .create_block_with_properties(
+                parent,
+                BlockContent::text(id),
+                Some(EntityUri::block(id)),
+                &HashMap::new(),
+                &Tags::default(),
+                &[],
+                &[],
+            )
+            .await
+            .unwrap();
+    }
+
+    /// The create window: `tree.create()` and the `STABLE_ID` insert are two
+    /// doc-state steps, and `LoroDocument::with_write` does not exclude
+    /// `with_read`, so a reader on another task observes a live child that has
+    /// no `STABLE_ID` yet. `list_children` must withhold it, not panic —
+    /// panicking kills the tokio worker that owns the org-writeback fold and
+    /// the file stays stale for the life of the process.
+    ///
+    /// Withholding (not `Err`) is the required shape: `file_sync_controller`
+    /// polls `ordering.children` until the expected ids appear and `?`-bails on
+    /// `Err`, so absence is recoverable and an error is not.
+    #[tokio::test]
+    async fn list_children_withholds_a_child_whose_stable_id_has_not_landed() {
+        let doc = Arc::new(LoroDocument::new("half-born".to_string()).unwrap());
+        let backend = LoroBackend::from_document(doc.clone());
+        create(&backend, EntityUri::no_parent(), "parent").await;
+        create(&backend, EntityUri::block("parent"), "settled").await;
+
+        let parent_tid = backend.resolve_to_tree_id("block:parent").await.unwrap();
+        doc.with_write(|d| {
+            d.get_tree(TREE_NAME).create(Some(parent_tid))?;
+            Ok(())
+        })
+        .unwrap();
+
+        let kids = backend.list_children("block:parent").await.unwrap();
+        assert_eq!(
+            kids,
+            vec!["block:settled".to_string()],
+            "a half-born child must be withheld, and its settled sibling must still be answered"
+        );
     }
 }
