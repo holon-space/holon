@@ -45,6 +45,8 @@ pub mod event_ring;
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))
 ))]
+#[cfg(test)]
+mod import_atomicity_probe;
 pub mod iroh_advertiser;
 #[cfg(all(
     feature = "iroh-sync",
