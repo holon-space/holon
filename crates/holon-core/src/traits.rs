@@ -861,6 +861,49 @@ async fn delete_block_via_cells(
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })
 }
 
+/// Pair every member of `descendants` with its hop count from `root`, walking
+/// `parent_id` inside the set itself.
+///
+/// The set is closed under `parent_id` by construction (it is one subtree), so
+/// a chain that leaves it or revisits a node is a corrupt hierarchy and errors
+/// rather than yielding an arbitrary order.
+fn subtree_ranked_deepest_first<'a, T: BlockEntity>(
+    root: &EntityUri,
+    descendants: &'a [T],
+) -> Result<Vec<(usize, &'a T)>> {
+    let by_id: HashMap<&str, &T> = descendants.iter().map(|d| (d.id().as_str(), d)).collect();
+    descendants
+        .iter()
+        .map(|d| {
+            let mut cur = d;
+            for hops in 0..=descendants.len() {
+                let parent = cur.parent_id().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "delete_subtree({root}): descendant {} has no block parent — its chain \
+                         leaves the subtree",
+                        d.id()
+                    )
+                })?;
+                if parent == root {
+                    return Ok((hops, d));
+                }
+                cur = by_id.get(parent.as_str()).copied().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "delete_subtree({root}): descendant {}'s parent {parent} is outside the \
+                         returned subtree",
+                        d.id()
+                    )
+                })?;
+            }
+            Err(anyhow::anyhow!(
+                "delete_subtree({root}): parent chain of {} cycles inside the subtree",
+                d.id()
+            )
+            .into())
+        })
+        .collect()
+}
+
 /// The row facts [`BlockOperations::move_block`] reads before it writes,
 /// answered by a caller that has already read them.
 ///
@@ -2025,11 +2068,17 @@ where
                 "delete_subtree: subtree resurrection not implemented (Loro authority)",
             ));
         }
-        let mut descendants: Vec<T> = self.get_descendants(id).await?;
+        let descendants: Vec<T> = self.get_descendants(id).await?;
         // Deepest-first: a node is deleted only after all of its descendants,
-        // so each `self.delete` operates on a leaf.
-        descendants.sort_by_key(|d| std::cmp::Reverse(d.depth()));
-        for d in &descendants {
+        // so each `self.delete` operates on a leaf and the fail-closed non-leaf
+        // guard is never tripped. The rank is derived from `parent_id` WITHIN
+        // the returned set, not from `BlockEntity::depth()`: `depth` is a stored
+        // column with no authoritative writer (neither the org ingest nor the
+        // Loro projector writes it — `block_cell_registry` calls it "derived
+        // from the tree structure"), so sorting by it ordered nothing.
+        let mut ranked = subtree_ranked_deepest_first(id, &descendants)?;
+        ranked.sort_by_key(|(rank, _)| std::cmp::Reverse(*rank));
+        for (_, d) in &ranked {
             self.delete(d.id().as_str()).await?;
         }
         self.delete(id.as_str()).await?;

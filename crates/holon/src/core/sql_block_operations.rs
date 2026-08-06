@@ -1226,7 +1226,8 @@ mod tests {
             .execute_ddl("PRAGMA foreign_keys = ON")
             .await
             .expect("FK pragma");
-        // Minimal schema: block_raw + junction tables + block matview.
+        // Minimal schema: block_raw + junction tables + block matview + the
+        // link junction every `delete` cleans up.
         holon_turso::schema_modules::CoreSchemaModule
             .ensure_schema(&handle)
             .await
@@ -1239,6 +1240,10 @@ mod tests {
             .ensure_schema(&handle)
             .await
             .expect("BlockMatviewSchemaModule");
+        holon_turso::schema_modules::LinkSchemaModule
+            .ensure_schema(&handle)
+            .await
+            .expect("LinkSchemaModule");
 
         let descriptors = BlockSchemaModule.edge_fields();
         let sql_ops = Arc::new(SqlOperationProvider::with_edge_fields(
@@ -1624,6 +1629,17 @@ mod tests {
             .unwrap_or_else(|| panic!("no depth row for {id}"))
     }
 
+    async fn row_exists(handle: &crate::storage::turso::DbHandle, id: &str) -> bool {
+        !handle
+            .query(
+                &format!("SELECT id FROM block_raw WHERE id = '{id}'"),
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("probe block_raw")
+            .is_empty()
+    }
+
     /// A parent cycle reaching the walk's own root must FAIL LOUD, not answer
     /// a list containing that root.
     ///
@@ -1768,7 +1784,22 @@ mod tests {
     ///
     /// This is independent of the batched-UPDATE path (it is the delta fed INTO
     /// it) and predates task #15; the assertions below therefore encode wrong
-    /// values on purpose. Fix the `depth()` impl and this test SHOULD fail.
+    /// values on purpose.
+    ///
+    /// STILL OPEN, and NOT fixable by making `depth()` read a stored value:
+    /// `block_raw.depth` has no authoritative writer. The org ingest
+    /// (`holon-orgmode::build_block_params`) omits the column, the Loro
+    /// projector omits it on purpose ("derived from the tree structure",
+    /// `holon-loro/src/block_cell_registry.rs:286`), and `BlockWriteField`
+    /// classes it as storage bookkeeping — so the stored value is the schema
+    /// DEFAULT 0 for essentially every block. A `depth()` that reads it would
+    /// still compute `new_depth = 0 + 1` here and flip this test green while
+    /// prod stayed exactly as wrong. The fork (make the column authoritative
+    /// at ingest, vs. drop it and derive depth) is Martin's call.
+    ///
+    /// `delete_subtree`, the other consumer of `depth()`, no longer depends on
+    /// it at all — see
+    /// `delete_subtree_deletes_a_three_level_subtree_with_unwritten_depths`.
     #[tokio::test]
     async fn indent_depth_is_wrong_because_block_entity_depth_is_hardcoded_zero() {
         use holon_core::BlockOperations;
@@ -1833,37 +1864,45 @@ mod tests {
         );
     }
 
-    /// CHARACTERIZATION of a PRE-EXISTING defect (same root cause as
-    /// `indent_depth_is_wrong_because_block_entity_depth_is_hardcoded_zero`):
-    /// `delete_subtree` orders its deletes deepest-first via
-    /// `sort_by_key(Reverse(d.depth()))`, but `depth()` is a hardcoded `0` for
-    /// `holon_api::Block`, so the sort is a NO-OP. The walk order then reaches
-    /// a non-leaf first and the single-block `delete`'s fail-closed guard
-    /// refuses it — `delete_subtree` cannot delete any subtree deeper than
-    /// one level.
+    /// `delete_subtree` deletes a subtree of ARBITRARY depth: its deepest-first
+    /// order is derived from `parent_id` within the descendant set, so every
+    /// `delete` sees a leaf and the fail-closed non-leaf guard never fires.
     ///
-    /// Independent of task #15 (the ordering lives in the trait default and the
-    /// `depth()` impl). Fix `depth()` and this test SHOULD fail.
+    /// Red-for-the-right-reason before the fix (the ordering read the stored
+    /// `depth` via `BlockEntity::depth()`, hardcoded `0`, so the sort was a
+    /// no-op): `refusing to cascade` — a registered dispatchable op that could
+    /// not delete anything deeper than one level.
+    ///
+    /// The stored depths below are DELIBERATELY all `0` — the value the org
+    /// ingest and the Loro projector actually write (neither sets the column).
+    /// The order must not depend on them.
     #[tokio::test]
-    async fn delete_subtree_refuses_a_two_level_subtree_because_depth_is_hardcoded_zero() {
+    async fn delete_subtree_deletes_a_three_level_subtree_with_unwritten_depths() {
         use holon_core::BlockOperations;
 
         let (_backend, ops, handle) = setup_sql_block_ops().await;
 
         insert_raw(&handle, "block:page", "sentinel:no_parent", 0, "a0").await;
-        insert_raw(&handle, "block:sub", "block:page", 1, "a1").await;
-        insert_raw(&handle, "block:sub-c", "block:sub", 2, "a2").await;
-        insert_raw(&handle, "block:sub-d", "block:sub-c", 3, "a3").await;
+        insert_raw(&handle, "block:keep", "block:page", 0, "a1").await;
+        insert_raw(&handle, "block:sub", "block:page", 0, "a2").await;
+        insert_raw(&handle, "block:sub-c", "block:sub", 0, "a3").await;
+        insert_raw(&handle, "block:sub-d", "block:sub-c", 0, "a4").await;
 
         // ALLOW(entity_uri_from_raw): test-fixture literal (#[cfg(test)])
         let sub = EntityUri::from_raw("block:sub");
-        let err = ops
-            .delete_subtree(&sub)
-            .await
-            .expect_err("WRONG: this should succeed once depth() is real");
-        assert!(
-            err.to_string().contains("refusing to cascade"),
-            "expected the non-leaf delete guard, got: {err}"
-        );
+        ops.delete_subtree(&sub).await.expect("delete the subtree");
+
+        for gone in ["block:sub", "block:sub-c", "block:sub-d"] {
+            assert!(
+                !row_exists(&handle, gone).await,
+                "{gone} must be deleted with its subtree"
+            );
+        }
+        for kept in ["block:page", "block:keep"] {
+            assert!(
+                row_exists(&handle, kept).await,
+                "{kept} is outside the subtree and must survive"
+            );
+        }
     }
 }
