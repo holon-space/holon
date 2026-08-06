@@ -698,7 +698,6 @@ impl DispatchingOperationEngine {
             p.insert("id".into(), Value::String(seg.id.clone()));
             p.insert("content".into(), Value::String(seg.name.clone()));
             p.insert("parent_id".into(), Value::String(seg.parent_id.clone()));
-            p.insert("depth".into(), Value::Integer(seg.depth));
             p.insert("tags".into(), page_tag());
             let p = self.stamp_provenance("create", p, origin);
             let (fwd, inv, ch) = self.dispatch_constituent("create", p).await?;
@@ -717,7 +716,6 @@ impl DispatchingOperationEngine {
             "parent_id".into(),
             Value::String(plan.destination_parent_id.clone()),
         );
-        pc.insert("depth".into(), Value::Integer(plan.page_depth));
         pc.insert("tags".into(), page_tag());
         if let Value::String(marks) = &plan.origin_marks
             && !marks.is_empty()
@@ -812,16 +810,16 @@ impl DispatchingOperationEngine {
             inverse_ops.extend(seg_invs);
             // Staleness fingerprint: guard the LITERALLY-restored fields
             // (parent_id, content, marks, resolved link state) and EXCLUDE the
-            // derived positional columns `depth`/`sort_key`. Structural ops
-            // RECOMPUTE those from the live tree rather than restoring the
-            // captured value, so their post-undo value is a function of the
-            // current parent chain, not the pre-op value — fingerprinting them
-            // makes a legitimate undo→redo trip spuriously "stale". (The moved
-            // blocks' parent_id — the field that actually defines the re-home —
-            // is still fingerprinted, so real external edits are caught.)
+            // derived order key `sort_key`. Structural ops RECOMPUTE it from the
+            // live tree rather than restoring the captured value, so its
+            // post-undo value is a function of the current sibling set, not the
+            // pre-op value — fingerprinting it makes a legitimate undo→redo trip
+            // spuriously "stale". (The moved blocks' parent_id — the field that
+            // actually defines the re-home — is still fingerprinted, so real
+            // external edits are caught.)
             let fp_changes: Vec<FieldDelta> = all_changes
                 .iter()
-                .filter(|d| d.field != "depth" && d.field != "sort_key")
+                .filter(|d| d.field != "sort_key")
                 .cloned()
                 .collect();
             let entry = UndoEntry {
@@ -1103,11 +1101,11 @@ impl DispatchingOperationEngine {
             move_invs.reverse();
             inverse_ops.extend(move_invs);
             // Same rule as the block→page transform: fingerprint the literally
-            // restored fields, never the positional columns structural ops
-            // recompute from the live tree — and never a row this merge removes.
+            // restored fields, never the order key structural ops recompute from
+            // the live tree — and never a row this merge removes.
             let fp_changes: Vec<FieldDelta> = all_changes
                 .iter()
-                .filter(|d| d.field != "depth" && d.field != "sort_key")
+                .filter(|d| d.field != "sort_key")
                 .filter(|d| !removed.contains(&d.entity_id))
                 .cloned()
                 .collect();

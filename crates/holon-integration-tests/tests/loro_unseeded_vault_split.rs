@@ -83,8 +83,8 @@ async fn run_test(runtime: Arc<tokio::runtime::Runtime>) {
     env.engine()
         .db_handle()
         .query(
-            "INSERT INTO block_raw (id, parent_id, depth, sort_key, content) VALUES ($id, \
-             $parent, 1, 'Zz', 'stranded content here')",
+            "INSERT INTO block_raw (id, parent_id, sort_key, content) VALUES ($id, \
+             $parent, 'Zz', 'stranded content here')",
             params,
         )
         .await

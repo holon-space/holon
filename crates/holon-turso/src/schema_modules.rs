@@ -400,7 +400,6 @@ impl SchemaModule for BlockSchemaModule {
 const BLOCK_RAW_COLUMNS: &[&str] = &[
     "id",
     "parent_id",
-    "depth",
     "sort_key",
     "content",
     "content_type",
@@ -1326,7 +1325,7 @@ mod tests {
     fn block_matview_select_exact_shape() {
         assert_eq!(
             block_matview_select(&[requires_descriptor()]),
-            "SELECT b.id, b.parent_id, b.depth, b.sort_key, b.content, b.content_type, \
+            "SELECT b.id, b.parent_id, b.sort_key, b.content, b.content_type, \
              b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.widget_only, \
              b.completed, \
              b.block_type, b.created_at, b.updated_at, b._change_origin, b.write_seq, \
@@ -1414,8 +1413,8 @@ mod tests {
         handle
             .execute(
                 // ALLOW(sole_block_writer): schema-module unit test seeding the FK parent row.
-                "INSERT INTO block_raw (id, parent_id, depth, sort_key, content) VALUES \
-                 ('block:src', 'sentinel:no_parent', 0, 1.0, 'Source')",
+                "INSERT INTO block_raw (id, parent_id, sort_key, content) VALUES \
+                 ('block:src', 'sentinel:no_parent', 1.0, 'Source')",
                 vec![],
             )
             .await
@@ -1478,8 +1477,8 @@ mod tests {
         handle
             .execute(
                 // ALLOW(sole_block_writer): schema-module unit test seeding the FK parent row.
-                "INSERT INTO block_raw (id, parent_id, depth, sort_key, content) VALUES \
-                 ('block:src', 'sentinel:no_parent', 0, 1.0, 'Source')",
+                "INSERT INTO block_raw (id, parent_id, sort_key, content) VALUES \
+                 ('block:src', 'sentinel:no_parent', 1.0, 'Source')",
                 vec![],
             )
             .await
@@ -1566,8 +1565,8 @@ mod tests {
         handle
             .execute(
                 // ALLOW(sole_block_writer): schema-module unit test seeding the FK parent row.
-                "INSERT INTO block_raw (id, parent_id, depth, sort_key, content) VALUES \
-                 ('block:src', 'sentinel:no_parent', 0, 1.0, 'Source')",
+                "INSERT INTO block_raw (id, parent_id, sort_key, content) VALUES \
+                 ('block:src', 'sentinel:no_parent', 1.0, 'Source')",
                 vec![],
             )
             .await
@@ -1684,8 +1683,8 @@ mod tests {
         handle
             .execute(
                 // ALLOW(sole_block_writer): schema-module unit test seeding the FK parent row.
-                "INSERT INTO block_raw (id, parent_id, depth, sort_key, content) VALUES \
-                 ('block:p', 'sentinel:no_parent', 0, 1.0, 'Page One')",
+                "INSERT INTO block_raw (id, parent_id, sort_key, content) VALUES \
+                 ('block:p', 'sentinel:no_parent', 1.0, 'Page One')",
                 vec![],
             )
             .await

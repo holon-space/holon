@@ -33,7 +33,6 @@ use holon_api::block::Block;
 use holon_api::capability::Consolidator;
 use holon_api::capability::SessionCapabilities;
 use holon_core::BlockDataSourceHelpers;
-use holon_core::BlockMaintenanceHelpers;
 use holon_core::BlockOperations;
 use holon_core::BlockQueryHelpers;
 use holon_core::CrudOperations;
@@ -226,32 +225,6 @@ impl BlockQueryHelpers<Block> for SqlBlockOperations {
             }
         }
         Ok(out)
-    }
-}
-#[async_trait]
-impl BlockMaintenanceHelpers<Block> for SqlBlockOperations {
-    /// One subtree read plus one batched UPDATE, replacing the inherited
-    /// default's level-by-level BFS (each level a full-table read with an
-    /// identical binding) and its `set_field`-per-descendant.
-    ///
-    /// The moved root keeps the depth `move_block` already wrote for it. That
-    /// holds because a cyclic tree is REFUSED, not because the CTE's starting
-    /// point excludes it: a cycle makes the root its own descendant, and
-    /// shifting it again would silently double-count the move. `descendant_ids`
-    /// owns that guard.
-    async fn update_descendant_depths(
-        &self,
-        parent_id: &EntityUri,
-        depth_delta: i64,
-    ) -> Result<()> {
-        if depth_delta == 0 {
-            return Ok(());
-        }
-        let ids = self.sql_ops.descendant_ids(parent_id.as_str()).await?;
-        if ids.is_empty() {
-            return Ok(());
-        }
-        self.sql_ops.shift_depths(&ids, depth_delta).await
     }
 }
 #[async_trait]
@@ -1599,15 +1572,14 @@ mod tests {
         handle: &crate::storage::turso::DbHandle,
         id: &str,
         parent_id: &str,
-        depth: i64,
         sort_key: &str,
     ) {
         handle
             .execute(
                 &format!(
-                    "INSERT INTO block_raw (id, parent_id, depth, sort_key, content, \
+                    "INSERT INTO block_raw (id, parent_id, sort_key, content, \
                      content_type, created_at, updated_at) VALUES ('{id}', '{parent_id}', \
-                     {depth}, '{sort_key}', '{id}', 'text', 0, 0)"
+                     '{sort_key}', '{id}', 'text', 0, 0)"
                 ),
                 vec![],
             )
@@ -1615,18 +1587,22 @@ mod tests {
             .unwrap_or_else(|e| panic!("insert {id}: {e}"));
     }
 
-    async fn read_depth(handle: &crate::storage::turso::DbHandle, id: &str) -> i64 {
-        let rows = handle
+    async fn read_parent(handle: &crate::storage::turso::DbHandle, id: &str) -> String {
+        handle
             .query(
-                &format!("SELECT depth FROM block_raw WHERE id = '{id}'"),
+                &format!("SELECT parent_id FROM block_raw WHERE id = '{id}'"),
                 std::collections::HashMap::new(),
             )
             .await
-            .expect("read depth");
-        rows.into_iter()
+            .expect("read parent_id")
+            .into_iter()
             .next()
-            .and_then(|r| r.get("depth").and_then(|v| v.as_i64()))
-            .unwrap_or_else(|| panic!("no depth row for {id}"))
+            .and_then(|r| {
+                r.get("parent_id")
+                    .and_then(|v| v.as_string())
+                    .map(String::from)
+            })
+            .unwrap_or_else(|| panic!("no row for {id}"))
     }
 
     async fn row_exists(handle: &crate::storage::turso::DbHandle, id: &str) -> bool {
@@ -1645,20 +1621,19 @@ mod tests {
     ///
     /// `move_block` has no reparent-under-own-descendant guard and is
     /// dispatchable (MCP `execute_operation`, Rhai), so this state is
-    /// reachable. If `descendant_ids` returns the root, `shift_depths` adds
-    /// the delta to the moved block a SECOND time — on top of the `depth`
-    /// `move_block` already wrote — corrupting depth silently. The predecessor
-    /// BFS hung instead, which is bad but loud; degrading loud to silent is
-    /// the forbidden direction.
+    /// reachable. A caller that walks the returned set (`get_descendants`,
+    /// `delete_subtree`) would otherwise treat the root as its own descendant
+    /// and act on it twice. The predecessor BFS hung instead, which is bad but
+    /// loud; degrading loud to silent is the forbidden direction.
     #[tokio::test]
     async fn descendant_ids_fails_loud_on_a_parent_cycle_through_its_own_root() {
         let (_backend, ops, handle) = setup_sql_block_ops().await;
 
         // root -> x -> y -> z, then close the loop: root's parent becomes z.
-        insert_raw(&handle, "block:root", "sentinel:no_parent", 0, "a0").await;
-        insert_raw(&handle, "block:x", "block:root", 1, "a1").await;
-        insert_raw(&handle, "block:y", "block:x", 2, "a2").await;
-        insert_raw(&handle, "block:z", "block:y", 3, "a3").await;
+        insert_raw(&handle, "block:root", "sentinel:no_parent", "a0").await;
+        insert_raw(&handle, "block:x", "block:root", "a1").await;
+        insert_raw(&handle, "block:y", "block:x", "a2").await;
+        insert_raw(&handle, "block:z", "block:y", "a3").await;
         handle
             .execute(
                 "UPDATE block_raw SET parent_id = 'block:z' WHERE id = 'block:root'",
@@ -1678,152 +1653,58 @@ mod tests {
         );
     }
 
-    /// The same cycle reaching `update_descendant_depths` must propagate the
-    /// Err rather than write a double-shifted depth.
+    /// `indent` reparents through `move_block` and writes NO depth: the column
+    /// it used to maintain does not exist, and the tree is the only authority
+    /// on nesting level.
+    ///
+    /// This replaces the characterization test that pinned the old arithmetic's
+    /// wrong output (`parent.depth()` read a hardcoded `0`, so every move wrote
+    /// `depth = 1` and shifted the subtree by a cumulative `+1`). The schema
+    /// assertion is the teeth: re-adding the column reds this test rather than
+    /// silently reviving a value nothing writes authoritatively.
     #[tokio::test]
-    async fn update_descendant_depths_propagates_the_cycle_error_without_writing() {
-        let (_backend, ops, handle) = setup_sql_block_ops().await;
-
-        insert_raw(&handle, "block:root", "sentinel:no_parent", 0, "a0").await;
-        insert_raw(&handle, "block:x", "block:root", 1, "a1").await;
-        handle
-            .execute(
-                "UPDATE block_raw SET parent_id = 'block:x' WHERE id = 'block:root'",
-                vec![],
-            )
-            .await
-            .expect("close the cycle");
-
-        // ALLOW(entity_uri_from_raw): test-fixture literal (#[cfg(test)])
-        let root = EntityUri::from_raw("block:root");
-        let before = read_depth(&handle, "block:root").await;
-        let err = <SqlBlockOperations as holon_core::BlockMaintenanceHelpers<Block>>::
-            update_descendant_depths(&ops, &root, 1)
-            .await
-            .expect_err("cycle must surface as an Err");
-        assert!(err.to_string().contains("cycle"), "got: {err}");
-        assert_eq!(
-            read_depth(&handle, "block:root").await,
-            before,
-            "no depth may be written when the tree is refused"
-        );
-    }
-
-    /// The batched depth UPDATE's arithmetic, over a REAL `SqlBlockOperations`
-    /// and a depth-2 subtree: every descendant shifts by exactly the delta, and
-    /// the walk root plus unrelated blocks are left alone.
-    ///
-    /// This drives `update_descendant_depths` directly rather than through
-    /// `indent`, because `indent`'s delta is computed from
-    /// `BlockEntity::depth()`, which for `holon_api::Block` is a hardcoded `0`
-    /// (holon-core/src/traits.rs:2480) — see the characterization test below.
-    /// Driving through `indent` would therefore assert that defect's output
-    /// instead of this path's arithmetic.
-    #[tokio::test]
-    async fn update_descendant_depths_shifts_the_whole_subtree_and_nothing_else() {
-        let (_backend, ops, handle) = setup_sql_block_ops().await;
-
-        // page -> {a, b}; b carries a depth-2 subtree b/c/d.
-        insert_raw(&handle, "block:page", "sentinel:no_parent", 0, "a0").await;
-        insert_raw(&handle, "block:a", "block:page", 1, "a1").await;
-        insert_raw(&handle, "block:b", "block:page", 1, "a2").await;
-        insert_raw(&handle, "block:c", "block:b", 2, "a3").await;
-        insert_raw(&handle, "block:d", "block:c", 3, "a4").await;
-
-        // ALLOW(entity_uri_from_raw): test-fixture literal (#[cfg(test)])
-        let b = EntityUri::from_raw("block:b");
-        let shift = |delta: i64| {
-            let ops = ops.clone();
-            let b = b.clone();
-            async move {
-                <SqlBlockOperations as holon_core::BlockMaintenanceHelpers<Block>>::
-                    update_descendant_depths(&ops, &b, delta)
-                    .await
-                    .expect("shift descendant depths")
-            }
-        };
-
-        shift(1).await;
-        assert_eq!(read_depth(&handle, "block:c").await, 3, "child +1");
-        assert_eq!(read_depth(&handle, "block:d").await, 4, "grandchild +1");
-        assert_eq!(
-            read_depth(&handle, "block:b").await,
-            1,
-            "the walk root is NOT shifted — move_block owns its own depth write"
-        );
-        assert_eq!(
-            read_depth(&handle, "block:a").await,
-            1,
-            "bystander untouched"
-        );
-        assert_eq!(
-            read_depth(&handle, "block:page").await,
-            0,
-            "ancestor untouched"
-        );
-
-        // Negative delta returns the subtree exactly; delta 0 is a no-op.
-        shift(-1).await;
-        shift(0).await;
-        assert_eq!(read_depth(&handle, "block:c").await, 2, "child restored");
-        assert_eq!(
-            read_depth(&handle, "block:d").await,
-            3,
-            "grandchild restored"
-        );
-    }
-
-    /// CHARACTERIZATION of a PRE-EXISTING defect, pinned so the fix is visible
-    /// when it lands: `impl BlockEntity for holon_api::Block` returns a
-    /// hardcoded `depth() == 0` (holon-core/src/traits.rs:2480, "Depth not
-    /// stored in flattened entity"). `move_block` derives
-    /// `new_depth = parent.depth() + 1` and `delta = new_depth - block.depth()`
-    /// from that, so for SQL-backed blocks EVERY move writes `depth = 1` on the
-    /// moved block and shifts its whole subtree by `+1` — regardless of where
-    /// it actually landed, and cumulatively across moves.
-    ///
-    /// This is independent of the batched-UPDATE path (it is the delta fed INTO
-    /// it) and predates task #15; the assertions below therefore encode wrong
-    /// values on purpose.
-    ///
-    /// STILL OPEN, and NOT fixable by making `depth()` read a stored value:
-    /// `block_raw.depth` has no authoritative writer. The org ingest
-    /// (`holon-orgmode::build_block_params`) omits the column, the Loro
-    /// projector omits it on purpose ("derived from the tree structure",
-    /// `holon-loro/src/block_cell_registry.rs:286`), and `BlockWriteField`
-    /// classes it as storage bookkeeping — so the stored value is the schema
-    /// DEFAULT 0 for essentially every block. A `depth()` that reads it would
-    /// still compute `new_depth = 0 + 1` here and flip this test green while
-    /// prod stayed exactly as wrong. The fork (make the column authoritative
-    /// at ingest, vs. drop it and derive depth) is Martin's call.
-    ///
-    /// `delete_subtree`, the other consumer of `depth()`, no longer depends on
-    /// it at all — see
-    /// `delete_subtree_deletes_a_three_level_subtree_with_unwritten_depths`.
-    #[tokio::test]
-    async fn indent_depth_is_wrong_because_block_entity_depth_is_hardcoded_zero() {
+    async fn indent_reparents_and_block_raw_has_no_depth_column() {
         use holon_core::BlockOperations;
 
         let (_backend, ops, handle) = setup_sql_block_ops().await;
 
-        insert_raw(&handle, "block:page", "sentinel:no_parent", 0, "a0").await;
-        insert_raw(&handle, "block:a", "block:page", 1, "a1").await;
-        insert_raw(&handle, "block:b", "block:page", 1, "a2").await;
-        insert_raw(&handle, "block:c", "block:b", 2, "a3").await;
+        insert_raw(&handle, "block:page", "sentinel:no_parent", "a0").await;
+        insert_raw(&handle, "block:a", "block:page", "a1").await;
+        insert_raw(&handle, "block:b", "block:page", "a2").await;
+        insert_raw(&handle, "block:c", "block:b", "a3").await;
+
+        let columns: Vec<String> = handle
+            .query(
+                "SELECT name FROM pragma_table_info('block_raw')",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("read block_raw columns")
+            .into_iter()
+            .filter_map(|r| r.get("name").and_then(|v| v.as_string()).map(String::from))
+            .collect();
+        assert!(
+            !columns.is_empty(),
+            "pragma_table_info must answer the real column set, got none"
+        );
+        assert!(
+            !columns.contains(&"depth".to_string()),
+            "block_raw must have no depth column; got {columns:?}"
+        );
 
         // ALLOW(entity_uri_from_raw): test-fixture literal (#[cfg(test)])
         let b = EntityUri::from_raw("block:b");
         ops.indent(&b).await.expect("indent b under a");
 
         assert_eq!(
-            read_depth(&handle, "block:b").await,
-            1,
-            "WRONG (should be 2): parent.depth() reads 0, so new_depth is always 1"
+            read_parent(&handle, "block:b").await,
+            "block:a",
+            "indent reparents b under its previous sibling"
         );
         assert_eq!(
-            read_depth(&handle, "block:c").await,
-            3,
-            "child shifted by the always-1 delta rather than by the real change"
+            read_parent(&handle, "block:c").await,
+            "block:b",
+            "the subtree rides along untouched"
         );
     }
 
@@ -1841,11 +1722,11 @@ mod tests {
 
         let (_backend, ops, handle) = setup_sql_block_ops().await;
 
-        insert_raw(&handle, "block:page", "sentinel:no_parent", 0, "a0").await;
-        insert_raw(&handle, "block:keep", "block:page", 1, "a1").await;
-        insert_raw(&handle, "block:sub", "block:page", 1, "a2").await;
-        insert_raw(&handle, "block:sub-c", "block:sub", 2, "a3").await;
-        insert_raw(&handle, "block:sub-d", "block:sub-c", 3, "a4").await;
+        insert_raw(&handle, "block:page", "sentinel:no_parent", "a0").await;
+        insert_raw(&handle, "block:keep", "block:page", "a1").await;
+        insert_raw(&handle, "block:sub", "block:page", "a2").await;
+        insert_raw(&handle, "block:sub-c", "block:sub", "a3").await;
+        insert_raw(&handle, "block:sub-d", "block:sub-c", "a4").await;
 
         // ALLOW(entity_uri_from_raw): test-fixture literal (#[cfg(test)])
         let sub = EntityUri::from_raw("block:sub");
@@ -1868,25 +1749,21 @@ mod tests {
     /// order is derived from `parent_id` within the descendant set, so every
     /// `delete` sees a leaf and the fail-closed non-leaf guard never fires.
     ///
-    /// Red-for-the-right-reason before the fix (the ordering read the stored
-    /// `depth` via `BlockEntity::depth()`, hardcoded `0`, so the sort was a
-    /// no-op): `refusing to cascade` — a registered dispatchable op that could
-    /// not delete anything deeper than one level.
-    ///
-    /// The stored depths below are DELIBERATELY all `0` — the value the org
-    /// ingest and the Loro projector actually write (neither sets the column).
-    /// The order must not depend on them.
+    /// Red-for-the-right-reason before the fix (the ordering sorted by
+    /// `BlockEntity::depth()`, hardcoded `0`, so the sort was a no-op):
+    /// `refusing to cascade` — a registered dispatchable op that could not
+    /// delete anything deeper than one level.
     #[tokio::test]
-    async fn delete_subtree_deletes_a_three_level_subtree_with_unwritten_depths() {
+    async fn delete_subtree_deletes_a_three_level_subtree() {
         use holon_core::BlockOperations;
 
         let (_backend, ops, handle) = setup_sql_block_ops().await;
 
-        insert_raw(&handle, "block:page", "sentinel:no_parent", 0, "a0").await;
-        insert_raw(&handle, "block:keep", "block:page", 0, "a1").await;
-        insert_raw(&handle, "block:sub", "block:page", 0, "a2").await;
-        insert_raw(&handle, "block:sub-c", "block:sub", 0, "a3").await;
-        insert_raw(&handle, "block:sub-d", "block:sub-c", 0, "a4").await;
+        insert_raw(&handle, "block:page", "sentinel:no_parent", "a0").await;
+        insert_raw(&handle, "block:keep", "block:page", "a1").await;
+        insert_raw(&handle, "block:sub", "block:page", "a2").await;
+        insert_raw(&handle, "block:sub-c", "block:sub", "a3").await;
+        insert_raw(&handle, "block:sub-d", "block:sub-c", "a4").await;
 
         // ALLOW(entity_uri_from_raw): test-fixture literal (#[cfg(test)])
         let sub = EntityUri::from_raw("block:sub");

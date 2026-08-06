@@ -297,16 +297,15 @@ struct GroupBuffer {
     entries: Vec<UndoEntry>,
 }
 
-/// Whether `field` is a DERIVED positional column (`depth`, `sort_key`) that
-/// structural ops RECOMPUTE from the live tree rather than restore to a
-/// captured value — so its post-replay value is a function of the current
-/// parent chain, not the pre-op value. Fingerprinting it makes a legitimate
-/// undo→redo trip spuriously "stale". Excluded from every composite
-/// [`Precondition`] here; the engine-level `convert_block_to_page` compound
-/// applies the SAME rule to its hand-assembled entry (single-sourced so the two
-/// cannot drift).
+/// Whether `field` is the DERIVED order key (`sort_key`) that structural ops
+/// RECOMPUTE from the live tree rather than restore to a captured value — so
+/// its post-replay value is a function of the current sibling set, not the
+/// pre-op value. Fingerprinting it makes a legitimate undo→redo trip spuriously
+/// "stale". Excluded from every composite [`Precondition`] here; the
+/// engine-level `convert_block_to_page` compound applies the SAME rule to its
+/// hand-assembled entry (single-sourced so the two cannot drift).
 pub fn is_derived_positional_field(field: &str) -> bool {
-    field == "depth" || field == "sort_key"
+    field == "sort_key"
 }
 
 /// Undo/redo history stack of C-shaped [`UndoEntry`] records.
@@ -494,8 +493,8 @@ impl UndoStack {
     ///   wins.
     /// - `redo_precondition` (checked BEFORE redo ⇒ must equal the PRE-group
     ///   state): per (entity, field) the FIRST writer's inverse fingerprint
-    ///   wins. Derived positional columns (`depth`/`sort_key`) are excluded
-    ///   from both (see [`is_derived_positional_field`]).
+    ///   wins. The derived order key (`sort_key`) is excluded from both (see
+    ///   [`is_derived_positional_field`]).
     fn compose(entries: Vec<UndoEntry>) -> UndoEntry {
         let mut ops: Vec<Operation> = Vec::new();
         for e in &entries {
@@ -876,15 +875,14 @@ mod tests {
         assert_eq!(e.inverse_ops.len(), 2);
     }
 
-    /// Derived positional columns never enter a composite precondition (they
-    /// are recomputed from the live tree, not restored).
+    /// The derived order key never enters a composite precondition (it is
+    /// recomputed from the live tree, not restored).
     #[test]
-    fn composite_precondition_excludes_depth_and_sort_key() {
-        assert!(is_derived_positional_field("depth"));
+    fn composite_precondition_excludes_sort_key() {
         assert!(is_derived_positional_field("sort_key"));
         assert!(!is_derived_positional_field("content"));
 
-        let with_depth = |id: &str, field: &str, val: &str| {
+        let entry_for = |id: &str, field: &str, val: &str| {
             let changes = vec![FieldDelta::new(
                 id,
                 field,
@@ -902,16 +900,15 @@ mod tests {
         };
         let mut stack = UndoStack::new();
         stack.begin_group();
-        stack.push(with_depth("b1", "content", "x"));
-        stack.push(with_depth("b1", "depth", "3"));
-        stack.push(with_depth("b1", "sort_key", "A0"));
+        stack.push(entry_for("b1", "content", "x"));
+        stack.push(entry_for("b1", "sort_key", "A0"));
         stack.end_group();
 
         let e = stack.peek_undo().unwrap();
         assert_eq!(
             e.precondition.fields.len(),
             1,
-            "only the content field is fingerprinted; depth/sort_key excluded"
+            "only the content field is fingerprinted; sort_key excluded"
         );
         assert_eq!(e.precondition.fields[0].field, "content");
     }

@@ -71,17 +71,10 @@ async fn block_engine() -> Arc<BackendEngine> {
     .expect("test engine with block provider")
 }
 
-async fn create_block(
-    engine: &BackendEngine,
-    id: &str,
-    parent_id: &str,
-    depth: i64,
-    content: &str,
-) {
+async fn create_block(engine: &BackendEngine, id: &str, parent_id: &str, content: &str) {
     let mut params: StorageEntity = HashMap::new();
     params.insert("id".into(), Value::String(id.to_string()));
     params.insert("content".into(), Value::String(content.to_string()));
-    params.insert("depth".into(), Value::Integer(depth));
     params.insert("parent_id".into(), Value::String(parent_id.to_string()));
     // Fixture setup, not the user action under test: use a non-User origin so
     // these pre-existing blocks don't land on the undo stack. (Since Wave 1,
@@ -117,23 +110,9 @@ async fn parent_of(engine: &BackendEngine, id: &str) -> String {
 async fn move_block_then_undo_restores_state_through_new_machinery() {
     let engine = block_engine().await;
 
-    create_block(
-        &engine,
-        "block:parent-a",
-        "sentinel:no_parent",
-        0,
-        "Parent A",
-    )
-    .await;
-    create_block(
-        &engine,
-        "block:parent-b",
-        "sentinel:no_parent",
-        0,
-        "Parent B",
-    )
-    .await;
-    create_block(&engine, "block:child", "block:parent-a", 1, "Child").await;
+    create_block(&engine, "block:parent-a", "sentinel:no_parent", "Parent A").await;
+    create_block(&engine, "block:parent-b", "sentinel:no_parent", "Parent B").await;
+    create_block(&engine, "block:child", "block:parent-a", "Child").await;
     assert_eq!(parent_of(&engine, "block:child").await, "block:parent-a");
 
     // The user moves the child from A to B — the op with a REAL inverse.
@@ -177,23 +156,9 @@ async fn move_block_then_undo_restores_state_through_new_machinery() {
 #[tokio::test(flavor = "multi_thread")]
 async fn rule_fired_move_never_enters_user_stack_e2e() {
     let engine = block_engine().await;
-    create_block(
-        &engine,
-        "block:parent-a",
-        "sentinel:no_parent",
-        0,
-        "Parent A",
-    )
-    .await;
-    create_block(
-        &engine,
-        "block:parent-b",
-        "sentinel:no_parent",
-        0,
-        "Parent B",
-    )
-    .await;
-    create_block(&engine, "block:child", "block:parent-a", 1, "Child").await;
+    create_block(&engine, "block:parent-a", "sentinel:no_parent", "Parent A").await;
+    create_block(&engine, "block:parent-b", "sentinel:no_parent", "Parent B").await;
+    create_block(&engine, "block:child", "block:parent-a", "Child").await;
 
     let mut params: StorageEntity = HashMap::new();
     params.insert("id".into(), Value::String("block:child".to_string()));
@@ -222,31 +187,10 @@ async fn rule_fired_move_never_enters_user_stack_e2e() {
 #[tokio::test(flavor = "multi_thread")]
 async fn stale_move_undo_drops_loudly_e2e() {
     let engine = block_engine().await;
-    create_block(
-        &engine,
-        "block:parent-a",
-        "sentinel:no_parent",
-        0,
-        "Parent A",
-    )
-    .await;
-    create_block(
-        &engine,
-        "block:parent-b",
-        "sentinel:no_parent",
-        0,
-        "Parent B",
-    )
-    .await;
-    create_block(
-        &engine,
-        "block:parent-c",
-        "sentinel:no_parent",
-        0,
-        "Parent C",
-    )
-    .await;
-    create_block(&engine, "block:child", "block:parent-a", 1, "Child").await;
+    create_block(&engine, "block:parent-a", "sentinel:no_parent", "Parent A").await;
+    create_block(&engine, "block:parent-b", "sentinel:no_parent", "Parent B").await;
+    create_block(&engine, "block:parent-c", "sentinel:no_parent", "Parent C").await;
+    create_block(&engine, "block:child", "block:parent-a", "Child").await;
 
     let mut params: StorageEntity = HashMap::new();
     params.insert("id".into(), Value::String("block:child".to_string()));

@@ -1937,7 +1937,7 @@ impl SutOrgRender for HeadlessFrontendComponent {
         let reader = CacheBlockReader::new(block_cache);
 
         // All block_raw rows by id — to resolve each file's doc (header) block.
-        let header_sql = "SELECT b.id, b.parent_id, b.depth, b.sort_key, b.content, b.content_type, \
+        let header_sql = "SELECT b.id, b.parent_id, b.sort_key, b.content, b.content_type, \
              b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.completed, \
              b.block_type, b.created_at, b.updated_at, COALESCE((SELECT json_group_array(tag) \
              FROM block_tags WHERE block_id = b.id), '[]') AS tags, COALESCE((SELECT \

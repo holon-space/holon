@@ -11,7 +11,6 @@
 SELECT
     id,
     parent_id,
-    depth,
     sort_key,
     content,
     content_type,

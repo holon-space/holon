@@ -71,19 +71,11 @@ async fn block_engine() -> Arc<BackendEngine> {
     .expect("test engine with block provider")
 }
 
-async fn create(
-    engine: &BackendEngine,
-    id: &str,
-    parent_id: &str,
-    content: &str,
-    depth: i64,
-    is_page: bool,
-) {
+async fn create(engine: &BackendEngine, id: &str, parent_id: &str, content: &str, is_page: bool) {
     let mut params: StorageEntity = HashMap::new();
     params.insert("id".into(), Value::String(id.to_string()));
     params.insert("content".into(), Value::String(content.to_string()));
     params.insert("parent_id".into(), Value::String(parent_id.to_string()));
-    params.insert("depth".into(), Value::Integer(depth));
     if is_page {
         params.insert(
             "tags".into(),
@@ -104,10 +96,10 @@ async fn link_search_lists_each_page_once() {
 
     // A page whose title matches the filter — the tempting duplicate.
     let page = "block:rust_page";
-    create(&engine, page, "sentinel:no_parent", "Rust rewrite", 0, true).await;
+    create(&engine, page, "sentinel:no_parent", "Rust rewrite", true).await;
     // A plain (non-page) content block that also matches — must still appear.
     let note = "block:rust_note";
-    create(&engine, note, page, "Rust notes go here", 1, false).await;
+    create(&engine, note, page, "Rust notes go here", false).await;
 
     let candidates = engine
         .search_link_candidates("Rust")

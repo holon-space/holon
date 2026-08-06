@@ -5,7 +5,6 @@
 CREATE TABLE IF NOT EXISTS block_raw (
     id TEXT PRIMARY KEY,
     parent_id TEXT,
-    depth INTEGER NOT NULL DEFAULT 0,
     sort_key TEXT NOT NULL DEFAULT 'A0',
     content TEXT NOT NULL DEFAULT '',
     content_type TEXT NOT NULL DEFAULT 'text',

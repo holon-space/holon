@@ -19,11 +19,6 @@ pub struct PlanSegment {
     pub id: String,
     pub name: String,
     pub parent_id: String,
-    /// `parent.depth + 1` — passed on the `create` so the page row carries a
-    /// tree-consistent `depth` (which `move_block` later reads to depth its
-    /// re-homed children; an unset depth would leave the moved subtree off by
-    /// one AND desynchronize the undo/redo staleness fingerprint).
-    pub depth: i64,
 }
 
 /// Fully-resolved plan for turning `origin_id` into a page under
@@ -40,8 +35,6 @@ pub struct BlockToPagePlan {
     pub origin_marks: Value,
     /// Deterministic id of the new page = `PageId::for_path(full path)`.
     pub page_id: String,
-    /// `destination_parent.depth + 1` — the new page's tree-consistent depth.
-    pub page_depth: i64,
     /// Existing (or to-be-created) page the new page lands under; the vault
     /// root sentinel when the destination path is empty.
     pub destination_parent_id: String,
@@ -61,15 +54,6 @@ fn get_str(obj: &std::collections::HashMap<String, Value>, key: &str) -> Result<
     }
 }
 
-fn get_i64(obj: &std::collections::HashMap<String, Value>, key: &str) -> Result<i64, String> {
-    match obj.get(key) {
-        Some(Value::Integer(n)) => Ok(*n),
-        other => Err(format!(
-            "BlockToPagePlan: field '{key}' must be an integer, got {other:?}"
-        )),
-    }
-}
-
 impl BlockToPagePlan {
     pub fn to_value(&self) -> Value {
         let mut obj = std::collections::HashMap::new();
@@ -83,7 +67,6 @@ impl BlockToPagePlan {
         );
         obj.insert("origin_marks".to_string(), self.origin_marks.clone());
         obj.insert("page_id".to_string(), Value::String(self.page_id.clone()));
-        obj.insert("page_depth".to_string(), Value::Integer(self.page_depth));
         obj.insert(
             "destination_parent_id".to_string(),
             Value::String(self.destination_parent_id.clone()),
@@ -101,7 +84,6 @@ impl BlockToPagePlan {
                             "parent_id".to_string(),
                             Value::String(seg.parent_id.clone()),
                         );
-                        o.insert("depth".to_string(), Value::Integer(seg.depth));
                         Value::Object(o)
                     })
                     .collect(),
@@ -134,7 +116,6 @@ impl BlockToPagePlan {
                         id: get_str(seg, "id")?,
                         name: get_str(seg, "name")?,
                         parent_id: get_str(seg, "parent_id")?,
-                        depth: get_i64(seg, "depth")?,
                     }),
                     other => Err(format!(
                         "BlockToPagePlan: segment must be Object, got {other:?}"
@@ -168,7 +149,6 @@ impl BlockToPagePlan {
             origin_content: get_str(obj, "origin_content")?,
             origin_marks: obj.get("origin_marks").cloned().unwrap_or(Value::Null),
             page_id: get_str(obj, "page_id")?,
-            page_depth: get_i64(obj, "page_depth")?,
             destination_parent_id: get_str(obj, "destination_parent_id")?,
             missing_segments,
             child_ids,

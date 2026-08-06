@@ -79,14 +79,12 @@ async fn create_block(
     engine: &BackendEngine,
     id: &str,
     parent_id: &str,
-    depth: i64,
     content: &str,
     origin: OpOrigin,
 ) {
     let mut params: StorageEntity = HashMap::new();
     params.insert("id".into(), Value::String(id.to_string()));
     params.insert("content".into(), Value::String(content.to_string()));
-    params.insert("depth".into(), Value::Integer(depth));
     params.insert("parent_id".into(), Value::String(parent_id.to_string()));
     engine
         .execute_operation(&EntityName::new("block"), "create", params, origin)
@@ -159,7 +157,6 @@ async fn set_field_content_undo_then_redo_is_identity() {
         &engine,
         "block:b",
         "sentinel:no_parent",
-        0,
         "before",
         OpOrigin::Sync,
     )
@@ -198,7 +195,6 @@ async fn cycle_task_state_undo_restores_both_properties() {
         &engine,
         "block:t",
         "sentinel:no_parent",
-        0,
         "Task",
         OpOrigin::Sync,
     )
@@ -262,7 +258,6 @@ async fn create_undo_removes_block_redo_recreates() {
         &engine,
         "block:new",
         "sentinel:no_parent",
-        0,
         "Fresh",
         OpOrigin::User,
     )
@@ -297,7 +292,6 @@ async fn rule_fired_create_never_enters_user_stack() {
         "parent_id".into(),
         Value::String("sentinel:no_parent".to_string()),
     );
-    params.insert("depth".into(), Value::Integer(0));
     engine
         .execute_operation(
             &EntityName::new("block"),
@@ -327,7 +321,6 @@ async fn delete_leaf_undo_resurrects_identical_row() {
         &engine,
         "block:parent",
         "sentinel:no_parent",
-        0,
         "Parent",
         OpOrigin::Sync,
     )
@@ -336,7 +329,6 @@ async fn delete_leaf_undo_resurrects_identical_row() {
         &engine,
         "block:leaf",
         "block:parent",
-        1,
         "Leaf content",
         OpOrigin::Sync,
     )
@@ -434,7 +426,7 @@ async fn read_edge(engine: &BackendEngine, table: &str, target_col: &str, id: &s
 async fn set_field_requires_undo_restores_prior_set_then_redo() {
     let engine = block_engine().await;
     for id in ["block:e", "block:d1", "block:d2"] {
-        create_block(&engine, id, "sentinel:no_parent", 0, "x", OpOrigin::Sync).await;
+        create_block(&engine, id, "sentinel:no_parent", "x", OpOrigin::Sync).await;
     }
 
     // Prior set (Sync — establishes state without a journal entry).
@@ -492,7 +484,6 @@ async fn set_field_tags_undo_restores_prior_set_then_redo() {
         &engine,
         "block:tg",
         "sentinel:no_parent",
-        0,
         "x",
         OpOrigin::Sync,
     )
@@ -547,7 +538,6 @@ async fn typing_three_chars_coalesces_into_one_undo() {
         &engine,
         "block:type",
         "sentinel:no_parent",
-        0,
         "",
         OpOrigin::Sync,
     )
