@@ -242,7 +242,9 @@ impl Module for LoroModule {
                         .get_global_doc()
                         .await
                         .expect("[LoroModule] get_global_doc for watermark advance");
-                    collab.doc().oplog_frontiers()
+                    collab
+                        .with_read(|doc| Ok(doc.oplog_frontiers()))
+                        .expect("[LoroModule] read global doc for watermark advance")
                 };
                 *projection.last_synced().lock().unwrap() = frontiers;
             }
@@ -277,6 +279,13 @@ impl Module for LoroModule {
                     .get_global_doc()
                     .await
                     .expect("[LoroModule] get_global_doc for share rehydration");
+                // Lock-exempt for now: `rehydrate_shared_trees` is async, so it
+                // cannot run inside the doc's synchronous read guard. It runs
+                // once at boot before the sync controller starts, with no
+                // concurrent writer — sealing it needs the function split into
+                // guarded reads around its awaits (follow-up).
+                // ALLOW(loro_doc_escape): async consumer, boot-only, no
+                // concurrent writer.
                 let doc_arc = collab.doc();
                 let doc = &*doc_arc;
                 match rehydrate_shared_trees(&backend, doc).await {

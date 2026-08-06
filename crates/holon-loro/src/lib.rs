@@ -38,6 +38,7 @@ pub mod degraded_signal_bus;
 pub mod device_key_store;
 /// A2 SAS device-pairing ceremony (ADR 0028 A2). Pure state machine, no iroh.
 pub mod device_pairing;
+mod doc_lock;
 pub mod event_bus;
 pub mod event_ring;
 

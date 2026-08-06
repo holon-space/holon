@@ -100,6 +100,9 @@ impl BlockCellRegistry {
     /// to a `LoroText` container, and dispatches non-content writes through
     /// the wrapped [`LoroBackend`] (Phase 2 authority flip).
     pub fn with_loro(loro_doc: Arc<LoroDocument>) -> Self {
+        // ALLOW(loro_doc_escape): the cell backings' retained container handles
+        // read single containers of already-born blocks; the scoped-capability
+        // ruling keeps them outside the doc-boundary lock.
         let doc = loro_doc.doc();
         let backend = Arc::new(LoroBackend::from_document(loro_doc));
         Self {

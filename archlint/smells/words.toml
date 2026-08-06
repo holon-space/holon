@@ -138,3 +138,33 @@ Raw SQL in a frontend. Frontends are pure render engines — move SQL to the \
 backend (holon crate) and expose via BackendEngine methods. To suppress: \
 // ALLOW(sql): <reason>
 """
+
+[[smell]]
+id = "loro_doc_escape"
+# `LoroDocument::doc()` hands out the raw `Arc<LoroDoc>` OUTSIDE the
+# doc-boundary lock (crates/holon-loro/src/doc_lock.rs), so its holder can
+# observe the interior of a write batch — a tree node created but not yet
+# carrying its stable_id, text whose marks were cleared but not re-applied.
+# The lock only holds if the escapes stay enumerated: this rule is the ratchet.
+# Blessed escapes (baselined): the cell backings' retained container handles
+# (scoped-capability ruling), and handles given to a transport or a
+# subscription registration that never read doc state themselves.
+# `txn.doc()` is `WriteTxn::doc()` — the sealed idiom, inside the guard.
+pattern = '(?<!txn)\.doc\(\)'
+files = "**/*.rs"
+exclude = [
+  "crates/holon-loro-testing/**",
+  "crates/holon-integration-tests/**",
+  "crates/holon/tests/**",
+  # `AliasLedger::doc()` is the ledger's OWN `&LoroDoc` accessor, a different
+  # doc with a different owner — not an escape from `LoroDocument`.
+  "crates/holon-sharing/src/alias_ledger.rs",
+]
+case_sensitive = true
+message = """
+Raw `LoroDocument::doc()` escape. The returned `Arc<LoroDoc>` is outside the \
+doc-boundary lock, so reads through it can observe a write batch's interior. \
+Use `with_read` / `with_write` instead. If the handle is genuinely lock-exempt \
+(a transport, a subscription registration, or a cell backing's retained \
+container), say so: // ALLOW(loro_doc_escape): <reason>
+"""

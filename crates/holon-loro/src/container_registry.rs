@@ -154,7 +154,7 @@ impl ContainerRegistry {
     /// what a policy-commit-time `SubtreeContainment` impl requires.
     pub async fn subtree_index(&self) -> Result<SubtreeIndex> {
         let doc = self.store.get_global_doc().await?;
-        let blocks = snapshot_blocks_from_doc(&doc.doc());
+        let blocks = doc.with_read(|d| Ok(snapshot_blocks_from_doc(d)))?;
         // child_uri -> parent_uri, both in EntityUri string form for a
         // scheme-consistent walk.
         let parents: HashMap<String, String> = blocks
@@ -242,6 +242,8 @@ mod replicate {
                 let addr = advertiser
                     .start_share_gated(
                         container.id.clone(),
+                        // ALLOW(loro_doc_escape): handed to the iroh advertiser
+                        // as a sync transport handle, not read here.
                         container.doc.doc(),
                         roster.clone(),
                         None,

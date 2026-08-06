@@ -5382,6 +5382,7 @@ dependencies = [
  "holon-macros",
  "iroh",
  "loro",
+ "parking_lot 0.12.5",
  "proptest 1.11.0",
  "proptest-state-machine",
  "rand 0.9.5",

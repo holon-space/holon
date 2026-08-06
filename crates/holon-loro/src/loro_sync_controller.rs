@@ -57,6 +57,7 @@ use tracing::error;
 use tracing::info;
 use tracing::warn;
 
+use crate::LoroDocument;
 use crate::LoroDocumentStore;
 use crate::loro_backend::SnapshotBlock;
 use crate::loro_backend::snapshot_blocks_from_doc;
@@ -364,12 +365,19 @@ impl LoroSyncController {
     ) -> Result<LoroSyncControllerHandle> {
         // (1) Loro subscription — synchronous, before spawn.
         let wake_for_callback = self.wake.clone();
+        // Lock-exempt raw handle: used only to REGISTER the subscription below,
+        // never to read doc state. The callback runs on the committing thread
+        // while that thread holds the doc write guard, so it must stay a pure
+        // function of the event — it extracts facts from the event's own diff
+        // and queues them. Touching the doc from it would re-enter the guard.
         let doc_arc = {
             let store = self.doc_store.read().await;
             let collab = store
                 .get_global_doc()
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to get global doc: {}", e))?;
+            // ALLOW(loro_doc_escape): subscription registration; the handle
+            // never reads doc state.
             collab.doc()
         };
         // Event-driven incremental input: extract each commit's dirty facts on
@@ -661,11 +669,8 @@ impl LoroProjection {
         let _guard = self.project_lock.lock().await;
         let t0 = std::time::Instant::now();
 
-        let doc_arc = self.raw_doc().await?;
-        let current = {
-            let doc = &*doc_arc;
-            doc.oplog_frontiers()
-        };
+        let collab = self.global_doc().await?;
+        let current = collab.with_read(|doc| Ok(doc.oplog_frontiers()))?;
         let last = self.last_synced.lock().unwrap().clone();
         let seeded = self.seeded.load(Ordering::SeqCst);
         let armed = self.armed.load(Ordering::SeqCst);
@@ -717,11 +722,10 @@ impl LoroProjection {
             let take_incremental =
                 !pending.is_empty() && pending.len() <= INCREMENTAL_BATCH_MAX.max(live_len);
             if take_incremental {
-                let (changed, settled) = {
-                    let doc = &*doc_arc;
+                let (changed, settled) = collab.with_read(|doc| {
                     let mut tid_index = self.tid_index.lock().unwrap();
-                    crate::loro_backend::incremental_block_changes(doc, &pending, &mut tid_index)?
-                };
+                    crate::loro_backend::incremental_block_changes(doc, &pending, &mut tid_index)
+                })?;
                 if settled {
                     // Build ops + a STAGING plan WITHOUT mutating `live`. `live`
                     // (the diff base) and `last_synced` advance only AFTER the sink
@@ -899,10 +903,8 @@ impl LoroProjection {
         // `block_raw` → Loro and re-establishes `live == block_raw` on success.
         // This path is not steady-state (cold boot / unsettled / orphan / oversized
         // bootstrap), so the extra sink read is not on the hot path.
-        let (after, after_settled): (HashMap<String, SnapshotBlock>, bool) = {
-            let doc = &*doc_arc;
-            snapshot_blocks_from_doc_settled(doc)
-        };
+        let (after, after_settled): (HashMap<String, SnapshotBlock>, bool) =
+            collab.with_read(|doc| Ok(snapshot_blocks_from_doc_settled(doc)))?;
         let before: Arc<HashMap<String, SnapshotBlock>> = Arc::new(self.read_sql_snapshot().await?);
         let snapshot_ms = t0.elapsed().as_millis();
 
@@ -986,10 +988,7 @@ impl LoroProjection {
         // the next pass can take the fast path (and so a later reseed diffs against
         // `live`).
         if after_settled {
-            let idx = {
-                let doc = &*doc_arc;
-                crate::loro_backend::build_tid_index(doc)
-            };
+            let idx = collab.with_read(|doc| Ok(crate::loro_backend::build_tid_index(doc)))?;
             *self.tid_index.lock().unwrap() = idx;
             *self.live.lock().unwrap() = after;
             self.seeded.store(true, Ordering::SeqCst);
@@ -1106,13 +1105,12 @@ impl LoroProjection {
         Ok(())
     }
 
-    async fn raw_doc(&self) -> Result<Arc<LoroDoc>> {
+    async fn global_doc(&self) -> Result<Arc<LoroDocument>> {
         let store = self.doc_store.read().await;
-        let collab = store
+        store
             .get_global_doc()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to get global doc: {}", e))?;
-        Ok(collab.doc())
+            .map_err(|e| anyhow::anyhow!("Failed to get global doc: {}", e))
     }
 
     /// Read the sink's current block state (the diff "before") via the injected
