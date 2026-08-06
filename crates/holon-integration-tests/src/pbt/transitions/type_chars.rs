@@ -148,8 +148,15 @@ crate::cap_transition! {
         sut.apply_type_chars(&me.text).await;
     }
     sql_budget: |_me, _state| {
+        // Bimodal over 6 dedup samples (d=3): 7 when the keystroke only
+        // touches the editor buffer (n=3), 15 when it commits and the write
+        // reaches storage (n=3) — `backend.execute_operation ▸
+        // dispatcher.execute_operation` plus `home.locate`
+        // (+ `home.resolve_doc`), `home.prev_sibling` and
+        // `org.on_block_feed ▸ org.on_block_changed`. The committing mode is
+        // the budget; `REACTIVE_BASE` alone never covered it.
         ExpectedSql {
-            reads: REACTIVE_BASE,
+            reads: REACTIVE_BASE + 10,
             writes: 0,
             ddl: 0,
             tolerance: 5,

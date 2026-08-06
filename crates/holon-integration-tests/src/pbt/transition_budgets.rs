@@ -155,6 +155,7 @@ pub enum Violation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Metric {
     SqlReads,
+    SqlReadRepeat,
     SqlWrites,
     SqlDdl,
     MaxQueryMs,
@@ -171,6 +172,7 @@ impl Metric {
     pub fn key(self) -> &'static str {
         match self {
             Metric::SqlReads => "sql_reads",
+            Metric::SqlReadRepeat => "sql_read_repeat",
             Metric::SqlWrites => "sql_writes",
             Metric::SqlDdl => "sql_ddl",
             Metric::MaxQueryMs => "max_query_ms",
@@ -204,6 +206,37 @@ fn sql_reads_pinned(transition: &crate::pbt::transitions::E2ETransition) -> bool
     matches!(transition, TV::PinBlock(_) | TV::OpenTabViaModifierClick(_))
 }
 
+/// Redundancy ratchet: the largest number of times ONE read binding-set may
+/// re-execute inside a single transition window.
+///
+/// Budgets are checked against the DEDUPLICATED read count, so the
+/// re-execution defect (task #15) no longer inflates them — this is the
+/// separate ceiling that keeps the defect from growing while it is unfixed.
+///
+/// Measured 2026-08-06 over 2063 transition samples / 2860 duplicate-read
+/// rows: max 54 (`SimulateRestart`, the block-hydrate select under
+/// `org.ingest_file`), then 36, 32, 26, 26, 24; 99.7% of rows sit at ≤14.
+/// The ceiling is 64 rather than 54 because that top decile is ten rows
+/// concentrated in the two full-reprojection transitions — a max drawn from
+/// ten observations is not characterized, and a ratchet that reds on sampling
+/// noise gets disarmed instead of fixed.
+///
+/// RATCHET DOWN as #15 progresses, NEVER UP. A breach means the re-execution
+/// defect grew; the fix is the new consumer, never this number.
+pub const MAX_READ_REPEAT_PER_BINDING: usize = 64;
+
+/// Violation messages quote the offending statement; the `sql` span attribute
+/// is already head…tail-fingerprinted (~440 chars), which is far more than a
+/// one-line failure needs to identify it.
+fn short_sql(sql: &str) -> String {
+    const KEEP: usize = 90;
+    let chars: Vec<char> = sql.chars().collect();
+    if chars.len() <= KEEP {
+        return sql.to_string();
+    }
+    format!("{}…", chars[..KEEP].iter().collect::<String>())
+}
+
 /// One metric's observed value for a transition, its absolute hard cap, and
 /// the fully-formed violation message to emit if `actual > limit`.
 pub struct MetricSample {
@@ -229,9 +262,10 @@ pub fn build_samples(
     let mut samples = Vec::new();
 
     let reads_limit = expected.reads + expected.tolerance;
+    let dedup_reads = metrics.dedup_read_count();
     samples.push(MetricSample {
         metric: Metric::SqlReads,
-        actual: metrics.sql_read_count as f64,
+        actual: dedup_reads as f64,
         limit: reads_limit as f64,
         severity: if sql_reads_pinned(transition) {
             Severity::Pinned
@@ -239,9 +273,11 @@ pub fn build_samples(
             Severity::Error
         },
         message: format!(
-            "{key}.sql_reads: {actual} exceeds expected {expected} + tolerance {tol} = {limit} \
-             (watches={w}, docs={d})",
-            actual = metrics.sql_read_count,
+            "{key}.sql_reads: {actual} dedup (raw {raw}, {excess} redundant re-executions) \
+             exceeds expected {expected} + tolerance {tol} = {limit} (watches={w}, docs={d})",
+            actual = dedup_reads,
+            raw = metrics.sql_read_count,
+            excess = metrics.redundant_read_excess(),
             expected = expected.reads,
             tol = expected.tolerance,
             limit = reads_limit,
@@ -249,6 +285,21 @@ pub fn build_samples(
             d = ref_state.files.documents.len(),
         ),
     });
+
+    if let Some((sql, repeats)) = metrics.worst_read_repeat() {
+        samples.push(MetricSample {
+            metric: Metric::SqlReadRepeat,
+            actual: repeats as f64,
+            limit: MAX_READ_REPEAT_PER_BINDING as f64,
+            severity: Severity::Error,
+            message: format!(
+                "{key}.sql_read_repeat: one binding-set of `{sql}` re-executed {repeats}x, \
+                 over the redundancy ratchet {MAX_READ_REPEAT_PER_BINDING} — the re-execution \
+                 defect GREW; find the new consumer, do not raise the ratchet",
+                sql = short_sql(sql),
+            ),
+        });
+    }
 
     let writes_limit = expected.writes + expected.tolerance;
     samples.push(MetricSample {

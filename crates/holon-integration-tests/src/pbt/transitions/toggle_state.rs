@@ -234,7 +234,20 @@ crate::cap_transition! {
         let watches = state.active_watch_count();
         let blocks = state.block_count();
         let docs = state.document_count();
-        expected_sql_for_kind(MutationKind::Update, watches, blocks, docs)
+        let mut sql = expected_sql_for_kind(MutationKind::Update, watches, blocks, docs);
+        // A state toggle re-renders the document, and the write-back re-resolves
+        // home authority per affected block — 30 of the 107 queries in the
+        // worst sample are `home.locate` (+ `home.resolve_doc`), alongside
+        // `org.on_block_feed ▸ org.on_block_changed`, `home.prev_sibling` and
+        // `backend.execute_operation ▸ dispatcher.execute_operation`.
+        //
+        // Dedup reads 14-52 over 15 samples, ANTI-correlated with vault size:
+        // 14-17 at b32-43 but 31-52 at b29, because the small fixture's toggle
+        // touches proportionally more of its document. `cdc_tolerance` scales
+        // the wrong way for this transition, so the ceiling is set to clear the
+        // b29 cluster's observed max (52) with headroom.
+        sql.reads += 12;
+        sql
     }
 }
 

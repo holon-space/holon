@@ -95,12 +95,14 @@ holon_pbt_core::cap_transition! {
     |me, _state, sut| {
         sut.apply_merge_from_peer(me.peer_idx).await;
     }
-    sql_budget: |_me, _state| {
-        // MergeFromPeer: async CDC drain from previous transitions can land here.
-        // In production, fires Loro's `subscribe_root` callback, which wakes
+    sql_budget: |_me, state| {
+        // The merge itself costs 5 reads (block hydrate + the doc-scoped
+        // descendants CTE) on top of the shared CDC drain: 137 samples, 0 at
+        // d=1 (n=134) and 8 at d=3 (n=3) = 3 floor + 5. In production this
+        // fires Loro's `subscribe_root` callback, which wakes
         // `LoroSyncController` to reconcile the diff into the command/event bus.
         ExpectedSql {
-            reads: 5,
+            reads: holon_pbt_core::budget::cdc_drain_floor(state.document_count()) + 5,
             writes: 0,
             ddl: 0,
             tolerance: 5,

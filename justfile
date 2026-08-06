@@ -87,11 +87,12 @@ arch-docs: arch-compile
 pbt name='general' cases='64' *FLAGS:
     #!/usr/bin/env bash
     set -euo pipefail
-    # inv-sql-budget opt-in, inherited by `keystone-smoke` and `keystone-full`
-    # (both delegate here) — this is the one place to arm the keystone's read
-    # budget. Default ON blocked by the redundancy roster (task #15) — flip when
-    # budgets re-derive from LEGITIMATE counts.
-    export HOLON_PERF_BUDGET=${HOLON_PERF_BUDGET-0}
+    # inv-sql-budget, inherited by `keystone-smoke` and `keystone-full` (both
+    # delegate here) — this is the one place to disarm the keystone's read
+    # budget. Armed by default: budgets are checked against the DEDUPLICATED
+    # read count, so the still-open redundancy roster (task #15) no longer
+    # inflates them and is gated separately by MAX_READ_REPEAT_PER_BINDING.
+    export HOLON_PERF_BUDGET=${HOLON_PERF_BUDGET-1}
     case "{{name}}" in
         general)
             PROPTEST_CASES={{cases}} cargo test \
@@ -149,9 +150,8 @@ hand-authored *FLAGS:
     # failing suite exited 0 and every weave/land gate using this recipe was a
     # silent false green (observed 2026-07-25).
     set -euo pipefail
-    # Default ON blocked by the redundancy roster (task #15) — flip when budgets
-    # re-derive from LEGITIMATE counts.
-    export HOLON_PERF_BUDGET=${HOLON_PERF_BUDGET-0}
+    # See `pbt` for why the budget is armed by default.
+    export HOLON_PERF_BUDGET=${HOLON_PERF_BUDGET-1}
     export HOLON_HAND_AUTHORED_SKIP=${HOLON_HAND_AUTHORED_SKIP-}
     cargo test \
         -p holon-integration-tests --features pbt --test hand_authored_regressions \
