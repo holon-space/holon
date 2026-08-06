@@ -107,6 +107,103 @@ draws, so a green run is evidence of DESELECTION, not of a fix.
 | `pinblock-unrendered-target` | known-red | `PinBlock.sql_reads: [0-9]+ exceeds expected 17` | `[inv-sql-budget PINNED] PinBlock.sql_reads: N exceeds expected 17 + tolerance 1 = 18`, N ≈ 90–141, wall ≈ 2.2s, spans ≈ 520–820. Co-fires with `inv-focus-roots` (right_sidebar) and `inv-main-panel-rows-match-focus`. | Ledger entry 14, RESOLVED 2026-08-04 by the measurement lane (+ verifier round): NOT a symptom of the focus-roots red and NOT a cost-model gap — all three reds share ONE cause, a pin target whose NESTING DEPTH exceeds the main-panel query's depth-20 recursion cap (`WHERE _vl2.depth < 20 … AND _vl2.depth <= 20`, documented at `crates/holon/tests/turso_storage_repros/tabs_main_panel_delivery.rs:130`). Past the cap the panel renders no row for it, so `click_entity_with_modifiers` (`user_driver.rs:719`) spins its 2s poll — 41 redundant re-snapshots of two `watch_view` SELECTs — and the pin never dispatches. Depth 12 → 17 reads; 21 → 89; 22 → 101. Width is irrelevant: a 40-block FLAT panel renders all 40 rows and pins the 40th for 17 reads. Oracle side, `main_editable_descendants()` applies no depth filter, so the generator offers targets the panel query truncates. Do NOT widen the ceiling. | #7 | read-budget measurement lane (task #7) |
 | `loro-frontier-height` | known-red | `frontier change present` | Panic at `loro_backend.rs` `doc_lamport_height`: `doc.get_change(id).expect("frontier change present")` — a frontier id whose change is not retrievable (suspect: shallow-snapshot history trimming). | Fired 1× in a 64-case run at main-based tree 2026-07-31. | #78 | Loro backend (task #78) |
 
+## `cargo test -p holon-integration-tests --lib --features pbt` known reds
+
+Separate suite from the composed nightly above (this is the crate's own unit
+tests, not `general_e2e_composed_pbt`), tracked here for the same
+pass-with-note discipline. `scripts/keystone-known-reds.sh` only classifies
+composed-nightly logs, so it does not consume these rows automatically — they
+are a manually-maintained baseline for judging this suite's local runs.
+
+**Baseline established 2026-08-06** from three consecutive runs at
+main=6ec42f1a (`/opt/homebrew/opt/parallel/bin/parallel --semaphore --id
+holon-build -j4 --fg -- cargo test -p holon-integration-tests --lib --features
+pbt`):
+
+| Run | Wall time | Passed | Failed |
+| --- | --- | --- | --- |
+| 1 | 89.09s | 291 | 10 |
+| 2 | 192.23s | 270 | 31 |
+| 3 | 67.39s | 290 | 11 |
+
+Run 2's wall time is >2x run 1/3's — a symptom of concurrent machine
+contention (other lanes sharing the `holon-build` semaphore slot), not a
+change in the suite. Its 21 extra failure names beyond run 1's set are NOT
+registered below: they never recurred in run 3 (a clean, non-contended run),
+so a single contended sample is insufficient evidence they are real
+intermittent reds rather than contention artifacts (timeouts, resource
+starvation) — see the flagged list at the end of this section. Both run 1 and
+run 3 are close in wall time to each other and neither shows machine
+contention symptoms, so their intersection is treated as the stable baseline.
+
+**Stable family — right-sidebar pin/focus-roots (9 tests, identical across
+all 3 runs)**, attributed to the SAME region-literal typo documented at
+`docs/Testing/BugFunnel.md:575` (OPEN/ESCALATED, uncorrected): the seed GQL
+`default-right-sidebar::src::0` filters `fr.region = 'right'` while
+production `focus_pin` writes `navigation_history.region = 'right_sidebar'`
+(`Region::RightSidebar.as_str()`), so the literal never matches and the right
+sidebar never shows a pin, in prod and in every SUT/oracle path that exercises
+it:
+
+| Key | Status | Match pattern | Signature | Evidence | Task | Owner |
+| --- | --- | --- | --- | --- | --- | --- |
+| `lib-nav-history-shift-action-region` | known-red | `the block bullet's shift_action pins into the right sidebar only` | `components.rs:2756` `pbt::frontend_slice::components::tests::headless_nav_history_ops_dispatch`: `assertion `left == right` failed: the block bullet's shift_action pins into the right sidebar only` / `left: Main` / `right: RightSidebar`. | Present verbatim in run1 (`taska_lib_run1.log:379-382`), run2, and run3 (`taska_lib_run3.log`) of the 2026-08-06 baseline. | BugFunnel.md:575 | region-literal fix (unowned, escalated) |
+| `lib-pin-block-right-sidebar-probe` | known-red | `focus_pin\(right_sidebar, .*\) must populate focus_roots\(right_sidebar\)` | `components.rs:5268` `pbt::frontend_slice::components::tests::headless_pin_block_right_sidebar_probe`: `[pin-probe] headless focus_pin(right_sidebar, block:ref-block-0) must populate focus_roots(right_sidebar) — the matview did not update without a window; got []`. | Present in all 3 runs of the 2026-08-06 baseline (e.g. `taska_lib_run1.log:412-415`). | BugFunnel.md:575 | region-literal fix (unowned, escalated) |
+| `lib-unpin-block-probe` | known-red | `no right-sidebar pin row for ref-block-0 in navigation_history` | `components.rs:5397` `pbt::frontend_slice::components::tests::headless_unpin_block_probe`: `[unpin-probe] no right-sidebar pin row for ref-block-0 in navigation_history`. | Present in all 3 runs of the 2026-08-06 baseline (e.g. `taska_lib_run1.log:421-424`). | BugFunnel.md:575 | region-literal fix (unowned, escalated) |
+| `lib-focus-roots-mismatch-right-sidebar` | known-red | `region 'right_sidebar' focus_roots mismatch .* the matview faithfully reflects the BASE navigation_history table` | `navigation_pbt.rs:650` `pin_block_lockstep_stays_green` and `navigation_pbt.rs` (`harness.rs:855`) `frontend_navigation_pbt`: `lockstep PinBlock should be green: [("inv-focus-roots", "[inv-focus-roots] region 'right_sidebar' focus_roots mismatch — the matview faithfully reflects the BASE navigation_history table, which itself disagrees with the reference. …")]` with `expected: {"block:ref-block-0"}` / `mirror/matview/base: {}`. | Present in all 3 runs of the 2026-08-06 baseline (e.g. `taska_lib_run1.log:432-435`). Covers 2 test names — both emit this exact `inv-focus-roots` payload. | BugFunnel.md:575 | region-literal fix (unowned, escalated) |
+| `lib-sut-only-pin-not-caught` | known-red | `SUT-only PinBlock must trip inv-focus-roots with a Fail; failures were \[\]` | `navigation_pbt.rs:685` `pbt::frontend_slice::navigation_pbt::teeth::sut_only_pin_block_is_caught_by_focus_roots`: `SUT-only PinBlock must trip inv-focus-roots with a Fail; failures were [], ran=[...]` — the invariant that should catch a SUT-only pin never fires (because the base row is never written into the region the invariant checks). | Present in all 3 runs of the 2026-08-06 baseline. | BugFunnel.md:575 | region-literal fix (unowned, escalated) |
+| `lib-right-sidebar-renders-pins` | known-red | `both pinned blocks must render in the right sidebar \(apple=None, zebra=None\)` | `structural_pbt.rs:4321` and `structural_pbt.rs:4341` (`right_sidebar_renders_pins`, `right_sidebar_renders_pins_in_declared_added_ts_order`): `both pinned blocks must render in the right sidebar (apple=None, zebra=None); rendered right-sidebar entity order = ["block:default-right-sidebar"]` — the first also names the cause verbatim in-message (`the seed region filter drifted off Region::RightSidebar.as_str() ('right_sidebar')`). | Present in all 3 runs of the 2026-08-06 baseline. Covers 2 test names sharing this message prefix. | BugFunnel.md:575 | region-literal fix (unowned, escalated) |
+| `lib-sidebar-pages-declared-order` | known-red | `both seeded sidebar pages must render \(apple=None, zebra=None\)` | `structural_pbt.rs:4175` `pbt::frontend_slice::structural_pbt::teeth::sidebar_renders_pages_in_declared_content_order`: `both seeded sidebar pages must render (apple=None, zebra=None); rendered sidebar entity order = ["block:default-left-sidebar"]`. Co-occurs with the right-sidebar family in all 3 runs and shares its `apple`/`zebra` pin-fixture naming, but the causal link to the `'right'`/`'right_sidebar'` literal typo has NOT been independently traced here (only correlated) — flag for attribution review before assuming it is the same root cause. | Present in all 3 runs of the 2026-08-06 baseline. | BugFunnel.md:575 (correlated, unverified) | region-literal fix (unowned, escalated) |
+
+**Separate stable red — unrelated to the above family:**
+
+| Key | Status | Match pattern | Signature | Evidence | Task | Owner |
+| --- | --- | --- | --- | --- | --- | --- |
+| `lib-seed-wide-drift` | known-red | `scripts/seed_wide/index.org body drifted from assets/default/index.org` | `live_mcp.rs:1223` `pbt::composed::live_mcp::tests::seed_wide_stays_aligned`: `assertion `left == right` failed: scripts/seed_wide/index.org body drifted from assets/default/index.org (the DEFAULT_INDEX_ORG the iOS app boots)`. Decoded diff: `assets/default/index.org` carries `:WIDGET_ONLY: t` on `default-left-sidebar`, `default-main-panel`, and `default-right-sidebar`; `scripts/seed_wide/index.org` does not — the two files have diverged. | Present in all 3 runs of the 2026-08-06 baseline. | — | UNOWNED — needs a triage owner |
+
+**Intermittent — reproduced in 2 of 3 runs (present in a CLEAN run, so not
+purely a contention artifact; absent from run 1):**
+
+| Key | Status | Match pattern | Signature | Evidence | Task | Owner |
+| --- | --- | --- | --- | --- | --- | --- |
+| `lib-displayed-text-nested-content-skipped` | known-red | `must reach Ok over the grafted nested content .* got Some\(Skipped\("\[inv-displayed-text/viewmodel\] no block-bound text widgets` | `integration_tests.rs:179` `pbt::frontend_slice::integration_tests::frontend_slice_displayed_text_viewmodel_bites_on_nested_content`: `headless /viewmodel must reach Ok over the grafted nested content (NOT Skipped — that would mean the recursive snapshot didn't resolve the Main-panel content), got Some(Skipped("[inv-displayed-text/viewmodel] no block-bound text widgets in the VM tree yet"))`. | Absent from run 1 (89s, clean); present in run 2 (192s, contended) AND run 3 (67s, clean) of the 2026-08-06 baseline with byte-identical panic text — reproduced in a non-contended run, so not registered as contention-only. Observed 2 of 3 runs; do not read this as a 67% rate, it is 2 samples. | — | UNOWNED — needs a triage owner |
+
+**Observed once, in the contended run only — NOT registered, needs separate
+triage before either fixing or adding to this file** (all 21 names below
+appeared ONLY in run 2 of the 2026-08-06 baseline and did not recur in the
+clean run 3; treat as likely contention-induced — e.g. a driver poll timeout
+under CPU starvation — not evidenced as genuine intermittent reds from a
+single contended sample):
+`headless_type_chars_commits_to_block_raw`,
+`booted_widget_tree_has_no_pending_placeholders`,
+`editor_sut_only_type_chars_is_caught`,
+`editor_type_chars_lockstep_stays_green`,
+`journal_feed_expanded_newest_first_with_divider`,
+`org_ingest_link_marks_survive_full_catalog`,
+`shadow_mesh_predicts_concurrent_primary_peer_merge`,
+`wide_create_document_lockstep_stays_green`,
+`wide_frontend_setup_watch_lockstep_stays_green`,
+`wide_frontend_sut_only_navigate_is_caught`,
+`wide_frontend_sut_only_toggle_state_is_caught`,
+`wide_frontend_sut_only_watch_rows_is_caught`,
+`wide_frontend_toggle_state_lockstep_stays_green`,
+`wide_indent_outdent_roundtrip_lockstep`,
+`wide_indent_then_split_parent_lockstep`,
+`wide_pin_block_lockstep_stays_green`,
+`wide_simulate_restart_lockstep_stays_green`,
+`wide_split_then_type_lockstep_stays_green`,
+`wide_sut_only_create_document_is_caught`,
+`wide_sut_only_pin_block_is_caught`.
+None of these match the three names from an earlier session's unverified
+"rotating 10th" premise (`editor_type_chars_lockstep_stays_green`,
+`wide_create_document_lockstep_stays_green`,
+`turso_draw_reaches_the_feed_driven_writeback_path`) as a stable rotating
+set — `editor_type_chars_lockstep_stays_green` and
+`wide_create_document_lockstep_stays_green` DO appear in this contended-only
+list, but `turso_draw_reaches_the_feed_driven_writeback_path` never failed in
+any of the 3 runs, and neither of the two that did appear recurred in the
+clean run 3. That premise is not re-confirmed by this baseline.
+
 ## Evidence corpus & the pattern-drift guard
 
 Every row's Evidence column must name a **decoded payload**, not a recollection.
