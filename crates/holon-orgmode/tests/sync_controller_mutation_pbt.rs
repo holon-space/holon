@@ -3967,6 +3967,101 @@ mod intermediate_ancestor_writeback_hole {
     /// the escalation test above stops proving the threshold it names.
     const GATE_SKIPS_BEFORE_DEGRADED_FOR_TEST: u32 = 8;
 
+    /// A SECOND permanent stall, on a DIFFERENT difference, must disclose
+    /// again. The banner names the difference it was raised for, so a latch
+    /// that outlives its own episode leaves the user reading about members
+    /// that have long since folded while a fresh set of edits silently stops
+    /// reaching disk — the same silent-unwritten-edits failure the first
+    /// disclosure exists to prevent, one episode later.
+    ///
+    /// Convergence is what ends an episode; a difference that merely CHANGES
+    /// never converged, so the gate cannot treat the first banner as still
+    /// speaking for it.
+    #[tokio::test]
+    async fn a_second_stall_episode_with_a_new_difference_discloses_again() {
+        #[derive(Default)]
+        struct Recorder(std::sync::Mutex<Vec<String>>);
+        impl holon_filesystem::WritebackDisclosure for Recorder {
+            fn writeback_degraded(&self, detail: &str) {
+                self.0.lock().unwrap().push(detail.to_string());
+            }
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new(temp_dir.path());
+        let p_a = fixture.doc_id.clone();
+        let a = text_block("ep-a", &p_a, "ep-a-outer", 1, 0);
+        // TWO never-folded members, so folding one changes the difference
+        // without converging — the only way to reach a second episode at all.
+        let ghost_a = text_block("ep-ghost-a", &p_a, "ep-ghost-a", 1, 1);
+        let ghost_b = text_block("ep-ghost-b", &p_a, "ep-ghost-b", 1, 2);
+        fixture.seed_blocks(&[a, ghost_a.clone(), ghost_b]);
+
+        let recorder = Arc::new(Recorder::default());
+        fixture.controller = fixture
+            .controller
+            .with_writeback_disclosure(recorder.clone());
+        fixture.controller.initialize().await.expect("initialize");
+
+        let edit = |i: u32| holon_filesystem::BlockDelta::Upsert {
+            block: text_block("ep-a", &p_a, &format!("ep-a-edit-{i}"), 1, 0),
+            prev: None,
+        };
+
+        // Episode 1: difference is {ghost-a, ghost-b} throughout.
+        for i in 0..(GATE_SKIPS_BEFORE_DEGRADED_FOR_TEST + 2) {
+            fixture
+                .controller
+                .on_block_changed(&p_a, &edit(i))
+                .await
+                .expect("a skipped render is not an error");
+        }
+        let after_first = recorder.0.lock().unwrap().clone();
+        assert_eq!(
+            after_first.len(),
+            1,
+            "the first episode must disclose exactly once before the second one starts, or this \
+             test is measuring the wrong thing. Raised: {after_first:?}"
+        );
+
+        // ghost-a folds. The holder is still short of ghost-b and never
+        // converges, so this is a NEW episode, not a resolution.
+        fixture
+            .controller
+            .on_block_changed(
+                &p_a,
+                &holon_filesystem::BlockDelta::Upsert {
+                    block: ghost_a,
+                    prev: None,
+                },
+            )
+            .await
+            .expect("a partial fold is not an error");
+
+        // Episode 2: difference is {ghost-b}, and edits keep being refused.
+        for i in 100..(100 + GATE_SKIPS_BEFORE_DEGRADED_FOR_TEST + 2) {
+            fixture
+                .controller
+                .on_block_changed(&p_a, &edit(i))
+                .await
+                .expect("a skipped render is not an error");
+        }
+
+        let raised = recorder.0.lock().unwrap().clone();
+        assert_eq!(
+            raised.len(),
+            2,
+            "a second permanent stall must raise its own banner — a latch that outlives its \
+             episode hides unlimited unwritten edits behind a message about members that already \
+             folded. Raised: {raised:?}"
+        );
+        assert!(
+            raised[1].contains("ep-ghost-b") && !raised[1].contains("ep-ghost-a"),
+            "the second banner must name the difference that is blocking NOW, not the one the \
+             first banner was raised for. Raised: {raised:?}"
+        );
+    }
+
     /// A fold that STOPS must hand the document to the authority-sourced
     /// recovery pass, not wait forever.
     ///

@@ -4458,6 +4458,11 @@ impl FileSyncController {
             entry.consecutive_any = 1;
             entry.consecutive = u32::from(delta_brings_new_content && unexplained > 0);
             entry.resync_requested = false;
+            // A difference that CHANGED never converged, so the previous
+            // banner — which names its own difference — no longer describes
+            // what is blocking disk. `warned` stays latched: it suppresses a
+            // per-skip WARN storm and carries no such detail.
+            entry.escalated = false;
         }
 
         if !entry.warned {
