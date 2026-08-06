@@ -26,8 +26,10 @@ use holon_api::live_data::home_by::HomeAuthority;
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::traits::Result as OrderingResult;
 use holon_filesystem::BlockReader;
+use holon_filesystem::MemoSeam;
 use holon_orgmode::home_authority::BlockHomeAuthority;
 use holon_orgmode::home_authority::DocHome;
+use holon_orgmode::home_authority::HomeBurstMemo;
 
 /// A store shaped like `block_raw`: it contains the self-parented root
 /// sentinel, and it records every authoritative point read.
@@ -158,7 +160,9 @@ async fn a_walk_to_the_tree_root_reads_no_id_twice() {
     let reader = Arc::new(RecordingReader::new(&[("orphan", false)]));
     let auth = authority(reader.clone());
 
-    auth.locate("block:orphan").await.unwrap();
+    auth.locate("block:orphan", &mut HomeBurstMemo::default())
+        .await
+        .unwrap();
 
     let (worst_id, worst_count) = reader.worst_repeat();
     assert_eq!(
@@ -183,7 +187,9 @@ async fn a_walk_to_a_page_reads_each_block_on_the_path_once() {
     ]));
     let auth = authority(reader.clone());
 
-    auth.locate("block:leaf").await.unwrap();
+    auth.locate("block:leaf", &mut HomeBurstMemo::default())
+        .await
+        .unwrap();
 
     let reads = reader.reads();
     let mut unique = reads.clone();
@@ -211,7 +217,7 @@ async fn a_walk_to_a_page_reads_each_block_on_the_path_once() {
 async fn the_resolved_home_is_unchanged_by_how_few_reads_it_took() {
     let paged = Arc::new(RecordingReader::new(&[("page", true), ("leaf", false)]));
     let placement = authority(paged)
-        .locate("block:leaf")
+        .locate("block:leaf", &mut HomeBurstMemo::default())
         .await
         .unwrap()
         .unwrap();
@@ -228,7 +234,7 @@ async fn the_resolved_home_is_unchanged_by_how_few_reads_it_took() {
 
     let orphan = Arc::new(RecordingReader::new(&[("orphan", false)]));
     let placement = authority(orphan)
-        .locate("block:orphan")
+        .locate("block:orphan", &mut HomeBurstMemo::default())
         .await
         .unwrap()
         .unwrap();
@@ -242,4 +248,97 @@ async fn the_resolved_home_is_unchanged_by_how_few_reads_it_took() {
         placement.parent, None,
         "a root-level block reports no parent (the sentinel is not a parent)"
     );
+}
+
+// ---- the burst memo, and the seams that prove it is audited ---------------
+
+/// The memo's whole point: a repeated lookup inside one burst costs nothing.
+/// Across bursts it costs full price, which is what keeps the memo's soundness
+/// argument ("no write can land inside a burst") load-bearing rather than
+/// decorative.
+#[tokio::test]
+async fn a_burst_memo_serves_a_repeated_locate_without_re_reading() {
+    let reader = Arc::new(RecordingReader::new(&[
+        ("page", true),
+        ("mid", false),
+        ("leaf", false),
+    ]));
+    let auth = authority(reader.clone());
+
+    let mut memo = HomeBurstMemo::default();
+    auth.locate("block:leaf", &mut memo).await.unwrap();
+    let after_first = reader.reads().len();
+    auth.locate("block:leaf", &mut memo).await.unwrap();
+    assert_eq!(
+        reader.reads().len(),
+        after_first,
+        "a second locate of the same block in the SAME burst must issue no read at all, got {:?}",
+        reader.reads()
+    );
+
+    auth.locate("block:leaf", &mut HomeBurstMemo::default())
+        .await
+        .unwrap();
+    assert!(
+        reader.reads().len() > after_first,
+        "a new burst starts from an empty memo — otherwise a write between bursts would never be \
+         seen"
+    );
+}
+
+/// Law 5. Poison one memo entry and the dual-read beside the next hit must
+/// name it, loudly, instead of letting the fold render from it. A memo whose
+/// corruption cannot be made to fail is an unfalsifiable claim.
+#[tokio::test]
+async fn a_poisoned_burst_memo_is_disclosed_and_not_served() {
+    let reader = Arc::new(RecordingReader::new(&[
+        ("page", true),
+        ("mid", false),
+        ("leaf", false),
+    ]));
+    let err = authority(reader)
+        .locate(
+            "block:leaf",
+            &mut HomeBurstMemo::with_seam(MemoSeam::armed()),
+        )
+        .await
+        .expect_err("an armed memo poison must surface as an error");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("stale") && msg.contains("block:leaf"),
+        "the disclosure must name the stale key and say what happened, got: {msg}"
+    );
+}
+
+/// The poison is not a no-op: with the audit half disarmed the SAME corruption
+/// silently moves the block to another document. This is what the test above
+/// prevents, and why the seam is not ceremony.
+#[tokio::test]
+async fn without_the_dual_read_a_poisoned_memo_silently_rehomes_the_block() {
+    let chain: &[(&str, bool)] = &[("page", true), ("mid", false), ("leaf", false)];
+
+    let clean = authority(Arc::new(RecordingReader::new(chain)))
+        .locate("block:leaf", &mut HomeBurstMemo::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(clean.doc, DocHome::Resolved(EntityUri::block("page")));
+
+    let poisoned = authority(Arc::new(RecordingReader::new(chain)))
+        .locate(
+            "block:leaf",
+            &mut HomeBurstMemo::with_seam(MemoSeam {
+                poison: true,
+                dual_read: false,
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        poisoned.doc, clean.doc,
+        "a poisoned row must actually change the fold's input, or the disclosure test above \
+         proves nothing"
+    );
+    assert_eq!(poisoned.doc, DocHome::Unresolved);
 }

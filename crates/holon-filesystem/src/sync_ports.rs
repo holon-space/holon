@@ -782,6 +782,144 @@ mod name_chain_tests {
 /// on its own at the root, at an absent block, or on a revisited id.
 const MAX_PAGE_WALK: usize = 50;
 
+/// The two test-only staleness seams a memo is audited through.
+///
+/// Both halves are OFF unless a test arms them: a memo that can only be proven
+/// sound by an assertion nobody runs is not proven at all, so the poison exists
+/// to make the disclosure go red on demand (Law 5), not to sample production.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MemoSeam {
+    /// Corrupt the first row this memo stores, so every later hit is wrong.
+    pub poison: bool,
+    /// Re-issue the authoritative read beside every memo hit and fail on
+    /// disagreement.
+    pub dual_read: bool,
+}
+
+impl MemoSeam {
+    /// Both halves armed — the red-provability configuration.
+    pub fn armed() -> Self {
+        Self {
+            poison: true,
+            dual_read: true,
+        }
+    }
+
+    /// Dual-read only: audits a memo that some OTHER memo poisoned.
+    pub fn auditing() -> Self {
+        Self {
+            poison: false,
+            dual_read: true,
+        }
+    }
+
+    /// Read the seam from the environment. `HOLON_MEMO_POISON` and
+    /// `HOLON_MEMO_DUAL_READ` arm the halves independently; unset means off,
+    /// which is every production process.
+    pub fn from_env() -> Self {
+        Self {
+            poison: std::env::var("HOLON_MEMO_POISON").is_ok_and(|v| v != "0"),
+            dual_read: std::env::var("HOLON_MEMO_DUAL_READ").is_ok_and(|v| v != "0"),
+        }
+    }
+}
+
+/// Burst-local memo of authoritative point reads: `id -> the row, or its proven
+/// absence`.
+///
+/// This generalizes the single-row prefetch callers used to pass as `first`:
+/// seeding the one row you already hold is [`prefetch`](Self::prefetch), and
+/// every row a walk reads is retained for the rest of the burst that owns the
+/// memo. Its lifetime is the caller's stack frame — there is no shared handle
+/// and no interior mutability, so an entry cannot outlive the burst that
+/// created it and "when do I invalidate?" has no answer to get wrong.
+pub struct BlockRowMemo {
+    rows: std::collections::BTreeMap<EntityUri, Option<Block>>,
+    seam: MemoSeam,
+    poisoned: bool,
+}
+
+impl Default for BlockRowMemo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BlockRowMemo {
+    pub fn new() -> Self {
+        Self::with_seam(MemoSeam::from_env())
+    }
+
+    pub fn with_seam(seam: MemoSeam) -> Self {
+        Self {
+            rows: std::collections::BTreeMap::new(),
+            seam,
+            poisoned: false,
+        }
+    }
+
+    pub fn seam(&self) -> MemoSeam {
+        self.seam
+    }
+
+    /// Drop every entry. The one invalidation edge a memo outside the
+    /// read-only fold has is a write, and its owner calls this at it.
+    pub fn clear(&mut self) {
+        self.rows.clear();
+        self.poisoned = false;
+    }
+
+    /// Seed the row for `id` the caller already read, so the walk below does
+    /// not pay for it again.
+    pub fn prefetch(&mut self, id: &EntityUri, row: Block) {
+        self.rows.insert(id.clone(), Some(row));
+    }
+
+    /// The authoritative row for `id`, served from the memo when present.
+    ///
+    /// `reads` counts the point reads actually issued, so it stays a read
+    /// counter rather than a call counter.
+    pub async fn get(
+        &mut self,
+        reader: &dyn BlockReader,
+        id: &EntityUri,
+        reads: Option<&std::sync::atomic::AtomicU64>,
+    ) -> Result<Option<Block>> {
+        if let Some(hit) = self.rows.get(id).cloned() {
+            if self.seam.dual_read {
+                let live = reader.get_block_authoritative(id).await?;
+                if live != hit {
+                    anyhow::bail!(
+                        "burst memo served a stale row for {id}: memo says {hit:?}, the authority \
+                         says {live:?} — a write landed inside a burst the memo assumes is \
+                         read-only"
+                    );
+                }
+            }
+            return Ok(hit);
+        }
+        if let Some(reads) = reads {
+            reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let mut row = reader.get_block_authoritative(id).await?;
+        if self.seam.poison && !self.poisoned {
+            self.poisoned = true;
+            row = poison_row(row);
+        }
+        self.rows.insert(id.clone(), row.clone());
+        Ok(row)
+    }
+}
+
+/// Corrupt one memoized row in the way a lost write would: reparent it to the
+/// root, which moves it (and everything below it) to a different document.
+fn poison_row(row: Option<Block>) -> Option<Block> {
+    row.map(|mut b| {
+        b.parent_id = EntityUri::no_parent();
+        b
+    })
+}
+
 /// Walk `start`'s parent chain upward to the nearest `Page` — the block that
 /// owns it — returning `None` when the chain reaches the root without finding
 /// one, leaves the store, or is cyclic.
@@ -794,9 +932,10 @@ const MAX_PAGE_WALK: usize = 50;
 /// bound. Three hand-rolled copies each burned ~49 identical point reads per
 /// call on the write-back and ingest paths.
 ///
-/// `first` is the row for `start` when the caller already read it, so a caller
-/// that has just fetched the block does not pay for it twice. `reads`, when
-/// given, is incremented once per point read the walk actually issues.
+/// `rows` is the caller's burst memo: it carries whatever row the caller
+/// already holds (see [`BlockRowMemo::prefetch`]) and retains every row this
+/// walk reads, so sibling walks that share an ancestor suffix pay for it once.
+/// `reads`, when given, is incremented once per point read actually issued.
 ///
 /// A cycle is disclosed loudly and answered `None` rather than `Err`: the
 /// `home_by` combinator treats an authority error as stream-fatal, and killing
@@ -805,12 +944,11 @@ const MAX_PAGE_WALK: usize = 50;
 pub async fn nearest_page_ancestor(
     reader: &dyn BlockReader,
     start: &EntityUri,
-    first: Option<Block>,
+    rows: &mut BlockRowMemo,
     reads: Option<&std::sync::atomic::AtomicU64>,
 ) -> Result<Option<Block>> {
     let root = EntityUri::no_parent();
     let mut cur = start.clone();
-    let mut first = first;
     let mut seen: std::collections::BTreeSet<EntityUri> = std::collections::BTreeSet::new();
     for _ in 0..MAX_PAGE_WALK {
         if cur == root {
@@ -823,17 +961,8 @@ pub async fn nearest_page_ancestor(
             );
             return Ok(None);
         }
-        let block = match first.take() {
-            Some(block) => block,
-            None => match {
-                if let Some(reads) = reads {
-                    reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                reader.get_block_authoritative(&cur).await?
-            } {
-                Some(block) => block,
-                None => return Ok(None),
-            },
+        let Some(block) = rows.get(reader, &cur, reads).await? else {
+            return Ok(None);
         };
         if block.is_page() {
             return Ok(Some(block));

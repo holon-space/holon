@@ -94,11 +94,24 @@ pub struct Placement<K> {
 /// document-scoped subtree read.
 #[async_trait]
 pub trait HomeAuthority<K: Send + 'static>: Send + Sync {
+    /// Scratch space the combinator hands to every read of ONE fold burst and
+    /// then drops.
+    ///
+    /// The fold mutates nothing the authority reads, so within a burst no
+    /// answer given can become wrong — an implementation is free to serve a
+    /// repeated lookup from here instead of re-reading. The combinator owns the
+    /// value as a stack local of the burst frame and passes it as `&mut`, so an
+    /// implementation cannot retain it past the burst and there is no
+    /// invalidation rule to get wrong. `()` for an authority with nothing to
+    /// memoize.
+    type Memo: Default + Send;
+
     /// Where `id` currently sits, or `None` if the authority no longer has it.
-    async fn locate(&self, id: &str) -> Result<Option<Placement<K>>>;
+    async fn locate(&self, id: &str, memo: &mut Self::Memo) -> Result<Option<Placement<K>>>;
 
     /// `parent`'s children in authoritative sibling order.
-    async fn children_of(&self, parent: Option<&str>) -> Result<Vec<String>>;
+    async fn children_of(&self, parent: Option<&str>, memo: &mut Self::Memo)
+    -> Result<Vec<String>>;
 
     /// The sibling immediately preceding `id` in the authority's order,
     /// ignoring documents.
@@ -108,10 +121,10 @@ pub trait HomeAuthority<K: Send + 'static>: Send + Sync {
     /// have moved, so a content-only edit answers with one point read instead
     /// of an ordered group read. It is deliberately not enough to emit from —
     /// [`Home::prev`] is document-relative.
-    async fn prev_sibling(&self, id: &str) -> Result<Option<String>>;
+    async fn prev_sibling(&self, id: &str, memo: &mut Self::Memo) -> Result<Option<String>>;
 
     /// Every descendant of `id`, excluding `id` itself.
-    async fn subtree_of(&self, id: &str) -> Result<Vec<String>>;
+    async fn subtree_of(&self, id: &str, memo: &mut Self::Memo) -> Result<Vec<String>>;
 
     /// Locate a whole snapshot at once.
     ///
@@ -122,10 +135,14 @@ pub trait HomeAuthority<K: Send + 'static>: Send + Sync {
     /// values the caller already holds, so a real implementation needs only one
     /// `children_of` per *distinct parent* for order, plus one top-down walk
     /// carrying the nearest enclosing page down for documents.
-    async fn locate_batch(&self, ids: &[String]) -> Result<BTreeMap<String, Placement<K>>> {
+    async fn locate_batch(
+        &self,
+        ids: &[String],
+        memo: &mut Self::Memo,
+    ) -> Result<BTreeMap<String, Placement<K>>> {
         let mut out = BTreeMap::new();
         for id in ids {
-            if let Some(p) = self.locate(id).await? {
+            if let Some(p) = self.locate(id, memo).await? {
                 out.insert(id.clone(), p);
             }
         }
@@ -202,6 +219,9 @@ struct HomeState<S, K, T, A> {
     authority: Arc<A>,
     /// Set once an authority error has been queued; after it drains we end.
     errored: bool,
+    /// Set once the source has reported end-of-stream mid-burst; the burst
+    /// still gets processed, then we end.
+    source_done: bool,
 }
 
 /// Core combinator: fold a stream of `MapDiff<String, Arc<T>>` into a stream
@@ -223,6 +243,7 @@ where
         pending: VecDeque::new(),
         authority,
         errored: false,
+        source_done: false,
     };
     futures::stream::unfold(state, |mut st| async move {
         use futures::stream::StreamExt as _;
@@ -230,15 +251,45 @@ where
             if let Some(item) = st.pending.pop_front() {
                 return Some((item, st));
             }
-            if st.errored {
+            if st.errored || st.source_done {
                 return None;
             }
-            let diff = st.source.next().await?;
-            if let Err(e) =
-                process_diff(&mut st.acc, &mut st.pending, st.authority.as_ref(), diff).await
-            {
-                st.errored = true;
-                st.pending.push_back(Err(e));
+
+            // The burst: everything the source already holds when it wakes us.
+            // A single op fans one diff per affected member, so the whole fan
+            // is queued by the time the first one arrives — draining it here is
+            // what gives the authority reads below a scope over which nothing
+            // can change (the fold writes to nothing they read), and what lets
+            // the downstream controller collapse the fan to one render per
+            // document. A write that lands mid-burst is echoed by its own diff
+            // in the NEXT burst, with a fresh memo: convergence at quiescence.
+            let mut burst = vec![st.source.next().await?];
+            loop {
+                match futures::poll!(st.source.next()) {
+                    std::task::Poll::Ready(Some(d)) => burst.push(d),
+                    std::task::Poll::Ready(None) => {
+                        st.source_done = true;
+                        break;
+                    }
+                    std::task::Poll::Pending => break,
+                }
+            }
+
+            let mut memo = A::Memo::default();
+            for diff in burst {
+                if let Err(e) = process_diff(
+                    &mut st.acc,
+                    &mut st.pending,
+                    st.authority.as_ref(),
+                    diff,
+                    &mut memo,
+                )
+                .await
+                {
+                    st.errored = true;
+                    st.pending.push_back(Err(e));
+                    break;
+                }
             }
         }
     })
@@ -275,6 +326,7 @@ async fn reassign_group<K, T, A>(
     acc: &mut BTreeMap<String, Entry<K, T>>,
     pending: &mut VecDeque<Result<HomedDiff<K, T>>>,
     authority: &A,
+    memo: &mut A::Memo,
     parent: Option<&str>,
     emit: Emit<'_>,
 ) -> Result<()>
@@ -283,7 +335,7 @@ where
     A: HomeAuthority<K>,
 {
     let ordered = authority
-        .children_of(parent)
+        .children_of(parent, memo)
         .await
         .with_context(|| format!("home_by children_of({parent:?}) failed"))?;
     let mut last_seen: BTreeMap<K, String> = BTreeMap::new();
@@ -328,6 +380,7 @@ async fn rehome_subtree<K, T, A>(
     acc: &mut BTreeMap<String, Entry<K, T>>,
     pending: &mut VecDeque<Result<HomedDiff<K, T>>>,
     authority: &A,
+    memo: &mut A::Memo,
     root: &str,
 ) -> Result<()>
 where
@@ -335,7 +388,7 @@ where
     A: HomeAuthority<K>,
 {
     let descendants = authority
-        .subtree_of(root)
+        .subtree_of(root, memo)
         .await
         .with_context(|| format!("home_by subtree_of({root}) failed"))?;
 
@@ -354,7 +407,7 @@ where
         .filter(|id| acc.contains_key(id))
         .collect();
     let placements = authority
-        .locate_batch(&live)
+        .locate_batch(&live, memo)
         .await
         .with_context(|| format!("home_by locate_batch during subtree re-home of {root} failed"))?;
     for id in &live {
@@ -377,7 +430,7 @@ where
     // per-document cursor, so neighbours' previous-siblings move even though
     // the tree order did not.
     for parent in affected {
-        reassign_group(acc, pending, authority, parent.as_deref(), Emit::All).await?;
+        reassign_group(acc, pending, authority, memo, parent.as_deref(), Emit::All).await?;
     }
     Ok(())
 }
@@ -389,6 +442,7 @@ async fn process_diff<K, T, A>(
     pending: &mut VecDeque<Result<HomedDiff<K, T>>>,
     authority: &A,
     diff: MapDiff<String, Arc<T>>,
+    memo: &mut A::Memo,
 ) -> Result<()>
 where
     K: Clone + Ord + Send + 'static,
@@ -406,7 +460,7 @@ where
             }
             let ids: Vec<String> = entries.iter().map(|(k, _)| k.clone()).collect();
             let placements = authority
-                .locate_batch(&ids)
+                .locate_batch(&ids, memo)
                 .await
                 .context("home_by locate_batch failed for the snapshot")?;
             let mut groups: std::collections::BTreeSet<Option<String>> =
@@ -434,12 +488,12 @@ where
             // One ordered read per distinct parent assigns every seeded block's
             // document-relative position, and emits the snapshot's additions.
             for parent in groups {
-                reassign_group(acc, pending, authority, parent.as_deref(), Emit::All).await?;
+                reassign_group(acc, pending, authority, memo, parent.as_deref(), Emit::All).await?;
             }
         }
         MapDiff::Insert { key, value } | MapDiff::Update { key, value } => {
             let placement = authority
-                .locate(&key)
+                .locate(&key, memo)
                 .await
                 .with_context(|| format!("home_by locate({key}) failed"))?
                 .with_context(|| {
@@ -475,7 +529,7 @@ where
             // own event, so the common content-only edit pays one point read
             // and no ordered group read.
             let tree_prev = authority
-                .prev_sibling(&key)
+                .prev_sibling(&key, memo)
                 .await
                 .with_context(|| format!("home_by prev_sibling({key}) failed"))?;
             let moved = match &old {
@@ -509,6 +563,7 @@ where
                             acc,
                             pending,
                             authority,
+                            memo,
                             old_parent.as_deref(),
                             Emit::Changed,
                         )
@@ -519,6 +574,7 @@ where
                     acc,
                     pending,
                     authority,
+                    memo,
                     placement.parent.as_deref(),
                     Emit::One(&key),
                 )
@@ -541,7 +597,7 @@ where
             // plain cross-document reparent of a non-page block is another.
             if let Some((old_doc, _, _, _)) = &old {
                 if *old_doc != placement.doc {
-                    rehome_subtree(acc, pending, authority, &key).await?;
+                    rehome_subtree(acc, pending, authority, memo, &key).await?;
                 }
             }
         }
@@ -559,6 +615,7 @@ where
                 acc,
                 pending,
                 authority,
+                memo,
                 entry.parent.as_deref(),
                 Emit::Changed,
             )
@@ -781,7 +838,9 @@ mod tests {
 
     #[async_trait]
     impl HomeAuthority<String> for TestAuthority {
-        async fn locate(&self, id: &str) -> Result<Option<Placement<String>>> {
+        type Memo = ();
+
+        async fn locate(&self, id: &str, _: &mut ()) -> Result<Option<Placement<String>>> {
             Calls::bump(&self.calls.locate);
             let t = self.tree.lock().unwrap();
             if !t.exists(id) {
@@ -793,7 +852,7 @@ mod tests {
             }))
         }
 
-        async fn children_of(&self, parent: Option<&str>) -> Result<Vec<String>> {
+        async fn children_of(&self, parent: Option<&str>, _: &mut ()) -> Result<Vec<String>> {
             Calls::bump(&self.calls.children);
             let t = self.tree.lock().unwrap();
             Ok(t.order
@@ -802,13 +861,13 @@ mod tests {
                 .unwrap_or_default())
         }
 
-        async fn prev_sibling(&self, id: &str) -> Result<Option<String>> {
+        async fn prev_sibling(&self, id: &str, _: &mut ()) -> Result<Option<String>> {
             Calls::bump(&self.calls.prev_sibling);
             let t = self.tree.lock().unwrap();
             Ok(t.prev_of(id))
         }
 
-        async fn subtree_of(&self, id: &str) -> Result<Vec<String>> {
+        async fn subtree_of(&self, id: &str, _: &mut ()) -> Result<Vec<String>> {
             Calls::bump(&self.calls.subtree);
             let t = self.tree.lock().unwrap();
             Ok(t.descendants(id))
@@ -820,6 +879,7 @@ mod tests {
         async fn locate_batch(
             &self,
             ids: &[String],
+            _: &mut (),
         ) -> Result<BTreeMap<String, Placement<String>>> {
             Calls::bump(&self.calls.batch);
             let t = self.tree.lock().unwrap();
@@ -1218,7 +1278,7 @@ mod tests {
         placement: &Placement<String>,
     ) -> Option<String> {
         let sibs = authority
-            .children_of(placement.parent.as_deref())
+            .children_of(placement.parent.as_deref(), &mut A::Memo::default())
             .await
             .unwrap();
         let pos = sibs.iter().position(|s| s == id)?;
@@ -1269,7 +1329,12 @@ mod tests {
                             st.pending.push_back(Ok(HomedDiff::Remove { doc, key }));
                         }
                         for (key, value) in entries {
-                            let p = st.authority.locate(&key).await.unwrap().unwrap();
+                            let p = st
+                                .authority
+                                .locate(&key, &mut A::Memo::default())
+                                .await
+                                .unwrap()
+                                .unwrap();
                             let prev = naive_prev(st.authority.as_ref(), &key, &p).await;
                             st.acc.insert(key.clone(), p.doc.clone());
                             st.pending.push_back(Ok(HomedDiff::Upsert {
@@ -1281,7 +1346,12 @@ mod tests {
                         }
                     }
                     MapDiff::Insert { key, value } | MapDiff::Update { key, value } => {
-                        let p = st.authority.locate(&key).await.unwrap().unwrap();
+                        let p = st
+                            .authority
+                            .locate(&key, &mut A::Memo::default())
+                            .await
+                            .unwrap()
+                            .unwrap();
                         let prev = naive_prev(st.authority.as_ref(), &key, &p).await;
                         if let Some(old) = st.acc.get(&key) {
                             if *old != p.doc {
@@ -1904,6 +1974,111 @@ mod tests {
         assert_eq!(real, expected);
     }
 
+    // ---- the burst boundary ----------------------------------------------
+
+    /// Tags itself with the burst it belongs to on first use, so a test can
+    /// see which diffs shared one.
+    #[derive(Default)]
+    struct BurstTag(Option<u64>);
+
+    /// Records `(burst tag, located id)` for every `locate` the fold issues.
+    struct BurstAuthority {
+        inner: TestAuthority,
+        next_tag: std::sync::atomic::AtomicU64,
+        seen: Arc<Mutex<Vec<(u64, String)>>>,
+    }
+
+    #[async_trait]
+    impl HomeAuthority<String> for BurstAuthority {
+        type Memo = BurstTag;
+
+        async fn locate(&self, id: &str, m: &mut BurstTag) -> Result<Option<Placement<String>>> {
+            let tag = *m.0.get_or_insert_with(|| {
+                self.next_tag
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            });
+            self.seen.lock().unwrap().push((tag, id.to_string()));
+            self.inner.locate(id, &mut ()).await
+        }
+        async fn children_of(&self, parent: Option<&str>, _: &mut BurstTag) -> Result<Vec<String>> {
+            self.inner.children_of(parent, &mut ()).await
+        }
+        async fn prev_sibling(&self, id: &str, _: &mut BurstTag) -> Result<Option<String>> {
+            self.inner.prev_sibling(id, &mut ()).await
+        }
+        async fn subtree_of(&self, id: &str, _: &mut BurstTag) -> Result<Vec<String>> {
+            self.inner.subtree_of(id, &mut ()).await
+        }
+        async fn locate_batch(
+            &self,
+            ids: &[String],
+            _: &mut BurstTag,
+        ) -> Result<BTreeMap<String, Placement<String>>> {
+            self.inner.locate_batch(ids, &mut ()).await
+        }
+    }
+
+    /// The burst is everything the source already holds when the fold wakes:
+    /// diffs queued together share one memo, and a diff that arrives after the
+    /// source went Pending gets a fresh one. This is the whole soundness
+    /// argument for memoizing without invalidation — a memo may only span
+    /// reads that no write can separate.
+    #[test]
+    fn queued_diffs_share_one_memo_and_a_later_diff_gets_a_fresh_one() {
+        let tree = Arc::new(Mutex::new(Tree::new()));
+        {
+            let mut t = tree.lock().unwrap();
+            t.live.insert(ROOT.into());
+            for k in ["a", "b", "c"] {
+                t.live.insert(k.into());
+                t.parent.insert(k.into(), Some(ROOT.into()));
+                t.order.entry(Some(ROOT.into())).or_default().push(k.into());
+            }
+        }
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let authority = Arc::new(BurstAuthority {
+            inner: TestAuthority::new(tree.clone()),
+            next_tag: std::sync::atomic::AtomicU64::new(0),
+            seen: seen.clone(),
+        });
+
+        let (tx, rx) = futures::channel::mpsc::unbounded::<MapDiff<String, Arc<Item>>>();
+        let mut stream = Box::pin(home_diffs(rx, authority));
+
+        for k in ["a", "b", "c"] {
+            tx.unbounded_send(MapDiff::Insert {
+                key: k.into(),
+                value: arc(0),
+            })
+            .expect("channel open");
+        }
+        drain(&mut stream);
+        tx.unbounded_send(MapDiff::Insert {
+            key: "a".into(),
+            value: arc(1),
+        })
+        .expect("channel open");
+        drain(&mut stream);
+
+        let seen = seen.lock().unwrap();
+        let first: Vec<&str> = seen
+            .iter()
+            .filter(|(t, _)| *t == 0)
+            .map(|(_, id)| id.as_str())
+            .collect();
+        assert_eq!(
+            first,
+            vec!["a", "b", "c"],
+            "three diffs already queued when the fold woke must be ONE burst sharing ONE memo"
+        );
+        assert_eq!(
+            seen.iter().map(|(t, _)| *t).max(),
+            Some(1),
+            "a diff sent after the source went Pending must open a new burst with a fresh memo — \
+             a memo spanning that gap could serve a row a write in between had replaced"
+        );
+    }
+
     // ---- DI-level supervision (Inc 2 prerequisite) -----------------------
     //
     // The combinator's terminal latch is correct and stays. These tests pin
@@ -1972,28 +2147,31 @@ mod tests {
 
         #[async_trait]
         impl HomeAuthority<String> for FlakyAuthority {
-            async fn locate(&self, id: &str) -> Result<Option<Placement<String>>> {
+            type Memo = ();
+
+            async fn locate(&self, id: &str, m: &mut ()) -> Result<Option<Placement<String>>> {
                 self.gate()?;
-                self.inner.locate(id).await
+                self.inner.locate(id, m).await
             }
-            async fn children_of(&self, parent: Option<&str>) -> Result<Vec<String>> {
+            async fn children_of(&self, parent: Option<&str>, m: &mut ()) -> Result<Vec<String>> {
                 self.gate()?;
-                self.inner.children_of(parent).await
+                self.inner.children_of(parent, m).await
             }
-            async fn prev_sibling(&self, id: &str) -> Result<Option<String>> {
+            async fn prev_sibling(&self, id: &str, m: &mut ()) -> Result<Option<String>> {
                 self.gate()?;
-                self.inner.prev_sibling(id).await
+                self.inner.prev_sibling(id, m).await
             }
-            async fn subtree_of(&self, id: &str) -> Result<Vec<String>> {
+            async fn subtree_of(&self, id: &str, m: &mut ()) -> Result<Vec<String>> {
                 self.gate()?;
-                self.inner.subtree_of(id).await
+                self.inner.subtree_of(id, m).await
             }
             async fn locate_batch(
                 &self,
                 ids: &[String],
+                m: &mut (),
             ) -> Result<BTreeMap<String, Placement<String>>> {
                 self.gate()?;
-                self.inner.locate_batch(ids).await
+                self.inner.locate_batch(ids, m).await
             }
         }
 

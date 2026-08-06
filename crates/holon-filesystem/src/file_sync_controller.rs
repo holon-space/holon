@@ -2107,11 +2107,14 @@ impl FileSyncController {
     /// ancestor) is absent from the authority: a brand-new / id-less / unknown
     /// block, which is normal ingest and must be left untouched. Depth-bounded.
     async fn resolve_authoritative_doc(&self, id: &EntityUri) -> Result<Option<EntityUri>> {
-        Ok(
-            crate::sync_ports::nearest_page_ancestor(self.block_reader.as_ref(), id, None, None)
-                .await?
-                .map(|page| page.id),
+        Ok(crate::sync_ports::nearest_page_ancestor(
+            self.block_reader.as_ref(),
+            id,
+            &mut crate::sync_ports::BlockRowMemo::new(),
+            None,
         )
+        .await?
+        .map(|page| page.id))
     }
 
     /// Read `path`, or `Ok(None)` when it has vanished (an external deletion —
@@ -3911,9 +3914,21 @@ impl FileSyncController {
     ///
     /// Runs for EVERY delta, including the ones a coalesced batch folds without
     /// rendering: any of them can be the upsert that mints the page.
-    async fn page_identity_preflight(&mut self, doc_id: &EntityUri, delta: &BlockDelta) {
+    /// `rows` memoizes the authoritative read below for the invocation that
+    /// owns it: the pre-flight runs once per DELTA, so N deltas touching one
+    /// block re-read that block N times. Its owner drops it whenever
+    /// `on_file_changed` runs — the one write in this fold, and so its one
+    /// invalidation edge.
+    async fn page_identity_preflight(
+        &mut self,
+        doc_id: &EntityUri,
+        delta: &BlockDelta,
+        rows: &mut crate::sync_ports::BlockRowMemo,
+    ) {
         if let BlockDelta::Upsert { block: b, .. } = delta {
-            match self.block_reader.get_block_authoritative(&b.id).await {
+            let reader = self.block_reader.clone();
+            let read = rows.get(reader.as_ref(), &b.id, None).await;
+            match read {
                 Ok(Some(auth)) if auth.is_page() => {
                     // The mark is keyed on `auth.id` — the page whose identity
                     // file failed — NOT on the routed `doc_id`: an untitled page
@@ -3990,6 +4005,10 @@ impl FileSyncController {
             by_doc.entry(doc.clone()).or_default().push(delta);
         }
 
+        // One memo for the whole invocation, so a block appearing in several
+        // deltas — or in several documents' deltas — is read once.
+        let mut rows = crate::sync_ports::BlockRowMemo::new();
+
         let mut out = Vec::with_capacity(order.len());
         for doc in order {
             let deltas = by_doc.remove(&doc).expect("doc came from this map");
@@ -3999,14 +4018,14 @@ impl FileSyncController {
             // folds `last` itself, so it is deliberately not folded here.
             let mut earlier_image = false;
             for delta in earlier {
-                self.page_identity_preflight(&doc, delta).await;
+                self.page_identity_preflight(&doc, delta, &mut rows).await;
                 self.apply_block_delta(&doc, delta);
                 if let BlockDelta::Upsert { block, .. } = delta {
                     earlier_image |= block.is_image_block();
                 }
             }
 
-            let verdict = self.on_block_changed(&doc, last).await;
+            let verdict = self.on_block_changed_memoized(&doc, last, &mut rows).await;
             // `on_block_changed` only re-materializes images for the delta it
             // was handed; an image folded earlier in this burst would otherwise
             // never reach disk.
@@ -4030,11 +4049,23 @@ impl FileSyncController {
     /// Re-renders the affected file and writes if content changed.
     /// Returns `true` if a matching document file was found and re-rendered,
     /// `false` if the doc_id didn't map to any known file.
-    #[tracing::instrument(skip(self, delta), name = "org.on_block_changed", fields(doc_id = %doc_id))]
     pub async fn on_block_changed(
         &mut self,
         doc_id: &EntityUri,
         delta: &BlockDelta,
+    ) -> Result<bool> {
+        self.on_block_changed_memoized(doc_id, delta, &mut crate::sync_ports::BlockRowMemo::new())
+            .await
+    }
+
+    /// As [`on_block_changed`](Self::on_block_changed), sharing `rows` with the
+    /// rest of the burst that owns it.
+    #[tracing::instrument(skip(self, delta, rows), name = "org.on_block_changed", fields(doc_id = %doc_id))]
+    async fn on_block_changed_memoized(
+        &mut self,
+        doc_id: &EntityUri,
+        delta: &BlockDelta,
+        rows: &mut crate::sync_ports::BlockRowMemo,
     ) -> Result<bool> {
         // Did this delta actually bring something new? Computed BEFORE the fold,
         // because afterwards the holder already agrees with it.
@@ -4062,7 +4093,7 @@ impl FileSyncController {
         // so it must reflect this delta before any path can read it.
         self.apply_block_delta(doc_id, delta);
 
-        self.page_identity_preflight(doc_id, delta).await;
+        self.page_identity_preflight(doc_id, delta, rows).await;
 
         let vault_path = match self.doc_id_to_path(doc_id).await {
             Ok(Some(p)) => p,
@@ -4106,6 +4137,10 @@ impl FileSyncController {
                 path.display()
             );
             self.on_file_changed(&path).await?;
+            // The one write inside this fold, and so the memo's one
+            // invalidation edge: rows read before it may name a parentage the
+            // ingest has just replaced.
+            rows.clear();
         }
 
         // Fold-completeness gate. Deliberately AFTER the pending-external-change
@@ -5524,9 +5559,13 @@ impl FileSyncController {
     /// destination file's bytes) races the render — the delta can carry a
     /// pre-move parent, and the destination file may not be written yet.
     async fn owning_file_of(&self, id: &EntityUri) -> Result<Option<PathBuf>> {
-        let Some(page) =
-            crate::sync_ports::nearest_page_ancestor(self.block_reader.as_ref(), id, None, None)
-                .await?
+        let Some(page) = crate::sync_ports::nearest_page_ancestor(
+            self.block_reader.as_ref(),
+            id,
+            &mut crate::sync_ports::BlockRowMemo::new(),
+            None,
+        )
+        .await?
         else {
             return Ok(None);
         };
