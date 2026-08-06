@@ -488,14 +488,16 @@ fn read_stable_id(meta: &loro::LoroMap) -> Option<String> {
     meta.get_typed(STABLE_ID, |val| val.as_string().map(|s| s.to_string()))
 }
 
-/// Disclose a child withheld from a `list_children` answer because its
-/// `STABLE_ID` had not landed yet.
-fn warn_half_born(node: loro::TreeID, parent_id: &str) {
+/// Disclose a node withheld from a read because its `STABLE_ID` had not landed
+/// yet. `site` names the reader so the two windows stay distinguishable in
+/// logs.
+fn warn_half_born(site: &str, node: loro::TreeID, parent: &str) {
     tracing::warn!(
+        site,
         ?node,
-        parent_id,
-        "list_children: live child has no STABLE_ID yet (in-flight create, meta not landed); \
-         withholding it from this answer — callers re-read until it appears"
+        parent,
+        "live node has no STABLE_ID yet (in-flight create, meta not landed); withholding it from \
+         this answer — callers re-read until it appears"
     );
 }
 
@@ -1134,9 +1136,26 @@ pub struct LoroTreeView {
 }
 
 impl LoroTreeView {
+    /// Scan the live nodes once, keyed by stable ID.
+    ///
+    /// A node whose `STABLE_ID` has not landed yet is an in-flight create, not
+    /// a corrupt node (`tree.create()` and the meta insert are two doc-state
+    /// steps and `with_write` does not exclude `with_read` — the same window
+    /// `list_children` and `snapshot_blocks_from_doc_settled` withhold for), so
+    /// it is withheld rather than fed to `block_uri_from_meta`, which panics by
+    /// contract and would kill the task running the user's indent / outdent /
+    /// drag. Its subtree is withheld with it: those nodes are only reachable
+    /// through a URI that does not exist yet, so admitting them would present
+    /// them as roots — `list_children` already withholds an unreachable node's
+    /// subtree the same way.
+    ///
+    /// The consumer is `BlockMutation::validate`, whose ancestry walk then sees
+    /// a shorter chain; `tree.mov`'s native cycle check stays as the
+    /// defense-in-depth guard ADR 0005 already assigns it.
     fn build(tree: &loro::LoroTree) -> Self {
-        let mut parents = HashMap::new();
-        let mut existing = HashSet::new();
+        let mut uris: HashMap<loro::TreeID, EntityUri> = HashMap::new();
+        let mut half_born: HashSet<loro::TreeID> = HashSet::new();
+        let mut live: Vec<loro::TreeID> = Vec::new();
         for node in tree.get_nodes(false) {
             if matches!(
                 node.parent,
@@ -1147,12 +1166,61 @@ impl LoroTreeView {
             let Ok(meta) = tree.get_meta(node.id) else {
                 continue;
             };
-            let uri = block_uri_from_meta(&meta, node.id);
+            live.push(node.id);
+            match read_stable_id(&meta) {
+                Some(sid) => {
+                    uris.insert(node.id, EntityUri::block(&sid));
+                }
+                None => {
+                    half_born.insert(node.id);
+                }
+            }
+        }
+
+        // Propagate the withholding down: a node is unreachable once any
+        // ancestor is. Each walk memoizes its whole path into `withheld`.
+        let mut withheld = half_born.clone();
+        for node in &live {
+            let mut path = Vec::new();
+            let mut cur = Some(*node);
+            let unreachable = loop {
+                let Some(n) = cur else { break false };
+                if withheld.contains(&n) {
+                    break true;
+                }
+                path.push(n);
+                cur = get_node_parent(tree, n);
+            };
+            if unreachable {
+                withheld.extend(path);
+            }
+        }
+
+        let mut parents = HashMap::new();
+        let mut existing = HashSet::new();
+        for node in live {
+            if withheld.contains(&node) {
+                if half_born.contains(&node) {
+                    warn_half_born(
+                        "LoroTreeView::build",
+                        node,
+                        &format!("{:?}", tree.parent(node)),
+                    );
+                } else {
+                    tracing::warn!(
+                        ?node,
+                        "LoroTreeView::build: withholding a node whose ancestor's STABLE_ID has \
+                         not landed — it is unreachable from this view"
+                    );
+                }
+                continue;
+            }
+            let uri = uris[&node].clone();
             existing.insert(uri.clone());
-            if let Some(ptid) = get_node_parent(tree, node.id)
-                && let Ok(pmeta) = tree.get_meta(ptid)
+            if let Some(ptid) = get_node_parent(tree, node)
+                && let Some(puri) = uris.get(&ptid)
             {
-                parents.insert(uri, block_uri_from_meta(&pmeta, ptid));
+                parents.insert(uri, puri.clone());
             }
         }
         Self { parents, existing }
@@ -3841,7 +3909,7 @@ impl CoreOperations for LoroBackend {
                         for shared_root in shared_tree.roots() {
                             let meta = shared_tree.get_meta(shared_root)?;
                             let Some(sid) = read_stable_id(&meta) else {
-                                warn_half_born(shared_root, parent_id);
+                                warn_half_born("list_children", shared_root, parent_id);
                                 continue;
                             };
                             result.push(EntityUri::block(&sid).to_string());
@@ -3860,7 +3928,7 @@ impl CoreOperations for LoroBackend {
                     // expect appear, so withholding is recoverable — an `Err`
                     // would abort their ingest instead.
                     let Some(sid) = read_stable_id(&meta) else {
-                        warn_half_born(*tid, parent_id);
+                        warn_half_born("list_children", *tid, parent_id);
                         continue;
                     };
                     result.push(EntityUri::block(&sid).to_string());
@@ -5364,6 +5432,82 @@ mod half_born_node_tests {
             kids,
             vec!["block:settled".to_string()],
             "a half-born child must be withheld, and its settled sibling must still be answered"
+        );
+    }
+
+    /// The same create window seen by `move_block`'s ADR-0005 precondition
+    /// read: it scans every live node into a `LoroTreeView`, so a half-born
+    /// node ANYWHERE in the tree — not just under the block being moved —
+    /// used to panic the task running the user's indent / outdent / drag.
+    #[tokio::test]
+    async fn move_block_survives_a_half_born_node_elsewhere_in_the_tree() {
+        let doc = Arc::new(LoroDocument::new("half-born-move".to_string()).unwrap());
+        let backend = LoroBackend::from_document(doc.clone());
+        create(&backend, EntityUri::no_parent(), "parent").await;
+        create(&backend, EntityUri::block("parent"), "mover").await;
+        create(&backend, EntityUri::no_parent(), "target").await;
+
+        let parent_tid = backend.resolve_to_tree_id("block:parent").await.unwrap();
+        doc.with_write(|d| {
+            d.get_tree(TREE_NAME).create(Some(parent_tid))?;
+            Ok(())
+        })
+        .unwrap();
+
+        backend
+            .move_block(&EntityUri::block("mover"), EntityUri::block("target"), None)
+            .await
+            .expect("a half-born sibling must not fail the move");
+
+        assert_eq!(
+            backend.list_children("block:target").await.unwrap(),
+            vec!["block:mover".to_string()],
+            "the move must have taken effect"
+        );
+    }
+
+    /// A half-born node's subtree is withheld with it: its children are
+    /// unreachable from the view (their parent has no URI to key on), so
+    /// admitting them would present them as roots. Same reachability semantics
+    /// as `list_children`, where an unreachable node's subtree is already
+    /// withheld.
+    #[tokio::test]
+    async fn tree_view_withholds_the_subtree_under_a_half_born_node() {
+        let doc = Arc::new(LoroDocument::new("half-born-subtree".to_string()).unwrap());
+        let backend = LoroBackend::from_document(doc.clone());
+        create(&backend, EntityUri::no_parent(), "parent").await;
+        create(&backend, EntityUri::block("parent"), "settled").await;
+
+        let parent_tid = backend.resolve_to_tree_id("block:parent").await.unwrap();
+        doc.with_write(|d| {
+            let tree = d.get_tree(TREE_NAME);
+            let half_born = tree.create(Some(parent_tid))?;
+            // A settled grandchild UNDER the half-born node: its own STABLE_ID
+            // landed, but it is only reachable through a node that has none.
+            let grandchild = tree.create(Some(half_born))?;
+            tree.get_meta(grandchild)?
+                .insert(STABLE_ID, loro::LoroValue::from("orphaned"))?;
+            d.commit();
+            Ok(())
+        })
+        .unwrap();
+
+        let view = doc
+            .with_read(|d| Ok(LoroTreeView::build(&d.get_tree(TREE_NAME))))
+            .unwrap();
+
+        assert!(
+            view.block_exists(&EntityUri::block("settled")),
+            "a settled node outside the half-born subtree stays visible"
+        );
+        assert!(
+            !view.block_exists(&EntityUri::block("orphaned")),
+            "a node under a half-born parent must be withheld with it, not surfaced as a root"
+        );
+        assert_eq!(
+            view.parent_of(&EntityUri::block("orphaned")),
+            None,
+            "and it must not be given a parent link either"
         );
     }
 }
