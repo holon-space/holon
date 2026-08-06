@@ -44,6 +44,12 @@ use crate::LoroDocument;
 use crate::event_ring::DEFAULT_EVENT_RING_CAPACITY;
 use crate::event_ring::EventRing;
 use crate::event_ring::deliver_to_subscribers;
+use crate::settled_read::LiveNode;
+use crate::settled_read::classify;
+use crate::settled_read::get_node_parent;
+use crate::settled_read::read_stable_id;
+use crate::settled_read::scan_live_tree;
+use crate::settled_read::warn_half_born;
 use crate::shared_tree::SharedTreeStore;
 use crate::shared_tree::is_mount_node;
 use crate::shared_tree::read_mount_info;
@@ -482,24 +488,6 @@ const RESERVED_PROPERTY_KEYS: &[&str] = &[
     "updated_at",
     "_change_origin",
 ];
-
-/// Read the stable ID from a node's metadata.
-fn read_stable_id(meta: &loro::LoroMap) -> Option<String> {
-    meta.get_typed(STABLE_ID, |val| val.as_string().map(|s| s.to_string()))
-}
-
-/// Disclose a node withheld from a read because its `STABLE_ID` had not landed
-/// yet. `site` names the reader so the two windows stay distinguishable in
-/// logs.
-fn warn_half_born(site: &str, node: loro::TreeID, parent: &str) {
-    tracing::warn!(
-        site,
-        ?node,
-        parent,
-        "live node has no STABLE_ID yet (in-flight create, meta not landed); withholding it from \
-         this answer — callers re-read until it appears"
-    );
-}
 
 /// Build an EntityUri from a node's stable ID metadata.
 /// Panics if the node has no STABLE_ID — all nodes must have one.
@@ -1107,14 +1095,6 @@ fn write_new_node(
     Ok((block, node))
 }
 
-/// Get the parent TreeID of a node.
-fn get_node_parent(tree: &loro::LoroTree, node: loro::TreeID) -> Option<loro::TreeID> {
-    match tree.parent(node)? {
-        loro::TreeParentId::Node(pid) => Some(pid),
-        _ => None,
-    }
-}
-
 /// Is this node deleted (or unknown) in the tree's CURRENT state? Used by the
 /// snapshot readers to distinguish a torn walk — a concurrent commit deleted
 /// the node between enumeration and the per-node reads — from a genuine
@@ -1136,94 +1116,29 @@ pub struct LoroTreeView {
 }
 
 impl LoroTreeView {
-    /// Scan the live nodes once, keyed by stable ID.
-    ///
-    /// A node whose `STABLE_ID` has not landed yet is an in-flight create, not
-    /// a corrupt node (`tree.create()` and the meta insert are two doc-state
-    /// steps and `with_write` does not exclude `with_read` — the same window
-    /// `list_children` and `snapshot_blocks_from_doc_settled` withhold for), so
-    /// it is withheld rather than fed to `block_uri_from_meta`, which panics by
-    /// contract and would kill the task running the user's indent / outdent /
-    /// drag. Its subtree is withheld with it: those nodes are only reachable
-    /// through a URI that does not exist yet, so admitting them would present
-    /// them as roots — `list_children` already withholds an unreachable node's
-    /// subtree the same way.
+    /// Scan the live nodes once under the shared settled-read policy
+    /// ([`scan_live_tree`]), keyed by stable ID: half-born nodes and their
+    /// subtrees are withheld rather than fed to `block_uri_from_meta`, which
+    /// panics by contract and would kill the task running the user's indent /
+    /// outdent / drag.
     ///
     /// The consumer is `BlockMutation::validate`, whose ancestry walk then sees
     /// a shorter chain; `tree.mov`'s native cycle check stays as the
     /// defense-in-depth guard ADR 0005 already assigns it.
-    fn build(tree: &loro::LoroTree) -> Self {
-        let mut uris: HashMap<loro::TreeID, EntityUri> = HashMap::new();
-        let mut half_born: HashSet<loro::TreeID> = HashSet::new();
-        let mut live: Vec<loro::TreeID> = Vec::new();
-        for node in tree.get_nodes(false) {
-            if matches!(
-                node.parent,
-                loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
-            ) {
-                continue;
-            }
-            let Ok(meta) = tree.get_meta(node.id) else {
-                continue;
-            };
-            live.push(node.id);
-            match read_stable_id(&meta) {
-                Some(sid) => {
-                    uris.insert(node.id, EntityUri::block(&sid));
-                }
-                None => {
-                    half_born.insert(node.id);
-                }
-            }
-        }
-
-        // Propagate the withholding down: a node is unreachable once any
-        // ancestor is. Each walk memoizes its whole path into `withheld`.
-        let mut withheld = half_born.clone();
-        for node in &live {
-            let mut path = Vec::new();
-            let mut cur = Some(*node);
-            let unreachable = loop {
-                let Some(n) = cur else { break false };
-                if withheld.contains(&n) {
-                    break true;
-                }
-                path.push(n);
-                cur = get_node_parent(tree, n);
-            };
-            if unreachable {
-                withheld.extend(path);
-            }
-        }
-
+    fn build(tree: &loro::LoroTree) -> anyhow::Result<Self> {
+        let scan = scan_live_tree(tree, "LoroTreeView::build")?;
         let mut parents = HashMap::new();
         let mut existing = HashSet::new();
-        for node in live {
-            if withheld.contains(&node) {
-                if half_born.contains(&node) {
-                    warn_half_born(
-                        "LoroTreeView::build",
-                        node,
-                        &format!("{:?}", tree.parent(node)),
-                    );
-                } else {
-                    tracing::warn!(
-                        ?node,
-                        "LoroTreeView::build: withholding a node whose ancestor's STABLE_ID has \
-                         not landed — it is unreachable from this view"
-                    );
-                }
-                continue;
-            }
-            let uri = uris[&node].clone();
+        for node in &scan.admitted {
+            let uri = scan.uris[node].clone();
             existing.insert(uri.clone());
-            if let Some(ptid) = get_node_parent(tree, node)
-                && let Some(puri) = uris.get(&ptid)
+            if let Some(ptid) = get_node_parent(tree, *node)
+                && let Some(puri) = scan.uris.get(&ptid)
             {
                 parents.insert(uri, puri.clone());
             }
         }
-        Self { parents, existing }
+        Ok(Self { parents, existing })
     }
 }
 
@@ -1286,13 +1201,15 @@ pub fn snapshot_blocks_from_doc_settled(
         // incomplete (mid-mutation), not absent: skip it for projection but
         // mark the snapshot unsettled so the caller withholds deletes. Panicking
         // here (`block_uri_from_meta`) would kill the projection task entirely.
-        let Ok(meta) = tree.get_meta(node.id) else {
-            settled = false;
-            continue;
-        };
-        if read_stable_id(&meta).is_none() {
-            settled = false;
-            continue;
+        // No subtree closure: this reader keys by stable id and never presents
+        // a node as a root, so a settled descendant of a half-born node still
+        // projects with its own parent link once that parent's meta lands.
+        match classify(&tree, node.id) {
+            LiveNode::Settled(_) => {}
+            LiveNode::HalfBorn | LiveNode::MetaUnreadable => {
+                settled = false;
+                continue;
+            }
         }
         let parent_tid = get_node_parent(&tree, node.id);
         let block = read_block_from_tree(&tree, node.id, parent_tid);
@@ -1444,8 +1361,12 @@ fn read_one_node_snapshot(
     node: loro::TreeID,
     group_keys: &mut HashMap<loro::TreeParentId, HashMap<loro::TreeID, Option<String>>>,
 ) -> Option<(String, SnapshotBlock)> {
-    let meta = tree.get_meta(node).ok()?; // ALLOW(ok): absence = node gone mid-batch; None withholds it
-    let stable_id = read_stable_id(&meta)?;
+    let stable_id = match classify(tree, node) {
+        LiveNode::Settled(sid) => sid,
+        // Gone mid-batch, or meta not yet landed: `None` withholds it and the
+        // caller's unsettled handling reseeds.
+        LiveNode::HalfBorn | LiveNode::MetaUnreadable => return None,
+    };
     let parent_tid = get_node_parent(tree, node);
     let scope = match parent_tid {
         Some(p) => loro::TreeParentId::Node(p),
@@ -1785,8 +1706,10 @@ fn find_stable_id_in_doc(doc: &loro::LoroDoc, needle: &str) -> Option<loro::Tree
         ) {
             continue;
         }
-        if let Ok(meta) = tree.get_meta(node.id)
-            && let Some(sid) = meta.get_typed(STABLE_ID, |v| v.as_string().map(|s| s.to_string()))
+        // A half-born or torn node carries no id to match — it is skipped
+        // silently: a lookup that misses is retried by its caller, and warning
+        // per scanned node on every miss would drown the real disclosures.
+        if let LiveNode::Settled(sid) = classify(&tree, node.id)
             && sid == needle
         {
             return Some(node.id);
@@ -3493,15 +3416,14 @@ impl LoroBackend {
                     ) {
                         continue;
                     }
-                    if let Ok(meta) = tree.get_meta(tree_node.id) {
-                        let node_stable_id =
-                            meta.get_typed(STABLE_ID, |val| val.as_string().map(|s| s.to_string()));
-                        if let Some(ref sid) = node_stable_id {
-                            // Populate cache for every node we encounter
-                            id_cache.lock().unwrap().insert(sid.clone(), tree_node.id);
-                            if *sid == stable_id_owned {
-                                return Ok(Some(tree_node.id));
-                            }
+                    // Same silent skip as `find_stable_id_in_doc`: a half-born
+                    // or torn node has no id to match or to cache, and this
+                    // scan runs on every cache miss.
+                    if let LiveNode::Settled(sid) = classify(&tree, tree_node.id) {
+                        // Populate cache for every node we encounter
+                        id_cache.lock().unwrap().insert(sid.clone(), tree_node.id);
+                        if sid == stable_id_owned {
+                            return Ok(Some(tree_node.id));
                         }
                     }
                 }
@@ -3907,29 +3829,37 @@ impl CoreOperations for LoroBackend {
                     {
                         let shared_tree = shared_doc.get_tree(TREE_NAME);
                         for shared_root in shared_tree.roots() {
-                            let meta = shared_tree.get_meta(shared_root)?;
-                            let Some(sid) = read_stable_id(&meta) else {
-                                warn_half_born("list_children", shared_root, parent_id);
-                                continue;
+                            let sid = match classify(&shared_tree, shared_root) {
+                                LiveNode::Settled(sid) => sid,
+                                LiveNode::HalfBorn => {
+                                    warn_half_born("list_children", shared_root, parent_id);
+                                    continue;
+                                }
+                                LiveNode::MetaUnreadable => {
+                                    return Err(anyhow::anyhow!(
+                                        "shared tree root {shared_root:?} has no readable meta"
+                                    ));
+                                }
                             };
                             result.push(EntityUri::block(&sid).to_string());
                         }
                         continue;
                     }
-                    let meta = tree.get_meta(*tid)?;
-                    // A live child with no `STABLE_ID` is an in-flight create,
-                    // not a corrupt node: `tree.create()` and the meta insert
-                    // are two doc-state steps and `with_write` does not exclude
-                    // `with_read` (the same window
-                    // `snapshot_blocks_from_doc_settled` withholds for). Panic
-                    // here and the tokio worker that owns the org-writeback
-                    // fold dies, leaving the file stale for the life of the
-                    // process. Callers poll `children` until the ids they
-                    // expect appear, so withholding is recoverable — an `Err`
-                    // would abort their ingest instead.
-                    let Some(sid) = read_stable_id(&meta) else {
-                        warn_half_born("list_children", *tid, parent_id);
-                        continue;
+                    // A half-born child is withheld, never an `Err`: callers
+                    // poll `children` until the ids they expect appear, so
+                    // absence is recoverable while an error aborts their
+                    // ingest. Withholding it also withholds its subtree — this
+                    // answer is one sibling level, and a caller that descends
+                    // does so through an id it never received.
+                    let sid = match classify(&tree, *tid) {
+                        LiveNode::Settled(sid) => sid,
+                        LiveNode::HalfBorn => {
+                            warn_half_born("list_children", *tid, parent_id);
+                            continue;
+                        }
+                        LiveNode::MetaUnreadable => {
+                            return Err(anyhow::anyhow!("child {tid:?} has no readable meta"));
+                        }
                     };
                     result.push(EntityUri::block(&sid).to_string());
                 }
@@ -4103,7 +4033,7 @@ impl CoreOperations for LoroBackend {
                     new_parent: new_parent.clone(),
                     after: after.clone(),
                 }
-                .validate(&LoroTreeView::build(&tree)))
+                .validate(&LoroTreeView::build(&tree)?))
             })
             .map_err(|e| ApiError::InternalError {
                 message: format!("move_block precondition read failed: {e}"),
@@ -5493,7 +5423,7 @@ mod half_born_node_tests {
         .unwrap();
 
         let view = doc
-            .with_read(|d| Ok(LoroTreeView::build(&d.get_tree(TREE_NAME))))
+            .with_read(|d| LoroTreeView::build(&d.get_tree(TREE_NAME)))
             .unwrap();
 
         assert!(
@@ -5579,7 +5509,7 @@ mod half_born_node_tests {
         );
 
         let view = reloaded
-            .with_read(|d| Ok(LoroTreeView::build(&d.get_tree(TREE_NAME))))
+            .with_read(|d| LoroTreeView::build(&d.get_tree(TREE_NAME)))
             .unwrap();
         assert!(view.block_exists(&EntityUri::block("parent")));
         assert!(

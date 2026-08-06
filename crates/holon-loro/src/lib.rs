@@ -79,6 +79,9 @@ pub mod owner_identity;
     not(all(target_arch = "wasm32", target_os = "unknown"))
 ))]
 pub mod roster_sidecar;
+/// The settled-read policy every structural reader of the Loro block tree
+/// routes through (half-born withholding + its reachability closure).
+mod settled_read;
 #[cfg(all(
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))
