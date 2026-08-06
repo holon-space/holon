@@ -313,7 +313,27 @@ impl MetricsSut {
                 } else {
                     format!("REDUNDANT x{}/binding", dup.max_repeat_per_binding)
                 };
-                eprintln!("  {}x ({bindings}) [{verdict}]: {}", dup.count, dup.sql);
+                // Origin turns "this text ran 146 times" into "WHO ran it 146
+                // times". A single origin fits inline; several stay SPLIT —
+                // collapsing them is exactly what forced the last attribution
+                // round to guess by co-occurrence.
+                match dup.by_origin.as_slice() {
+                    [(chain, _)] => eprintln!(
+                        "  {}x ({bindings}) [{verdict}]: {} origin={chain}",
+                        dup.count, dup.sql
+                    ),
+                    origins => {
+                        eprintln!(
+                            "  {}x ({bindings}) [{verdict}]: {} origins={}",
+                            dup.count,
+                            dup.sql,
+                            origins.len()
+                        );
+                        for (chain, subcount) in origins {
+                            eprintln!("      {subcount:>4}x origin={chain}");
+                        }
+                    }
+                }
             }
         }
 
