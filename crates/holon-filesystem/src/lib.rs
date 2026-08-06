@@ -86,6 +86,7 @@ pub use sync_ports::MountRegistry;
 pub use sync_ports::ShareWritebackDisclosure;
 pub use sync_ports::ThreeWayTextMerge;
 pub use sync_ports::WritebackDisclosure;
+pub use sync_ports::nearest_page_ancestor;
 pub use vault_path::VaultPath;
 #[cfg(not(target_arch = "wasm32"))]
 pub use writeback_render::WritebackRenderer;

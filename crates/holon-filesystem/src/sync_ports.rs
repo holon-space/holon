@@ -777,3 +777,68 @@ mod name_chain_tests {
         assert_eq!(chain, vec!["todo".to_string()]);
     }
 }
+
+/// Depth bound on a parent-chain walk. A backstop only — the walk terminates
+/// on its own at the root, at an absent block, or on a revisited id.
+const MAX_PAGE_WALK: usize = 50;
+
+/// Walk `start`'s parent chain upward to the nearest `Page` — the block that
+/// owns it — returning `None` when the chain reaches the root without finding
+/// one, leaves the store, or is cyclic.
+///
+/// # Why this is one function and not three walks
+///
+/// Every copy of this loop must stop at [`EntityUri::no_parent`], because under
+/// Turso that sentinel is a real, **self-parented** row in `block_raw`: a walk
+/// that reaches it stops advancing and re-reads that one row until the depth
+/// bound. Three hand-rolled copies each burned ~49 identical point reads per
+/// call on the write-back and ingest paths.
+///
+/// `first` is the row for `start` when the caller already read it, so a caller
+/// that has just fetched the block does not pay for it twice. `reads`, when
+/// given, is incremented once per point read the walk actually issues.
+///
+/// A cycle is disclosed loudly and answered `None` rather than `Err`: the
+/// `home_by` combinator treats an authority error as stream-fatal, and killing
+/// write-back for the whole vault is worse than homing one corrupt chain
+/// nowhere — which is also what the depth bound silently returned before.
+pub async fn nearest_page_ancestor(
+    reader: &dyn BlockReader,
+    start: &EntityUri,
+    first: Option<Block>,
+    reads: Option<&std::sync::atomic::AtomicU64>,
+) -> Result<Option<Block>> {
+    let root = EntityUri::no_parent();
+    let mut cur = start.clone();
+    let mut first = first;
+    let mut seen: std::collections::BTreeSet<EntityUri> = std::collections::BTreeSet::new();
+    for _ in 0..MAX_PAGE_WALK {
+        if cur == root {
+            return Ok(None);
+        }
+        if !seen.insert(cur.clone()) {
+            tracing::error!(
+                "[nearest_page_ancestor] parent cycle reached from {start} at {cur} — this chain \
+                 has no owning page; its blocks will not sync until the parentage is repaired"
+            );
+            return Ok(None);
+        }
+        let block = match first.take() {
+            Some(block) => block,
+            None => match {
+                if let Some(reads) = reads {
+                    reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                reader.get_block_authoritative(&cur).await?
+            } {
+                Some(block) => block,
+                None => return Ok(None),
+            },
+        };
+        if block.is_page() {
+            return Ok(Some(block));
+        }
+        cur = block.parent_id;
+    }
+    Ok(None)
+}

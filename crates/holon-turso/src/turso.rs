@@ -332,6 +332,26 @@ fn named_params_fingerprint(params: &HashMap<String, Value>) -> String {
     format!("{:016x}", hasher.finish())
 }
 
+/// The `sql` span attribute: the identity every SQL-metrics consumer buckets
+/// by. Head AND tail, because a head-only prefix cannot separate Holon's block
+/// queries — the full-table hydrating scan, the doc-scoped CTE and the
+/// single-block point read share ~900 characters of column list and differ only
+/// in the trailing FROM/WHERE, so prefix-bucketing merged three consumers into
+/// one and misattributed which of them was re-querying.
+fn sql_fingerprint(sql: &str) -> String {
+    const HEAD: usize = 200;
+    // The block queries' last edge subquery alone is ~150 characters, so a
+    // shorter tail stops before the FROM/WHERE that tells them apart.
+    const TAIL: usize = 240;
+    let chars: Vec<char> = sql.chars().collect();
+    if chars.len() <= HEAD + TAIL {
+        return sql.to_string();
+    }
+    let head: String = chars[..HEAD].iter().collect();
+    let tail: String = chars[chars.len() - TAIL..].iter().collect();
+    format!("{head} … {tail}")
+}
+
 /// Positional-parameter sibling of [`named_params_fingerprint`], for
 /// `execute` spans.
 fn positional_params_fingerprint(params: &[turso::Value]) -> String {
@@ -367,7 +387,11 @@ pub struct DbHandle {
 
 impl DbHandle {
     /// Execute a query (SELECT) with named parameters and return results
-    #[tracing::instrument(skip(self, params), fields(sql = %sql.chars().take(120).collect::<String>(), params_fp = %named_params_fingerprint(&params)))]
+    // 120 chars is NOT enough to tell Holon's block queries apart: the
+    // full-table hydrating scan, the doc-scoped CTE and the single-block point
+    // read share a longer prefix than that, so a shorter fingerprint merges
+    // three different consumers into one bucket and misattributes redundancy.
+    #[tracing::instrument(skip(self, params), fields(sql = %sql_fingerprint(sql), params_fp = %named_params_fingerprint(&params)))]
     pub async fn query(
         &self,
         sql: &str,
@@ -420,7 +444,7 @@ impl DbHandle {
 
     /// Execute a statement (INSERT, UPDATE, DELETE) and return affected row
     /// count
-    #[tracing::instrument(skip(self, params), fields(sql = %sql.chars().take(120).collect::<String>(), params_fp = %positional_params_fingerprint(&params)))]
+    #[tracing::instrument(skip(self, params), fields(sql = %sql_fingerprint(sql), params_fp = %positional_params_fingerprint(&params)))]
     pub async fn execute(&self, sql: &str, params: Vec<turso::Value>) -> Result<u64> {
         let (response_tx, response_rx) = oneshot::channel();
         self.tx
@@ -438,7 +462,7 @@ impl DbHandle {
     }
 
     /// Execute DDL (CREATE TABLE, CREATE VIEW, etc.)
-    #[tracing::instrument(skip(self), fields(sql = %sql.chars().take(120).collect::<String>()))]
+    #[tracing::instrument(skip(self), fields(sql = %sql_fingerprint(sql)))]
     pub async fn execute_ddl(&self, sql: &str) -> Result<()> {
         let (response_tx, response_rx) = oneshot::channel();
         self.tx
@@ -572,7 +596,7 @@ impl DbHandle {
     /// * `requires` - Resources this operation depends on
     /// * `priority` - Execution priority (higher = sooner among ready
     ///   operations)
-    #[tracing::instrument(skip(self, provides, requires), fields(sql = %sql.chars().take(120).collect::<String>()))]
+    #[tracing::instrument(skip(self, provides, requires), fields(sql = %sql_fingerprint(sql)))]
     pub async fn execute_ddl_with_deps(
         &self,
         sql: &str,
@@ -2512,7 +2536,7 @@ impl TursoBackend {
     /// Answer `op`'s waiter with `MissingDependencies` instead of letting it
     /// wait out the dependency timeout.
     fn fail_unpromised_ddl(state: &mut ActorState, op: PendingDdl, unpromised: Vec<String>) {
-        let sql_preview: String = op.sql.chars().take(120).collect();
+        let sql_preview: String = sql_fingerprint(&op.sql);
         tracing::warn!(
             missing = ?unpromised,
             sql = %sql_preview,
