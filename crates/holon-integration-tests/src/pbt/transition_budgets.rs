@@ -263,27 +263,51 @@ pub fn build_samples(
 
     let reads_limit = expected.reads + expected.tolerance;
     let dedup_reads = metrics.dedup_read_count();
+    let raw_reads = metrics.sql_read_count;
+    // PINNED ceilings compare RAW reads; every other budget compares dedup.
+    //
+    // The pins exist to catch identical-binding redundancy GROWTH — entry 14's
+    // defect is literally "41 redundant re-snapshots of two `watch_view`
+    // SELECTs" — so measuring them after dedup would subtract exactly the thing
+    // being pinned. Their values were also measured on raw reads and are not
+    // re-derived here.
+    let pinned = sql_reads_pinned(transition);
     samples.push(MetricSample {
         metric: Metric::SqlReads,
-        actual: dedup_reads as f64,
+        actual: if pinned { raw_reads } else { dedup_reads } as f64,
         limit: reads_limit as f64,
-        severity: if sql_reads_pinned(transition) {
+        severity: if pinned {
             Severity::Pinned
         } else {
             Severity::Error
         },
-        message: format!(
-            "{key}.sql_reads: {actual} dedup (raw {raw}, {excess} redundant re-executions) \
-             exceeds expected {expected} + tolerance {tol} = {limit} (watches={w}, docs={d})",
-            actual = dedup_reads,
-            raw = metrics.sql_read_count,
-            excess = metrics.redundant_read_excess(),
-            expected = expected.reads,
-            tol = expected.tolerance,
-            limit = reads_limit,
-            w = ref_state.mcp.active_watches.len(),
-            d = ref_state.files.documents.len(),
-        ),
+        // The pinned arm keeps the historical wording verbatim up to the
+        // `(watches=…)` tail — `docs/Testing/KeystoneKnownReds.md` matches
+        // `pinblock-unrendered-target` on that prefix.
+        message: if pinned {
+            format!(
+                "{key}.sql_reads: {raw_reads} exceeds expected {expected} + tolerance {tol} = \
+                 {limit} (watches={w}, docs={d}) [PINNED ceilings gate RAW reads; dedup was \
+                 {dedup_reads}]",
+                expected = expected.reads,
+                tol = expected.tolerance,
+                limit = reads_limit,
+                w = ref_state.mcp.active_watches.len(),
+                d = ref_state.files.documents.len(),
+            )
+        } else {
+            format!(
+                "{key}.sql_reads: {dedup_reads} dedup (raw {raw_reads}, {excess} redundant \
+                 re-executions) exceeds expected {expected} + tolerance {tol} = {limit} \
+                 (watches={w}, docs={d})",
+                excess = metrics.redundant_read_excess(),
+                expected = expected.reads,
+                tol = expected.tolerance,
+                limit = reads_limit,
+                w = ref_state.mcp.active_watches.len(),
+                d = ref_state.files.documents.len(),
+            )
+        },
     });
 
     if let Some((sql, repeats)) = metrics.worst_read_repeat() {

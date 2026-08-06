@@ -859,7 +859,15 @@ impl TransitionMetrics {
     /// models the reads the transition legitimately needs rather than the
     /// re-execution defect layered on top (ruling (c), 2026-08-06).
     pub fn dedup_read_count(&self) -> usize {
-        self.sql_read_count - self.redundant_read_excess()
+        let excess = self.redundant_read_excess();
+        self.sql_read_count.checked_sub(excess).unwrap_or_else(|| {
+            panic!(
+                "redundant read excess {excess} exceeds the {} reads it was derived from — \
+                 `duplicate_reads` must be built from the SAME \"query\" span set as \
+                 `sql_read_count`",
+                self.sql_read_count,
+            )
+        })
     }
 
     /// The worst read re-execution in this window: `(fingerprint, repeats)` for
