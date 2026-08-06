@@ -157,6 +157,9 @@ pub async fn push_once(
             continue;
         }
         let state = session.states.entry(log.clone()).or_default();
+        // ALLOW(loro_doc_escape): `doc` is re-read after the `transport.push` await
+        // (line below reads `doc.oplog_vv()` post-push) — it can't be confined to a
+        // single with_read/with_write scope without changing what vv gets recorded.
         let doc = container.doc.doc();
         doc.commit();
         let from = state.last_pushed.clone().unwrap_or_default();

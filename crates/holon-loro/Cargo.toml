@@ -35,6 +35,7 @@ holon-filesystem.workspace = true
 holon-macros.workspace = true
 iroh = { workspace = true, features = ["default"], optional = true }
 loro.workspace = true
+parking_lot.workspace = true
 proptest = { workspace = true, optional = true }
 proptest-state-machine = { workspace = true, optional = true }
 rand.workspace = true

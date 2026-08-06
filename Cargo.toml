@@ -114,6 +114,10 @@ loro = "= 1.13.7"
 # path package — both are loro-family and coexist without touching other deps.
 loro_fractional_index = "= 1.6.0"
 indexmap = "2.12"
+# Doc-boundary RwLock for `LoroDocument` (commit-granular observation). Chosen
+# over `std::sync::RwLock` for `try_write_for` — a lock wait that exceeds the
+# budget is reported as an error naming the doc, not an unexplained hang.
+parking_lot = "0.12"
 regex = "1.10"
 rand = "0.9"
 once_cell = "1.19"

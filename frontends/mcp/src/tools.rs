@@ -2112,7 +2112,7 @@ impl HolonMcpServer {
             // Loro FIRST (the projection that writes the reordered sort_key CDC
             // then fires): a frontier not yet caught up counts as activity.
             if let (Some(sync), Some(store)) = (&loro_sync, &loro_store) {
-                let current = {
+                let collab = {
                     let guard = store.read().await;
                     guard.get_global_doc().await.map_err(|e| {
                         rmcp::ErrorData::internal_error(
@@ -2120,9 +2120,15 @@ impl HolonMcpServer {
                             None,
                         )
                     })?
-                }
-                .doc()
-                .oplog_frontiers();
+                };
+                let current = collab.with_read(|doc| Ok(doc.oplog_frontiers())).map_err(
+                    |e: anyhow::Error| {
+                        rmcp::ErrorData::internal_error(
+                            format!("await_quiescence: reading Loro global doc frontiers: {e:#}"),
+                            None,
+                        )
+                    },
+                )?;
                 if sync.last_synced_frontiers() != current {
                     moving.push("loro");
                 }

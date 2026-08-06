@@ -1035,6 +1035,44 @@ pub struct NewBlockWithProperties {
 /// what lets a batch create N nodes in one commit while the single-block path
 /// keeps its own. Sole writer of a new node's meta, so the two paths cannot
 /// drift.
+/// Width of the artificial pause between `tree.create` and the `stable_id`
+/// insert. `UNRESOLVED` until the first create reads
+/// `HOLON_LORO_WIDEN_BIRTH_MS`.
+static BIRTH_WIDENING_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(BIRTH_WIDENING_UNRESOLVED);
+const BIRTH_WIDENING_UNRESOLVED: u64 = u64::MAX;
+
+/// Stretch the interval between `tree.create` and the `stable_id` insert, so a
+/// concurrent reader lands inside a create's half-born interior reliably rather
+/// than by luck.
+///
+/// The window is real at every width — the doc-boundary lock is what closes it,
+/// and this seam is how the tests prove that, in both directions. In production
+/// the width resolves to zero and this is a relaxed load plus a branch.
+fn widen_birth_window() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut ms = BIRTH_WIDENING_MS.load(Relaxed);
+    if ms == BIRTH_WIDENING_UNRESOLVED {
+        ms = match std::env::var("HOLON_LORO_WIDEN_BIRTH_MS") {
+            Ok(raw) => raw
+                .parse()
+                .unwrap_or_else(|e| panic!("HOLON_LORO_WIDEN_BIRTH_MS must be milliseconds: {e}")),
+            Err(_) => 0,
+        };
+        BIRTH_WIDENING_MS.store(ms, Relaxed);
+    }
+    if ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
+/// Set the birth-window width for the current process. Tests that use it must
+/// be `#[serial]` — the width is process-global, like the race it widens.
+#[cfg(test)]
+fn set_birth_widening_ms(ms: u64) {
+    BIRTH_WIDENING_MS.store(ms, std::sync::atomic::Ordering::Relaxed);
+}
+
 fn write_new_node(
     tree: &loro::LoroTree,
     id_cache: &Arc<Mutex<HashMap<String, loro::TreeID>>>,
@@ -1046,6 +1084,7 @@ fn write_new_node(
         resolve_parent_tree_id_for_create(tree, id_cache, &request.parent_id, &request.id)?;
 
     let node = tree.create(parent_tree_id)?;
+    widen_birth_window();
     let meta = tree.get_meta(node)?;
     meta.insert(STABLE_ID, loro::LoroValue::from(stable_id.as_str()))?;
     write_content_to_meta(&meta, &request.content)?;
@@ -1889,7 +1928,15 @@ impl LoroBackend {
         if self.shared_trees.is_some() {
             return None;
         }
-        Some(doc_lamport_height(&self.collab_doc.doc()))
+        match self.collab_doc.with_read(|doc| Ok(doc_lamport_height(doc))) {
+            Ok(height) => Some(height),
+            // Same contract as the shared-tree arm: `None` tells the caller to
+            // re-read rather than trust a version. Disclosed, never silent.
+            Err(e) => {
+                tracing::error!("change_version: could not read the doc: {e:#}");
+                None
+            }
+        }
     }
 
     pub fn collab_for_test(&self) -> Arc<LoroDocument> {
@@ -5314,6 +5361,7 @@ mod legacy_link_mark_payloads {
 #[cfg(test)]
 mod half_born_node_tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use super::*;
     use crate::LoroDocument;
@@ -5441,71 +5489,77 @@ mod half_born_node_tests {
         );
     }
 
-    /// CHARACTERIZATION (task #17) — asserts the CURRENT, WRONG behaviour on
-    /// purpose: repairing the durability hole SHOULD fail this test.
+    /// Count live nodes and, of those, how many carry no `stable_id`.
+    fn live_and_half_born(tree: &loro::LoroTree) -> (usize, usize) {
+        let live: Vec<_> = tree
+            .get_nodes(false)
+            .into_iter()
+            .filter(|n| {
+                !matches!(
+                    n.parent,
+                    loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
+                )
+            })
+            .collect();
+        let half_born = live
+            .iter()
+            .filter(|n| match tree.get_meta(n.id) {
+                Ok(m) => read_stable_id(&m).is_none(),
+                Err(_) => false,
+            })
+            .count();
+        (live.len(), half_born)
+    }
+
+    /// Every block operation ends in `save_doc` → `LoroDocumentStore::save_all`
+    /// (`loro_block_operations.rs`, ~13 call sites), so a save on one task can
+    /// land in another task's create window. This drives exactly that: the save
+    /// thread wakes in the middle of a deliberately widened create.
     ///
-    /// The create window is not only transient. Every block operation ends in
-    /// `save_doc` → `LoroDocumentStore::save_all` (`loro_block_operations.rs`,
-    /// ~13 call sites), which takes a read guard on the STORE and none on the
-    /// doc — and `with_write` takes none either. So a save on one task lands
-    /// between another task's `tree.create()` and its `STABLE_ID` insert, and
-    /// the snapshot it writes carries the node WITHOUT the id.
-    ///
-    /// The reader-side fixes (`list_children`, `LoroTreeView::build`,
-    /// `snapshot_blocks_from_doc_settled`) make this survivable but permanent:
-    /// on reload nothing ever supplies the missing id, so the node is withheld
-    /// from every read for the life of the store — an invisible node holding a
-    /// live subtree, not a crash. The repair is a separate decision.
+    /// It used to persist the node WITHOUT its id — a block invisible to every
+    /// reader for the life of the store, because nothing ever supplies the
+    /// missing id on reload. `save_to_file` now exports under the doc's read
+    /// guard, so the save serializes behind the create's commit and the
+    /// snapshot carries both nodes, both with ids. Task #17's tripwire is
+    /// retired with it.
     #[tokio::test]
-    async fn a_snapshot_saved_mid_create_persists_a_permanently_invisible_node() {
+    #[serial_test::serial]
+    async fn a_snapshot_saved_mid_create_waits_for_the_commit_boundary() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store.loro");
         let doc = Arc::new(LoroDocument::new("half-born-export".to_string()).unwrap());
         let backend = LoroBackend::from_document(doc.clone());
         create(&backend, EntityUri::no_parent(), "parent").await;
-        let parent_tid = backend.resolve_to_tree_id("block:parent").await.unwrap();
 
-        // The two doc-state steps of a create, with the autosave in between.
-        let raw = doc.doc();
-        let tree = raw.get_tree(TREE_NAME);
-        let half_born = tree.create(Some(parent_tid)).unwrap();
-        doc.save_to_file(&path).unwrap();
-        tree.get_meta(half_born)
-            .unwrap()
-            .insert(STABLE_ID, loro::LoroValue::from("late"))
-            .unwrap();
-        raw.commit();
+        set_birth_widening_ms(WIDENED_BIRTH_MS);
+        let saver = {
+            let doc = doc.clone();
+            let path = path.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(WIDENED_BIRTH_MS / 2));
+                let started = std::time::Instant::now();
+                doc.save_to_file(&path).unwrap();
+                started.elapsed()
+            })
+        };
+        create(&backend, EntityUri::block("parent"), "late").await;
+        let waited = saver.join().unwrap();
+        set_birth_widening_ms(0);
+
+        assert!(
+            waited >= Duration::from_millis(WIDENED_BIRTH_MS / 4),
+            "the save returned in {waited:?} — it did not block on the create's write guard, \
+             so it was free to export the batch interior"
+        );
 
         let reloaded = LoroDocument::load_from_file(&path, "reloaded".to_string()).unwrap();
-        let (live, without_id) = reloaded
-            .with_read(|d| {
-                let t = d.get_tree(TREE_NAME);
-                let live: Vec<_> = t
-                    .get_nodes(false)
-                    .into_iter()
-                    .filter(|n| {
-                        !matches!(
-                            n.parent,
-                            loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
-                        )
-                    })
-                    .collect();
-                let without_id = live
-                    .iter()
-                    .filter(|n| {
-                        t.get_meta(n.id)
-                            .map(|m| read_stable_id(&m).is_none())
-                            .unwrap_or(false)
-                    })
-                    .count();
-                Ok((live.len(), without_id))
-            })
+        let (live, half_born) = reloaded
+            .with_read(|d| Ok(live_and_half_born(&d.get_tree(TREE_NAME))))
             .unwrap();
-
         assert_eq!(
-            (live, without_id),
-            (2, 1),
-            "the saved snapshot carries the half-born node; the STABLE_ID insert came after it"
+            (live, half_born),
+            (2, 0),
+            "the snapshot must be a commit-boundary state: both nodes present, neither id-less"
         );
 
         let view = reloaded
@@ -5513,9 +5567,80 @@ mod half_born_node_tests {
             .unwrap();
         assert!(view.block_exists(&EntityUri::block("parent")));
         assert!(
-            !view.block_exists(&EntityUri::block("late")),
-            "the id that landed too late is not in the snapshot, so the node stays invisible \
-             forever — the reader-side withholding never gets to settle"
+            view.block_exists(&EntityUri::block("late")),
+            "the block the save caught mid-creation must be visible after reload"
+        );
+    }
+
+    /// Wide enough that a reader's single mid-window sample lands nowhere near
+    /// an actual loro op, so the unguarded arm measures visibility rather than
+    /// racing the fork's internal `try_lock`.
+    const WIDENED_BIRTH_MS: u64 = 200;
+
+    /// The two directions of the doc-boundary lock, in one arrangement.
+    ///
+    /// A create is widened so its half-born interior is open for
+    /// [`WIDENED_BIRTH_MS`]; two readers sample the tree from other threads at
+    /// the midpoint. The UNGUARDED reader — the shape every raw `doc()` escape
+    /// still has — observes the interior: a live node with no `stable_id`. The
+    /// GUARDED reader (`with_read`) cannot: it blocks on the write guard and
+    /// wakes at the commit boundary.
+    ///
+    /// Both arms are teeth. Removing the widening reds the unguarded arm;
+    /// removing the read guard from `with_read` reds the guarded one.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn the_birth_window_is_open_to_a_raw_reader_and_closed_to_a_guarded_one() {
+        let doc = Arc::new(LoroDocument::new("half-born-hammer".to_string()).unwrap());
+        let backend = LoroBackend::from_document(doc.clone());
+        create(&backend, EntityUri::no_parent(), "parent").await;
+
+        let midpoint = Duration::from_millis(WIDENED_BIRTH_MS / 2);
+        set_birth_widening_ms(WIDENED_BIRTH_MS);
+
+        let raw_reader = {
+            // ALLOW(loro_doc_escape): the unguarded reader IS this arm's
+            // subject — it must stay outside the lock to stay meaningful.
+            let raw = doc.doc();
+            std::thread::spawn(move || {
+                std::thread::sleep(midpoint);
+                live_and_half_born(&raw.get_tree(TREE_NAME))
+            })
+        };
+        let guarded_reader = {
+            let doc = doc.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(midpoint);
+                let started = std::time::Instant::now();
+                let seen = doc
+                    .with_read(|d| Ok(live_and_half_born(&d.get_tree(TREE_NAME))))
+                    .unwrap();
+                (seen, started.elapsed())
+            })
+        };
+
+        create(&backend, EntityUri::block("parent"), "child").await;
+
+        let (_, raw_half_born) = raw_reader.join().unwrap();
+        let ((guarded_live, guarded_half_born), guarded_waited) = guarded_reader.join().unwrap();
+        set_birth_widening_ms(0);
+
+        assert_eq!(
+            raw_half_born, 1,
+            "the birth window must still be open to an unguarded reader — otherwise the \
+             guarded assertion below proves nothing"
+        );
+        assert_eq!(
+            guarded_half_born, 0,
+            "a reader inside the doc's read guard observed a create's interior"
+        );
+        assert_eq!(
+            guarded_live, 2,
+            "and it must wake to the finished state, not to a pre-create one"
+        );
+        assert!(
+            guarded_waited >= Duration::from_millis(WIDENED_BIRTH_MS / 4),
+            "the guarded read returned in {guarded_waited:?} without blocking on the write guard"
         );
     }
 }

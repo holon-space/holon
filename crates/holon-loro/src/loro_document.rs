@@ -7,10 +7,44 @@ use loro::PeerID;
 use tracing::debug;
 use tracing::info;
 
+use crate::doc_lock::DocLock;
+
 pub struct LoroDocument {
     doc: Arc<LoroDoc>,
+    /// The doc-boundary lock (see [`crate::doc_lock`]). Keyed by the inner
+    /// `Arc<LoroDoc>`, so every wrapper over one doc shares it.
+    lock: DocLock,
     peer_id: PeerID,
     doc_id: String,
+}
+
+/// Proof that the holder is inside the doc's write guard.
+///
+/// The token cannot be constructed outside [`LoroDocument::with_write_origin`],
+/// so a `&WriteTxn` in a signature is a static guarantee that the whole batch
+/// it performs is invisible to readers until the closure's `commit()`.
+///
+/// `Deref` is the transitional affordance: existing write closures reach the
+/// `LoroDoc` through it unchanged while the seam is established. Sealing
+/// continues by growing a mutation vocabulary on `WriteTxn` and removing
+/// `Deref` once no caller needs the raw doc.
+pub struct WriteTxn<'a> {
+    doc: &'a LoroDoc,
+}
+
+impl<'a> WriteTxn<'a> {
+    /// The doc this transaction writes to.
+    pub fn doc(&self) -> &'a LoroDoc {
+        self.doc
+    }
+}
+
+impl std::ops::Deref for WriteTxn<'_> {
+    type Target = LoroDoc;
+
+    fn deref(&self) -> &LoroDoc {
+        self.doc
+    }
 }
 
 /// Resolve the peer id for a fresh doc: an INJECTED id wins, else the process
@@ -56,11 +90,17 @@ impl LoroDocument {
             doc_id, peer_id
         );
 
-        Ok(Self {
-            doc: Arc::new(doc),
+        Ok(Self::wrap(Arc::new(doc), peer_id, doc_id))
+    }
+
+    fn wrap(doc: Arc<LoroDoc>, peer_id: PeerID, doc_id: String) -> Self {
+        let lock = DocLock::for_doc(&doc);
+        Self {
+            doc,
+            lock,
             peer_id,
             doc_id,
-        })
+        }
     }
 
     pub fn doc_id(&self) -> &str {
@@ -72,11 +112,7 @@ impl LoroDocument {
     /// to share a doc that was set up directly via the loro crate.
     pub fn from_existing(doc: Arc<LoroDoc>, doc_id: impl Into<String>) -> Self {
         let peer_id = doc.peer_id();
-        Self {
-            doc,
-            peer_id,
-            doc_id: doc_id.into(),
-        }
+        Self::wrap(doc, peer_id, doc_id.into())
     }
 
     pub fn peer_id(&self) -> PeerID {
@@ -91,16 +127,19 @@ impl LoroDocument {
     }
 
     pub fn insert_text(&self, container: &str, index: usize, text: &str) -> Result<Vec<u8>> {
-        let text_obj = self.doc.get_text(container);
-        text_obj.insert(index, text)?;
-        Ok(self
-            .doc
-            .export(loro::ExportMode::updates_owned(Default::default()))?)
+        self.lock.write(&self.doc_id, || {
+            let text_obj = self.doc.get_text(container);
+            text_obj.insert(index, text)?;
+            Ok(self
+                .doc
+                .export(loro::ExportMode::updates_owned(Default::default()))?)
+        })
     }
 
     pub fn get_text(&self, container: &str) -> Result<String> {
-        let text_obj = self.doc.get_text(container);
-        Ok(text_obj.to_string())
+        self.lock.read(&self.doc_id, || {
+            Ok(self.doc.get_text(container).to_string())
+        })
     }
 
     pub fn apply_update(&self, update: &[u8]) -> Result<()> {
@@ -108,35 +147,59 @@ impl LoroDocument {
     }
 
     pub fn apply_update_with_origin(&self, origin: &str, update: &[u8]) -> Result<()> {
-        self.doc.import_with(update, origin)?;
-        debug!("Applied update of {} bytes", update.len());
-        Ok(())
+        self.lock.write(&self.doc_id, || {
+            self.doc.import_with(update, origin)?;
+            debug!("Applied update of {} bytes", update.len());
+            Ok(())
+        })
     }
 
     pub fn export_snapshot(&self) -> Result<Vec<u8>> {
-        Ok(self.doc.export(loro::ExportMode::Snapshot)?)
+        self.lock.read(&self.doc_id, || {
+            Ok(self.doc.export(loro::ExportMode::Snapshot)?)
+        })
     }
 
     pub fn with_read<F, R>(&self, f: F) -> Result<R>
     where
         F: FnOnce(&LoroDoc) -> Result<R>,
     {
-        f(&self.doc)
+        self.lock.read(&self.doc_id, || f(&self.doc))
     }
 
     pub fn with_write<F, R>(&self, f: F) -> Result<R>
     where
-        F: FnOnce(&LoroDoc) -> Result<R>,
+        F: FnOnce(&WriteTxn) -> Result<R>,
     {
         self.with_write_origin("ui_local", f)
     }
 
+    /// Apply a write batch under the doc's write guard.
+    ///
+    /// The guard is held across the whole closure *and* the trailing
+    /// `commit()`, so no reader, exporter or saver can observe the batch
+    /// interior — the invariant the [`WriteTxn`] token names.
+    ///
+    /// The `commit()` fires Loro subscribers on this thread while the guard is
+    /// still held. **A subscription callback must not touch the doc**: it must
+    /// take what it needs from the event's own diff and hand it on over a
+    /// channel. Re-reading the doc from a callback on another thread's behalf
+    /// would block that thread; the doc-lock's timeout reports it rather than
+    /// hanging, but the fix is always to keep the callback pure.
     pub fn with_write_origin<F, R>(&self, origin: &str, f: F) -> Result<R>
     where
-        F: FnOnce(&LoroDoc) -> Result<R>,
+        F: FnOnce(&WriteTxn) -> Result<R>,
+    {
+        self.lock
+            .write(&self.doc_id, || self.write_batch(origin, f))
+    }
+
+    fn write_batch<F, R>(&self, origin: &str, f: F) -> Result<R>
+    where
+        F: FnOnce(&WriteTxn) -> Result<R>,
     {
         self.doc.set_next_commit_origin(origin);
-        let result = f(&self.doc)?;
+        let result = f(&WriteTxn { doc: &self.doc })?;
 
         // Flush the transaction so the origin-tagged commit actually fires and
         // subscribers observe `origin`. Loro batches changes until an explicit
@@ -166,6 +229,21 @@ impl LoroDocument {
         Ok(result)
     }
 
+    /// The raw inner doc, OUTSIDE the doc-boundary lock.
+    ///
+    /// Every escape is an observer that can see a write batch's interior, so
+    /// each production call site is classified in the seal audit
+    /// (`docs/Architecture/`-adjacent: the commit that introduced
+    /// [`crate::doc_lock`]). The blessed uses are (a) handing the doc to a
+    /// long-lived transport/subscription that never reads state itself, and
+    /// (b) the cell backings' retained container handles, which the
+    /// scoped-capability ruling keeps outside the lock. Anything that reads or
+    /// mutates tree/text state belongs in [`Self::with_read`] /
+    /// [`Self::with_write`].
+    ///
+    /// Note that any `LoroDocument` re-wrapping this `Arc` (via
+    /// [`Self::from_existing`]) still resolves to the SAME lock — the seal
+    /// survives re-wrapping; only raw use bypasses it.
     pub fn doc(&self) -> Arc<LoroDoc> {
         self.doc.clone()
     }
@@ -177,14 +255,21 @@ impl LoroDocument {
     /// Peers whose version vector predates the trim cannot receive an
     /// incremental delta; `IrohSyncAdapter` detects that and ships a full
     /// snapshot instead.
+    /// Takes the WRITE guard, not the read guard: the leading `commit()`
+    /// flushes a pending batch and fires subscribers.
     pub fn export_compact_snapshot(&self) -> Result<Vec<u8>> {
-        self.doc.commit();
-        let frontiers = self.doc.oplog_frontiers();
-        Ok(self
-            .doc
-            .export(loro::ExportMode::shallow_snapshot(&frontiers))?)
+        self.lock.write(&self.doc_id, || {
+            self.doc.commit();
+            let frontiers = self.doc.oplog_frontiers();
+            Ok(self
+                .doc
+                .export(loro::ExportMode::shallow_snapshot(&frontiers))?)
+        })
     }
 
+    /// Sealed through [`Self::export_snapshot`]'s read guard: the bytes are
+    /// captured at a commit boundary, so what lands on disk can never be a
+    /// write batch's interior.
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     pub fn save_to_file(&self, path: &Path) -> Result<()> {
         let snapshot = self.export_snapshot()?;
@@ -234,11 +319,7 @@ impl LoroDocument {
             peer_id
         );
 
-        Ok(Self {
-            doc: Arc::new(doc),
-            peer_id,
-            doc_id,
-        })
+        Ok(Self::wrap(Arc::new(doc), peer_id, doc_id))
     }
 }
 
