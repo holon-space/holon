@@ -5,8 +5,9 @@
 //! A walk that reaches it therefore stops advancing — `cur = block.parent_id`
 //! hands back the sentinel — and re-reads that one row until its depth bound.
 //! Three separate copies of this loop had the defect; these tests pin the one
-//! function they now share, the shared function is the intended home for any future walk (nothing prevents a new hand-rolled copy — reviewers should route walks here)
-//! rather than a fourth repeat of the same bug.
+//! function they now share, the shared function is the intended home for any
+//! future walk (nothing prevents a new hand-rolled copy — reviewers should
+//! route walks here) rather than a fourth repeat of the same bug.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -18,6 +19,7 @@ use async_trait::async_trait;
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 use holon_filesystem::BlockReader;
+use holon_filesystem::BlockRowMemo;
 use holon_filesystem::nearest_page_ancestor;
 
 /// A store shaped like `block_raw`: it holds the self-parented root sentinel,
@@ -102,9 +104,14 @@ fn no_id_read_twice(reads: &[String]) -> bool {
 async fn a_chain_reaching_the_root_sentinel_stops_there() {
     let reader = Arc::new(RecordingReader::new(&[("orphan", false)]));
 
-    let found = nearest_page_ancestor(reader.as_ref(), &EntityUri::block("orphan"), None, None)
-        .await
-        .unwrap();
+    let found = nearest_page_ancestor(
+        reader.as_ref(),
+        &EntityUri::block("orphan"),
+        &mut BlockRowMemo::new(),
+        None,
+    )
+    .await
+    .unwrap();
 
     assert!(
         found.is_none(),
@@ -121,9 +128,14 @@ async fn a_chain_reaching_the_root_sentinel_stops_there() {
 async fn a_cycle_answers_none_loudly_instead_of_spinning() {
     let reader = Arc::new(RecordingReader::cyclic());
 
-    let found = nearest_page_ancestor(reader.as_ref(), &EntityUri::block("a"), None, None)
-        .await
-        .unwrap();
+    let found = nearest_page_ancestor(
+        reader.as_ref(),
+        &EntityUri::block("a"),
+        &mut BlockRowMemo::new(),
+        None,
+    )
+    .await
+    .unwrap();
 
     assert!(
         found.is_none(),
@@ -145,10 +157,15 @@ async fn the_nearest_page_wins_and_each_step_is_read_once() {
         ("leaf", false),
     ]));
 
-    let found = nearest_page_ancestor(reader.as_ref(), &EntityUri::block("leaf"), None, None)
-        .await
-        .unwrap()
-        .expect("leaf is inside a page");
+    let found = nearest_page_ancestor(
+        reader.as_ref(),
+        &EntityUri::block("leaf"),
+        &mut BlockRowMemo::new(),
+        None,
+    )
+    .await
+    .unwrap()
+    .expect("leaf is inside a page");
 
     assert_eq!(
         found.id,
@@ -172,10 +189,12 @@ async fn a_prefetched_first_row_is_not_read_again() {
         .unwrap();
     let counter = AtomicU64::new(0);
 
+    let mut memo = BlockRowMemo::new();
+    memo.prefetch(&EntityUri::block("leaf"), leaf);
     let found = nearest_page_ancestor(
         reader.as_ref(),
         &EntityUri::block("leaf"),
-        Some(leaf),
+        &mut memo,
         Some(&counter),
     )
     .await
@@ -196,10 +215,15 @@ async fn a_prefetched_first_row_is_not_read_again() {
 async fn a_page_is_its_own_owner() {
     let reader = Arc::new(RecordingReader::new(&[("page", true)]));
 
-    let found = nearest_page_ancestor(reader.as_ref(), &EntityUri::block("page"), None, None)
-        .await
-        .unwrap()
-        .expect("a page owns itself");
+    let found = nearest_page_ancestor(
+        reader.as_ref(),
+        &EntityUri::block("page"),
+        &mut BlockRowMemo::new(),
+        None,
+    )
+    .await
+    .unwrap()
+    .expect("a page owns itself");
 
     assert_eq!(found.id, EntityUri::block("page"));
 }

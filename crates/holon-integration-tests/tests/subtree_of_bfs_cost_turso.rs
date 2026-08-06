@@ -40,6 +40,7 @@ use holon_core::block_ordering::BlockOrdering;
 use holon_core::traits::Result as OrderingResult;
 use holon_filesystem::BlockReader;
 use holon_orgmode::home_authority::BlockHomeAuthority;
+use holon_orgmode::home_authority::HomeBurstMemo;
 use holon_turso::schema_modules::BlockSchemaModule;
 
 /// Blocks in the document that owns the measured subtree. Fixed while the
@@ -213,7 +214,9 @@ async fn measure(subtree: usize) -> Result<()> {
 
     // (a) today's BFS.
     let t = Instant::now();
-    let found = authority.subtree_of(host.as_str()).await?;
+    let found = authority
+        .subtree_of(host.as_str(), &mut HomeBurstMemo::default())
+        .await?;
     let bfs_elapsed = t.elapsed();
     let bfs_children = children_calls.load(AtomicOrdering::Relaxed);
     assert_eq!(
@@ -283,7 +286,9 @@ async fn measure(subtree: usize) -> Result<()> {
     // cost already deemed acceptable.
     authority.reset_locate_reads();
     let t = Instant::now();
-    let placed = authority.locate_batch(&subtree_ids).await?;
+    let placed = authority
+        .locate_batch(&subtree_ids, &mut HomeBurstMemo::default())
+        .await?;
     let batch_elapsed = t.elapsed();
     let batch_reads = authority.locate_reads();
     assert_eq!(placed.len(), subtree, "locate_batch must place every id");
