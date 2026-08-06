@@ -861,6 +861,28 @@ async fn delete_block_via_cells(
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })
 }
 
+/// The row facts [`BlockOperations::move_block`] reads before it writes,
+/// answered by a caller that has already read them.
+///
+/// Each field MUST be the state as of the move's entry: read in the same
+/// operation, with no write to that row in between. `block`'s parent and
+/// `old_predecessor` are what the undo inverse restores, so a stale one
+/// silently sends undo to the wrong slot.
+///
+/// The fields carry the derived facts rather than whole entities, so the
+/// prefetch cannot outlive its meaning: `block`'s non-optional parent encodes
+/// the "not a root block" check the caller must already have made.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct MovePrefetch {
+    /// `(parent_id, depth, is_page)` of the block being moved.
+    pub block: Option<(EntityUri, i64, bool)>,
+    /// The block's previous sibling BEFORE the move. `Some(None)` means
+    /// "prefetched, and there is none".
+    pub old_predecessor: Option<Option<EntityUri>>,
+    /// `(depth, is_page)` of the destination parent.
+    pub new_parent: Option<(i64, bool)>,
+}
+
 /// Hierarchical structure operations (for any block-like entity)
 ///
 /// This trait provides operations for manipulating block hierarchies.
@@ -929,14 +951,24 @@ where
             .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
         // `move_block` enforces the "must have a parent" invariant, but we
         // check up-front to keep the indent-specific error message.
-        block
+        let old_parent = block
             .parent_id()
+            .cloned()
             .ok_or_else(|| anyhow::anyhow!("Cannot indent root block"))?;
+        let moved = (old_parent, block.depth(), block.is_page());
 
         let prev_sibling = self.get_prev_sibling(id).await?.ok_or_else(|| {
             anyhow::anyhow!("Cannot indent: no previous sibling to become parent")
         })?;
         let new_parent_uri = prev_sibling.id().clone();
+        // The previous sibling is BOTH the destination parent and — since the
+        // move has not happened yet — `id`'s old predecessor. Both of
+        // `move_block`'s reads for them are already answered.
+        let prefetch = MovePrefetch {
+            block: Some(moved),
+            old_predecessor: Some(Some(new_parent_uri.clone())),
+            new_parent: Some((prev_sibling.depth(), prev_sibling.is_page())),
+        };
 
         // Indent semantics: the indented block becomes the LAST child of the
         // previous sibling. `move_block` interprets `after_block_id = None`
@@ -956,7 +988,7 @@ where
                 .last()
                 .map(|c| c.id().clone()),
         };
-        self.move_block(id, &new_parent_uri, after_uri.as_ref())
+        self.move_block_prefetched(id, &new_parent_uri, after_uri.as_ref(), prefetch)
             .await
     }
 
@@ -999,88 +1031,8 @@ where
         parent_id: &EntityUri,
         after_block_id: Option<&EntityUri>,
     ) -> Result<OperationResult> {
-        let id_str = id.as_str();
-        // Capture old state before mutation
-        let maybe_block: Option<T> = self.get_by_id(id_str).await?;
-        let block: T = maybe_block.ok_or_else(|| anyhow::anyhow!("Block not found"))?;
-        let old_parent_uri = block
-            .parent_id()
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("Cannot move root block"))?;
-        let old_predecessor = self.get_prev_sibling(id).await?;
-        let old_depth = block.depth();
-
-        // Compute new depth for descendants' delta-update.
-        let maybe_parent: Option<T> = self.get_by_id(parent_id.as_str()).await?;
-        let parent: T = maybe_parent.ok_or_else(|| anyhow::anyhow!("Parent not found"))?;
-
-        // No-pages-under-non-pages (interim ruling 2026-07-13, Fork B B1): a page
-        // block may only be reparented under another page (an org file nests only
-        // under an org file). Enforced HERE, at the single shared write chokepoint
-        // for every reparenting op — `move_block` itself plus `indent`/`outdent`/
-        // `move_up`/`move_down`, which all route through it — so both the SQL and
-        // Loro providers (each using this default `BlockOperations` impl) reject it
-        // identically. This is the WRITE-side guard; `name_chain` (writeback) is the
-        // downstream READ-side tripwire. Fail loud rather than let the prohibited
-        // topology land and surface deep in writeback.
-        if crate::block_op_catalog::page_under_non_page_prohibited(
-            block.is_page(),
-            Some(parent.is_page()),
-        ) {
-            return Err(anyhow::anyhow!(
-                "move_block: refusing to reparent page block '{}' under non-page parent '{}' — \
-                 pages under non-pages are prohibited (interim ruling 2026-07-13); a page may only \
-                 nest under another page",
-                id_str,
-                parent_id.as_str(),
-            )
-            .into());
-        }
-
-        let new_depth = parent.depth() + 1;
-        let depth_delta = new_depth - old_depth;
-
-        // Position + depth update.
-        let mut changes = self.move_to_position(id, parent_id, after_block_id).await?;
-        // Disclose the reparent itself: `move_to_position` reports no deltas
-        // (ordering-internal), but parent_id DID change — propagation consumers
-        // and the undo precondition both need the true field-level change.
-        changes.push(FieldDelta::new(
-            id_str,
-            "parent_id",
-            Value::String(old_parent_uri.as_str().to_string()),
-            Value::String(parent_id.as_str().to_string()),
-        ));
-        let depth_result = self
-            .set_field(id_str, "depth", Value::Integer(new_depth))
-            .await?;
-        changes.extend(depth_result.changes);
-
-        // Recursively update all descendants' depths by the same delta
-        // Note: update_descendant_depths calls set_field internally, so it will also
-        // return FieldDeltas For now, we'll skip collecting those to avoid
-        // complexity
-        if depth_delta != 0 {
-            self.update_descendant_depths(id, depth_delta).await?;
-        }
-
-        // Return inverse operation using macro-generated helper
-        use crate::__operations_block_operations;
-
-        // Entity name will be set by OperationProvider when operation is executed
-        let old_pred_uri = old_predecessor.as_ref().map(|p| p.id().clone());
-        Ok(OperationResult::new(
-            changes,
-            __operations_block_operations::move_block_op(
-                "placeholder", /* OperationDispatcher overwrites this with the resolved
-                                * entity_name (see operation_dispatcher.rs:504). EntityName::new
-                                * debug-asserts on empty/invalid scheme, so we use a valid
-                                * placeholder. */
-                id,
-                &old_parent_uri,
-                old_pred_uri.as_ref(),
-            ),
-        ))
+        self.move_block_prefetched(id, parent_id, after_block_id, MovePrefetch::default())
+            .await
     }
 
     /// Move block out to parent's level (decrease indentation)
@@ -1123,13 +1075,24 @@ where
 
         // Capture old predecessor before move (for inverse operation)
         let old_parent_uri = parent_id.clone();
-        let old_predecessor = self.get_prev_sibling(id).await?;
+        let old_predecessor = self
+            .get_prev_sibling(id)
+            .await?
+            .map(|pred| pred.id().clone());
 
-        // Move to grandparent's children, after parent
+        // Move to grandparent's children, after parent. The block and its
+        // predecessor were read above, in this same op, before any write —
+        // `move_block` does not read them again. The grandparent was not, so
+        // that one read stays.
         let grandparent_uri = grandparent_id.clone();
         let parent_uri = old_parent_uri.clone();
+        let prefetch = MovePrefetch {
+            block: Some((old_parent_uri.clone(), block.depth(), block.is_page())),
+            old_predecessor: Some(old_predecessor.clone()),
+            new_parent: None,
+        };
         let move_result = self
-            .move_block(id, &grandparent_uri, Some(&parent_uri))
+            .move_block_prefetched(id, &grandparent_uri, Some(&parent_uri), prefetch)
             .await?;
 
         // Return inverse: move_block back to old parent after old predecessor.
@@ -1138,7 +1101,7 @@ where
         use crate::__operations_block_operations;
 
         // Entity name will be set by OperationProvider when operation is executed
-        let old_pred_uri = old_predecessor.as_ref().map(|p| p.id().clone());
+        let old_pred_uri = old_predecessor;
         Ok(OperationResult::new(
             move_result.changes,
             __operations_block_operations::move_block_op(
@@ -2142,6 +2105,137 @@ where
             "delete_keep_children: reparent+delete not yet invertible",
         ))
     }
+}
+
+/// `move_block` with its up-front reads already answered by the caller.
+///
+/// A separate trait because EVERY async method on [`BlockOperations`] becomes
+/// an entry in the operation catalog, and this is not an operation — it is the
+/// same operation reached by a caller that already holds the rows.
+/// Blanket-implemented, so every `BlockOperations` impl has it.
+#[async_trait]
+pub trait BlockMovePrefetched<T>: BlockOperations<T>
+where
+    T: BlockEntity + MaybeSendSync + 'static,
+{
+    /// [`move_block`](Self::move_block) with its three up-front reads
+    /// optionally answered by the caller — see [`MovePrefetch`] for the
+    /// freshness contract. Not itself an operation: `move_block` is the
+    /// catalog entry and this is the seam its structural callers reach.
+    async fn move_block_prefetched(
+        &self,
+        id: &EntityUri,
+        parent_id: &EntityUri,
+        after_block_id: Option<&EntityUri>,
+        prefetch: MovePrefetch,
+    ) -> Result<OperationResult> {
+        let id_str = id.as_str();
+        // Capture old state before mutation
+        let (old_parent_uri, old_depth, moved_is_page) = match prefetch.block {
+            Some(facts) => facts,
+            None => {
+                let maybe_block: Option<T> = self.get_by_id(id_str).await?;
+                let block: T = maybe_block.ok_or_else(|| anyhow::anyhow!("Block not found"))?;
+                let old_parent_uri = block
+                    .parent_id()
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("Cannot move root block"))?;
+                (old_parent_uri, block.depth(), block.is_page())
+            }
+        };
+        let old_predecessor: Option<EntityUri> = match prefetch.old_predecessor {
+            Some(pred) => pred,
+            None => self
+                .get_prev_sibling(id)
+                .await?
+                .map(|pred| pred.id().clone()),
+        };
+
+        // Compute new depth for descendants' delta-update.
+        let (parent_depth, parent_is_page) = match prefetch.new_parent {
+            Some(facts) => facts,
+            None => {
+                let maybe_parent: Option<T> = self.get_by_id(parent_id.as_str()).await?;
+                let parent: T = maybe_parent.ok_or_else(|| anyhow::anyhow!("Parent not found"))?;
+                (parent.depth(), parent.is_page())
+            }
+        };
+
+        // No-pages-under-non-pages (interim ruling 2026-07-13, Fork B B1): a page
+        // block may only be reparented under another page (an org file nests only
+        // under an org file). Enforced HERE, at the single shared write chokepoint
+        // for every reparenting op — `move_block` itself plus `indent`/`outdent`/
+        // `move_up`/`move_down`, which all route through it — so both the SQL and
+        // Loro providers (each using this default `BlockOperations` impl) reject it
+        // identically. This is the WRITE-side guard; `name_chain` (writeback) is the
+        // downstream READ-side tripwire. Fail loud rather than let the prohibited
+        // topology land and surface deep in writeback.
+        if crate::block_op_catalog::page_under_non_page_prohibited(
+            moved_is_page,
+            Some(parent_is_page),
+        ) {
+            return Err(anyhow::anyhow!(
+                "move_block: refusing to reparent page block '{}' under non-page parent '{}' — \
+                 pages under non-pages are prohibited (interim ruling 2026-07-13); a page may only \
+                 nest under another page",
+                id_str,
+                parent_id.as_str(),
+            )
+            .into());
+        }
+
+        let new_depth = parent_depth + 1;
+        let depth_delta = new_depth - old_depth;
+
+        // Position + depth update.
+        let mut changes = self.move_to_position(id, parent_id, after_block_id).await?;
+        // Disclose the reparent itself: `move_to_position` reports no deltas
+        // (ordering-internal), but parent_id DID change — propagation consumers
+        // and the undo precondition both need the true field-level change.
+        changes.push(FieldDelta::new(
+            id_str,
+            "parent_id",
+            Value::String(old_parent_uri.as_str().to_string()),
+            Value::String(parent_id.as_str().to_string()),
+        ));
+        let depth_result = self
+            .set_field(id_str, "depth", Value::Integer(new_depth))
+            .await?;
+        changes.extend(depth_result.changes);
+
+        // Recursively update all descendants' depths by the same delta
+        // Note: update_descendant_depths calls set_field internally, so it will also
+        // return FieldDeltas For now, we'll skip collecting those to avoid
+        // complexity
+        if depth_delta != 0 {
+            self.update_descendant_depths(id, depth_delta).await?;
+        }
+
+        // Return inverse operation using macro-generated helper
+        use crate::__operations_block_operations;
+
+        // Entity name will be set by OperationProvider when operation is executed
+        Ok(OperationResult::new(
+            changes,
+            __operations_block_operations::move_block_op(
+                "placeholder", /* OperationDispatcher overwrites this with the resolved
+                                * entity_name (see operation_dispatcher.rs:504). EntityName::new
+                                * debug-asserts on empty/invalid scheme, so we use a valid
+                                * placeholder. */
+                id,
+                &old_parent_uri,
+                old_predecessor.as_ref(),
+            ),
+        ))
+    }
+}
+
+#[async_trait]
+impl<T, S> BlockMovePrefetched<T> for S
+where
+    S: BlockOperations<T> + ?Sized,
+    T: BlockEntity + MaybeSendSync + 'static,
+{
 }
 
 /// Rename operations (for entities with a name field)

@@ -542,6 +542,85 @@ impl SqlOperationProvider {
             .is_empty())
     }
 
+    /// Every descendant id of `root` — children, grandchildren, … — in ONE
+    /// recursive-CTE read, `root` itself excluded.
+    ///
+    /// Replaces a level-by-level BFS whose per-level child query was an
+    /// unfiltered full-table read: the identical binding-set re-executed once
+    /// per tree level, which made it the dominant re-execution family (task
+    /// #15). `UNION` rather than `UNION ALL` so a stored parent cycle
+    /// terminates instead of recursing forever.
+    ///
+    /// # Cycle contract
+    ///
+    /// A stored parent cycle is refused, matching [`Self::prepare_delete`]'s
+    /// cascade. A block has exactly ONE parent, so any cycle among `root`'s
+    /// descendants must pass through `root` itself — `root` returning as its
+    /// own descendant is therefore the complete test, not a heuristic.
+    /// Excluding it silently instead would leave callers shifting depths over
+    /// a corrupt tree; `move_block` has no reparent-under-own-descendant guard
+    /// and is dispatchable, so this state is reachable.
+    ///
+    /// Reads the write table, so a descendant written earlier in this same
+    /// operation is visible — the matview-backed BFS could miss it.
+    pub async fn descendant_ids(&self, root: &str) -> Result<Vec<String>> {
+        let sql = format!(
+            "WITH RECURSIVE descendants(id) AS (SELECT id FROM {table} WHERE parent_id = '{root}' \
+             UNION SELECT b.id FROM {table} b JOIN descendants d ON b.parent_id = d.id) SELECT id \
+             FROM descendants",
+            table = self.table_name,
+            root = root.replace('\'', "''"),
+        );
+        let ids: Vec<String> = self
+            .db_handle
+            .query(&sql, HashMap::new())
+            .await
+            .map_err(|e| format!("descendant_ids({root}): {e}"))?
+            .into_iter()
+            .filter_map(|row| {
+                row.get("id")
+                    .and_then(|v| v.as_string())
+                    .map(str::to_string)
+            })
+            .collect();
+        if ids.iter().any(|id| id == root) {
+            return Err(format!(
+                "descendant_ids: parent cycle detected — block '{root}' is its own descendant \
+                 (corrupt block tree); refusing to walk it"
+            )
+            .into());
+        }
+        Ok(ids)
+    }
+
+    /// Shift `depth` by `delta` on every row in `ids`, batched.
+    ///
+    /// Depth is derived state that carries no undo inverse — `move_block`'s
+    /// inverse re-runs the move and re-derives every descendant depth — so the
+    /// bulk UPDATE is the whole write, not a shortcut past one.
+    pub async fn shift_depths(&self, ids: &[String], delta: i64) -> Result<()> {
+        /// Ids per statement. Bounds the SQL text; the count of statements is
+        /// what the read budget sees.
+        const CHUNK: usize = 400;
+        for chunk in ids.chunks(CHUNK) {
+            let list = chunk
+                .iter()
+                .map(|id| format!("'{}'", id.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "UPDATE {table} SET {depth} = {depth} + {delta} WHERE id IN ({list})",
+                table = self.table_name,
+                depth = Self::quote_identifier("depth"),
+            );
+            self.db_handle
+                .execute(&sql, vec![])
+                .await
+                .map_err(|e| format!("shift_depths({} ids, {delta}): {e}", chunk.len()))?;
+        }
+        Ok(())
+    }
+
     /// Whether `id` has any DIRECT child carrying the `Page` tag — the
     /// `remove_tag("Page")` guard: unmarking a page with page children would
     /// leave those children as pages under a non-page block.
@@ -1635,6 +1714,40 @@ impl SqlOperationProvider {
             .unwrap_or(Value::Null))
     }
 
+    /// One read answering everything a content write needs about the row it is
+    /// about to overwrite: `content_type` (source blocks keep their leading
+    /// whitespace) plus the current `content` and `marks` (the undo inverse's
+    /// old value). These describe the same instant by definition, so issuing
+    /// them as two or three point SELECTs of the same row was pure redundancy
+    /// (task #15).
+    ///
+    /// A missing row reads back as `(false, Null, Null)` — the same sentinel
+    /// [`read_field_old_value`](Self::read_field_old_value) returns, which the
+    /// inverse `set_field` uses to REMOVE the field.
+    async fn read_content_row(&self, id: &str) -> Result<(bool, Value, Value)> {
+        let sql = format!(
+            "SELECT content_type, content, marks FROM {table} WHERE id = '{id}'",
+            table = self.table_name,
+            id = id.replace('\'', "''"),
+        );
+        let row = self
+            .db_handle
+            .query(&sql, HashMap::new())
+            .await
+            .map_err(|e| format!("read_content_row({id}): {e}"))?
+            .into_iter()
+            .next();
+        let Some(mut row) = row else {
+            return Ok((false, Value::Null, Value::Null));
+        };
+        let is_source = row.get("content_type").and_then(|v| v.as_string()) == Some("source");
+        Ok((
+            is_source,
+            row.remove("content").unwrap_or(Value::Null),
+            row.remove("marks").unwrap_or(Value::Null),
+        ))
+    }
+
     /// Build the inverse `set_field` [`Operation`] that restores `field` to
     /// `old_value` on row `id`. The param shape ({id, field, value}) matches
     /// the forward op so the undo stack's word-boundary coalescer (which
@@ -1711,35 +1824,15 @@ impl SqlOperationProvider {
             }
         }
 
-        // Trim per content_type (source blocks preserve first-line whitespace).
-        let ct_sql = format!(
-            "SELECT content_type FROM {} WHERE id = '{}'",
-            self.table_name,
-            id.replace('\'', "''")
-        );
-        let is_source = self
-            .db_handle
-            .query(&ct_sql, HashMap::new())
-            .await
-            .map_err(|e| format!("set_field(content rich) content_type lookup: {e}"))?
-            .into_iter()
-            .next()
-            .and_then(|row| {
-                row.get("content_type")
-                    .and_then(|v| v.as_string())
-                    .map(str::to_string)
-            })
-            .is_some_and(|s| s == "source");
+        // Trim per content_type (source blocks preserve first-line whitespace),
+        // and capture prior (content, marks) BEFORE the write — the marks
+        // column still holds the prior set here (the interactive path's `marks`
+        // follow-up runs AFTER this returns), so this is the true predecessor.
+        let (is_source, prior_content, prior_marks) = self.read_content_row(id).await?;
         let trimmed = match Self::trimmed_content(&Value::String(text), is_source) {
             Value::String(s) => s,
             other => unreachable!("trimmed_content(String) yields String, got {other:?}"),
         };
-
-        // Capture prior (content, marks) BEFORE the write — the marks column
-        // still holds the prior set here (the interactive path's `marks`
-        // follow-up runs AFTER this returns), so this is the true predecessor.
-        let prior_content = self.read_field_old_value(id, "content").await?;
-        let prior_marks = self.read_field_old_value(id, "marks").await?;
 
         let content_sql = Self::value_to_sql(&Value::String(trimmed.clone()));
         let marks_sql = match &marks_val {
@@ -2301,8 +2394,7 @@ impl OperationProvider for SqlOperationProvider {
     /// reads back as `Ok(None)` (unknown → the caller fails safe), matching
     /// the "never null on unknown" contract on the trait method.
     async fn read_block_content_marks(&self, id: &str) -> Result<Option<(String, Value)>> {
-        let content = self.read_field_old_value(id, "content").await?;
-        let marks = self.read_field_old_value(id, "marks").await?;
+        let (_, content, marks) = self.read_content_row(id).await?;
         match content {
             Value::String(s) => Ok(Some((s, marks))),
             Value::Null => Ok(None),
@@ -2356,32 +2448,19 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     return self.set_field_content_rich(id, obj).await;
                 }
 
-                let value = if field == "content" {
-                    // For set_field, params only carries {id, field, value} — no
-                    // content_type. Look up the existing block's content_type so
-                    // source blocks preserve first-line whitespace verbatim.
-                    let ct_sql = format!(
-                        "SELECT content_type FROM {} WHERE id = '{}'",
-                        self.table_name,
-                        id.replace('\'', "''")
-                    );
-                    let rows = self
-                        .db_handle
-                        .query(&ct_sql, HashMap::new())
-                        .await
-                        .map_err(|e| format!("set_field content_type lookup failed: {}", e))?;
-                    let is_source = rows
-                        .into_iter()
-                        .next()
-                        .and_then(|row| {
-                            row.get("content_type")
-                                .and_then(|v| v.as_string())
-                                .map(|s| s.to_string())
-                        })
-                        .is_some_and(|s| s == "source");
-                    Self::trimmed_content(raw_value, is_source)
+                // For set_field, params only carries {id, field, value} — no
+                // content_type. The row read here answers BOTH the trimming
+                // question (source blocks preserve first-line whitespace
+                // verbatim) and, further down, the inverse's old value: no
+                // write to this row happens in between, so one read serves both.
+                let content_row = if field == "content" {
+                    Some(self.read_content_row(id).await?)
                 } else {
-                    raw_value.clone()
+                    None
+                };
+                let value = match &content_row {
+                    Some((is_source, _, _)) => Self::trimmed_content(raw_value, *is_source),
+                    None => raw_value.clone(),
                 };
 
                 let sql_value = Self::value_to_sql(&value);
@@ -2440,7 +2519,14 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     return Ok(OperationResult::new(Vec::new(), inverse));
                 }
 
-                let old_value = self.read_field_old_value(id, field).await?;
+                // `prior_marks` is the SAME read that answered `old_value`: the
+                // UPDATE below touches `content`/`write_seq` only, and the
+                // `marks` junction arm cannot run for `field == "content"`, so
+                // the column still holds what `read_content_row` saw.
+                let (old_value, prior_marks) = match content_row {
+                    Some((_, old_content, old_marks)) => (old_content, Some(old_marks)),
+                    None => (self.read_field_old_value(id, field).await?, None),
+                };
 
                 // Editor echo-suppression ordering token. The gpui editor stamps
                 // `write_seq` on each content keystroke (holon_api::write_seq) so
@@ -2566,7 +2652,11 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     })?;
                 }
 
-                if field == "content" {
+                // Read-back probe for the content write. Its ONLY consumer is
+                // the trace event, so it is gated on TRACE actually being
+                // enabled — unconditionally it was a third same-row SELECT per
+                // content write, paid in full at every log level.
+                if field == "content" && tracing::enabled!(tracing::Level::TRACE) {
                     let verify_sql = format!(
                         "SELECT content FROM {} WHERE id = '{}'",
                         self.table_name,
@@ -2618,7 +2708,10 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 // predecessor (no marks) keeps the String inverse so the undo
                 // stack's word-boundary coalescer still recognises typing.
                 let inverse = if field == "content" {
-                    let prior_marks = self.read_field_old_value(id, "marks").await?;
+                    let prior_marks = match prior_marks {
+                        Some(marks) => marks,
+                        None => self.read_field_old_value(id, "marks").await?,
+                    };
                     if Self::marks_non_empty(&prior_marks) {
                         let prior_text = old_value.as_string().unwrap_or_default().to_string();
                         self.set_field_inverse(
@@ -4003,6 +4096,110 @@ mod delete_inverse_classification_tests {
             }
             other => panic!("subtree delete must be declared irreversible, got {other:?}"),
         }
+    }
+
+    /// The rich-content write path (`content` as an Object `{text, marks}`),
+    /// which had no producer in any test — so the 3-reads-into-1 collapse that
+    /// now feeds `rich_content_value(prior_text, prior_marks)` was uncovered.
+    ///
+    /// Sets a rich value over a block that already carries content+marks, then
+    /// applies the returned inverse and asserts BOTH columns come back
+    /// byte-identical. That is exactly what the collapsed read must preserve:
+    /// its three values are captured at one instant before the UPDATE.
+    #[tokio::test]
+    async fn set_field_content_rich_undo_restores_content_and_marks_byte_identically() {
+        let (db_handle, provider) = provider_with_rows().await;
+
+        let prior_text = "hello bold world";
+        // Built through the real serializer, not a hand-written literal: the
+        // undo path re-derives `block_links` from this JSON and rejects a shape
+        // it cannot parse, so a drifting fixture would fail as a fake red.
+        let prior_marks = holon_api::marks_to_json(&[holon_api::MarkSpan::new(
+            6,
+            10,
+            holon_api::InlineMark::Bold,
+        )]);
+        db_handle
+            .execute(
+                &format!(
+                    "INSERT INTO block_raw (id, parent_id, content, marks, content_type) VALUES \
+                     ('block:rich', 'block:root', '{prior_text}', '{prior_marks}', 'text')"
+                ),
+                vec![],
+            )
+            .await
+            .expect("seed the rich block");
+
+        let read_pair = |handle: crate::storage::turso::DbHandle| async move {
+            let rows = handle
+                .query(
+                    "SELECT content, marks FROM block_raw WHERE id = 'block:rich'",
+                    HashMap::new(),
+                )
+                .await
+                .expect("read back");
+            let row = rows.into_iter().next().expect("row present");
+            // `marks` is a jsonb column — it comes back as Value::Json/Array,
+            // never Value::String — so it is compared as a Value. Stringifying
+            // it would collapse every state to "" and pass vacuously.
+            (
+                row.get("content")
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_default()
+                    .to_string(),
+                row.get("marks").cloned().unwrap_or(Value::Null),
+            )
+        };
+        let before = read_pair(db_handle.clone()).await;
+        assert_eq!(before.0, prior_text, "seeded content");
+        assert!(
+            SqlOperationProvider::marks_non_empty(&before.1),
+            "the fixture must actually carry marks, else the restore assertion is vacuous: {:?}",
+            before.1
+        );
+
+        // Rich write: content arrives as Object { text, marks }.
+        let mut obj: HashMap<String, Value> = HashMap::new();
+        obj.insert("text".into(), Value::String("goodbye".into()));
+        obj.insert("marks".into(), Value::Null);
+        let mut params: StorageEntity = HashMap::new();
+        params.insert("id".into(), Value::String("block:rich".into()));
+        params.insert("field".into(), Value::String("content".into()));
+        params.insert("value".into(), Value::Object(obj));
+
+        let result = provider
+            .execute_operation(&EntityName::new("block"), "set_field", params)
+            .await
+            .expect("rich content write");
+
+        let after = read_pair(db_handle.clone()).await;
+        assert_eq!(after.0, "goodbye", "content written");
+        assert!(
+            !SqlOperationProvider::marks_non_empty(&after.1),
+            "the rich write carried marks=Null, so the column must be cleared: {:?}",
+            after.1
+        );
+
+        // Apply the inverse and demand an exact restore of BOTH columns.
+        let inverse = match result.undo {
+            UndoAction::Undo(op) => op,
+            other => panic!("rich content write must be invertible, got {other:?}"),
+        };
+        let inverse_params: StorageEntity = inverse
+            .params
+            .iter()
+            .map(|(k, v)| (k.as_str().into(), v.clone()))
+            .collect();
+        provider
+            .execute_operation(&EntityName::new("block"), &inverse.op_name, inverse_params)
+            .await
+            .expect("undo the rich content write");
+
+        assert_eq!(
+            read_pair(db_handle).await,
+            before,
+            "undo must restore content AND marks byte-identically"
+        );
     }
 }
 
