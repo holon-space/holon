@@ -5510,4 +5510,82 @@ mod half_born_node_tests {
             "and it must not be given a parent link either"
         );
     }
+
+    /// CHARACTERIZATION (task #17) — asserts the CURRENT, WRONG behaviour on
+    /// purpose: repairing the durability hole SHOULD fail this test.
+    ///
+    /// The create window is not only transient. Every block operation ends in
+    /// `save_doc` → `LoroDocumentStore::save_all` (`loro_block_operations.rs`,
+    /// ~13 call sites), which takes a read guard on the STORE and none on the
+    /// doc — and `with_write` takes none either. So a save on one task lands
+    /// between another task's `tree.create()` and its `STABLE_ID` insert, and
+    /// the snapshot it writes carries the node WITHOUT the id.
+    ///
+    /// The reader-side fixes (`list_children`, `LoroTreeView::build`,
+    /// `snapshot_blocks_from_doc_settled`) make this survivable but permanent:
+    /// on reload nothing ever supplies the missing id, so the node is withheld
+    /// from every read for the life of the store — an invisible node holding a
+    /// live subtree, not a crash. The repair is a separate decision.
+    #[tokio::test]
+    async fn a_snapshot_saved_mid_create_persists_a_permanently_invisible_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.loro");
+        let doc = Arc::new(LoroDocument::new("half-born-export".to_string()).unwrap());
+        let backend = LoroBackend::from_document(doc.clone());
+        create(&backend, EntityUri::no_parent(), "parent").await;
+        let parent_tid = backend.resolve_to_tree_id("block:parent").await.unwrap();
+
+        // The two doc-state steps of a create, with the autosave in between.
+        let raw = doc.doc();
+        let tree = raw.get_tree(TREE_NAME);
+        let half_born = tree.create(Some(parent_tid)).unwrap();
+        doc.save_to_file(&path).unwrap();
+        tree.get_meta(half_born)
+            .unwrap()
+            .insert(STABLE_ID, loro::LoroValue::from("late"))
+            .unwrap();
+        raw.commit();
+
+        let reloaded = LoroDocument::load_from_file(&path, "reloaded".to_string()).unwrap();
+        let (live, without_id) = reloaded
+            .with_read(|d| {
+                let t = d.get_tree(TREE_NAME);
+                let live: Vec<_> = t
+                    .get_nodes(false)
+                    .into_iter()
+                    .filter(|n| {
+                        !matches!(
+                            n.parent,
+                            loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
+                        )
+                    })
+                    .collect();
+                let without_id = live
+                    .iter()
+                    .filter(|n| {
+                        t.get_meta(n.id)
+                            .map(|m| read_stable_id(&m).is_none())
+                            .unwrap_or(false)
+                    })
+                    .count();
+                Ok((live.len(), without_id))
+            })
+            .unwrap();
+
+        assert_eq!(
+            (live, without_id),
+            (2, 1),
+            "the saved snapshot carries the half-born node; the STABLE_ID insert came after it"
+        );
+
+        let view = reloaded
+            .with_read(|d| Ok(LoroTreeView::build(&d.get_tree(TREE_NAME))))
+            .unwrap();
+        assert!(view.block_exists(&EntityUri::block("parent")));
+        assert!(
+            !view.block_exists(&EntityUri::block("late")),
+            "the id that landed too late is not in the snapshot, so the node stays invisible \
+             forever — the reader-side withholding never gets to settle"
+        );
+    }
 }
