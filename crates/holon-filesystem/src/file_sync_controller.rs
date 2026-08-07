@@ -467,6 +467,27 @@ struct SiblingGrounding {
     authority_lost: Vec<String>,
 }
 
+/// The proof that let a page's stale home be deleted — or the reason there was
+/// none. Only the two proven variants reach an `fs.remove`; `Refused` carries
+/// the disclosure text, so a refusal can never be silent.
+enum StaleHomeOwner {
+    /// The file's bytes are exactly what we last projected to that path.
+    OurLastProjection,
+    /// The file's `#+ID:` header still names this page as its document root.
+    StillRootsThisPage,
+    Refused(String),
+}
+
+impl std::fmt::Display for StaleHomeOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OurLastProjection => f.write_str("bytes match our last projection"),
+            Self::StillRootsThisPage => f.write_str("header still roots this page"),
+            Self::Refused(reason) => write!(f, "REFUSED: {reason}"),
+        }
+    }
+}
+
 pub struct FileSyncController {
     /// What we last wrote to (or confirmed on) disk, per file.
     /// Uses CanonicalPath to resolve macOS /var → /private/var symlinks,
@@ -520,6 +541,20 @@ pub struct FileSyncController {
     /// Callback to register doc_id → path aliases in the storage layer.
     /// Set by the DI wiring when Loro is available.
     alias_registrar: Option<Arc<dyn AliasRegistrar>>,
+
+    /// The file this controller currently believes homes each document — the
+    /// doc-keyed twin of `last_projection` (which is path-keyed and so cannot
+    /// answer "where did this page live BEFORE its title changed?").
+    ///
+    /// A page rename derives a NEW path from the new title, so retiring the old
+    /// file needs the previous one. `alias_registrar` also holds that mapping,
+    /// but it is a Loro-backed seam the composition root wires only when CRDT
+    /// storage is enabled — in the shipped SqlOnly default it is `None`, and
+    /// sourcing the previous home from it alone left every renamed page
+    /// DOUBLE-HOMED (`inv-every-page-has-its-own-file`). This map is
+    /// mode-independent: the controller is the sole writer of page files, so it
+    /// can always record where it put one.
+    doc_home: HashMap<EntityUri, CanonicalPath>,
 
     /// Shell command to run after each org file write (from holon.toml).
     post_write_hook: Option<String>,
@@ -745,6 +780,7 @@ impl FileSyncController {
             doc_manager,
             root_dir,
             alias_registrar: None,
+            doc_home: HashMap::new(),
             post_write_hook: None,
             image_data: None,
             format,
@@ -1579,8 +1615,20 @@ impl FileSyncController {
         Ok(())
     }
 
+    /// Record that `path` now holds `doc_id`'s file.
+    ///
+    /// Called from every site that establishes a document's home — our own
+    /// write-back, an ingest, an atomic file rename — so a later page rename
+    /// can always find the file to retire, with or without the Loro-backed
+    /// alias registry.
+    fn note_doc_home(&mut self, doc_id: &EntityUri, path: &Path) {
+        self.doc_home
+            .insert(doc_id.clone(), CanonicalPath::new(path));
+    }
+
     /// Drop every per-file tracking entry for a vanished path.
     fn forget_file_state(&mut self, canonical: &CanonicalPath) {
+        self.doc_home.retain(|_, home| home != canonical);
         self.last_projection.remove(canonical);
         self.last_projection_hash.remove(canonical);
         self.disk_signatures.remove(canonical);
@@ -1598,6 +1646,11 @@ impl FileSyncController {
     /// The diff `base` itself is keyed by document id, not path, so it needs no
     /// migration.
     fn migrate_file_state(&mut self, from: &CanonicalPath, to: &CanonicalPath) {
+        for home in self.doc_home.values_mut() {
+            if home == from {
+                *home = to.clone();
+            }
+        }
         if let Some(v) = self.last_projection.remove(from) {
             self.last_projection.insert(to.clone(), v);
         }
@@ -1692,8 +1745,9 @@ impl FileSyncController {
         // source, quarantine) from the old path to the new one.
         self.migrate_file_state(&from_canon, &to_canon);
 
-        // Re-point the alias so `inv-every-page-has-its-own-file` and every
+        // Re-point the doc's home so `inv-every-page-has-its-own-file` and every
         // file-tracking consumer resolve the doc to its NEW home immediately.
+        self.note_doc_home(&document_uri, to);
         if let Some(ref registrar) = self.alias_registrar {
             registrar.register_alias(&document_uri, to).await;
         }
@@ -2265,12 +2319,6 @@ impl FileSyncController {
             return Ok(());
         }
 
-        let last = self
-            .last_projection
-            .get(&canonical)
-            .map(|s| s.as_str())
-            .unwrap_or("");
-
         // Phase 1 cold-boot fast-path: when `last_projection` has no entry
         // (first time we see this file this session) but `last_projection_hash`
         // — loaded from `file.content_hash` at startup — matches the disk
@@ -2310,6 +2358,14 @@ impl FileSyncController {
                      path)",
                     path.display()
                 );
+                // The skip bypasses the ingest that would normally record where
+                // this document lives, so record it from the header alone —
+                // otherwise a page renamed later in a session that booted an
+                // unchanged vault has no previous home to retire and stays
+                // DOUBLE-HOMED.
+                if let Some(bare) = self.format.doc_id_from_content(&disk_content) {
+                    self.note_doc_home(&EntityUri::block(&bare), path);
+                }
                 self.last_projection.insert(canonical.clone(), disk_content);
                 return Ok(());
             }
@@ -2450,7 +2506,8 @@ impl FileSyncController {
                 .with_context(|| format!("record ingest doc-create history for {document_uri}"))?;
         }
 
-        // Register UUID → file path alias (if Loro is available)
+        // Register UUID → file path (in the alias registry too, if Loro is available)
+        self.note_doc_home(&document_uri, path);
         if let Some(ref registrar) = self.alias_registrar {
             registrar.register_alias(&document_uri, path).await;
         }
@@ -2482,6 +2539,11 @@ impl FileSyncController {
         // parsed from (`base_source`), so the base can never desync from
         // `last_projection` regardless of which render path last wrote it.
         let base_key = BaseKey::file("org", document_uri.as_str());
+        let last = self
+            .last_projection
+            .get(&canonical)
+            .map(String::as_str)
+            .unwrap_or("");
         let base_fresh = self.base_source.get(&canonical).map(String::as_str) == Some(last);
         let old_blocks: HashMap<EntityUri, Block> =
             if base_fresh && self.base_store.is_base_seeded(&base_key) {
@@ -5078,27 +5140,17 @@ impl FileSyncController {
         // Capture the page's PREVIOUS on-disk home (the alias registry is
         // rewritten to the new path below) so the now-orphaned old file can be
         // removed after the new one is written — otherwise the page is
-        // DOUBLE-HOMED across two files (inv-every-page-has-its-own-file). The
-        // removal's own delete event is made safe by the stale-file guard in
-        // `on_file_deleted`.
-        // This path feeds an `fs.remove` below, so it is proven contained on the
-        // way in — a rename cleanup that DELETES outside the vault is the same
-        // escape class as a write that does, and the alias registrar is the same
-        // unproven source `doc_id_to_path` checks.
-        let prior_path = match &self.alias_registrar {
-            Some(registrar) => match registrar.resolve_alias_to_path(page_id).await {
-                Some(prior) => {
-                    Some(VaultPath::inside(&self.root_dir, prior).with_context(|| {
-                        format!(
-                            "materialize_page_identity_file({page_id}): prior alias path (rename \
-                         cleanup DELETE)"
-                        )
-                    })?)
-                }
-                None => None,
-            },
-            None => None,
-        };
+        // DOUBLE-HOMED across two files (inv-every-page-has-its-own-file).
+        // The removal's own delete event lands in `on_file_deleted` AFTER the
+        // `forget_file_state` below dropped this path's `last_projection`, so
+        // identity there falls to `find_by_name_chain` on the now-vacated OLD
+        // chain; the ordinary outcome is a miss and the "no document entity"
+        // early return.
+        // These paths feed an `fs.remove` below, so they are proven contained on
+        // the way in — a rename cleanup that DELETES outside the vault is the
+        // same escape class as a write that does, and neither source is any more
+        // trusted than the one `doc_id_to_path` checks.
+        let prior_paths = self.prior_page_homes(page_id).await?;
         // Already ours (we wrote it) — nothing to do.
         if self.last_projection.contains_key(&canonical) {
             return Ok(());
@@ -5145,27 +5197,50 @@ impl FileSyncController {
         if let Some(ref registrar) = self.alias_registrar {
             registrar.register_alias(page_id, &path).await;
         }
-        // Remove the orphaned old file left by a page rename (see `prior_path`).
-        if let Some(prior_vault) = prior_path {
+        // Remove the orphaned old files left by a page rename (see `prior_paths`).
+        // Each removal is gated on a fresh OWNERSHIP proof: a stale home record
+        // says where the page USED to live, never who owns those bytes now.
+        for prior_vault in prior_paths {
             let prior = prior_vault.as_path();
             let prior_canonical = CanonicalPath::new(prior);
-            if prior_canonical != canonical && self.fs.exists(prior) {
-                self.fs.remove(prior).await.map_err(|e| {
-                    anyhow::anyhow!(
-                        "materialize_page_identity_file({page_id}): removing orphaned old file {} \
-                         after rename to {}: {e}",
+            if prior_canonical == canonical || !self.fs.exists(prior) {
+                continue;
+            }
+            match self
+                .stale_home_ownership(page_id, prior, &prior_canonical)
+                .await?
+            {
+                StaleHomeOwner::Refused(reason) => {
+                    tracing::warn!(
+                        page_id = %page_id,
+                        stale_home = %prior.display(),
+                        new_home = %path.display(),
+                        "[FileSyncController] REFUSED to remove the page's stale home: {reason}. \
+                         The page stays DOUBLE-HOMED (inv-every-page-has-its-own-file) until the \
+                         watcher re-ingests that file — deleting bytes this page does not own \
+                         would destroy someone else's document.",
+                    );
+                    continue;
+                }
+                proven => {
+                    self.fs.remove(prior).await.map_err(|e| {
+                        anyhow::anyhow!(
+                            "materialize_page_identity_file({page_id}): removing orphaned old file \
+                             {} after rename to {}: {e}",
+                            prior.display(),
+                            path.display()
+                        )
+                    })?;
+                    self.forget_file_state(&prior_canonical);
+                    self.run_post_write_hook(prior);
+                    tracing::info!(
+                        "[FileSyncController] Removed orphaned old file {} after page {} renamed \
+                         to {} (ownership: {proven})",
                         prior.display(),
-                        path.display()
-                    )
-                })?;
-                self.forget_file_state(&prior_canonical);
-                self.run_post_write_hook(prior);
-                tracing::info!(
-                    "[FileSyncController] Removed orphaned old file {} after page {} renamed to {}",
-                    prior.display(),
-                    page_id,
-                    path.display(),
-                );
+                        page_id,
+                        path.display(),
+                    );
+                }
             }
         }
         self.last_projection.insert(canonical, rendered);
@@ -5175,6 +5250,82 @@ impl FileSyncController {
             path.display()
         );
         Ok(())
+    }
+
+    /// Whether the bytes currently at a page's stale home are the page's to
+    /// delete.
+    ///
+    /// A home record (`doc_home` or the alias registry) says where the page
+    /// USED to live; it says nothing about who owns that path NOW. Between our
+    /// last write and this rename the file can have been replaced — by a user,
+    /// by another tool, by a second page's write-back — and the watcher's
+    /// re-ingest may not have landed yet, so the store cannot be asked either.
+    /// Only the bytes on disk can answer, so they are re-read here rather than
+    /// inferred from tracking state.
+    async fn stale_home_ownership(
+        &self,
+        page_id: &EntityUri,
+        prior: &Path,
+        prior_canonical: &CanonicalPath,
+    ) -> Result<StaleHomeOwner> {
+        let disk = read_disk_or_empty(&self.fs, prior).await?;
+        // Byte-identical to what we last projected there: nothing has touched
+        // the file since, so it holds no content that is not already in the
+        // store and safely re-rendered at the new home.
+        if self.last_projection.get(prior_canonical) == Some(&disk) {
+            return Ok(StaleHomeOwner::OurLastProjection);
+        }
+        // Otherwise the file must still declare THIS page as its root. This
+        // DELIBERATELY accepts a same-page file whose body we did not write:
+        // an unsynced edit made in the watcher window is lost to the store's
+        // render at the new home — the invariant (one page, one file) wins
+        // over that window, the same store-wins call reconciliation makes
+        // elsewhere in this controller.
+        match self.format.doc_id_from_content(&disk) {
+            Some(bare) if EntityUri::block(&bare) == *page_id => {
+                Ok(StaleHomeOwner::StillRootsThisPage)
+            }
+            Some(bare) => Ok(StaleHomeOwner::Refused(format!(
+                "its bytes differ from our last projection AND its header now roots {} instead of \
+                 this page",
+                EntityUri::block(&bare)
+            ))),
+            None => Ok(StaleHomeOwner::Refused(
+                "its bytes differ from our last projection and it declares no `#+ID:` root at all"
+                    .to_string(),
+            )),
+        }
+    }
+
+    /// Every file that currently claims to home `page_id`, deduplicated and
+    /// PROVEN inside the vault (each one may feed an `fs.remove`).
+    ///
+    /// Two independent records answer this. `alias_registrar` is the one
+    /// `doc_id_to_path` consults, but it is Loro-backed and absent in SqlOnly;
+    /// `doc_home` is this controller's own record and exists in every mode.
+    /// Both are collected rather than one preferred: if they disagree the page
+    /// is already double-homed, and retiring only one of them would leave the
+    /// invariant broken.
+    async fn prior_page_homes(&self, page_id: &EntityUri) -> Result<Vec<VaultPath>> {
+        let mut raw: Vec<PathBuf> = Vec::new();
+        if let Some(registrar) = &self.alias_registrar {
+            if let Some(prior) = registrar.resolve_alias_to_path(page_id).await {
+                raw.push(prior);
+            }
+        }
+        if let Some(home) = self.doc_home.get(page_id) {
+            raw.push(home.as_path_buf().clone());
+        }
+        let mut homes: Vec<VaultPath> = Vec::with_capacity(raw.len());
+        for prior in raw {
+            let proven = VaultPath::inside(&self.root_dir, prior).with_context(|| {
+                format!("prior_page_homes({page_id}): prior home path (rename cleanup DELETE)")
+            })?;
+            if !homes.contains(&proven) {
+                homes.push(proven);
+            }
+        }
+        Ok(homes)
     }
 
     /// Fork B B2 — materialize every page (document root) that owns NO file on
@@ -5885,7 +6036,10 @@ impl FileSyncController {
             }
         }
         match self.fs.write(path, rendered).await {
-            Ok(()) => Ok(true),
+            Ok(()) => {
+                self.note_doc_home(doc_id, path);
+                Ok(true)
+            }
             Err(e) if is_read_only_fs(&e) => {
                 self.mark_readonly_writeback(doc_id, path, &e, canonical);
                 Ok(false)
