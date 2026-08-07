@@ -2028,7 +2028,7 @@ mod tests {
         // and the OTel layer records the span (an untouched collector captures
         // nothing).
         let collector = crate::test_tracing::SpanCollector::global();
-        let _scope = crate::test_tracing::ensure_test_scope();
+        let scope = crate::test_tracing::ensure_test_scope();
 
         let wiring = Wiring::custom(
             vec![
@@ -2040,10 +2040,13 @@ mod tests {
             vec![],
         );
         let ref_state = wide_e2e_ref_for(&wiring);
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("build multi-thread runtime");
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.enable_all();
+        // `org.on_block_feed` fires on a runtime worker, and spans are charged
+        // to the scope owning the emitting thread — without this binding the
+        // span this test asserts on belongs to nobody.
+        crate::test_tracing::attach_scope_to_runtime(&mut builder, scope);
+        let rt = builder.build().expect("build multi-thread runtime");
         rt.block_on(async {
             let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
             let (_caps, _handle, _scaffold) = boot_and_seed_wide(&resolver, &ref_state).await;

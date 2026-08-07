@@ -3035,10 +3035,13 @@ impl BuilderServices for ReactiveEngine {
             .query_engine()
             .ok_or_else(|| anyhow::anyhow!("no query engine in this (no-Turso) session"))?;
         let rt = self.runtime_handle.clone();
+        let bridge = crate::bridge_thread::capture();
         std::thread::scope(|s| {
-            s.spawn(|| rt.block_on(engine.watch_query(query, lang, HashMap::new(), ctx)))
-                .join()
-                .unwrap()
+            s.spawn(|| {
+                bridge.run(|| rt.block_on(engine.watch_query(query, lang, HashMap::new(), ctx)))
+            })
+            .join()
+            .unwrap()
         })
     }
 
@@ -3465,8 +3468,9 @@ impl BuilderServices for ReactiveEngine {
         // Bridge the async snapshot from a fresh thread — same pattern as
         // `watch_query` — so this stays callable from the GPUI main thread
         // whether or not it is itself a tokio worker.
+        let bridge = crate::bridge_thread::capture();
         let snapshot = std::thread::scope(|s| {
-            s.spawn(|| rt.block_on(session.block_query().snapshot()))
+            s.spawn(|| bridge.run(|| rt.block_on(session.block_query().snapshot())))
                 .join()
                 .unwrap()
         });
@@ -3490,8 +3494,9 @@ impl BuilderServices for ReactiveEngine {
         let session = self.session.clone();
         let rt = self.runtime_handle.clone();
         // Same fresh-thread snapshot bridge as `list_templates`.
+        let bridge = crate::bridge_thread::capture();
         let snapshot = std::thread::scope(|s| {
-            s.spawn(|| rt.block_on(session.block_query().snapshot()))
+            s.spawn(|| bridge.run(|| rt.block_on(session.block_query().snapshot())))
                 .join()
                 .unwrap()
         });

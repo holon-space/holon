@@ -1,11 +1,12 @@
 //! In-memory OpenTelemetry span collection for integration tests.
 //!
 //! The tracing subscriber is global (per-process), initialized once via
-//! `SpanCollector::global()`. Captured problems (ERROR events + panics) are
-//! NOT global: they are routed to the [`TestScope`] that OWNS the emitting
-//! thread, so parallel `--lib` tests can never be blamed for each other's
-//! failures. Each PBT transition calls `reset()` to clear its own scope's
-//! problems and the (still process-global) span exporter.
+//! `SpanCollector::global()`. What it COLLECTS is not global: both captured
+//! problems (ERROR events + panics) and finished SPANS are routed to the
+//! [`TestScope`] that OWNS the emitting thread, so parallel tests in one
+//! binary can neither be blamed for each other's failures nor charged for
+//! each other's SQL. Each PBT transition calls `reset()` to clear its own
+//! scope's problems and spans.
 //!
 //! Span names come from `#[tracing::instrument]` on SQL operations in
 //! `turso.rs`:
@@ -14,6 +15,7 @@
 //! - `"execute_ddl"` — DDL statements
 //! - `"execute_ddl_with_deps"` — DDL with dependency tracking
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -21,15 +23,17 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use opentelemetry::global;
-use opentelemetry_sdk::trace::InMemorySpanExporter;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::trace::SpanData;
 
-/// Thread-safe handle to the in-memory span exporter.
-/// Clone is cheap — `InMemorySpanExporter` wraps `Arc<Mutex<Vec<SpanData>>>`.
+/// Handle to the per-[`TestScope`] span and problem windows.
+///
+/// It carries NO buffer of its own: every read and every `reset` addresses the
+/// scope that owns the CALLING thread, so a clone handed to one test's SUT can
+/// never reach another test's window.
 #[derive(Clone)]
 pub struct SpanCollector {
-    exporter: InMemorySpanExporter,
+    _private: (),
 }
 
 /// A problem captured during a test run that would otherwise be SWALLOWED: an
@@ -64,6 +68,9 @@ impl std::fmt::Display for CapturedProblem {
 
 /// Shared, resettable sink for captured problems.
 type ProblemSink = Arc<Mutex<Vec<CapturedProblem>>>;
+
+/// Shared, resettable sink for finished spans — one per [`TestScope`].
+type SpanSink = Arc<Mutex<Vec<SpanData>>>;
 
 /// A `tracing` layer that routes every ERROR-level EVENT to the scope owning
 /// the emitting thread. Events (not spans) are what `tracing::error!(...)`
@@ -147,14 +154,31 @@ enum ThreadRole {
 struct ScopeRegistry {
     next_id: u64,
     sinks: HashMap<TestScope, ProblemSink>,
+    spans: HashMap<TestScope, SpanSink>,
     threads: HashMap<std::thread::ThreadId, ThreadRole>,
 }
 
 static SCOPES: Mutex<Option<ScopeRegistry>> = Mutex::new(None);
 
+/// Bumped on every change to the thread→scope map. [`route_span`] runs once per
+/// finished span (tens of thousands per transition), so it caches its sink in a
+/// thread-local and revalidates against this counter instead of taking the
+/// registry lock each time.
+static REGISTRY_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Finished spans that no scope could be charged for — see [`route_span`].
+/// Reported by [`unattributed_span_count`] so under-measurement is disclosed
+/// rather than silently shrinking a budget window.
+static UNATTRIBUTED_SPANS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn with_registry<R>(f: impl FnOnce(&mut ScopeRegistry) -> R) -> R {
     let mut guard = SCOPES.lock().expect("SCOPES lock poisoned");
     f(guard.get_or_insert_with(ScopeRegistry::default))
+}
+
+/// Invalidate every thread's [`route_span`] sink cache.
+fn bump_registry_generation() {
+    REGISTRY_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Release);
 }
 
 /// Open a fresh observability scope owned by the calling thread, retiring any
@@ -167,6 +191,7 @@ pub fn begin_test_scope() -> TestScope {
     with_registry(|reg| {
         if let Some(ThreadRole::Driver(old)) = reg.threads.get(&me).copied() {
             reg.sinks.remove(&old);
+            reg.spans.remove(&old);
             reg.threads.retain(|_, role| {
                 !matches!(role, ThreadRole::Driver(s) | ThreadRole::Worker(s) if *s == old)
             });
@@ -174,7 +199,9 @@ pub fn begin_test_scope() -> TestScope {
         reg.next_id += 1;
         let scope = TestScope(reg.next_id);
         reg.sinks.insert(scope, Arc::new(Mutex::new(Vec::new())));
+        reg.spans.insert(scope, Arc::new(Mutex::new(Vec::new())));
         reg.threads.insert(me, ThreadRole::Driver(scope));
+        bump_registry_generation();
         scope
     })
 }
@@ -192,6 +219,36 @@ pub fn ensure_test_scope() -> TestScope {
         None => begin_test_scope(),
     }
 }
+
+/// The scope owning the calling thread, or `None` when it owns none. The
+/// tolerant read: routing and the bridge-thread hook both have a defined
+/// answer for an unowned thread, unlike [`current_scope`].
+fn current_scope_opt() -> Option<TestScope> {
+    let me = std::thread::current().id();
+    with_registry(|reg| reg.threads.get(&me).copied()).map(|role| match role {
+        ThreadRole::Driver(scope) | ThreadRole::Worker(scope) => scope,
+    })
+}
+
+/// Teach `holon-frontend`'s bridge threads — fresh OS threads that exist only
+/// to `block_on` outside a runtime and are joined immediately — to run under
+/// their SPAWNER's scope. Without this every span such a bridge emits (the
+/// whole `watch_query` compile+query subtree) belongs to no scope and silently
+/// shrinks the window that actually drove it.
+#[cfg(feature = "test-infra")]
+fn install_bridge_thread_adoption() {
+    holon_frontend::bridge_thread::install_bridge_thread_hook(
+        holon_frontend::bridge_thread::BridgeThreadHook {
+            current: || current_scope_opt().map(|TestScope(id)| id),
+            enter: |id| register_worker_thread(TestScope(id)),
+            leave: unregister_worker_thread,
+        },
+    );
+}
+
+/// No frontend in this build, so no bridge threads to adopt.
+#[cfg(not(feature = "test-infra"))]
+fn install_bridge_thread_adoption() {}
 
 /// The scope owning the calling thread. Panics when the thread has none —
 /// reading or resetting an observability window that was never opened is a
@@ -222,6 +279,7 @@ pub fn attach_scope_to_runtime(builder: &mut tokio::runtime::Builder, scope: Tes
 pub fn register_worker_thread(scope: TestScope) {
     let me = std::thread::current().id();
     with_registry(|reg| reg.threads.insert(me, ThreadRole::Worker(scope)));
+    bump_registry_generation();
 }
 
 /// Drop the calling thread's worker registration (thread ids are recycled by
@@ -229,6 +287,7 @@ pub fn register_worker_thread(scope: TestScope) {
 pub fn unregister_worker_thread() {
     let me = std::thread::current().id();
     with_registry(|reg| reg.threads.remove(&me));
+    bump_registry_generation();
 }
 
 /// Route a captured problem to the scope that owns the emitting thread —
@@ -279,6 +338,94 @@ fn scope_sink(scope: TestScope) -> ProblemSink {
             .unwrap_or_else(|| panic!("{scope:?} has been retired; no sink to read"))
             .clone()
     })
+}
+
+/// The span window of `scope`. Same use-after-free contract as [`scope_sink`].
+fn scope_spans(scope: TestScope) -> SpanSink {
+    with_registry(|reg| {
+        reg.spans
+            .get(&scope)
+            .unwrap_or_else(|| panic!("{scope:?} has been retired; no span window to read"))
+            .clone()
+    })
+}
+
+/// The span window the CALLING thread's spans belong in, or `None` when no
+/// scope can be charged. Resolved exactly like [`route_problem`]: the owning
+/// scope, else the sole open scope when there is one (unambiguous), else
+/// nobody — a bystander test must never be charged for another's SQL.
+fn resolve_span_sink() -> Option<SpanSink> {
+    let me = std::thread::current().id();
+    with_registry(|reg| match reg.threads.get(&me).copied() {
+        Some(ThreadRole::Driver(scope) | ThreadRole::Worker(scope)) => Some(
+            reg.spans
+                .get(&scope)
+                .expect("owning scope's span window must exist while the thread is registered")
+                .clone(),
+        ),
+        None if reg.spans.len() == 1 => reg.spans.values().next().cloned(),
+        None => None,
+    })
+}
+
+thread_local! {
+    /// `(generation, sink)` — see [`REGISTRY_GENERATION`].
+    static SPAN_SINK_CACHE: RefCell<Option<(u64, Option<SpanSink>)>> = const { RefCell::new(None) };
+}
+
+/// File a finished span into the window of the scope owning the emitting
+/// thread. Spans that belong to nobody are counted, not charged.
+fn route_span(span: SpanData) {
+    let generation = REGISTRY_GENERATION.load(std::sync::atomic::Ordering::Acquire);
+    let sink = SPAN_SINK_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        match &*cache {
+            Some((cached_gen, sink)) if *cached_gen == generation => sink.clone(),
+            _ => {
+                let sink = resolve_span_sink();
+                *cache = Some((generation, sink.clone()));
+                sink
+            }
+        }
+    });
+    match sink {
+        Some(sink) => sink.lock().expect("span window lock poisoned").push(span),
+        None => {
+            UNATTRIBUTED_SPANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// Spans this process could attribute to no test scope, cumulative. Non-zero
+/// means some window measured LESS than the work it drove — disclosed by the
+/// budget report so an under-measurement is never silent.
+pub fn unattributed_span_count() -> usize {
+    UNATTRIBUTED_SPANS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Routes every finished span to its owning [`TestScope`]'s window.
+///
+/// A [`SpanProcessor`](opentelemetry_sdk::trace::SpanProcessor) rather than a
+/// [`SpanExporter`](opentelemetry_sdk::trace::SpanExporter): `on_end` is the
+/// last hook the SDK still runs ON THE THREAD THAT ENDED THE SPAN, which is
+/// what makes thread-keyed attribution possible at all.
+#[derive(Debug)]
+struct ScopeRoutingProcessor;
+
+impl opentelemetry_sdk::trace::SpanProcessor for ScopeRoutingProcessor {
+    fn on_start(&self, _: &mut opentelemetry_sdk::trace::Span, _: &opentelemetry::Context) {}
+
+    fn on_end(&self, span: SpanData) {
+        route_span(span);
+    }
+
+    fn force_flush(&self) -> opentelemetry_sdk::error::OTelSdkResult {
+        Ok(())
+    }
+
+    fn shutdown_with_timeout(&self, _: Duration) -> opentelemetry_sdk::error::OTelSdkResult {
+        Ok(())
+    }
 }
 
 fn is_driver_thread() -> bool {
@@ -369,13 +516,12 @@ impl SpanCollector {
                 }));
             }
 
-            let exporter = InMemorySpanExporter::default();
-            let collector = SpanCollector {
-                exporter: exporter.clone(),
-            };
+            install_bridge_thread_adoption();
+
+            let collector = SpanCollector { _private: () };
 
             let provider = SdkTracerProvider::builder()
-                .with_simple_exporter(exporter)
+                .with_span_processor(ScopeRoutingProcessor)
                 .build();
             global::set_tracer_provider(provider);
 
@@ -506,12 +652,17 @@ impl SpanCollector {
         })
     }
 
-    /// Clear the process-global span exporter and the CALLING THREAD's scope's
-    /// captured problems. Call at the start of each transition (per-transition
-    /// isolation for both spans and error/panic capture).
+    /// Clear the CALLING THREAD's scope's spans and captured problems. Call at
+    /// the start of each transition (per-transition isolation for both spans
+    /// and error/panic capture). A concurrently-running test's window is
+    /// untouched.
     pub fn reset(&self) {
-        self.exporter.reset();
-        scope_sink(current_scope())
+        let scope = current_scope();
+        scope_spans(scope)
+            .lock()
+            .expect("span window lock poisoned")
+            .clear();
+        scope_sink(scope)
             .lock()
             .expect("problem sink lock poisoned")
             .clear();
@@ -533,11 +684,12 @@ impl SpanCollector {
         self.captured_problems().len()
     }
 
-    /// Get all spans collected since last reset.
+    /// All spans the CALLING THREAD's scope collected since its last reset.
     pub fn finished_spans(&self) -> Vec<SpanData> {
-        self.exporter
-            .get_finished_spans()
-            .expect("InMemorySpanExporter lock poisoned")
+        scope_spans(current_scope())
+            .lock()
+            .expect("span window lock poisoned")
+            .clone()
     }
 
     /// Count spans whose name exactly matches.
@@ -1225,6 +1377,7 @@ pub fn maybe_write_flamegraph(collector: &SpanCollector, transition_key: &str) {
 #[cfg(test)]
 mod duplicate_sql_origin_tests {
     use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_sdk::trace::InMemorySpanExporter;
     use tracing_subscriber::layer::SubscriberExt;
 
     use super::*;
@@ -1425,6 +1578,78 @@ mod capture_tests {
                 .iter()
                 .any(|p| p.message.contains("owner-only-marker-91c2")),
             "bystander scope {bystander:?} must NOT inherit another test's panic"
+        );
+    }
+
+    /// SQL a concurrent test drives is invisible to this test's metrics
+    /// window — the contamination that charged
+    /// `echo_loop_block_to_page_child_render_leak_parked`'s
+    /// `CreateBlockUnderFocus` budget with the hand-authored corpus's 34 env
+    /// boots (54 DDL against a ceiling of 42) whenever the two overlapped, and
+    /// let it pass in isolation.
+    ///
+    /// Both windows are opened BEFORE either emits, and the bystander reads
+    /// only after the other scope is done, so the assertion is about
+    /// attribution and not about timing.
+    #[test]
+    fn spans_from_a_concurrent_scope_are_invisible_to_this_metrics_window() {
+        let collector = SpanCollector::global();
+        let bystander = begin_test_scope();
+        collector.reset();
+
+        let other = std::thread::Builder::new()
+            .name("concurrent-metrics-driver".into())
+            .spawn(|| {
+                let owner = begin_test_scope();
+                let collector = SpanCollector::global();
+                collector.reset();
+                for i in 0..7 {
+                    let span = tracing::info_span!("concurrent_scope_marker_4d81", i = i);
+                    let _entered = span.enter();
+                }
+                (owner, collector.count_spans("concurrent_scope_marker_4d81"))
+            })
+            .expect("spawn concurrent driver");
+        let (owner, owner_seen) = other.join().expect("concurrent driver joins");
+
+        assert_eq!(
+            owner_seen, 7,
+            "the scope that DROVE the spans must see all of them, else this test is vacuous"
+        );
+        assert_eq!(
+            collector.count_spans("concurrent_scope_marker_4d81"),
+            0,
+            "bystander scope {bystander:?} must NOT be charged for {owner:?}'s spans"
+        );
+    }
+
+    /// A concurrent test's per-transition `reset` must not wipe this window —
+    /// the other half of a shared collector: overlapping runs both LOSE spans
+    /// they drove and GAIN spans they did not.
+    #[test]
+    fn a_concurrent_scopes_reset_does_not_wipe_this_window() {
+        let collector = SpanCollector::global();
+        begin_test_scope();
+        collector.reset();
+        {
+            let span = tracing::info_span!("survives_foreign_reset_9ab3");
+            let _entered = span.enter();
+        }
+
+        std::thread::Builder::new()
+            .name("resetting-driver".into())
+            .spawn(|| {
+                begin_test_scope();
+                SpanCollector::global().reset();
+            })
+            .expect("spawn resetting driver")
+            .join()
+            .expect("resetting driver joins");
+
+        assert_eq!(
+            collector.count_spans("survives_foreign_reset_9ab3"),
+            1,
+            "another test's transition reset must not clear this test's span window"
         );
     }
 }
