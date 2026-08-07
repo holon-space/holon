@@ -3367,9 +3367,13 @@ impl HolonMcpServer {
 
     #[tool(
         description = "List the live keybinding registry as action → key chord (e.g. `move_up` → \
-                       [\"alt\",\"up\"]). The chord's key names are exactly what send_key_chord's \
-                       `keys` accepts, so a binding read here can be sent back verbatim — never \
-                       hardcode a shortcut."
+                       [\"alt\",\"up\"]). Unions BOTH registries and tags each entry with its \
+                       source: `structural` (chords wired to reactive operations — indent, \
+                       split_block, …) and `window` (the frontend's platform keymap — undo, redo, \
+                       quick-open, tab switching). `context` names the keymap context a chord is \
+                       scoped to (null = always active). The chord's key names are exactly what \
+                       send_key_chord's `keys` accepts, so a binding read here can be sent back \
+                       verbatim — never hardcode a shortcut."
     )]
     async fn list_keybindings(&self) -> Result<CallToolResult, rmcp::ErrorData> {
         let services = self.builder_services().ok_or_else(|| {
@@ -3379,17 +3383,34 @@ impl HolonMcpServer {
             )
         })?;
 
-        let bindings: Vec<serde_json::Value> = services
-            .key_bindings_snapshot()
-            .into_iter()
-            .map(|(action, chord)| {
-                let keys: Vec<String> = chord.0.iter().map(|k| k.to_string()).collect();
-                serde_json::json!({ "action": action, "chord": keys })
+        let window = self.debug.window_key_bindings.get();
+        let bindings: Vec<serde_json::Value> = crate::keybindings::union_key_bindings(
+            services.key_bindings_snapshot(),
+            window.map(|v| v.as_slice()),
+        )
+        .map_err(|e| rmcp::ErrorData::internal_error(e, None))?
+        .into_iter()
+        .map(|b| {
+            serde_json::json!({
+                "action": b.action,
+                "chord": b.keys,
+                "registry": b.registry.as_str(),
+                "context": b.context,
             })
-            .collect();
+        })
+        .collect();
 
         let result = serde_json::json!({
             "bindings": bindings,
+            // Disclose a missing registry instead of presenting a partial
+            // snapshot as complete — an under-reporting introspection tool
+            // turns into a confident wrong answer (dogfood 2026-08-07).
+            "window_registry": match window {
+                Some(_) => "published by the running frontend",
+                None => "UNAVAILABLE — no windowed frontend published a keymap in this session, \
+                         so window-level chords (undo/redo/quick-open/tab switching) are NOT \
+                         listed below",
+            },
         });
 
         Ok(CallToolResult::success(vec![Content::text(
@@ -3403,25 +3424,28 @@ impl HolonMcpServer {
     }
 
     #[tool(
-        description = "Simulate a keyboard shortcut (key chord) at a specific entity. The chord \
-                       bubbles up through the reactive tree via focus-path, matching against \
-                       bound operations. If a match is found, the operation is executed. Read the \
+        description = "Press a keyboard shortcut (key chord) at a specific entity, through the \
+                       SAME real input pipeline a user's keystroke takes: the target is focused, \
+                       then the chord is dispatched as platform key events, so whichever \
+                       registry owns the chord (structural or window-level) handles it exactly as \
+                       in production. The chord is first looked up in the union registry \
+                       `list_keybindings` reports; an unbound chord is NOT dispatched. The \
+                       response's `status` is an enumerated state: `executed` (bound, focused, \
+                       pressed), `unbound` (bound in neither registry — nothing was sent), or \
+                       `bound_but_not_dispatched` (the driver declined to press it). Read the \
                        chord from list_keybindings rather than hardcoding it."
     )]
     async fn send_key_chord(
         &self,
         Parameters(params): Parameters<SendKeyChordParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        use holon_frontend::input::WidgetInput;
-
-        let keys: std::collections::BTreeSet<holon_frontend::input::Key> = params
+        let keys: Vec<holon_frontend::input::Key> = params
             .keys
             .iter()
             .map(|s| parse_key(s))
             .collect::<Result<_, _>>()
             .map_err(|e| rmcp::ErrorData::invalid_params(e, None))?;
-
-        let input = WidgetInput::KeyChord { keys };
+        let chord = holon_api::KeyChord::new(&keys);
 
         let entity_uri = holon_api::EntityUri::parse(&params.entity_id).map_err(|e| {
             rmcp::ErrorData::invalid_params(
@@ -3429,105 +3453,99 @@ impl HolonMcpServer {
                 None,
             )
         })?;
-        match self.debug.input_router.bubble_input(&entity_uri, &input) {
-            Some(holon_frontend::input::InputAction::ExecuteOperation {
-                entity_name,
-                operation,
-                entity_id,
-            }) => {
-                // send_key_chord can only supply the entity id (plus any params
-                // the descriptor pre-bound from its DSL args). Structural editor
-                // ops (e.g. split_block) additionally need UI-context params —
-                // a live caret `position`, a selection range — that live in the
-                // editor's InputState, not in this tool. Dispatching without
-                // them fails deep inside the op with an opaque
-                // "Missing or invalid parameter 'position'". Detect it here and
-                // fail loud with an actionable message instead.
-                let mut op_params: holon_api::StorageEntity = HashMap::new();
-                op_params.insert("id".into(), holon_api::Value::String(entity_id.to_string()));
-                for (k, v) in &operation.bound_params {
-                    op_params.insert(k.as_str().into(), v.clone());
-                }
 
-                let missing: Vec<&str> = operation
-                    .required_params
-                    .iter()
-                    .map(|p| p.name.as_str())
-                    .filter(|name| {
-                        *name != "id"
-                            && *name != operation.id_column.as_str()
-                            && !op_params.contains_key(*name)
-                    })
-                    .collect();
-                if !missing.is_empty() {
-                    return Err(rmcp::ErrorData::invalid_params(
-                        format!(
-                            "Key chord matched operation '{}.{}', but it requires UI-context \
-                             parameter(s) {:?} that send_key_chord cannot supply — it dispatches \
-                             with only the entity id (and DSL-bound params). These come from the \
-                             live caret/selection in the editor's InputState. Drive this through \
-                             the real input pipeline instead: use `type_text` / \
-                             `send_raw_keystroke` to send the keystroke, which lets the focused \
-                             editor supply {:?}.",
-                            entity_name, operation.name, missing, missing
-                        ),
-                        None,
-                    ));
-                }
+        let services = self.builder_services().ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                "send_key_chord needs a frontend, which this session does not wire",
+                None,
+            )
+        })?;
+        let window = self.debug.window_key_bindings.get();
+        let bindings = crate::keybindings::union_key_bindings(
+            services.key_bindings_snapshot(),
+            window.map(|v| v.as_slice()),
+        )
+        .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
+        let matched = crate::keybindings::match_chord(&bindings, &chord);
 
-                let entity_name_typed = EntityName::new(&entity_name);
-                let response = self
-                    .engine()
-                    .execute_operation(
-                        &entity_name_typed,
-                        &operation.name,
-                        op_params,
-                        holon_api::OpOrigin::User,
-                    )
-                    .await
-                    .map_err(|e| {
-                        rmcp::ErrorData::internal_error(
-                            format!(
-                                "Key chord matched operation '{}.{}' but execution failed: {}",
-                                entity_name, operation.name, e
-                            ),
-                            None,
-                        )
-                    })?;
-
-                Ok(CallToolResult::success(vec![Content::text(
+        // A chord nobody registered and a registered chord that no-opped used
+        // to be the same `action:none` answer, so a broken driver was
+        // indistinguishable from a deliberately inert key (dogfood
+        // 2026-08-07). Separate them: report `unbound` without pressing
+        // anything, and name every chord that IS bound.
+        if matched.is_empty() {
+            let known: Vec<serde_json::Value> = bindings
+                .iter()
+                .map(|b| {
                     serde_json::json!({
-                        "matched_operation": format!("{}.{}", entity_name, operation.name),
-                        "entity_id": entity_id,
-                        "result": response.response.map(|v| v.to_json_string()),
+                        "action": b.action,
+                        "chord": b.keys,
+                        "registry": b.registry.as_str(),
                     })
-                    .to_string(),
-                )]))
-            }
-            Some(holon_frontend::input::InputAction::Focus {
-                block_id,
-                placement,
-            }) => Ok(CallToolResult::success(vec![Content::text(
+                })
+                .collect();
+            return Ok(CallToolResult::success(vec![Content::text(
                 serde_json::json!({
-                    "action": "focus",
-                    "target_block_id": block_id.as_str(),
-                    "placement": format!("{:?}", placement),
+                    "status": "unbound",
+                    "keys": params.keys,
+                    "detail": "This chord is bound in neither the structural nor the window \
+                               registry, so nothing was dispatched. `bound_chords` lists every \
+                               chord that IS bound.",
+                    "bound_chords": known,
                 })
                 .to_string(),
-            )])),
-            Some(holon_frontend::input::InputAction::Handled) => {
-                Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::json!({"action": "handled"}).to_string(),
-                )]))
-            }
-            None => Ok(CallToolResult::success(vec![Content::text(
-                serde_json::json!({
-                    "action": "none",
-                    "detail": "No handler matched the key chord"
-                })
-                .to_string(),
-            )])),
+            )]));
         }
+
+        let driver = self.debug.user_driver.get().ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                "send_key_chord needs a UserDriver — the frontend has not registered one yet",
+                None,
+            )
+        })?;
+        // The driver's contract takes the layout root; take the real one the
+        // frontend published rather than fabricate a tree.
+        let root_tree = self.debug.input_router.root_tree().ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                "send_key_chord: no frontend has published a root tree to the input router yet",
+                None,
+            )
+        })?;
+        let root_id = holon_frontend::focus_path::resolve_entity_id(&root_tree)
+            .unwrap_or_else(|| entity_uri.clone());
+
+        let dispatched = driver
+            .send_key_chord(&root_id, &root_tree, &entity_uri, &chord, HashMap::new())
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!(
+                        "send_key_chord({:?}, {:?}): the chord is bound but the press failed: {e:#}",
+                        params.entity_id, params.keys
+                    ),
+                    None,
+                )
+            })?;
+
+        let matched_json: Vec<serde_json::Value> = matched
+            .iter()
+            .map(|b| {
+                serde_json::json!({
+                    "action": b.action,
+                    "registry": b.registry.as_str(),
+                    "context": b.context,
+                })
+            })
+            .collect();
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({
+                "status": if dispatched { "executed" } else { "bound_but_not_dispatched" },
+                "keys": params.keys,
+                "entity_id": params.entity_id,
+                "matched": matched_json,
+            })
+            .to_string(),
+        )]))
     }
 
     // ── UI interaction tools (raw input level) ─────────────────────────
@@ -3537,9 +3555,13 @@ impl HolonMcpServer {
                        describe_ui): the click is dispatched at the element's center via the same \
                        entity-addressed UserDriver path the E2E tests use — it resolves the \
                        element bounds, hit-tests the point, warns if a different element is on \
-                       top, and survives scroll/relayout. Falls back to raw `x`/`y` pixel \
-                       coordinates when `entity_id` is omitted. Dispatches MouseDown+MouseUp \
-                       events."
+                       top, and survives scroll/relayout. When the target is a main-region block \
+                       editor the call additionally WAITS for that editor to take window focus \
+                       and ERRORS if it never does, so a success means the caret is seated and a \
+                       following `insert_text`/`type_text` will land — a click is never reported \
+                       as a bare hit-test. Falls back to raw `x`/`y` pixel coordinates when \
+                       `entity_id` is omitted; that form cannot verify focus and reports the \
+                       window's `handled` flag instead. Dispatches MouseDown+MouseUp events."
     )]
     async fn click(
         &self,
@@ -3594,14 +3616,19 @@ impl HolonMcpServer {
                 rmcp::ErrorData::internal_error("GPUI interaction channel disconnected", None)
             })?;
 
-        resp_rx.await.map_err(|_| {
+        let response = resp_rx.await.map_err(|_| {
             rmcp::ErrorData::internal_error("GPUI did not respond to click event", None)
         })?;
 
+        // The coordinate form has no entity to prove focus against, so it
+        // reports what the window did with the event instead of asserting a
+        // success it cannot verify. `handled:false` means no element consumed
+        // the click — nothing was focused by it.
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::json!({
                 "clicked": [params.x, params.y],
                 "button": params.button,
+                "handled": response.handled,
             })
             .to_string(),
         )]))

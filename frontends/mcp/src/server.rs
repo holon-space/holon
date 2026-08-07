@@ -129,6 +129,19 @@ pub enum InteractionEvent {
     /// the `screenshot` MCP tool on platforms with no OS-level window-capture
     /// path. The pump answers with [`InteractionResponse::screenshot`] set.
     CaptureScreenshot,
+    /// Draw one frame, now, on the main thread — no platform input, no visual
+    /// side effect.
+    ///
+    /// Render-derived state (the `BoundsRegistry`'s rects, and the
+    /// `editable_text` window-focus flag it carries) is only as fresh as the
+    /// last frame that painted. A window that is not the frontmost application
+    /// paints when the platform decides to, so a driver waiting on that state
+    /// can sit out its whole budget while the thing it waits for has already
+    /// happened — reporting a failure that is purely an artifact of nobody
+    /// having drawn (dogfood 2026-08-07, DRIVER PARITY). `window.refresh()`
+    /// only marks the window dirty; this forces the draw itself, so a wait
+    /// paces on frames it produces rather than frames it hopes for.
+    ForceFrame,
 }
 
 /// Raw pixel readback of the GPUI window, produced by
@@ -149,6 +162,26 @@ pub struct InteractionResponse {
     pub screenshot: Option<CapturedImage>,
 }
 
+/// One window-level key binding, as the frontend registered it with the
+/// platform keymap.
+///
+/// The structural registry (`BuilderServices::key_bindings_snapshot`) only
+/// knows chords wired to reactive operations; window chords (undo, redo,
+/// quick-open, tab switching) live in the platform keymap and were invisible
+/// to `list_keybindings` until this carried them across (dogfood 2026-08-07).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WindowKeyBinding {
+    /// Action name, in the same namespace `list_keybindings` reports.
+    pub action: String,
+    /// Chord keys in the `holon_api::Key` wire vocabulary, e.g.
+    /// `["cmd", "shift", "z"]` — directly re-sendable via `send_key_chord`.
+    pub keys: Vec<String>,
+    /// The keymap context the binding is scoped to (`None` = global). A
+    /// context-scoped chord only fires while that context is active, which an
+    /// agent reading the registry must be able to see.
+    pub context: Option<String>,
+}
+
 /// Optional services for debug/inspection tools.
 /// Fields use `OnceLock` so they can be populated after DI resolution
 /// (e.g. Loro doc store is only available after `FrontendSession` is created).
@@ -163,6 +196,11 @@ pub struct DebugServices {
     /// chords). Set by the GPUI frontend; MCP tools call `bubble_input` on
     /// it.
     pub input_router: Arc<InputRouter>,
+    /// Window-level key bindings the frontend registered with the platform
+    /// keymap. `list_keybindings` unions these with the structural registry;
+    /// unset in a headless run, where the tool then reports the structural
+    /// registry alone and says so.
+    pub window_key_bindings: std::sync::OnceLock<Vec<WindowKeyBinding>>,
     /// Channel for injecting raw input events into the GPUI window.
     /// Set by the GPUI frontend after window creation.
     /// Uses `futures::channel::mpsc` so the pump awaits messages instead of
@@ -276,6 +314,7 @@ impl Default for DebugServices {
             orgmode_root: std::sync::OnceLock::new(),
             navigation_state: Arc::new(std::sync::RwLock::new(NavigationDebugState::default())),
             input_router: Arc::new(InputRouter::new()),
+            window_key_bindings: std::sync::OnceLock::new(),
             interaction_tx: std::sync::OnceLock::new(),
             user_driver: std::sync::OnceLock::new(),
             geometry: std::sync::OnceLock::new(),

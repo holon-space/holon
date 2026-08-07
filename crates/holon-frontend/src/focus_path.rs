@@ -728,6 +728,12 @@ impl InputRouter {
         self.root.read().unwrap().is_some()
     }
 
+    /// The root tree a frontend last published, for callers that must hand a
+    /// real `root_tree` to a `UserDriver` verb rather than fabricate one.
+    pub fn root_tree(&self) -> Option<Arc<ReactiveViewModel>> {
+        self.root.read().unwrap().clone()
+    }
+
     /// Diagnostic: describe the current root tree.
     pub fn describe(&self) -> String {
         let guard = self.root.read().unwrap();

@@ -10,6 +10,7 @@ pub mod dense_projection;
 pub mod describe_ui_expand;
 pub mod describe_ui_geometry;
 pub mod di;
+pub mod keybindings;
 pub mod resources;
 pub mod server;
 pub mod tools;

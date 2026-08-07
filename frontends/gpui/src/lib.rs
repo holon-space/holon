@@ -231,6 +231,145 @@ actions!(
 // per-row `capture_action` that dispatches the op for the focused block.
 actions!(holon_gpui, [TurnIntoPage]);
 
+/// One window-level chord: the keymap registration plus the metadata an agent
+/// needs to read it back out of `list_keybindings`.
+pub struct WindowChordRow {
+    pub action: &'static str,
+    pub chord: String,
+    pub context: Option<&'static str>,
+    pub binding: KeyBinding,
+}
+
+fn window_chord(
+    action: &'static str,
+    chord: String,
+    context: Option<&'static str>,
+    make: impl FnOnce(&str) -> KeyBinding,
+) -> WindowChordRow {
+    let binding = make(&chord);
+    WindowChordRow {
+        action,
+        chord,
+        context,
+        binding,
+    }
+}
+
+/// Every chord this frontend registers with the platform keymap, as the ONE
+/// source for both `cx.bind_keys` and the `list_keybindings` snapshot.
+///
+/// Two registries used to exist — the structural one in `ReactiveEngine` and
+/// this keymap — and only the first was introspectable, so an agent obeying
+/// "read a shortcut before you send it" concluded undo was unbound (dogfood
+/// 2026-08-07). A chord added here is registered AND reported; it cannot go
+/// missing from one side.
+pub fn window_key_bindings() -> Vec<WindowChordRow> {
+    #[cfg(target_os = "macos")]
+    let (m, redo_chord) = ("cmd", "cmd-shift-z".to_string());
+    #[cfg(not(target_os = "macos"))]
+    let (m, redo_chord) = ("ctrl", "ctrl-y".to_string());
+
+    let mut rows = vec![
+        // Context-free undo/redo — see the `actions!(holon_gpui, ...)` comment
+        // above for why `gpui_component::input::{Undo, Redo}` alone (context
+        // "Input") can't cover the no-editor-focused case.
+        window_chord("undo", format!("{m}-z"), None, |c| {
+            KeyBinding::new(c, TriggerUndo, None)
+        }),
+        window_chord("redo", redo_chord, None, |c| {
+            KeyBinding::new(c, TriggerRedo, None)
+        }),
+        // Quick-open / search — cmd-K (free chord; cmd-P is unbound too but
+        // cmd-K matches the VS Code / Linear / Slack command-palette idiom).
+        window_chord("open_search", format!("{m}-k"), None, |c| {
+            KeyBinding::new(c, OpenSearch, None)
+        }),
+        // Open-blocks tab navigation (Increment 2).
+        window_chord("cycle_tab_next", format!("{m}-]"), None, |c| {
+            KeyBinding::new(c, CycleTabNext, None)
+        }),
+        window_chord("cycle_tab_prev", format!("{m}-["), None, |c| {
+            KeyBinding::new(c, CycleTabPrev, None)
+        }),
+        window_chord("jump_to_tab_1", format!("{m}-1"), None, |c| {
+            KeyBinding::new(c, JumpToTab1, None)
+        }),
+        window_chord("jump_to_tab_2", format!("{m}-2"), None, |c| {
+            KeyBinding::new(c, JumpToTab2, None)
+        }),
+        window_chord("jump_to_tab_3", format!("{m}-3"), None, |c| {
+            KeyBinding::new(c, JumpToTab3, None)
+        }),
+        window_chord("jump_to_tab_4", format!("{m}-4"), None, |c| {
+            KeyBinding::new(c, JumpToTab4, None)
+        }),
+        window_chord("jump_to_tab_5", format!("{m}-5"), None, |c| {
+            KeyBinding::new(c, JumpToTab5, None)
+        }),
+        window_chord("jump_to_tab_6", format!("{m}-6"), None, |c| {
+            KeyBinding::new(c, JumpToTab6, None)
+        }),
+        window_chord("jump_to_tab_7", format!("{m}-7"), None, |c| {
+            KeyBinding::new(c, JumpToTab7, None)
+        }),
+        window_chord("jump_to_tab_8", format!("{m}-8"), None, |c| {
+            KeyBinding::new(c, JumpToTab8, None)
+        }),
+        window_chord("jump_to_tab_9", format!("{m}-9"), None, |c| {
+            KeyBinding::new(c, JumpToTab9, None)
+        }),
+    ];
+    // "Turn into page" — bound in the editor's "Input" context (same context
+    // gpui_component binds Tab/Shift-Tab -> IndentInline/OutdentInline in), so
+    // it only fires while a block editor is focused. `EditorView`'s per-row
+    // `capture_action(&TurnIntoPage)` handles it for the focused block.
+    rows.push(window_chord(
+        "turn_into_page",
+        format!("{m}-shift-p"),
+        Some("Input"),
+        |c| KeyBinding::new(c, TurnIntoPage, Some("Input")),
+    ));
+    rows
+}
+
+/// Publish the keymap registry into `DebugServices` so `list_keybindings` can
+/// union it with the structural one. Chord strings are translated into the
+/// `holon_api::Key` wire vocabulary here so a reported chord can be handed
+/// straight back to `send_key_chord`; a segment that does not parse is a
+/// programming error in [`window_key_bindings`], not user input.
+fn publish_window_key_bindings(
+    rows: &[WindowChordRow],
+    debug: &Arc<holon_mcp::server::DebugServices>,
+) {
+    let bindings: Vec<holon_mcp::server::WindowKeyBinding> = rows
+        .iter()
+        .map(|row| {
+            let keys: Vec<String> = row
+                .chord
+                .split('-')
+                .map(|seg| {
+                    seg.parse::<holon_api::Key>()
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "window_key_bindings: chord {:?} for action {:?} has segment \
+                                 {seg:?} outside the holon_api::Key vocabulary ({e}) — an agent \
+                                 could not send it back",
+                                row.chord, row.action
+                            )
+                        })
+                        .to_string()
+                })
+                .collect();
+            holon_mcp::server::WindowKeyBinding {
+                action: row.action.to_string(),
+                keys,
+                context: row.context.map(str::to_string),
+            }
+        })
+        .collect();
+    debug.window_key_bindings.set(bindings).ok(); // ALLOW(ok): a second window reuses the first's identical registry
+}
+
 // ── AppModel: Entity-based reactive state ──────────────────────────────────
 
 /// Reactive model backed by `ReactiveEngine`.
@@ -1717,56 +1856,11 @@ fn launch_holon_window_impl(
 )> {
     gpui_component::init(cx);
 
-    // Context-free undo/redo bindings — see the `actions!(holon_gpui, ...)`
-    // comment above for why `gpui_component::input::{Undo, Redo}` alone
-    // (context "Input") can't cover the no-editor-focused case.
-    #[cfg(target_os = "macos")]
-    cx.bind_keys([
-        KeyBinding::new("cmd-z", TriggerUndo, None),
-        KeyBinding::new("cmd-shift-z", TriggerRedo, None),
-        // Quick-open / search — cmd-K (free chord; cmd-P is unbound too but
-        // cmd-K matches the VS Code / Linear / Slack command-palette idiom).
-        KeyBinding::new("cmd-k", OpenSearch, None),
-        // Open-blocks tab navigation (Increment 2).
-        KeyBinding::new("cmd-]", CycleTabNext, None),
-        KeyBinding::new("cmd-[", CycleTabPrev, None),
-        KeyBinding::new("cmd-1", JumpToTab1, None),
-        KeyBinding::new("cmd-2", JumpToTab2, None),
-        KeyBinding::new("cmd-3", JumpToTab3, None),
-        KeyBinding::new("cmd-4", JumpToTab4, None),
-        KeyBinding::new("cmd-5", JumpToTab5, None),
-        KeyBinding::new("cmd-6", JumpToTab6, None),
-        KeyBinding::new("cmd-7", JumpToTab7, None),
-        KeyBinding::new("cmd-8", JumpToTab8, None),
-        KeyBinding::new("cmd-9", JumpToTab9, None),
-    ]);
-    #[cfg(not(target_os = "macos"))]
-    cx.bind_keys([
-        KeyBinding::new("ctrl-z", TriggerUndo, None),
-        KeyBinding::new("ctrl-y", TriggerRedo, None),
-        KeyBinding::new("ctrl-k", OpenSearch, None),
-        // Open-blocks tab navigation (Increment 2).
-        KeyBinding::new("ctrl-]", CycleTabNext, None),
-        KeyBinding::new("ctrl-[", CycleTabPrev, None),
-        KeyBinding::new("ctrl-1", JumpToTab1, None),
-        KeyBinding::new("ctrl-2", JumpToTab2, None),
-        KeyBinding::new("ctrl-3", JumpToTab3, None),
-        KeyBinding::new("ctrl-4", JumpToTab4, None),
-        KeyBinding::new("ctrl-5", JumpToTab5, None),
-        KeyBinding::new("ctrl-6", JumpToTab6, None),
-        KeyBinding::new("ctrl-7", JumpToTab7, None),
-        KeyBinding::new("ctrl-8", JumpToTab8, None),
-        KeyBinding::new("ctrl-9", JumpToTab9, None),
-    ]);
-
-    // "Turn into page" — bound in the editor's "Input" context (same context
-    // gpui_component binds Tab/Shift-Tab -> IndentInline/OutdentInline in), so
-    // it only fires while a block editor is focused. `EditorView`'s per-row
-    // `capture_action(&TurnIntoPage)` handles it for the focused block.
-    #[cfg(target_os = "macos")]
-    cx.bind_keys([KeyBinding::new("cmd-shift-p", TurnIntoPage, Some("Input"))]);
-    #[cfg(not(target_os = "macos"))]
-    cx.bind_keys([KeyBinding::new("ctrl-shift-p", TurnIntoPage, Some("Input"))]);
+    let window_chords = window_key_bindings();
+    if let Some(debug) = debug.as_ref() {
+        publish_window_key_bindings(&window_chords, debug);
+    }
+    cx.bind_keys(window_chords.into_iter().map(|row| row.binding));
 
     #[cfg(debug_assertions)]
     inspector::init(cx);
@@ -2605,6 +2699,16 @@ pub fn setup_interaction_pump(
                 let result = cx.update_window(window_handle, |_, window, cx| {
                     use holon_mcp::server::InteractionEvent;
                     match &cmd.event {
+                        InteractionEvent::ForceFrame => {
+                            // `refresh()` marks dirty; `draw()` is what actually
+                            // produces the frame, and it does not care whether
+                            // the window is key, visible, or on this Space. The
+                            // returned token must clear the element arena before
+                            // the next draw.
+                            window.refresh();
+                            window.draw(cx).clear();
+                            Ok((true, None))
+                        }
                         InteractionEvent::ScrollEntityIntoView { entity_id } => {
                             // Read the *live* engine: after a rebind the window is
                             // bound to a new engine, and scroll-into-view must look
@@ -3123,7 +3227,8 @@ pub fn interaction_event_to_platform_inputs(
         InteractionEvent::ScrollEntityIntoView { .. }
         | InteractionEvent::ScrollList { .. }
         | InteractionEvent::InsertText { .. }
-        | InteractionEvent::CaptureScreenshot => {
+        | InteractionEvent::CaptureScreenshot
+        | InteractionEvent::ForceFrame => {
             // Handled directly by the interaction pump's match arms
             // (`scroll_entity_into_view` / `scroll_list_by` / `dispatch_insert_text`),
             // not by synthesizing a platform input. Returning an empty vec keeps
