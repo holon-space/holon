@@ -4003,19 +4003,36 @@ impl HeadlessFrontendComponent {
         // `OpDispatchWriter` dispatch floor (behaviour-identical to the former
         // default), so `keystroke_writer_with`'s fail-loud resolver assert
         // never trips here.
-        let block_tree: Arc<dyn SutBlockTreeWrite> = if self.resolver.get().is_some() {
-            Arc::new(self.keystroke_writer_with(driver.clone()))
-        } else {
-            Arc::new(OpDispatchWriter::new(self.engine.clone()))
+        //
+        // The keystroke pipeline resolves the block's editable `MutableText`
+        // through the `BlockCellRegistry`, which exists only when the CRDT is
+        // on — so a SqlOnly build (`crdt.enabled = false`, the shipped default)
+        // also takes the dispatch floor. Advertising the keystroke writer there
+        // would admit `SplitBlock`/`TypeChars` into the alphabet and then fail
+        // mid-run with "editable_text not configured".
+        let editor_wired = self.loro_doc_store().is_some();
+        let block_tree: Arc<dyn SutBlockTreeWrite> = match self.resolver.get() {
+            Some(_) if editor_wired => Arc::new(self.keystroke_writer_with(driver.clone())),
+            // The dispatch floor still has to share the runner's id map: a
+            // `split_block` op mints a NEW id, and the per-tick reconcile pairs
+            // the oracle's synthetic id to it through exactly this resolver.
+            Some(resolver) => Arc::new(OpDispatchWriter::with_resolver(
+                self.engine.clone(),
+                resolver.clone(),
+            )),
+            None => Arc::new(OpDispatchWriter::new(self.engine.clone())),
         };
         caps.insert(block_tree);
         // `SutFocusWrite`/`SutEditorMirrorWrite`/`SutMutate`: the driver-bound shim
         // that delegates to the component's `*_via` bodies (sidebar-click
         // focus, editor keystrokes, `state_toggle` clicks) so the whole family
-        // rides ONE driver.
+        // rides ONE driver. `SutEditorMirrorWrite` is the editor-keystroke half,
+        // so it is hosted only when the editor cells exist.
         let shim = Arc::new(DriverBoundFrontendWrite::new(self.clone(), driver));
         caps.insert(shim.clone() as Arc<dyn SutFocusWrite>);
-        caps.insert(shim.clone() as Arc<dyn SutEditorMirrorWrite>);
+        if editor_wired {
+            caps.insert(shim.clone() as Arc<dyn SutEditorMirrorWrite>);
+        }
         caps.insert(shim as Arc<dyn SutMutate>);
     }
 }
