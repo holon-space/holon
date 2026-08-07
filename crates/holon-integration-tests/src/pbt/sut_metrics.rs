@@ -40,6 +40,11 @@ pub(super) struct MetricsSut {
     /// RSS (bytes) at the very start of the PBT run, for cumulative growth.
     #[cfg(feature = "otel-testing")]
     rss_baseline: usize,
+    /// Process-wide unattributed-span count sampled when the transition
+    /// started, so the report can disclose how many spans THIS window failed
+    /// to charge rather than a cumulative process total.
+    #[cfg(feature = "otel-testing")]
+    unattributed_before: usize,
     /// Span metrics + wall/RSS frozen at invariant-check start
     /// ([`Self::freeze_at_check_start`]), so the budget measures the
     /// transition itself (apply + settle) — NOT the invariant bodies' own
@@ -60,6 +65,9 @@ struct FrozenCheckMetrics {
     /// attribute the invariant bodies' own reads, which dwarf the transition's.
     origin: crate::test_tracing::QueryOriginBreakdown,
     breakdown: crate::test_tracing::SqlBreakdown,
+    /// Spans emitted while this window was open that no scope could be charged
+    /// for — the window measured LESS work than it drove.
+    unattributed: usize,
 }
 
 impl MetricsSut {
@@ -79,6 +87,8 @@ impl MetricsSut {
             rss_before: 0,
             #[cfg(feature = "otel-testing")]
             rss_baseline: 0,
+            #[cfg(feature = "otel-testing")]
+            unattributed_before: 0,
             #[cfg(feature = "otel-testing")]
             frozen_at_check: RefCell::new(None),
         }
@@ -100,12 +110,15 @@ impl MetricsSut {
         let rss_after = crate::test_tracing::current_rss_bytes();
         let origin = self.span_collector.queries_by_origin();
         let breakdown = self.span_collector.sql_breakdown();
+        let unattributed =
+            crate::test_tracing::unattributed_span_count() - self.unattributed_before;
         *self.frozen_at_check.borrow_mut() = Some(FrozenCheckMetrics {
             metrics,
             wall,
             rss_after,
             origin,
             breakdown,
+            unattributed,
         });
     }
 
@@ -118,6 +131,7 @@ impl MetricsSut {
     #[cfg(feature = "otel-testing")]
     pub(super) fn on_transition_start(&mut self) {
         self.span_collector.reset();
+        self.unattributed_before = crate::test_tracing::unattributed_span_count();
         *self.frozen_at_check.borrow_mut() = None;
         self.last_transition_start = Some(std::time::Instant::now());
         let rss_now = crate::test_tracing::current_rss_bytes();
@@ -157,6 +171,7 @@ impl MetricsSut {
             rss_after,
             origin,
             breakdown,
+            unattributed,
         } = self
             .frozen_at_check
             .borrow_mut()
@@ -228,10 +243,27 @@ impl MetricsSut {
                 ref_state.main_rendered_block_ids().len(),
             )
         };
+        // Spans no scope could be charged for mean this window measured LESS
+        // work than it drove (a thread emitting them was never bound to a test
+        // scope while several were open). Disclosed inline rather than left to
+        // silently shrink a budget.
+        //
+        // The counter behind this delta is process-cumulative, so under
+        // parallelism a concurrent test's unattributed spans land in this
+        // number too: read it as "somebody lost spans while this window was
+        // open", never as attribution. It can only over-report — an
+        // unattributed span is by definition in nobody's window, so a non-zero
+        // reading can never mean this budget was measured against too much.
+        let unattributed_summary = if unattributed == 0 {
+            String::new()
+        } else {
+            format!(" UNATTRIBUTED-SPANS={unattributed}")
+        };
         eprintln!(
             "[inv-sql-budget] {key}: reads={} (dedup {})/{} writes={}/{} ddl={}/{} tol={} \
              max_q={}ms wall={}ms spans={} rss={delta:+.1}MB \
-             (cum={cum:+.1}MB){state_summary}{render_summary}{cdc_summary}{perf_summary}",
+             (cum={cum:+.1}MB){state_summary}{render_summary}{cdc_summary}{perf_summary}\
+             {unattributed_summary}",
             metrics.sql_read_count,
             metrics.dedup_read_count(),
             expected.reads,
