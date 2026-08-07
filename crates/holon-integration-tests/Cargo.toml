@@ -154,6 +154,10 @@ memory-stats = { workspace = true, optional = true }
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
+# Increment 2.5 catalog-truthfulness probe: the PN simulator the declared
+# transitions are fired on (tests/pn_catalog_truthfulness_probe.rs).
+holon-engine.workspace = true
+chrono.workspace = true
 # Testing infrastructure (enable pbt feature for test targets)
 proptest.workspace = true
 proptest-state-machine.workspace = true
