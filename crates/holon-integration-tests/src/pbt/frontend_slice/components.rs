@@ -90,6 +90,17 @@ use crate::pbt::transitions::toggle_state::cycle_click_count;
 use crate::pbt::types::MutationApply;
 use crate::pbt::vm_snapshot::view_model_to_snapshot;
 
+/// How long the headless component's FIRST layout render may take.
+///
+/// This is a cold-boot cost, not an interaction: the root slot query, the three
+/// region `live_block`s, the sidebar's own SQL, and its first CDC batch all
+/// happen on the first `snapshot_resolved`. Measured at ~0.5-0.8s idle
+/// (`tests/sidebar_bind_latency_probe.rs`); the budget is set well above that
+/// because the machine running the corpus is routinely building four crates at
+/// once, and this phase must NOT be the thing that fails under load. It is
+/// separate from — never added to — the 5s budget for one row's wiring.
+const LAYOUT_BOOT_BUDGET: Duration = Duration::from_secs(30);
+
 /// Raise a fixed test deadline to the scale-soak settle budget
 /// (`HOLON_SOAK_SETTLE_MS`) when the soak is on. The frontend component's
 /// settle/bind/postcondition deadlines (3-10s) are tuned for the keystone's
@@ -1304,11 +1315,100 @@ impl HeadlessFrontendComponent {
             .await
     }
 
+    /// Wait for the LAYOUT to exist before waiting for one row's wiring.
+    ///
+    /// The headless component never subscribes to the root layout, so the very
+    /// first `snapshot_resolved` — which happens inside the sidebar barrier —
+    /// cold-boots the entire chain there: the root slot query, the three region
+    /// `live_block`s, the sidebar's own SQL, and its first CDC batch. Charging
+    /// that to the barrier made a 5s "did this row bind its selectable?" budget
+    /// pay for "has the UI booted at all?", and it is the whole reason that
+    /// barrier is load-sensitive. This phase gets its OWN budget and its own
+    /// message so the two failures never wear each other's signature.
+    ///
+    /// Starting the watchers here rather than at boot is deliberate: the
+    /// barrier started them anyway on its first poll, so no watcher exists
+    /// that did not exist before and no per-transition SQL read budget
+    /// moves.
+    async fn await_layout_rendered(&self, region: &str) {
+        let root_uri = holon_api::root_layout_block_uri();
+        let sidebar = EntityUri::parse("block:default-left-sidebar")
+            .expect("static sidebar key is a valid EntityUri");
+        let started = tokio::time::Instant::now();
+        let deadline = started + soak_deadline(LAYOUT_BOOT_BUDGET);
+        loop {
+            let resolved = self.reactive.snapshot_resolved(&root_uri);
+            let panel_up = holon_frontend::focus_path::region_panel_present(&resolved, region);
+            // The panel node appears as soon as the ROOT slot query delivers,
+            // but the sidebar's own SQL and its first CDC batch are the slow
+            // half — waiting only for the panel leaves most of the cold boot
+            // still charged to the per-row budget. Demanding a non-empty row
+            // set is sound because this barrier only ever runs when the caller
+            // is about to click a sidebar row, so at least one must exist.
+            let rows_up = !self
+                .reactive
+                .ensure_watching(&sidebar)
+                .snapshot()
+                .1
+                .is_empty();
+            if panel_up && rows_up {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "[await_layout_rendered] after {LAYOUT_BOOT_BUDGET:?} the layout still is not up \
+                 (region {region} panel rendered: {panel_up}; sidebar page list streamed rows: \
+                 {rows_up}) — the UI itself never came up, so no sidebar row could bind \
+                 anything. This is a layout/boot failure, NOT a missing `selectable` on the \
+                 target row.\n  SIDEBAR ROW SET: {}\n  {}",
+                self.sidebar_row_ids_debug().await,
+                holon_frontend::reactive::generation_drops::report(),
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// The ids the sidebar's own watch currently holds, next to the ids its own
+    /// SQL returns right now. Separating the two is what tells a missing
+    /// sidebar row apart as a PROJECTION miss (the page is not `Page`-tagged /
+    /// not in the query result) from a DELIVERY miss (the query returns it, the
+    /// watch's row set never received it).
+    async fn sidebar_row_ids_debug(&self) -> String {
+        let sidebar = EntityUri::parse("block:default-left-sidebar")
+            .expect("static sidebar key is a valid EntityUri");
+        let (_, rows) = self.reactive.ensure_watching(&sidebar).snapshot();
+        let mut watched: Vec<String> = rows
+            .iter()
+            .filter_map(|r| r.get("id").and_then(|v| v.as_string()).map(str::to_string))
+            .collect();
+        watched.sort();
+        let mut queried: Vec<String> = self
+            .sql_query(
+                "SELECT b.id FROM block b JOIN block_tags bt ON bt.block_id = b.id \
+                 WHERE bt.tag = 'Page' AND b.id != 'block:__default__' ORDER BY b.content ASC",
+            )
+            .await
+            .iter()
+            .filter_map(|r| Self::cell(r, "id"))
+            .collect();
+        queried.sort();
+        format!(
+            "watch holds {} row(s) {watched:?}; the sidebar's own SQL returns {} row(s) \
+             {queried:?}",
+            watched.len(),
+            queried.len(),
+        )
+    }
+
     /// Modifier-parameterised form of [`Self::await_sidebar_nav_intent`]. The
     /// primary click resolves `navigation.focus`, cmd/ctrl resolve
     /// `navigation.open_tab`; both stream in on the same nested `live_block`
     /// watch, so both need the same barrier.
     async fn await_sidebar_intent(&self, id: &EntityUri, modifiers: holon_api::ClickModifiers) {
+        // Two waits, two budgets: first that the UI exists at all, then that
+        // THIS row bound its wiring. Folding them into one 5s budget is what
+        // made this barrier fire under load (`sidebar-focus-bind`).
+        self.await_layout_rendered("left_sidebar").await;
         let root_uri = holon_api::root_layout_block_uri();
         let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(5));
         loop {
@@ -1338,7 +1438,16 @@ impl HeadlessFrontendComponent {
                  {id} with modifiers {modifiers:?} within 5s — either the sidebar page list \
                  (nested live_block watch) did not stream the target's selectable, or that \
                  template arg resolves to None (check `is_template_arg`). A click would then \
-                 fall through to an in-memory set_focus, writing NO navigation_history row."
+                 fall through to an in-memory set_focus, writing NO navigation_history row.\n  \
+                 MISS REASON: {}\n  SIDEBAR ROW SET: {}\n  {}",
+                holon_frontend::focus_path::click_intent_miss_reason(
+                    &resolved,
+                    id,
+                    "left_sidebar",
+                    modifiers,
+                ),
+                self.sidebar_row_ids_debug().await,
+                holon_frontend::reactive::generation_drops::report(),
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }

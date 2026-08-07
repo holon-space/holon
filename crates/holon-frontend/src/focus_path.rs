@@ -245,6 +245,16 @@ fn find_region_panel<'a>(
     find_panel(root, &panel_id)
 }
 
+/// True if `region`'s panel is rendered in `root` at all.
+///
+/// Distinguishes "the layout has not been rendered yet" from "the panel is
+/// there but empty" — the two states every region-scoped lookup collapses into
+/// a bare `None`. A frontend that has not yet resolved its layout answers
+/// `false` for every region.
+pub fn region_panel_present(root: &crate::view_model::ViewModel, region: &str) -> bool {
+    find_region_panel(root, region).is_some()
+}
+
 pub fn find_click_intent_in_region(
     root: &crate::view_model::ViewModel,
     entity_id: &EntityUri,
@@ -253,6 +263,79 @@ pub fn find_click_intent_in_region(
 ) -> Option<crate::operations::OperationIntent> {
     let panel = find_region_panel(root, region)?;
     find_click_intent_in_view_model(panel, entity_id, modifiers)
+}
+
+/// Name why [`find_click_intent_in_region`] resolved nothing for `entity_id`.
+///
+/// The bare `None` conflates three structurally different states — no region
+/// panel, the entity absent from the panel, and the entity present but binding
+/// no click wiring for these `modifiers`. Only the second is a readiness race
+/// worth polling; a caller that guesses sends the investigation the wrong way.
+pub fn click_intent_miss_reason(
+    root: &crate::view_model::ViewModel,
+    entity_id: &EntityUri,
+    region: &str,
+    modifiers: holon_api::ClickModifiers,
+) -> String {
+    fn collect_matches<'a>(
+        node: &'a crate::view_model::ViewModel,
+        entity_id: &EntityUri,
+        out: &mut Vec<&'a crate::view_model::ViewModel>,
+    ) {
+        if node.entity_id().as_ref() == Some(entity_id) {
+            out.push(node);
+        }
+        for child in node.children() {
+            collect_matches(child, entity_id, out);
+        }
+    }
+
+    fn collect_ids(node: &crate::view_model::ViewModel, out: &mut Vec<String>) {
+        if let Some(id) = node.entity_id() {
+            out.push(id.to_string());
+        }
+        for child in node.children() {
+            collect_ids(child, out);
+        }
+    }
+
+    let Some(panel) = find_region_panel(root, region) else {
+        return format!("region {region} renders no panel in the resolved tree at all");
+    };
+
+    let mut matched = Vec::new();
+    collect_matches(panel, entity_id, &mut matched);
+    if matched.is_empty() {
+        let mut ids = Vec::new();
+        collect_ids(panel, &mut ids);
+        ids.sort();
+        ids.dedup();
+        return format!(
+            "{entity_id} renders NO node in region {region} — the panel is not showing this \
+             entity at all. It renders {} distinct entities: [{}]",
+            ids.len(),
+            ids.join(", ")
+        );
+    }
+
+    let bound: Vec<String> = matched
+        .iter()
+        .flat_map(|n| n.operations.iter())
+        .map(|ow| {
+            format!(
+                "{}.{} @ {:?}",
+                ow.descriptor.entity_name,
+                ow.descriptor.name,
+                ow.descriptor.click_modifiers()
+            )
+        })
+        .collect();
+    format!(
+        "{entity_id} DOES render {} node(s) in region {region}, but none binds a click wiring for \
+         modifiers {modifiers:?} — the row is there, the action is not. Bound operations: [{}]",
+        matched.len(),
+        bound.join(", ")
+    )
 }
 
 /// Resolve the intent a click on `entity_id`'s `state_toggle` glyph dispatches,
