@@ -286,7 +286,7 @@ impl BlockCellRegistry {
         // SQL path; the inbound consumer (when it sees a non-Loro origin
         // CDC event) reflects them back into Loro where applicable.
         // - `id`: the row's primary key, never reassigned
-        // - `depth`: derived from the tree structure on snapshot
+        // - `depth`: no SQL column; consumers derive depth from the tree
         // - `content_type`, `source_name`: stored in Loro but written by
         //   `update_block_text` / chord-time content create paths, not by `set_field`
         //   callers

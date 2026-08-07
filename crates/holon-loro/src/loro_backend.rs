@@ -446,8 +446,8 @@ fn read_properties_from_meta(meta: &loro::LoroMap) -> HashMap<String, Value> {
     // the always-emitted bookkeeping `updated_at` via `or_insert`), producing a
     // bookkeeping-only update that decodes to zero typed ops and trips the
     // consolidator's `agrees_with_ops` divergence. Stripping here makes Loro's
-    // `properties` agree with SQL's by construction. (`RESERVED_PROPERTY_KEYS`
-    // mirrors `schema_modules::BLOCK_RAW_COLUMNS`.)
+    // `properties` agree with SQL's by construction (see
+    // `RESERVED_PROPERTY_KEYS` below).
     //
     // Edge-typed fields (junction tables, not raw columns) get the same
     // treatment for the same reason — they leak in as `Array([])` and, being
@@ -462,11 +462,12 @@ fn read_properties_from_meta(meta: &loro::LoroMap) -> HashMap<String, Value> {
 }
 
 /// Block columns / typed fields that must never appear in the generic
-/// `properties` map — each has a dedicated typed `Block` slot and SQL column.
-/// Mirrors `holon_turso::schema_modules::BLOCK_RAW_COLUMNS` (minus `properties`
-/// itself). Edge fields (`tags`/`requires`/`advice_suppressed`) are stripped
-/// separately above. Kept as a local const (rather than a cross-crate import)
-/// to match the existing hardcoded edge strip in this module.
+/// `properties` map — each has a dedicated typed `Block` slot and, except
+/// `depth` (no SQL column; depth is derived from the tree wherever needed),
+/// a `holon_turso::schema_modules::BLOCK_RAW_COLUMNS` entry. Edge fields
+/// (`tags`/`requires`/`advice_suppressed`) are stripped separately above.
+/// Kept as a local const (rather than a cross-crate import) to match the
+/// existing hardcoded edge strip in this module.
 ///
 /// `collapsed` and `widget_only` are deliberately EXCLUDED: unlike the other
 /// columns they ARE stored in the Loro properties map (a `set_field` scalar),
