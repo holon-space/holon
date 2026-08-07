@@ -213,6 +213,93 @@ fn unmarked_markup_literal_reaches_a_fixed_point() {
     assert_fixed_point("the __default__ profile", &[], 3);
 }
 
+/// The 2026-08-07 dogfood payload, pinned as behaviour rather than as a bug.
+///
+/// A `Code` mark on `b` between two LITERAL `~` characters is unrepresentable
+/// in org: the code delimiter IS `~`, so the only bytes that could carry both
+/// meanings are `~~b~~`, which org reads as ONE code span over `~b~`. The
+/// emission therefore drops the mark, re-seals the literal as `=~b~=`, keeps
+/// every content byte, and settles on the first cycle.
+///
+/// What this locks is the RUNG. `ProtectiveDropped` says the content survived;
+/// `ContentUnpreserved` would say the ladder fell through to pass 2 and the
+/// bytes on disk no longer re-parse to what the store holds. The sighting was
+/// repeatedly attributed to the terminal "no emission settles" branch, which
+/// this proves is not the branch taken.
+#[test]
+fn a_code_mark_between_literal_code_delimiters_keeps_every_byte_and_settles() {
+    let content = "nested a ~b~ c";
+    let marks = [span(10, 11, InlineMark::Code)];
+    let mut block = Block::new_text(
+        EntityUri::block("dogfood-2026-08-07"),
+        EntityUri::block("parent"),
+        content,
+    );
+    block.marks = Some(marks.to_vec());
+    let (emitted, fidelity) = render_block_content_checked(&block);
+
+    assert_eq!(fidelity, RenderFidelity::ProtectiveDropped);
+    assert_eq!(emitted, "nested a =~b~= c");
+    assert_eq!(
+        extract_inline_marks(&emitted).0,
+        content,
+        "the content bytes must survive the dropped mark; emitted {emitted:?}"
+    );
+    assert_fixed_point(content, &marks, 3);
+}
+
+/// The same span with a STYLING mark instead. Same impossibility, one rung
+/// higher: nothing protective was given up, so the ladder must stop at
+/// `StylingDropped` rather than walk further down.
+#[test]
+fn a_styling_mark_between_literal_code_delimiters_stops_at_the_styling_rung() {
+    let content = "nested a ~b~ c";
+    let marks = [span(10, 11, InlineMark::Bold)];
+    let mut block = Block::new_text(
+        EntityUri::block("dogfood-2026-08-07-styling"),
+        EntityUri::block("parent"),
+        content,
+    );
+    block.marks = Some(marks.to_vec());
+    let (emitted, fidelity) = render_block_content_checked(&block);
+
+    assert_eq!(fidelity, RenderFidelity::StylingDropped);
+    assert_eq!(emitted, "nested a =~b~= c");
+    assert_eq!(extract_inline_marks(&emitted).0, content);
+    assert_fixed_point(content, &marks, 3);
+}
+
+/// The discriminating control, and the reason the two rows above are an org
+/// LIMITATION and not a renderer defect: a literal `~b~` in the content costs
+/// nothing as long as the mark does not live inside it, and having BOTH quote
+/// delimiters in the content costs nothing either. If any of these ever
+/// degrades, the ladder has become over-eager and the rows above stop
+/// describing org rather than the code.
+#[test]
+fn a_mark_outside_the_literal_keeps_full_fidelity() {
+    for (content, mark) in [
+        ("lit ~x~ and b", span(12, 13, InlineMark::Code)),
+        ("has = and ~ and b", span(16, 17, InlineMark::Code)),
+        // A mark spanning the literal delimiters themselves IS representable —
+        // `~~b~~` is exactly one code span over `~b~`.
+        ("nested a ~b~ c", span(9, 12, InlineMark::Code)),
+    ] {
+        let mut block = Block::new_text(
+            EntityUri::block("control"),
+            EntityUri::block("parent"),
+            content,
+        );
+        block.marks = Some(vec![mark.clone()]);
+        let (emitted, fidelity) = render_block_content_checked(&block);
+        assert_eq!(
+            fidelity,
+            RenderFidelity::Exact,
+            "{content:?} + {mark:?} must render exactly; emitted {emitted:?}"
+        );
+        assert_fixed_point(content, &[mark], 3);
+    }
+}
+
 /// The class, not the instances. Any `(content, marks)` state ANY producer
 /// can mint must be render-safe — see `MarkedContent` for why generating marks
 /// by parsing org text cannot reach most of those states.
