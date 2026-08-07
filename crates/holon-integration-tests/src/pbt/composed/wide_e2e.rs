@@ -1324,13 +1324,34 @@ pub fn authority_routing_disclosure(wiring: &Wiring) -> String {
     )
 }
 
+/// The floor the SHIPPED-DEFAULT (SQL block-CRUD authority) share of accepted
+/// keystone draws must clear — see `sql_crud_authority_draw_share_meets_floor`.
+/// Production defaults `crdt.enabled` to false, so a keystone that resolves
+/// every draw to the Loro CRUD authority tests a mode nobody ships. The value
+/// is a floor on the LIVE draw, not a target: the SQL-CRUD share is
+/// `P(Turso ∧ ¬Loro)`, measured at 0.220 over 4096 deterministic draws, so this
+/// line leaves headroom for generator tuning while still catching a collapse
+/// back toward zero.
+pub const MIN_SQL_CRUD_DRAW_SHARE: f64 = 1.0 / 8.0;
+
+/// Resolve a drawn manifest into the `ComponentSet` the composed SUT boots.
+///
+/// `Projection::EditorState` is selected IFF the resolved manifest wires
+/// [`StorageAdapter::Loro`]: `compose_sut` passes that flag straight through as
+/// `crdt.enabled`, so it decides whether `LoroBlockOperations` or the fallback
+/// `SqlOperationProvider` is the block-CRUD authority. Tying it to the Loro
+/// adapter keeps the manifest honest (no Loro adapter ⇒ no Loro authority) and
+/// makes the SHIPPED DEFAULT — `crdt.enabled = false` — a drawable mode.
 pub fn set_for_wiring(wiring: &Wiring) -> ComponentSet {
     let mut wiring = wiring.clone();
     wiring.actors.remove(&Actor::UI);
     if !wiring.has_storage(StorageAdapter::Turso) {
         wiring.storage_adapters.insert(StorageAdapter::Loro);
     }
-    let mut projections: BTreeSet<Projection> = [Projection::EditorState].into_iter().collect();
+    let mut projections: BTreeSet<Projection> = BTreeSet::new();
+    if wiring.has_storage(StorageAdapter::Loro) {
+        projections.insert(Projection::EditorState);
+    }
     if wiring.has_storage(StorageAdapter::Turso) {
         projections.insert(Projection::ViewModel);
     }
@@ -2071,6 +2092,121 @@ mod tests {
         );
     }
 
+    /// **Task #22 — the SHIPPED DEFAULT mode must be a reachable draw.**
+    ///
+    /// Production defaults `crdt.enabled` to `false`
+    /// (`holon-frontend/src/config.rs::crdt_enabled`), so the shipped desktop
+    /// app registers NO `CrudAuthority` and block CRUD falls back to
+    /// `SqlOperationProvider`. In the composed keystone that mode is
+    /// `loro_enabled = false`, which `compose_sut` reads off
+    /// `Projection::EditorState`. A draw whose manifest carries no
+    /// `StorageAdapter::Loro` therefore MUST resolve to the SQL authority —
+    /// otherwise the keystone claims a Loro CRUD authority the manifest never
+    /// wired, and the shipped default never runs.
+    #[test]
+    fn a_turso_draw_without_loro_routes_block_crud_to_sql() {
+        let sql_only = Wiring::sql_only();
+        assert!(
+            !sql_only.has_storage(StorageAdapter::Loro),
+            "premise: the sql_only blessed manifest wires no Loro adapter"
+        );
+        let set = set_for_wiring(&sql_only);
+        assert!(
+            !set.has_projection(Projection::EditorState),
+            "a Loro-free manifest must not select EditorState — EditorState IS the Loro-CRUD \
+             switch (compose_sut passes it as `loro_enabled`), so selecting it turns the CRDT on \
+             for a draw that never wired Loro and hides the shipped default; got {set:?}"
+        );
+        let line = authority_routing_disclosure(&sql_only);
+        assert!(
+            line.contains("block-CRUD=Sql(SqlOperationProvider)"),
+            "the shipped default (crdt off) must resolve block CRUD to the SQL provider: {line}"
+        );
+    }
+
+    /// **Task #22 non-vacuity floor.** The structural resolution above is
+    /// worthless if no *drawn* wiring ever hits it. Over the live
+    /// `any_valid_wiring()` draw (fixed-seed runner), the share of accepted
+    /// draws that resolve block CRUD to SQL must clear
+    /// [`MIN_SQL_CRUD_DRAW_SHARE`] — a generator change that starves the
+    /// shipped-default mode fails loudly here instead of silently returning it
+    /// to zero coverage.
+    #[test]
+    fn sql_crud_authority_draw_share_meets_floor() {
+        use proptest::strategy::Strategy;
+        use proptest::strategy::ValueTree;
+        use proptest::test_runner::TestRunner;
+
+        let strategy = holon_pbt_core::wiring::any_valid_wiring();
+        let mut runner = TestRunner::deterministic();
+        let draws = 4096;
+        let mut sql_crud = 0usize;
+        for _ in 0..draws {
+            let w = strategy
+                .new_tree(&mut runner)
+                .expect("any_valid_wiring must always produce a valid manifest")
+                .current();
+            if !set_for_wiring(&w).has_projection(Projection::EditorState) {
+                sql_crud += 1;
+            }
+        }
+        let share = sql_crud as f64 / draws as f64;
+        assert!(
+            share >= MIN_SQL_CRUD_DRAW_SHARE,
+            "shipped-default coverage floor: only {sql_crud}/{draws} ({share:.3}) accepted draws \
+             resolve block CRUD to `SqlOperationProvider`, below the \
+             {MIN_SQL_CRUD_DRAW_SHARE:.3} floor — the mode the desktop app actually ships \
+             (crdt.enabled defaults to false) would run in fewer keystone cases than the floor \
+             allows"
+        );
+    }
+
+    /// **Task #22 end-to-end teeth.** The floor above only counts draws; this
+    /// boots one. A `{Turso, Org}` draw must compose, seed, and run the
+    /// composed invariant catalog GREEN with the block-id correspondence
+    /// actually running (non-vacuity), while the SUT is in SQL-CRUD mode.
+    #[test]
+    fn sql_only_draw_boots_and_runs_the_catalog_green() {
+        let wiring = Wiring::custom(
+            vec![StorageAdapter::Org, StorageAdapter::Turso],
+            vec![],
+            vec![],
+        );
+        assert!(
+            !set_for_wiring(&wiring).has_projection(Projection::EditorState),
+            "premise: this draw must be in SQL-CRUD mode"
+        );
+        let ref_state = wide_e2e_ref_for(&wiring);
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("build multi-thread runtime");
+        rt.block_on(async {
+            let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+            let (caps, _handle, scaffold) = boot_and_seed_wide(&resolver, &ref_state).await;
+            let report = <WideE2E as ComposedSlice>::run_report(
+                &caps,
+                &resolver,
+                &BurnedPairs::new(),
+                &std::collections::BTreeSet::new(),
+                &scaffold,
+                &ref_state,
+            )
+            .await;
+            assert!(
+                report.failures().is_empty(),
+                "SqlOnly wide seed must run the catalog green; failures: {:?}",
+                report.failures()
+            );
+            let ran = report.ran_ids();
+            assert!(
+                ran.contains(&"inv-blocks-match-ref/block_raw"),
+                "the block-id comparison must RUN over the seeded SqlOnly SUT (non-vacuity proof \
+                 the seed landed); ran: {ran:?}"
+            );
+        });
+    }
+
     /// The SUT-side parameterization seam's behaviour-preservation anchor: the
     /// swap's current fixed wiring round-trips through [`set_for_wiring`]
     /// to exactly `full_headless` (so flipping `init_state` to draw
@@ -2101,34 +2237,42 @@ mod tests {
         assert!(set_for_wiring(&turso).has_projection(Projection::ViewModel));
     }
 
-    /// The failure-header authority disclosure must, for the very draw that
-    /// misled prior readers (`storage={Turso}` + the always-selected
-    /// `EditorState` projection), name LORO as the block-CRUD authority — NOT
-    /// Turso — while naming SQL as the projection sink. Single-sourced from
-    /// `set_for_wiring`, so it can never disagree with what the SUT actually
-    /// boots.
+    /// The failure-header authority disclosure must name LORO as the block-CRUD
+    /// authority — NOT Turso — for a draw that wires BOTH, while naming SQL as
+    /// the projection sink (the reading that misled prior readers of a
+    /// `storage={…,Turso}` header). Single-sourced from `set_for_wiring`, so it
+    /// can never disagree with what the SUT actually boots.
     #[test]
-    fn authority_disclosure_names_loro_as_block_crud_for_a_turso_editorstate_draw() {
-        // `storage={Org, Turso}` is exactly the composed keystone's failing draw.
-        let turso = Wiring::custom(
-            vec![StorageAdapter::Org, StorageAdapter::Turso],
+    fn authority_disclosure_names_loro_as_block_crud_for_a_loro_turso_draw() {
+        let loro_turso = Wiring::custom(
+            vec![
+                StorageAdapter::Loro,
+                StorageAdapter::Org,
+                StorageAdapter::Turso,
+            ],
             vec![],
             vec![],
         );
-        let line = authority_routing_disclosure(&turso);
+        let line = authority_routing_disclosure(&loro_turso);
         assert_eq!(
             line,
             "authority: block-CRUD=Loro(LoroBlockOperations, via EditorState); \
              projection-sinks=Sql(block_raw,matview); org-writeback=on"
         );
-        assert!(
-            !line.contains("block-CRUD=Sql"),
-            "a Turso+EditorState draw must NEVER claim Turso executes block CRUD: {line}"
+
+        // The SHIPPED DEFAULT: the same draw minus the Loro adapter routes block
+        // CRUD to the SQL provider over the same SQL sink.
+        let sql_only = Wiring::custom(
+            vec![StorageAdapter::Org, StorageAdapter::Turso],
+            vec![],
+            vec![],
+        );
+        assert_eq!(
+            authority_routing_disclosure(&sql_only),
+            "authority: block-CRUD=Sql(SqlOperationProvider); \
+             projection-sinks=Sql(block_raw,matview); org-writeback=on"
         );
 
-        // A hypothetical no-editor draw would route block CRUD to SQL. Construct
-        // the set directly (the live draw always selects EditorState) to prove
-        // the Sql arm is reachable and correct.
         let loro_only = Wiring::custom(vec![StorageAdapter::Loro], vec![], vec![]);
         let loro_line = authority_routing_disclosure(&loro_only);
         assert!(
