@@ -105,11 +105,12 @@ pub const CLICK_JITTER_TOLERANCE: usize = 1;
 /// origins `execute_query` ×2 + `<no-parent>` ×1. It is NOT the `focus_roots`
 /// re-read it was long assumed to be — `focus_roots` never appears in it.
 ///
-/// Conditional on the vault holding more than one document: measured 0 reads
-/// at d=1 (AddPeer n=123, PeerEdit n=130, Nothing n=209, SyncWithPeer n=297,
-/// all exactly 0) and exactly 3 at d=3 (AddPeer n=6, PeerEdit n=6, Nothing
-/// n=1). Shared rather than folded into each transition's constant so the one
-/// mechanism has one name.
+/// Flat in the document count, because the three reads are three distinct
+/// subscribers firing once each and two of them are whole-vault scans — there
+/// is no per-document fan-out. Measured 2026-08-07: 28 samples spanning d=3..8,
+/// after creates, BlockToPage, Indent and CDC-heavy mutations, budget armed and
+/// unarmed, ALL exactly 3; d=1 reads 0 (n=5). Shared rather than folded into
+/// each transition's constant so the one mechanism has one name.
 pub fn cdc_drain_floor(docs: usize) -> usize {
     if docs > 1 { 3 } else { 0 }
 }
