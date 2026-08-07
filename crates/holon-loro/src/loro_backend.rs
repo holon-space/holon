@@ -952,18 +952,21 @@ fn resolve_parent_core(
                     ) {
                         continue;
                     }
-                    if let Ok(meta) = tree.get_meta(node.id)
-                        && let Some(loro::ValueOrContainer::Value(v)) = meta.get(STABLE_ID)
-                        && v.as_string()
-                            .map(|s| s.as_ref() == parent_uri.id())
-                            .unwrap_or(false)
-                    {
-                        // Found it — also populate the cache for next time
-                        id_cache
-                            .lock()
-                            .unwrap()
-                            .insert(parent_uri.id().to_string(), node.id);
-                        return Some(node.id);
+                    match classify(&tree, node.id) {
+                        LiveNode::Settled(sid) if sid == parent_uri.id() => {
+                            // Found it — also populate the cache for next time
+                            id_cache
+                                .lock()
+                                .unwrap()
+                                .insert(parent_uri.id().to_string(), node.id);
+                            return Some(node.id);
+                        }
+                        // Silent skip, like the other id-lookup scans: this
+                        // walk runs on every cache miss over every node, so a
+                        // warning per non-matching node would drown the real
+                        // disclosures. A half-born parent resolves on the
+                        // caller's next read.
+                        LiveNode::Settled(_) | LiveNode::HalfBorn | LiveNode::MetaUnreadable => {}
                     }
                 }
             }
@@ -1701,10 +1704,22 @@ pub fn build_tid_index(doc: &loro::LoroDoc) -> HashMap<loro::TreeID, String> {
         ) {
             continue;
         }
-        if let Ok(meta) = tree.get_meta(node.id)
-            && let Some(sid) = read_stable_id(&meta)
-        {
-            index.insert(node.id, EntityUri::block(&sid).to_string());
+        match classify(&tree, node.id) {
+            LiveNode::Settled(sid) => {
+                index.insert(node.id, EntityUri::block(&sid).to_string());
+            }
+            // The index maps a live node to the id a later delete must retract.
+            // A node whose STABLE_ID has not landed was never projected, so it
+            // has nothing to retract — but this scan runs once per reseed, not
+            // per lookup, so the window is cheap enough to disclose.
+            LiveNode::HalfBorn => warn_half_born(
+                "build_tid_index",
+                node.id,
+                &format!("{:?}", tree.parent(node.id)),
+            ),
+            // Gone between enumeration and this read: nothing to index, and
+            // nothing survives that a delete could later name.
+            LiveNode::MetaUnreadable => {}
         }
     }
     index
@@ -1749,10 +1764,9 @@ fn find_stable_id_in_doc(doc: &loro::LoroDoc, needle: &str) -> Option<loro::Tree
         // A half-born or torn node carries no id to match — it is skipped
         // silently: a lookup that misses is retried by its caller, and warning
         // per scanned node on every miss would drown the real disclosures.
-        if let LiveNode::Settled(sid) = classify(&tree, node.id)
-            && sid == needle
-        {
-            return Some(node.id);
+        match classify(&tree, node.id) {
+            LiveNode::Settled(sid) if sid == needle => return Some(node.id),
+            LiveNode::Settled(_) | LiveNode::HalfBorn | LiveNode::MetaUnreadable => {}
         }
     }
     None
@@ -3314,10 +3328,20 @@ impl LoroBackend {
                 ) {
                     continue;
                 }
-                if let Ok(meta) = tree.get_meta(node.id)
-                    && let Some(sid) = read_stable_id(&meta)
-                {
-                    cache.insert(sid, node.id);
+                match classify(&tree, node.id) {
+                    LiveNode::Settled(sid) => {
+                        cache.insert(sid, node.id);
+                    }
+                    // Uncacheable: there is no id to key it by. The cache is
+                    // re-warmed on every import and the lookup scans fall back
+                    // to a tree walk on a miss, so the node becomes resolvable
+                    // as soon as its meta lands.
+                    LiveNode::HalfBorn => warn_half_born(
+                        "warm_stable_id_cache",
+                        node.id,
+                        &format!("{:?}", tree.parent(node.id)),
+                    ),
+                    LiveNode::MetaUnreadable => {}
                 }
             }
             Ok(())
@@ -3467,12 +3491,15 @@ impl LoroBackend {
                     // Same silent skip as `find_stable_id_in_doc`: a half-born
                     // or torn node has no id to match or to cache, and this
                     // scan runs on every cache miss.
-                    if let LiveNode::Settled(sid) = classify(&tree, tree_node.id) {
-                        // Populate cache for every node we encounter
-                        id_cache.lock().unwrap().insert(sid.clone(), tree_node.id);
-                        if sid == stable_id_owned {
-                            return Ok(Some(tree_node.id));
+                    match classify(&tree, tree_node.id) {
+                        LiveNode::Settled(sid) => {
+                            // Populate cache for every node we encounter
+                            id_cache.lock().unwrap().insert(sid.clone(), tree_node.id);
+                            if sid == stable_id_owned {
+                                return Ok(Some(tree_node.id));
+                            }
                         }
+                        LiveNode::HalfBorn | LiveNode::MetaUnreadable => {}
                     }
                 }
                 Ok(None)
@@ -4928,6 +4955,33 @@ mod incremental_tests {
         .unwrap();
         doc.commit();
         node
+    }
+
+    /// `build_tid_index` seeds the delete-retraction index, so it may only
+    /// carry ids that were actually projected. A node still inside its create
+    /// window has none: it is withheld from the index (and disclosed), while
+    /// its settled sibling is indexed as usual.
+    #[test]
+    fn build_tid_index_withholds_a_half_born_node_and_indexes_its_settled_sibling() {
+        let doc = new_fi_doc();
+        let settled = create_node(&doc, None, "settled-sib", "s");
+
+        // The create window: node alive, STABLE_ID insert not yet done.
+        let half_born = doc.get_tree(TREE_NAME).create(None).unwrap();
+        doc.commit();
+
+        let index = build_tid_index(&doc);
+
+        assert_eq!(
+            index.get(&settled).map(String::as_str),
+            Some(schemed("settled-sib").as_str()),
+            "a settled node must be indexed by its own URI"
+        );
+        assert!(
+            !index.contains_key(&half_born),
+            "a node whose STABLE_ID has not landed was never projected, so the index must not \
+             claim an id for it: {index:?}"
+        );
     }
 
     /// Case 1 — subtree delete during a dirtied scope. A batch that creates C
