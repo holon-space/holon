@@ -63,6 +63,16 @@ const CLICK_BOUNDS_TIMEOUT: Duration = Duration::from_secs(5);
 /// success — dogfood #3).
 const SCROLL_SETTLE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How long a caret-seating gesture waits for the target's editor to take
+/// WINDOW focus in a committed frame. Focus travels engine `focused_block` →
+/// spawned binding → render pass → `handle_input`, so it is never observable
+/// at the instant the MouseUp is dispatched; an occluded/idle window paints
+/// only when driven. Measured against a live app: a cold first click on a
+/// window that is not frontmost needs more than 2s for the editor to mount and
+/// report focus in a committed frame, so this shares `CLICK_BOUNDS_TIMEOUT`'s
+/// budget rather than the tighter one a driven PBT window can afford.
+const EDITOR_FOCUS_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Channel-based `UserDriver` for GPUI. Sends `InteractionCommand`s on
 /// the shared `interaction_tx` channel; the GPUI interaction pump drains
 /// them on the main thread and dispatches real `PlatformInput` events
@@ -183,7 +193,12 @@ impl GpuiUserDriver {
     /// un-rendered block) — it fires only when nothing in the chain resolves.
     ///
     /// Lookup chain: `render-entity-{id}` → `selectable-{id}` → raw `{id}` →
-    /// entity_id scan. The default `index.org` sidebar wraps each row in
+    /// entity_id scan. `render-entity-{id}` names the row-wide click-to-focus
+    /// wrapper, which records NO bounds today — so for a main-panel row this
+    /// chain lands on the `selectable-{id}` bullet, which is a drag handle, not
+    /// a caret target. Caret-seating verbs must go through
+    /// `require_click_center`, never here. The default `index.org` sidebar
+    /// wraps each row in
     /// `selectable(row(...))` directly, with no outer `render_entity()`,
     /// so sidebar rows register under `selectable-{id}`. Without that
     /// second alias, `click_entity` on a sidebar item would always miss.
@@ -395,6 +410,68 @@ impl GpuiUserDriver {
         }
     }
 
+    /// Block until `entity_id`'s `editable_text` reports window focus in a
+    /// committed frame, or fail loud naming what holds focus instead.
+    ///
+    /// Engine focus (`focused_block`) moves synchronously with the click, but
+    /// the target's editor mounts and takes WINDOW focus only on a following
+    /// render pass — until then a keystroke or an `insertText:` is either
+    /// dropped or consumed by the previously-focused editor.
+    ///
+    /// The flag it reads is render-derived, so the wait DRIVES the frames it
+    /// paces on (`InteractionEvent::ForceFrame`) instead of waiting for the
+    /// platform to schedule one. Focus arrives through a SPAWNED signal
+    /// binding, whose `notify` lands after the frame the gesture itself
+    /// forced; a window that is not the frontmost application then paints
+    /// nothing more, and a passive wait would report a failure on a gesture
+    /// that had in fact succeeded — with a STALE previous holder named as the
+    /// culprit, because the registry still carries the last frame that drew
+    /// it. `window.refresh()` alone (which every input already does) only
+    /// marks the window dirty; only a real draw refreshes the flag.
+    async fn await_editor_window_focus(
+        &self,
+        entity_id: &str,
+        verb: &str,
+        timeout: Duration,
+    ) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            // Draw FIRST: every read below is then of a frame this loop
+            // produced, so neither the success test nor the diagnostic can be
+            // answered from a stale one.
+            self.dispatch_event(InteractionEvent::ForceFrame).await?;
+            let elements = self.geometry.all_elements();
+            if elements.iter().any(|(_, info)| {
+                info.entity_id.as_deref() == Some(entity_id)
+                    && info.widget_type.as_ref() == "editable_text"
+                    && info.focused == Some(true)
+            }) {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let holder: Vec<String> = elements
+                    .iter()
+                    .filter(|(_, info)| {
+                        info.widget_type.as_ref() == "editable_text" && info.focused == Some(true)
+                    })
+                    .map(|(_, info)| info.entity_id.as_deref().unwrap_or("<none>").to_string())
+                    .collect();
+                anyhow::bail!(
+                    "GpuiUserDriver::{verb}: {entity_id:?}'s editable_text never took window \
+                     focus within {timeout:?}. Engine focused_block={:?}; editors reporting \
+                     window focus: {holder:?}. The gesture reached the element but did not seat a \
+                     caret, so any following keystroke would land nowhere (or in another block).",
+                    self.engine
+                        .ui_state()
+                        .focused_block_mutable()
+                        .get_cloned()
+                        .map(|u| u.as_str().to_string()),
+                );
+            }
+            let _ = tokio::time::timeout(Duration::from_millis(50), self.geometry.changed()).await;
+        }
+    }
+
     fn require_element_center(&self, entity_id: &str, verb: &str) -> Result<(f32, f32)> {
         self.element_center(entity_id).with_context(|| {
             format!(
@@ -424,8 +501,38 @@ impl GpuiUserDriver {
             if let Some(center) = self.element_center_in_region(entity_id, r) {
                 return Ok(center);
             }
+        } else if let Some(center) = self.text_center(entity_id) {
+            return Ok(center);
         }
         self.require_element_center(entity_id, verb)
+    }
+
+    /// Center of the entity's TEXT element — where a caret-seating click has
+    /// to land.
+    ///
+    /// `element_center`'s documented first lookup is `render-entity-{id}`, the
+    /// row-wide click-to-focus wrapper, but that wrapper records no bounds, so
+    /// the lookup misses and resolution falls through to `selectable-{id}` —
+    /// the 16px bullet, a drag handle whose click never seats a caret. Every
+    /// entity-addressed click into the main panel therefore looked like a
+    /// successful hit-test and focused nothing (dogfood 2026-08-07). The text
+    /// element is what a user actually aims at, is present focused
+    /// (`editable_text`) and unfocused (`rendered_text`), and lies inside the
+    /// focus wrapper, so the click reaches both handlers.
+    fn text_center(&self, entity_id: &str) -> Option<(f32, f32)> {
+        let elements = self.geometry.all_elements();
+        ["editable_text", "rendered_text"]
+            .into_iter()
+            .find_map(|want| {
+                elements
+                    .iter()
+                    .find(|(_, info)| {
+                        info.entity_id.as_deref() == Some(entity_id)
+                            && info.widget_type.as_ref() == want
+                            && info.has_visible_area()
+                    })
+                    .map(|(_, info)| info.center())
+            })
     }
 
     /// Center of the element carrying `entity_id` whose parent chain
@@ -624,6 +731,29 @@ impl UserDriver for GpuiUserDriver {
             modifiers: Vec::new(),
         })
         .await?;
+        // A click on a block editor is a caret-seating gesture, and seating the
+        // caret is asynchronous (engine focus → binding → render pass →
+        // `handle_input`). Returning at MouseUp reports a hit-test as if it
+        // were a focus, so a following `insert_text` / keystroke lands nowhere
+        // and the caller has no way to tell (dogfood 2026-08-07, DRIVER
+        // PARITY). Prove the focus, or fail loud. Sidebar rows navigate rather
+        // than seat a caret, so only main-region editors are held to it.
+        let is_main = region
+            .parse::<holon_api::Region>()
+            .map(|r| r == holon_api::Region::Main)
+            // ALLOW(unwrap_or): an unparseable region string is the same
+            // "no sidebar scoping" case `require_click_center` already treats
+            // as main.
+            .unwrap_or(true);
+        // `:__virtual:` is the creation slot: clicking it mints a NEW block and
+        // focuses THAT, so the slot's own id never takes focus and holding it
+        // to the proof would fail a working gesture.
+        let seats_a_caret =
+            is_main && !entity_id.contains(":__virtual:") && self.text_center(entity_id).is_some();
+        if seats_a_caret {
+            self.await_editor_window_focus(entity_id, "click_entity", EDITOR_FOCUS_TIMEOUT)
+                .await?;
+        }
         Ok(())
     }
 
@@ -714,9 +844,12 @@ impl UserDriver for GpuiUserDriver {
                     // the reference model (see `model_chord_click_focus`).
                     break;
                 }
-                let (cx, cy) = self.require_element_center(entity_id, "send_key_chord")?;
+                // The caret-seating resolution `click_entity` uses: the row's
+                // TEXT, not the `selectable-{id}` bullet `element_center` alone
+                // resolves — a bullet click never focuses.
+                let click_point = self.require_click_center(entity_id, "main", "send_key_chord")?;
                 self.dispatch_event(InteractionEvent::MouseClick {
-                    position: (cx, cy),
+                    position: click_point,
                     button: "left".into(),
                     modifiers: Vec::new(),
                 })
@@ -764,30 +897,10 @@ impl UserDriver for GpuiUserDriver {
         // Engine focus has moved, but the target's editor mounts and takes
         // WINDOW focus only on a following render pass — until then a key is
         // either dropped or consumed by the previously-focused editor, which
-        // the `handled` flag can't distinguish. Wait for the target's
-        // editable_text to report `focused == true` in a committed frame.
-        {
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-            loop {
-                let window_focused = self.geometry.all_elements().iter().any(|(_, info)| {
-                    info.entity_id.as_deref() == Some(entity_id)
-                        && info.widget_type.as_ref() == "editable_text"
-                        && info.focused == Some(true)
-                });
-                if window_focused {
-                    break;
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    anyhow::bail!(
-                        "send_key_chord: {entity_id:?}'s editable_text never took window focus \
-                         within 2s of click-to-focus — refusing to press {chord:?} into whatever \
-                         editor still holds it"
-                    );
-                }
-                let _ =
-                    tokio::time::timeout(Duration::from_millis(50), self.geometry.changed()).await;
-            }
-        }
+        // the `handled` flag can't distinguish.
+        self.await_editor_window_focus(entity_id, "send_key_chord", EDITOR_FOCUS_TIMEOUT)
+            .await
+            .with_context(|| format!("refusing to press {chord:?} into the wrong editor"))?;
 
         // Position the cursor with real input when the caller specified a
         // byte offset. Click lands the cursor somewhere in the line; we
