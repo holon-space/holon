@@ -18,7 +18,7 @@ use crate::block_params::build_block_params;
 use crate::models::OrgBlockExt;
 use crate::models::OrgDocumentExt;
 use crate::org_renderer::OrgRenderer;
-use crate::parser::parse_doc_id;
+use crate::parser::parse_doc_id_any_carrier;
 use crate::parser::parse_org_file_with;
 
 /// Carries the link-target classifier used at the ingest parse boundary. The
@@ -75,7 +75,12 @@ impl FileFormatAdapter for OrgFormatAdapter {
     }
 
     fn doc_id_from_content(&self, content: &str) -> Option<String> {
-        parse_doc_id(content)
+        // BOTH carriers, not just `#+ID:`. The controller treats `None` as "no
+        // stable identity" and force-writes `#+ID: <name-chain uuid>` onto the
+        // file; for a file identified by its file-level drawer that would add a
+        // SECOND, disagreeing carrier, and the next parse rejects the file
+        // outright. Seeing the drawer here is what keeps that from happening.
+        parse_doc_id_any_carrier(content)
     }
 
     fn build_block_params(
@@ -139,6 +144,29 @@ impl FileFormatAdapter for OrgFormatAdapter {
         }
         if parsed.file_title() != persisted.file_title() {
             persisted.set_file_title(parsed.file_title());
+            changed = true;
+        }
+        // The file-level `:PROPERTIES:` drawer and the marker recording that the
+        // file ALSO spelled its id as `#+ID:`. This is the only place parsed
+        // doc-root metadata reaches the persisted root, and write-back renders
+        // the PERSISTED root — so a drawer left out here is a drawer the very
+        // next write-back deletes from the user's file.
+        if parsed.file_drawer() != persisted.file_drawer() {
+            persisted.set_file_drawer(parsed.file_drawer());
+            changed = true;
+        }
+        let parsed_marker = parsed.get_property(crate::models::org_props::FILE_ID_KEYWORD);
+        if parsed_marker != persisted.get_property(crate::models::org_props::FILE_ID_KEYWORD) {
+            match parsed_marker {
+                Some(value) => {
+                    persisted.set_property(crate::models::org_props::FILE_ID_KEYWORD, value)
+                }
+                None => {
+                    persisted
+                        .properties
+                        .remove(crate::models::org_props::FILE_ID_KEYWORD);
+                }
+            }
             changed = true;
         }
         changed

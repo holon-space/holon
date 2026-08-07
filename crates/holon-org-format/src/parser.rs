@@ -116,6 +116,164 @@ pub fn parse_doc_id(content: &str) -> Option<String> {
     None
 }
 
+/// The FILE-LEVEL `:PROPERTIES:` drawer, split off the front of raw file
+/// content: the authored key/value pairs in order, plus the content with the
+/// drawer's lines removed.
+///
+/// Holon reads this drawer ITSELF instead of asking orgize for a
+/// `PROPERTY_DRAWER` node, and hands orgize only `rest`. Two live defects came
+/// from splitting the job — a cheap probe that answered one way and the grammar
+/// that answered another — and both were silent, because a document that
+/// resolves to no identity is minted a fresh one rather than reported. Owning
+/// the read end to end means there is only one answer to disagree with:
+///
+/// - orgize's `node_property_node` requires whitespace after the key, so ONE
+///   value-less `:KEY:` line makes its whole drawer parse fail; the drawer then
+///   decays into body text and the file loses its identity.
+/// - orgize's `PropertyDrawer::iter()` pairs two TEXT tokens per property, so a
+///   key with an empty value yields none and the line is dropped outright.
+///
+/// Both are lines the author wrote, and neither may be lost. Position is still
+/// the grammar: org admits a file-level drawer only as the first element of the
+/// file, and `drawer_begin_node` allows leading horizontal space, so the first
+/// line is matched after `trim_start`.
+fn split_file_drawer(content: &str) -> (Option<Vec<(String, String)>>, &str) {
+    let no_drawer = (None, content);
+    let mut lines = content.lines();
+    let Some(first) = lines.next() else {
+        return no_drawer;
+    };
+    if !first.trim().eq_ignore_ascii_case(":PROPERTIES:") {
+        return no_drawer;
+    }
+
+    let mut entries = Vec::new();
+    // Byte offset just past the `:PROPERTIES:` line. `lines()` strips the
+    // terminator, so step over it explicitly to keep `rest` line-aligned.
+    let mut consumed = first.len();
+    consumed += newline_len_at(content, consumed);
+
+    for line in lines {
+        let line_end = consumed + line.len() + newline_len_at(content, consumed + line.len());
+        let trimmed = line.trim();
+        if trimmed.eq_ignore_ascii_case(":END:") {
+            return (Some(entries), &content[line_end..]);
+        }
+        match parse_drawer_line(line) {
+            Some(entry) => entries.push(entry),
+            // A line that is neither a property nor `:END:` means this is not a
+            // well-formed drawer. Leave the whole region to orgize rather than
+            // swallow text that was never drawer content.
+            None if !trimmed.is_empty() => return no_drawer,
+            None => {}
+        }
+        consumed = line_end;
+    }
+    // Ran out of lines without `:END:` — unterminated, so not a drawer.
+    no_drawer
+}
+
+/// Length of the line terminator at `at` (0 at end of input).
+fn newline_len_at(content: &str, at: usize) -> usize {
+    if content[at..].starts_with("\r\n") {
+        2
+    } else if content[at..].starts_with('\n') {
+        1
+    } else {
+        0
+    }
+}
+
+/// One `:KEY:` or `:KEY: value` line of a property drawer. `None` for the
+/// `:PROPERTIES:` / `:END:` delimiters and for anything that is not a property
+/// line. The value is optional on purpose — see [`split_file_drawer`].
+fn parse_drawer_line(line: &str) -> Option<(String, String)> {
+    let rest = line.trim_start().strip_prefix(':')?;
+    let (key, value) = rest.split_once(':')?;
+    if key.is_empty() || key.contains(char::is_whitespace) {
+        return None;
+    }
+    if key.eq_ignore_ascii_case("PROPERTIES") || key.eq_ignore_ascii_case("END") {
+        return None;
+    }
+    Some((key.to_string(), value.trim().to_string()))
+}
+
+/// A file-level drawer's `:ID:` when it carries a usable one.
+///
+/// THE single definition of "the drawer identifies the document". The lenient
+/// probe, the strict parse and the renderer all ask through here, so none of
+/// them can disagree about whether a drawer owns the identity — a disagreement
+/// between the probe and the parse is what makes the sync controller stamp a
+/// second, conflicting `#+ID:` onto the file.
+///
+/// An EMPTY `:ID:` is not a carrier. It names nothing, so the document keeps
+/// its other identity and the empty value stays in the drawer as authored.
+fn drawer_id(drawer: &[(String, String)]) -> Option<&str> {
+    drawer
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("ID"))
+        .map(|(_, value)| value.as_str())
+        .filter(|value| !value.is_empty())
+}
+
+/// A file-level `:PROPERTIES:` drawer read straight from raw file content.
+///
+/// The cheap probe `FileFormat::doc_id_from_content` needs, and LITERALLY the
+/// same function the full parse uses — not merely an agreeing reimplementation.
+/// Nothing here builds a syntax tree, so it stays affordable for the per-file
+/// scan, and no third divergence axis can open up between probe and parse.
+pub fn parse_file_drawer_from_content(content: &str) -> Option<Vec<(String, String)>> {
+    split_file_drawer(content).0
+}
+
+/// The document's bare id as the file declares it, from EITHER carrier, with
+/// the drawer preferred. Lenient by design: when the two carriers disagree this
+/// still answers, and [`parse_org_file_with`] is where the file is rejected.
+///
+/// Answering for a drawer-identified file is the whole point. A `None` here
+/// tells the sync controller the file has no stable identity, and it responds
+/// by force-writing `#+ID: <name-chain uuid>` — manufacturing exactly the
+/// two-carrier conflict that then rejects the file on every subsequent load.
+pub fn parse_doc_id_any_carrier(content: &str) -> Option<String> {
+    if let Some(drawer) = parse_file_drawer_from_content(content) {
+        if let Some(id) = drawer_id(&drawer) {
+            return Some(id.to_string());
+        }
+    }
+    parse_doc_id(content)
+}
+
+/// The document's bare id from the two carriers a file may use — the
+/// file-level drawer's `:ID:` and the `#+ID:` keyword — or `None` when it uses
+/// neither and keeps its path-derived `file:` identity.
+///
+/// Two carriers naming DIFFERENT ids is unresolvable: either answer discards an
+/// identity the author wrote, and a document silently adopting the loser is how
+/// links and backlinks detach from their page. Reject the file at the parse
+/// boundary instead, the same policy `reject_id_cycles` applies next door.
+fn resolve_document_identity(
+    path: &Path,
+    file_drawer: Option<&[(String, String)]>,
+    id_keyword: Option<&str>,
+) -> Result<Option<String>> {
+    let drawer_id = file_drawer.and_then(drawer_id);
+
+    match (drawer_id, id_keyword) {
+        (Some(drawer), Some(keyword)) if drawer != keyword => anyhow::bail!(
+            "org identity conflict in {}: the file-level :PROPERTIES: drawer says :ID: {:?} but \
+             the #+ID: keyword says {:?}. Both name the document, so there is no safe way to \
+             pick one — every link written against the loser would detach. Make them agree, or \
+             delete one carrier.",
+            path.display(),
+            drawer,
+            keyword,
+        ),
+        (Some(id), _) | (None, Some(id)) => Ok(Some(id.to_string())),
+        (None, None) => Ok(None),
+    }
+}
+
 /// Parse an org file and return Document + Block entities, classifying link
 /// targets against the BUILT-IN entity schemes only.
 ///
@@ -159,15 +317,6 @@ pub fn parse_org_file_with(
     let title = parse_title(content);
     let todo_keywords_raw = parse_todo_keywords_config(content);
 
-    // `#+ID: <bare>` (when present) overrides the path-derived `file:` identity
-    // with a stable `block:<bare>` URI, so renames don't change document
-    // identity. The resolved `file_id` is used both as the document's id and
-    // as the parent for top-level headlines.
-    let file_id = match parse_doc_id(content) {
-        Some(bare) => EntityUri::block(&bare),
-        None => generate_file_id(path, root),
-    };
-
     // Build TaskState array from raw config (or None if no config)
     let todo_task_states: Option<Vec<TaskState>> = todo_keywords_raw.as_ref().map(|kw| {
         let (active, done) = parse_keywords_from_config(kw);
@@ -181,15 +330,13 @@ pub fn parse_org_file_with(
         states
     });
 
-    // Create document block. The first line of content is the title; the
-    // `Page` tag marks it as a page (formerly the `name`-bearing variant).
-    let title_line = title.clone().unwrap_or(file_name);
-    let mut document = Block::new_text(file_id.clone(), parent_dir_id.clone(), title_line);
-    document.set_page(true);
-
-    // Set org-specific properties using extension trait
-    document.set_file_title(title);
-    document.set_todo_keywords(todo_task_states);
+    // The file-level `:PROPERTIES:` drawer (org 9.0+, org-roam's default) —
+    // authored data that must survive write-back untouched, and whose `:ID:`
+    // names the document exactly as `#+ID:` does. Split off BEFORE orgize sees
+    // the content: Holon owns this drawer, and handing orgize a body that still
+    // contained it would either duplicate it (parsed as a node) or fold it into
+    // the doc-root preamble (when its grammar refuses one of the lines).
+    let (file_drawer, body_src) = split_file_drawer(content);
 
     // Parse org content
     let org = if let Some(ref kw) = todo_keywords_raw {
@@ -198,7 +345,7 @@ pub fn parse_org_file_with(
             todo_keywords: (active, done),
             ..Default::default()
         };
-        config.parse(content)
+        config.parse(body_src)
     } else {
         let active: Vec<String> = DEFAULT_ACTIVE_KEYWORDS
             .iter()
@@ -212,8 +359,65 @@ pub fn parse_org_file_with(
             todo_keywords: (active, done),
             ..Default::default()
         };
-        config.parse(content)
+        config.parse(body_src)
     };
+
+    let id_keyword = parse_doc_id(content);
+    let resolved = resolve_document_identity(path, file_drawer.as_deref(), id_keyword.as_deref())?;
+
+    // THE CLASS-KILLER. `FileSyncController` asks `doc_id_from_content` for this
+    // file's identity BEFORE parsing, and treats `None` as "no stable identity"
+    // by minting one and stamping it on the file — silently rewriting the id the
+    // author wrote. So the probe disagreeing with the parse is not a cosmetic
+    // inconsistency, it is data loss with no error and no log line, and it has
+    // now happened twice (indented drawer; value-less `:KEY:` line).
+    //
+    // The two share one function today, so this cannot fire. It is here because
+    // "cannot fire" is a property of the current factoring, not of the contract:
+    // if they are ever split again, the third axis must be LOUD instead of
+    // costing another vault its ids.
+    let probed = parse_doc_id_any_carrier(content);
+    if probed != resolved {
+        anyhow::bail!(
+            "org identity probe/parse divergence in {}: the cheap probe used to resolve this \
+             document reports {:?} but the full parse resolves {:?}. The controller trusts the \
+             probe, so a `None` there means this file's authored id is REPLACED by a minted one \
+             with no other symptom. Refusing to parse rather than silently re-identify the \
+             document.",
+            path.display(),
+            probed,
+            resolved,
+        );
+    }
+
+    let file_id = resolved
+        .map(|bare| EntityUri::block(&bare))
+        .unwrap_or_else(|| generate_file_id(path, root));
+
+    // Create document block. The first line of content is the title; the
+    // `Page` tag marks it as a page (formerly the `name`-bearing variant).
+    let title_line = title.clone().unwrap_or(file_name);
+    let mut document = Block::new_text(file_id.clone(), parent_dir_id.clone(), title_line);
+    document.set_page(true);
+
+    // Set org-specific properties using extension trait
+    document.set_file_title(title);
+    document.set_todo_keywords(todo_task_states);
+    if let Some(drawer) = &file_drawer {
+        let mut map = serde_json::Map::new();
+        for (key, value) in drawer {
+            map.insert(key.clone(), serde_json::Value::String(value.clone()));
+        }
+        document.set_file_drawer(Some(map));
+    }
+    // Only a file that declares its identity BOTH ways needs this marker, and
+    // only to keep write-back from dropping one of the two carriers. Recording
+    // it for every ordinary `#+ID:` file would put a new property on every
+    // doc-root in the vault to remember something none of them need.
+    let drawer_carries_id = file_drawer.as_deref().and_then(drawer_id).is_some();
+    if id_keyword.is_some() && drawer_carries_id {
+        document.set_property(crate::models::org_props::FILE_ID_KEYWORD, "t");
+    }
 
     // Extract blocks (headlines)
     let mut blocks = Vec::new();
@@ -278,7 +482,16 @@ pub fn parse_org_file_with(
     // don't validate: reject the malformed file HERE with an enriched error so
     // the ingest boundary quarantines it (loud + disclosed, other files keep
     // syncing) instead of writing the cyclic row the projection then crashes on.
-    reject_id_cycles(path, &document, &blocks)?;
+    reject_id_cycles(
+        path,
+        &document,
+        &blocks,
+        if drawer_carries_id {
+            "the document root (file-level :PROPERTIES: :ID:)"
+        } else {
+            "the document root (#+ID:)"
+        },
+    )?;
 
     // Sibling order is conveyed positionally — blocks are pushed in document
     // DFS order, so the org sync controller derives each block's
@@ -301,19 +514,25 @@ pub fn parse_org_file_with(
 /// `focus_descendants` projection then recurses without bound and crashes the
 /// app on boot. Fail loud here so the offending file is quarantined at ingest,
 /// never written to the store where the projection would overflow the stack.
-fn reject_id_cycles(path: &Path, document: &Block, blocks: &[Block]) -> Result<()> {
+fn reject_id_cycles(
+    path: &Path,
+    document: &Block,
+    blocks: &[Block],
+    doc_id_carrier: &'static str,
+) -> Result<()> {
     let mut owners: HashMap<&str, &'static str> = HashMap::new();
-    owners.insert(document.id.as_str(), "the document root (#+ID:)");
+    owners.insert(document.id.as_str(), doc_id_carrier);
     for block in blocks {
         if let Some(prev) = owners.insert(block.id.as_str(), "a heading/block (:ID:)") {
             anyhow::bail!(
                 "org id collision in {}: id {:?} is claimed by both {} and a heading/block -- \
                  duplicate ids make a block its own ancestor (self-parent cycle), which recurses \
                  the tree projection without bound and crashes the app on boot. Give the colliding \
-                 heading a distinct :ID: (or drop the file's #+ID:).",
+                 heading a distinct :ID: (or change the document's own id in {}).",
                 path.display(),
                 block.id.as_str(),
                 prev,
+                doc_id_carrier,
             );
         }
         // Direct 1-cycle backstop: any block naming itself as parent, however

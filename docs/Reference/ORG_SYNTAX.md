@@ -53,6 +53,80 @@ entity a YAML sidecar declares. Registration is keyed by SQL table name
 without that fold every multi-word sidecar entity would silently read as an
 unknown scheme. Pages are ordinary blocks tagged `Page`.
 
+### File-level `:PROPERTIES:` drawer (document identity + preserved keys)
+
+Standard Emacs org since 9.0 — and org-roam's default — puts the file's own
+properties in a `:PROPERTIES:` drawer at the **very top** of the file, before any
+`#+` keyword:
+
+```org
+:PROPERTIES:
+:ID: 20260807T101010
+:ROAM_REFS: https://example.com/paper
+:END:
+#+TITLE: Preserved
+* First heading
+```
+
+Holon preserves it. The rules:
+
+- **Position is part of the grammar.** Org (and orgize's `document_node`) only
+  recognize a file-level drawer as the *first* element of the file. A
+  `:PROPERTIES:` block that appears later is ordinary text and is treated as such.
+- **`:ID:` is the document identity** — the same role this file gives `#+ID:`.
+  Bare in the file, promoted to `block:<bare>` at the parse boundary. A file
+  identified this way is rename-safe exactly like a `#+ID:` file.
+- **`#+ID:` and a drawer `:ID:` together**: identical values are accepted (the
+  file simply states its identity twice, and both carriers are written back).
+  **Disagreeing values are rejected at the parse boundary** with an error naming
+  the file and both ids. Silently preferring one would discard an authored
+  identity — the failure this rule exists to prevent. There is no precedence
+  order to remember.
+- **Every non-`:ID:` key is preserved verbatim**, in the order the author wrote
+  it, whether or not Holon models it (`:ROAM_REFS:`, `:CATEGORY:`, anything).
+  They ride on the doc-root block under the `file_properties` property (a
+  JSON object; `serde_json::Map` preserves insertion order), so they survive the
+  store round trip and are written back unchanged.
+- **Write-back keeps the author's carrier.** A file whose drawer holds `:ID:` is
+  re-emitted with the drawer first and **no** `#+ID:` line; a file with no drawer
+  keeps using `#+ID:` as before. The drawer's `:ID:` value is always re-derived
+  from the document's current identity, so the two can never drift apart.
+- **Byte-identity holds for the canonical single-space form, NOT for padded
+  files.** Emacs aligns drawer values (`org-property-format`, default `%-10s`),
+  so a real org-roam file says `:ID:       20260807T101010` with padding. Holon
+  re-emits every key as `:KEY: value` with ONE space and trims the value, in the
+  same convergent sense as `:BLOCKED-BY:` → `:REQUIRES:` below: the first
+  write-back rewrites that padding, and every write-back after it is a fixed
+  point. No key and no value is lost — but do not expect a padded file to come
+  back byte-for-byte, because it will not. If the padding matters to you, the
+  fix is to preserve the authored whitespace per key, which this does not do.
+- **An empty value keeps a trailing space** (`:KEY: `). That is not cosmetic:
+  orgize's property grammar requires whitespace between key and value, and a
+  bare `:KEY:` line makes the WHOLE drawer fail to parse and decay into body
+  text. The space is what lets an empty-valued key survive re-ingest.
+- **Indentation is allowed on input and CANONICALIZED on write.** Org's
+  `drawer_begin_node` accepts leading horizontal space, so `  :PROPERTIES:` is
+  still the file's drawer; Holon re-emits it at column 0. Same disclosure as the
+  padding above: nothing is lost, the leading whitespace is not preserved.
+- **A value-less `:KEY:` line is preserved** (re-emitted as `:KEY: `). Note that
+  orgize's own property grammar rejects such a line and would void the entire
+  drawer, which is why Holon reads this drawer itself rather than through the
+  syntax tree — see `split_file_drawer`.
+- **An empty `:ID:` does not identify the document.** It names nothing, so the
+  document falls back to `#+ID:` or its name chain, and the empty value stays in
+  the drawer exactly as authored — it is never filled in with the document's id.
+- **A repeated key keeps its last value** (a `serde_json::Map` insert), and its
+  first authored position.
+
+| Role | File | Key function |
+|------|------|--------------|
+| Read the drawer + strip it from the body | `parser.rs` | `split_file_drawer()` — Holon owns this drawer; orgize never sees it |
+| Cheap identity probe (same function) | `parser.rs` | `parse_file_drawer_from_content()` / `parse_doc_id_any_carrier()` |
+| Fail loud if probe and parse ever disagree | `parser.rs` | the divergence check in `parse_org_file_with` |
+| Reject disagreeing identity carriers | `parser.rs` | `resolve_document_identity()` |
+| Carry it on the doc-root | `models.rs` | `OrgDocumentExt::file_drawer()` / `set_file_drawer()` (`org_props::FILE_PROPERTIES`) |
+| Render it back | `models.rs` | `render_document_header()` emits the drawer before `#+ID:`/`#+TITLE:` |
+
 ### Heading blocks
 
 ```org
