@@ -49,6 +49,7 @@ use holon_core::cell_registry::EntityCellRegistry;
 use holon_core::fractional_index::default_sort_key;
 use holon_core::fractional_index::gen_key_between;
 use holon_core::fractional_index::gen_n_keys;
+use holon_core::fractional_index::is_minted_key;
 use holon_core::storage::types::StorageEntity;
 
 use crate::core::queryable_cache::HasCache;
@@ -136,6 +137,98 @@ impl SqlBlockOperations {
             .collect();
         pairs.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
         Ok(pairs)
+    }
+
+    /// True when `siblings` do not describe an insertable sequence: two share a
+    /// key (no room between them), or one is not minted generator output and
+    /// therefore is not a position at all. Either way the set must be re-keyed
+    /// before anything can be placed relative to it.
+    fn needs_rekey(siblings: &[(String, String)]) -> bool {
+        siblings.windows(2).any(|w| w[0].1 == w[1].1)
+            || siblings.iter().any(|(_, sk)| !is_minted_key(sk))
+    }
+
+    /// Order-preserving re-key of `siblings` into distinct minted keys, with
+    /// one extra slot at `insert_idx`. Returns all `siblings.len() + 1` target
+    /// keys; the caller picks the slot it asked for. Every sibling whose key
+    /// actually changes gets a single `set_field("sort_key")` — values are
+    /// computed up-front, with no re-reads between writes, so the chord-op
+    /// projection race documented in MEMORY can't bite.
+    ///
+    /// This is the ONLY way an unkeyed row becomes a position: it is re-minted
+    /// in the place it is already observed in, never skipped. Skipping one
+    /// would silently place the new block on the wrong side of it.
+    async fn rekey_children_with_slot(
+        &self,
+        siblings: &[(String, String)],
+        insert_idx: usize,
+    ) -> Result<Vec<String>> {
+        let new_keys = gen_n_keys(siblings.len() + 1)
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })?;
+        let entity = EntityName::new(Block::entity_name());
+        for (i, (sib_id, sib_key)) in siblings.iter().enumerate() {
+            let target_key = if i < insert_idx {
+                &new_keys[i]
+            } else {
+                &new_keys[i + 1]
+            };
+            if sib_key == target_key {
+                continue;
+            }
+            let mut params: StorageEntity = HashMap::new();
+            params.insert("id".into(), Value::String(sib_id.clone()));
+            params.insert("field".into(), Value::String("sort_key".to_string()));
+            params.insert("value".into(), Value::String(target_key.clone()));
+            self.sql_ops
+                .execute_operation(&entity, "set_field", params)
+                .await?;
+        }
+        Ok(new_keys)
+    }
+
+    /// The SqlOnly order owner's single mint path, over bare id strings.
+    /// [`BlockOrdering::new_child_anchor`] and the `create` /
+    /// `apply_ingest_batch` append sites all route through here so they agree
+    /// on what a position is.
+    async fn mint_child_key(&self, parent_id: &str, after_id: Option<&str>) -> Result<String> {
+        // P1 isolation: only the SqlOnly (no-Loro) order owner mints keys here.
+        // In Loro mode the fractional index is authoritative — `apply_create`
+        // sets it from `position_after_block_id` and this return value is
+        // discarded — so short-circuit BEFORE the generator and its rebalance,
+        // which would otherwise emit spurious sibling `set_field("sort_key")`
+        // writes against the Loro-projected SQL view. The placeholder routes
+        // through `default_sort_key()` (the single default owner), never a
+        // stray literal.
+        if matches!(self.consolidator(), Consolidator::Upstream) {
+            return Ok(default_sort_key());
+        }
+        // `(id, sort_key)` pairs already in `(sort_key, id)` order — matches
+        // `OrgRenderer::render_entity_tree` so the new block's "after" slot is
+        // interpreted in the same order the on-disk render uses.
+        let siblings = self.sibling_keys(parent_id).await?;
+
+        // Insertion index: where the new block lands. With no `after_id` it is
+        // slot 0 (first child).
+        let insert_idx = match after_id {
+            None => 0usize,
+            Some(after) => {
+                siblings.iter().position(|(id, _)| id == after).ok_or_else(
+                    || -> Box<dyn std::error::Error + Send + Sync> {
+                        format!("mint_child_key: after block {after} missing").into()
+                    },
+                )? + 1
+            }
+        };
+
+        if Self::needs_rekey(&siblings) {
+            let new_keys = self.rekey_children_with_slot(&siblings, insert_idx).await?;
+            return Ok(new_keys[insert_idx].clone());
+        }
+
+        let prev_key = insert_idx.checked_sub(1).map(|i| siblings[i].1.clone());
+        let next_key = siblings.get(insert_idx).map(|(_, sk)| sk.clone());
+        gen_key_between(prev_key.as_deref(), next_key.as_deref())
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })
     }
 }
 
@@ -259,15 +352,14 @@ impl BlockOperations<Block> for SqlBlockOperations {
 /// violators (out-of-place, or carrying the default sentinel) are re-minted
 /// strictly between their predecessor's final key and the next keepable anchor.
 ///
-/// The default sentinel is never "keepable": it is not a `gen_key_between`
-/// value and lands arbitrarily in the lexical keyspace (`"A0"` sorts *above*
-/// real hex-ish indices like `"80"`), so an unkeyed block must always receive a
-/// real minted key (projection totality). Idempotent: a fully-keyed,
-/// already-ordered input returns its input unchanged.
+/// A key that is not minted output (`is_minted_key`) is never "keepable": it
+/// lands arbitrarily in the lexical keyspace (the default `"A0"` sorts *above*
+/// real indices like `"80"`) and cannot be anchored on, so such a block must
+/// always receive a real minted key (projection totality). Idempotent: a
+/// fully-keyed, already-ordered input returns its input unchanged.
 fn relabel_order(ordered_ids: &[&str], cur_keys: &[String]) -> Result<Vec<String>> {
-    let default_key = default_sort_key();
     let keepable =
-        |k: &str, prev: Option<&str>| -> bool { k != default_key && prev.is_none_or(|p| k > p) };
+        |k: &str, prev: Option<&str>| -> bool { is_minted_key(k) && prev.is_none_or(|p| k > p) };
     let mut out: Vec<String> = Vec::with_capacity(ordered_ids.len());
     let mut prev_final: Option<String> = None;
     for i in 0..ordered_ids.len() {
@@ -301,101 +393,16 @@ impl OrderKeyMinting for SqlBlockOperations {
     /// pure Loro ordering seam has no minting method at all (`OrderKeyMinting`,
     /// Replication.md §5).
     ///
-    /// Tied-key rebalance: if any two siblings under `parent_id` already
-    /// share a `sort_key` (e.g. parser-default `"A0"` after a bulk file
-    /// write), `gen_key_between` can't produce a strictly-between key for
-    /// the new slot. We detect the tie and redistribute all siblings into
-    /// distinct evenly-spaced keys via `gen_n_keys`, with the new block's
-    /// slot inserted at the correct position. Existing siblings are
-    /// updated with a single `set_field("sort_key")` each (no re-reads
-    /// between writes — values are computed up-front so the chord-op
-    /// projection race documented in MEMORY can't bite). The new block's
-    /// key is returned for the caller to persist on create.
+    /// Sibling sets that do not describe an insertable sequence — ties, or a
+    /// row carrying the SQL default `"A0"` or a legacy value — are re-keyed
+    /// first; see `mint_child_key`.
     async fn new_child_anchor(
         &self,
         parent_id: &EntityUri,
         after_id: Option<&EntityUri>,
     ) -> Result<String> {
-        let parent_id = parent_id.as_str();
-        let after_id: Option<&str> = after_id.map(|u| u.as_str());
-        // P1 isolation: only the SqlOnly (no-Loro) order owner mints keys here.
-        // In Loro mode the fractional index is authoritative — `apply_create`
-        // sets it from `position_after_block_id` and this return value is
-        // discarded — so short-circuit BEFORE the `gen_key_between` generator
-        // and its tied-key rebalance, which would otherwise emit spurious
-        // sibling `set_field("sort_key")` writes against the Loro-projected SQL
-        // view. The placeholder routes through `default_sort_key()` (the single
-        // default owner), never a stray literal.
-        if matches!(self.consolidator(), Consolidator::Upstream) {
-            return Ok(default_sort_key());
-        }
-        // `(id, sort_key)` pairs already in `(sort_key, id)` order — matches
-        // `OrgRenderer::render_entity_tree` so the new block's "after" slot is
-        // interpreted in the same order the on-disk render uses.
-        let siblings = self.sibling_keys(parent_id).await?;
-
-        let has_ties = siblings.windows(2).any(|w| w[0].1 == w[1].1);
-
-        if has_ties {
-            // Insertion index: where the new block lands in the rebalanced
-            // sequence. With no `after_id` it's slot 0 (first child).
-            let insert_idx = match after_id {
-                None => 0usize,
-                Some(after) => {
-                    siblings.iter().position(|(id, _)| id == after).ok_or_else(
-                        || -> Box<dyn std::error::Error + Send + Sync> {
-                            format!("new_child_anchor: after block {after} missing").into()
-                        },
-                    )? + 1
-                }
-            };
-            let new_keys = gen_n_keys(siblings.len() + 1).map_err(
-                |e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() },
-            )?;
-            let new_block_key = new_keys[insert_idx].clone();
-            let entity = EntityName::new(Block::entity_name());
-            for (i, (sib_id, sib_key)) in siblings.iter().enumerate() {
-                let target_key = if i < insert_idx {
-                    &new_keys[i]
-                } else {
-                    &new_keys[i + 1]
-                };
-                if sib_key == target_key {
-                    continue;
-                }
-                let mut params: StorageEntity = HashMap::new();
-                params.insert("id".into(), Value::String(sib_id.clone()));
-                params.insert("field".into(), Value::String("sort_key".to_string()));
-                params.insert("value".into(), Value::String(target_key.clone()));
-                self.sql_ops
-                    .execute_operation(&entity, "set_field", params)
-                    .await?;
-            }
-            return Ok(new_block_key);
-        }
-
-        let (prev_key, next_key): (Option<String>, Option<String>) = match after_id {
-            None => {
-                let first = siblings.first().map(|(_, sk)| sk.clone());
-                (None, first)
-            }
-            Some(after) => {
-                let after_key = siblings
-                    .iter()
-                    .find(|(id, _)| id == after)
-                    .map(|(_, sk)| sk.clone())
-                    .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
-                        format!("new_child_anchor: after block {after} missing").into()
-                    })?;
-                let next = siblings
-                    .iter()
-                    .find(|(_, sk)| *sk > after_key)
-                    .map(|(_, sk)| sk.clone());
-                (Some(after_key), next)
-            }
-        };
-        gen_key_between(prev_key.as_deref(), next_key.as_deref())
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })
+        self.mint_child_key(parent_id.as_str(), after_id.map(|u| u.as_str()))
+            .await
     }
 }
 
@@ -836,13 +843,29 @@ impl BlockOrdering for SqlBlockOperations {
                             .and_then(|v| v.as_string())
                             .map(str::to_string)
                     {
-                        let cursor = match parent_cursor.entry(parent.clone()) {
-                            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-                            std::collections::hash_map::Entry::Vacant(e) => {
-                                let existing = self.sibling_keys(&parent).await?;
-                                e.insert(existing.last().map(|(_, k)| k.clone()))
-                            }
-                        };
+                        if !parent_cursor.contains_key(&parent) {
+                            let existing = self.sibling_keys(&parent).await?;
+                            // The batch appends after the LAST sibling. If the
+                            // set is not an insertable sequence, re-key it in
+                            // place first (order-preserving) and seed from the
+                            // last sibling's NEW key — skipping an unkeyed row
+                            // instead would silently place every ingested block
+                            // before it.
+                            let seed = if Self::needs_rekey(&existing) {
+                                let new_keys = self
+                                    .rekey_children_with_slot(&existing, existing.len())
+                                    .await?;
+                                existing.len().checked_sub(1).map(|i| new_keys[i].clone())
+                            } else {
+                                existing.last().map(|(_, k)| k.clone())
+                            };
+                            parent_cursor.insert(parent.clone(), seed);
+                        }
+                        let cursor = parent_cursor.get_mut(&parent).ok_or_else(
+                            || -> Box<dyn std::error::Error + Send + Sync> {
+                                format!("apply_ingest_batch: cursor for {parent} vanished").into()
+                            },
+                        )?;
                         // SqlOnly `Store` order owner — the sanctioned mint site
                         // (Replication.md §5): batched form of `new_child_anchor`'s
                         // append path with an in-memory per-parent cursor.
@@ -1049,15 +1072,20 @@ impl CrudOperations<Block> for SqlBlockOperations {
             && matches!(self.consolidator(), Consolidator::Store)
             && let Some(parent_id) = fields.get("parent_id").and_then(|v| v.as_string())
         {
-            let siblings = self.sibling_keys(parent_id).await?;
-            let last_key = siblings.last().map(|(_, sk)| sk.clone());
+            // Append = anchor after the LAST sibling, whatever its key looks
+            // like. Routing through `mint_child_key` means an unkeyed sibling
+            // gets re-minted in place and the new block still lands after it;
+            // anchoring on the greatest minted key instead would skip the
+            // unkeyed row and silently place the new block BEFORE it.
+            let last_id = self.sibling_keys(parent_id).await?.pop().map(|(id, _)| id);
             // ALLOW(order_minting): sanctioned SqlOnly order-owner mint site
             // (Replication.md §5), same file/gate as `new_child_anchor`.
-            let minted = gen_key_between(last_key.as_deref(), None).map_err(
-                |e| -> Box<dyn std::error::Error + Send + Sync> {
+            let minted = self
+                .mint_child_key(parent_id, last_id.as_deref())
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
                     format!("SqlBlockOperations::create: mint sort_key: {e:#}").into()
-                },
-            )?;
+                })?;
             fields.insert("sort_key".into(), Value::String(minted));
         }
 
@@ -1151,6 +1179,7 @@ mod tests {
     use holon_core::__operations_block_operations;
     use holon_core::OperationRegistry;
     use holon_core::block_ordering::BlockOrdering;
+    use holon_core::fractional_index::is_minted_key;
     use holon_core::storage::types::StorageEntity;
     use holon_turso::schema_modules::BlockMatviewSchemaModule;
     use holon_turso::schema_modules::BlockSchemaModule;
@@ -1780,6 +1809,233 @@ mod tests {
                 row_exists(&handle, kept).await,
                 "{kept} is outside the subtree and must survive"
             );
+        }
+    }
+
+    /// Ordered `(id, sort_key)` for a parent, straight off `block_raw` in the
+    /// order the projection reads it.
+    async fn ordered_siblings(
+        handle: &crate::storage::turso::DbHandle,
+        parent_id: &str,
+    ) -> Vec<(String, String)> {
+        handle
+            .query(
+                &format!(
+                    "SELECT id, sort_key FROM block_raw WHERE parent_id = '{parent_id}' ORDER BY \
+                     sort_key, id"
+                ),
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("read siblings")
+            .into_iter()
+            .map(|r| {
+                let get = |k: &str| {
+                    r.get(k)
+                        .and_then(|v| v.as_string().map(str::to_string))
+                        .unwrap_or_default()
+                };
+                (get("id"), get("sort_key"))
+            })
+            .collect()
+    }
+
+    /// The SqlOnly `split_block` failure: `new_child_anchor` anchored on the
+    /// raw column value of the sibling that follows the split origin. When
+    /// that sibling still carries the SQL default `"A0"` — one unkeyed row,
+    /// which ties with nothing, so the tied-key rebalance never fired — the
+    /// pair handed to the generator was `("80", "A0")`. Neither is separable
+    /// from the other (both are one byte; the generator only searches the
+    /// bytes before the last), so the op failed outright with "Failed to
+    /// generate fractional index between given keys".
+    ///
+    /// A single unkeyed sibling is exactly what a legacy vault row and a
+    /// create that bypassed the minter both look like, so the anchor scan must
+    /// classify keys, not read them.
+    #[tokio::test]
+    async fn split_anchors_past_a_single_unkeyed_sibling() {
+        use holon_core::block_ordering::OrderKeyMinting;
+
+        let (_backend, ops, handle) = setup_sql_block_ops().await;
+
+        insert_raw(&handle, "block:parent", "sentinel:no_parent", "8180").await;
+        // The split origin, carrying a real minted key.
+        insert_raw(&handle, "block:origin", "block:parent", "80").await;
+        // One never-positioned sibling: the SQL column default. It ties with
+        // nothing, so the pre-existing tied-key rebalance does not fire.
+        insert_raw(&handle, "block:unkeyed", "block:parent", "A0").await;
+
+        // ALLOW(entity_uri_from_raw): test-fixture literal (#[cfg(test)])
+        let parent = EntityUri::from_raw("block:parent");
+        // ALLOW(entity_uri_from_raw): test-fixture literal (#[cfg(test)])
+        let origin = EntityUri::from_raw("block:origin");
+
+        let new_key = ops
+            .new_child_anchor(&parent, Some(&origin))
+            .await
+            .expect("anchor the new half of a split after its origin");
+
+        // Every sibling now holds a real position, and the new block's key
+        // sits strictly between the origin's and the next sibling's.
+        let siblings = ordered_siblings(&handle, "block:parent").await;
+        for (id, key) in &siblings {
+            assert!(
+                is_minted_key(key),
+                "{id} still holds the unkeyed value {key:?} after the anchor scan"
+            );
+        }
+        let origin_key = &siblings
+            .iter()
+            .find(|(id, _)| id == "block:origin")
+            .expect("origin row")
+            .1;
+        let unkeyed_key = &siblings
+            .iter()
+            .find(|(id, _)| id == "block:unkeyed")
+            .expect("unkeyed row")
+            .1;
+        assert!(
+            origin_key < &new_key && &new_key < unkeyed_key,
+            "new key {new_key} must land between {origin_key} and {unkeyed_key}"
+        );
+        // Order is preserved, not reshuffled, by the re-key.
+        assert_eq!(
+            siblings
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            ["block:origin", "block:unkeyed"],
+        );
+    }
+
+    /// An append must land LAST even when a sibling is unkeyed. Anchoring on
+    /// the greatest MINTED key instead skips the unkeyed row — the new block
+    /// then sorts BEFORE a sibling it must follow, silently. With the parent's
+    /// only child carrying the default, there is no minted key at all, so the
+    /// append anchors on nothing and the new block sorts FIRST.
+    #[tokio::test]
+    async fn create_appends_after_a_single_unkeyed_sibling() {
+        use holon_core::CrudOperations;
+
+        let (_backend, ops, handle) = setup_sql_block_ops().await;
+
+        insert_raw(&handle, "block:parent", "sentinel:no_parent", "8180").await;
+        insert_raw(&handle, "block:only", "block:parent", "A0").await;
+
+        create_child(&ops, "block:appended", "block:parent").await;
+
+        assert_appended_last(&handle, &["block:only", "block:appended"]).await;
+    }
+
+    /// Same defect with a minted sibling present, so the skip is not merely
+    /// "no anchor at all": anchoring on `"80"` and ignoring the `"A0"` row
+    /// drops the new block into the MIDDLE of the sequence.
+    #[tokio::test]
+    async fn create_appends_after_a_mixed_keyed_and_unkeyed_sibling_set() {
+        use holon_core::CrudOperations;
+
+        let (_backend, ops, handle) = setup_sql_block_ops().await;
+
+        insert_raw(&handle, "block:parent", "sentinel:no_parent", "8180").await;
+        insert_raw(&handle, "block:keyed", "block:parent", "80").await;
+        insert_raw(&handle, "block:unkeyed", "block:parent", "A0").await;
+
+        create_child(&ops, "block:appended", "block:parent").await;
+
+        assert_appended_last(&handle, &["block:keyed", "block:unkeyed", "block:appended"]).await;
+    }
+
+    async fn create_child(ops: &Arc<SqlBlockOperations>, id: &str, parent_id: &str) {
+        use holon_core::CrudOperations;
+
+        let mut fields: StorageEntity = std::collections::HashMap::new();
+        fields.insert("id".into(), holon_api::Value::String(id.to_string()));
+        fields.insert(
+            "parent_id".into(),
+            holon_api::Value::String(parent_id.to_string()),
+        );
+        fields.insert("content".into(), holon_api::Value::String(id.to_string()));
+        fields.insert(
+            "content_type".into(),
+            holon_api::Value::String("text".to_string()),
+        );
+        ops.create(fields)
+            .await
+            .unwrap_or_else(|e| panic!("create {id}: {e}"));
+    }
+
+    async fn assert_appended_last(handle: &crate::storage::turso::DbHandle, expected: &[&str]) {
+        let siblings = ordered_siblings(handle, "block:parent").await;
+        assert_eq!(
+            siblings
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            expected,
+            "the appended block must sort LAST, after every existing sibling"
+        );
+        for (id, key) in &siblings {
+            assert!(
+                is_minted_key(key),
+                "{id} still holds the unkeyed value {key:?} — an append must re-mint the rows it \
+                 passes, never skip them"
+            );
+        }
+    }
+
+    /// The same defect without a split, and for the LEGACY shape rather than
+    /// the column default: a persisted `sort_key` that is not minted output
+    /// (here `"a0"` — lower-case and unterminated, so not a position) sorts
+    /// arbitrarily against real keys, and anchoring on it cannot mint. Only
+    /// excluding the literal `"A0"` sentinel is not enough — `place_all`, the
+    /// SqlOnly order owner's total re-key driven by the Org authority's line
+    /// order (ADR 0007), must classify every key and re-mint the ones that are
+    /// not positions.
+    #[tokio::test]
+    async fn place_all_re_keys_a_legacy_unkeyed_block_into_its_requested_slot() {
+        use holon_core::block_ordering::BlockOrdering;
+
+        let (_backend, ops, handle) = setup_sql_block_ops().await;
+
+        insert_raw(&handle, "block:parent", "sentinel:no_parent", "8180").await;
+        insert_raw(&handle, "block:first", "block:parent", "80").await;
+        // Belongs in the middle, but this legacy value sorts above every
+        // minted key — and it is not the `"A0"` sentinel, so a check that only
+        // excludes the column default reads it as a real position.
+        insert_raw(&handle, "block:middle", "block:parent", "a0").await;
+        insert_raw(&handle, "block:last", "block:parent", "8180").await;
+
+        assert_eq!(
+            ordered_siblings(&handle, "block:parent")
+                .await
+                .iter()
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>(),
+            ["block:first", "block:last", "block:middle"],
+            "precondition: the unkeyed row sorts last"
+        );
+
+        // ALLOW(entity_uri_from_raw): test-fixture literal (#[cfg(test)])
+        let parent = EntityUri::from_raw("block:parent");
+        let ordered: Vec<EntityUri> = ["block:first", "block:middle", "block:last"]
+            .iter()
+            // ALLOW(entity_uri_from_raw): test-fixture literal (#[cfg(test)])
+            .map(|id| EntityUri::from_raw(id))
+            .collect();
+        ops.place_all(&parent, &ordered)
+            .await
+            .expect("re-key the parent to the authority's order");
+
+        let siblings = ordered_siblings(&handle, "block:parent").await;
+        assert_eq!(
+            siblings
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            ["block:first", "block:middle", "block:last"],
+        );
+        for (id, key) in &siblings {
+            assert!(is_minted_key(key), "{id} kept the unkeyed value {key:?}");
         }
     }
 }
