@@ -20,6 +20,15 @@ Usage:
     python3 scripts/measure_latency.py <logfile>
     <something> | python3 scripts/measure_latency.py -
     python3 scripts/measure_latency.py <logfile> --fail-over-p95 2000   # CI gate (exit 1 if worst action p95 > 2000ms)
+    python3 scripts/measure_latency.py <logfile> --ratchet docs/Testing/latency-ceilings.txt
+
+`--ratchet` is the per-rung RATCHET GATE. Unlike `--fail-over-p95` (one global
+threshold over the harness-only `action_total` stage), it judges the PROD
+`stage=e2e` measurement — interaction -> projection-visible, the exact quantity
+the `holon_oracles` latency-slo oracle judges — separately per action, against
+per-action ceilings from a checked-in file. Every action named in the ceilings
+file MUST produce at least `--min-samples` samples, so a run that silently
+stopped measuring fails instead of passing vacuously.
 """
 import re
 import sys
@@ -27,6 +36,28 @@ from collections import defaultdict
 
 FIELD = re.compile(r'(\w+)=(?:"([^"]*)"|(\S+))')
 ANSI = re.compile(r'\x1b\[[0-9;]*m')
+# Two line forms, one rung per line; `#` comments and blank lines ignored:
+#
+#   <stage>.<stat>.<action> = 1130     a GATED rung — over its ceiling fails
+#   report.<stage>.<stat>.<action>     a REPORT-ONLY rung — printed, never fails
+#
+# Deliberately not TOML/JSON: the file is a reviewed ratchet artifact whose
+# per-line rationale comments are the point, and the repo's python is 3.9 (no
+# stdlib tomllib).
+#
+# `<stat>` is p50 or p95, and the distinction is load-bearing. `pct()`
+# interpolates, so at small n the p95 is dominated by the largest sample: at
+# n=12 it is 0.55*v[10] + 0.45*v[11], i.e. the max carries ~45% of the statistic
+# and ONE slow sample moves it. Every rung this repo gates is therefore a p50.
+# p95 remains accepted by the parser and is printed in the tables above the
+# gate, but no p95 rung is currently gated — see docs/Testing/latency-ceilings.txt.
+#
+# The report-only form exists because a rung can be worth WATCHING before it is
+# stable enough to gate. Naming it here keeps it visible in every run instead of
+# quietly dropping off the report when it is ungated.
+CEILING_LINE = re.compile(
+    r'^\s*(e2e|total)\.(p50|p95)\.([A-Za-z_][\w]*)\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*$')
+REPORT_LINE = re.compile(r'^\s*report\.(e2e|total)\.(p50|p95)\.([A-Za-z_][\w]*)\s*$')
 
 
 def parse(line):
@@ -61,12 +92,99 @@ def num(fields, key):
         return None
 
 
+def read_ceilings(path):
+    """Parse the ratchet file into ({(stage, stat, action): ceiling_ms}, [rungs]).
+
+    `stage` is `e2e` (the prod interaction->projection-visible correlator) or
+    `total` (the harness's `action_total`, keyed by transition name). `stat` is
+    `p50` or `p95`. The second return value lists the REPORT-ONLY rungs, which
+    are measured and printed but can never fail the gate.
+
+    Fails loudly on a malformed line rather than skipping it: a typo'd rung
+    name that silently vanished from the gate would make the gate pass
+    vacuously, which is the one failure mode a ratchet must not have.
+    """
+    ceilings = {}
+    report_only = []
+    with open(path) as fh:
+        for lineno, raw in enumerate(fh, 1):
+            line = raw.split("#", 1)[0]
+            if not line.strip():
+                continue
+            r = REPORT_LINE.match(line)
+            if r:
+                report_only.append((r.group(1), r.group(2), r.group(3)))
+                continue
+            m = CEILING_LINE.match(line)
+            if not m:
+                raise SystemExit(
+                    f"{path}:{lineno}: malformed ceiling line {raw.rstrip()!r} "
+                    f"(expected `<e2e|total>.<p50|p95>.<action> = ms` or "
+                    f"`report.<e2e|total>.<p50|p95>.<action>`)")
+            ceilings[(m.group(1), m.group(2), m.group(3))] = float(m.group(4))
+    # Report-only rungs deliberately do not count: a file listing nothing BUT
+    # observations gates nothing, and must say so rather than exit 0.
+    if not ceilings:
+        raise SystemExit(f"{path}: no gated ceilings defined - the gate would pass vacuously")
+    return ceilings, report_only
+
+
+def ratchet_gate(ceilings, report_only, by_stage, min_samples):
+    """Judge each gated rung's statistic against its ratchet ceiling.
+
+    Report-only rungs are measured and printed in the same table but cannot
+    affect the verdict. Returns True when every GATED rung is within budget AND
+    met its sample floor.
+    """
+    print("\n" + "=" * 72)
+    print(f"LATENCY RATCHET GATE  (per-rung statistic, min {min_samples} samples/rung)")
+    print("=" * 72)
+    print(f"{'rung':<32}{'n':>5}{'value':>9}{'ceiling':>10}{'headroom':>10}  verdict")
+    print("-" * 72)
+    ok = True
+    for stage, stat, action in sorted(ceilings):
+        ceiling = ceilings[(stage, stat, action)]
+        rung = f"{stage}.{stat}.{action}"
+        vals = by_stage[stage].get(action, [])
+        n, p50, p95, _, _ = stats(vals)
+        if n < min_samples:
+            ok = False
+            print(f"{rung:<32}{n:>5}{'-':>9}{ceiling:>10.0f}{'-':>10}  "
+                  f"FAIL (need >= {min_samples} samples)")
+            continue
+        value = p50 if stat == "p50" else p95
+        headroom = ceiling - value
+        verdict = "ok" if value <= ceiling else "FAIL (over ceiling)"
+        if value > ceiling:
+            ok = False
+        print(f"{rung:<32}{n:>5}{value:>9.1f}{ceiling:>10.0f}"
+              f"{headroom:>+10.1f}  {verdict}")
+
+    for stage, stat, action in sorted(report_only):
+        rung = f"{stage}.{stat}.{action}"
+        n, p50, p95, _, _ = stats(by_stage[stage].get(action, []))
+        value = p50 if stat == "p50" else p95
+        shown = f"{value:>9.1f}" if n else f"{'-':>9}"
+        print(f"{rung:<32}{n:>5}{shown}{'-':>10}{'-':>10}  report-only (not gated)")
+    return ok
+
+
 def main():
     args = sys.argv[1:]
     fail_over_p95 = None
     if "--fail-over-p95" in args:
         i = args.index("--fail-over-p95")
         fail_over_p95 = float(args[i + 1])
+        del args[i:i + 2]
+    ratchet = None
+    if "--ratchet" in args:
+        i = args.index("--ratchet")
+        ratchet, ratchet_report_only = read_ceilings(args[i + 1])
+        del args[i:i + 2]
+    min_samples = 5
+    if "--min-samples" in args:
+        i = args.index("--min-samples")
+        min_samples = int(args[i + 1])
         del args[i:i + 2]
     if len(args) != 1:
         print(__doc__)
@@ -229,6 +347,13 @@ def main():
         print(f"\nDOMINATOR: projection accounts for {proj_sum:.0f}ms across "
               f"{len(proj_ms)} passes vs {tot_sum:.0f}ms of end-to-end action wall "
               f"({100*proj_sum/tot_sum:.0f}% of total action time).")
+
+    if ratchet is not None:
+        by_stage = {"e2e": e2e_by_action, "total": total_by_action}
+        if not ratchet_gate(ratchet, ratchet_report_only, by_stage, min_samples):
+            print("\nLATENCY RATCHET GATE FAILED", file=sys.stderr)
+            sys.exit(1)
+        print("\nLATENCY RATCHET GATE PASSED")
 
     # CI gate: fail if any action's end-to-end p95 exceeds the threshold. The gate
     # is intentionally generous (the headless keystone runs small docs); it exists to

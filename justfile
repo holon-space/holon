@@ -336,6 +336,61 @@ measure-latency cases='16' *FLAGS:
     echo "raw log: /tmp/holon-latency.log ($(grep -c holon_latency /tmp/holon-latency.log || true) events)"
     python3 scripts/measure_latency.py /tmp/holon-latency.log
 
+# Latency RATCHET gate — per-rung interaction->visible ceilings over two stages:
+# the PROD `stage=e2e` measurement (the exact quantity the runtime
+# `holon_oracles` latency-slo oracle judges — see crates/holon-api/src/
+# latency_e2e.rs "SLO endpoint") and the harness's `stage=action_total`.
+# Ceilings live in docs/Testing/latency-ceilings.txt and only ever move DOWN;
+# the 200ms SLO stays the documented target, not the gate threshold.
+#
+# Every GATED rung is a p50. p95 is printed but not gated: it interpolates, so
+# at replay-scale n it is dominated by the single largest sample and flaps on
+# unmodified code. That file also carries two REPORT-ONLY rungs (the SplitBlock
+# pair), printed every run but unable to fail the build until their bimodal slow
+# mode is attributed. See the ceilings file for the measured spreads.
+#
+# Unlike `measure-latency` (a report), this FAILS the build on a regression, and
+# refuses to pass vacuously: every GATED rung must produce at least
+# --min-samples samples, and a file with no gated rung at all is an error.
+#
+# The drive is the DETERMINISTIC hand-authored replay (latency-ratchet.jsonl),
+# not a random keystone sweep: a ratchet needs the same rungs and the same
+# sample counts every run, or the statistic it compares against a fixed ceiling
+# moves for reasons that have nothing to do with the code.
+#
+#   just latency-gate                          # the gate
+#   just latency-gate /tmp/tightened.txt       # prove-it-can-fail run
+latency-gate ceilings='docs/Testing/latency-ceilings.txt':
+    #!/usr/bin/env bash
+    # pipefail so a `tee`'d failure cannot report success (see `hand-authored`).
+    set -euo pipefail
+    # Tree assertion: a failed `cd` must never yield a green that ran nothing
+    # (a gate exited 0 having run 0 tests in the WRONG tree, 2026-07-25).
+    corpus=crates/holon-integration-tests/hand-authored-regressions/latency-ratchet.jsonl
+    for f in scripts/measure_latency.py {{ceilings}} "$corpus" \
+             crates/holon-integration-tests/tests/hand_authored_regressions.rs; do
+        [ -f "$f" ] || { echo "latency-gate: wrong tree — missing $f" >&2; exit 2; }
+    done
+    # Per-invocation log. A fixed /tmp path collides when two trees (or a lane
+    # and its verifier) run this gate at once, and the loser reads the other's
+    # output — which reads as an inexplicable failure in a tree that is fine.
+    log="$(mktemp -t holon-latency-gate)"
+    echo "latency-gate: run log $log"
+    # The replay's own correctness has its own gates (`keystone-smoke`,
+    # `hand-authored`); this gate's subject is latency. So a non-zero test exit is
+    # DISCLOSED, not swallowed and not fatal — a run that died early loses
+    # samples, which the --min-samples floor below turns into a hard failure.
+    status=0
+    RUST_LOG="holon_latency=debug" HOLON_OTEL_FILTER=off \
+        HOLON_HAND_AUTHORED_SIDECAR="hand-authored-regressions/latency-ratchet.jsonl" \
+        cargo test -p holon-integration-tests --features pbt \
+        --test hand_authored_regressions -- --nocapture > "$log" 2>&1 || status=$?
+    [ "$status" -eq 0 ] || echo "latency-gate: NOTE — replay exited $status; latency data below is still judged (see $log)"
+    # Floor of 18: every rung is driven >= 20 times by construction, so a count
+    # below this means the replay lost transitions, not that the workload is
+    # small. See the corpus header for why the counts are >= 20.
+    python3 scripts/measure_latency.py "$log" --ratchet {{ceilings}} --min-samples 18
+
 # Scale-soak: drive the REAL pipeline against a seeded 5–10k-block vault WITH CRDT on,
 # measuring per-action latency vs the p95<200ms SLO plus RSS growth. Boots the keystone
 # (`general_e2e_composed_pbt`, forced to the full_headless/CRDT wiring) over a synthetic
