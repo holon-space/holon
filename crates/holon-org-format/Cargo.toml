@@ -23,6 +23,7 @@ workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
 proptest.workspace = true
+tracing-subscriber.workspace = true
 # Dev-only cycle (that crate depends on this one): the shared `(content, marks)`
 # store-state generators live there per the shared-generator directive.
 holon-block-roundtrip-testing = { workspace = true }
