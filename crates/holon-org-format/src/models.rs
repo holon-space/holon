@@ -1136,10 +1136,37 @@ enum DegradeReason {
     Unrepresentable,
 }
 
+impl DegradeReason {
+    /// The rung's name, emitted as a structured field so a reader can tell
+    /// WHICH branch of the ladder fired without re-deriving it from the prose.
+    fn rung(self) -> &'static str {
+        match self {
+            Self::StylingDropped => "StylingDropped",
+            Self::ProtectiveDropped => "ProtectiveDropped",
+            Self::AllMarksDropped => "AllMarksDropped",
+            Self::Unrepresentable => "Unrepresentable",
+        }
+    }
+
+    /// True when the emitted bytes still re-parse to the stored content, i.e.
+    /// only marks were given up.
+    fn content_survives(self) -> bool {
+        match self {
+            Self::StylingDropped | Self::ProtectiveDropped | Self::AllMarksDropped => true,
+            Self::Unrepresentable => false,
+        }
+    }
+}
+
 /// Loud once per (block, reason) per process, quiet after. A block whose marks
-/// cross is re-rendered on every write-back pass, so an unconditional ERROR
-/// would bury the log — but each distinct first occurrence must be impossible
-/// to miss.
+/// cross is re-rendered on every write-back pass, so an unconditional emission
+/// would bury the log — but each distinct first occurrence must be visible.
+///
+/// Severity follows the error-handling priority order: a rung that keeps every
+/// content byte is a disclosed degraded mode (priority 2) and emits WARN, while
+/// a rung that cannot preserve the bytes is a real failure (priority 3) and
+/// emits ERROR. The split matters because ERROR is what the keystone's
+/// `inv-no-observed-errors` treats as a swallowed problem.
 fn disclose_degraded_render(block: &Block, reason: DegradeReason, detail: std::fmt::Arguments) {
     static SEEN: std::sync::OnceLock<std::sync::Mutex<HashSet<(String, DegradeReason)>>> =
         std::sync::OnceLock::new();
@@ -1148,15 +1175,23 @@ fn disclose_degraded_render(block: &Block, reason: DegradeReason, detail: std::f
         .lock()
         .expect("degraded-render disclosure set poisoned")
         .insert((block.id.as_str().to_string(), reason));
-    if first {
-        tracing::error!(
+    if !first {
+        tracing::debug!(
             block = block.id.as_str(),
+            rung = reason.rung(),
+            "org render still degraded: {detail}"
+        );
+    } else if reason.content_survives() {
+        tracing::warn!(
+            block = block.id.as_str(),
+            rung = reason.rung(),
             "org render is DEGRADED for this block: {detail}"
         );
     } else {
-        tracing::debug!(
+        tracing::error!(
             block = block.id.as_str(),
-            "org render still degraded: {detail}"
+            rung = reason.rung(),
+            "org render is DEGRADED for this block: {detail}"
         );
     }
 }
