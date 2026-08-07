@@ -17,6 +17,7 @@ use fluxdi::Module;
 use fluxdi::Provider;
 use fluxdi::Shared;
 use holon::core::queryable_cache::QueryableCache;
+use holon::core::sql_block_operations::SqlBlockOperations;
 use holon::storage::BLOCK_READ_TABLE;
 use holon::storage::BLOCK_WRITE_TABLE;
 use holon::storage::schema_module::SchemaModule;
@@ -41,6 +42,8 @@ use holon_orgmode::di::register_org_file_sync_core;
 use holon_orgmode::di::seed_default_org_assets;
 use holon_profiles::TypeRegistry;
 use holon_turso::schema_modules::BlockSchemaModule;
+
+use crate::ordered_block_crud::OrderedBlockCrud;
 
 /// BlockReader backed by `QueryableCache<Block>`.
 ///
@@ -987,10 +990,22 @@ impl Module for OrgModeModule {
                         Arc::new(wrapper) as Arc<dyn OperationProvider>
                     }
                     None => {
-                        let wrapper = OperationWrapper::new(
+                        // SQL is the order owner here, but this provider is a
+                        // bare `SqlOperationProvider` — it has no notion of
+                        // sibling order, so an unwrapped `create` would leave
+                        // `sort_key` on the column default and a re-parent
+                        // would carry the old parent's key over. `SqlBlockOperations`
+                        // built with its SqlOnly defaults IS that order owner;
+                        // `OrderedBlockCrud` routes the placement-changing
+                        // writes through it.
+                        let block_cache = resolver.resolve_async::<QueryableCache<Block>>().await;
+                        let order_owner =
+                            Arc::new(SqlBlockOperations::new(sql_ops.clone(), block_cache));
+                        let ordered = Arc::new(OrderedBlockCrud::new(
                             sql_ops.clone() as Arc<dyn OperationProvider>,
-                            Some(sync_provider),
-                        );
+                            order_owner,
+                        )) as Arc<dyn OperationProvider>;
+                        let wrapper = OperationWrapper::new(ordered, Some(sync_provider));
                         Arc::new(wrapper) as Arc<dyn OperationProvider>
                     }
                 }

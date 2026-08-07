@@ -34,6 +34,7 @@ pub mod mcp_integrations;
 pub mod no_turso;
 #[cfg(test)]
 mod no_turso_test;
+pub mod ordered_block_crud;
 pub mod seed;
 pub mod session;
 pub mod turso_seams;
