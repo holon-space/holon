@@ -159,6 +159,9 @@ impl BlockHomeAuthority {
         )
     }
 
+    /// The ordering seam's own answer. No longer on the serving path — it is
+    /// the INDEPENDENT oracle the dual-read audits the derived answer against,
+    /// which is what keeps that audit from agreeing with itself.
     async fn read_prev_sibling(&self, id: &EntityUri) -> Result<Option<EntityUri>> {
         self.ordering
             .prev_sibling(id)
@@ -187,6 +190,38 @@ impl BlockHomeAuthority {
         let live = self.read_children(parent).await?;
         memo.children.insert(parent.clone(), live.clone());
         Ok(live)
+    }
+
+    /// `prev` derived from the two reads the burst already performs: the row
+    /// `locate` put in the memo names the parent, and the parent's ordered
+    /// children are the same list `children_of` asks for.
+    ///
+    /// Delegating to [`BlockOrdering::prev_sibling`] instead would re-issue
+    /// both statements underneath the memo, where no memoization can reach
+    /// them — so a burst carrying N siblings of one parent read that parent's
+    /// order N times. Deriving here reads it once per distinct parent.
+    async fn derive_prev_sibling(
+        &self,
+        id: &EntityUri,
+        memo: &mut HomeBurstMemo,
+    ) -> Result<Option<EntityUri>> {
+        let Some(block) = memo
+            .rows
+            .get(self.reader.as_ref(), id, Some(&self.locate_reads))
+            .await?
+        else {
+            anyhow::bail!("prev_sibling({id}): the authority does not hold that block");
+        };
+        // The root sentinel is not a parent: a block directly under it has no
+        // sibling order at all.
+        if !block.parent_id.is_block() {
+            return Ok(None);
+        }
+        let siblings = self.children_uris(&block.parent_id, memo).await?;
+        let Some(pos) = siblings.iter().position(|s| s == id) else {
+            return Ok(None);
+        };
+        Ok(pos.checked_sub(1).map(|i| siblings[i].clone()))
     }
 }
 
@@ -248,7 +283,7 @@ impl HomeAuthority<DocHome> for BlockHomeAuthority {
             }
             return Ok(hit.map(|p| p.as_str().to_string()));
         }
-        let prev = self.read_prev_sibling(&uri).await?;
+        let prev = self.derive_prev_sibling(&uri, memo).await?;
         memo.prev_sibling.insert(uri, prev.clone());
         Ok(prev.map(|p| p.as_str().to_string()))
     }
