@@ -92,4 +92,7 @@ impl RefSqlCardinality for ReferenceState {
     fn last_navigate_first_visit(&self) -> bool {
         self.ui.tab.last_navigate_first_visit
     }
+    fn last_open_tab_activated(&self) -> bool {
+        self.ui.tab.last_open_tab_activated
+    }
 }

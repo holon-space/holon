@@ -280,6 +280,9 @@ impl RefNavHistoryMut for ReferenceState {
         // cursor-only, no INSERT, and NO reordering (no SQL moves open rows).
         let pins = self.ui.user.open_pins.entry(region).or_default();
         let already_open = pins.iter().any(|p| p.block_id.as_ref() == Some(block_id));
+        // The two branches issue different SQL, so the budget needs to know
+        // which one ran; post-apply the row is open either way.
+        self.ui.tab.last_open_tab_activated = already_open;
         if !already_open {
             let history_id = self.ui.tab.next_history_id;
             self.ui.tab.next_history_id += 1;
