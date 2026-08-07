@@ -140,6 +140,38 @@ mod tests {
         assert_eq!(keys, sorted);
     }
 
+    /// Undo of a structural move RE-MINTS the order key rather than restoring
+    /// the captured one (`undo::is_derived_positional_field`), so the contract
+    /// is sibling ORDER and the bytes are free. Whether they nevertheless come
+    /// back identical depends only on the block's sibling position — which is
+    /// why one observer reports "undo restored sort_key exactly" and the next
+    /// reports it corrupted, both correctly.
+    ///
+    /// The keys below are the ones an append-only ingest of three children
+    /// actually produces, so both arms quote values an observer really sees.
+    #[test]
+    fn undo_remints_the_order_key_and_only_order_is_guaranteed() {
+        let a = gen_key_between(None, None).unwrap();
+        let b = gen_key_between(Some(&a), None).unwrap();
+        let c = gen_key_between(Some(&b), None).unwrap();
+        assert_eq!((a.as_str(), b.as_str(), c.as_str()), ("80", "8180", "8280"));
+
+        // LAST child: undo re-places it after `a` with no successor. The mint is
+        // idempotent, so the key returns byte-identical and nothing looks amiss.
+        assert_eq!(gen_key_between(Some(&a), None).unwrap(), b);
+
+        // MIDDLE child: undo re-places it between `a` and the successor that
+        // never moved. The mint CANNOT reproduce `b` — it must land strictly
+        // between two keys that already bracket it — yet the order is exact.
+        let remint = gen_key_between(Some(&a), Some(&c)).unwrap();
+        assert_eq!(remint, "827F80");
+        assert_ne!(remint, b);
+        assert!(
+            a < remint && remint < c,
+            "order is the contract, not the bytes"
+        );
+    }
+
     #[test]
     fn test_gen_n_keys() {
         let keys = gen_n_keys(5).unwrap();
