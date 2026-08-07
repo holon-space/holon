@@ -86,6 +86,13 @@ pub struct UITabState {
     /// `NavigateFocus::apply_to_ref` because `expected_sql` only sees the
     /// post-apply state (where the target is already inserted).
     pub last_navigate_first_visit: bool,
+
+    /// Whether the most recent `open_tab` found a row already open for its
+    /// `(region, block_id)` and so delegated to `activate`. Recorded by
+    /// `nav_open_tab` because `expected_sql` only sees the post-apply state,
+    /// where the row is open under either branch. `inv-sql-budget` reads it to
+    /// pick which of the two `OPEN_TAB_*_READS` ceilings applies.
+    pub last_open_tab_activated: bool,
 }
 
 impl UITabState {
@@ -101,6 +108,7 @@ impl UITabState {
             active_editor: None,
             seen_focus_targets: HashSet::new(),
             last_navigate_first_visit: false,
+            last_open_tab_activated: false,
         }
     }
 }

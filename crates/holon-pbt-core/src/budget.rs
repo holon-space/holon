@@ -32,18 +32,21 @@ pub const READS_PER_WATCH: usize = 2;
 // resolved-tree snapshot before navigating — reads the nav-drive constants
 // (`REACTIVE_BASE + JOURNAL_READS + NAV_DML_READS` = 12) do not model.
 //
-// The two constants below are that extra cost, PINNED AT THE MEASURED CEILING
+// The constants below are that extra cost, PINNED AT THE MEASURED CEILING
 // (2026-08-03, ~290 samples over `hand-authored` + keystone at
 // 32/64/64/64/64/128/128 cases). They are upper limits taken from observation,
 // NOT derived formulas: a breach means the click path grew, and the number must
 // be re-measured deliberately, never nudged to make a run pass.
 //
-// They are SEPARATE because the two transitions measurably differ — one shared
+// They are SEPARATE because the transitions measurably differ — one shared
 // constant would have to sit at the larger, leaving the cheaper transition
-// 5 reads of dead slack in which a regression could hide.
+// 5 reads of dead slack in which a regression could hide. `open_tab` is split
+// once more along the same principle: its activate and insert branches issue
+// different statements, so each carries its own ceiling.
 //
-// Neither carries state-dependent terms, because every candidate term measured
-// ZERO (each was implemented, run, and refuted by telemetry):
+// The only state-dependent term is which `open_tab` branch ran, read from the
+// reference. Every OTHER candidate measured ZERO (each was implemented, run,
+// and refuted by telemetry):
 // - document count — reads never tracked `docs_tolerance` (which ranged 8–12
 //   across the corpus); a docs-scaled tolerance only hides breaches, and did:
 //   it swallowed the first teeth run.
@@ -73,26 +76,49 @@ pub const READS_PER_WATCH: usize = 2;
 /// renders all 40 rows and pins the 40th for 17 reads.
 pub const PIN_BLOCK_CLICK_RESOLVE_READS: usize = 5;
 
-/// `OpenTabViaModifierClick`'s click-resolve cost. Ceiling = 12 + 10 =
-/// **22 reads**.
+/// `OpenTabViaModifierClick`'s click-resolve cost on the ACTIVATE branch —
+/// the clicked row is already open, so `open_tab` delegates to `activate`.
+/// Ceiling = 12 + 10 = **22 reads**.
 ///
 /// Sampling caveat worth heeding: a first pass over 39 samples saw a maximum of
 /// 21 and the ceiling was set there; the very next 64-case run produced 22 in
 /// 56 of 75 draws. A few dozen samples do NOT characterize this mode.
-pub const OPEN_TAB_CLICK_RESOLVE_READS: usize = 10;
+pub const OPEN_TAB_ACTIVATE_CLICK_RESOLVE_READS: usize = 10;
 
-/// The reactive render coalesces nondeterministically, so a click-nav
-/// transition re-reads `focus_roots` / `current_focus` either 3 or 4 times for
-/// the same work — the 21-vs-22 bimodality in the corpus is exactly this one
-/// redundant read, and the N+1 report calls it out as "identical bindings —
-/// redundant".
+/// `OpenTabViaModifierClick`'s click-resolve cost on the INSERT branch — no row
+/// is open for the target, so a new one is appended. Ceiling = 12 + 11 =
+/// **23 reads**, one above the activate branch.
 ///
-/// A *fixed* one-read pad for that jitter, shared by both click transitions
-/// because it models the same coalescing mechanism. Deliberately NOT
-/// `docs_tolerance`: each ceiling stays hard and state-independent
-/// (`<transition>_CLICK_RESOLVE_READS` + 1), it just does not pretend a
-/// coalescing-dependent counter is exact. Widening this is not the fix for a
-/// breach — a breach means the click path grew.
+/// The branches are budgeted separately because they run DIFFERENT SQL, not
+/// because one is noisier. Measured from `HOLON_PERF_DETAIL` dumps at matched
+/// state `b28/d4/w0/r1`: insert reads 23 (13 unique) and spends its extra read
+/// on `SELECT MAX(id) as max_id FROM navigation_history WHERE region = $region`
+/// alongside `INSERT INTO navigation_history`; activate reads 22 (12 unique)
+/// and instead takes the `navigation_cursor` LEFT JOIN `navigation_history`
+/// cursor read, with no `MAX(id)` and no insert.
+///
+/// Which branch ran is read from the reference
+/// (`RefSqlCardinality::last_open_tab_activated`), never sniffed from SQL text.
+///
+/// WHAT THE OPEN-TAB MODEL GUARANTEES: each branch is pinned EXACTLY, with
+/// tolerance ZERO, so the pins do not overlap and each one is independently
+/// falsifiable — mis-assigning the branch flag reds both deterministic cases.
+/// A tolerance of even 1 would destroy that: the branch delta IS 1, so the
+/// activate ceiling would reach the insert cost and a backwards flag would sail
+/// through. Anything this transition measures other than exactly 22 (activate)
+/// or exactly 23 (insert) is DATA — report and model it, never pad it away.
+pub const OPEN_TAB_INSERT_CLICK_RESOLVE_READS: usize = 11;
+
+/// `PinBlock`'s one-read pad for the reactive render's nondeterministic
+/// coalescing. `PinBlock` is its only user.
+///
+/// It does NOT apply to `open_tab`, which pins each of its two branches exactly
+/// (tolerance zero) — the ±1 long attributed to render coalescing there was in
+/// fact the activate-vs-insert branch, which is now modelled outright.
+///
+/// Deliberately NOT `docs_tolerance`: the ceiling stays hard and
+/// state-independent. Widening this is not the fix for a breach — a breach
+/// means the click path grew.
 pub const CLICK_JITTER_TOLERANCE: usize = 1;
 
 /// The CDC drain that lands in a transition window even when the transition

@@ -17,9 +17,9 @@ use std::time::Duration;
 // so existing `crate::pbt::transition_budgets::…` import sites keep resolving.
 pub use holon_pbt_core::budget::{
     CACHE_EVENT_READS, CLICK_JITTER_TOLERANCE, ExpectedSql, JOURNAL_READS, MutationKind,
-    NAV_DML_READS, NAV_RENDER_FAN_READS, OPEN_TAB_CLICK_RESOLVE_READS,
-    PIN_BLOCK_CLICK_RESOLVE_READS, REACTIVE_BASE, READS_PER_WATCH, SqlBudget, cdc_tolerance,
-    docs_tolerance, expected_sql_for_kind,
+    NAV_DML_READS, NAV_RENDER_FAN_READS, OPEN_TAB_ACTIVATE_CLICK_RESOLVE_READS,
+    OPEN_TAB_INSERT_CLICK_RESOLVE_READS, PIN_BLOCK_CLICK_RESOLVE_READS, REACTIVE_BASE,
+    READS_PER_WATCH, SqlBudget, cdc_tolerance, docs_tolerance, expected_sql_for_kind,
 };
 use holon_pbt_core::types::Mutation;
 

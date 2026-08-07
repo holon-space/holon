@@ -2673,6 +2673,11 @@ pub trait RefSqlCardinality {
     fn document_count(&self) -> usize;
     fn active_watch_count(&self) -> usize;
     fn last_navigate_first_visit(&self) -> bool;
+    /// True iff the last `open_tab` found its `(region, block_id)` row already
+    /// open and delegated to `activate`. `OpenTabViaModifierClick`'s budget
+    /// switches on it because the two branches issue different SQL, and the
+    /// post-apply state cannot tell them apart.
+    fn last_open_tab_activated(&self) -> bool;
 }
 
 /// Reference-side typed block surface for `inv-backend-blocks-match-ref`.

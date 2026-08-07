@@ -36,15 +36,15 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 #[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::CLICK_JITTER_TOLERANCE;
-#[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::JOURNAL_READS;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::NAV_DML_READS;
 #[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::OPEN_TAB_CLICK_RESOLVE_READS;
+use crate::pbt::transition_budgets::OPEN_TAB_ACTIVATE_CLICK_RESOLVE_READS;
+#[cfg(feature = "otel-testing")]
+use crate::pbt::transition_budgets::OPEN_TAB_INSERT_CLICK_RESOLVE_READS;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::REACTIVE_BASE;
 
@@ -123,28 +123,43 @@ crate::cap_transition! {
     |me, _state, sut| {
         sut.open_tab_via_modifier_click(&me.block_id, me.use_ctrl).await;
     }
-    sql_budget: |_me, _state| {
-        // open_tab = SELECT (open-row lookup) + INSERT-or-cursor-UPDATE, the
-        // same one-read/one-write shape `focus_pin` has, plus the PINNED
-        // `OPEN_TAB_CLICK_RESOLVE_READS` the cmd/ctrl-click row resolution
-        // costs (22-read ceiling).
-        // Enforced regardless of `HOLON_PERF_BUDGET`; CLICK_JITTER_TOLERANCE
-        // pads the ±1 read coalescing jitter of this counter.
-        // (see `sql_reads_pinned`).
+    sql_budget: |_me, state| {
+        // `open_tab` has TWO branches and they issue different SQL, so each
+        // carries its own PINNED ceiling: activate (row already open —
+        // cursor-only) costs one read less than insert (append a new row, which
+        // also reads `MAX(id)`). Which branch ran comes from the reference's
+        // `last_open_tab_activated`, recorded at apply time because the
+        // post-apply state has the row open under either branch.
+        //
+        // Enforced regardless of `HOLON_PERF_BUDGET` (see `sql_reads_pinned`).
+        //
+        // TOLERANCE IS ZERO, and it has to be: the branch delta is exactly 1,
+        // so ANY tolerance makes the activate ceiling reach the insert cost and
+        // the two pins overlap — a backwards flag would pass both branches and
+        // this whole split would assert nothing. Zero is what the measurements
+        // support: every sample of both branches lands EXACTLY on its pin. If a
+        // real render-coalescing jitter ever shows up here it must red, be
+        // measured, and be modelled explicitly the way the branch now is —
+        // never re-absorbed into a blanket pad that hides the branch again.
         //
         // NO first-visit term, unlike `NavigateFocus`, and no per-watch term,
         // unlike the document-mutating siblings — both were measured at zero
         // here. `open_tab` appends a row instead of closing the region's others,
         // so the panel keeps rendering the same subtree and no watch matview is
-        // created: first-visit opens cost 21 reads / 0 DDL, the same as
-        // revisits, and watches cost nothing (no block mutation ⇒ no CDC).
+        // created: first-visit opens cost the same reads and 0 DDL as revisits,
+        // and watches cost nothing (no block mutation ⇒ no CDC).
         // Kept sampled by the hand-authored cases (first visit) and
         // `watch-bearing-click-nav-sql-budget` (watches=2).
+        let click_resolve = if state.last_open_tab_activated() {
+            OPEN_TAB_ACTIVATE_CLICK_RESOLVE_READS
+        } else {
+            OPEN_TAB_INSERT_CLICK_RESOLVE_READS
+        };
         ExpectedSql {
-            reads: REACTIVE_BASE + JOURNAL_READS + NAV_DML_READS + OPEN_TAB_CLICK_RESOLVE_READS,
+            reads: REACTIVE_BASE + JOURNAL_READS + NAV_DML_READS + click_resolve,
             writes: 0,
             ddl: 0,
-            tolerance: CLICK_JITTER_TOLERANCE,
+            tolerance: 0,
         }
     }
 }
