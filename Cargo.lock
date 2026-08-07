@@ -5303,6 +5303,7 @@ dependencies = [
  "holon-app",
  "holon-block-roundtrip-testing",
  "holon-core",
+ "holon-engine",
  "holon-filesystem",
  "holon-frontend",
  "holon-layout-testing",
