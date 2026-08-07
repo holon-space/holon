@@ -2718,14 +2718,21 @@ mod tests {
             let virtual_encoded = sort_value(slot_row.get("sort_key"));
 
             let mut keys = mint_fractional_keys(&positions);
-            // Always include the column default and an after-chain (highest keys
-            // production mints), the hardest case for "sorts last" to satisfy.
-            keys.push(holon_core::fractional_index::default_sort_key());
-            let mut hi = holon_core::fractional_index::default_sort_key();
+            // Always include an after-chain off the greatest key so far (the
+            // highest keys production mints) and the column default, the two
+            // hardest cases for "sorts last" to satisfy. The chain must start
+            // from a MINTED key: the default is not a position and cannot be
+            // anchored on.
+            let mut hi = keys
+                .iter()
+                .max()
+                .cloned()
+                .unwrap_or_else(|| holon_core::fractional_index::gen_key_between(None, None).expect("gen_key_between mints a valid key")); // ALLOW(order_minting): test-only reproduction of the order owner's minting to prove the virtual-slot sort contract
             for _ in 0..5 {
                 hi = holon_core::fractional_index::gen_key_after(&hi).expect("gen_key_after mints a valid key"); // ALLOW(order_minting): test-only reproduction of the order owner's after-key minting to prove the virtual-slot sort contract
                 keys.push(hi.clone());
             }
+            keys.push(holon_core::fractional_index::default_sort_key());
 
             for k in &keys {
                 // SortedChild::cmp orders by `sort_key.cmp(other.sort_key)` first;
