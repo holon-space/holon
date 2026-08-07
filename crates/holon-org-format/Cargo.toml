@@ -13,7 +13,12 @@ ignored = ["workspace-hack"]
 orgize.workspace = true
 anyhow.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+# `preserve_order` is load-bearing, not incidental: the file-level and headline
+# `:PROPERTIES:` drawers replay their keys in the order the author wrote them,
+# and that order lives in a `serde_json::Map`. Declared here rather than
+# inherited from workspace-hack's feature unification, which a hakari regen
+# could withdraw — alphabetizing every drawer in the vault on the next write.
+serde_json = { workspace = true, features = ["preserve_order"] }
 sha2.workspace = true
 hex.workspace = true
 uuid.workspace = true

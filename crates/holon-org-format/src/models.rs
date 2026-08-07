@@ -41,6 +41,20 @@ pub mod org_props {
     /// wrote them, recorded at parse and replayed by the renderer. Underscore
     /// prefix keeps it out of the drawer it describes.
     pub const DRAWER_ORDER: &str = "_drawer_order";
+    /// A doc-root's FILE-LEVEL `:PROPERTIES:` drawer (org 9.0+, org-roam's
+    /// identity carrier) as a JSON object in the order the author wrote it,
+    /// `ID` included. Present only on a doc-root whose file had one, and its
+    /// presence is what makes the renderer emit the drawer back.
+    ///
+    /// Deliberately NOT `_`-prefixed, unlike [`DRAWER_ORDER`]: `_` keys are
+    /// dropped by `drawer_properties()` and so never reach the store, and a
+    /// drawer that survives only until the first write-back is the very bug
+    /// this carrier exists to fix.
+    pub const FILE_PROPERTIES: &str = "file_properties";
+    /// `"t"` on a doc-root whose file carried a `#+ID:` keyword. It is what
+    /// keeps a file that declares its identity BOTH ways (drawer `:ID:` and
+    /// `#+ID:`, in agreement) from losing one of the two on write-back.
+    pub const FILE_ID_KEYWORD: &str = "file_id_keyword";
 }
 
 // =============================================================================
@@ -294,6 +308,13 @@ pub trait OrgDocumentExt {
     /// Set the org file title (#+TITLE value)
     fn set_file_title(&mut self, title: Option<String>);
 
+    /// The file-level `:PROPERTIES:` drawer, keys in the order the author
+    /// wrote them and `ID` included. `None` when the file had no such drawer.
+    fn file_drawer(&self) -> Option<serde_json::Map<String, serde_json::Value>>;
+
+    /// Set (or clear) the file-level `:PROPERTIES:` drawer.
+    fn set_file_drawer(&mut self, drawer: Option<serde_json::Map<String, serde_json::Value>>);
+
     /// Get the TODO keywords as TaskState objects.
     fn todo_keywords(&self) -> Option<Vec<TaskState>>;
 
@@ -318,6 +339,32 @@ impl OrgDocumentExt for Block {
             self.set_property(org_props::TITLE, t);
         } else {
             self.properties.remove(org_props::TITLE);
+        }
+    }
+
+    fn file_drawer(&self) -> Option<serde_json::Map<String, serde_json::Value>> {
+        let value = self.get_property(org_props::FILE_PROPERTIES)?;
+        let json = value.as_string()?.to_string();
+        Some(serde_json::from_str(&json).unwrap_or_else(|e| {
+            panic!(
+                "malformed {} {json:?}: {e} — we wrote it, so a parse failure means the \
+                 file-level drawer carrier was corrupted in transit, and rendering on would \
+                 delete the author's drawer",
+                org_props::FILE_PROPERTIES
+            )
+        }))
+    }
+
+    fn set_file_drawer(&mut self, drawer: Option<serde_json::Map<String, serde_json::Value>>) {
+        match drawer {
+            Some(d) => self.set_property(
+                org_props::FILE_PROPERTIES,
+                serde_json::to_string(&d)
+                    .expect("a file-level drawer is a string map — always serializable"),
+            ),
+            None => {
+                self.properties.remove(org_props::FILE_PROPERTIES);
+            }
         }
     }
 
@@ -440,11 +487,62 @@ pub(crate) fn trim_blank_lines(s: &str) -> &str {
 pub fn render_document_header(doc_block: &Block) -> String {
     let mut result = String::new();
 
+    // A hand-authored FILE-LEVEL `:PROPERTIES:` drawer goes first and verbatim:
+    // org-mode (and orgize's `document_node`) only recognize it as the file's
+    // own drawer when it is the first element of the file, so any other
+    // placement would silently demote it to body text on the next read.
+    let file_drawer = doc_block.file_drawer();
+    let drawer_carries_id = match &file_drawer {
+        Some(drawer) => {
+            let mut carries_id = false;
+            result.push_str(":PROPERTIES:\n");
+            for (key, value) in drawer {
+                let authored = match value {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                // The `:ID:` line is re-derived from the block's CURRENT
+                // identity rather than replayed, so the drawer and the document
+                // can never drift apart across a rename or a promotion.
+                //
+                // An EMPTY `:ID:` is NOT the identity carrier and must not be
+                // filled in — `EntityUri::id()` of a name-chain document is its
+                // PATH, so substituting there would write the file's own path
+                // into the drawer as if the author had chosen it. This mirrors
+                // the parser's `drawer_id`, which rejects an empty value for the
+                // same reason; the two guards must agree or write-back invents
+                // an identity the parse will not accept back.
+                let rendered = if key.eq_ignore_ascii_case("ID") && !authored.is_empty() {
+                    carries_id = true;
+                    doc_block.id.id().to_string()
+                } else {
+                    authored
+                };
+                // The space after the key is REQUIRED, empty value or not:
+                // orgize's `node_property_node` matches `space1` between key and
+                // value, so `:KEY:` with nothing after it does not parse as a
+                // property — and one unparsable line makes the WHOLE drawer fail
+                // to parse and decay into body text. The trailing space on an
+                // empty value is the cost of the drawer surviving re-ingest.
+                result.push_str(&format!(":{key}: {rendered}\n"));
+            }
+            result.push_str(":END:\n");
+            carries_id
+        }
+        None => false,
+    };
+
     // Document identity. Files identified by a stable `block:<uuid>` get a
     // `#+ID:` directive so the id travels with the file (rename-safe).
     // Files still using the transient path-derived `file:` URI render
     // without `#+ID:` — they keep name-chain identity until promoted.
-    if doc_block.id.is_block() {
+    //
+    // A drawer that already carries `:ID:` IS the identity carrier, so no
+    // `#+ID:` is added beside it — the file keeps the single carrier its author
+    // chose instead of growing a second one on every write-back. A file that
+    // authored BOTH (in agreement — the parser rejects disagreement) keeps both.
+    let authored_id_keyword = doc_block.get_property(org_props::FILE_ID_KEYWORD).is_some();
+    if doc_block.id.is_block() && (!drawer_carries_id || authored_id_keyword) {
         result.push_str(&format!("#+ID: {}\n", doc_block.id.id()));
     }
 
