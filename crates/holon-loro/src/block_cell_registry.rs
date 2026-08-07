@@ -42,7 +42,6 @@ use loro::LoroText;
 use crate::loro_backend::CONTENT_RAW;
 use crate::loro_backend::LoroBackend;
 use crate::loro_backend::NewBlockWithProperties;
-use crate::loro_backend::STABLE_ID;
 use crate::loro_backend::TREE_NAME;
 use crate::loro_document::LoroDocument;
 use crate::loro_meta_cell_backing::LoroMetaCellBacking;
@@ -182,13 +181,7 @@ impl BlockCellRegistry {
             let meta = tree
                 .get_meta(node.id)
                 .map_err(|e| anyhow!("tree.get_meta({:?}) failed: {e:#}", node.id))?;
-            let stable_id_matches = match meta.get(STABLE_ID) {
-                Some(loro::ValueOrContainer::Value(v)) => {
-                    v.as_string().is_some_and(|s| s.to_string() == bare_id)
-                }
-                _ => false,
-            };
-            if stable_id_matches {
+            if crate::settled_read::read_stable_id(&meta).is_some_and(|sid| sid == bare_id) {
                 return Ok(meta);
             }
         }
@@ -1143,6 +1136,7 @@ mod tests {
     use holon_core::cell_registry::EntityCellRegistryExt;
 
     use super::*;
+    use crate::loro_backend::STABLE_ID;
 
     fn make_loro_doc_with_block(block_id: &str) -> Arc<LoroDoc> {
         let doc = Arc::new(LoroDoc::new());

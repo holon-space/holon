@@ -29,7 +29,6 @@ use iroh::SecretKey;
 use loro::LoroDoc;
 use loro::TreeID;
 use loro::TreeParentId;
-use loro::ValueOrContainer;
 use tokio::sync::RwLock;
 use tokio::time::Duration;
 use tokio::time::timeout;
@@ -75,6 +74,8 @@ fn err(msg: impl Into<String>) -> Box<dyn std::error::Error + Send + Sync> {
 /// normalized `EntityName`.
 pub const TREE_ENTITY: &str = "tree";
 use crate::loro_backend::STABLE_ID;
+use crate::settled_read::LiveNode;
+use crate::settled_read::classify;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default enrollment window for a share ticket's capability: after this many
 /// seconds no *new* peer may enroll (already-enrolled peers keep syncing). 30
@@ -1186,10 +1187,7 @@ fn find_tree_id_by_stable_id(doc: &LoroDoc, stable_id: &EntityUri) -> Option<Tre
         if matches!(node.parent, TreeParentId::Deleted | TreeParentId::Unexist) {
             continue;
         }
-        if let Ok(meta) = tree.get_meta(node.id)
-            && let Some(ValueOrContainer::Value(v)) = meta.get(STABLE_ID)
-            && v.as_string().map(|s| s.as_str()) == Some(needle)
-        {
+        if read_stable_id(&tree, node.id).as_deref() == Some(needle) {
             return Some(node.id);
         }
     }
@@ -1224,7 +1222,15 @@ fn first_local_collision(global: &LoroDoc, ops: &[(String, StorageEntity)]) -> O
 
 /// Find an existing mount node for a given `shared_tree_id`. Returns the
 /// mount's `TreeID` and its `STABLE_ID` if found.
-fn find_mount_by_shared_tree_id(doc: &LoroDoc, shared_tree_id: &str) -> Option<(TreeID, String)> {
+///
+/// A mount whose `STABLE_ID` has not landed is an `Err`, not an empty id: the
+/// caller projects the returned string as the mount's block URI, so an empty
+/// one would write an unaddressable SQL row for a block that does have an
+/// identity, just not yet a readable one.
+fn find_mount_by_shared_tree_id(
+    doc: &LoroDoc,
+    shared_tree_id: &str,
+) -> anyhow::Result<Option<(TreeID, String)>> {
     let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
     for node in tree.get_nodes(false) {
         if matches!(node.parent, TreeParentId::Deleted | TreeParentId::Unexist) {
@@ -1238,11 +1244,17 @@ fn find_mount_by_shared_tree_id(doc: &LoroDoc, shared_tree_id: &str) -> Option<(
         {
             let stable_id = read_stable_id(&tree, node.id)
                 .map(|s| block_uri_from_bare(&s))
-                .unwrap_or_default();
-            return Some((node.id, stable_id));
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "mount node {:?} for shared tree {shared_tree_id} has no STABLE_ID; \
+                         cannot name the mount block it stands for",
+                        node.id
+                    )
+                })?;
+            return Ok(Some((node.id, stable_id)));
         }
     }
-    None
+    Ok(None)
 }
 
 fn parent_as_option(doc: &LoroDoc, tid: TreeID) -> Option<TreeID> {
@@ -1690,7 +1702,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
             let doc = txn.doc();
 
             if let Some((existing_tid, existing_uri)) =
-                find_mount_by_shared_tree_id(doc, &shared_tree_id)
+                find_mount_by_shared_tree_id(doc, &shared_tree_id)?
             {
                 // Idempotent re-accept: the mount already exists. Recover its
                 // (already page-resolved) SQL parent from its Loro placement.
@@ -2349,17 +2361,20 @@ struct MountRehydrationRecord {
     parent_stable_id: Option<String>,
 }
 
-/// Read the `STABLE_ID` metadata from a tree node. Returns `None` when
-/// the node has no metadata, the key is missing, or the value isn't a
-/// string. The returned id is whatever the meta holds — callers should
-/// not assume presence or absence of a `block:` scheme prefix (see
-/// [`block_uri_from_bare`] for the normalization).
+/// The share backend's entry into the settled-read policy: `Some` only for a
+/// node whose `STABLE_ID` has landed. The returned id is whatever the meta
+/// holds — callers should not assume presence or absence of a `block:` scheme
+/// prefix (see [`block_uri_from_bare`] for the normalization).
+///
+/// Every caller that cannot proceed without an id turns the `None` into an
+/// `Err` naming the node; the ones that may skip do so knowingly.
 fn read_stable_id(tree: &loro::LoroTree, tid: TreeID) -> Option<String> {
-    let meta = tree.get_meta(tid).ok()?; // ALLOW(ok): Option chain — missing meta means no stable id
-    let v = meta.get(STABLE_ID)?;
-    match v {
-        ValueOrContainer::Value(val) => val.as_string().map(|s| s.to_string()),
-        _ => None,
+    match classify(tree, tid) {
+        LiveNode::Settled(sid) => Some(sid),
+        // No id exists to answer with: an in-flight create has not landed its
+        // STABLE_ID insert yet, or a concurrent commit removed the node
+        // between enumeration and this read.
+        LiveNode::HalfBorn | LiveNode::MetaUnreadable => None,
     }
 }
 
@@ -2399,6 +2414,39 @@ mod tests {
             LoroShareBackend::new(store, snapshot_store, manager, advertiser, bus, key),
             dir,
         )
+    }
+
+    /// A mount node found by its shared-tree id must come back with the block
+    /// URI it stands for. If its own `STABLE_ID` has not landed the lookup
+    /// errs: the caller writes the returned string as the mount's SQL block
+    /// id, and an empty one is an unaddressable row for a block that does have
+    /// an identity — just not a readable one yet.
+    #[test]
+    fn a_mount_without_a_stable_id_errs_instead_of_naming_an_empty_block() {
+        use crate::loro_backend::TREE_NAME;
+
+        let doc = LoroDoc::new();
+        let tree = doc.get_tree(TREE_NAME);
+        let shared_root = tree.create(None).unwrap();
+        let mount = shared_tree::create_mount_node(&tree, None, "tree-77", shared_root).unwrap();
+        doc.commit();
+
+        let err = find_mount_by_shared_tree_id(&doc, "tree-77")
+            .expect_err("a mount with no STABLE_ID must not resolve to an empty block id");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("has no STABLE_ID"),
+            "the error must name the missing id: {msg}"
+        );
+
+        // The settled companion: once the id lands, the same lookup answers.
+        set_stable_id(&doc, mount, "block:99999999-9999-9999-9999-999999999999").unwrap();
+        doc.commit();
+        let (tid, uri) = find_mount_by_shared_tree_id(&doc, "tree-77")
+            .unwrap()
+            .expect("the mount is still there");
+        assert_eq!(tid, mount);
+        assert_eq!(uri, "block:99999999-9999-9999-9999-999999999999");
     }
 
     /// F1.1 regression: a node WITHHELD from the settled snapshot (here:
