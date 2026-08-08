@@ -3121,7 +3121,11 @@ impl BuilderServices for ReactiveEngine {
         // End-to-end latency: start the interaction clock at the dispatch
         // entry point; `holon_api::latency_e2e` closes it when the target's
         // row lands in a LiveData mirror (stage="e2e").
-        if let Some(target) = params.get("id").and_then(|v| v.as_string()) {
+        let latency_target = params
+            .get("id")
+            .and_then(|v| v.as_string())
+            .map(String::from);
+        if let Some(target) = &latency_target {
             holon_api::latency_e2e::interaction_dispatched(
                 &op_name,
                 target,
@@ -3147,6 +3151,12 @@ impl BuilderServices for ReactiveEngine {
                     }
                 }
                 Err(e) => {
+                    // A refused/failed op writes nothing: retire its latency
+                    // entry so no later unrelated delivery for the row closes
+                    // it as a phantom sample.
+                    if let Some(target) = &latency_target {
+                        holon_api::latency_e2e::interaction_failed(&op_name, target);
+                    }
                     // Disclose the failed write: the UI already reflects the
                     // user's gesture, so a dropped error would silently look
                     // like success. Records + logs (PBT/monitoring seam) AND
@@ -3237,7 +3247,12 @@ impl BuilderServices for ReactiveEngine {
             // End-to-end latency: start the interaction clock here;
             // `holon_api::latency_e2e` closes it when the target's row lands
             // in a LiveData mirror (stage="e2e").
-            if let Some(target) = intent.params.get("id").and_then(|v| v.as_string()) {
+            let latency_target = intent
+                .params
+                .get("id")
+                .and_then(|v| v.as_string())
+                .map(String::from);
+            if let Some(target) = &latency_target {
                 holon_api::latency_e2e::interaction_dispatched(
                     &intent.op_name,
                     target,
@@ -3245,15 +3260,23 @@ impl BuilderServices for ReactiveEngine {
                 );
             }
             let t_dispatch = std::time::Instant::now();
-            let response = session
+            let outcome = session
                 .execute_operation(&intent.entity_name, &intent.op_name, intent.params)
-                .await
-                .with_context(|| {
-                    format!(
-                        "dispatch_intent_sync: {}.{} failed",
-                        intent.entity_name, intent.op_name
-                    )
-                })?;
+                .await;
+            if outcome.is_err() {
+                // A refused/failed op writes nothing: retire its latency entry
+                // so no later unrelated delivery for the row closes it as a
+                // phantom sample.
+                if let Some(target) = &latency_target {
+                    holon_api::latency_e2e::interaction_failed(&intent.op_name, target);
+                }
+            }
+            let response = outcome.with_context(|| {
+                format!(
+                    "dispatch_intent_sync: {}.{} failed",
+                    intent.entity_name, intent.op_name
+                )
+            })?;
             tracing::info!(
                 target: "holon_latency",
                 stage = "dispatch",
@@ -3291,7 +3314,11 @@ impl BuilderServices for ReactiveEngine {
         let entity_name = intent.entity_name.clone();
         let op_name = intent.op_name.clone();
         let params = intent.params;
-        if let Some(target) = params.get("id").and_then(|v| v.as_string()) {
+        let latency_target = params
+            .get("id")
+            .and_then(|v| v.as_string())
+            .map(String::from);
+        if let Some(target) = &latency_target {
             holon_api::latency_e2e::interaction_dispatched(
                 &op_name,
                 target,
@@ -3316,6 +3343,12 @@ impl BuilderServices for ReactiveEngine {
                     Ok(response.delivery)
                 }
                 Err(e) => {
+                    // A refused/failed op writes nothing: retire its latency
+                    // entry so no later unrelated delivery for the row closes
+                    // it as a phantom sample.
+                    if let Some(target) = &latency_target {
+                        holon_api::latency_e2e::interaction_failed(&op_name, target);
+                    }
                     // Disclose the failed write (same seam as `dispatch_intent`);
                     // the caller ALSO surfaces it as a visible toast.
                     session.error_tracker().record_error();

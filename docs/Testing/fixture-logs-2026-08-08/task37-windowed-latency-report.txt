@@ -1,0 +1,339 @@
+# Task-#37 lane report, preserved verbatim below (provenance: written by the
+# task-#37 windowed-latency lane, 2026-08-08; kept as .txt because the repo
+# gitignores *.log and *.md lane reports are not tracked). Cited by the
+# 2026-08-07/08 latency rows in docs/Testing/BugFunnel.md.
+
+# Lane report — task #37: where SplitBlock's latency actually goes (windowed)
+
+Base: `main = 0f0c99e5` (worktree `agent-a32f91a158aaf6f0f`), dev-profile
+`holon-gpui`, real GPUI window, foreground, throwaway vaults on ports
+8710/8720/8730. Nothing committed. All runs teed under `lane-logs/`.
+
+---
+
+## Verdict in one paragraph
+
+**The hypothesis is REFUTED.** The windowed GPUI app does not pay ~800 ms for a
+SplitBlock, and it does not sit in a contention-driven slow mode. Measured on
+the real window, driven through the app's own MCP with the same gesture the
+keystone uses: `split_block` interaction→projection-visible is **p50 36 ms**
+(n=22 over two independent instances, max 58 ms), and the outside-measured
+interaction→everything-settled bound is **p50 ~140 ms**. Under deliberate heavy
+contention (14 CPU spinners on 16 cores) it degrades only to **p50 57.5 ms /
+max 113 ms** — a 1.6x shift, not a distinct regime. The main thread is **96 %
+idle** across the burst window; its entire busy share is GPUI paint and layout
+that happens *after* the data is already visible to the view model, and never
+blocks the pipeline.
+
+**But the number the BugFunnel row rests on is not measuring what it says.**
+This lane found a concrete defect in the e2e correlator that makes
+`split_block` systematically unmeasurable, and makes any sample that *does*
+appear suspect. It is the same class as the previous lane's FINDING 2
+(navigation clock bleed), now on the **write** path. That is the real
+deliverable, and it must be fixed before any SplitBlock ceiling is set.
+
+---
+
+## 1. Methodology
+
+The prior lane could not measure windowed SplitBlock because the windowed
+channel was blocked. It is not blocked any more (the 2026-08-07 driver-parity
+`text_center` fixes landed), so this lane measured it directly instead of
+inferring it.
+
+1. Built `holon-gpui` from this worktree through the build slot
+   (`lane-logs/build-gpui.sh`, 24m13s, log `lane-logs/build-gpui-37.log`).
+   **Deviation from the brief:** the `dev` profile was used, not `debugger`.
+   `[profile.dev]` already carries `debug = "line-tables-only"`, which is all
+   `sample` needs to symbolicate, and `dev` is the profile the dogfood
+   measurement came from — a second ~25 min cold build would have bought
+   nothing. No breakpoint profiling was needed; `sample` plus the app's own
+   `holon_latency` stages answered the question.
+2. Launched into a throwaway sandbox (`lane-logs/launch-app.sh`): own config
+   dir, own vault, `MCP_SERVER_PORT` 8710/8720/8730, `RUST_LOG=…
+   ,holon_latency=debug`. The boot line was read back every launch to confirm
+   every path was inside the sandbox. Port 8520 and the real vault were never
+   touched. Vault seeded with a `Bench` page of 12–30 sibling items
+   (dogfood scale: 31 blocks). Config was the shipped default — `loro: false`
+   (SqlOnly), same as the dogfood.
+3. Drove splits through MCP with the keystone's exact gesture
+   (`crates/holon-integration-tests/src/pbt/transitions/split_block.rs`):
+   `click(block) → home → right×3 → enter`. Script `lane-logs/split_burst.py`,
+   which timestamps every MCP call.
+4. `/usr/bin/sample <pid> N 1` ran across each burst (`lane-logs/run-burst.sh`),
+   giving 1 ms-resolution main-thread stacks; summarized by
+   `lane-logs/analyze_sample.py` and `lane-logs/sink_split.py`.
+5. Three measurement channels, deliberately independent:
+   - `stage="e2e"` — the app's own correlator, the quantity the SLO oracle and
+     the BugFunnel row use.
+   - `stage="dispatch"` — op-execution time.
+   - `await_quiescence` called from outside right after the Enter — an **upper**
+     bound on interaction→settled (it also waits for the org idle tick, so it
+     over-counts projection-visible).
+
+**One methodological trap worth recording.** The first burst produced eight
+identical `click … 5047 ms` failures: *"element bounds never committed"*. It was
+not a bug — only *painted* elements commit bounds, and the target rows were
+scrolled out of the viewport. Any windowed driver must aim inside the painted
+area; the burst was changed to walk **upward** through visible rows (a split
+inserts its new block *below* the target, so rows above never shift out).
+
+---
+
+## 2. Measurements
+
+### 2.1 SplitBlock, windowed, unloaded — two independent instances, n=11 each
+
+| channel | run A (port 8720) | run B (port 8730) |
+|---|---|---|
+| `e2e.split_block` (ms, sorted) | 30 34 35 36 36 36 36 38 40 40 58 | 34 35 35 35 36 36 37 38 38 41 43 |
+| **e2e p50 / max** | **36 / 58** | **36 / 43** |
+| `dispatch.split_block` p50 | ~55 | 56 (52–63) |
+| MCP `enter` call wall p50 | 14.5 | 14.6 |
+| `await_quiescence` after Enter, p50 / max | 139.3 / 167.8 | 143.3 / 179.7 |
+
+Evidence: `lane-logs/evidence-clean-arm-latency.txt` (run B verbatim app-log
+lines), `lane-logs/evidence-burst-clean1.txt`, `…-clean2.txt`.
+
+Against the dogfood's p50 803 ms / p95 944 ms: **~22x lower**, on the same
+build family, same window, same SqlOnly config, comparable vault size.
+`dispatch` reproduces the dogfood's own figure (45 ms there, 52–63 ms here), so
+the two channels agree on the half that was never in doubt and disagree by
+22x on the half that was.
+
+### 2.2 Same burst under deliberate contention (14 CPU spinners / 16 cores)
+
+| channel | value |
+|---|---|
+| `e2e.split_block` (ms, sorted) | 28 47 55 56 56 59 61 63 63 113 (n=10) |
+| **e2e p50 / max** | **57.5 / 113** |
+| `dispatch.split_block` p50 / max | 93 / 141 |
+| `await_quiescence` p50 / max | 196.8 / 244.2 |
+
+Evidence: `lane-logs/evidence-loaded-arm-latency.txt`,
+`lane-logs/evidence-burst-loaded.txt`.
+
+This is the direct test of FINDING 2b's proposed unification — *"the windowed
+app permanently contends with its own render loop, so it may sit in the slow
+mode by default"*. It does not. Saturating the machine moves the p50 by 1.6x
+and keeps the distribution unimodal. **That hypothesis is dead**; the headless
+bimodality of `total.SplitBlock` needs a different explanation.
+
+### 2.3 Where the main thread's time goes
+
+`sample`, 1 ms interval; a count *is* milliseconds of wall time on that thread.
+Full output: `lane-logs/evidence-sink-attribution.txt`,
+`lane-logs/evidence-sample-clean1-mainthread.txt` (and the loaded twin).
+
+| sink | unloaded (69.5 s window, 11 splits) | loaded (30.2 s window, 11 splits) |
+|---|---|---|
+| **idle — run loop blocked in `mach_msg2_trap`** | **66 619 ms (95.9 %)** | **27 882 ms (92.3 %)** |
+| `_dispatch_main_queue_drain` (all foreground work) | 2 179 ms (3.1 %) | 1 781 ms (5.9 %) |
+| ↳ `Window::draw` | 1 642 ms | 1 286 ms |
+| ↳↳ `draw_roots` (paint) | 1 466 ms | — |
+| ↳↳ `prepaint_as_root` | 743 ms | 592 ms |
+| ↳↳↳ `TaffyLayoutEngine::compute_layout` | 418 ms | 343 ms |
+| ↳ `list::StateInner::prepaint_items` | 619 ms | 463 ms |
+| ↳ MCP interaction pump | 219 ms | 217 ms |
+| projection / view-model interpret on main thread | **1 ms** | **1 ms** |
+| bounds registry flush | 7 ms | 3 ms |
+
+Reading the candidate sinks the brief named:
+
+- **(a) paint/layout of the re-rendered tree — REAL but small and off the
+  critical path.** ~1.6 s of paint across ~22 interactions ≈ **75 ms of
+  main-thread paint per split cycle**, spread over the frames *after* the CDC
+  batch already landed in the reactive mirror. It is inside the ~140 ms settle
+  bound and cannot explain 800 ms.
+- **(b) bounds tracking/flush — NOT a sink.** 7 ms in 69.5 s.
+- **(c) projection / org write-back on the UI thread — NOT a sink.** 1 ms.
+  `dispatch_intent_chain` spawns onto the tokio handle
+  (`crates/holon-frontend/src/reactive.rs:4088`); engine work is genuinely off
+  the main thread, and the sample proves it empirically.
+- **(d) channel/executor stall — NO.** "Idle-but-blocked" would show as main
+  thread parked *while the e2e clock runs*; e2e is 36 ms, i.e. the pipeline is
+  not waiting on the UI thread at all.
+- **(e) something else — yes, see §3.** The cost is not in the app; it is in
+  the measurement.
+
+---
+
+## 3. The finding that matters: `split_block` cannot close its own e2e clock
+
+### The mechanism
+
+`crates/holon-api/src/latency_e2e.rs::close_delivered` correlates by op
+instance:
+
+1. exact match — a delivered row's `WriteSeq` equals a pending entry's token;
+2. else, if the batch delivered any **tokenless** row for that target, close the
+   newest pending entry for it;
+3. else close nothing.
+
+Only **editor content writes** stamp `write_seq` (`write_seq_from_params`,
+`> 0`). `split_block` is tokenless. And `write_seq` is a **sticky column on the
+block row** — once an editor write sets it, every later projection of that row
+carries that same token.
+
+So for a block that has ever been typed into:
+
+- the split's own delivered row arrives as `(T, Some(S_old))`;
+- rule 1 finds no pending entry with `S_old` (the `set_field` entry that owned
+  it was already closed and removed);
+- rule 2 never fires, because the batch delivers no tokenless row for `T`;
+- **nothing closes.** The split's pending entry survives and is eventually
+  pruned in silence — writes deliberately do not warn on expiry, only
+  `navigate` does (`latency_e2e.rs:151`).
+
+### The proof
+
+- 8 splits driven with the dogfood gesture (click → type → Enter) produced
+  **8 `dispatch` events and 0 `e2e` events**:
+  `lane-logs/evidence-typed-gesture-8710-app.txt`,
+  `lane-logs/evidence-burst-typed-gesture.txt`.
+- Single-block probe, twice, on two instances
+  (`lane-logs/evidence-probe-typed-split-no-e2e.txt`): `write_seq` 0 → click →
+  type "qq" → `write_seq` 2 → Enter → `dispatch split_block ms=37`, **no
+  `e2e`**, and `write_seq` still 2 for 24 s afterwards.
+- The same split gesture on a block whose row `write_seq` is still 0 closes
+  normally at 30–43 ms — §2.1's whole dataset is exactly those blocks.
+- Firing a further `set_field` through MCP on the stalled block did **not**
+  close the entry either (the row still carries the old token).
+
+### What this does to the 803 ms row
+
+Two consequences, both load-bearing:
+
+1. **The `e2e.split_block` sample set is biased by construction** — only splits
+   on never-typed-into blocks can ever produce a sample. The dogfood row's own
+   numbers carry the signature: **n=5 for `split_block` against n=179 for
+   `set_field`** in the same session. That is not sampling luck; splits were
+   being dropped.
+2. **Any sample that did close, closed on a *later, unrelated* tokenless
+   delivery for that block** — so its `ms` is "time until something else
+   touched this row", not split latency. This is precisely the bleed the
+   previous lane documented for `navigate` (FINDING 2), now on the write path.
+   The dogfood's tight 803/944/975 cluster is as consistent with a systematic
+   delayed-close rule as with a deterministic per-interaction cost — the same
+   argument that lane made about navigation, and it was right.
+
+Corroborating, from this lane's own logs: `e2e action=navigate ms=1466`
+(unloaded) and `ms=4546` (loaded) on a page that renders in well under a second,
+plus `stage="e2e_expired" action=navigate waited_ms=190983`. The navigate clock
+is still bleeding exactly as documented.
+
+---
+
+## 4. Per-sink attribution table (the brief's question, answered)
+
+| sink | ms per SplitBlock | evidence |
+|---|---|---|
+| op dispatch (Loro/SQL write, tokio) | 55 (p50), 93 under load | `evidence-clean-arm-latency.txt` |
+| pipeline → projection-visible (`e2e`) | 36 (p50), 57.5 under load | same |
+| GPUI paint + layout, main thread, after visible | ~75 | `evidence-sink-attribution.txt` |
+| bounds flush | <1 | same |
+| projection / interpret on UI thread | ~0 | same |
+| org write-back idle floor (inside the settle bound) | ≤ ~100 | settle 140 − e2e 36 |
+| **total interaction → everything settled** | **~140 (p50), ~197 under load** | `evidence-burst-clean*.txt` |
+| *the missing ~800 ms* | **does not exist at this rev** | §2.1 |
+
+---
+
+## 5. Recommendations
+
+**R1 — Fix the correlator: give every dispatched op an instance token (high
+impact, small change).** Stamp a fresh `WriteSeq` in `interaction_dispatched`
+for *all* ops and carry it to the row the op writes, instead of only editor
+content writes. Today the token is a property of the *row* rather than of the
+*op instance*, which is what makes it sticky and makes tokenless ops
+uncloseable. Impact: `split_block`/`indent`/`outdent`/`join`/`delete` become
+measurable at all, and the delayed-close bleed class disappears for writes.
+Until this lands, no `e2e`-based SplitBlock number — including the 803 ms — can
+be taken at face value.
+
+**R2 — Make a write-path expiry loud, like navigate's.** A pending write entry
+that expires without a delivered row is currently dropped in silence
+(`latency_e2e.rs:151` warns only for `navigate`). Had it warned, this defect
+would have been visible on the dogfood night rather than mined out of a lane.
+Low cost, high diagnostic value.
+
+**R3 — Re-triage the BugFunnel row, do not fix a phantom.** The
+2026-08-07 `split_block` 803 ms row should be re-opened as *measurement not
+established*, with this lane's windowed numbers attached, and re-measured after
+R1. No split-path optimisation is warranted: the path costs 36 ms.
+
+**R4 — Retire FINDING 2b's unification hypothesis.** §2.2 refutes it directly.
+The headless `total.SplitBlock` 2.45x run-to-run spread is a *separate* open
+question and still owns the ceiling blocker. (One untested lead worth a cheap
+look: `total.SplitBlock` is a settle-based measurement, and this lane's settle
+bound moved 140 → 197 ms under load while `e2e` moved 36 → 57.5 — the settle
+machinery is the more load-sensitive of the two.)
+
+**R5 — Latency ceilings.** See below.
+
+---
+
+## 6. Can the SplitBlock ceiling be set?
+
+**For the two gated-file rungs: not yet, and for a sharper reason than before.**
+
+- `report.e2e.p50.split_block` **must not be gated until R1 lands.** Its sample
+  set is data-dependent in exactly the way `docs/Testing/latency-ceilings.txt`
+  already refuses to tolerate for navigation ("a ratchet cannot rest on a rung
+  whose sample count moves"). This lane showed the mechanism: whether a
+  SplitBlock yields a sample depends on whether the drawn block had been typed
+  into earlier in the run. A generator change that types more, or less, moves
+  the sample set silently.
+- `report.total.p50.SplitBlock` stays blocked on the headless bimodality, which
+  this lane did **not** explain — it only killed the leading hypothesis for it.
+
+**What *can* be stated now** is a windowed budget, if a windowed latency gate is
+built (BugFunnel's "missing piece" for that row):
+
+| proposed windowed rung | worst observed p50 | ×1.6 ceiling |
+|---|---|---|
+| `e2e.p50.split_block` (windowed) | 57.5 (loaded arm) | **92 ms** |
+| interaction→settled p50 (windowed) | 196.8 (loaded arm) | **320 ms** |
+
+Provisional, and honestly so: the file's ratcheting method asks for ≥3 runs
+under normal load, and this lane has two unloaded runs plus one loaded one.
+Both proposed numbers sit comfortably under the 200 ms SLO for the quantity the
+SLO actually names (`e2e`), which is the substantive result: **SplitBlock is not
+an SLO violation in the windowed app at `0f0c99e5`.**
+
+---
+
+## 7. What this report does not establish
+
+- The dogfood's build (`5670921a`) was not rebuilt and re-measured. The claim is
+  that its 803 ms is not reproducible at `0f0c99e5` **and** that the correlator
+  defect makes the figure untrustworthy at any rev — not that the old build was
+  provably fast. Settling it properly means R1, then a re-run.
+- Loro/CRDT mode was not measured; every run was the shipped default
+  (`loro: false`), which is also what the dogfood ran.
+- The headless `total.SplitBlock` bimodality remains unattributed.
+- Absolute numbers are dev-profile on a 16-core M-series machine; the
+  cross-channel ratios (22x windowed-vs-dogfood, 1.6x loaded-vs-unloaded) are
+  the load-bearing evidence.
+
+---
+
+## 8. Evidence index (all under `lane-logs/`, all `.txt` so nothing is gitignored)
+
+| file | what it holds |
+|---|---|
+| `evidence-clean-arm-latency.txt` | verbatim `holon_latency` dispatch/e2e lines, unloaded n=11 |
+| `evidence-loaded-arm-latency.txt` | same, 14-spinner contention arm |
+| `evidence-typed-gesture-8710-app.txt` | full app log of the typed-gesture run: 8 splits, 0 e2e |
+| `evidence-probe-typed-split-no-e2e.txt` | single-block probe: write_seq 0→2, split emits dispatch only |
+| `evidence-burst-clean1.txt`, `evidence-burst-clean2.txt` | MCP-side per-call timings incl. settle |
+| `evidence-burst-loaded.txt` | same, loaded arm |
+| `evidence-burst-typed-gesture.txt` | MCP-side timings for the dogfood gesture |
+| `evidence-sink-attribution.txt` | main-thread sink table, both arms |
+| `evidence-sample-clean1-mainthread.txt`, `evidence-sample-loaded-mainthread.txt` | trimmed `sample` call graphs (raw dumps were 35–110 MB each and were deleted after summarising; reproduce with `run-burst.sh`) |
+| `build-gpui-37.log` | the build |
+| `split_burst.py`, `run-burst.sh`, `run-burst-loaded.sh`, `launch-app.sh`, `stale_entry_probe.py`, `analyze_sample.py`, `sink_split.py` | the harness, re-runnable as-is |
+
+Processes: every app instance this lane started (pids 84507, 74655, 19734,
+69090) and every CPU spinner was stopped. Martin's own release instance was
+never touched.

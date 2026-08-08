@@ -1,0 +1,21 @@
+=== probe on block:bench-01
+[08:08:40] execute_raw_sql      1.9ms  rows[1]{write_seq}:
+  0
+
+[08:08:40] click               42.9ms  {"clicked_entity":"block:bench-01","region":"main"}
+[08:08:40] type_text           20.0ms  {"keystrokes_sent":1,"keystrokes_handled":1,"dropped":0}
+[08:08:40] type_text            3.0ms  {"keystrokes_sent":1,"keystrokes_handled":1,"dropped":0}
+[08:08:40] type_text            9.8ms  {"keystrokes_sent":1,"keystrokes_handled":1,"dropped":0}
+[08:08:40] type_text            9.8ms  {"keystrokes_sent":1,"keystrokes_handled":1,"dropped":0}
+[08:08:40] type_text           38.8ms  {"keystrokes_sent":2,"keystrokes_handled":2,"dropped":0}
+--- after the content write (expect write_seq > 0)
+[08:08:40] execute_raw_sql      2.8ms  rows[1]{write_seq}:
+  2
+
+[08:08:40] type_text            1.5ms  {"keystrokes_sent":1,"keystrokes_handled":1,"dropped":0}
+--- split dispatched; polling write_seq WITHOUT dispatching further ops
+--- t+2s
+[08:08:42] execute_raw_sql      2.5ms  rows[1]{write_seq}:
+  2
+
+--- t+4s
