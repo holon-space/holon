@@ -33,6 +33,20 @@ use crate::pbt::transition_budgets::ExpectedSql;
 const TPL_ROOT: &str = "block:tpl";
 const TPL_CHILD: &str = "block:tpl-c1";
 
+/// The definition child's rich text: `DirectUserDriver::instantiate_template`
+/// seeds `see {{date}} now` with `see` bolded, so every instantiation exercises
+/// the mark-carrying path (`plan_instantiation` → `remap_marks`) rather than a
+/// marks-free template. The span sits entirely before the `{{date}}` slot at
+/// byte 4, so substitution leaves it where it is — instance and definition
+/// carry the identical span.
+fn tpl_child_marks() -> Option<Vec<holon_api::MarkSpan>> {
+    Some(vec![holon_api::MarkSpan::new(
+        0,
+        3,
+        holon_api::InlineMark::Bold,
+    )])
+}
+
 /// Instantiate the canned template under an existing non-page block.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct InstantiateTemplate {
@@ -144,10 +158,20 @@ impl<R: RefLifecycle + RefBlockTree + RefBlockTreeMut + RefLayoutMutate> Transit
         let tpl_root = EntityUri::from_raw(TPL_ROOT);
         let tpl_child = EntityUri::from_raw(TPL_CHILD);
         if state.block_content(&tpl_root).is_none() {
-            state.seed_template_definition(&EntityUri::no_parent(), "{{date}}", tpl_root.clone());
+            state.seed_template_definition(
+                &EntityUri::no_parent(),
+                "{{date}}",
+                None,
+                tpl_root.clone(),
+            );
         }
         if state.block_content(&tpl_child).is_none() {
-            state.seed_template_definition(&tpl_root, "see {{date}} now", tpl_child);
+            state.seed_template_definition(
+                &tpl_root,
+                "see {{date}} now",
+                tpl_child_marks(),
+                tpl_child,
+            );
         }
 
         // The SUT's `plan_instantiation` mints deterministic instance ids from
@@ -171,6 +195,7 @@ impl<R: RefLifecycle + RefBlockTree + RefBlockTreeMut + RefLayoutMutate> Transit
             inst_child_id,
             &self.date,
             &format!("see {} now", self.date),
+            tpl_child_marks(),
             TPL_ROOT,
         );
     }

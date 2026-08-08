@@ -301,8 +301,17 @@ impl RefLayoutMutate for ReferenceState {
         ReferenceState::create_block_under_with_id(self, parent, content, id);
     }
 
-    fn seed_template_definition(&mut self, parent: &EntityUri, content: &str, id: EntityUri) {
+    fn seed_template_definition(
+        &mut self,
+        parent: &EntityUri,
+        content: &str,
+        marks: Option<Vec<holon_api::MarkSpan>>,
+        id: EntityUri,
+    ) {
         ReferenceState::create_block_under_with_id(self, parent, content, id.clone());
+        if let Some(b) = self.domain.block_state.blocks.get_mut(&id) {
+            b.marks = marks;
+        }
         // Re-classify as SEED. `insert_block_under_no_snapshot` derives the
         // document from the parent, which for a definition CHILD is the
         // definition root — a real document, so the child would start being
@@ -322,6 +331,7 @@ impl RefLayoutMutate for ReferenceState {
         inst_child_id: EntityUri,
         root_content: &str,
         child_content: &str,
+        child_marks: Option<Vec<holon_api::MarkSpan>>,
         template_id: &str,
     ) {
         ReferenceState::apply_instantiate_template(
@@ -331,6 +341,7 @@ impl RefLayoutMutate for ReferenceState {
             inst_child_id,
             root_content,
             child_content,
+            child_marks,
             template_id,
         );
     }

@@ -2478,12 +2478,21 @@ pub trait RefLayoutMutate {
     /// truthfulness and seed classification are independent axes; conflating
     /// them by parenting definitions at `no_parent` made every definition child
     /// report the document-root sentinel to `inv-watch-rows-match-ref`.
-    fn seed_template_definition(&mut self, parent: &EntityUri, content: &str, id: EntityUri);
+    fn seed_template_definition(
+        &mut self,
+        parent: &EntityUri,
+        content: &str,
+        marks: Option<Vec<holon_api::MarkSpan>>,
+        id: EntityUri,
+    );
 
     /// `InstantiateTemplate`: mint the instance subtree (root + child) under
     /// `target_parent` as ONE undoable unit, so a single `UndoLastMutation`
     /// removes the whole instantiation. The ids are caller-computed and must
     /// be born-equal with the SUT's; the instance root carries `instance_of`.
+    /// `child_marks` are the definition child's marks after `{{var}}`
+    /// substitution has shifted them — an instance inherits the definition's
+    /// rich text, it is not born plain.
     fn apply_instantiate_template(
         &mut self,
         target_parent: &EntityUri,
@@ -2491,6 +2500,7 @@ pub trait RefLayoutMutate {
         inst_child_id: EntityUri,
         root_content: &str,
         child_content: &str,
+        child_marks: Option<Vec<holon_api::MarkSpan>>,
         template_id: &str,
     );
 
