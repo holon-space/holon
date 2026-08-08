@@ -1,0 +1,97 @@
+Finding 2 — clicking a link in READ mode: page links navigate, but external
+URLs and any scheme link without a backing block row BLANK the main panel.
+
+Environment: throwaway vault, sandboxed launch on port 8710, binary from main
+e3cc10fe. All links below were INGESTED from hand-authored org files (they
+parse correctly and carry real Link marks) — deliberately NOT typed into the
+editor, so this finding stays disjoint from the separate "typed [[wiki links]]
+are never parsed" defect (task #12, ledger row dated 2026-08-08).
+
+Marks as stored (verified over MCP execute_raw_sql, so the data side is sound):
+
+  ...00000b  [{"start":32,"end":41,"kind":"Link","target":{"type":"name","name":"Beta Page"},"label":"Beta Page"}]
+  ...00000c  [{"start":30,"end":46,"kind":"Link","target":{"type":"scheme","raw":"block:bbbb2222-0000-4000-8000-00000000000a"},"label":"Beta first block"}]
+  ...00000d  [{"start":34,"end":46,"kind":"Link","target":{"type":"external","url":"https://example.com"},"label":"example site"}]
+  ...cccc-a  [{"start":45,"end":57,"kind":"Link","target":{"type":"scheme","raw":"cc-session:0f3a"},"label":"the refactor"}]
+  ...cccc-b  [{"start":28,"end":36,"kind":"Link","target":{"type":"scheme","raw":"tag:rust"},"label":"rust tag"}]
+  ...cccc-c  [{"start":54,"end":70,"kind":"Link","target":{"type":"name","name":"Nonexistent Page"},"label":"Nonexistent Page"}]
+
+RESULT MATRIX — every click made on a block that was in READ mode
+(widget == rendered_text, re-measured immediately before each click):
+
+  link kind                     mark target            outcome
+  ---------------------------------------------------------------------------
+  page link [[Beta Page]]       Name{Beta Page}        OK   navigates to the page
+  dangling page [[Nonexistent]] Name{Nonexistent Page} OK   create_page_from_link
+                                                            then navigates
+  block link -> real block      Scheme{block:bbbb…}    OK   zooms to the block
+  tag link [[tag:rust]]         Scheme{tag:rust}       FAIL main panel BLANK
+  unregistered [[cc-session:…]] Scheme{cc-session:0f3a}FAIL main panel BLANK
+  external [[https://…]]        External{url}          FAIL main panel BLANK,
+                                                            no browser opens
+
+The three FAIL rows are indistinguishable to a user from "the link is not
+clickable": the click appears to do nothing useful, the content disappears, and
+there is no way back except the sidebar.
+
+THE DISPATCH, verbatim from the app log (ANSI stripped) — this is the whole bug
+in one line:
+
+  INFO ... backend.execute_operation{operation.entity="navigation" operation.name="focus" operation.origin="user"}:
+  [BackendEngine] execute_operation: entity=navigation, op=focus, origin=user,
+  params={"region": String("main"), "block_id": String("https://example.com")}
+
+and for the scheme cases:
+
+  params={"region": String("main"), "block_id": String("cc-session:0f3a")}
+  params={"block_id": String("tag:rust"), "region": String("main")}
+
+A URL and a bare scheme string are being passed as a block_id. navigation.focus
+accepts them, finds nothing, and renders an empty panel. describe_ui on the
+main panel afterwards:
+
+  column
+    view_mode_switcher
+      tree [1 items]
+        tree_item
+          (empty)
+    divider
+    (empty)
+
+No banner, no toast, no ERROR line — the log's ERROR count did not move across
+any of the three failing clicks. This is a silent degradation, priority 4 in
+the project's own error-handling ordering.
+
+ISOLATION quality: each failing click was bracketed by a count of
+`operation.entity="navigation"` occurrences in the log, so the dispatch is
+attributed to the click and not to the preceding navigation. The passing rows
+are the control that the click coordinates and the read-mode precondition were
+both correct.
+
+MECHANISM (code read, not modified)
+  frontends/gpui/src/render/builders/rendered_text.rs:279-313
+      kind dispatch. External{url} -> nav_focus(url) at :299.
+      Scheme -> nav_focus only when link_classifier().resolves_entity(&uri)
+      at :286 — but that predicate answers "is this SCHEME registered", not
+      "does this entity INSTANCE exist", so tag: and cc-session: (both
+      registered) are routed to navigation for targets that have no row.
+  frontends/gpui/src/render/builders/rendered_text.rs:321-332
+      nav_focus builds navigation.focus{region:"main", block_id} from the raw
+      target string with no parse and no existence check.
+  crates/holon-api/src/link_parser.rs:60
+      BUILT_IN_LINK_SCHEMES = ["block","tag","person"], plus every entity a
+      YAML sidecar declares — which is why an integration's schemes count as
+      "resolvable" even when that integration is inert.
+
+Two independent defects stack here:
+  (a) an external URL should never become a navigation.focus at all;
+  (b) navigation.focus accepts an arbitrary string as block_id and renders an
+      empty panel instead of refusing loudly.
+
+Martin's hypothesis (the click->caret handler intercepting) is NOT what is
+happening for these three kinds — the navigation genuinely dispatches. The
+outer click_to_focus handler on render-entity-{id}
+(frontends/gpui/src/render/builders/prelude.rs:47-60, mounted at
+frontends/gpui/src/views/render_entity_view.rs:210-212) does fire in addition,
+and it does not stop_propagation the way selectable.rs:68-70 does, but it is
+not the cause of the blank panel.

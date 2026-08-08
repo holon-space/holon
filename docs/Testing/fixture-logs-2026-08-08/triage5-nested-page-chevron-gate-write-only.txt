@@ -1,0 +1,97 @@
+Finding 5 — the trailing (right-hand) chevron on an embedded/nested page never
+opens it. The click IS received and DOES write to the store; the gate that
+decides whether the page renders open never reads what the click wrote.
+
+Environment: throwaway vault, sandboxed launch on port 8710, binary from main
+e3cc10fe. Subject: the nested page row "2026-08-08" on the Journals page,
+block:4dca296c-ed1d-6b18-5b11-102b9d596898, tagged Page, rendered by the
+`embedded_page` rule (assets/default/types/block_profile.yaml:98-108) which
+sets hover_reveal_toggle: true — i.e. the chevron sits to the RIGHT of the
+header, revealed on hover. That is the affordance whose job is "open the
+linked page".
+
+Measured geometry of the toggle container:
+  expand_toggle block:4dca296c-…-102b9d596898  x=356.0 y=438.0 w=844.0 h=32.0 visible
+The trailing chevron therefore occupies roughly x 1180..1200 (chevron width =
+tree_chevron_size = 20.0, style.rs:50), vertical centre y = 454.
+
+REPRODUCTION — an x-sweep across the whole chevron, so a coordinate miss cannot
+explain the result. Reported value is the chevron glyph in describe_ui plus
+whether the lazy content thunk has been forced:
+
+  baseline:            ('/25B6 collapsed', content UNEVALUATED)
+  after click x=1160:  ('/25B6 collapsed', content UNEVALUATED)
+  after click x=1170:  ('/25B6 collapsed', content UNEVALUATED)
+  after click x=1180:  ('/25B6 collapsed', content UNEVALUATED)
+  after click x=1186:  ('/25B6 collapsed', content UNEVALUATED)
+  after click x=1190:  ('/25B6 collapsed', content UNEVALUATED)
+  after click x=1194:  ('/25B6 collapsed', content UNEVALUATED)
+  after click x=1198:  ('/25B6 collapsed', content UNEVALUATED)
+  after click x=1190:  ('/25B6 collapsed', content UNEVALUATED)
+  after click x=1190:  ('/25B6 collapsed', content UNEVALUATED)
+
+  Nine clicks, no state change, content never materialised.
+
+CONTROL 1 — coordinate clicking and chevrons both work in this session.
+The LEADING tree_item chevron on an ordinary parent row (block …-00000000000d,
+which has one child) was clicked at (341,256):
+  child …-00000000000e   ->  rendered_text ABSENT: not_painted
+  SQL                    ->  collapsed = 1
+So a chevron click at measured coordinates does flip a row. The trailing
+chevron is the one that does not.
+
+CONTROL 2 — the trailing chevron IS receiving the click. Before the sweep the
+row was forced collapsed so that the toggle's write would be a real change:
+  set_field(collapsed=true)  ->  SQL collapsed = 1
+  two chevron clicks
+  SQL after                  ->  collapsed = 0
+  log tail                   ->  entity=block, op=set_field
+                                 entity=block, op=set_field
+The handler runs, flips its local Mutable, and dispatches set_field. The UI
+still shows the row collapsed with content unevaluated. So the loss is on the
+READ side, after the write.
+
+MECHANISM (code read, not modified) — writer and reader are DIFFERENT STORES:
+
+  READER — crates/holon-frontend/src/shadow_builders/expand_toggle.rs:61
+      let seed_expanded =
+          ba.services.block_expanded_view(&target_id).unwrap_or(default_expanded);
+      let expanded = Mutable::new(seed_expanded);
+    The comment above it states the intent plainly: seed from "the engine's
+    view-local expansion store (RATIFIED 2026-07-16, Option B) when the user
+    has driven this toggle" — precisely because profile-driven embedded pages
+    "carry no `collapsed` document field". Precedence is
+    explicit store entry > default_expanded > false.
+
+  WRITER (production) — frontends/gpui/src/render/builders/expand_toggle.rs:69-88
+      expanded_handle.set(new_val);
+      … OperationIntent::set_field(…, "collapsed", Value::Boolean(!new_val));
+      services.dispatch_intent(intent);
+    It sets the per-render Mutable and writes the DOCUMENT's `collapsed`
+    field. It never calls set_block_expanded_view.
+
+  THE ONLY WRITER of that store in the whole tree:
+      crates/holon-frontend/src/user_driver.rs:878
+          .set_block_expanded_view(bare, expanded);
+    — the TEST driver.
+
+Consequence: block_expanded_view(target_id) stays None forever in production,
+so every structural rebuild re-seeds the gate from default_expanded (false for
+`embedded_page`, which declares no default_expanded) and discards the click.
+The write to `collapsed` cannot rescue it either: the `embedded_page` render
+rule never binds the gate to col("collapsed"), and because the gate always
+rebuilds as collapsed, every click computes new_val = !false = true and
+dispatches collapsed = !true = false — the write is idempotent, and the row
+can never be driven to the expanded state at all.
+
+The live-follow watcher at shadow_builders/expand_toggle.rs:112-131 folds the
+gate on external CHANGES to `collapsed`, but it is edge-triggered against
+`last = initial_collapsed` recomputed at each rebuild, so it cannot restore an
+expansion the rebuild has already reset.
+
+WHY THE PBT IS GREEN: the layout PBT's ToggleCollapse transition goes through
+DirectUserDriver::set_block_expanded, which writes the view store that
+production never writes. The test exercises the gate through the one path that
+makes it work. This is the same class as the 2026-08-08 send_key_chord row —
+the harness's reply/route diverges from the production route at exactly the
+affordance under test.

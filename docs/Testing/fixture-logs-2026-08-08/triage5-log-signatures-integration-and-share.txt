@@ -1,0 +1,148 @@
+Finding 4 — the two signatures from Martin's 2026-08-08 cold-start log.
+
+PRIVACY: the source log is from the real vault. Nothing below quotes vault
+content. Paths under the vault are replaced with <VAULT-PATH>, block ids with
+<REDACTED>. Only signature lines, counts and timings are reproduced.
+
+================================================================================
+4a — 1x "Integration unavailable — claude-history: provider 'claude-history'"
+================================================================================
+
+WHERE THE TEXT COMES FROM. It is a TOAST label, not a tracing macro:
+  frontends/gpui/src/share_ui.rs:1641-1645
+      DegradedKind::IntegrationConnectFailed => (0xef4444 red, "/26D4",
+                                                 "Integration unavailable")
+  frontends/gpui/src/share_ui.rs:1654   "{icon}  {label} — {detail}"
+  frontends/gpui/src/share_ui.rs:318-325  detail = format!("{integration}: {error}")
+The red is the ERROR-severity colour, which is why it reads as an ERROR line.
+
+WHAT THE LOG ACTUALLY CONTAINS (2 lines, both WARN, ANSI stripped, truncated):
+
+  02:34:22.491108Z  WARN di.factory.FrontendSession…: holon_app::mcp_integrations:
+    [McpIntegrationsModule] Failed to connect provider 'claude-history':
+    provider 'claude-history': entity 'session' render 'default' queries foreign
+    table 'cc_message_fdw', whose entity declares no `vtable.fetch_contract`.
+    A view on the mirror is maintained from re-fetches, and what a re-fetch's
+    ABSENCE means — deleted, or merely outside the scope this fetch chose — is
+    a property of the source that cannot be inferred, only declared. Set
+    `fetch_contract` to `snapshot`, `scoped_snapshot`, or `delta`.
+
+  02:34:24.607591Z  WARN …: [McpIntegrationsModule] Integration 'claude-history'
+    unavailable (not configured or failed to connect) — registering inert
+    provider; cause was disclosed on the degraded bus at boot
+
+So this is NOT a missing binary and NOT a failed handshake. The child process
+started and the service initialised (the log shows rmcp "Service initialized as
+client" and five auto-discovered entities immediately before the failure at
+02:34:22.47x). The provider was rejected by Holon's own validation.
+
+ROOT CAUSE — CONFIG-DIR SIDECAR DRIFT, proven by A/B:
+
+  The loader reads {config_dir}/integrations/*.yaml, NOT the repo path
+  (crates/holon-app/src/wiring.rs -> resolve_mcp_integrations_dir ->
+   config_dir.join("integrations"), consumed by
+   crates/holon-mcp-client/src/integration_config.rs::load_integration_configs).
+
+  Nothing syncs the repo's docs/integrations/*.yaml into that directory.
+
+  installed copy   ~/.config/holon/integrations/claude-history.yaml
+                   dated Jul 28 19:10, 10433 bytes,
+                   `fetch_contract` occurrences: 0
+  repo copy        docs/integrations/claude-history.yaml
+                   dated Aug  8 10:50, 26250 bytes,
+                   `fetch_contract` occurrences: 5
+
+  (counts obtained with grep -c; the files' contents were not read out.)
+
+  A/B CONTROL, run this session: the sandbox launch copied the REPO sidecar
+  into its config dir. claude-history CONNECTED CLEANLY there — same binary,
+  same code, only the sidecar differs:
+
+    08:52:31.740667Z INFO [load_integration_configs] Loaded provider
+      'claude-history' from '<SANDBOX>/config/integrations/claude-history.yaml'
+    08:52:35.384631Z INFO rmcp::service: Service initialized as client …
+    08:52:35.386438Z INFO [finish_integration] Auto-discovered entity 'plan' …
+    08:52:35.481074Z INFO [McpSyncEngine] Subscribing to
+      'claude-history://projects' for entity 'project'
+
+  Therefore: a schema requirement landed repo-side after Jul 28 and silently
+  broke every already-installed instance. There is no version check, no
+  migration, and no message telling the user their sidecar is stale — the
+  error blames the sidecar's content without saying the file is out of date or
+  where the current one lives.
+
+BLAST RADIUS
+  - The provider is registered INERT for the whole session
+    (crates/holon-app/src/mcp_integrations.rs:344-356). There is no reconnect
+    path; the condition's declared all-clear is "the provider connecting",
+    which nothing can trigger post-boot
+    (crates/holon-loro/src/degraded_signal_bus.rs:108).
+  - The user sees one red sticky toast and otherwise silence.
+  - AGGRAVATOR, not cause, for finding 2: with claude-history inert, every
+    cc-session:/cc-message: link in the vault points at an entity with no row.
+    Those links then hit the finding-2 path and blank the main panel. (Finding
+    2 reproduces independently of this — in the sandbox claude-history
+    connected and cc-session: links still blanked the panel — so they are two
+    separate defects that compound.)
+
+UNRELATED BUT REPRODUCED IN THE SANDBOX, already in the ledger (2026-08-08,
+"MCP client integration sync fails at boot and then on every poll"):
+  08:52:38.422760Z WARN initial sync failed error=Batch transaction failed:
+    Database error: Failed to execute statement: datatype mismatch
+  09:02:37.562786Z WARN poll_resync{entity=jp_posts}: poll resync failed
+    error=… datatype mismatch
+  Cross-referenced, not re-counted.
+
+================================================================================
+4b — 4x "Shared edit saved - org file pending - block:<REDACTED>"
+================================================================================
+
+WHERE THE TEXT COMES FROM. Also a toast, not a tracing macro:
+  frontends/gpui/src/share_ui.rs:1631-1635
+      DegradedKind::SharedSubtreeNotMaterialized (amber /26A0)
+      label "Shared edit saved - org file pending"
+  frontends/gpui/src/share_ui.rs:308-315   detail carries the block id
+
+WHAT IT MEANS. A block carrying a shared_tree_id whose OWNING PAGE is not a
+registered shared-subtree mount. The shared content therefore owns no dedicated
+org file and write-back cannot resolve a disk path:
+  crates/holon-orgmode/src/di.rs:796-815   walk up to the owning page,
+      found = current.is_share_mount(); if not a mount -> disclose
+  crates/holon-orgmode/src/di.rs:633-645   live (non-seed) upserts only
+  crates/holon-orgmode/src/di.rs:823-832 -> ShareDegradedDisclosure
+      (crates/holon-app/src/loro_seams.rs:662-671) -> degraded bus
+
+CONSEQUENCE: the edit is durable in Loro and SQL and syncs to peers, but the
+on-disk org projection never catches up. There is NO retry and NO flush — the
+doc comment states materialisation is not built yet, and no code path raises
+the all-clear, so the condition holds for the whole session
+(crates/holon-loro/src/degraded_signal_bus.rs:88-91). A repo-wide search for a
+site that clears SHARED_SUBTREE_NOT_MATERIALIZED found none.
+
+WHY "4x" IS NOT A RETRY LOOP. Disclosure is deduped once per shared_tree_id per
+session (di.rs:816-822, set constructed once at di.rs:563-565) and the bus
+upserts by (subject, kind) (degraded_signal_bus.rs:238-248). Four identical
+lines therefore mean four renders of one sticky toast, or four distinct
+shared_tree_ids — not four failed writes.
+
+THE CORROBORATING LOG SIGNATURE, exactly 4 occurrences, on 4 DIFFERENT pages:
+
+  WARN …:org.ingest_file{path=<VAULT-PATH>}: holon_filesystem::file_sync_controller:
+    [FileSyncController] a `share-role` drawer property was found on a page that
+    is NOT a registered shared-subtree mount — ingesting it as a normal file.
+    path=<VAULT-PATH> page_id=block:<REDACTED>
+
+That is the mechanism in one line: the on-disk `share-role` marker SURVIVES a
+restart, but the share-mount REGISTRATION does not. On the next cold start the
+pages are ingested as ordinary files, so every subsequent edit to their shared
+subtrees is disclosed as "org file pending" and never written back.
+
+The block id Martin quoted appears exactly once in the log, inside the
+creates_ids list of the ORGSYNC_DIFF for one of those four files — i.e. it is a
+block on a page that carries a share-role drawer and is not a registered mount.
+That ties the toast to the four WARNs.
+
+DISCLOSED CASUALTY: 4b was NOT reproduced live. Setting up a real share, then
+restarting to lose the registration, was out of scope for this lane. The row is
+root-caused from the code plus the log signature; the reproduction step is
+named in the ledger row as the work still owed.
