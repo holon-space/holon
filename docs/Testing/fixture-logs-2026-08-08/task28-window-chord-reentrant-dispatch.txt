@@ -1,0 +1,142 @@
+task #28 — window-registry chords fail with "the window is gone"
+================================================================
+Evidence for the BugFunnel row "cmd+K / cmd+[ / cmd+] / cmd+1..9 never reach
+their window" (dogfood P1 F2, 2026-08-08).
+
+Subject under test: frontends/gpui/tests/window_chord_reentrant_dispatch.rs
+                    ::window_registry_chords_reach_their_window
+Fix:                frontends/gpui/src/lib.rs (OpenSearch handler; on_cycle! /
+                    on_jump! macros)
+
+
+§A — RED FOR THE RIGHT REASON (pre-fix tree, verbatim)
+------------------------------------------------------
+lane-logs/task28-red-1.log
+
+ Nextest run ID 761cca08-cf02-46ef-ab47-e7f7421d8969 with nextest profile: default
+    Starting 1 test across 1 binary
+       START [         ] (1/1) holon-gpui::window_chord_reentrant_dispatch window_registry_chords_reach_their_window
+
+running 1 test
+[GPUI] pre-warm timeout — window will open with loading state
+
+thread 'window_registry_chords_reach_their_window' (507594418) panicked at frontends/gpui/tests/window_chord_reentrant_dispatch.rs:238:5:
+assertion `left == right` failed: cmd+] must reach the window it was registered against
+  left: Failed("cycle_tab_next: the window is gone: window not found")
+ right: Succeeded
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.46s
+
+The `left` value is byte-for-byte the string the dogfood pass got back over MCP
+("cycle_tab_next: the window is gone: window not found"), reproduced by a
+TestPlatform driver that never touches the MCP tool layer.
+
+
+§B — GREEN (fixed tree)
+-----------------------
+lane-logs/task28-green-1.log
+
+running 1 test
+[GPUI] pre-warm timeout — window will open with loading state
+test window_registry_chords_reach_their_window ... ok
+
+     Summary [   5.604s] 1 test run: 1 passed, 0 skipped
+
+
+§C — MUTATION PROOF, BOTH HALVES OF THE FIX
+-------------------------------------------
+Each mutation restores the pre-fix acquisition in ONE handler family and is
+then reverted; frontends/gpui/src/lib.rs is sha256-identical before and after
+(dd2c2ba2bb2b429ffda4d6b903a63900fc3814d3647fd46d3f991074246501d7).
+
+(A) on_jump! hops through cx.update_window again
+    lane-logs/task28-mutation-a-jump-tab.log
+
+    panicked at frontends/gpui/tests/window_chord_reentrant_dispatch.rs:247:5:
+      left: Failed("jump_to_tab_2: the window is gone: window not found")
+     right: Succeeded
+
+(B) the OpenSearch handler drops cx.defer and hops immediately
+    lane-logs/task28-mutation-b-open-search.log
+
+    panicked at frontends/gpui/tests/window_chord_reentrant_dispatch.rs:257:5:
+      left: Failed("open_search: the window is gone: window not found")
+     right: Succeeded
+
+Each of the three assertions therefore bites on its own handler family, and the
+cmd+k assertion pair (journal outcome + modal actually open) is not vacuous.
+
+
+§D — ROOT CAUSE
+---------------
+The COMPILED gpui is the Holon fork, git+https://github.com/holon-space/zed.git
+?branch=holon at 44506e18 (Cargo.lock "name = gpui" / version 0.2.2). Line
+numbers below are that tree's; a gpui upgrade must re-verify them there.
+
+gpui App::update_window_id (crates/gpui/src/app.rs:1561-1602) starts with
+
+    let mut window = cx.windows.get_mut(id)?.take()?;          // :1566
+
+and only puts the window back in its `trail` at the end; the failing `?` picks
+up its message from `.context("window not found")` at :1602. Global
+`cx.on_action` listeners are invoked from Window::dispatch_action_on_node
+(crates/gpui/src/window.rs:4729) — ours in the BUBBLE phase at :4802 — i.e.
+while that `take()` is in effect, so a handler that calls
+`cx.update_window(wh, …)` re-enters the emptied slot, gets None, and the `?`
+turns it into Err("window not found").
+
+Holon's window-registry handlers (frontends/gpui/src/lib.rs):
+
+  undo / redo          share_ui::dispatch_undo → rt_handle.spawn + cx.spawn;
+                       the window hop runs on the executor AFTER dispatch
+                       returns                                    → always worked
+  open_search          synchronous cx.update_window inside on_action → ALWAYS failed
+  cycle_tab_next/prev  synchronous cx.update_window inside on_action → ALWAYS failed
+  jump_to_tab_1..9     synchronous cx.update_window inside on_action → ALWAYS failed
+  turn_into_page       element-level capture_action; the handler is handed
+                       `&mut Window` directly                     → always worked
+
+12 of the 15 published chords were broken; the 3 that worked are exactly the
+3 that never re-enter the window.
+
+
+§E — FIX
+--------
+* cycle_tab_* and jump_to_tab_* (11 chords): the window hop was pure ceremony —
+  tab_strip::apply_cycle / apply_jump take `&mut App` and the closure's `window`
+  parameter was `_window`. They now run directly on the dispatch-time `&mut App`.
+* open_search (1 chord): genuinely needs a `Window` (it focuses the modal's
+  input), so the hop is wrapped in `cx.defer`, which GPUI documents as running
+  "at the end of the current effect cycle, allowing entities that are currently
+  on the stack to be returned to the app".
+
+Audit: every other `cx.update_window` in frontends/gpui/src is reached through
+an `AsyncApp` inside a spawned task (share_ui, breadcrumb, tab_strip's query
+pump, search_ui, input_box, editor_view, oracles_ui, the interaction pump) or
+holds a real `Window` already. These three were the only synchronous
+re-entrant sites.
+
+
+§F — RESIDUAL, DISCLOSED
+------------------------
+Real-keypress equivalence is established by CONSTRUCTION, not by a hardware
+press: the failure is in GPUI's action-dispatch re-entrancy, downstream of how
+the keystroke arrived, and the windowed rung drives the real dispatch tree
+rather than the MCP tool layer. A hardware cmd+k on a live build was not
+performed in this lane (no interactive session available), so that last step
+remains unobserved.
+
+The cmd+] / cmd+2 presses run against a tab strip with fewer than two tabs, so
+they assert "the handler reached its window", not "the active tab changed";
+`navigation.activate` fan-out on a multi-tab strip has no coverage here.
+
+cycle_tab_* / jump_to_tab_* now settle Succeeded unconditionally and have no
+failure channel at all: dispatch_intent is fire-and-forget returning (), so the
+journal entry attests that the handler RAN, not that the tab changed — a
+downstream navigation.activate failure would still read Succeeded.
+
+If the window dies between dispatch and the effect flush, open_search's entry
+stays Pending forever where the pre-fix code settled Failed. That degrades to
+"unknown", never to false success: key_chord_report's
+`an_unsettled_outcome_is_reported_as_pending_never_as_success` pins the reply
+side of that.
