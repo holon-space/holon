@@ -275,6 +275,58 @@ async fn live_content_edit_extracts_page_link_marks_and_junction() {
     );
 }
 
+/// Task #36 probe: the creation-slot birth is an authority-only `block.create`
+/// with EMPTY content dispatched as a non-user op — hence `AuthoredInput::
+/// Verbatim`, which does NOT adopt. The question that had to be answered
+/// before shipping birth-on-focus: does the FIRST content a user types into
+/// such a block still get its `[[links]]` adopted, or does the Verbatim birth
+/// poison the block?
+///
+/// It does not. Adoption belongs to the EDIT arm, and the first keystroke is an
+/// ordinary user `set_field` — so marks and junction appear exactly as they do
+/// for any other block. There is nothing for task #22 to fix here; the Verbatim
+/// birth carries no content for adoption to have missed.
+#[tokio::test(flavor = "multi_thread")]
+async fn first_content_typed_into_an_empty_born_block_still_adopts_its_links() {
+    let (_backend, handle) = TursoBackend::new_in_memory()
+        .await
+        .expect("in-memory turso");
+    setup_schema(&handle).await;
+    let d = dispatcher(handle.clone());
+    let entity: EntityName = ENTITY.to_string().into();
+
+    // The birth, exactly as `ReactiveEngine::birth_creation_affordance` fires
+    // it: empty content, NOT authored live.
+    let mut birth: holon_api::StorageEntity = HashMap::new();
+    birth.insert("id".into(), Value::String("block:newborn".to_string()));
+    birth.insert("content".into(), Value::String(String::new()));
+    d.execute_operation_with_input(&entity, "create", birth, AuthoredInput::Verbatim)
+        .await
+        .expect("authority-only birth");
+
+    // The user's first keystrokes carry a wiki link.
+    set_content(&d, &entity, "newborn", "see [[Linked Page Test]]").await;
+
+    let (content, marks) = read_content_marks(&handle, "newborn").await;
+    assert_eq!(
+        content, "see Linked Page Test",
+        "first content into an empty-born block must be adopted (stripped label stored), \
+         not left as raw [[...]] markup"
+    );
+    let marks = marks.expect(
+        "marks must be populated — if this is NULL the Verbatim birth poisoned the edit arm \
+         and task #36's birth-on-focus would ship links that never resolve",
+    );
+    let parsed: Vec<MarkSpan> = holon_api::marks_from_json(&marks).expect("marks JSON round-trips");
+    assert_eq!(parsed.len(), 1, "one link mark");
+    assert!(matches!(parsed[0].mark, InlineMark::Link { .. }));
+    assert_eq!(
+        links_rows(&handle, "newborn").await,
+        vec![("Linked Page Test".to_string(), "page".to_string(), None)],
+        "and the junction row is written, so the link is backlinkable"
+    );
+}
+
 /// An edit that REMOVES the link must drop the junction row (reconciliation
 /// handles update, not just create — the DELETE-then-derive replace).
 #[tokio::test(flavor = "multi_thread")]

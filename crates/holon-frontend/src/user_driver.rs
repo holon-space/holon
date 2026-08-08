@@ -37,7 +37,6 @@ use holon_api::EntityUri;
 use holon_api::KeyChord;
 use holon_api::Value;
 
-use crate::editor_view_model::EditorViewModel;
 use crate::input::InputAction;
 use crate::input::WidgetInput;
 use crate::operations::OperationIntent;
@@ -610,32 +609,69 @@ impl ReactiveEngineDriver {
             tokio::time::sleep(Duration::from_millis(120)).await;
         };
 
-        // Build the `:__virtual:<parent>` slot id exactly as the render does, and
-        // commit through the production `handle_text_sync` create path. The
-        // editor node only needs `context_params["id"]` = this virtual id; the
-        // create branch reads the parent back out of it (never the caret).
+        // Build the affordance id exactly as the render keys it, then drive the
+        // PRODUCTION focus path: focus reaching an affordance is what births a
+        // real empty block (`ReactiveEngine::birth_creation_affordance`). The
+        // newborn's id is the focus authority's value straight afterwards — the
+        // birth seats it synchronously.
         let slot_id = RowOrigin::creation_placeholder_id(&parent);
         let slot_uri = EntityUri::parse(&slot_id)
             .with_context(|| format!("creation-slot id {slot_id:?} is not a valid EntityUri"))?;
-        let mut context_params = std::collections::HashMap::new();
-        context_params.insert("id".to_string(), holon_api::Value::String(slot_id.clone()));
-        let intent = EditorViewModel::new(
-            Vec::new(),
-            Vec::new(),
-            context_params,
-            "content".to_string(),
-            String::new(),
-        )
-        .pending_commit_intent(content)
-        .with_context(|| {
+        crate::reactive::BuilderServices::set_focus(&*self.engine, Some(slot_uri));
+        let born = self.engine.focused_block().with_context(|| {
             format!(
-                "creation-slot commit produced no create intent for slot {slot_id} content \
-                 {content:?} — the slot id did not parse as a CreationPlaceholder, or the content \
-                 was empty"
+                "focusing creation affordance {slot_id} seated no focus — the birth did not run"
             )
         })?;
-        self.engine.dispatch_intent_sync(intent).await?;
-        Ok(slot_uri)
+
+        // Wait for the newborn to exist before writing into it. This is not a
+        // test-only nicety: in the real UI the newborn's editor mounts only
+        // when its row arrives, so the first keystroke is BY CONSTRUCTION after
+        // the create. A driver that writes the instant focus moves would race
+        // ahead of the create and see "Block not found".
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            use holon_api::ReactiveRowProvider;
+            if self
+                .engine
+                .ensure_watching(&born)
+                .row_mutable(&born)
+                .is_some()
+            {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "creation-affordance birth of {born} under {parent} did not land within 3s — \
+                     the block.create dispatched by the focus edge never produced a row"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // The typed text lands the same way any first keystroke does: the
+        // content write against the now-real block.
+        if !content.is_empty() {
+            let mut params = std::collections::HashMap::new();
+            params.insert("id".into(), holon_api::Value::String(born.to_string()));
+            params.insert(
+                "field".into(),
+                holon_api::Value::String("content".to_string()),
+            );
+            params.insert(
+                "value".into(),
+                holon_api::Value::String(content.to_string()),
+            );
+            self.engine.ephemeral_newborns_handle().retire(&born);
+            self.engine
+                .dispatch_intent_sync(crate::operations::OperationIntent::new(
+                    holon_api::EntityName::new("block"),
+                    "set_field".to_string(),
+                    params,
+                ))
+                .await?;
+        }
+        Ok(born)
     }
 
     /// Create a block under `parent` with an explicit, born-equal `id` — the

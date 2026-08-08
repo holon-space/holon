@@ -469,6 +469,56 @@ pub(crate) fn advice_readonly_template() -> holon_api::render_types::RenderExpr 
     call("selectable", vec![pos(inner), named("action", action)])
 }
 
+/// The creation affordance's template: a selectable hint, deliberately with NO
+/// `editable_text`.
+///
+/// The affordance is a rendered row, not a block — it mounts no editor, holds
+/// no caret and carries no content, so none of the gestures that need a real
+/// block (typing, indent, Enter, the breadcrumb trail) can be aimed at it. Its
+/// only action is `navigation.focus`, which the engine intercepts and turns
+/// into a birth (`ReactiveEngine::birth_creation_affordance`): by the time
+/// anything can receive input, a real empty block exists and holds the caret.
+pub(crate) fn creation_affordance_template() -> holon_api::render_types::RenderExpr {
+    use holon_api::Value;
+    use holon_api::render_types::Arg;
+    use holon_api::render_types::RenderExpr;
+
+    let hint = RenderExpr::FunctionCall {
+        name: "text".to_string(),
+        args: vec![Arg {
+            name: None,
+            value: RenderExpr::Literal {
+                value: Value::String(CREATION_AFFORDANCE_HINT.to_string()),
+            },
+        }],
+    };
+    let action = RenderExpr::FunctionCall {
+        name: "navigation.focus".to_string(),
+        args: vec![Arg {
+            name: Some("block_id".to_string()),
+            value: RenderExpr::ColumnRef {
+                name: "id".to_string(),
+            },
+        }],
+    };
+    RenderExpr::FunctionCall {
+        name: "selectable".to_string(),
+        args: vec![
+            Arg {
+                name: None,
+                value: hint,
+            },
+            Arg {
+                name: Some("action".to_string()),
+                value: action,
+            },
+        ],
+    }
+}
+
+/// The affordance's visible prompt.
+pub const CREATION_AFFORDANCE_HINT: &str = "type here to add a new block";
+
 /// Configuration for creating a collection ReactiveView.
 pub struct CollectionConfig {
     pub layout: CollectionVariant,
@@ -1150,6 +1200,7 @@ impl ReactiveView {
             let ds = data_source.clone();
             let rules = config_rules;
             let advice_tmpl = advice_readonly_template();
+            let slot_tmpl = creation_affordance_template();
             Arc::new(
                 move |row: Arc<holon_api::widget_spec::DataRow>,
                       depth: usize,
@@ -1165,7 +1216,13 @@ impl ReactiveView {
                     // the dismiss/click template, never the collection's editable
                     // `item_template` — and skips rules (like the virtual slot).
                     let is_advice = occurrence != holon_api::Occurrence::Canonical;
-                    let template = if is_advice { &advice_tmpl } else { &tmpl };
+                    let template = if is_advice {
+                        &advice_tmpl
+                    } else if is_virtual {
+                        &slot_tmpl
+                    } else {
+                        &tmpl
+                    };
                     let active_rules: &[holon_api::render_types::RuleSpec] =
                         if is_virtual || is_advice { &[] } else { &rules };
                     let positional = HashMap::from([
@@ -2955,6 +3012,54 @@ mod tests {
     /// with no copy (the shared-cell model, ADR 0015 §1a). Proves the
     /// wrapper-injection mechanism and the data half of the identity
     /// reframe without touching the store.
+    /// The creation affordance's template is EDITOR-FREE, and that is the whole
+    /// safety property: with no `editable_text` there is no caret to sit in a
+    /// row that is not a block, hence no breadcrumb lookup of an id with no
+    /// path, no silently swallowed indent, and no Enter that has to mean
+    /// something special (ruling C + sub-ruling B).
+    ///
+    /// This asserts the TEMPLATE, so it holds for every consumer of it. Which
+    /// rows get handed this template is asserted separately, and only for the
+    /// snapshot path — see
+    /// `sidebar_creation_slot::the_creation_affordance_mounts_no_editor`
+    /// and the disclosure in lane-report-36.md.
+    #[test]
+    fn the_creation_affordance_template_interprets_without_any_editor() {
+        let services: Arc<dyn crate::reactive::BuilderServices> =
+            Arc::new(StubBuilderServices::new());
+
+        let mut row = DataRow::new();
+        row.insert("id".into(), Value::String("block:__virtual:page-1".into()));
+        row.insert("parent_id".into(), Value::String("block:page-1".into()));
+        let row = Arc::new(row);
+
+        let node = services.interpret(
+            &creation_affordance_template(),
+            &crate::RenderContext::default().with_row(row),
+        );
+
+        fn names(n: &ReactiveViewModel, out: &mut Vec<String>) {
+            if let Some(name) = n.widget_name() {
+                out.push(name);
+            }
+            for c in &n.children {
+                names(c, out);
+            }
+        }
+        let mut widgets = Vec::new();
+        names(&node, &mut widgets);
+
+        assert!(
+            !widgets.iter().any(|w| w == "editable_text"),
+            "the affordance template must mount NO editor; got {widgets:?}"
+        );
+        assert!(
+            widgets.iter().any(|w| w == "selectable"),
+            "the affordance must be selectable so focus can reach it and be turned into a \
+             birth; got {widgets:?}"
+        );
+    }
+
     /// The read-only advice template (ADR 0021 v1): a `Placed` advice row must
     /// interpret to a selectable (click-through) row of read-only content + a
     /// `dismiss_advice` op_button — and MUST NOT contain an `editable_text` /

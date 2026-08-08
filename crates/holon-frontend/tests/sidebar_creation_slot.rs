@@ -248,3 +248,94 @@ fn main_panel_tree_still_renders_its_creation_slot() {
         "the opted-in main-panel tree keeps its trailing creation slot"
     );
 }
+
+/// The main panel's REAL item template: rows are editable.
+const EDITABLE_MAIN_PANEL_TREE: &str = r#"tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: editable_text(col("content")), creation_slot: true, virtual_parent: true})"#;
+
+/// Every widget name reachable from `vm`, paired with the row id in force at
+/// that node (inherited from the nearest ancestor that carries one).
+fn widgets_by_row(vm: &Arc<ReactiveViewModel>) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut stack: Vec<(Arc<ReactiveViewModel>, String)> = vec![(vm.clone(), String::new())];
+    while let Some((node, inherited)) = stack.pop() {
+        let row = node.row_id().unwrap_or(inherited);
+        if let Some(name) = node.widget_name() {
+            out.push((row.clone(), name.to_string()));
+        }
+        for child in node.children.iter() {
+            stack.push((child.clone(), row.clone()));
+        }
+        if let Some(view) = node.collection.as_ref() {
+            for item in view.children_snapshot() {
+                stack.push((item, row.clone()));
+            }
+        }
+        if let Some(slot) = node.slot.as_ref() {
+            stack.push((slot.content.get_cloned(), row.clone()));
+        }
+    }
+    out
+}
+
+/// Ruling (C) + sub-ruling (B): the creation affordance is NOT a block, so it
+/// mounts no editor. This is the structural guarantee behind every symptom the
+/// ruling kills — with no `editable_text` there is no caret to sit in a
+/// non-block, hence no breadcrumb lookup of an id with no path, no silently
+/// swallowed indent, and no Enter that has to mean something special.
+///
+/// Red before the fix: the affordance rendered through the collection's own
+/// `item_template`, so it carried an `editable_text` exactly like a real row.
+#[test]
+fn the_creation_affordance_mounts_no_editor() {
+    let vm = render(
+        EDITABLE_MAIN_PANEL_TREE,
+        vec![
+            page("block:page", "block:root-layout", "Page"),
+            page("block:child", "block:page", "Child"),
+        ],
+    );
+    let editable_on_the_affordance: Vec<(String, String)> = widgets_by_row(&vm)
+        .into_iter()
+        .filter(|(row, widget)| {
+            widget == "editable_text"
+                && holon_frontend::RowOrigin::from_id(row).is_creation_placeholder()
+        })
+        .collect();
+    assert!(
+        editable_on_the_affordance.is_empty(),
+        "the creation affordance must mount NO editor — a caret must never be able to sit in a \
+         row that is not a block; got {editable_on_the_affordance:?}"
+    );
+
+    // ... and the real row beside it still does, so the assertion above is not
+    // vacuously true of a tree that renders no editors at all.
+    let editable_rows: Vec<String> = widgets_by_row(&vm)
+        .into_iter()
+        .filter(|(_, widget)| widget == "editable_text")
+        .map(|(row, _)| row)
+        .collect();
+    assert!(
+        !editable_rows.is_empty(),
+        "the real rows must still be editable; the affordance assertion would otherwise be vacuous"
+    );
+}
+
+/// The affordance's one gesture: `navigation.focus` on its own id, which the
+/// engine intercepts and turns into a birth. Without an action it would be
+/// inert and there would be no way to create the first block on an empty page.
+#[test]
+fn the_creation_affordance_is_selectable_so_focus_can_reach_it() {
+    let vm = render(
+        EDITABLE_MAIN_PANEL_TREE,
+        vec![page("block:page", "block:root-layout", "Page")],
+    );
+    let affordance_widgets: Vec<String> = widgets_by_row(&vm)
+        .into_iter()
+        .filter(|(row, _)| holon_frontend::RowOrigin::from_id(row).is_creation_placeholder())
+        .map(|(_, widget)| widget)
+        .collect();
+    assert!(
+        affordance_widgets.iter().any(|w| w == "selectable"),
+        "the affordance must be selectable so a click can reach it; got {affordance_widgets:?}"
+    );
+}

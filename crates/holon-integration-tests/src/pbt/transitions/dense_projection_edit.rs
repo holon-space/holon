@@ -218,8 +218,11 @@ impl<R: RefLifecycle + RefBlockTree + RefBlockTreeMut + RefLayoutMutate> Transit
         match &self.edit {
             // Mint-when-absent: dense_patch mints the uuid server-side, so
             // the oracle allocates a synthetic `create-N` the harness
-            // reconcile pairs with the SUT's minted id — same arm as
-            // `CreateBlockUnderFocus{id: None}`.
+            // reconcile pairs with the SUT's minted id. This is a server-side
+            // patch, NOT the creation-slot gesture — it stays ONE user-origin
+            // create, which is why it keeps `create_block_under` while
+            // `CreateBlockUnderFocus{id: None}` moved to
+            // `birth_block_via_creation_slot`.
             DenseEditKind::AppendChild { content } => {
                 state.create_block_under(&self.parent_id, content);
             }

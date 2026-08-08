@@ -8,18 +8,24 @@
 //! creation-slot gesture mint under focus root @pbt gen both id-present (direct
 //! create) and id-absent (slot gesture) arms
 //!
-//! The capstone WP-G gate. Drives the "type here to create" gesture a real
-//! user performs — focus the live `:__virtual:<parent>` creation slot of the
-//! focused page and commit content — through the PRODUCTION creation-slot
-//! commit path (`ReactiveEngineDriver::commit_creation_slot` →
-//! `ViewEventHandler::handle_text_sync` → `block.create`). The parent the new
-//! block lands under is read from the live slot id that WP-E's
+//! The capstone WP-G gate. Drives the "type here to create" gesture a real user
+//! performs. Under ruling C (2026-08-08) + sub-ruling B (2026-08-09) that
+//! gesture is: focus reaches the creation AFFORDANCE — a rendered row that
+//! mounts no editor and is not a block — which the engine intercepts into a
+//! BIRTH (`ReactiveEngine::birth_creation_affordance`): a frontend-minted id,
+//! an authority-only `block.create` with empty content under the resolved
+//! parent (`OpOrigin::Rule`, so no undo entry), and the caret seated in the
+//! newborn. The typed text then lands as an ordinary undo-visible content
+//! write. The headless driver (`ReactiveEngineDriver::commit_creation_slot`)
+//! drives exactly that sequence through `BuilderServices::set_focus`. The
+//! parent is read from the live affordance id that WP-E's
 //! `resolve_creation_parent` produced (the query's FOCUS ROOT, not the panel
 //! container), so this transition makes WP-E's focus-root parenting a
 //! cross-backend regression assertion.
 //!
-//! Oracle: the model predicts a new text block parented under the single Main
-//! focus root, appended as its last child (`create_block_under`). The existing
+//! Oracle: for the born-equal arm the model predicts one user create
+//! (`create_block_under_with_id`); for the gesture arm it predicts the two-op
+//! shape plus the caret move (`birth_block_under_slot`). The existing
 //! `inv-live-children-match-ref` then asserts — across BOTH the SQL projection
 //! and the Loro tree — that the new block exists under exactly that parent; a
 //! backend that dropped it, or parented it to the panel/container instead of
@@ -161,9 +167,13 @@ impl<R: RefLifecycle + RefLayout + RefFocusRoots + RefLayoutInteract + RefLayout
         match &self.id {
             // Born-equal: the oracle holds the exact id the SUT will dispatch.
             Some(uri) => state.create_block_under_with_id(&parent, &self.content, uri.clone()),
-            // Mint-when-absent: oracle allocates a synthetic `create-N` the
-            // harness reconcile pairs with the SUT's minted uuid.
-            None => state.create_block_under(&parent, &self.content),
+            // The creation-slot GESTURE. Two ops, not one: an undo-invisible
+            // empty birth then the user's undo-visible content write (ruling C
+            // + sub-ruling B; ADR 0030 D1 authority-only birth, `OpOrigin::Rule`
+            // pushes no undo entry). The oracle still allocates a synthetic
+            // `create-N` for the harness reconcile to pair with the SUT's
+            // minted uuid.
+            None => state.birth_block_via_creation_slot(&parent, &self.content),
         }
     }
 }
@@ -183,16 +193,30 @@ crate::cap_transition! {
         );
         sut.apply_create_under_focus(&parent, &me.content, me.id.as_ref()).await;
     }
-    sql_budget: |_me, state| {
+    sql_budget: |me, state| {
         let watches = state.active_watch_count();
         let blocks = state.block_count();
         let docs = state.document_count();
         let create = expected_sql_for_kind(MutationKind::Create, watches, blocks, docs);
+        // The born-equal arm is ONE direct `block.create`. The slot-gesture arm
+        // (`id: None`) is TWO ops — the authority-only empty birth plus the
+        // user's content write — so it must declare both. Declaring only the
+        // create would under-state the gesture and leave the difference to be
+        // absorbed by tolerance, which is exactly the cap that stops being able
+        // to catch a regression.
+        let content_write = me
+            .id
+            .is_none()
+            .then(|| expected_sql_for_kind(MutationKind::Update, watches, blocks, docs));
         ExpectedSql {
-            reads: create.reads + CACHE_EVENT_READS,
-            writes: create.writes,
+            reads: create.reads
+                + CACHE_EVENT_READS
+                + content_write.as_ref().map_or(0, |w| w.reads),
+            writes: create.writes + content_write.as_ref().map_or(0, |w| w.writes),
             ddl: 0,
-            tolerance: create.tolerance + REACTIVE_BASE,
+            tolerance: create.tolerance
+                + REACTIVE_BASE
+                + content_write.as_ref().map_or(0, |w| w.tolerance),
         }
     }
 }

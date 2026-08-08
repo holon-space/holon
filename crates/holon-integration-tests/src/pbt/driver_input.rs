@@ -379,10 +379,23 @@ impl SutDriver for DriverInputComponent {
         }
     }
 
-    /// The windowed slice uses fixed shared ids (no synthetic ref-doc URIs to
-    /// remap), so the id passes through unchanged.
+    /// Resolve a REFERENCE id into SUT id space through the SAME shared
+    /// pairing map every other id-taking method on this component uses
+    /// ([`Self::resolve`]), so a focus comparison and a click cannot disagree
+    /// about what a ref id means.
+    ///
+    /// This used to pass the id through unchanged, on the premise that "the
+    /// windowed slice uses fixed shared ids (no synthetic ref-doc URIs to
+    /// remap)". That premise died with the creation-slot gesture: the gesture
+    /// arm mints a synthetic `block::create-N` in the oracle and a uuid in the
+    /// SUT, and the birth now moves the reference's focus ONTO that synthetic
+    /// id — so `inv-focus-matches-ref` began comparing an unresolved synthetic
+    /// against the real uuid and reporting `resolved: block::create-0`, its own
+    /// echo. Draw-dependent, not intermittent: only draws whose last
+    /// focus-setting transition is the `id: None` arm can hit it, which is why
+    /// it showed in 1 of 3 full-suite runs and never in isolation.
     fn resolve_ref_block_id(&self, id: &EntityUri) -> EntityUri {
-        id.clone()
+        self.resolve(id)
     }
 }
 
