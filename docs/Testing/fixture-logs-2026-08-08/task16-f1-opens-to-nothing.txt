@@ -238,3 +238,134 @@ failure the test reports.
 CORRECTION D — line nit. The RED block above cites
 nested_page_chevron_gate.rs:675:9; the tree produces :671:9. The panic TEXT is
 verbatim; only the cited line is off.
+
+
+========================================================================
+ROUND 5 — LIVE RE-CHECK REPRODUCES F1 AT THE LANDED FIX.
+STOPPED BEFORE A SECOND FIX, PER THE DOGFOOD CONTRACT.
+========================================================================
+
+Nothing above is rewritten. The routing fix documented above is real and
+mutation-proven, but it is NOT the whole bug.
+
+LIVE EVIDENCE (worktree agent-af146ce1320de67c5, lane-logs/dogfood27_check1.log,
+real GPUI app at main 9e1b1431 which INCLUDES the routing change):
+  BEFORE: A Nested Page: gate_open=False
+  CLICK trailing chevron at (1192,152)
+  AFTER:  A Nested Page: gate_open=True
+  painted set BEFORE and AFTER are byte-identical apart from element serials.
+  click_entity on both child ids -> "element bounds never committed".
+`from descendants` returns both rows; an ordinary indented tree child paints
+immediately; the toggle re-click confirms the gate really flips.
+
+------------------------------------------------------------------------
+THE DISCRIMINATING HYPOTHESIS IS REFUTED
+
+Hypothesis under test: the routing at expand_toggle.rs keys on
+`content.widget_name() == Some("live_query")` LITERALLY, so a runtime-wrapped
+content node takes the `super::render` Panel branch and collapses to 0 px
+again (the latent wrapper shapes this lane's own residual named).
+
+PROBE `real_profile_embedded_page_probe` (new, in
+frontends/gpui/tests/nested_page_chevron_gate.rs) builds the fixture from the
+REAL shipped yaml — assets/default/types/block_profile.yaml, variant
+`embedded_page`, extracted at test time and asserted to contain both
+"expand_toggle(" and "live_query(" so a mis-extraction cannot pass silently —
+rather than from a hand-built DSL string:
+
+  expand_toggle(#{
+    hover_reveal_toggle: true,
+    header: row(icon("orgmode", #{size: 12}), text(col("content"))),
+    content: live_query(#{
+      prql: "from descendants",
+      item_template: tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"),
+                            item_template: render_entity()})
+    })
+  })
+
+Readout, verbatim:
+
+  [probe] materialized widget_name = Some("live_query")
+  [probe] materialized: widget_name = Some("live_query"), collection = false,
+          slot = true, lazy_slot = false, children = 0,
+          props = ["render_expr", "query_context_id", "query", "query_lang"]
+
+So under the REAL profile the runtime widget_name IS "live_query": the routing
+MATCHES and takes the content-height branch. Hypothesis refuted.
+
+And the container is NOT collapsed — the geometry is correct:
+
+  ("expand_toggle#3",   "expand_toggle",   None, x=0,  y=0,  w=1920, h=96)
+  ("reactive_shell#8",  "reactive_shell",  None, x=20, y=32, w=1900, h=64)
+  ("tree_item#4",       "tree_item",       None, x=20, y=32, w=1900, h=32)
+  ("tree_item#6",       "tree_item",       None, x=20, y=64, w=1900, h=32)
+
+Two rows, full height, inside a 64px shell. The collection delivered both.
+
+------------------------------------------------------------------------
+WHAT THE PROBE DID FIND: THE LEAF IS EMPTY
+
+With `render_entity()` the two row shells paint NO text and NO bullet.
+Swapping ONLY that innermost leaf for `text(col("content"))`, keeping every
+other byte of the real yaml, makes them appear at the same coordinates:
+
+  ("tree_bullet::child-buy-milk",            "tree_bullet", None,                     x=20, y=32, w=20,   h=26)
+  ("text-block:child-buy-milk-content",      "text",        Some("buy milk"),         x=44, y=32, w=1876, h=26)
+  ("tree_bullet::child-see-journals",        "tree_bullet", None,                     x=20, y=64, w=20,   h=26)
+  ("text-block:child-see-journals-content",  "text",        Some("see Journals now"), x=44, y=64, w=1876, h=26)
+
+CONVERGENCE WITH THE LIVE EVIDENCE (this is why the two readings agree rather
+than conflict): the live check probed the CHILD ENTITY ids via click_entity,
+and only the LEAF registers a bounds entry under an entity id
+(`text-block:<id>-content`); the `tree_item` shell does not. So "row shells
+present, leaves empty" is EXACTLY what "element bounds never committed" looks
+like from that probe. The live symptom and the probe symptom are the same
+signature.
+
+------------------------------------------------------------------------
+WHY THIS LANE STOPPED HERE INSTEAD OF FIXING
+
+The probe CANNOT distinguish:
+  (a) prod's `render_entity` leaf under a nested page paints nothing, from
+  (b) the fixture's stub cannot resolve `render_entity` at all.
+In these services `render_entity()` resolves through
+`StubBuilderServices::get_block_data`, which returns a canned `table_expr()`
+for EVERY entity and renders nothing while raising no error — a silent
+non-resolution, indistinguishable from a real prod failure at this leaf.
+
+Per the dogfood contract ("if you cannot make it red with the real-profile
+fixture, STOP and report what the harness supplies that prod doesn't — do not
+fix blind") this lane stops. No second fix was attempted.
+
+WHAT THE FIXTURE LACKS, precisely — the next increment, required BEFORE any
+fix: a `BuilderServices` impl with a real `get_block_data` and real profile
+resolution behind `render_entity()`, so the leaf is prod-shaped. Only then can
+"the nested page's children paint" be earned as a red for the right reason at
+the leaf level. `setup_embedded_page_sut`
+(crates/holon-integration-tests/src/pbt/frontend_slice/structural_pbt.rs:3664)
+already builds a real embedded page headlessly and is the obvious donor.
+
+------------------------------------------------------------------------
+CLASSIFICATION HISTORY — BOTH EARLIER CALLS WERE WRONG
+
+  round 3: ORACLE primary + ENVIRONMENT secondary, via a driver-vs-static
+           harness-masking story. REFUTED by the verifier's single-variable
+           swap (see ROUND 4 CORRECTIONS above).
+  round 4: "pure ORACLE, no environment gap". ALSO WRONG.
+
+There IS an environment gap. It is neither of the two I named: it is that the
+fixture's `render_entity()` leaf is a silent stub. Both wrong calls are kept
+above verbatim; this is the third and, unlike the first two, it is stated
+together with the experiment that would falsify it (build the real-leaf
+fixture; if the children then paint, prod and fixture have diverged somewhere
+else again).
+
+------------------------------------------------------------------------
+GATES THIS ROUND (no production source changed)
+
+cargo test -p holon-gpui --test nested_page_chevron_gate   6 passed / 0 failed
+  (5 prior tests + the new probe; the probe asserts only that the gate opened,
+   so it cannot be mistaken for a paint assertion)
+bash scripts/bugfunnel-check.sh   ORACLE 61 exact across header / log / rows;
+  COVERAGE 93-vs-96 pre-existing delta unchanged
+cargo fmt --all --check           clean
