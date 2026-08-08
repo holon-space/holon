@@ -140,6 +140,23 @@ impl LocalEntityScope {
         g.entry(key).or_insert_with(create).clone()
     }
 
+    /// Peek without creating. For a builder whose construction needs fallible
+    /// work (a blocking lookup, a parse): a hit skips that work entirely, so
+    /// the cost stays on the miss and the failure can render instead of being
+    /// forced to produce an entity.
+    pub fn get_typed<T: 'static>(&self, key: &CacheKey) -> Option<Entity<T>> {
+        let cache = self.cache_for_key(key);
+        let g = cache.read().unwrap();
+        g.get(key).map(|any| {
+            any.clone().downcast::<T>().unwrap_or_else(|_| {
+                panic!(
+                    "entity_cache type mismatch on key {key:?} — same key was used for a \
+                     different Entity<T>"
+                )
+            })
+        })
+    }
+
     /// Typed wrapper around [`get_or_create`] that downcasts back to
     /// `Entity<T>`.
     ///

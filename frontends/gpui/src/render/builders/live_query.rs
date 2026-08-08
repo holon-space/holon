@@ -38,6 +38,51 @@ pub(crate) fn render_content_height(
     )
 }
 
+/// The `blocks_with_paths` path of `id` — what a context-dependent query
+/// matches its `$context_path_prefix` against. An unresolved prefix binds a
+/// sentinel that matches no row, so neither outcome is silent: `Err` is painted
+/// by the caller, `Ok(None)` is logged at WARN.
+///
+/// Blocking, on a joined-immediately thread so `block_on` stays legal wherever
+/// the synchronous render pass runs. Only reached on an entity-cache MISS.
+fn resolve_block_path(
+    services: &std::sync::Arc<dyn holon_frontend::reactive::BuilderServices>,
+    id: &holon_api::EntityUri,
+) -> Result<Option<String>, String> {
+    // A services impl can watch queries without offering the path lookup
+    // (`query_engine()` defaults to `None`). Degraded, so it is announced:
+    // that impl's context-dependent queries stay unresolved.
+    let Some(engine) = services.query_engine() else {
+        tracing::warn!(
+            block = %id,
+            "live_query: no query engine to resolve the context path prefix — `from descendants` \
+             under this block will match no row"
+        );
+        return Ok(None);
+    };
+    let rt = services.runtime_handle();
+    std::thread::scope(|s| {
+        s.spawn(|| rt.block_on(engine.lookup_block_path(id)))
+            .join()
+            .unwrap()
+    })
+    .map(Some)
+    .map_err(|e| format!("live_query({id}): context path prefix lookup failed: {e:#}"))
+}
+
+/// The visible-failure element: what a builder paints when it cannot build.
+/// Mirrors `builders::error::render`, reached without a `ViewModel` detour.
+fn error_element(message: &str, ctx: &GpuiRenderContext) -> AnyElement {
+    div()
+        .p_2()
+        .rounded(px(4.0))
+        .bg(tc(ctx, |t| t.secondary))
+        .text_color(tc(ctx, |t| t.danger))
+        .text_sm()
+        .child(message.to_string())
+        .into_any_element()
+}
+
 fn render_placed(
     node: &ReactiveViewModel,
     ctx: &GpuiRenderContext,
@@ -62,36 +107,60 @@ fn render_placed(
             let bounds = ctx.bounds_registry.clone();
             let ancestors = ctx.live_block_ancestors.clone();
 
-            let entity = ctx.local.get_or_create_typed(cache_key, || {
-                let query_context = query_context_id.as_ref().map(|id| {
-                    // ALLOW(entity_uri_from_raw): render-spec live_query node props
-                    let uri = holon_api::EntityUri::from_raw(id);
-                    holon_frontend::QueryContext {
-                        current_block_id: Some(uri.clone()),
-                        context_parent_id: Some(uri),
-                        context_path_prefix: None,
+            // Resolving the context's path prefix costs a blocking matview
+            // read, so it happens only on a cache MISS — and before the entry
+            // is created, so a failure can paint instead of having to produce
+            // an entity. `from descendants` matches on that prefix; a context
+            // without one binds a sentinel that matches no row, so an embedded
+            // page would open onto nothing.
+            let cached = ctx.local.get_typed::<ReactiveShell>(&cache_key);
+            let query_context = match cached {
+                Some(_) => None,
+                None => {
+                    let resolved = query_context_id.as_ref().map(|id| {
+                        // ALLOW(entity_uri_from_raw): render-spec live_query node props
+                        let uri = holon_api::EntityUri::from_raw(id);
+                        resolve_block_path(&services, &uri).map(|path| match path {
+                            Some(path) => holon_frontend::QueryContext::for_block_with_path(
+                                &uri,
+                                Some(uri.clone()),
+                                path,
+                            ),
+                            None => {
+                                holon_frontend::QueryContext::for_block(&uri, Some(uri.clone()))
+                            }
+                        })
+                    });
+                    match resolved.transpose() {
+                        Ok(ctxt) => ctxt,
+                        Err(msg) => return error_element(&msg, ctx),
                     }
-                });
-                let (watch_key, live_block) =
-                    services.watch_query_live(query, lang, re, query_context, services.clone());
-                let render_ctx = holon_frontend::RenderContext::default();
-                ctx.with_gpui(|_window, cx| {
-                    cx.new(|cx| {
-                        // The `LiveBlock` carries a `WatchGuard` for the
-                        // engine's query-watcher key; the shell holds it, so
-                        // dropping the shell releases the query watcher —
-                        // the same RAII lifecycle live blocks get.
-                        ReactiveShell::new_for_block(
-                            watch_key.to_string(),
-                            render_ctx,
-                            services,
-                            live_block,
-                            nav,
-                            bounds,
-                            ancestors,
-                            placement,
-                            cx,
-                        )
+                }
+            };
+
+            let entity = cached.unwrap_or_else(|| {
+                ctx.local.get_or_create_typed(cache_key, || {
+                    let (watch_key, live_block) =
+                        services.watch_query_live(query, lang, re, query_context, services.clone());
+                    let render_ctx = holon_frontend::RenderContext::default();
+                    ctx.with_gpui(|_window, cx| {
+                        cx.new(|cx| {
+                            // The `LiveBlock` carries a `WatchGuard` for the
+                            // engine's query-watcher key; the shell holds it, so
+                            // dropping the shell releases the query watcher —
+                            // the same RAII lifecycle live blocks get.
+                            ReactiveShell::new_for_block(
+                                watch_key.to_string(),
+                                render_ctx,
+                                services,
+                                live_block,
+                                nav,
+                                bounds,
+                                ancestors,
+                                placement,
+                                cx,
+                            )
+                        })
                     })
                 })
             });

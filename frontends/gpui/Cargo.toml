@@ -70,6 +70,10 @@ name = "gpui_sim_replay_capture"
 harness = false
 required-features = ["pbt"]
 
+[[test]]
+name = "nested_page_real_engine"
+required-features = ["pbt"]
+
 [features]
 default = ["desktop"]
 desktop = ["dep:gpui_platform"]
