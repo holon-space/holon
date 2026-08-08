@@ -1,0 +1,240 @@
+F1 — the nested page opens onto nothing (dogfood gate pass on the #16 fix).
+Red, localization, fix, green, mutation.
+
+SYMPTOM (dogfood, real GPUI app over the embedded MCP, 2026-08-08):
+clicking the trailing chevron on the `2026-08-08` nested-page row flips the
+toggle to the open glyph and `describe_ui` replaces the
+UNEVALUATED[expand_toggle_content] node with a `live_query` node — and the two
+real children get NO geometry entry at all. Reproduced twice, 4s settle, zero
+ERROR lines. describe_ui says OPEN, the window says EMPTY, and the window is
+the truth.
+
+========================================================================
+WHY THE #16 PBT WAS GREEN THROUGH THIS
+
+The #16 windowed test already clicked the REAL chevron at measured bounds
+through the production `on_mouse_down`. It asserted:
+  - the gate `Mutable` flipped,
+  - `materialize_if_gated()` returned Some,
+  - the chevron painted the open glyph.
+All three are true in the broken app. They are facts ABOUT THE AFFORDANCE, not
+about the affordance's RESULT. Nothing asserted a painted descendant row.
+That is the ORACLE gap, and it is the primary classification.
+
+The secondary ENVIRONMENT gap is why the shared harness could not have caught
+it either. `support::TestServices::watch_query_live` (frontends/gpui/tests/
+support/mod.rs) returns
+
+    ReactiveView::new_static_with_layout(rows, CollectionVariant::list(0.0))
+
+whose `items` are ALREADY populated at construction and whose `start()` is a
+documented no-op for static variants (reactive_view.rs:928-940). A canned
+`live_query` therefore paints with NO driver at all. Production's is
+driver-backed: `items: MutableVec::new()` — empty until the driver the shell
+starts fills it. A fixture built on the canned watcher paints rows that
+production would still be waiting for, and cannot expose a 0-px shell.
+
+So the harness was made prod-faithful BEFORE the red was allowed to count.
+
+========================================================================
+THE PROD-FAITHFUL FIXTURE
+
+`an_opened_nested_page_paints_its_children` (frontends/gpui/tests/
+nested_page_chevron_gate.rs) uses:
+
+  * the REAL `embedded_page` content shape — a `live_query(#{prql:
+    "from descendants", item_template: tree(...)})`, not the static `text`
+    the round-1/2 tests used;
+  * a DRIVER-BACKED collection: rows live behind a `ReactiveRowProvider` and
+    `ReactiveView::new_collection`, so they reach `items` only once the driver
+    runs — and the fixture's `watch_query_live` calls `start_reactive_views`
+    on the tree it returns, mirroring `ReactiveEngine::watch_query_live`
+    (reactive.rs:2727);
+  * the gate and materialisation assertions as PRECONDITIONS, so a failure
+    can never be misread as "the toggle did not flip".
+
+========================================================================
+RED, verbatim
+
+running 5 tests
+test chevron_click_opens_the_live_row ... ok
+test chevron_click_survives_the_structural_rebuild ... ok
+test an_opened_nested_page_paints_its_children ... FAILED
+test an_external_fold_closes_the_nested_page_across_a_rebuild ... ok
+test an_external_unfold_leaves_the_nested_page_closed ... ok
+
+---- an_opened_nested_page_paints_its_children stdout ----
+thread 'an_opened_nested_page_paints_its_children' panicked at
+frontends/gpui/tests/nested_page_chevron_gate.rs:675:9:
+an opened nested page must PAINT its children: "buy milk" is not among the
+painted text of the window. The gate is open and the content materialised, so
+the row opened onto nothing.
+painted = [
+    "▼",
+    "A Nested Page",
+]
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured
+
+Chevron open, header painted, both children absent — the dogfood symptom.
+
+========================================================================
+LOCALIZATION — three probes, each ruling out one explanation
+
+1. Is the shell even mounted?  Probe printed
+     [probe] watch_query_live CALLED
+     [probe] materialised widget = Some("live_query")
+     [probe] props = ["query_context_id", "render_expr", "query_lang", "query"]
+   So the node carries every prop `live_query::render_placed` needs, and the
+   ReactiveShell IS created. Not a missing-props fallback.
+
+2. Is it a timing artifact of the harness?  Twenty rounds of
+   `sleep(50ms) + run_until_parked() + bounds.flush()` — a full second of real
+   settling, matching the dogfood's 4s:
+     [probe settle 0] painted = ["▼", "A Nested Page"]
+     ...
+     [probe settle 19] painted = ["▼", "A Nested Page"]
+   Rows never arrive. Not timing.
+
+3. Is the data there?  Reading the view's own items beside the painted set:
+     [probe settle 0] view_items=Some(2) painted = ["A Nested Page", "▼"]
+     ...
+   DECISIVE: the driver ran, the collection HOLDS BOTH ROWS, and none of them
+   paint. The loss is in the render, not in the data or the query.
+
+========================================================================
+ROOT CAUSE — a 0-px shell, with the precedent already in the tree
+
+`expand_toggle`'s container is content-sized:
+
+    let mut container = div().w_full().flex().flex_col();
+
+and it rendered its materialised content through the generic `super::render`,
+which gives a `live_query` the `Panel` shell shape: `size_full` plus
+`height: relative(1.0)`. A percentage height has nothing to resolve against in
+a content-sized flex-col parent, so the shell resolves to 0 px and takes every
+row with it — painted geometry for the rows never exists.
+
+This is not a new diagnosis. `live_query::render_content_height`
+(frontends/gpui/src/render/builders/live_query.rs:30) exists precisely for it,
+and `column::render` (column.rs:180-196) already routes a `live_query` child to
+it with a comment naming the same failure ("has no definite height to resolve
+against and collapses to 0 px, taking the whole section with it"). Also
+`accordion::render_bounded`, which solves it the other way by pinning a
+definite height first. `expand_toggle` was the one lazy container that never
+adopted the routing.
+
+FIX (frontends/gpui/src/render/builders/expand_toggle.rs):
+
+    let content_el = if content.widget_name().as_deref() == Some("live_query") {
+        super::live_query::render_content_height(&content, ctx)
+    } else {
+        super::render(&content, ctx)
+    };
+
+========================================================================
+GREEN
+
+running 5 tests
+test chevron_click_opens_the_live_row ... ok
+test chevron_click_survives_the_structural_rebuild ... ok
+test an_opened_nested_page_paints_its_children ... ok
+test an_external_fold_closes_the_nested_page_across_a_rebuild ... ok
+test an_external_unfold_leaves_the_nested_page_closed ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured
+
+MUTATION — reverting only the routing (`let content_el = super::render(...)`)
+reds exactly this test and leaves the other four green:
+
+---- an_opened_nested_page_paints_its_children stdout ----
+an opened nested page must PAINT its children: "buy milk" is not among the
+painted text of the window...
+painted = [
+    "A Nested Page",
+    "▼",
+]
+test result: FAILED. 4 passed; 1 failed
+
+========================================================================
+CORRECTION TO THE #16 RESIDUAL (it was wrong in the other direction)
+
+The round-2 residual said the `HeadlessBuilderServices` gap means "MCP
+describe_ui reports every toggle closed regardless of what the user opened".
+The dogfood contradicts that: describe_ui reported the toggle OPEN and the
+live_query node PRESENT while the window painted nothing. Whatever the
+headless-services gap costs elsewhere, it did not manifest as under-reporting
+here, and the residual must not be read as "describe_ui under-reports toggles".
+The accurate statement is narrower: `HeadlessBuilderServices` implements
+neither `block_expanded_view` nor `set_block_expanded_view`, so a toggle driven
+purely through that surface has no view-store seed to read — untested either
+way, and NOT the behaviour observed in the live app.
+
+========================================================================
+GATES
+
+cargo fmt --all --check                       clean
+nested_page_chevron_gate                      5 passed / 0 failed
+windowed suite (-j 2, --no-fail-fast)         271 run / 270 passed / 1 failed
+  the 1 = capmap_hosts_windowed_sutlayout_over_real_geometry, the documented
+  pre-existing pre-warm-timeout red. 271 = base 266 + this lane's 5.
+just keystone-smoke                           4 passed / 0 failed
+bash scripts/bugfunnel-check.sh               ORACLE 61 reconciles across
+  header / increment log / rows; COVERAGE 93-vs-96 is the pre-existing
+  delta-of-3, unchanged by this lane.
+
+
+========================================================================
+ROUND 4 CORRECTIONS (verifier-refuted claims; nothing above is rewritten)
+========================================================================
+
+CORRECTION A — "Secondary ENVIRONMENT" IS FALSE. Delete it from your reading
+of this file.
+
+The sections above (WHY THE #16 PBT WAS GREEN THROUGH THIS, and THE
+PROD-FAITHFUL FIXTURE) argue that the shared harness's canned
+`watch_query_live` — a pre-populated `new_static_with_layout` whose `start()`
+is a no-op — is a second, independent reason the bug could not be caught, and
+that the driver-backed collection is what made the red possible.
+
+A fresh-context verifier REFUTED that by single-variable experiment: swapping
+ONLY the collection shape in the new test to the shared harness's
+pre-populated `new_static_with_layout` STILL FAILS on the broken tree with the
+identical signature
+
+    painted = ["▼", "A Nested Page"]
+    test result: FAILED. 0 passed; 1 failed; ... 4 filtered out
+
+and PASSES on the fixed tree
+
+    test result: ok. 1 passed; 0 failed; ... 4 filtered out
+
+(lane-logs/verify-16c-maskprobe.log and verify-16c-maskprobe-control.log).
+
+So driver-vs-static is NOT the masking factor and never was. A 0-px shell
+paints nothing whether its rows arrived from a driver or were canned in place.
+The miss has ONE cause: no test ever put a `live_query` under an
+`expand_toggle` and asserted painted rows. PURE ORACLE, no secondary gap.
+
+The driver-backed shape stays in the test — it is harmless and arguably the
+more prod-like fixture — but it is NOT load-bearing for the red, and this file
+should not be cited as evidence that it was.
+
+CORRECTION B — "the harness was made prod-faithful FIRST" overstates what
+changed. `support::TestServices::watch_query_live` (support/mod.rs:393) is
+UNCHANGED by this lane. Only the new test carries its own `BuilderServices`
+impl. Nothing shared was made more faithful.
+
+CORRECTION C — the sole windowed red is MISLABELLED in the GATES section
+above. `capmap_hosts_windowed_sutlayout_over_real_geometry` is not "a
+pre-warm-timeout red". Its documented signature is the INVARIANT FAILURE
+`inv-viewmodel-entity-ids-subset-of-data` (phantom ids) plus
+`inv-matview-consistent-with-ref/root_layout` (GHOST ROW `block:root-layout`)
+— PbtComposition_EndgameRoadmap.md:757. The attribution (pre-existing, not
+this lane's) is right; the label was wrong. A `[GPUI] pre-warm timeout` line
+does appear in its stderr, which is what misled the label, but it is not the
+failure the test reports.
+
+CORRECTION D — line nit. The RED block above cites
+nested_page_chevron_gate.rs:675:9; the tree produces :671:9. The panic TEXT is
+verbatim; only the cited line is off.

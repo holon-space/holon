@@ -268,3 +268,24 @@ NOT EXERCISED BY THESE TESTS (flagged, not closed)
    which has no UiState - UiState lives on holon-frontend's ReactiveEngine - so
    wiring it means threading a UiState through holon-app's describe_ui
    construction sites. Left flagged rather than done blind.
+
+
+========================================================================
+ROUND 4 CORRECTION — the sole windowed red is mislabelled above
+========================================================================
+
+The GATES section above calls the sole windowed red a "GPUI pre-warm timeout".
+That is the wrong label for
+`capmap_hosts_windowed_sutlayout_over_real_geometry`. Its documented signature
+is the INVARIANT FAILURE `inv-viewmodel-entity-ids-subset-of-data` (phantom
+ids) plus `inv-matview-consistent-with-ref/root_layout` (GHOST ROW
+`block:root-layout`) — PbtComposition_EndgameRoadmap.md:757. The attribution
+(pre-existing, identical at base, not this lane's regression) is unchanged and
+correct; only the name for it was wrong. A `[GPUI] pre-warm timeout` line does
+appear in that test's stderr, which is what misled the label, but it is not
+the failure the test reports.
+
+The two OTHER reds described above (window_renders_compose_sut_base... and
+overlay_windowed_caps..., and later page_with_a_nested_band...) genuinely ARE
+fixed-point/pre-warm timeouts ("window never reached a fixed point within
+30s") and pass when re-run serially — that part stands.
