@@ -8,6 +8,9 @@ use std::time::Duration;
 use gpui::Application;
 
 fn main() {
+    if holon_integration_tests::libtest_list::handled_list_protocol("executor_bridge_test") {
+        return;
+    }
     let app = Application::with_platform(gpui_platform::current_platform(false));
 
     let rt = tokio::runtime::Builder::new_multi_thread()
