@@ -31,6 +31,7 @@ pub mod cdc;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cli;
 pub mod collection_layout;
+pub mod dispatch_journal;
 pub mod lane_filtered_provider;
 
 /// Re-exports for the cell primitive (defined in `holon-core`). Frontends

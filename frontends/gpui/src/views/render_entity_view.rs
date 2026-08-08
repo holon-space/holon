@@ -142,8 +142,13 @@ impl Render for RenderEntityView {
             let services = gpui_ctx.services.clone();
             return div()
                 .child(child_el)
-                .capture_action(move |_: &Enter, window, cx| {
-                    if window.modifiers().platform {
+                .capture_action(move |enter: &Enter, _window, cx| {
+                    // The chord's own modifier, as GPUI parsed it into the
+                    // action — not `window.modifiers()`, which is ambient
+                    // state about no particular keystroke. Same non-macOS
+                    // residual as `editor_view`'s twin: `secondary` is ctrl
+                    // off macOS while the registry advertises Cmd.
+                    if enter.secondary {
                         let input = WidgetInput::chord(&[Key::Cmd, Key::Enter]);
                         if let Some(action) = nav.bubble_input(&entity_id, &input) {
                             match action {

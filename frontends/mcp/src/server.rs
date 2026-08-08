@@ -243,6 +243,11 @@ pub struct DebugServices {
     /// answer against the retired engine; this cell fails that failure mode
     /// by being swappable alongside [`LiveMcpBackend`].
     pub live_debug: LiveDebugHandles,
+    /// Serializes `send_key_chord` presses across every session's server.
+    /// The tool attributes what a chord DID by reading the dispatch journal
+    /// between a mark and the press returning; two presses in flight at once
+    /// would each claim the other's entries.
+    pub key_chord_press: tokio::sync::Mutex<()>,
 }
 
 /// Live, swappable [`DebugHandlesCell`] shared across every session's server (a
@@ -322,6 +327,7 @@ impl Default for DebugServices {
             reset_tx: std::sync::OnceLock::new(),
             reset_builder: std::sync::OnceLock::new(),
             live_debug: Arc::new(std::sync::RwLock::new(DebugHandlesCell::default())),
+            key_chord_press: tokio::sync::Mutex::new(()),
         }
     }
 }

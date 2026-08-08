@@ -266,3 +266,19 @@ pub async fn graft_band_geometry_page(env: &TestEnvironment, post_count: usize) 
         .context("graft the last row of the page")?;
     Ok(())
 }
+
+/// Block id [`graft_chord_target_row`] grafts.
+pub const CHORD_TARGET_ID: &str = "chord-target";
+/// Content of the grafted chord target row.
+pub const CHORD_TARGET_CONTENT: &str = "Chord target row";
+
+/// Graft a single plain row under the Main focus root: a caret target for
+/// tests that press a chord into a real editor. Deliberately childless so a
+/// structural op's effect on the block count is unambiguous.
+pub async fn graft_chord_target_row(env: &TestEnvironment) -> Result<()> {
+    let root = main_focus_root(env).await?;
+    env.create_block(CHORD_TARGET_ID, &root, CHORD_TARGET_CONTENT)
+        .await
+        .context("graft the chord target row under Main focus root")?;
+    Ok(())
+}

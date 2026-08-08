@@ -1,0 +1,91 @@
+task #11 amendments — the dispatch journal covers BOTH chord registries
+=======================================================================
+Raised by the lane verifier: the first version of the journal recorded only
+`dispatch_intent*`, so a window-registry chord (undo/redo/open_search/
+cycle_tab_*/jump_to_tab_1..9/turn_into_page — 15 actions) produced an empty
+press window and the new reply answered `bound_but_not_dispatched` — "nothing
+ran" — for a cmd+z that HAD run and mutated the outline. That is a
+reply-accuracy regression, so the reply was wrong in a new way.
+
+
+1. MUTATION PROOF that the window-registry journaling is load-bearing
+--------------------------------------------------------------------
+Mutation applied to frontends/gpui/src/share_ui.rs (the one line that records
+the window action):
+
+    -    let journal_seq = journal.record_window_action(if is_redo { "redo" } else { "undo" });
+    +    let journal_seq = u64::MAX; // MUTATION: window registry not journaled
+
+    cargo test -p holon-gpui --features holon-gpui/pbt \
+      --test cmd_enter_chord_dispatch -- --nocapture --test-threads=1
+
+    thread 'cmd_enter_cycles_task_state_and_plain_enter_still_splits' panicked at
+    frontends/gpui/tests/cmd_enter_chord_dispatch.rs:290:13:
+    cmd+z must journal the window-registry `undo` action; the press window held []
+
+    test result: FAILED. 0 passed; 1 failed
+
+`the press window held []` IS the verifier's finding, reproduced as a test
+failure: an undo that ran, with nothing to show for it. Restored afterwards;
+sha256 of share_ui.rs before and after the mutation is identical
+(8d35c49a0848bfb9222da954e6d40acc3a49f46a3ac6b856651e387aa7979fef).
+
+Un-mutated the same run is green (lane-logs/lane11-cmd-enter-windowed.log):
+
+    test result: ok. 1 passed; 0 failed
+
+
+2. THE REPLY ITSELF, unit-tested per registry and per outcome
+-------------------------------------------------------------
+The classification is now a pure function, `holon_mcp::key_chord_report::classify`
+(pressed, matched actions, journal entries) -> (status, detail), 7/7 green
+(lane-logs/lane11-mcp-report-units.log). The cmd+z case is the first test:
+
+    a_window_registry_undo_that_ran_is_executed_not_nothing_ran
+        entries = [ window.undo -> Succeeded ], matched = ["undo"]
+        => status "executed", detail None
+
+    equivalent reply JSON for a cmd+z press:
+      {
+        "status": "executed",
+        "detail": null,
+        "keys": ["cmd","z"],
+        "entity_id": "block:<id>",
+        "matched":    [{"action":"undo","registry":"window","context":null}],
+        "dispatched": [{"entity":"window","operation":"undo","target":null,
+                        "outcome":"succeeded","error":null}]
+      }
+
+The other six pin the rules that keep it honest:
+  - a matched action that FAILED reports dispatched_but_failed with the verbatim error
+  - a failure anywhere in the press window outranks a matched success
+  - an unsettled outcome reports dispatched_outcome_pending, never success
+  - an empty press window is bound_but_not_dispatched
+  - a press the driver declined is credited with nothing
+  - a chord that ran a DIFFERENT action is dispatched_other_action
+
+
+3. WHY THERE IS NO LIVE MCP REPLY CAPTURE HERE (disclosed, not skipped)
+-----------------------------------------------------------------------
+A live instance was booted for exactly this — throwaway sandbox, verified boot
+line `Config dir: /tmp/holon-lane11/config, db: /tmp/holon-lane11/config/holon.db,
+orgmode: Some("/tmp/holon-lane11/vault"), loro: false`, MCP on port 8712 (never
+8520), later killed and the sandbox removed. Every send_key_chord call — with
+the window fronted via System Events AND relaunched under
+HOLON_GPUI_FORCE_ACTIVE=1 — fails BEFORE the reply is built:
+
+  send_key_chord("block:4dca296c-...", ["cmd","enter"]): the chord is bound but
+  the press failed: refusing to press KeyChord({Cmd, Enter}) into the wrong
+  editor: GpuiUserDriver::send_key_chord: "block:4dca296c-..."'s editable_text
+  never took window focus within 5s. Engine focused_block=Some("block:4dca296c-...");
+  editors reporting window focus: []. The gesture reached the element but did
+  not seat a caret, so any following keystroke would land nowhere (or in
+  another block).
+
+The driver refuses to press when no editor can take WINDOW focus, and in this
+non-interactive session none can. So the tool errors instead of replying, for
+EVERY chord — the reply cannot be captured from this session at all. This is
+the same click-to-focus/window-focus gap already flagged by this lane (now with
+a verbatim error string from the real GpuiUserDriver rather than only the
+TestPlatform one), and it is the reason the coverage above is a windowed test
+plus a unit-tested classifier rather than a live capture.

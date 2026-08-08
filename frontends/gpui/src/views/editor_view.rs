@@ -1048,7 +1048,7 @@ impl Render for EditorView {
                 let services = self.services.clone();
                 let row_id = self.row_id.clone();
                 let editor_entity = editor_entity.clone();
-                move |_: &Enter, window, cx: &mut App| {
+                move |enter: &Enter, window, cx: &mut App| {
                     // Two layered guards keep Enter on a Page-level editor
                     // from acting on behalf of a focused child:
                     //   1. only the editor whose own InputState owns keyboard focus runs the
@@ -1063,10 +1063,20 @@ impl Render for EditorView {
                         .focused_block()
                         .map(|u| u.as_str().to_string())
                         .unwrap_or_else(|| row_id.clone());
-                    // Cmd+Enter → dispatch cycle_task_state.
-                    // GPUI's action system captures Enter before on_key_down fires,
-                    // so we handle the keychord here directly.
-                    if window.modifiers().platform {
+                    // Cmd+Enter → cycle_task_state. `enter`, `shift-enter` and
+                    // `secondary-enter` all resolve to this one action, so the
+                    // chord is discriminated by the action's own `secondary`
+                    // flag — the modifier GPUI parsed off THIS keystroke.
+                    // `window.modifiers()` is ambient state maintained by
+                    // separate ModifiersChanged events and does not describe
+                    // the key that got us here.
+                    //
+                    // RESIDUAL for a platform lane: GPUI's `secondary` is cmd
+                    // on macOS and ctrl elsewhere, while the structural
+                    // registry publishes this chord as Cmd+Enter on every
+                    // platform. On Linux/Windows ctrl+enter therefore cycles
+                    // while the advertised chord does not.
+                    if enter.secondary {
                         let mut params = std::collections::HashMap::new();
                         params.insert("id".into(), holon_api::Value::String(target_id.clone()));
                         services.dispatch_intent(holon_frontend::operations::OperationIntent::new(
@@ -1484,6 +1494,16 @@ impl Render for EditorView {
                         "convert_block_to_page".to_string(),
                         params,
                     );
+                    // Registry name for the chord, beside the intent it
+                    // causes: a reply matching on `turn_into_page` would
+                    // otherwise see only `convert_block_to_page` and call the
+                    // press a different action. Settled Ok because dispatching
+                    // IS this handler's job — the intent's own journal entry
+                    // carries the operation's outcome.
+                    if let Some(journal) = services.dispatch_journal() {
+                        let seq = journal.record_window_action("turn_into_page");
+                        journal.settle(seq, Ok(()));
+                    }
                     let live_text = input.read(cx).value().to_string();
                     dispatch_structural_as_commit_point(&ctrl, &services, &live_text, intent);
                     cx.stop_propagation();

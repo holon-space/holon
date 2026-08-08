@@ -1,0 +1,56 @@
+task #11 (dogfood P1-1) — the windowed rung's RED-for-the-right-reason and its GREEN
+====================================================================================
+Test: frontends/gpui/tests/cmd_enter_chord_dispatch.rs
+      cmd_enter_cycles_task_state_and_plain_enter_still_splits
+Run:  cargo test -p holon-gpui --features holon-gpui/pbt \
+        --test cmd_enter_chord_dispatch -- --nocapture --test-threads=1
+
+
+RED (before the fix, verbatim tail)
+-----------------------------------
+running 1 test
+test cmd_enter_cycles_task_state_and_plain_enter_still_splits ... [GPUI] pre-warm timeout — window will open with loading state
+
+thread 'cmd_enter_cycles_task_state_and_plain_enter_still_splits' (486570085) panicked at frontends/gpui/tests/cmd_enter_chord_dispatch.rs:218:5:
+cmd+enter must dispatch cycle_task_state; it dispatched ["split_block"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+    cmd_enter_cycles_task_state_and_plain_enter_still_splits
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.82s
+
+The assertion reads the DISPATCH JOURNAL, not the keymap: `["split_block"]` is what
+the app actually ran for a cmd+enter press. This is the dogfooded symptom reproduced
+in automation, one layer below the MCP reply that had been calling it `executed`.
+
+
+GREEN (after the fix, verbatim tail)
+------------------------------------
+running 1 test
+test cmd_enter_cycles_task_state_and_plain_enter_still_splits ... [GPUI] pre-warm timeout — window will open with loading state
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.91s
+
+Four assertions are green, in order:
+  1. cmd+enter dispatched cycle_task_state
+  2. cmd+enter dispatched NO split_block
+  3. the non-page block count is unchanged  (the junk empty block is gone)
+  4. plain enter still dispatched split_block AND moved the count by +1
+Assertion 4 is what keeps 2 and 3 non-vacuous: the same gesture path, on the same
+row, in the same run, does produce a split and does move the counter.
+
+
+TWO EARLIER REDS, both for the WRONG reason, recorded so the ladder is honest
+----------------------------------------------------------------------------
+  send_key_chord: click on block:chord-target never moved focused_block to it
+  within 4s (incl. re-click attempts) — refusing to press KeyChord({Cmd, Enter})
+  into the wrong editor
+
+The row painted (the boot precondition passed) but SimUserDriver's click-to-focus
+never seated focus on it. That is click TARGETING, a different concern with its own
+coverage; the test now seats engine focus directly and lets the driver take its
+already-focused path, which still waits for the row's editor to take WINDOW focus.
+So the chord is pressed into a real mounted editor and only the chord is on trial.

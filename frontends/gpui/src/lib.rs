@@ -1262,6 +1262,9 @@ impl Render for HolonApp {
                 let m = self.app_model.read(cx);
                 (m.session.clone(), m.rt_handle.clone())
             };
+            // Window-registry chords bypass `dispatch_intent`; they journal
+            // themselves so a reply can tell "ran" from "nothing ran".
+            let journal = self.app_model.read(cx).engine.ui_state().dispatch_journal();
             let window_handle = window.window_handle();
             div()
                 .size_full()
@@ -1283,6 +1286,7 @@ impl Render for HolonApp {
                     let session = session.clone();
                     let rt_handle = rt_handle.clone();
                     let share_ui = self.share_ui.clone();
+                    let journal = journal.clone();
                     move |_: &gpui_component::input::Undo, _window, cx: &mut App| {
                         let async_cx = cx.to_async();
                         share_ui::dispatch_undo(
@@ -1290,6 +1294,7 @@ impl Render for HolonApp {
                             rt_handle.clone(),
                             share_ui.clone(),
                             window_handle,
+                            journal.clone(),
                             &async_cx,
                         );
                         cx.stop_propagation();
@@ -1299,6 +1304,7 @@ impl Render for HolonApp {
                     let session = session.clone();
                     let rt_handle = rt_handle.clone();
                     let share_ui = self.share_ui.clone();
+                    let journal = journal.clone();
                     move |_: &gpui_component::input::Redo, _window, cx: &mut App| {
                         let async_cx = cx.to_async();
                         share_ui::dispatch_redo(
@@ -1306,6 +1312,7 @@ impl Render for HolonApp {
                             rt_handle.clone(),
                             share_ui.clone(),
                             window_handle,
+                            journal.clone(),
                             &async_cx,
                         );
                         cx.stop_propagation();
@@ -1315,6 +1322,7 @@ impl Render for HolonApp {
                     let session = session.clone();
                     let rt_handle = rt_handle.clone();
                     let share_ui = self.share_ui.clone();
+                    let journal = journal.clone();
                     move |_: &TriggerUndo, _window, cx: &mut App| {
                         let async_cx = cx.to_async();
                         share_ui::dispatch_undo(
@@ -1322,6 +1330,7 @@ impl Render for HolonApp {
                             rt_handle.clone(),
                             share_ui.clone(),
                             window_handle,
+                            journal.clone(),
                             &async_cx,
                         );
                         cx.stop_propagation();
@@ -1331,6 +1340,7 @@ impl Render for HolonApp {
                     let session = session.clone();
                     let rt_handle = rt_handle.clone();
                     let share_ui = self.share_ui.clone();
+                    let journal = journal.clone();
                     move |_: &TriggerRedo, _window, cx: &mut App| {
                         let async_cx = cx.to_async();
                         share_ui::dispatch_redo(
@@ -1338,6 +1348,7 @@ impl Render for HolonApp {
                             rt_handle.clone(),
                             share_ui.clone(),
                             window_handle,
+                            journal.clone(),
                             &async_cx,
                         );
                         cx.stop_propagation();
@@ -2319,9 +2330,11 @@ fn launch_holon_window_impl(
     // invoked newest-first and the break on `!propagate_event` skips stale
     // ones pointing at the previous window.
     {
+        let journal = app_model.read(cx).engine.ui_state().dispatch_journal();
         let session_for_undo = app_model.read(cx).session.clone();
         let rt_for_undo = rt_handle.clone();
         let share_ui_for_undo = app_model.read(cx).share_ui.clone();
+        let journal_for_undo = journal.clone();
         cx.on_action(move |_: &TriggerUndo, cx: &mut App| {
             let async_cx = cx.to_async();
             share_ui::dispatch_undo(
@@ -2329,6 +2342,7 @@ fn launch_holon_window_impl(
                 rt_for_undo.clone(),
                 share_ui_for_undo.clone(),
                 wh,
+                journal_for_undo.clone(),
                 &async_cx,
             );
             cx.stop_propagation();
@@ -2336,6 +2350,7 @@ fn launch_holon_window_impl(
         let session_for_redo = app_model.read(cx).session.clone();
         let rt_for_redo = rt_handle.clone();
         let share_ui_for_redo = app_model.read(cx).share_ui.clone();
+        let journal_for_redo = journal.clone();
         cx.on_action(move |_: &TriggerRedo, cx: &mut App| {
             let async_cx = cx.to_async();
             share_ui::dispatch_redo(
@@ -2343,6 +2358,7 @@ fn launch_holon_window_impl(
                 rt_for_redo.clone(),
                 share_ui_for_redo.clone(),
                 wh,
+                journal_for_redo.clone(),
                 &async_cx,
             );
             cx.stop_propagation();
@@ -2354,15 +2370,25 @@ fn launch_holon_window_impl(
     // focus. Needs the window to focus the input, so it hops through
     // `update_window`.
     if let Some(search_entity) = search_entity_slot.get().cloned() {
+        let journal_for_search = app_model.read(cx).engine.ui_state().dispatch_journal();
         cx.on_action(move |_: &OpenSearch, cx: &mut App| {
             let search_entity = search_entity.clone();
-            let _ = cx.update_window(wh, move |_, window, cx| {
+            // Opening the panel IS the whole action, and it happens inside
+            // `update_window` — so the outcome is whether that hop ran.
+            let seq = journal_for_search.record_window_action("open_search");
+            let opened = cx.update_window(wh, move |_, window, cx| {
                 search_entity.update(cx, |s, cx| {
                     s.open(window, cx);
                     cx.emit(search_ui::NotifySearchUi);
                     cx.notify();
                 });
             });
+            journal_for_search.settle(
+                seq,
+                opened
+                    .map(|_| ())
+                    .map_err(|e| format!("open_search: the window is gone: {e}")),
+            );
             cx.stop_propagation();
         });
     }
@@ -2375,46 +2401,67 @@ fn launch_holon_window_impl(
     if let Some(tab_entity) = tab_strip_entity_slot.get().cloned() {
         let tab_services: Arc<dyn BuilderServices> = app_model.read(cx).engine.clone();
 
+        // Each tab action journals under its REGISTRY name. The follow-on
+        // `navigation.activate` intent journals itself separately, so a reply
+        // shows both the chord that ran and what it caused.
+        let tab_journal = app_model.read(cx).engine.ui_state().dispatch_journal();
+
         macro_rules! on_cycle {
-            ($action:ty, $delta:expr) => {{
+            ($action:ty, $delta:expr, $name:expr) => {{
                 let entity = tab_entity.clone();
                 let services = tab_services.clone();
+                let journal = tab_journal.clone();
                 cx.on_action(move |_: &$action, cx: &mut App| {
                     let entity = entity.clone();
                     let services = services.clone();
-                    let _ = cx.update_window(wh, move |_, _window, cx| {
+                    let seq = journal.record_window_action($name);
+                    let applied = cx.update_window(wh, move |_, _window, cx| {
                         tab_strip::apply_cycle(&entity, &services, $delta, cx);
                     });
+                    journal.settle(
+                        seq,
+                        applied
+                            .map(|_| ())
+                            .map_err(|e| format!("{}: the window is gone: {e}", $name)),
+                    );
                     cx.stop_propagation();
                 });
             }};
         }
-        on_cycle!(CycleTabNext, 1);
-        on_cycle!(CycleTabPrev, -1);
+        on_cycle!(CycleTabNext, 1, "cycle_tab_next");
+        on_cycle!(CycleTabPrev, -1, "cycle_tab_prev");
 
         macro_rules! on_jump {
-            ($action:ty, $n:expr) => {{
+            ($action:ty, $n:expr, $name:expr) => {{
                 let entity = tab_entity.clone();
                 let services = tab_services.clone();
+                let journal = tab_journal.clone();
                 cx.on_action(move |_: &$action, cx: &mut App| {
                     let entity = entity.clone();
                     let services = services.clone();
-                    let _ = cx.update_window(wh, move |_, _window, cx| {
+                    let seq = journal.record_window_action($name);
+                    let applied = cx.update_window(wh, move |_, _window, cx| {
                         tab_strip::apply_jump(&entity, &services, $n, cx);
                     });
+                    journal.settle(
+                        seq,
+                        applied
+                            .map(|_| ())
+                            .map_err(|e| format!("{}: the window is gone: {e}", $name)),
+                    );
                     cx.stop_propagation();
                 });
             }};
         }
-        on_jump!(JumpToTab1, 1);
-        on_jump!(JumpToTab2, 2);
-        on_jump!(JumpToTab3, 3);
-        on_jump!(JumpToTab4, 4);
-        on_jump!(JumpToTab5, 5);
-        on_jump!(JumpToTab6, 6);
-        on_jump!(JumpToTab7, 7);
-        on_jump!(JumpToTab8, 8);
-        on_jump!(JumpToTab9, 9);
+        on_jump!(JumpToTab1, 1, "jump_to_tab_1");
+        on_jump!(JumpToTab2, 2, "jump_to_tab_2");
+        on_jump!(JumpToTab3, 3, "jump_to_tab_3");
+        on_jump!(JumpToTab4, 4, "jump_to_tab_4");
+        on_jump!(JumpToTab5, 5, "jump_to_tab_5");
+        on_jump!(JumpToTab6, 6, "jump_to_tab_6");
+        on_jump!(JumpToTab7, 7, "jump_to_tab_7");
+        on_jump!(JumpToTab8, 8, "jump_to_tab_8");
+        on_jump!(JumpToTab9, 9, "jump_to_tab_9");
     }
 
     // Root layout signal — structural changes only (render_expr).
