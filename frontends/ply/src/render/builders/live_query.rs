@@ -15,6 +15,38 @@ fn error_text(msg: String) -> PlyWidget {
     })
 }
 
+/// The `blocks_with_paths` path of `id` — what a context-dependent query
+/// matches its `$context_path_prefix` against. An unresolved prefix binds a
+/// sentinel that matches no row, so neither outcome is silent: `Err` is painted
+/// by the caller, `Ok(None)` is logged at WARN.
+///
+/// Blocking, on a joined-immediately thread so `block_on` stays legal wherever
+/// the synchronous render pass runs. Only reached when the watch entry is new.
+fn resolve_block_path(
+    ctx: &RenderContext,
+    id: &holon_api::EntityUri,
+) -> Result<Option<String>, String> {
+    // A services impl can watch queries without offering the path lookup
+    // (`query_engine()` defaults to `None`). Degraded, so it is announced:
+    // that impl's context-dependent queries stay unresolved.
+    let Some(engine) = ctx.services.query_engine() else {
+        tracing::warn!(
+            block = %id,
+            "live_query: no query engine to resolve the context path prefix — `from descendants` \
+             under this block will match no row"
+        );
+        return Ok(None);
+    };
+    let rt = ctx.services.runtime_handle();
+    std::thread::scope(|s| {
+        s.spawn(|| rt.block_on(engine.lookup_block_path(id)))
+            .join()
+            .unwrap()
+    })
+    .map(Some)
+    .map_err(|e| format!("live_query({id}): context path prefix lookup failed: {e:#}"))
+}
+
 pub fn build(args: &ResolvedArgs, ctx: &RenderContext) -> PlyWidget {
     let (query, language) = if let Some(gql) = args.get_string("gql") {
         (gql.to_string(), QueryLanguage::HolonGql)
@@ -59,16 +91,6 @@ pub fn build_query(
                 .map(|s| s.to_string())
         });
 
-    let query_context = context_id.as_ref().map(|id| {
-        // ALLOW(entity_uri_from_raw): render-spec context arg or query row 'id'
-        let uri = holon_api::EntityUri::from_raw(id);
-        holon_frontend::QueryContext {
-            current_block_id: Some(uri.clone()),
-            context_parent_id: Some(uri),
-            context_path_prefix: None,
-        }
-    });
-
     // Watchers persist in PlyExt across immediate-mode frames: the first
     // frame starts the CDC watch (compilation errors surface as a rendered
     // error), every frame drains pending changes and renders the accumulated
@@ -79,12 +101,36 @@ pub fn build_query(
         let state = match watches.entry(watch_key) {
             Entry::Occupied(e) => e.into_mut(),
             Entry::Vacant(v) => {
-                let state = match ctx.services.watch_query(&query, language, query_context) {
-                    Ok(stream) => QueryWatchState::Live {
-                        rx: stream.into_inner(),
-                        acc: holon_api::DataRowAccumulator::new(),
-                    },
-                    Err(e) => QueryWatchState::Failed(format!("Query error: {e}")),
+                // Built only here: this frontend re-renders every frame and the
+                // prefix costs a blocking matview read, so a failed resolution
+                // must land in the entry as `Failed` like a failed watch does —
+                // returning early would re-block every frame under this lock.
+                // Consequence: the prefix is pinned for the entry's life, so a
+                // context block re-parented later keeps the stale prefix.
+                let resolved = context_id.as_ref().map(|id| {
+                    // ALLOW(entity_uri_from_raw): render-spec context arg or
+                    // query row 'id'
+                    let uri = holon_api::EntityUri::from_raw(id);
+                    resolve_block_path(ctx, &uri).map(|path| match path {
+                        Some(path) => holon_frontend::QueryContext::for_block_with_path(
+                            &uri,
+                            Some(uri.clone()),
+                            path,
+                        ),
+                        None => holon_frontend::QueryContext::for_block(&uri, Some(uri.clone())),
+                    })
+                });
+                let state = match resolved.transpose() {
+                    Err(msg) => QueryWatchState::Failed(msg),
+                    Ok(query_context) => {
+                        match ctx.services.watch_query(&query, language, query_context) {
+                            Ok(stream) => QueryWatchState::Live {
+                                rx: stream.into_inner(),
+                                acc: holon_api::DataRowAccumulator::new(),
+                            },
+                            Err(e) => QueryWatchState::Failed(format!("Query error: {e}")),
+                        }
+                    }
                 };
                 v.insert(state)
             }
