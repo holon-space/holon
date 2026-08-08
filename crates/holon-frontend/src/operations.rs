@@ -24,7 +24,11 @@ pub fn dispatch_operation(
     // End-to-end latency: start the interaction clock at the dispatch entry
     // point; `holon_api::latency_e2e` closes it when the target's row lands
     // in a LiveData mirror (stage="e2e").
-    if let Some(target) = params.get("id").and_then(|v| v.as_string()) {
+    let latency_target = params
+        .get("id")
+        .and_then(|v| v.as_string())
+        .map(String::from);
+    if let Some(target) = &latency_target {
         holon_api::latency_e2e::interaction_dispatched(
             &op_name,
             target,
@@ -36,6 +40,11 @@ pub fn dispatch_operation(
             .execute_operation(&entity_name, &op_name, params)
             .await
         {
+            // A refused/failed op writes nothing: retire its latency entry so no
+            // later unrelated delivery for the row closes it as a phantom sample.
+            if let Some(target) = &latency_target {
+                holon_api::latency_e2e::interaction_failed(&op_name, target);
+            }
             session.error_tracker().record_error();
             tracing::error!("Operation {entity_name}.{op_name} failed: {e}");
         }

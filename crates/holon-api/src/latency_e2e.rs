@@ -29,7 +29,11 @@
 //!   completes, or it expires harmlessly.
 //! - Ops that carry no token (toggle / split / delete / create-by-parent) fall
 //!   back to closing the **newest** pending entry for the target and dropping
-//!   all older same-target entries as superseded no-ops.
+//!   all older same-target entries as superseded no-ops. This holds even when
+//!   the delivered row carries a token: `write_seq` is **sticky on the row**
+//!   (it records the last *editor* write, and every later projection repeats
+//!   it), so a token nobody is waiting for is not evidence about the op in
+//!   flight and never blocks a tokenless entry.
 //!
 //! In both paths the invariant holds: a measurement is **never** attributed
 //! across a newer, already-completed entry on the same target — so the SLO
@@ -40,6 +44,10 @@
 //!   (`holon-frontend` `dispatch_operation` / `dispatch_intent{,_sync}`) with
 //!   the op name, the target entity id, and the op's `WriteSeq` if it carries
 //!   one. Starts the clock.
+//! - [`interaction_failed`] — called from the `Err` arm of the same dispatch
+//!   seams. A refused or failed op writes nothing, so its entry is retired at
+//!   once instead of squatting until expiry, where any unrelated later delivery
+//!   for that row would close it as a measurement of nothing.
 //! - [`rows_delivered`] — called from `LiveData::subscribe` with the `(id,
 //!   WriteSeq?)` pairs an applied batch made visible. Closes the matching
 //!   entries and emits, per closure:
@@ -78,8 +86,9 @@
 //!   gap).
 //! - Ops without an `id` param, and deletes whose CDC `Deleted.id` is a rowid
 //!   rather than the entity id, are not correlated (no event).
-//! - Entries expire after 30s (op failed / never touched its target row). With
-//!   identity correlation an unexpired no-op entry is inert — it cannot steal.
+//! - Entries expire after 30s (op failed / never touched its target row), and
+//!   every expiry is disclosed as `stage="e2e_expired"`. With identity
+//!   correlation an unexpired no-op entry is inert — it cannot steal.
 //!
 //! Cost: one small mutex op per dispatch; per-batch cost is a single atomic
 //! load while no interaction is pending (the overwhelmingly common case).
@@ -128,38 +137,55 @@ pub fn write_seq_from_params(params: &HashMap<String, crate::Value>) -> Option<W
         .map(WriteSeq::from_i64)
 }
 
+/// One pending entry removed without a measurement — expired, or retired
+/// because its op produced no write. Carries what the disclosure names.
+struct Expired {
+    action: String,
+    target: String,
+    waited_ms: u64,
+}
+
+/// Drop the entries older than [`EXPIRY`], returning every one of them for
+/// disclosure. An expiry means the correlator never saw a delivery it could
+/// tie to this interaction — for writes it is either a genuine no-op re-commit
+/// (expected, harmless) or a correlation defect that suppresses the whole
+/// measurement for that op class. The two are indistinguishable from inside,
+/// so the caller warns for both: an unmeasured interaction dropped in silence
+/// is precisely how the uncloseable-`split_block` defect survived a dogfood
+/// night, and silent degradation is what this project forbids.
+fn prune_expired(pending: &mut Vec<Pending>, now: Instant) -> Vec<Expired> {
+    let mut expired = Vec::new();
+    pending.retain(|e| {
+        let waited = now.duration_since(e.t0);
+        if waited < EXPIRY {
+            return true;
+        }
+        expired.push(Expired {
+            action: e.action.clone(),
+            target: e.target.clone(),
+            waited_ms: waited.as_millis() as u64,
+        });
+        false
+    });
+    expired
+}
+
 /// Record a user interaction entering the op pipeline. `target` is the entity
 /// the op addresses (the `id` param). `seq` is the op-instance token if the op
 /// carries one (editor content writes stamp `write_seq`); `None` otherwise.
 pub fn interaction_dispatched(action: &str, target: &str, seq: Option<WriteSeq>) {
     let mut pending = PENDING.lock().expect("latency_e2e mutex poisoned");
     let now = Instant::now();
-    pending.retain(|e| {
-        if now.duration_since(e.t0) < EXPIRY {
-            return true;
-        }
-        // Fail-loud disclosure: a navigation interaction that never saw its
-        // target's rows within EXPIRY. Some warm navigations legitimately
-        // expire (the page was already materialized, so no CDC batch arrives);
-        // but a persistent stream of these on freshly-materialized pages means
-        // the dispatched `block_id` and the delivered `parent_id` disagree on
-        // scheme, so the correlation silently never closes. Surface it as a
-        // greppable line instead of dropping it — the alternative (this
-        // module's original silent drop) is what let the whole nav-latency
-        // gap stay invisible. Write entries keep the documented silent-expiry
-        // (no-op re-commits are expected to lapse), so only navigate warns.
-        if e.action == "navigate" {
-            tracing::warn!(
-                target: "holon_latency",
-                stage = "e2e_expired",
-                action = %e.action,
-                block = %e.target,
-                waited_ms = now.duration_since(e.t0).as_millis() as u64,
-                "holon_latency: navigation interaction expired without delivered rows",
-            );
-        }
-        false
-    });
+    for e in prune_expired(&mut pending, now) {
+        tracing::warn!(
+            target: "holon_latency",
+            stage = "e2e_expired",
+            action = %e.action,
+            block = %e.target,
+            waited_ms = e.waited_ms,
+            "holon_latency: interaction expired without a delivered row",
+        );
+    }
     if pending.len() >= MAX_PENDING {
         pending.remove(0);
     }
@@ -170,6 +196,61 @@ pub fn interaction_dispatched(action: &str, target: &str, seq: Option<WriteSeq>)
         t0: now,
     });
     PENDING_LEN.store(pending.len(), Ordering::Release);
+}
+
+/// Retire the pending entry of an interaction that produced no write, because
+/// the op was **refused or failed**. Without this the entry squats until
+/// [`EXPIRY`] and any unrelated later delivery for that row — a background
+/// re-projection, a peer edit — closes it as a multi-second measurement of
+/// nothing, which the latency-slo oracle then reports as a real SLO breach.
+///
+/// Retires the NEWEST entry matching BOTH action and target (the one this
+/// dispatch pushed), so a concurrent interaction on the same row is untouched.
+/// No `e2e` sample is emitted: the interaction produced no visible change, so
+/// there is nothing to measure. Called from the `Err` arm of every op-dispatch
+/// seam (`holon_frontend::operations` / `reactive`).
+pub fn interaction_failed(action: &str, target: &str) {
+    let mut pending = PENDING.lock().expect("latency_e2e mutex poisoned");
+    let retired = retire_failed(&mut pending, action, target, Instant::now());
+    PENDING_LEN.store(pending.len(), Ordering::Release);
+    drop(pending);
+    if let Some(r) = retired {
+        tracing::debug!(
+            target: "holon_latency",
+            stage = "e2e_retired",
+            action = %r.action,
+            block = %r.target,
+            waited_ms = r.waited_ms,
+            reason = "op refused or failed — no write, nothing to measure",
+            "holon_latency",
+        );
+    }
+}
+
+/// Pure core of [`interaction_failed`]: remove and return the newest entry
+/// matching both `action` and `target`.
+fn retire_failed(
+    pending: &mut Vec<Pending>,
+    action: &str,
+    target: &str,
+    now: Instant,
+) -> Option<Expired> {
+    let mut newest: Option<usize> = None;
+    for (i, p) in pending.iter().enumerate() {
+        if p.action != action || p.target != target {
+            continue;
+        }
+        if newest.is_none_or(|w| p.t0 > pending[w].t0) {
+            newest = Some(i);
+        }
+    }
+    let i = newest?;
+    let p = pending.remove(i);
+    Some(Expired {
+        action: p.action,
+        target: p.target,
+        waited_ms: now.duration_since(p.t0).as_millis() as u64,
+    })
 }
 
 /// Diagnostic inspection of the correlation registry: the targets of all
@@ -235,9 +316,13 @@ pub fn rows_delivered<'a>(
 ///    on a tie). This closes exactly the op instance that produced the delta.
 /// 2. **Tokenless path** — else, if the batch delivered any tokenless row for
 ///    the target, the winner is the *newest* pending entry for that target.
-/// 3. Otherwise (only non-matching tokens) nothing is closed — the delta
-///    belongs to an untracked dispatch; mis-attributing it would be worse than
-///    emitting nothing.
+/// 3. **Anonymous-token path** — else (only tokens nobody is waiting for) the
+///    winner is the newest pending entry *if it is tokenless*. Such a token is
+///    the sticky `write_seq` column left by an earlier editor write, so it says
+///    nothing about the op in flight; a tokenless op must not be blocked by it.
+///    A *tokenful* entry still closes on nothing here — it waits for its own
+///    token, which is what stops a stale no-op re-commit from stealing an
+///    untracked dispatch's delta.
 ///
 /// The winner and every pending entry for the target **older than** it are
 /// removed (superseded no-ops). Entries newer than the winner remain pending
@@ -270,13 +355,27 @@ fn close_delivered<S: AsRef<str>>(
                 winner = Some(i);
             }
         }
-        // 2. tokenless path — newest entry for the target (any token state).
-        if winner.is_none() && has_tokenless {
+        // 2/3. anonymous delivery — the batch named no pending op instance.
+        if winner.is_none() {
+            let mut newest: Option<usize> = None;
             for (i, p) in pending.iter().enumerate() {
                 if p.target != target {
                     continue;
                 }
-                if winner.is_none_or(|w| p.t0 > pending[w].t0) {
+                if newest.is_none_or(|w| p.t0 > pending[w].t0) {
+                    newest = Some(i);
+                }
+            }
+            // A delivered token nobody is waiting for is the STICKY row column,
+            // not evidence about an op in flight: `write_seq` records the row's
+            // last editor write and every later projection of that row repeats
+            // it. So it may not veto a tokenless entry's closure (rule 3) — that
+            // veto is what made split/indent/join unmeasurable on any block the
+            // user had ever typed into. A tokenful entry still waits for its own
+            // token unless the batch carried a genuinely tokenless row (rule 2),
+            // which is what keeps a stale no-op re-commit from stealing.
+            if let Some(i) = newest {
+                if has_tokenless || pending[i].seq.is_none() {
                     winner = Some(i);
                 }
             }
@@ -360,6 +459,187 @@ mod tests {
         );
         assert!(closed.is_empty(), "no exact match ⇒ no measurement");
         assert_eq!(pending.len(), 1, "the stale entry is left untouched");
+    }
+
+    /// A structural op (`split_block`/`indent`/`join`) on a block that was EVER
+    /// typed into must still be measurable. `write_seq` is a **sticky column on
+    /// the block row**: once an editor write stamps it, every later projection
+    /// of that row carries the same value — including the row the split writes.
+    /// The delivered token therefore names an op instance that closed long ago,
+    /// and it must NOT veto the tokenless split's closure.
+    #[test]
+    fn structural_op_closes_over_a_stale_row_token() {
+        let base = Instant::now();
+        let mut pending = vec![pend("split_block", "block:typed", None, base)];
+        let now = base + Duration::from_millis(36);
+        // The split's own delta on its target: the row still carries the token
+        // of the last EDITOR write (42), whose pending entry already closed.
+        let closed = close_delivered(
+            &mut pending,
+            &[("block:typed", Some(WriteSeq::from_i64(42)))],
+            now,
+        );
+        assert_eq!(closed.len(), 1, "the split must yield its OWN measurement");
+        assert_eq!(closed[0].action, "split_block");
+        assert_eq!(closed[0].ms, 36);
+        assert!(pending.is_empty(), "the split entry is consumed");
+    }
+
+    /// The dogfood gesture end to end (click → type → Enter), at the pure core:
+    /// a content write closes on its own token, then the split of THAT block
+    /// must close too. Before the anonymous-delivery rule the split's entry
+    /// survived, expired, and was pruned — so `split_block` produced `dispatch`
+    /// samples and ZERO `e2e` samples on any block the user had typed into.
+    #[test]
+    fn typed_then_split_the_same_block_both_measure() {
+        let base = Instant::now();
+        let mut pending = Vec::new();
+        // 1. the keystroke's content write, stamped write_seq 7.
+        pending.push(pend("set_field", "block:t", Some(7), base));
+        let typed = close_delivered(
+            &mut pending,
+            &[("block:t", Some(WriteSeq::from_i64(7)))],
+            base + Duration::from_millis(20),
+        );
+        assert_eq!(typed.len(), 1, "the content write closes on its own token");
+        assert!(pending.is_empty());
+        // 2. Enter → split_block, tokenless. Its delta re-projects the row, which still
+        //    carries the sticky write_seq 7.
+        let t1 = base + Duration::from_millis(100);
+        pending.push(pend("split_block", "block:t", None, t1));
+        let split = close_delivered(
+            &mut pending,
+            &[
+                ("block:t", Some(WriteSeq::from_i64(7))),
+                ("block:new-child", None),
+            ],
+            t1 + Duration::from_millis(36),
+        );
+        assert_eq!(split.len(), 1, "the split closes too — not only the type");
+        assert_eq!(split[0].action, "split_block");
+        assert_eq!(
+            split[0].ms, 36,
+            "measures the split, not time-to-something-else"
+        );
+    }
+
+    /// Rule 3's own attribution order, pinned. Two tokenless entries on one
+    /// target + an anonymous delivery: the NEWEST closes and the older is
+    /// dropped as superseded, exactly as the genuinely-tokenless route already
+    /// does (`tokenless_closes_newest_and_drops_older`). Without this a future
+    /// change could silently flip rule 3 to FIFO and charge the split's delta
+    /// to whatever was dispatched before it.
+    #[test]
+    fn anonymous_delivery_closes_newest_and_drops_older() {
+        let base = Instant::now();
+        let mut pending = vec![
+            pend("split_block", "block:x", None, base),
+            pend("indent", "block:x", None, base + Duration::from_millis(50)),
+        ];
+        let closed = close_delivered(
+            &mut pending,
+            &[("block:x", Some(WriteSeq::from_i64(42)))],
+            base + Duration::from_millis(60),
+        );
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].action, "indent", "the NEWEST entry is the winner");
+        assert_eq!(closed[0].ms, 10, "its own 10ms, not the older entry's 60ms");
+        assert!(
+            pending.is_empty(),
+            "the older entry is dropped as superseded"
+        );
+    }
+
+    /// A REFUSED op writes nothing, so its entry must be retired at the source
+    /// — otherwise rule 3 lets any unrelated later delivery for that row (a
+    /// background re-projection, a peer edit) close it as a multi-second sample
+    /// of nothing, which the latency-slo oracle reports as a real SLO breach.
+    /// Retiring is what the `Err` arm of every dispatch seam now does.
+    #[test]
+    fn refused_op_is_retired_so_a_later_delivery_cannot_phantom_close_it() {
+        let base = Instant::now();
+        let mut pending = vec![pend("outdent", "block:refused", None, base)];
+        // Without the retirement this delivery closes a 25s phantom.
+        let retired = retire_failed(
+            &mut pending,
+            "outdent",
+            "block:refused",
+            base + Duration::from_millis(3),
+        )
+        .expect("the refused op's entry must be retired");
+        assert_eq!(retired.action, "outdent");
+        assert_eq!(retired.target, "block:refused");
+        assert!(pending.is_empty());
+        let closed = close_delivered(
+            &mut pending,
+            &[("block:refused", Some(WriteSeq::from_i64(5)))],
+            base + Duration::from_secs(25),
+        );
+        assert!(
+            closed.is_empty(),
+            "no phantom 25s sample survives the retirement"
+        );
+    }
+
+    /// Retirement targets the op instance that failed, never a concurrent
+    /// interaction on the same row: it matches action AND target, and takes the
+    /// newest such entry.
+    #[test]
+    fn retirement_leaves_a_concurrent_interaction_on_the_same_row_pending() {
+        let base = Instant::now();
+        let mut pending = vec![
+            pend("split_block", "block:r", None, base),
+            pend("outdent", "block:r", None, base + Duration::from_millis(5)),
+        ];
+        let retired = retire_failed(
+            &mut pending,
+            "outdent",
+            "block:r",
+            base + Duration::from_millis(6),
+        );
+        assert_eq!(retired.expect("outdent retired").action, "outdent");
+        assert_eq!(
+            pending.len(),
+            1,
+            "the concurrent split still awaits its delta"
+        );
+        assert_eq!(pending[0].action, "split_block");
+        // Nothing to retire is not an error — the entry may already have closed.
+        assert!(
+            retire_failed(&mut pending, "outdent", "block:r", base).is_none(),
+            "a second retirement of the same op instance is a no-op"
+        );
+    }
+
+    /// An expired entry is disclosed for EVERY action, not only `navigate`.
+    /// A silently-pruned write entry is the "silently degrades to look fine"
+    /// case: it is exactly how the uncloseable-`split_block` defect stayed
+    /// invisible through a whole dogfood night.
+    #[test]
+    fn expired_write_entry_is_disclosed() {
+        let base = Instant::now();
+        let mut pending = vec![
+            pend("split_block", "block:stuck", None, base),
+            pend("navigate", "block:page", None, base),
+            pend("set_field", "block:fresh", Some(3), base + EXPIRY),
+        ];
+        let expired = prune_expired(&mut pending, base + EXPIRY + Duration::from_millis(5));
+        let actions: Vec<&str> = expired.iter().map(|e| e.action.as_str()).collect();
+        assert!(
+            actions.contains(&"split_block"),
+            "a write entry that never saw its row must be disclosed, not dropped in silence: {actions:?}"
+        );
+        assert!(actions.contains(&"navigate"));
+        assert_eq!(
+            expired
+                .iter()
+                .find(|e| e.action == "split_block")
+                .unwrap()
+                .target,
+            "block:stuck",
+            "the disclosure names the entity"
+        );
+        assert_eq!(pending.len(), 1, "the unexpired entry survives");
     }
 
     /// Tokenless ops (toggle/split/delete) correlate by newest-per-target and
