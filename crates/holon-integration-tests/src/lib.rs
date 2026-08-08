@@ -47,6 +47,7 @@ pub mod pbt;
 pub mod pbt_mcp_fake;
 pub mod polling;
 pub mod screenshot_overlay;
+pub mod template_fixture;
 pub mod test_environment;
 #[cfg(feature = "otel-testing")]
 pub mod test_tracing;
