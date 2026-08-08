@@ -222,6 +222,35 @@ pub fn apply_org_headline_tag_split(block: &mut Block) {
     }
 }
 
+/// Apply the org RESOLVED-LINK lens to a block: on disk a `[[Page]]` link
+/// whose target page exists is emitted in the resolved `[[block:<id>][Page]]`
+/// form, because every production writeback renders through
+/// `WritebackRenderer::with_resolved_links` (the `block_links` junction
+/// upgrade). The stores keep the authored `Name` target — the upgrade is a
+/// render-time projection — so this lens belongs to the on-disk view ONLY.
+///
+/// `resolve` mirrors `SqlOperationProvider::resolve_page_name`: the LEAF of a
+/// `parent/leaf` chain names the page, a preceding segment is a
+/// disambiguation hint.
+pub fn apply_org_resolved_link_lens(
+    block: &mut Block,
+    resolve: &dyn Fn(&str) -> Option<EntityUri>,
+) {
+    let Some(marks) = block.marks.as_mut() else {
+        return;
+    };
+    for span in marks.iter_mut() {
+        if let holon_api::InlineMark::Link { target, .. } = &mut span.mark
+            && let holon_api::EntityRef::Name { name } = &*target
+            && let Some(id) = resolve(name)
+        {
+            *target = holon_api::EntityRef::Scheme {
+                raw: id.to_string(),
+            };
+        }
+    }
+}
+
 impl MutationApply for Mutation {
     /// Apply mutation to a vector of blocks (for reference model)
     fn apply_to(&self, blocks: &mut Vec<Block>) {

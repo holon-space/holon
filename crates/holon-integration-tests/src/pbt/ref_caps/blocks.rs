@@ -436,6 +436,7 @@ impl RefBackend for ReferenceState {
         // drawer. (`EntityUri::file` parents are a future concern, not used
         // for block parentage today.)
         let seed = self.seed_block_ids();
+        let resolve_page = |name: &str| self.resolve_page_name(name);
         self.domain
             .block_state
             .blocks
@@ -444,6 +445,10 @@ impl RefBackend for ReferenceState {
             .filter(|b| !b.is_page())
             .cloned()
             .map(|mut b| {
+                // A link to a page that EXISTS reaches disk in its resolved
+                // form — the writeback renderer applies the `block_links`
+                // upgrade that the stores themselves never take.
+                crate::pbt::types::apply_org_resolved_link_lens(&mut b, &resolve_page);
                 // On disk the first content line is the headline title, so a
                 // trailing `:tag:` group re-parses as org TAGS (the in-memory
                 // stores keep the raw content — e.g. after an editor split
@@ -453,6 +458,37 @@ impl RefBackend for ReferenceState {
                 b
             })
             .collect()
+    }
+}
+
+impl ReferenceState {
+    /// The page a wiki-name link target names, mirroring
+    /// `SqlOperationProvider::resolve_page_name`: the LEAF of a `parent/leaf`
+    /// chain names the page, a preceding segment prefers candidates whose
+    /// parent carries that name, ties break by id.
+    fn resolve_page_name(&self, target: &str) -> Option<EntityUri> {
+        let mut segs = target.rsplit('/');
+        let leaf = segs.next().unwrap_or(target).trim();
+        if leaf.is_empty() {
+            return None;
+        }
+        let hint = segs.next().map(str::trim);
+        let blocks = &self.domain.block_state.blocks;
+        blocks
+            .values()
+            .filter(|b| b.is_page() && b.content == leaf)
+            .min_by_key(|b| {
+                let hint_rank = match hint {
+                    Some(h) => {
+                        let parent_matches =
+                            blocks.get(&b.parent_id).is_some_and(|p| p.content == h);
+                        u8::from(!parent_matches)
+                    }
+                    None => 0,
+                };
+                (hint_rank, b.id.to_string())
+            })
+            .map(|b| b.id.clone())
     }
 }
 
