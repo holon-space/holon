@@ -1,0 +1,67 @@
+dogfood-explorer 2026-08-08 — `navigate` e2e samples never close on their own
+delivery; a foreign row batch closes them and fires a FALSE SLO violation
+==============================================================================
+App: main e1ba76e6, MCP 8710, RUST_LOG=info,holon_latency=debug.
+
+WHAT THE USER SEES: a full-width red banner over the app,
+  "ORACLE VIOLATION (1) — live invariant check failed
+   [latency-slo] interaction 'navigate' on block:4dca296c-… took 11982ms
+   end-to-end (SLO: p95 <200ms)"
+(screenshot: <worktree>/target/dogfood-sandbox/shots/01-after-outdent-refusal.png
+ — gitignored session artifact, kept beside the app log)
+
+WHAT ACTUALLY HAPPENED: the navigate was visible in ~100 ms.
+
+  07:51:59.526  sidebar click dispatched
+  07:51:59.530  stage="rows" source="focus_roots" seq=123 ms=0   <- the navigate's
+  07:51:59.534  stage="rows" source="focus_roots" seq=126 ms=0      own delivery
+  (describe_ui at +100 ms already renders the new page, geometry measured)
+  … 12 s of me typing into an unrelated block …
+  07:52:11.450  stage="e2e" action=navigate … source="block" ms=11982
+  07:52:11.451  ERROR ORACLE VIOLATION [latency-slo] … 11982ms
+
+The sample is closed by `source="block"`. The navigate delivers on
+`source="focus_roots"`. Nothing correlates the two, so the open sample survives
+until some unrelated later block-row batch closes it, and every millisecond of
+idle/human time in between is billed to the navigate.
+
+CONTROLLED PROBE, run twice (lane-logs/dogfood-2026-08-08-nav-probe1.log,
+…-nav-probe2.log): click a sidebar page, then sit completely idle.
+  probe 1 — 30 s idle: focus_roots rows at +4 ms; NO e2e, NO e2e_expired.
+  probe 2 — 40 s idle, window fronted first: same result.
+The sample neither closes nor expires while idle — the reaper is event-driven,
+not timer-driven, so an idle app accumulates open samples silently.
+
+FOUR false violations in one ~15-minute session:
+  581/583   e2e action=navigate ms=11982  -> ORACLE VIOLATION
+  734/736   e2e action=navigate ms=468    -> ORACLE VIOLATION
+  1653/1655 e2e action=navigate ms=10471  -> ORACLE VIOLATION
+  1679      e2e action=split_block ms=26375 -> ORACLE VIOLATION
+            (that split was itself the junk split the broken cmd+enter created;
+             its sample sat open 26 s for the same reason)
+and two very late expiries of the same kind:
+  709   e2e_expired action=navigate block=block:journals waited_ms=56693
+  1625  e2e_expired action=navigate block=block:journals waited_ms=56124
+
+CONTRAST — the interactions the 2026-08-07 correlator work DID wire close
+promptly and correctly, all far inside the 200 ms SLO:
+  split_block  e2e  25 ms   dispatch 52 ms
+  join_block   e2e  32 ms   dispatch 44 ms
+  indent       e2e  18 ms   dispatch 42 ms
+  outdent      e2e  17 ms
+  set_field    e2e  10–79 ms (typing)
+and a refused outdent is retired rather than measured, correctly:
+  stage="e2e_retired" action=outdent waited_ms=1
+    reason="op refused or failed — no write, nothing to measure"
+
+SECONDARY, same subsystem: one 21-character type_text burst emitted ~14 separate
+`stage="e2e" action=set_field` lines for the SAME block from several
+subscribe_actor spans (44/48/69/71/79 ms all inside one 60 ms window), so any p95
+computed off this stream double-counts single deliveries.
+
+DISCLOSED CAVEAT: the app reported `[interaction-pump] WINDOW-INACTIVE` for MCP
+input throughout (osascript `frontmost` did not make the GPUI window key). This
+cannot explain the finding — describe_ui measured painted geometry for the new
+page at +100 ms, and the missing correlation is a source-name mismatch visible in
+the event stream itself — but the absolute wall-clock figures were taken on a
+non-key window and should not be quoted as paint latency.
