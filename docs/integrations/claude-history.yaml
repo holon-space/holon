@@ -1,3 +1,8 @@
+# Sidecar-format generation. The app runs its own bundled copy of this file
+# unless an INSTALLED copy declares the generation the running build understands
+# (crates/holon-mcp-client/src/bundled_sidecars.rs).
+schema_version: 1
+
 transport:
   child_process:
     command: /Users/martin/Workspaces/ai/claude-code-history-mcp/target/debug/claude-code-history-mcp

@@ -12,6 +12,17 @@ This is the concrete realization of **Model.md Layer 1** ("the outside world as
 replicas") and the `mcp-yaml-sidecars` directive: *MCP clients = declarative
 YAML sidecars only.*
 
+**Installed file = the switch, not the schema.** Every sidecar in this directory
+is compiled into the binary (`crates/holon-mcp-client/src/bundled_sidecars.rs`)
+and declares `schema_version`. A file in `~/.config/holon/integrations/` turns
+its provider ON; for a provider the build ships, the file supplies CONTENT only
+when its `schema_version` matches the running build's `SIDECAR_SCHEMA_VERSION`.
+Otherwise the bundled copy runs and the app discloses which installed file was
+ignored and why — a copy taken before a format requirement landed can no longer
+silently outrank the sidecar the engine was built against. Bump
+`SIDECAR_SCHEMA_VERSION` (and every file here) whenever a requirement lands that
+an older sidecar does not satisfy.
+
 > Scope note: connectors today are **read-into-the-graph** replicas plus
 > **explicitly-declared write tools** for MCP transports. General bidirectional
 > sync with **leases / lease-governed external effects** (ADR 0024 Phase 4

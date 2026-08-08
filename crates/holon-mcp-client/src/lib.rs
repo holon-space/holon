@@ -10,6 +10,7 @@
 //! Reusable MCP client: connects to MCP servers and exposes their tools as
 //! `OperationProvider`s.
 
+pub mod bundled_sidecars;
 pub mod credential_store;
 pub mod entity_mirror;
 pub mod integration_config;
@@ -28,8 +29,14 @@ pub mod rest_transport;
 pub mod sync_freshness;
 pub mod write_authorization;
 
+pub use bundled_sidecars::BUNDLED_SIDECARS;
+pub use bundled_sidecars::BundledSidecar;
+pub use bundled_sidecars::SIDECAR_SCHEMA_VERSION;
+pub use bundled_sidecars::bundled_sidecar;
 pub use holon_core::SyncGate;
 pub use integration_config::IntegrationFileConfig;
+pub use integration_config::LoadedIntegrations;
+pub use integration_config::SupersededSidecar;
 pub use integration_config::load_integration_configs;
 pub use mcp_integration::AuthMode;
 pub use mcp_integration::McpConnectionResult;

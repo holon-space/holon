@@ -13,10 +13,11 @@ use holon_api::EntityName;
 use holon_core::OperationProvider;
 use holon_core::SyncGate;
 use holon_core::SyncTokenStore;
-use holon_mcp_client::IntegrationFileConfig;
+use holon_mcp_client::LoadedIntegrations;
 use holon_mcp_client::McpIntegration;
 use holon_mcp_client::PendingOAuthFlows;
 use holon_mcp_client::PendingWriteStore;
+use holon_mcp_client::SupersededSidecar;
 use holon_mcp_client::build_mcp_integration;
 use holon_mcp_client::integration_config::UnresolvedVar;
 use holon_mcp_client::load_integration_configs;
@@ -52,6 +53,21 @@ fn disclose_needs_auth(name: &str, auth_url: &str, bus: &DegradedSignalBus) {
         reason: ShareDegradedReason::IntegrationNeedsAuth {
             integration: name.to_string(),
             auth_url: auth_url.to_string(),
+        },
+    });
+}
+
+/// Disclose that an installed sidecar was ignored in favour of the bundled
+/// one. The integration works, so nothing else in the boot path would ever say
+/// that the file on disk is not what is running.
+fn disclose_superseded_sidecar(s: &SupersededSidecar, bus: &DegradedSignalBus) {
+    bus.emit(ShareDegraded {
+        shared_tree_id: s.provider.clone(),
+        reason: ShareDegradedReason::IntegrationSidecarSuperseded {
+            integration: s.provider.clone(),
+            installed_path: s.installed_path.display().to_string(),
+            bundled_source: s.bundled_source.to_string(),
+            incompatibility: s.incompatibility.clone(),
         },
     });
 }
@@ -96,10 +112,11 @@ impl McpIntegrationRegistry {
 /// implementation so the `OperationDispatcher` can discover and route
 /// operations to MCP servers.
 pub struct McpIntegrationsModule {
-    /// Loaded configs, or the enriched load error (e.g. malformed YAML).
-    /// The error is surfaced in `configure()` so it propagates through the
+    /// The scan of the integrations directory, or the enriched load error (e.g.
+    /// malformed YAML for a provider this build does not ship). The error is
+    /// surfaced in `configure()` so it propagates through the
     /// module-registration `Result` instead of being swallowed here.
-    configs: Result<Vec<(String, IntegrationFileConfig)>, String>,
+    loaded: Result<LoadedIntegrations, String>,
 }
 
 impl McpIntegrationsModule {
@@ -109,23 +126,42 @@ impl McpIntegrationsModule {
     /// read or parse is a hard error — it is captured here and returned from
     /// `configure()` (fail loud, never skip a malformed integration config).
     pub fn from_dir(dir: &Path) -> Self {
-        let configs = load_integration_configs(dir).map_err(|e| format!("{e:#}"));
-        if let Ok(configs) = &configs {
+        let loaded = load_integration_configs(dir).map_err(|e| format!("{e:#}"));
+        if let Ok(loaded) = &loaded {
+            // Logged here, not at disclosure time: the registry singleton is
+            // resolved lazily, so the bus signal may never fire in a container
+            // that never touches an integration — the log must not depend on it.
+            for s in &loaded.superseded {
+                warn!(
+                    "[McpIntegrationsModule] Installed sidecar '{}' for provider '{}' was NOT \
+                     used: {}. Running the sidecar bundled with this build ('{}') instead. To \
+                     silence this, delete the installed file, or re-author it against this \
+                     build's schema_version.",
+                    s.installed_path.display(),
+                    s.provider,
+                    s.incompatibility,
+                    s.bundled_source
+                );
+            }
             info!(
-                "[McpIntegrationsModule] Loaded {} integration configs from '{}'",
-                configs.len(),
-                dir.display()
+                "[McpIntegrationsModule] Loaded {} integration configs from '{}' ({} installed \
+                 sidecar(s) superseded by the bundled copy)",
+                loaded.configs.len(),
+                dir.display(),
+                loaded.superseded.len()
             );
         }
-        Self { configs }
+        Self { loaded }
     }
 }
 
 impl Module for McpIntegrationsModule {
     fn configure(&self, injector: &Injector) -> std::result::Result<(), fluxdi::Error> {
-        let configs = self.configs.as_ref().map_err(|msg| {
+        let loaded = self.loaded.as_ref().map_err(|msg| {
             fluxdi::Error::module_lifecycle_failed("McpIntegrationsModule", "configure", msg)
         })?;
+        let configs = &loaded.configs;
+        let superseded = Arc::new(loaded.superseded.clone());
         if configs.is_empty() {
             return Ok(());
         }
@@ -157,6 +193,7 @@ impl Module for McpIntegrationsModule {
             let configs_for_registry = configs_for_registry.clone();
             let pending_flows = pending_flows.clone();
             let pending_writes = pending_writes_for_registry.clone();
+            let superseded = superseded.clone();
             async move {
                 let db_handle = resolver
                     .resolve_async::<dyn holon::di::DbHandleProvider>()
@@ -191,6 +228,10 @@ impl Module for McpIntegrationsModule {
                         )
                     }))
                 .clone();
+
+                for s in superseded.iter() {
+                    disclose_superseded_sidecar(s, &degraded_bus);
+                }
 
                 // Layered `${VAR}` resolver: environment variable wins, then a
                 // settings value whose key matches case-insensitively with `.`/`_`

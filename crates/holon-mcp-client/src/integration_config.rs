@@ -1,10 +1,14 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::path::PathBuf;
 
 use anyhow::Context;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::bundled_sidecars::BundledSidecar;
+use crate::bundled_sidecars::SIDECAR_SCHEMA_VERSION;
+use crate::bundled_sidecars::bundled_sidecar;
 use crate::mcp_integration::AuthMode;
 use crate::mcp_integration::McpIntegrationConfig;
 use crate::mcp_integration::McpTransport;
@@ -180,6 +184,12 @@ pub struct AuthConfig {
 /// The provider name is derived from the filename (stem without `.yaml`).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct IntegrationFileConfig {
+    /// Sidecar-format generation this file was authored against. Absent in
+    /// every file written before the format was versioned, which is precisely
+    /// the population that cannot be trusted to still match the engine — see
+    /// [`crate::bundled_sidecars`].
+    #[serde(default)]
+    pub schema_version: Option<u32>,
     pub transport: TransportConfig,
     #[serde(default)]
     pub auth: Option<AuthConfig>,
@@ -371,20 +381,43 @@ fn expand_vars(input: &str, lookup: &VarLookup<'_>) -> anyhow::Result<String> {
     Ok(out)
 }
 
-/// Scan a directory for `*.yaml` provider config files and return `(name,
-/// config)` pairs.
+/// An installed sidecar that was NOT used, and why. Carried out of the loader
+/// as data so the caller cannot forget to disclose it — a supersede that only
+/// logged would be the same silent-staleness defect in a new place.
+#[derive(Debug, Clone)]
+pub struct SupersededSidecar {
+    pub provider: String,
+    pub installed_path: PathBuf,
+    /// Repo-relative path of the sidecar that was used instead.
+    pub bundled_source: &'static str,
+    /// Why the installed file could not be honored, in the reader's terms.
+    pub incompatibility: String,
+}
+
+/// What a scan of the integrations directory yielded.
+#[derive(Debug)]
+pub struct LoadedIntegrations {
+    pub configs: Vec<(String, IntegrationFileConfig)>,
+    pub superseded: Vec<SupersededSidecar>,
+}
+
+/// Scan a directory for `*.yaml` provider config files.
 ///
 /// The provider name is the file stem (e.g., `claude-history.yaml` ->
-/// `"claude-history"`).
+/// `"claude-history"`), and the file's PRESENCE is what enables that provider.
 ///
-/// A missing integrations directory means "no integrations configured" and
-/// returns `Ok(vec![])` (disclosed via a debug log). Files without a
-/// `.yaml`/`.yml` extension are skipped. Anything else fails loud: a YAML file
-/// that cannot be read or parsed is a hard error enriched with the file path —
-/// a malformed integration config must never be silently ignored.
-pub fn load_integration_configs(
-    dir: &Path,
-) -> anyhow::Result<Vec<(String, IntegrationFileConfig)>> {
+/// For a provider this build ships (see [`crate::bundled_sidecars`]) the
+/// installed file supplies content only when it declares this build's
+/// [`SIDECAR_SCHEMA_VERSION`]; otherwise the bundled sidecar is used and the
+/// installed one is reported in [`LoadedIntegrations::superseded`]. That is
+/// what keeps a copy taken before a format requirement landed from silently
+/// outranking the sidecar the engine was built against.
+///
+/// A missing integrations directory means "no integrations configured".
+/// Files without a `.yaml`/`.yml` extension are skipped. A YAML file for a
+/// provider this build does NOT ship is a hard error when it cannot be read or
+/// parsed — there is nothing to fall back to, so it must never be skipped.
+pub fn load_integration_configs(dir: &Path) -> anyhow::Result<LoadedIntegrations> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -393,7 +426,10 @@ pub fn load_integration_configs(
                  integrations configured",
                 dir.display()
             );
-            return Ok(vec![]);
+            return Ok(LoadedIntegrations {
+                configs: Vec::new(),
+                superseded: Vec::new(),
+            });
         }
         Err(e) => {
             return Err(anyhow::Error::new(e).context(format!(
@@ -404,6 +440,7 @@ pub fn load_integration_configs(
     };
 
     let mut configs = Vec::new();
+    let mut superseded = Vec::new();
     for entry in entries {
         let entry = entry
             .with_context(|| format!("Failed to read directory entry in '{}'", dir.display()))?;
@@ -427,18 +464,72 @@ pub fn load_integration_configs(
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("Failed to read integration config '{}'", path.display()))?;
 
-        let config = serde_yaml::from_str::<IntegrationFileConfig>(&content)
-            .with_context(|| format!("Failed to parse integration config '{}'", path.display()))?;
+        let Some(bundled) = bundled_sidecar(&name) else {
+            let config =
+                serde_yaml::from_str::<IntegrationFileConfig>(&content).with_context(|| {
+                    format!("Failed to parse integration config '{}'", path.display())
+                })?;
+            tracing::info!(
+                "[load_integration_configs] Loaded provider '{}' from '{}'",
+                name,
+                path.display()
+            );
+            configs.push((name, config));
+            continue;
+        };
 
-        tracing::info!(
-            "[load_integration_configs] Loaded provider '{}' from '{}'",
-            name,
-            path.display()
-        );
-        configs.push((name, config));
+        // Byte-identical to what we ship: the same file, not an override.
+        // Nothing drifted, so nothing to log and nothing to disclose.
+        if content == bundled.yaml {
+            configs.push((name, parse_bundled(bundled)?));
+            continue;
+        }
+
+        let incompatibility = match serde_yaml::from_str::<IntegrationFileConfig>(&content) {
+            Ok(config) if config.schema_version == Some(SIDECAR_SCHEMA_VERSION) => {
+                tracing::info!(
+                    "[load_integration_configs] Provider '{}' is OVERRIDDEN by '{}' \
+                     (schema_version {SIDECAR_SCHEMA_VERSION}); the sidecar bundled at '{}' is \
+                     not used",
+                    name,
+                    path.display(),
+                    bundled.source_path
+                );
+                configs.push((name, config));
+                continue;
+            }
+            Ok(config) => format!(
+                "it declares schema_version {} but this build's sidecar format is schema_version \
+                 {SIDECAR_SCHEMA_VERSION}",
+                match config.schema_version {
+                    Some(v) => v.to_string(),
+                    None => "none".to_string(),
+                }
+            ),
+            Err(e) => format!(
+                "it does not parse against this build's sidecar format, so no schema_version \
+                 could be established: {e}"
+            ),
+        };
+
+        superseded.push(SupersededSidecar {
+            provider: name.clone(),
+            installed_path: path,
+            bundled_source: bundled.source_path,
+            incompatibility,
+        });
+        configs.push((name, parse_bundled(bundled)?));
     }
 
-    Ok(configs)
+    Ok(LoadedIntegrations {
+        configs,
+        superseded,
+    })
+}
+
+fn parse_bundled(bundled: &'static BundledSidecar) -> anyhow::Result<IntegrationFileConfig> {
+    serde_yaml::from_str::<IntegrationFileConfig>(bundled.yaml)
+        .with_context(|| format!("Bundled sidecar '{}' does not parse", bundled.source_path))
 }
 
 #[cfg(test)]
@@ -612,9 +703,9 @@ entities: {}
         // Non-yaml file (should be skipped)
         std::fs::write(dir.path().join("readme.txt"), "ignore me").unwrap();
 
-        let configs = load_integration_configs(dir.path()).unwrap();
-        assert_eq!(configs.len(), 1);
-        assert_eq!(configs[0].0, "test-provider");
+        let loaded = load_integration_configs(dir.path()).unwrap();
+        assert_eq!(loaded.configs.len(), 1);
+        assert_eq!(loaded.configs[0].0, "test-provider");
     }
 
     #[test]
@@ -634,8 +725,8 @@ entities: {}
 
     #[test]
     fn load_configs_missing_directory() {
-        let configs = load_integration_configs(Path::new("/nonexistent/path")).unwrap();
-        assert!(configs.is_empty());
+        let loaded = load_integration_configs(Path::new("/nonexistent/path")).unwrap();
+        assert!(loaded.configs.is_empty());
     }
 
     #[test]

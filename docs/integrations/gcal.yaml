@@ -1,3 +1,8 @@
+# Sidecar-format generation. The app runs its own bundled copy of this file
+# unless an INSTALLED copy declares the generation the running build understands
+# (crates/holon-mcp-client/src/bundled_sidecars.rs).
+schema_version: 1
+
 # Google Calendar — direct REST API (`transport: rest`) + generic OAuth2.
 #
 # WHY REST (not an MCP server): the `rest` transport is pure in-app HTTP with no
