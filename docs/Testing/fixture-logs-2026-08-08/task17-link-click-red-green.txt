@@ -1,0 +1,212 @@
+task #17 — link click blanks the main panel: the red-for-the-right-reason logs,
+the gates, and the ONE precondition this lane deliberately did NOT land.
+
+Base: worktree off main=876b0835. Method for the reds: the two prod edits were
+mechanically reverted to their pre-fix form (external routing back to nav_focus;
+the `focus` scheme precondition disabled) with the TEST files untouched, the
+suites re-run, then the fix restored and every suite re-run green. So each red
+below is the new test observing the OLD code, not a test written to fail.
+
+================================================================================
+RED 1 — the click-site routing table (unit, holon-gpui lib)
+================================================================================
+The pre-fix code's answer, verbatim: a web address routed to NAVIGATE.
+
+     Running unittests src/lib.rs (target/debug/deps/holon_gpui-152ebbda8f5b0298)
+
+running 2 tests
+test render::builders::rendered_text::tests::link_click_action_opens_mailto_rather_than_navigating ... FAILED
+test render::builders::rendered_text::tests::link_click_action_routes_each_kind_to_its_verb ... FAILED
+
+failures:
+
+---- render::builders::rendered_text::tests::link_click_action_opens_mailto_rather_than_navigating stdout ----
+
+thread 'render::builders::rendered_text::tests::link_click_action_opens_mailto_rather_than_navigating' (492361969) panicked at frontends/gpui/src/render/builders/rendered_text.rs:656:9:
+assertion `left == right` failed
+  left: Navigate("mailto:a@b.c")
+ right: OpenUrl("mailto:a@b.c")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- render::builders::rendered_text::tests::link_click_action_routes_each_kind_to_its_verb stdout ----
+
+thread 'render::builders::rendered_text::tests::link_click_action_routes_each_kind_to_its_verb' (492361970) panicked at frontends/gpui/src/render/builders/rendered_text.rs:596:9:
+assertion `left == right` failed: an external URL must go to the platform opener, never to navigation
+  left: Navigate("https://example.com")
+ right: OpenUrl("https://example.com")
+
+
+failures:
+    render::builders::rendered_text::tests::link_click_action_opens_mailto_rather_than_navigating
+    render::builders::rendered_text::tests::link_click_action_routes_each_kind_to_its_verb
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 122 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p holon-gpui --lib`
+
+
+================================================================================
+RED 2 — the windowed click (holon-gpui, tests/layout_editor.rs)
+================================================================================
+This is the load-bearing one: the windowed test reproduces Martin's dogfood
+dispatch VERBATIM, including the URL sitting in the block_id slot. Note the
+CONTROL (`clicking_an_entity_link_still_navigates`) is green in this same arm —
+so the red is the External routing, not "clicks are broken".
+
+warning: `holon-gpui` (bin "holon-gpui") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.14s
+warning: the following packages contain code that will be rejected by a future version of Rust: block v0.1.6, proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/layout_editor.rs (target/debug/deps/layout_editor-d833d936fac2b6ab)
+
+running 2 tests
+test windowed_caret::clicking_an_entity_link_still_navigates ... ok
+test windowed_caret::clicking_an_external_link_opens_the_url_instead_of_navigating ... FAILED
+
+failures:
+
+---- windowed_caret::clicking_an_external_link_opens_the_url_instead_of_navigating stdout ----
+
+thread 'windowed_caret::clicking_an_external_link_opens_the_url_instead_of_navigating' (492371051) panicked at frontends/gpui/tests/layout_editor.rs:409:9:
+an external URL must never be dispatched as a navigation target; got [OperationIntent { entity_name: Named("navigation"), op_name: "focus", params: {"block_id": String("https://example.com"), "region": String("main")} }]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    windowed_caret::clicking_an_external_link_opens_the_url_instead_of_navigating
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `-p holon-gpui --test layout_editor`
+
+
+================================================================================
+RED 3 — the navigation.focus precondition (holon, turso_storage_repros)
+================================================================================
+`expect_err ... : ()` = the op returned Ok. A URL was accepted as a focus target.
+
+running 2 tests
+test navigation_focus_refuses_unresolvable_target::focus_with_no_block_id_is_still_accepted ... ok
+test navigation_focus_refuses_unresolvable_target::focus_refuses_a_target_that_names_no_block ... FAILED
+
+failures:
+
+---- navigation_focus_refuses_unresolvable_target::focus_refuses_a_target_that_names_no_block stdout ----
+
+thread 'navigation_focus_refuses_unresolvable_target::focus_refuses_a_target_that_names_no_block' (492380089) panicked at crates/holon/tests/turso_storage_repros/navigation_focus_refuses_unresolvable_target.rs:130:50:
+focusing 'https://example.com' must be refused, not accepted: ()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    navigation_focus_refuses_unresolvable_target::focus_refuses_a_target_that_names_no_block
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 60 filtered out; finished in 0.04s
+
+error: test failed, to rerun pass `-p holon --test turso_storage_repros`
+
+
+================================================================================
+THE PRECONDITION THIS LANE DID NOT LAND, and the measurement that stopped it
+================================================================================
+The task asked navigation.focus to refuse a block_id that "does not parse as an
+entity URI OR does not exist". The parse/shape half landed. The EXISTENCE half
+was implemented, measured, and REVERTED — it is escalated, not forgotten.
+
+What was built: a `block_exists.sql` probe of `block_raw` (base table, not the
+matview, so a create->navigate chain sees its own insert) run before the history
+write, refusing with "no such block".
+
+What it did to the windowed suite (the whole reason it is not in the diff):
+
+    thread 'benchmark_windowed_per_case_boot_cost' panicked at
+    crates/holon-app/src/wiring.rs:453:22:
+    boot [component=session stage=session-resolve]: seed_default_layout failed:
+    Operation 'focus' on entity 'navigation' failed: navigation.focus: refusing
+    'block:journals' as a main focus target - no such block. Focusing it would
+    render an EMPTY panel with no error.
+
+    Summary 153/266 tests run: 140 passed, 13 failed
+    (every failure a windowed test that boots the app; all 13 the same message)
+
+WHY, root-caused rather than guessed (scout read, file:line):
+  - `block:journals` IS a real first-class block, not a synthetic target:
+    crates/holon-frontend/src/lib.rs:101-137 builds it (`JOURNALS_PAGE_ID`,
+    `set_page(true)`), and seed.rs:74 seeds "the journals machinery ...
+    regardless".
+  - In the LORO arm the row does not exist YET at focus time.
+    `ordering.create_in_tree` (crates/holon/src/core/sql_block_operations.rs:577-601
+    -> crates/holon-loro/src/block_cell_registry.rs:796) writes only the Loro
+    tree; seed.rs's SQL insert branch (:125-148) runs only when persisted ==
+    false, i.e. SqlOnly.
+  - crates/holon-app/src/wiring.rs:446-473 then projects the seeded layout into
+    `block_raw` AFTER `seed_default_layout` returns, by its own comment:
+    seed_default_layout "does not itself project to SQL". So boot focuses a
+    block whose SQL row lands strictly later. SqlOnly is unaffected.
+  - The invariant is nevertheless SEMANTICALLY right: assets/default/index.org:26-45
+    inner-joins `block b ... JOIN focus_roots fr ON b.id = fr.root_id`, so a
+    focus root with no block row renders empty by construction.
+
+So this is a BOOT-ORDERING fork, not a link-click bug, and its remedy touches
+every boot in the Loro arm: either hoist the wiring.rs:463 SQL flush above the
+focus dispatch, or split the focus out of `seed_default_layout` to after it, or
+make the Loro-arm seed mirror rows synchronously the way the SqlOnly branch
+does. Out of scope here; escalated with this evidence.
+
+It is PINNED, not merely written down: the last assertion of
+`focus_refuses_a_target_that_names_no_block` focuses
+`block:00000000-0000-4000-8000-000000000000` and `expect`s SUCCESS with the
+message "KNOWN HOLE: a nonexistent block: target is still accepted (existence
+unchecked)". The day existence is enforced, that line flips expect -> expect_err.
+
+Incidentally disclosed by the same measurement: on a Loro-arm first launch the
+main panel's very first focus root is a block SQL cannot yet join, so the
+opening frame is empty-by-construction until the flush lands. Not triaged in
+this lane.
+
+================================================================================
+GATES (all teed; logs under the lane's scratchpad, summaries verbatim)
+================================================================================
+cargo fmt --all --check ............ clean (no output)
+archlint ........................... 0 new (the 7 pre-existing
+                                     `no-underscore-params` in
+                                     frontends/gpui/tests/support/mod.rs were
+                                     converted to bare `_` as the rule's own
+                                     message prescribes; the file-scoped hook
+                                     blocks edits otherwise)
+cargo check -p holon-gpui -p holon-app ... Finished, 0 errors
+
+windowed suite (cargo nextest run -p holon-gpui --no-fail-fast):
+    Summary [67.647s] 266 tests run: 265 passed (10 slow), 1 failed, 0 skipped
+    FAIL capmap_hosts_windowed_sutlayout_over_real_geometry
+  == the documented baseline 266/265. The sole red is the known pass-with-note,
+  and its signature is the pre-existing one, not a new shape:
+    [GPUI] pre-warm timeout - window will open with loading state
+    ... inv-viewmodel-entity-ids-subset-of-data: phantom entity IDs
+    ... inv-matview-consistent-with-ref/root_layout: IVM MATVIEW GHOST ROW
+  With the reverted existence precondition this same suite was 140/13 — the
+  contrast is the reason that half is escalated.
+
+keystone-smoke (just keystone-smoke) ... 4 passed; 0 failed
+    [engagement summary] 19 invariants, each 4/4 (inv-no-observed-errors=4/4)
+
+hand-authored (just hand-authored) ... 9 passed; 0 failed
+    38 of 38 corpus cases PASSED (`hand-authored regression] PASSED` x38).
+    NOTE: the brief said 39; the corpus file
+    crates/holon-integration-tests/hand-authored-regressions/keystone.jsonl has
+    38 lines at this base and is UNTOUCHED by this lane (not in the diff), so 38
+    is the base's own count, not a dropped case.
+
+holon turso_storage_repros (full binary) ... 60 passed; 0 failed; 2 ignored
+    incl. tabs_close_cursor_follow (the other NavigationProvider consumer,
+    unaffected: it drives open_tab/activate/close, not focus)
+
+bash scripts/bugfunnel-check.sh:
+    OK ENVIRONMENT: header=150 == baseline+log=150 == rows=150
+    MISMATCH COVERAGE: header=93 baseline+log=93 rows=96 (baseline=37 log_sum=56)
+    OK PERCEPTION: header=67 == baseline+log=67 == rows=67
+    OK ORACLE: header=60 == baseline+log=60 == rows=60
+    ledger rows scanned: 373
+  Byte-identical to this base's pre-lane run: the documented 93-vs-96 COVERAGE
+  delta of 3 is PRESERVED and the row count is unchanged, because this lane
+  UPDATES the existing 2026-08-08 row's resolution cell and adds no new row.

@@ -239,6 +239,26 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
     manual_ops
 }
 
+/// Is `raw` shaped like something a region can focus?
+///
+/// A focus root reaches the screen only through `focus_roots JOIN block`, so
+/// the one admissible shape is a `block:` URI. Anything else — a web address, a
+/// link scheme with no view of its own — silently produced an empty panel,
+/// which is how a URL came to travel as a `block_id` at all. `Err` carries the
+/// reason as prose the caller splices into its own refusal.
+fn focus_target_is_a_block(raw: &str) -> std::result::Result<(), String> {
+    let uri = holon_api::EntityUri::parse(raw)
+        .map_err(|e| format!("it does not parse as an entity URI ({e})"))?;
+    if uri.scheme() != "block" {
+        return Err(format!(
+            "its scheme is '{}', not 'block' (an external URL or a bare link scheme names no \
+             focusable entity)",
+            uri.scheme()
+        ));
+    }
+    Ok(())
+}
+
 /// Navigation provider for managing region focus state
 pub struct NavigationProvider {
     db_handle: DbHandle,
@@ -265,6 +285,16 @@ impl NavigationProvider {
             region,
             block_id
         );
+
+        if let Some(id) = block_id {
+            focus_target_is_a_block(id).map_err(|why| {
+                format!(
+                    "navigation.focus: refusing '{id}' as a {region} focus target — {why}. A \
+                     focus root is joined to the block table to render, so a target that is not \
+                     a block URI renders an EMPTY panel instead of failing."
+                )
+            })?;
+        }
 
         let mut params = HashMap::new();
         params.insert("region".to_string(), Value::from(region));

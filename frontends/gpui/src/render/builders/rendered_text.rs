@@ -268,7 +268,7 @@ fn styled_run_render(
         .child(styled)
         .on_mouse_down(
             MouseButton::Left,
-            move |ev: &MouseDownEvent, _window, _cx| {
+            move |ev: &MouseDownEvent, _window, cx| {
                 let Ok(byte_offset) = layout.index_for_position(ev.position) else {
                     // Click past the glyphs: plain focus, caret defaults to
                     // end-of-text (disclosed degradation, never a fabricated
@@ -276,37 +276,17 @@ fn styled_run_render(
                     services.set_focus(Some(block.clone()));
                     return;
                 };
-                match link_at_offset(&segments, byte_offset) {
-                    // Scheme-shaped: only the LIVE registry knows whether it
-                    // names an entity. Unregistered resolves to nothing and
-                    // must never mint a page, so a click is an ordinary caret
-                    // placement.
-                    Some(target @ EntityRef::Scheme { .. }) => {
-                        match target.entity_uri() {
-                            Some(uri) if services.link_classifier().resolves_entity(&uri) => {
-                                services.dispatch_intent(nav_focus(uri.to_string()));
-                            }
-                            // Either the scheme is unregistered, or the target
-                            // names no entity at all — neither may mint a page,
-                            // so the click is ordinary caret placement.
-                            _ => services.set_focus_with_caret(
-                                block.clone(),
-                                styled_offset_to_buffer_offset(byte_offset),
-                            ),
-                        }
+                let action = link_click_action(
+                    link_at_offset(&segments, byte_offset),
+                    services.link_classifier(),
+                );
+                match action {
+                    LinkClickAction::OpenUrl(url) => cx.open_url(&url),
+                    LinkClickAction::Navigate(uri) => services.dispatch_intent(nav_focus(uri)),
+                    LinkClickAction::FollowDangling(name) => {
+                        services.follow_dangling_link(name, "main".to_string());
                     }
-                    Some(EntityRef::External { url }) => {
-                        services.dispatch_intent(nav_focus(url.clone()));
-                    }
-                    Some(EntityRef::Name { name }) => {
-                        // Dangling link: create the page chain for this name (lazy
-                        // page-create, 2026-07-10 links ruling) and navigate the
-                        // main region to the new leaf; the next render re-resolves
-                        // the healed junction and this segment becomes a
-                        // resolving `Scheme` target.
-                        services.follow_dangling_link(name.clone(), "main".to_string());
-                    }
-                    None => services.set_focus_with_caret(
+                    LinkClickAction::SeedCaret => services.set_focus_with_caret(
                         block.clone(),
                         styled_offset_to_buffer_offset(byte_offset),
                     ),
@@ -315,6 +295,52 @@ fn styled_run_render(
         )
         .into_any_element();
     (element, styled_runs)
+}
+
+/// What a click on a `rendered_text` offset must do, decided by the link kind
+/// under the cursor. Kept as a value so the routing is testable without a
+/// window: the whole class of bugs here is a target reaching the WRONG verb.
+#[derive(Debug, PartialEq, Clone)]
+enum LinkClickAction {
+    /// Hand a web address to the platform opener. A URL names no entity, so it
+    /// must never travel as a `navigation.focus` `block_id`.
+    OpenUrl(String),
+    /// Navigate the main region to this entity URI.
+    Navigate(String),
+    /// Create the page chain for a dangling wiki name, then navigate to it.
+    FollowDangling(String),
+    /// Not a followable link: place the caret at the clicked offset.
+    SeedCaret,
+}
+
+/// Route a clicked link target to its verb.
+///
+/// Two gates stand between a scheme-shaped target and navigation, and they ask
+/// different questions. `classifier` (the LIVE registry) answers "is this
+/// scheme registered at all" — an unregistered one must never mint a page. The
+/// `block` check answers "can a region actually SHOW this": a focus root
+/// reaches the screen only through `focus_roots JOIN block`, so a
+/// registered-but-viewless scheme (`tag:`, `person:`, a sidecar entity) would
+/// navigate to an empty panel. Both fall back to caret placement, the same
+/// benign outcome as clicking ordinary text.
+///
+/// Whether the named block INSTANCE exists is not knowable here (no synchronous
+/// read); `navigation.focus` owns that precondition and refuses loudly.
+fn link_click_action(
+    target: Option<&EntityRef>,
+    classifier: &holon_api::link_parser::LinkTargetClassifier,
+) -> LinkClickAction {
+    match target {
+        Some(EntityRef::External { url }) => LinkClickAction::OpenUrl(url.clone()),
+        Some(target @ EntityRef::Scheme { .. }) => match target.entity_uri() {
+            Some(uri) if classifier.resolves_entity(&uri) && uri.scheme() == "block" => {
+                LinkClickAction::Navigate(uri.to_string())
+            }
+            _ => LinkClickAction::SeedCaret,
+        },
+        Some(EntityRef::Name { name }) => LinkClickAction::FollowDangling(name.clone()),
+        None => LinkClickAction::SeedCaret,
+    }
 }
 
 /// Build a `navigation.focus` intent for the main region targeting `block_id`.
@@ -558,6 +584,84 @@ mod tests {
 
         assert!(link_at_offset(&segments, 0).is_none());
         assert!(link_at_offset(&segments, link_end).is_none());
+    }
+
+    /// The routing table, one row per link kind. `External` going anywhere near
+    /// `Navigate` is the bug that blanked the main panel (BugFunnel 2026-08-08,
+    /// task #17): a URL is not an entity id.
+    #[test]
+    fn link_click_action_routes_each_kind_to_its_verb() {
+        let classifier = holon_api::link_parser::LinkTargetClassifier::default();
+
+        assert_eq!(
+            link_click_action(
+                Some(&EntityRef::External {
+                    url: "https://example.com".into()
+                }),
+                &classifier
+            ),
+            LinkClickAction::OpenUrl("https://example.com".into()),
+            "an external URL must go to the platform opener, never to navigation"
+        );
+        assert_eq!(
+            link_click_action(
+                Some(&EntityRef::Scheme {
+                    raw: "block:abc-123".into()
+                }),
+                &classifier
+            ),
+            LinkClickAction::Navigate("block:abc-123".into())
+        );
+        assert_eq!(
+            link_click_action(
+                Some(&EntityRef::Scheme {
+                    raw: "cc-session:0f3a".into()
+                }),
+                &classifier
+            ),
+            LinkClickAction::SeedCaret,
+            "an unregistered scheme must not navigate (and must not mint a page)"
+        );
+        assert_eq!(
+            link_click_action(
+                Some(&EntityRef::Scheme {
+                    raw: "tag:rust".into()
+                }),
+                &classifier
+            ),
+            LinkClickAction::SeedCaret,
+            "`tag` is a REGISTERED scheme with no main-panel view — navigating to it would blank \
+             the panel, so it must not navigate either"
+        );
+        assert_eq!(
+            link_click_action(
+                Some(&EntityRef::Name {
+                    name: "Beta Page".into()
+                }),
+                &classifier
+            ),
+            LinkClickAction::FollowDangling("Beta Page".into())
+        );
+        assert_eq!(
+            link_click_action(None, &classifier),
+            LinkClickAction::SeedCaret
+        );
+    }
+
+    /// `mailto:` is an external address too, and its scheme shape is exactly
+    /// what would otherwise tempt the entity-scheme branch.
+    #[test]
+    fn link_click_action_opens_mailto_rather_than_navigating() {
+        let classifier = holon_api::link_parser::LinkTargetClassifier::default();
+        assert_eq!(
+            link_click_action(
+                Some(&EntityRef::External {
+                    url: "mailto:a@b.c".into()
+                }),
+                &classifier
+            ),
+            LinkClickAction::OpenUrl("mailto:a@b.c".into())
+        );
     }
 
     #[test]

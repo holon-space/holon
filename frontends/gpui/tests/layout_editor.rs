@@ -171,6 +171,7 @@ mod windowed_caret {
     use gpui::VisualTestContext;
     use gpui::point;
     use gpui::px;
+    use holon_api::EntityRef;
     use holon_api::EntityUri;
     use holon_api::InlineMark;
     use holon_api::MarkSpan;
@@ -372,6 +373,93 @@ mod windowed_caret {
             caret_offset(&services),
             Some(6),
             "clicking a non-link span in a styled block should seed the caret at the offset"
+        );
+    }
+
+    /// An `External` link target is a WEB address, not an entity: clicking it
+    /// hands the URL to the platform, and must never become a
+    /// `navigation.focus` whose `block_id` is that URL — the dispatch that
+    /// blanked the whole main panel with no ERROR line (BugFunnel 2026-08-08,
+    /// task #17). `cx.opened_url()` reads gpui's `TestPlatform` recorder, so
+    /// the assertion observes the open WITHOUT launching a real browser.
+    #[gpui::test]
+    fn clicking_an_external_link_opens_the_url_instead_of_navigating(cx: &mut TestAppContext) {
+        // "see the example site" — "example site" (offsets 8..20) is the link.
+        let marks = vec![MarkSpan::new(
+            8,
+            20,
+            InlineMark::Link {
+                target: EntityRef::External {
+                    url: "https://example.com".to_string(),
+                },
+                label: "example site".to_string(),
+            },
+        )];
+        let vm = rendered_text_vm("block:link-external", "see the example site", &marks);
+        let (services, bounds, vcx) = mount(cx, vm);
+
+        // Glyph 10 sits inside "example site".
+        click(vcx, glyph_center(&bounds, 10));
+
+        let nav_intents: Vec<_> = services
+            .recorded_intents()
+            .into_iter()
+            .filter(|i| i.entity_name == "navigation")
+            .collect();
+        assert!(
+            nav_intents.is_empty(),
+            "an external URL must never be dispatched as a navigation target; got {nav_intents:?}"
+        );
+        assert_eq!(
+            vcx.opened_url(),
+            Some("https://example.com".to_string()),
+            "clicking an external link should hand the URL to the platform opener"
+        );
+    }
+
+    /// The control for the test above: a link to a REGISTERED entity scheme
+    /// still navigates, and opens no URL. Pins that the external routing fix
+    /// did not disarm entity links.
+    #[gpui::test]
+    fn clicking_an_entity_link_still_navigates(cx: &mut TestAppContext) {
+        let target = "block:bbbb2222-0000-4000-8000-00000000000a";
+        let marks = vec![MarkSpan::new(
+            4,
+            9,
+            InlineMark::Link {
+                target: EntityRef::Scheme {
+                    raw: target.to_string(),
+                },
+                label: "other".to_string(),
+            },
+        )];
+        let vm = rendered_text_vm("block:link-entity", "see other now", &marks);
+        let (services, bounds, vcx) = mount(cx, vm);
+
+        click(vcx, glyph_center(&bounds, 6));
+
+        let nav_intents: Vec<_> = services
+            .recorded_intents()
+            .into_iter()
+            .filter(|i| i.entity_name == "navigation")
+            .collect();
+        assert_eq!(
+            nav_intents.len(),
+            1,
+            "a registered entity link should dispatch exactly one navigation intent"
+        );
+        assert_eq!(
+            nav_intents[0]
+                .params
+                .get("block_id")
+                .and_then(|v| v.as_string()),
+            Some(target),
+            "the navigation must target the entity URI"
+        );
+        assert_eq!(
+            vcx.opened_url(),
+            None,
+            "an entity link must not open a browser"
         );
     }
 }
