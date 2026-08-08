@@ -391,51 +391,15 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                 let changes: Vec<Change<StorageEntity>> =
                     batch.inner.items.into_iter().map(Into::into).collect();
                 let change_count = changes.len();
-                // Entities this batch makes visible — feeds the e2e
-                // interaction-latency correlator AFTER apply below, as
-                // `(id, WriteSeq?)` pairs. The row's own `id` carries its
-                // `write_seq` op-instance token (editor content writes); the
-                // `parent_id` correlation (a create/split op dispatched at a
-                // parent completes via its new child's row) is always tokenless.
-                let touched: Vec<(String, Option<crate::write_seq::WriteSeq>)> = changes
-                    .iter()
-                    .flat_map(|c| {
-                        let row_pairs = |data: &StorageEntity| {
-                            let seq = data
-                                .get("write_seq")
-                                .and_then(|v| v.as_i64())
-                                .filter(|&s| s > 0)
-                                .map(crate::write_seq::WriteSeq::from_i64);
-                            let mut out = Vec::new();
-                            if let Some(id) = data.get("id").and_then(|v| v.as_string()) {
-                                out.push((id.to_string(), seq));
-                            }
-                            if let Some(pid) = data.get("parent_id").and_then(|v| v.as_string()) {
-                                out.push((pid.to_string(), None));
-                            }
-                            out
-                        };
-                        match c {
-                            Change::Created { data, .. } => row_pairs(data),
-                            Change::Updated { id, data, .. } => {
-                                let mut pairs = row_pairs(data);
-                                if !pairs.iter().any(|(pid, _)| pid == id) {
-                                    pairs.push((id.clone(), None));
-                                }
-                                pairs
-                            }
-                            Change::Deleted { id, .. } => vec![(id.clone(), None)],
-                            Change::FieldsChanged { entity_id, .. } => {
-                                vec![(entity_id.clone(), None)]
-                            }
-                        }
-                    })
-                    .collect();
+                // Entities this batch makes visible, each tagged with the
+                // observable it is — feeds the e2e interaction-latency
+                // correlator AFTER apply below.
+                let touched = crate::latency_e2e::touched_entities(source_name, &changes);
                 let t_rows = std::time::Instant::now();
                 live.apply_changes(changes);
                 crate::latency_e2e::rows_delivered(
                     source_name,
-                    touched.iter().map(|(id, seq)| (id.as_str(), *seq)),
+                    touched.iter().map(|(id, obs)| (id.as_str(), *obs)),
                 );
                 if seq > 0 {
                     live.last_consumed_seq.store(seq, Ordering::SeqCst);
