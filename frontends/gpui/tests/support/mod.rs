@@ -197,6 +197,10 @@ pub struct TestServices {
     caret_seed: std::sync::Mutex<Option<(EntityUri, usize)>>,
     /// Last block handed to `set_focus` / `set_focus_with_caret`.
     focused: std::sync::Mutex<Option<EntityUri>>,
+    /// Every intent handed to `dispatch_intent`, in order. Lets a windowed
+    /// click test assert WHICH operation a click chose (or that it chose none)
+    /// — the stub's own `dispatch_intent` only logs.
+    dispatched_intents: std::sync::Mutex<Vec<OperationIntent>>,
 }
 
 impl TestServices {
@@ -210,7 +214,13 @@ impl TestServices {
             quiescent_runtime: false,
             caret_seed: std::sync::Mutex::new(None),
             focused: std::sync::Mutex::new(None),
+            dispatched_intents: std::sync::Mutex::new(Vec::new()),
         })
+    }
+
+    /// Every intent this fixture's click handlers dispatched, in order.
+    pub fn recorded_intents(&self) -> Vec<OperationIntent> {
+        self.dispatched_intents.lock().unwrap().clone()
     }
 
     /// Construct with a shared `BlockTreeRegistry` and a quiescent
@@ -229,6 +239,7 @@ impl TestServices {
             quiescent_runtime: true,
             caret_seed: std::sync::Mutex::new(None),
             focused: std::sync::Mutex::new(None),
+            dispatched_intents: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -245,6 +256,7 @@ impl TestServices {
             quiescent_runtime: false,
             caret_seed: std::sync::Mutex::new(None),
             focused: std::sync::Mutex::new(None),
+            dispatched_intents: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -296,9 +308,9 @@ impl BuilderServices for TestServices {
     }
     fn watch_query(
         &self,
-        _query: &str,
-        _lang: QueryLanguage,
-        _ctx: Option<QueryContext>,
+        _: &str,
+        _: QueryLanguage,
+        _: Option<QueryContext>,
     ) -> Result<holon_api::EnrichedChangeStream> {
         // Canned empty stream. `shared_live_query_build` (interpret) only
         // checks Ok-vs-Err then drops the stream, so an immediately-closed
@@ -327,6 +339,7 @@ impl BuilderServices for TestServices {
             .insert(id.to_string(), open);
     }
     fn dispatch_intent(&self, intent: OperationIntent) {
+        self.dispatched_intents.lock().unwrap().push(intent.clone());
         self.inner.dispatch_intent(intent)
     }
     fn present_op(
@@ -393,10 +406,10 @@ impl BuilderServices for TestServices {
     fn watch_query_live(
         &self,
         query: String,
-        _lang: QueryLanguage,
-        _render_expr: RenderExpr,
-        _query_context: Option<QueryContext>,
-        _services: Arc<dyn BuilderServices>,
+        _: QueryLanguage,
+        _: RenderExpr,
+        _: Option<QueryContext>,
+        _: Arc<dyn BuilderServices>,
     ) -> (EntityUri, holon_frontend::LiveBlock) {
         let (prefix, key) = if query.contains("backlinks") {
             ("backlink", "query:canned-backlinks")
