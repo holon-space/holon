@@ -303,11 +303,6 @@ impl BlockReader for InMemoryBlockStore {
             .cloned())
     }
 
-    /// No junction to resolve against — this double stores marks as given.
-    async fn resolve_link_marks(&self, _: &mut [Block]) -> anyhow::Result<()> {
-        Ok(())
-    }
-
     async fn iter_documents_with_blocks(&self) -> anyhow::Result<Vec<(EntityUri, Vec<Block>)>> {
         Ok(self
             .blocks
@@ -2320,11 +2315,6 @@ mod fast_path_loro_presence_tests {
         async fn get_block_authoritative(&self, id: &EntityUri) -> Result<Option<Block>> {
             self.inner.get_block_authoritative(id).await
         }
-        /// No junction to resolve against — this double stores marks as given.
-        async fn resolve_link_marks(&self, _: &mut [Block]) -> Result<()> {
-            Ok(())
-        }
-
         async fn iter_documents_with_blocks(&self) -> Result<Vec<(EntityUri, Vec<Block>)>> {
             self.inner.iter_documents_with_blocks().await
         }
@@ -2679,11 +2669,6 @@ mod initial_scan_batched_barrier_tests {
         async fn get_block_authoritative(&self, id: &EntityUri) -> Result<Option<Block>> {
             self.store.get_block_authoritative(id).await
         }
-        /// No junction to resolve against — this double stores marks as given.
-        async fn resolve_link_marks(&self, _: &mut [Block]) -> Result<()> {
-            Ok(())
-        }
-
         async fn iter_documents_with_blocks(&self) -> Result<Vec<(EntityUri, Vec<Block>)>> {
             self.store.iter_documents_with_blocks().await
         }
@@ -2724,11 +2709,6 @@ mod initial_scan_batched_barrier_tests {
         async fn get_block_authoritative(&self, id: &EntityUri) -> Result<Option<Block>> {
             self.store.get_block_authoritative(id).await
         }
-        /// No junction to resolve against — this double stores marks as given.
-        async fn resolve_link_marks(&self, _: &mut [Block]) -> Result<()> {
-            Ok(())
-        }
-
         async fn iter_documents_with_blocks(&self) -> Result<Vec<(EntityUri, Vec<Block>)>> {
             self.store.iter_documents_with_blocks().await
         }

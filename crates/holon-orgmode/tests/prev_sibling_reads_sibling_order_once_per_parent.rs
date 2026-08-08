@@ -128,10 +128,6 @@ impl BlockReader for RecordingReader {
         Ok(self.vault.blocks.get(id).cloned())
     }
 
-    async fn resolve_link_marks(&self, _: &mut [Block]) -> anyhow::Result<()> {
-        Ok(())
-    }
-
     async fn iter_documents_with_blocks(&self) -> anyhow::Result<Vec<(EntityUri, Vec<Block>)>> {
         unimplemented!("not exercised by the burst")
     }

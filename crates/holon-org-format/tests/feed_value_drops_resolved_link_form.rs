@@ -1,12 +1,10 @@
-//! The org bytes a block renders to depend on whether its `page` link mark was
-//! upgraded from `EntityRef::Name` to `EntityRef::Scheme`.
+//! A link mark's TARGET is byte-visible in org output: `EntityRef::Name`
+//! renders `[[<label>]]`, `EntityRef::Scheme` renders `[[<id>][<label>]]`.
 //!
-//! `CacheBlockReader::get_blocks` / `get_block_authoritative` run
-//! `substitute_resolved_links` — a documented RENDER-TIME upgrade that leaves
-//! the stored marks untouched. The `block` matview projects `b.marks`
-//! verbatim, so a `Block` taken from the block FEED never carries the upgrade.
-//! Any write-back that renders feed-sourced values therefore emits the
-//! pre-upgrade form, silently reverting `[[<id>][<label>]]` to `[[<label>]]`.
+//! Write-back renders the stored mark verbatim, so these bytes are decided by
+//! what the user authored — never by a resolution the renderer looked up, and
+//! never by which read produced the value. Anything that rewrites a target
+//! between store and disk shows up here.
 
 use holon_api::EntityRef;
 use holon_api::InlineMark;

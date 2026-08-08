@@ -157,20 +157,6 @@ impl BlockReader for LoroBlockReader {
         }
     }
 
-    async fn resolve_link_marks(&self, _: &mut [Block]) -> AnyhowResult<()> {
-        // Nothing to resolve against: link resolution is recorded in the
-        // `block_links` junction, which is a Turso table. The Loro tree stores
-        // marks exactly as authored and holds no name -> id index.
-        //
-        // Consequence, stated rather than hidden: in a Loro-backed (no-Turso)
-        // wiring a dangling `[[Some Page]]` renders as authored and never
-        // upgrades to `[[block:<id>][Some Page]]`. That is the truthful output
-        // for a store that does not know the link resolved — not a dropped
-        // upgrade. `LoroBlockReader` is wired only by the no-Turso test
-        // container, where the junction does not exist at all.
-        Ok(())
-    }
-
     async fn iter_documents_with_blocks(&self) -> AnyhowResult<Vec<(EntityUri, Vec<Block>)>> {
         // The implicit root document: top-level blocks live directly under the
         // tree root (`no_parent`), excluding any Page roots which are returned

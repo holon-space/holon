@@ -123,11 +123,6 @@ impl BlockReader for CountingBlockReader {
             .cloned())
     }
 
-    /// No junction to resolve against — this double stores marks as given.
-    async fn resolve_link_marks(&self, _: &mut [Block]) -> anyhow::Result<()> {
-        Ok(())
-    }
-
     async fn iter_documents_with_blocks(&self) -> anyhow::Result<Vec<(EntityUri, Vec<Block>)>> {
         Ok(vec![(
             self.doc_id.clone(),
@@ -1111,11 +1106,6 @@ impl BlockReader for ChildlessPageReader {
     async fn get_block_authoritative(&self, id: &EntityUri) -> anyhow::Result<Option<Block>> {
         Ok((self.page.id == *id).then(|| self.page.clone()))
     }
-    /// No junction to resolve against — this double stores marks as given.
-    async fn resolve_link_marks(&self, _: &mut [Block]) -> anyhow::Result<()> {
-        Ok(())
-    }
-
     async fn iter_documents_with_blocks(&self) -> anyhow::Result<Vec<(EntityUri, Vec<Block>)>> {
         Ok(vec![(self.page.id.clone(), vec![])])
     }
