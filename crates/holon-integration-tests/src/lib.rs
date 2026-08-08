@@ -30,6 +30,7 @@ pub mod debug_pause;
 pub use holon_pbt_core::cap_transition;
 pub mod fake_mcp_module;
 pub mod faults;
+pub mod libtest_list;
 /// `display_assertions` moved to `holon-layout-testing`. Re-exported here
 /// so call sites inside this crate can keep using
 /// `crate::display_assertions::*`. Only available with the `pbt` feature

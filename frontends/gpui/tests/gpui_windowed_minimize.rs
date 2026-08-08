@@ -11,9 +11,11 @@
 //! Captures must be POST-BOOT (the composed alphabet has no `StartApp`).
 //!
 //! `harness = false`. Run with:
-//!   cargo test -p holon-gpui --test gpui_windowed_minimize --features pbt
-//! Env: HOLON_CAPTURE=/abs.json (default: the composed keystone capture path);
-//!      HOLON_MINIMIZE_SIGNATURE=<substr> (default inv-blocks-match-ref/loro).
+//!   HOLON_CAPTURE=/abs.json cargo test -p holon-gpui \
+//!     --test gpui_windowed_minimize --features pbt
+//! Minimizing is OPT-IN: without `HOLON_CAPTURE` this is a disclosed no-op, so
+//! the suite stays hermetic no matter what sits in the gitignored `.captures/`.
+//! Env: HOLON_MINIMIZE_SIGNATURE=<substr> (default inv-blocks-match-ref/loro).
 
 #[path = "pbt_harness/mod.rs"]
 mod pbt_harness;
@@ -26,23 +28,22 @@ use holon_integration_tests::pbt::transitions::E2ETransition;
 use pbt_harness::windowed_wide::payload_signature_match;
 use pbt_harness::windowed_wide::replay_fixture_windowed;
 
-fn capture_path() -> String {
-    std::env::var("HOLON_CAPTURE").unwrap_or_else(|_| {
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../crates/holon-integration-tests/tests/.captures/general_e2e_composed_pbt.\
-             captured.json"
-        )
-        .to_string()
-    })
-}
-
 fn main() {
-    let path = capture_path();
-    if !std::path::Path::new(&path).exists() {
-        eprintln!("[minimize-window] {path} does not exist — no capture to minimize");
+    if pbt_harness::handled_list_protocol("gpui_windowed_minimize") {
         return;
     }
+    // A capture is by construction a RECORDED FAILING sequence, and `.captures/`
+    // is gitignored — so minimizing whatever happens to sit at a default path
+    // would flip the suite red from state version control cannot see. Minimizing
+    // is opt-in; an explicitly requested capture that is missing fails loud.
+    let Ok(path) = std::env::var("HOLON_CAPTURE") else {
+        eprintln!("[minimize-window] no capture requested; set HOLON_CAPTURE=<path> to minimize");
+        return;
+    };
+    assert!(
+        std::path::Path::new(&path).exists(),
+        "[minimize-window] HOLON_CAPTURE={path} does not exist"
+    );
     let signature = std::env::var("HOLON_MINIMIZE_SIGNATURE")
         .unwrap_or_else(|_| "inv-blocks-match-ref/loro".to_string());
     let fixture = json::load_file(std::path::Path::new(&path));

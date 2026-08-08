@@ -29,6 +29,9 @@ fn feature_path() -> String {
 }
 
 fn main() {
+    if pbt_harness::handled_list_protocol("gpui_gherkin_replay") {
+        return;
+    }
     let path = feature_path();
     let fixtures = GherkinFixtureSource::new(&path).load();
     assert!(
