@@ -134,6 +134,11 @@ pub enum DegradedKind {
     /// undo/redo must never look like a silent no-op when it actually blew
     /// up, so this is always surfaced instead of just logged.
     UndoFailed,
+    /// Red — a history entry no longer matched the state it was recorded
+    /// against, so it was DROPPED: that edit can never be undone again. This is
+    /// a data-trust event, not a failed request, so it says what was lost
+    /// rather than that the press did not work.
+    UndoStepDropped,
     /// Red — a slash-menu command was selected but failed (e.g. a template
     /// insert whose target block couldn't be resolved, or an empty page-root
     /// placement). Fail-loud: the selection consumed the key, so it must never
@@ -817,15 +822,53 @@ pub fn dispatch_accept(
         .detach();
 }
 
-/// Undo/redo dispatch, cmd-z / cmd-shift-z.
+/// What one undo/redo press owes the user, if anything.
+struct UndoDisclosure {
+    kind: DegradedKind,
+    detail: String,
+    /// A consumed no-op entry is a degraded press; a DROPPED step and a failed
+    /// request are errors.
+    warn_only: bool,
+}
+
+/// Map an undo/redo outcome to its disclosure. `None` = nothing to say: the
+/// press did its job, and for `Applied` the projection update is the feedback.
 ///
-/// `FrontendSession::undo`/`redo` currently return `Result<bool>` (`true` =
-/// applied, `false` = stack empty) — there is no richer outcome type wired
-/// into this workspace yet (a `holon_api::UndoOutcome` with a
-/// `StaleDropped { reason }` case exists in a sibling, not-yet-integrated
-/// workstream; once it lands, replace the `Ok(bool)` match below with a
-/// match on the enum and route `StaleDropped` through its own toast kind
-/// instead of `UndoFailed`).
+/// Extracted from the dispatch closure so the ROUTING — which outcome earns
+/// which toast kind and which words — is pinned by a test instead of living
+/// only inside a GPUI window callback. `StaleDropped` must NOT share a kind
+/// with the failure arms: a step that is gone forever and a press that did not
+/// work call for different actions from the reader.
+fn undo_disclosure(
+    label: &str,
+    outcome: &Result<Result<holon_api::UndoOutcome, String>, futures::channel::oneshot::Canceled>,
+) -> Option<UndoDisclosure> {
+    match outcome {
+        Ok(Ok(holon_api::UndoOutcome::Applied | holon_api::UndoOutcome::Empty)) => None,
+        Ok(Ok(holon_api::UndoOutcome::NoChange)) => Some(UndoDisclosure {
+            kind: DegradedKind::UndoFailed,
+            detail: format!("{label}: entry made no change (no-op)"),
+            warn_only: true,
+        }),
+        Ok(Ok(holon_api::UndoOutcome::StaleDropped { reason })) => Some(UndoDisclosure {
+            kind: DegradedKind::UndoStepDropped,
+            detail: holon_api::undo_step_dropped_detail(label, reason),
+            warn_only: false,
+        }),
+        Ok(Err(e)) => Some(UndoDisclosure {
+            kind: DegradedKind::UndoFailed,
+            detail: format!("{label}: {e}"),
+            warn_only: false,
+        }),
+        Err(_cancelled) => Some(UndoDisclosure {
+            kind: DegradedKind::UndoFailed,
+            detail: format!("{label}: task dropped before responding"),
+            warn_only: false,
+        }),
+    }
+}
+
+/// Undo/redo dispatch, cmd-z / cmd-shift-z.
 ///
 /// Same tokio-side-compute + oneshot + GPUI-side-toast shape as
 /// `dispatch_share`/`dispatch_accept` above: the engine call runs on the
@@ -860,99 +903,35 @@ fn dispatch_undo_redo(
         .spawn(async move |cx| {
             let outcome = rx.await;
             let label = if is_redo { "redo" } else { "undo" };
-            // Every arm settles the journal entry: `Ok` = the action ran (an
-            // empty stack is a legitimate outcome of running it), `Err` =
-            // it did not do its job, verbatim reason attached.
-            match outcome {
-                Ok(Ok(holon_api::UndoOutcome::Applied)) => {
-                    tracing::debug!("[{label}] applied");
-                    journal.settle(journal_seq, Ok(()));
-                }
-                Ok(Ok(holon_api::UndoOutcome::Empty)) => {
-                    tracing::debug!("[{label}] stack empty — no-op");
-                    journal.settle(journal_seq, Ok(()));
-                }
-                Ok(Ok(holon_api::UndoOutcome::NoChange)) => {
-                    // Fail-loud: the entry was consumed but changed nothing
-                    // (its inverse/forward replay was a no-op). Surface it so
-                    // the press never reads as a silent success — otherwise a
-                    // poison no-op entry silently eats undo presses while the
-                    // real target underneath stays unreachable (BugFunnel
-                    // 2026-07-13 undo row).
-                    tracing::warn!("[{label}] entry made no observable change (no-op)");
-                    journal.settle(
-                        journal_seq,
-                        Err(format!("{label}: entry made no change (no-op)")),
-                    );
-                    let _ = cx.update_window(window_handle, |_, _window, cx| {
-                        share_state.update(cx, |s, cx| {
-                            s.push_toast(DegradedToast {
-                                kind: DegradedKind::UndoFailed,
-                                shared_tree_id: "undo".into(),
-                                detail: format!("{label}: entry made no change (no-op)"),
-                                condition: None,
-                            });
-                            cx.emit(NotifyShareUi);
-                            cx.notify();
+            let disclosure = undo_disclosure(label, &outcome);
+            match &disclosure {
+                None => tracing::debug!("[{label}] ran with nothing to disclose"),
+                Some(d) if d.warn_only => tracing::warn!("[{label}] {}", d.detail),
+                Some(d) => tracing::error!("[{label}] {}", d.detail),
+            }
+            // Every press settles the journal entry: no disclosure = the action
+            // ran (an empty stack is a legitimate outcome of running it), a
+            // disclosure = it did not do its job, verbatim reason attached.
+            journal.settle(
+                journal_seq,
+                match &disclosure {
+                    None => Ok(()),
+                    Some(d) => Err(d.detail.clone()),
+                },
+            );
+            if let Some(d) = disclosure {
+                let _ = cx.update_window(window_handle, |_, _window, cx| {
+                    share_state.update(cx, |s, cx| {
+                        s.push_toast(DegradedToast {
+                            kind: d.kind,
+                            shared_tree_id: "undo".into(),
+                            detail: d.detail,
+                            condition: None,
                         });
+                        cx.emit(NotifyShareUi);
+                        cx.notify();
                     });
-                }
-                Ok(Ok(holon_api::UndoOutcome::StaleDropped { reason })) => {
-                    tracing::error!("[{label}] entry stale — dropped: {reason}");
-                    journal.settle(
-                        journal_seq,
-                        Err(format!("{label}: history entry stale — dropped ({reason})")),
-                    );
-                    let _ = cx.update_window(window_handle, |_, _window, cx| {
-                        share_state.update(cx, |s, cx| {
-                            s.push_toast(DegradedToast {
-                                kind: DegradedKind::UndoFailed,
-                                shared_tree_id: "undo".into(),
-                                detail: format!(
-                                    "{label}: history entry stale — dropped ({reason})"
-                                ),
-                                condition: None,
-                            });
-                            cx.emit(NotifyShareUi);
-                            cx.notify();
-                        });
-                    });
-                }
-                Ok(Err(e)) => {
-                    tracing::error!("[{label}] failed: {e}");
-                    journal.settle(journal_seq, Err(format!("{label}: {e}")));
-                    let _ = cx.update_window(window_handle, |_, _window, cx| {
-                        share_state.update(cx, |s, cx| {
-                            s.push_toast(DegradedToast {
-                                kind: DegradedKind::UndoFailed,
-                                shared_tree_id: "undo".into(),
-                                detail: format!("{label}: {e}"),
-                                condition: None,
-                            });
-                            cx.emit(NotifyShareUi);
-                            cx.notify();
-                        });
-                    });
-                }
-                Err(_cancelled) => {
-                    tracing::error!("[{label}] task dropped before responding");
-                    journal.settle(
-                        journal_seq,
-                        Err(format!("{label}: task dropped before responding")),
-                    );
-                    let _ = cx.update_window(window_handle, |_, _window, cx| {
-                        share_state.update(cx, |s, cx| {
-                            s.push_toast(DegradedToast {
-                                kind: DegradedKind::UndoFailed,
-                                shared_tree_id: "undo".into(),
-                                detail: format!("{label}: task dropped before responding"),
-                                condition: None,
-                            });
-                            cx.emit(NotifyShareUi);
-                            cx.notify();
-                        });
-                    });
-                }
+                });
             }
         })
         .detach();
@@ -1658,6 +1637,11 @@ fn render_toast_stack(
                 crate::icon("⛔"),
                 "Undo/redo failed",
             ),
+            DegradedKind::UndoStepDropped => (
+                gpui::rgba(0xef4444ff),
+                crate::icon("⛔"),
+                "History step dropped — that edit can no longer be undone",
+            ),
             DegradedKind::CommandFailed => {
                 (gpui::rgba(0xef4444ff), crate::icon("⛔"), "Command failed")
             }
@@ -1805,6 +1789,7 @@ fn render_error_modal(
 
 #[cfg(test)]
 mod tests {
+    use futures::channel::oneshot;
     use holon::sync::ShareDegraded;
     use holon::sync::ShareDegradedReason;
 
@@ -1897,6 +1882,83 @@ mod tests {
         assert_eq!(s.toasts.len(), 1);
         assert_eq!(s.toasts[0].kind, DegradedKind::UndoFailed);
         assert!(s.toasts[0].detail.contains("operation engine"));
+    }
+
+    /// A dropped history entry is a data-trust event: the step is gone for
+    /// good. Its disclosure must lead with the loss, carry the engine's
+    /// verbatim reason, and must NOT reuse the generic "undo/redo failed" kind
+    /// — a user who reads that assumes the press simply did not work and
+    /// presses again. This drives the ROUTING the dispatcher uses, so changing
+    /// the kind at the routing site (not just the words) reds here.
+    #[test]
+    fn stale_dropped_entry_routes_to_its_own_kind_and_discloses_the_lost_step() {
+        let reason = "state changed under undo: block:5260462b.content expected String(\"second \
+                      lin\") but found Some(String(\"second li\"))";
+        let outcome: Result<Result<holon_api::UndoOutcome, String>, oneshot::Canceled> =
+            Ok(Ok(holon_api::UndoOutcome::StaleDropped {
+                reason: reason.to_string(),
+            }));
+
+        let d = super::undo_disclosure("undo", &outcome).expect("a dropped step must disclose");
+        assert_eq!(
+            d.kind,
+            DegradedKind::UndoStepDropped,
+            "a lost step must not share a toast kind with a failed press"
+        );
+        assert!(
+            d.detail.contains("can no longer be undone"),
+            "the disclosure must name the loss, got {:?}",
+            d.detail
+        );
+        assert!(
+            d.detail.contains(reason),
+            "the disclosure must carry the engine's reason verbatim, got {:?}",
+            d.detail
+        );
+        assert!(!d.warn_only, "a lost step is an error, not a warning");
+
+        // …and the routed disclosure is what reaches the toast stack.
+        let mut s = ShareUiState::new();
+        s.push_toast(DegradedToast {
+            kind: d.kind,
+            shared_tree_id: "undo".into(),
+            detail: d.detail,
+            condition: None,
+        });
+        assert_eq!(s.toasts.len(), 1);
+        assert_eq!(s.toasts[0].kind, DegradedKind::UndoStepDropped);
+    }
+
+    /// The arms that must stay silent, and the arms that must not: a press that
+    /// did its job says nothing, everything else discloses. Without this,
+    /// moving an outcome into the silent arm would go unnoticed.
+    #[test]
+    fn only_a_press_that_did_its_job_stays_silent() {
+        let silent: Vec<Result<Result<holon_api::UndoOutcome, String>, oneshot::Canceled>> = vec![
+            Ok(Ok(holon_api::UndoOutcome::Applied)),
+            Ok(Ok(holon_api::UndoOutcome::Empty)),
+        ];
+        for outcome in &silent {
+            assert!(
+                super::undo_disclosure("undo", outcome).is_none(),
+                "{outcome:?} must not toast"
+            );
+        }
+
+        let loud: Vec<Result<Result<holon_api::UndoOutcome, String>, oneshot::Canceled>> = vec![
+            Ok(Ok(holon_api::UndoOutcome::NoChange)),
+            Ok(Err("no operation engine wired".to_string())),
+            Err(oneshot::Canceled),
+        ];
+        for outcome in &loud {
+            let d = super::undo_disclosure("undo", outcome)
+                .unwrap_or_else(|| panic!("{outcome:?} must disclose"));
+            assert_eq!(
+                d.kind,
+                DegradedKind::UndoFailed,
+                "{outcome:?} is a failed press, not a lost step"
+            );
+        }
     }
 
     #[test]

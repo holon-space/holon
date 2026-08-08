@@ -19,12 +19,17 @@ path = "src/lib.rs"
 [features]
 default = ["iroh-sync"]
 # Enable test helpers for integration tests that need access to test utilities
-test-helpers = ["dep:tempfile", "holon-loro/test-helpers", "testing"]
+test-helpers = ["dep:tempfile", "holon-loro/test-helpers", "testing", "test-yield"]
 # Enable proptest-backed test utilities (`holon::testing`, `api::pbt_infrastructure`).
 # Keeps proptest / proptest-state-machine out of production builds.
 testing = ["dep:proptest", "dep:proptest-state-machine"]
 # Enable Iroh P2P transport for syncing Loro documents across devices
 iroh-sync = ["iroh", "base64", "holon-loro/iroh-sync"]
+# Widen the compound write step at the two points a competing write could
+# overtake it (see `EntityWriteLocks`), so the interleave a compound must
+# survive is forceable instead of a stopwatch race. Test-only: it changes
+# nothing but WHEN a task may be preempted. Implied by `test-helpers`.
+test-yield = []
 
 [dependencies]
 loro.workspace = true
@@ -155,6 +160,14 @@ name = "undo_move_block_e2e"
 required-features = ["test-helpers"]
 
 [[test]]
+name = "undo_concurrent_keystrokes"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "undo_compound_interleave"
+required-features = ["test-helpers"]
+
+[[test]]
 name = "undo_inverse_wave1"
 required-features = ["test-helpers"]
 
@@ -165,4 +178,3 @@ required-features = ["test-helpers"]
 [[test]]
 name = "query_history_mcp"
 required-features = ["test-helpers"]
-

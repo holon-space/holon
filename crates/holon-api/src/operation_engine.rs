@@ -169,6 +169,19 @@ pub enum UndoOutcome {
     NoChange,
 }
 
+/// The disclosure text for [`UndoOutcome::StaleDropped`]: what the user LOST
+/// first, the state divergence that caused it second. `label` is `"undo"` or
+/// `"redo"`.
+///
+/// Lives here, beside the outcome, because every surface must say the same
+/// thing — the GPUI toast, the dispatch journal a test or an agent reads, and
+/// the MCP reply. A dropped entry is permanent, so a surface that says only
+/// "skipped" or "failed" invites the user to press again for a step that can
+/// never come back.
+pub fn undo_step_dropped_detail(label: &str, reason: &str) -> String {
+    format!("{label}: history step dropped — this edit can no longer be undone ({reason})")
+}
+
 impl UndoOutcome {
     /// Back-compat helper: did an entry actually apply?
     pub fn applied(&self) -> bool {
