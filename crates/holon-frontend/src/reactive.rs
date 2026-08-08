@@ -193,6 +193,18 @@ pub trait BuilderServices: Send + Sync {
         None
     }
 
+    /// Record the user's expand/collapse intent for `target_id` — the write
+    /// side of [`Self::block_expanded_view`], and the ONLY store the
+    /// `expand_toggle` gate is seeded from. Every affordance that opens or
+    /// closes a toggle (the frontend chevron handler, the test drivers) must
+    /// write it, or the next structural rebuild re-seeds from the default and
+    /// discards the gesture. Default no-op, paired with the default-`None`
+    /// reader: a services impl without a store reads nothing and writes
+    /// nowhere.
+    fn set_block_expanded_view(&self, target_id: &str, expanded: bool) {
+        let _ = (target_id, expanded);
+    }
+
     /// Look up the *explicitly stored* widget state, or `None` when the user
     /// never toggled it. The default treats every widget as explicit (i.e.
     /// preserves the legacy open-by-default semantics); the real session-backed
@@ -3075,6 +3087,10 @@ impl BuilderServices for ReactiveEngine {
 
     fn block_expanded_view(&self, target_id: &str) -> Option<bool> {
         self.ui_state.block_expanded_view(target_id)
+    }
+
+    fn set_block_expanded_view(&self, target_id: &str, expanded: bool) {
+        self.ui_state.set_block_expanded_view(target_id, expanded);
     }
 
     fn widget_state_explicit(&self, id: &str) -> Option<WidgetState> {

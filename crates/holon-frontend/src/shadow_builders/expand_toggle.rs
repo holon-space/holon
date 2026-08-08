@@ -59,6 +59,7 @@ holon_macros::widget_builder! {
         // profile-driven embedded pages, which carry no `collapsed` document
         // field. Precedence: explicit store entry > default_expanded > false.
         let seed_expanded = ba.services.block_expanded_view(&target_id).unwrap_or(default_expanded);
+        let seed_target = target_id.clone();
         let expanded = futures_signals::signal::Mutable::new(seed_expanded);
 
         let header = header
@@ -119,12 +120,21 @@ holon_macros::widget_builder! {
         // `state_toggle`.
         if let Some(runtime) = ba.services.try_runtime_handle() {
             let expanded_handle = expanded.clone();
+            let follow_services = ba.services.clone_arc();
+            let follow_target = seed_target.clone();
             let mut last = initial_collapsed;
             let task = runtime.spawn(data.signal_cloned().for_each(move |row| {
                 let collapsed = row_collapsed(&row);
                 if collapsed != last {
                     last = collapsed;
                     expanded_handle.set(!collapsed);
+                    // Only the FOLD edge is durable. `collapsed` belongs to the
+                    // outline row's own chevron, so propagating the UNFOLD edge
+                    // would let unfolding the outline open — and eagerly load —
+                    // a nested page nobody clicked.
+                    if collapsed {
+                        follow_services.set_block_expanded_view(&follow_target, false);
+                    }
                 }
                 async {}
             }));

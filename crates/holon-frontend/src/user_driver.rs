@@ -837,8 +837,10 @@ impl UserDriver for ReactiveEngineDriver {
     /// the headless test gate (`set_expand_toggle_gate`). Fails loud if no
     /// matching node exists (a shadow_builder / interpret regression). The
     /// flipped `Mutable` is reborn on the next `snapshot_reactive` (the tree
-    /// is rebuilt per call); the durable half now lives in the `collapsed`
-    /// field.
+    /// is rebuilt per call), so BOTH paths below record the same view-local
+    /// expansion store the production chevron handler writes — the store the
+    /// gate is seeded from. Anything this driver writes that production does
+    /// not is a harness/production divergence at the affordance under test.
     async fn set_block_expanded(&self, target: &EntityUri, expanded: bool) -> Result<()> {
         let root_uri = holon_api::root_layout_block_uri();
         let target_str = target.as_str();
@@ -847,15 +849,19 @@ impl UserDriver for ReactiveEngineDriver {
         // Explicit / mounted toggle: a block whose render expr carries
         // `expand_toggle` renders a live gate directly in the one-shot
         // root-layout snapshot AND collapse is DOCUMENT state (2026-07-11
-        // ruling). Flip the node gate for an immediate mounted re-render and
-        // dispatch `set_field(collapsed)` so the SUT block row changes. This
-        // path is unchanged; the view-local store below stays empty for it.
+        // ruling). Flip the node gate for an immediate mounted re-render,
+        // record the view-local seed, and dispatch `set_field(collapsed)` so
+        // the SUT block row changes — the same three writes the production
+        // chevron handler performs.
         if let Some(gate) = self
             .engine
             .snapshot_reactive(&root_uri)
             .find_expand_toggle_gate(bare)
         {
             gate.set(expanded);
+            self.engine
+                .ui_state()
+                .set_block_expanded_view(bare, expanded);
             let intent = OperationIntent::set_field(
                 &EntityName::new("block"),
                 "set_field",
@@ -868,11 +874,11 @@ impl UserDriver for ReactiveEngineDriver {
         }
 
         // Profile-driven embedded page: the `expand_toggle` is synthesized
-        // during recursive resolve (no gate in a one-shot snapshot) and carries
-        // no `collapsed` document field, so expansion is purely VIEW state
-        // (RATIFIED 2026-07-16, Option B). Record the intent in the engine's
-        // non-persistent view store — the `expand_toggle` builder seeds its gate
-        // from it on the next (re)build — and bump the render generation.
+        // during recursive resolve (no gate in a one-shot snapshot), so there is
+        // no `Mutable` to poke and the view store is the whole gesture
+        // (RATIFIED 2026-07-16, Option B). The `expand_toggle` builder seeds its
+        // gate from it on the next (re)build; the write bumps the render
+        // generation.
         self.engine
             .ui_state()
             .set_block_expanded_view(bare, expanded);
