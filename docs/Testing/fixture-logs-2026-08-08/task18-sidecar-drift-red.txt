@@ -1,0 +1,25 @@
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.pathfinder_simd
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.psm
+warning: workspace (manifest) generated 2 warnings
+   Compiling holon-mcp-client v0.1.0 (/Users/martin/Workspaces/pkm/holon/.claude/worktrees/agent-a4049774bffc8608d/crates/holon-mcp-client)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.92s
+     Running tests/sidecar_drift_red_probe.rs (target/debug/deps/sidecar_drift_red_probe-c9bdef0623c83cdd)
+
+running 1 test
+test a_stale_installed_claude_history_does_not_shadow_the_shipped_sidecar ... FAILED
+
+failures:
+
+---- a_stale_installed_claude_history_does_not_shadow_the_shipped_sidecar stdout ----
+
+thread 'a_stale_installed_claude_history_does_not_shadow_the_shipped_sidecar' (497465183) panicked at crates/holon-mcp-client/tests/sidecar_drift_red_probe.rs:63:5:
+the app must run the sidecar it ships, not a copy installed before `fetch_contract` was required — this is the drift that makes the provider permanently unavailable
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    a_stale_installed_claude_history_does_not_shadow_the_shipped_sidecar
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p holon-mcp-client --test sidecar_drift_red_probe`

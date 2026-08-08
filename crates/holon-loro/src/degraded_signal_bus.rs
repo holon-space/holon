@@ -117,6 +117,22 @@ pub enum ShareDegradedReason {
         integration: String,
         auth_url: String,
     },
+    /// An INSTALLED sidecar for a provider this build ships could not be
+    /// honored, so the bundled sidecar was used instead. The integration works;
+    /// what is degraded is the user's expectation that the file they installed
+    /// is what runs. Disclosed with both paths and the incompatibility so the
+    /// remedy (delete the file, or re-author it against this build's
+    /// `schema_version`) needs no guessing. `shared_tree_id` carries the
+    /// integration name.
+    ///
+    /// All-clear: none within a session — the choice is made once at boot. The
+    /// condition ends when the installed file is fixed and the app restarts.
+    IntegrationSidecarSuperseded {
+        integration: String,
+        installed_path: String,
+        bundled_source: String,
+        incompatibility: String,
+    },
 }
 
 impl ShareDegradedReason {
@@ -125,6 +141,7 @@ impl ShareDegradedReason {
     pub const FOREIGN_ID_COLLISION: &'static str = "foreign-id-collision";
     pub const INTEGRATION_CONNECT_FAILED: &'static str = "integration-connect-failed";
     pub const INTEGRATION_NEEDS_AUTH: &'static str = "integration-needs-auth";
+    pub const INTEGRATION_SIDECAR_SUPERSEDED: &'static str = "integration-sidecar-superseded";
     pub const ORG_INGEST_FAILED: &'static str = "org-ingest-failed";
     pub const REHYDRATION_FAILED: &'static str = "rehydration-failed";
     pub const SHARED_SUBTREE_NOT_MATERIALIZED: &'static str = "shared-subtree-not-materialized";
@@ -142,6 +159,7 @@ impl ShareDegradedReason {
         match self {
             Self::IntegrationConnectFailed { .. } => Self::INTEGRATION_CONNECT_FAILED,
             Self::IntegrationNeedsAuth { .. } => Self::INTEGRATION_NEEDS_AUTH,
+            Self::IntegrationSidecarSuperseded { .. } => Self::INTEGRATION_SIDECAR_SUPERSEDED,
             Self::SnapshotSaveFailed(_) => Self::SNAPSHOT_SAVE_FAILED,
             Self::SnapshotLoadFailed(_) => Self::SNAPSHOT_LOAD_FAILED,
             Self::RehydrationFailed(_) => Self::REHYDRATION_FAILED,

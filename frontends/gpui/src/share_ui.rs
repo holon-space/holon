@@ -170,6 +170,10 @@ pub enum DegradedKind {
     /// Red — an MCP integration provider is waiting on an OAuth grant. Same
     /// blank-page consequence, but the user can fix it via the carried URL.
     IntegrationNeedsAuth,
+    /// Yellow — an installed sidecar was not honored and the copy bundled with
+    /// this build was used instead. The integration works; the file the user
+    /// installed does not, so the detail names both paths and the mismatch.
+    IntegrationSidecarSuperseded,
     /// A plain info-style toast (used for "ticket copied").
     Info,
 }
@@ -332,6 +336,22 @@ impl ShareUiState {
                     kind: DegradedKind::IntegrationNeedsAuth,
                     shared_tree_id: event.shared_tree_id,
                     detail: format!("{integration}: authorize at {auth_url}"),
+                    condition: Some(condition.clone()),
+                });
+            }
+            ShareDegradedReason::IntegrationSidecarSuperseded {
+                integration,
+                installed_path,
+                bundled_source,
+                incompatibility,
+            } => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::IntegrationSidecarSuperseded,
+                    shared_tree_id: event.shared_tree_id,
+                    detail: format!(
+                        "{integration}: {installed_path} was ignored ({incompatibility}); running \
+                         the bundled {bundled_source}"
+                    ),
                     condition: Some(condition.clone()),
                 });
             }
@@ -1676,6 +1696,11 @@ fn render_toast_stack(
                 crate::icon("⛔"),
                 "Integration needs authorization",
             ),
+            DegradedKind::IntegrationSidecarSuperseded => (
+                gpui::rgba(0xfbbf24ff),
+                "⚠",
+                "Installed integration file ignored — using the bundled one",
+            ),
             DegradedKind::Info => (gpui::rgba(0x60a5faff), "i", "Info"),
         };
         let close_state = share_state.clone();
@@ -1994,6 +2019,43 @@ mod tests {
         assert_eq!(s.toasts[0].kind, DegradedKind::IntegrationNeedsAuth);
         assert!(s.toasts[0].detail.contains("linear"));
         assert!(s.toasts[0].detail.contains("https://linear.app/oauth"));
+    }
+
+    /// The supersede toast is the ONLY place a user learns that the file they
+    /// installed is not the one running, so its detail must carry all four
+    /// facts needed to act: which provider, which file was ignored, why, and
+    /// what ran instead.
+    #[test]
+    fn apply_degraded_routes_sidecar_superseded_to_toast() {
+        let mut s = ShareUiState::new();
+        s.apply_degraded(ShareDegraded {
+            shared_tree_id: "claude-history".into(),
+            reason: ShareDegradedReason::IntegrationSidecarSuperseded {
+                integration: "claude-history".into(),
+                installed_path: "/home/u/.config/holon/integrations/claude-history.yaml".into(),
+                bundled_source: "docs/integrations/claude-history.yaml".into(),
+                incompatibility: "it declares schema_version none but this build's sidecar format \
+                                  is schema_version 1"
+                    .into(),
+            },
+        });
+        assert_eq!(s.toasts.len(), 1);
+        assert_eq!(s.toasts[0].kind, DegradedKind::IntegrationSidecarSuperseded);
+        let detail = &s.toasts[0].detail;
+        assert!(detail.contains("claude-history"), "provider: {detail}");
+        assert!(
+            detail.contains("/home/u/.config/holon/integrations/claude-history.yaml"),
+            "installed path: {detail}"
+        );
+        assert!(
+            detail.contains("schema_version"),
+            "incompatibility: {detail}"
+        );
+        assert!(
+            detail.contains("docs/integrations/claude-history.yaml"),
+            "bundled source: {detail}"
+        );
+        assert!(s.quarantines.is_empty());
     }
 
     #[test]
