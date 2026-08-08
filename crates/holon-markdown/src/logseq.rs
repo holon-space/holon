@@ -321,21 +321,6 @@ impl FileFormatAdapter for LogseqMarkdownAdapter {
         false
     }
 
-    fn check_writeback_lossless(
-        &self,
-        path: &Path,
-        _source: &str,
-        _rendered: &str,
-        _sibling_renders: &[(&Path, &str)],
-        _sanctioned_removals: &std::collections::HashSet<String>,
-        _root: &Path,
-    ) -> Result<()> {
-        anyhow::bail!(
-            "LogseqMarkdownAdapter (Tier R/O) refuses write-back to foreign vault file {}",
-            path.display()
-        )
-    }
-
     fn writeback_drops(
         &self,
         path: &Path,

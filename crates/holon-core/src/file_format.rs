@@ -128,45 +128,27 @@ pub trait FileFormatAdapter: Send + Sync {
     /// `update_metadata` only when `true`.
     fn sync_document_metadata(&self, parsed: &Block, persisted: &mut Block) -> bool;
 
-    /// Refuse a write-back that would SILENTLY drop blocks present on disk
-    /// (BugFunnel row 28, P0 data-loss class; ADR 0025 op-grounding).
+    /// Which blocks a write-back would SILENTLY drop from disk (BugFunnel row
+    /// 28, P0 data-loss class; ADR 0025 op-grounding) — as DATA, not an error.
+    /// Real parse/IO defects are still `Err`, never folded into the verdict.
     ///
     /// `source` is the on-disk file about to be overwritten, `rendered` is the
     /// projection about to be written over it. A block present in `source` but
     /// absent from `rendered` is GROUNDED — and therefore not loss — when it is
-    /// present in any `sibling_renders` entry (the sibling file a child page
-    /// de-inlined into, folded into the surviving union) OR its id is in
-    /// `sanctioned_removals` (the triggering delta's `Remove` set; a genuine
-    /// user deletion). A block grounded by none is loss: returns `Err`
-    /// (loud, naming the file + dropped blocks) and the controller
-    /// quarantines the file so no write-back path rewrites the truncated
-    /// state.
+    /// present in any `sibling_renders` entry (the file that block now lives
+    /// in, folded into the surviving union) OR its id is in
+    /// `sanctioned_removals` (the triggering delta's `Remove` set, or an
+    /// authority-proven move). A block grounded by neither is loss: the
+    /// caller refuses the write and quarantines the file so no write-back
+    /// path rewrites the truncated state.
     ///
-    /// The ingest boundary and the recovery path pass empty `sibling_renders` /
-    /// `sanctioned_removals` as appropriate (they hold no op). A LEGAL
-    /// canonical reformat and a 3-way text merge both return `Ok(())` — the
-    /// anchor is block preservation, not byte equality. `root` is the vault
-    /// root used for stable file-id derivation while parsing.
-    fn check_writeback_lossless(
-        &self,
-        path: &Path,
-        source: &str,
-        rendered: &str,
-        sibling_renders: &[(&Path, &str)],
-        sanctioned_removals: &HashSet<String>,
-        root: &Path,
-    ) -> Result<()>;
-
-    /// Same grounding as [`check_writeback_lossless`], but returns the
-    /// ungrounded drops as DATA (a [`WritebackDropVerdict`]) instead of an
-    /// error. Real parse/IO defects are still `Err` (never folded into the
-    /// verdict).
-    ///
-    /// The block-driven write-back paths need the drops as data because they
-    /// widen the grounding first (the sibling-file union is resolved per absent
-    /// block, and an unresolvable own-file path is its own hard veto) before
-    /// deciding. Their verdict is the same as the ingest boundary's: any
-    /// remaining ungrounded drop refuses the write and quarantines the file.
+    /// EVERY write-back boundary — ingest re-project and block-driven alike —
+    /// assembles that grounding from the same authority
+    /// (`FileSyncController::writeback_drops`), so no boundary can accidentally
+    /// ground against the file's own projection alone. A LEGAL canonical
+    /// reformat and a 3-way text merge both drop nothing — the anchor is block
+    /// preservation, not byte equality. `root` is the vault root used for
+    /// stable file-id derivation while parsing.
     fn writeback_drops(
         &self,
         path: &Path,

@@ -10,7 +10,9 @@ ZERO-TOLERANCE (`FileSyncController::veto_ungrounded_removals`): the former
 mass-truncation threshold (`max(3, 25%)`) let an unsanctioned removal of a few blocks
 through silently, which destroyed the blocks a folder companion authored under an inlined
 foreign page root (BugFunnel 2026-08-01). A removal grounded by neither a delivered op nor
-a sibling file now refuses the write and quarantines the file whatever its size.
+a sibling file now refuses the write and quarantines the file whatever its size. Since
+2026-08-09 the ingest re-project shares that one grounding assembly and recognises RELOCATION
+on store-authority evidence — see the amendment at the end.
 **Context:** first-principles session on block loss, 2026-07-12; empirical basis: the seven
 block-loss classes found and fixed 2026-07-10..12.
 
@@ -74,3 +76,28 @@ conformance tripwires (not patches):
   "delete defensive code" sweeps.
 - Future subsystems (connectors/twins, rules) inherit the rule: emit ops, never mutate state
   behind the projection's back.
+
+## Amendment 2026-08-09 — the ingest boundary grounds on store authority
+
+The external-file boundary above is still intent-less, and its guard is still permanent. What
+changed is the EVIDENCE that guard is allowed to use.
+
+Grounding an absence against the ingested file's own re-projection cannot tell a block that
+MOVED from one that was DESTROYED. `get_blocks` stops at `Page` boundaries, so a `:Page:`
+child of a hand-authored file is legitimately absent from its host's render the moment it
+becomes a page doc-root — and was reported as data loss, quarantining the file (BugFunnel
+2026-08-09).
+
+The ingest re-project therefore uses the same verdict as the block-driven paths
+(`FileSyncController::writeback_drops`): for each absent block, the same authority that
+produced the render names the file that owns it now. A block the authority homes elsewhere is
+RELOCATED, not lost. This is not op-grounding — no op exists here — it is authority-grounding,
+and it is available at this boundary precisely because the render was taken from that
+authority. Ingest holds no op, and must still infer nothing from the diff alone.
+
+Unchanged: a block the authority no longer HOLDS (`AbsentOwner::AuthorityLost`) is ungrounded
+and refuses; a sibling's bytes cannot rescue it, because that file may have been written
+before the loss — only the projection about to be written can, since those are the bytes that
+will land on disk. An absent block whose own-file path cannot be derived is UNRESOLVABLE and
+refuses under its own disclosure, ahead of the loss verdict. One grounding assembly serves
+every boundary, so grounding against a file's own projection alone is unrepresentable.

@@ -24,22 +24,15 @@
 //! caller quarantines the file (loud ERROR) so no write-back path rewrites the
 //! truncated state over disk.
 //!
-//! ## One verdict, two entry points (ADR 0025)
+//! ## One verdict, one grounding (ADR 0025)
 //!
-//! Every write-back path refuses an ungrounded drop; they differ only in how
-//! they assemble the grounding, which is why this module exposes the verdict
-//! twice:
-//! - **ingest re-project** (the original row-28 site) grounds solely via the
-//!   file's own projection — it holds no op — and calls
-//!   [`ensure_ingest_lossless`] for the `Err` directly.
-//! - **`on_block_changed` / `re_render_all_tracked`** widen the grounding
-//!   first: the feed preserves per-block `Remove` identity end-to-end (di.rs),
-//!   so a removal — and a cross-doc departure via `LiveData::group_by` —
-//!   arrives on the owning doc as a sanctioned removal, and each absent block's
-//!   own-file path is resolved to fold in the sibling it de-inlined into. They
-//!   take the [`WritebackDrops`] verdict as data
-//!   (`FileSyncController::veto_ungrounded_removals`) to do that widening, then
-//!   veto + quarantine on whatever remains ungrounded.
+//! This module only computes the [`WritebackDrops`] verdict; it never assembles
+//! the grounding. `FileSyncController::writeback_drops` does that for EVERY
+//! write-back boundary — ingest re-project and block-driven alike — by asking
+//! the same authority the projection was rendered from which file owns each
+//! absent block. A boundary therefore cannot ground against the file's own
+//! projection alone, which is what made a first ingest of a hand-authored page
+//! inlining `:Page:` children read as loss and quarantine the file.
 //!
 //! ## Canonical reformat is NOT loss
 //!
@@ -58,46 +51,11 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::path::PathBuf;
 
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 
 use crate::parser::parse_org_file;
-
-/// A refused write-back: the freshly-ingested projection dropped block(s) that
-/// exist in the on-disk source. Rewriting the file would destroy that content
-/// permanently, so the caller MUST refuse the write and quarantine the file.
-#[derive(Debug, Clone)]
-pub struct IngestLoss {
-    /// The file whose write-back is refused.
-    pub path: PathBuf,
-    /// Number of non-empty blocks parsed from the on-disk source.
-    pub source_block_count: usize,
-    /// Number of non-empty blocks in the projection about to be written.
-    pub rendered_block_count: usize,
-    /// One `id: excerpt` line per dropped source block (matched by neither id
-    /// nor content in the projection).
-    pub dropped: Vec<String>,
-}
-
-impl std::fmt::Display for IngestLoss {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "INGEST DATA LOSS: write-back of {} would DELETE {} block(s) that exist on disk but \
-             did NOT survive ingest (source has {} block(s), projection has {}). Refusing the \
-             write-back to protect the file. Dropped blocks:\n  {}",
-            self.path.display(),
-            self.dropped.len(),
-            self.source_block_count,
-            self.rendered_block_count,
-            self.dropped.join("\n  "),
-        )
-    }
-}
-
-impl std::error::Error for IngestLoss {}
 
 /// The evidence set a source block must survive in to be considered preserved:
 /// the block ids and non-empty normalized contents of the projection(s) that
@@ -186,12 +144,6 @@ impl SurvivingProjection {
         }
         Ok(())
     }
-
-    /// Number of distinct non-empty contents — the projection's non-empty block
-    /// count as reported in [`IngestLoss`].
-    fn content_count(&self) -> usize {
-        self.contents.len()
-    }
 }
 
 /// Collapse all runs of whitespace to a single space and trim, so a block's
@@ -213,61 +165,16 @@ fn excerpt(block: &Block) -> String {
     format!("{}: {:?}{}", block.id.as_str(), body, ellipsis)
 }
 
-/// Guard a write-back against SILENT block loss (ADR 0025 op-grounding).
-///
-/// `source` is the on-disk file about to be overwritten; `surviving` is the
-/// grounding union — block ids and non-empty contents — of the projection(s)
-/// write-back is about to put on disk (the file itself, optionally unioned via
-/// [`SurvivingProjection::union_rendered`] with the sibling files the same
-/// convergence pass materializes). `sanctioned_removals` is the set of block
-/// ids the triggering op authorizes to disappear (a genuine user deletion;
-/// empty on the intent-less ingest and recovery paths). `root` is the vault
-/// root (used only for stable file-id derivation while parsing `source`; it
-/// never affects the comparison).
-///
-/// Returns `Err(IngestLoss)` when a non-empty block present in `source` is
-/// grounded by NONE of: a `surviving` block id, a `surviving` normalized
-/// content, or `sanctioned_removals` — the block was dropped and the write-back
-/// would delete it from disk. Returns `Ok(())` for a lossless projection,
-/// including a legal canonical reformat, a 3-way text merge, a sibling
-/// de-inline (grounded by the union), or a sanctioned removal (see module
-/// docs).
-///
-/// Parse errors on the `source` side are propagated (never swallowed): a source
-/// that no longer parses is a defect the caller must see. (Projection parse
-/// errors are surfaced when the caller builds `surviving`.)
-pub fn ensure_ingest_lossless(
-    path: &Path,
-    source: &str,
-    surviving: &SurvivingProjection,
-    sanctioned_removals: &HashSet<String>,
-    root: &Path,
-) -> anyhow::Result<()> {
-    let drops = writeback_drops(path, source, surviving, sanctioned_removals, root)?;
-    if drops.dropped.is_empty() {
-        Ok(())
-    } else {
-        Err(IngestLoss {
-            path: path.to_path_buf(),
-            source_block_count: drops.source_block_count,
-            rendered_block_count: surviving.content_count(),
-            dropped: drops.dropped,
-        }
-        .into())
-    }
-}
-
 /// The ungrounded drops a write-back would cause — the guard VERDICT as data,
 /// separated from real parse/IO failures (which are `Err`). `dropped` is one
 /// `id: excerpt` per source block grounded by NEITHER the `surviving` union NOR
 /// `sanctioned_removals`; empty means lossless.
 ///
-/// The block-driven paths take the verdict as data so they can widen the
-/// grounding (resolve each absent block's own file, fold the sibling in) before
-/// refusing; the ingest boundary skips that and wraps a non-empty verdict into
-/// an [`IngestLoss`] via [`ensure_ingest_lossless`]. A source that no longer
-/// parses is a real defect and is propagated as `Err`, never folded into the
-/// verdict.
+/// The verdict is data, never an error, because every caller widens the
+/// grounding first (resolve each absent block's own file, fold the sibling in)
+/// and an unresolvable own-file path is its own hard veto with its own message.
+/// A source that no longer parses is a real defect and is propagated as `Err`,
+/// never folded into the verdict.
 #[derive(Debug, Clone, Default)]
 pub struct WritebackDrops {
     /// Number of non-empty blocks parsed from `source`.
@@ -376,17 +283,25 @@ Command palette body.
         HashSet::new()
     }
 
+    /// The verdict's dropped list — the guard's whole output. A `source` that
+    /// no longer parses is a real defect, never a verdict, so it panics here.
+    fn drops(
+        source: &str,
+        surviving: &SurvivingProjection,
+        sanctioned: &HashSet<String>,
+    ) -> Vec<String> {
+        writeback_drops(&path(), source, surviving, sanctioned, &root())
+            .expect("source must parse")
+            .dropped
+    }
+
     #[test]
     fn honest_round_trip_passes() {
         let rendered = render_projection(SOURCE);
-        ensure_ingest_lossless(
-            &path(),
-            SOURCE,
-            &surviving(&rendered),
-            &no_removals(),
-            &root(),
-        )
-        .expect("faithful round trip must pass the guard");
+        assert!(
+            drops(SOURCE, &surviving(&rendered), &no_removals()).is_empty(),
+            "faithful round trip must pass the guard"
+        );
     }
 
     #[test]
@@ -414,14 +329,10 @@ Overlay for capture.
 ";
         let canonical = render_projection(noisy);
         assert_ne!(noisy, canonical, "reformat should change bytes");
-        ensure_ingest_lossless(
-            &path(),
-            noisy,
-            &surviving(&canonical),
-            &no_removals(),
-            &root(),
-        )
-        .expect("canonical reformat must NOT be flagged as loss");
+        assert!(
+            drops(noisy, &surviving(&canonical), &no_removals()).is_empty(),
+            "canonical reformat must NOT be flagged as loss"
+        );
     }
 
     #[test]
@@ -446,22 +357,10 @@ The shell hosts the flow.
 Command palette body.
 ";
         let rendered = render_projection(lossy_source_missing_overlay);
-        let err = ensure_ingest_lossless(
-            &path(),
-            SOURCE,
-            &surviving(&rendered),
-            &no_removals(),
-            &root(),
-        )
-        .expect_err("a projection missing a source block must be refused");
-        let msg = format!("{err:#}");
+        let dropped = drops(SOURCE, &surviving(&rendered), &no_removals());
         assert!(
-            msg.contains("capture-mode-overlay"),
-            "error must name the dropped block; got: {msg}"
-        );
-        assert!(
-            msg.contains("INGEST DATA LOSS"),
-            "error must be loud; got: {msg}"
+            dropped.iter().any(|d| d.contains("capture-mode-overlay")),
+            "the verdict must name the dropped block; got: {dropped:?}"
         );
     }
 
@@ -491,14 +390,10 @@ Overlay for capture.
 Command palette body.
 ";
         let rendered = render_projection(merged);
-        ensure_ingest_lossless(
-            &path(),
-            SOURCE,
-            &surviving(&rendered),
-            &no_removals(),
-            &root(),
-        )
-        .expect("id-preserving content merge must NOT be flagged as loss");
+        assert!(
+            drops(SOURCE, &surviving(&rendered), &no_removals()).is_empty(),
+            "id-preserving content merge must NOT be flagged as loss"
+        );
     }
 
     #[test]
@@ -509,14 +404,10 @@ Command palette body.
             "{SOURCE}\n* Newly added in app\n:PROPERTIES:\n:ID: brand-new\n:END:\nAdded body.\n"
         );
         let rendered = render_projection(&with_extra);
-        ensure_ingest_lossless(
-            &path(),
-            SOURCE,
-            &surviving(&rendered),
-            &no_removals(),
-            &root(),
-        )
-        .expect("extra blocks in the projection are not loss");
+        assert!(
+            drops(SOURCE, &surviving(&rendered), &no_removals()).is_empty(),
+            "extra blocks in the projection are not loss"
+        );
     }
 
     /// Fork B B1' — a block dropped from the projection but sanctioned by the
@@ -546,8 +437,10 @@ Command palette body.
         let sanctioned = HashSet::from([EntityUri::block("capture-mode-overlay")
             .as_str()
             .to_string()]);
-        ensure_ingest_lossless(&path(), SOURCE, &surviving(&rendered), &sanctioned, &root())
-            .expect("a delta-sanctioned removal must NOT be flagged as loss");
+        assert!(
+            drops(SOURCE, &surviving(&rendered), &sanctioned).is_empty(),
+            "a delta-sanctioned removal must NOT be flagged as loss"
+        );
     }
 
     /// Fork B B1' — a block dropped from the file being written but PRESENT in
@@ -584,8 +477,10 @@ Overlay for capture.
                 &root(),
             )
             .unwrap();
-        ensure_ingest_lossless(&path(), SOURCE, &union, &no_removals(), &root())
-            .expect("a page de-inlined into a sibling file must be grounded by the union");
+        assert!(
+            drops(SOURCE, &union, &no_removals()).is_empty(),
+            "a page de-inlined into a sibling file must be grounded by the union"
+        );
     }
 
     /// Fork B B1' — a block dropped with NEITHER a sanctioned removal NOR a
@@ -611,13 +506,10 @@ Command palette body.
         let rendered = render_projection(lossy);
         // Sanction a DIFFERENT id; the empty-sibling union has no capture-overlay.
         let unrelated = HashSet::from([EntityUri::block("some-other-block").as_str().to_string()]);
-        let err =
-            ensure_ingest_lossless(&path(), SOURCE, &surviving(&rendered), &unrelated, &root())
-                .expect_err("an ungrounded drop must still be refused");
-        let msg = format!("{err:#}");
+        let dropped = drops(SOURCE, &surviving(&rendered), &unrelated);
         assert!(
-            msg.contains("capture-mode-overlay") && msg.contains("INGEST DATA LOSS"),
-            "veto must loudly name the dropped block; got: {msg}"
+            dropped.iter().any(|d| d.contains("capture-mode-overlay")),
+            "veto must loudly name the dropped block; got: {dropped:?}"
         );
     }
 
@@ -647,14 +539,10 @@ Shared body text.
 :END:
 Shared body text.
 ";
-        ensure_ingest_lossless(
-            &path(),
-            source,
-            &surviving(projection),
-            &no_removals(),
-            &root(),
-        )
-        .expect("a block grounded only by unchanged content must pass");
+        assert!(
+            drops(source, &surviving(projection), &no_removals()).is_empty(),
+            "a block grounded only by unchanged content must pass"
+        );
     }
 
     /// Sibling content-only grounding: a block de-inlined into a sibling file
@@ -707,7 +595,9 @@ Child page body.
             .union_rendered(&sibling_path, sibling_projection, &root())
             .unwrap();
 
-        ensure_ingest_lossless(&path(), source, &surviving, &no_removals(), &root())
-            .expect("a block grounded only by sibling content must pass");
+        assert!(
+            drops(source, &surviving, &no_removals()).is_empty(),
+            "a block grounded only by sibling content must pass"
+        );
     }
 }
