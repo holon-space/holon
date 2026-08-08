@@ -1,0 +1,94 @@
+TASK #21 — "a wiki link typed to a page that EXISTS makes the org file
+oscillate": the evidence the 2026-08-08 BugFunnel row cites. Preserved as .txt
+because *.log is gitignored.
+
+Case: hand-authored keystone row
+`wiki-link-to-an-existing-page-reaches-an-org-fixed-point`
+(crates/holon-integration-tests/hand-authored-regressions/keystone.jsonl), one
+transition: CreateBlockUnderFocus { content: "see [[Journals]] now", id:
+"block:wl1" }. `Journals` is a SEEDED page, so the link resolves.
+
+
+A. RED, verbatim (lane-logs/t21-probe-RED-1.log)
+================================================
+
+thread 'hand_authored_keystone_regressions' (494155140) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:855:13:
+reconciled composed sequence diverged from the oracle: [("inv-org-render-fixed-point", "[inv-org-render-fixed-point] render != disk PERSISTED for 5s — not a transient projection lag but a real echo-loop / oscillation: the next re_render_all_tracked would keep rewriting the file.\n--- disk (193 bytes) [/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpOF2dlv/structural-page.org] ---\n#+ID: structural-page\n* parent\n:PROPERTIES:\n:ID: parent\n:END:\n* c1\n:PROPERTIES:\n:ID: c1\n:END:\n* c2\n:PROPERTIES:\n:ID: c2\n:END:\n* see [[block:journals][Journals]] now\n:PROPERTIES:\n:ID: wl1\n:END:\n\n--- rendered from SQL (177 bytes) ---\n#+ID: structural-page\n* parent\n:PROPERTIES:\n:ID: parent\n:END:\n* c1\n:PROPERTIES:\n:ID: c1\n:END:\n* c2\n:PROPERTIES:\n:ID: c2\n:END:\n* see [[Journals]] now\n:PROPERTIES:\n:ID: wl1\n:END:\n"), ("inv-blocks-match-ref/org", "[inv-blocks-match-ref/org] fields diverge from reference\n  inv-blocks-match-ref/org: 9 blocks, reference: 9 blocks\n  only in inv-blocks-match-ref/org (0): []\n  only in reference (0): []\n  field deltas (1):\n    block:wl1: marks: sut=Some([MarkSpan { start: 4, end: 12, mark: Link { target: Scheme { raw: \"block:journals\" }, label: \"Journals\" } }]) ref=Some([MarkSpan { start: 4, end: 12, mark: Link { target: Name { name: \"Journals\" }, label: \"Journals\" } }])\n")]
+authority: block-CRUD=Loro(LoroBlockOperations, via EditorState); projection-sinks=Sql(block_raw,matview); org-writeback=on
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+
+
+B. WHAT THE RED ACTUALLY SHOWS
+==============================
+
+The two dumps read together fix the state exactly:
+
+  disk            `[[block:journals][Journals]]`   (resolved form)
+  render-from-SQL `[[Journals]]`                   (authored Name form)
+  /org lens (parses disk)  Link{Scheme "block:journals"}
+  reference                Link{Name "Journals"}
+
+So the STORES hold the authored `Name` mark and DISK holds the resolved
+`Scheme` form. The divergence is permanent because the harness rendered
+through `OrgRenderer::render_document` DIRECTLY
+(crates/holon-integration-tests/src/pbt/frontend_slice/components.rs:2036),
+skipping the `block_links` upgrade
+(`CacheBlockReader::resolve_link_marks_impl`, crates/holon-app/src/turso_seams.rs:190)
+that `WritebackRenderer::with_resolved_links`
+(crates/holon-filesystem/src/writeback_render.rs:85) applies before EVERY
+production write. The invariant therefore compared a render production never
+performs against bytes production wrote.
+
+NO ECHO LOOP EXISTS IN PRODUCTION: `re_render_all_tracked` renders through the
+resolving path and rewrites byte-identical content, so nothing re-fires an
+FSEvent. The green in §D is that proof.
+
+
+C. A/B ATTRIBUTION — each fix reverted in isolation against the green tree
+=========================================================================
+
+ref lens removed (lane-logs/t21-ab-no-ref-lens.log):
+  reconciled composed sequence diverged from the oracle: [("inv-blocks-match-ref/org", ... block:wl1: marks: sut=Some([... Link { target: Scheme { raw: "block:journals" ...) ref=Some([... Link { target: Name { name: "Journals" ...)])]
+  test result: FAILED. 8 passed; 1 failed
+  -> `inv-org-render-fixed-point` STAYS GREEN: the render fix alone closes it.
+
+SUT `resolve_link_marks` removed (lane-logs/t21-ab-no-render-resolve.log):
+  reconciled composed sequence diverged from the oracle: [("inv-org-render-fixed-point", "... render != disk PERSISTED for 5s ...  disk (193 bytes) ... * see [[block:journals][Journals]] now ... rendered from SQL (177 bytes) ... * see [[Journals]] now ...")]
+  test result: FAILED. 8 passed; 1 failed
+  -> `/org` STAYS GREEN: the ref lens alone closes it.
+
+Neither fix masks the other; neither alone makes the case green.
+
+
+D. GREEN (lane-logs/t21-green-1.log, re-confirmed lane-logs/t21-green-final.log)
+===============================================================================
+
+[hand-authored regression] running case "wiki-link-to-an-existing-page-reaches-an-org-fixed-point" (1 transitions)
+[hand-authored regression] PASSED case "wiki-link-to-an-existing-page-reaches-an-org-fixed-point"
+[engagement summary] ... inv-blocks-match-ref/org=6/6 ... inv-org-render-fixed-point=6/6 ...
+
+Full suite (lane-logs/t21-gate-1.log): `just hand-authored` 9 passed / 0 failed;
+`just keystone-smoke` 4 passed / 0 failed.
+
+
+E. OPEN AFTER THIS LANE — escalated, not decided
+================================================
+
+The stores keep `Name` while disk carries `Scheme`. The design comment at
+turso_seams.rs:186 expects a file re-ingest to "upgrade every store", but the
+writeback's own write is echo-suppressed, so the upgrade fires only when
+something else re-ingests the file (a later boot, an external edit). At that
+moment the stored mark flips AND its `block_links` row flips from
+`kind='page', target='Journals'` to `kind='block', target='block:journals'` —
+a page-link becomes a block-link. Closing it is an architecture fork:
+
+  (A) resolve at EVERY write boundary (dispatcher adoption AND provider-direct
+      org ingest, else a hand-authored `[[Journals]]` reintroduces it);
+  (B) stop emitting the resolved form: disk keeps the authored `[[Journals]]`,
+      resolution stays in the junction (holon-api/src/inline_mark.rs:64), and
+      docs/Explanation/DESIGN_LINKS.md §Phase 2-3 already says the rewrite
+      happens on NAVIGATE, not on writeback. Against it:
+      crates/holon-orgmode/tests/render_seam_resolves_link_marks.rs ratifies
+      today's behaviour, and name-form links break across a page rename.
+
+Recommendation in lane-report-21.md: (B). It is a user-visible semantics call.

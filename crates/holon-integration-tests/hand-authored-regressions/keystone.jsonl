@@ -506,3 +506,24 @@
 # ingest converge on ONE representation), then the create boundary is fixed to reach it without
 # a file round-trip.
 {"name": "wiki-link-created-in-the-ui-is-adopted-at-the-write-boundary", "description": "dogfood 2026-08-08 P1-2: a block born from the creation slot with a typed `[[Wiki Target Page]]` must store the STRIPPED label plus a Link mark, like ingest — not raw markup with NULL marks that the next boot silently rewrites.", "transitions": [{"CreateBlockUnderFocus": {"content": "see [[Wiki Target Page]] now", "id": "block:wl0"}}]}
+#
+# --- a wiki link typed to a page that EXISTS reaches an org fixed point (task #21) ---
+# The twin of the row above with a RESOLVING target: `Journals` is a seeded page, so the
+# writeback renders the link in its resolved `[[block:journals][Journals]]` form (the
+# `block_links` upgrade `WritebackRenderer::with_resolved_links` applies before every write)
+# while the stores keep the authored `Name` target. Two harness organs read the disk view and
+# BOTH modelled the un-upgraded form:
+#   inv-org-render-fixed-point (RED, lane-logs/t21-probe-RED-1.log): "render != disk PERSISTED
+#     for 5s ... a real echo-loop / oscillation", disk `* see [[block:journals][Journals]] now`
+#     vs rendered-from-SQL `* see [[Journals]] now` -- because `SutOrgRender` rendered through
+#     `OrgRenderer` DIRECTLY, skipping the upgrade every production render performs.
+#   inv-blocks-match-ref/org (RED, same log): block:wl1 marks sut=Some([Link{Scheme
+#     "block:journals"}]) ref=Some([Link{Name "Journals"}]) -- the reference's org lens did not
+#     model resolution.
+# GREEN once the SUT render applies `resolve_link_marks` and the ref's `org_blocks` applies the
+# resolved-link lens: the green PROVES prod reaches a fixed point (re_render_all_tracked would
+# rewrite identical bytes), which the red did not.
+# STILL TRUE and deliberately not asserted here: the stores keep `Name` while disk carries
+# `Scheme`, so the two authorities disagree about the mark until a file re-ingest flips the
+# store. That asymmetry is escalated in docs/Testing/BugFunnel.md, not fixed by this row.
+{"name": "wiki-link-to-an-existing-page-reaches-an-org-fixed-point", "description": "task #21: a wiki link typed to a page that EXISTS must reach an org render/disk fixed point -- the resolved form the writeback emits is what the fixed-point oracle must predict, and the reference's on-disk view must carry it too.", "transitions": [{"CreateBlockUnderFocus": {"content": "see [[Journals]] now", "id": "block:wl1"}}]}
