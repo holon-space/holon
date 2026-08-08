@@ -27,9 +27,10 @@
 //! would go GREEN on ANY stable companion, including a wrong one that
 //! stabilized while still retaining a de-inlined child's backlink line. This
 //! oracle locks the *shape*: the companion holds no child-page heading at all.
-//! Both are RED today (the per-file writeback guard `ensure_ingest_lossless`
-//! refuses the de-inline as apparent block loss — B0 red-first; B1's
-//! SurvivingProjection union makes it green).
+//! Green since the write-back guard grounds an absence against the store
+//! authority — the file that owns each absent block — instead of the
+//! companion's own projection, so a de-inlined child page reads as relocated,
+//! not lost.
 //!
 //! ## Detection (dependency-free)
 //!

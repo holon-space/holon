@@ -6,7 +6,7 @@
 //! Both adapters implement `holon_core::FileFormatAdapter`. They are **read
 //! only**: `render_document` / `render_blocks` panic (a write to a foreign file
 //! is loss by definition under ADR 0025 until anchored write-back lands), and
-//! `check_writeback_lossless` always refuses. The [`ReadOnlyWriteGuard`] is the
+//! `writeback_drops` always refuses. The [`ReadOnlyWriteGuard`] is the
 //! controller-level gate that must veto any write to a foreign-vault doc before
 //! a renderer is ever reached.
 

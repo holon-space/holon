@@ -3,7 +3,7 @@
 //! ADR 0025 — a foreign file is not produced by a Holon op, so no op can ground
 //! a write to it. R/O makes this unconditional. These tests prove the three
 //! layers that enforce it: the controller-level [`ReadOnlyWriteGuard`], the
-//! adapter's `check_writeback_lossless` refusal, and the render panic.
+//! adapter's `writeback_drops` refusal, and the render panic.
 
 use std::path::Path;
 
@@ -35,11 +35,11 @@ fn checked_write_panics_on_read_only_vault() {
 }
 
 #[test]
-fn logseq_adapter_refuses_writeback_lossless_check() {
+fn logseq_adapter_refuses_writeback_drop_verdict() {
     let a = LogseqMarkdownAdapter::new();
     let removals = std::collections::HashSet::new();
     let err = a
-        .check_writeback_lossless(
+        .writeback_drops(
             Path::new("/v/p/Compat.md"),
             "- a\n",
             "- b\n",
@@ -52,11 +52,11 @@ fn logseq_adapter_refuses_writeback_lossless_check() {
 }
 
 #[test]
-fn obsidian_adapter_refuses_writeback_lossless_check() {
+fn obsidian_adapter_refuses_writeback_drop_verdict() {
     let a = ObsidianMarkdownAdapter::new();
     let removals = std::collections::HashSet::new();
     let err = a
-        .check_writeback_lossless(
+        .writeback_drops(
             Path::new("/v/Note.md"),
             "x",
             "y",

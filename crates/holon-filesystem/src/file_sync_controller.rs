@@ -3817,17 +3817,17 @@ impl FileSyncController {
         // no write-back path renders the truncated state over disk. A legal
         // canonical reformat / 3-way merge preserves every block and passes.
         //
-        // ADR 0025: this ingest re-project is one of the two irreducibly
-        // intent-less boundaries — it holds no op, so it grounds ONLY via the
-        // file's own projection (no sibling union, no sanctioned removals).
-        if let Err(lossy) = self.format.check_writeback_lossless(
-            path,
-            &disk_content,
-            &rendered,
-            &[],
-            &stale_removals,
-            &self.root_dir,
-        ) {
+        // Grounding is AUTHORITY-based, the same single verdict the block-driven
+        // paths take (`writeback_drops`): the store that produced `rendered` also
+        // says which file owns each block the render omitted. That is what makes
+        // a first ingest of a hand-authored page inlining `:Page:` children pass
+        // — those children became page doc-roots of their OWN files during this
+        // very ingest, so the render legitimately stops at them — while a block
+        // the authority no longer holds still reads as loss.
+        let (loss, unresolvable) = self
+            .writeback_drops(path, &disk_content, &rendered, &stale_removals)
+            .await?;
+        if !loss.dropped.is_empty() || !unresolvable.is_empty() {
             // Inc 3 carry-forward (risk-register #2). If the SOLE reason we left the
             // UPDATE-only fast path is `needs_block_id_writeback` (a pure id-less
             // reconcile that bound blocks onto existing store ids), the re-render
@@ -3855,14 +3855,37 @@ impl FileSyncController {
                     .await;
                 return Ok(());
             }
-            return Err(lossy).with_context(|| {
-                format!(
-                    "[FileSyncController] REFUSING write-back of {} — ingest was lossy (see the \
-                     INGEST DATA LOSS error). The on-disk file is left intact; the file is \
-                     quarantined until a clean re-ingest.",
-                    path.display()
-                )
-            });
+            // Checked BEFORE the drop verdict, mirroring the block-driven
+            // boundary's `veto_ungrounded_removals`: an absent block whose
+            // own-file path could not be derived is ALSO in `dropped`, so
+            // leading with the loss headline would report one block twice and
+            // send the reader hunting a truncated ingest instead of the
+            // prohibited topology that actually refused the write.
+            if !unresolvable.is_empty() {
+                anyhow::bail!(
+                    "[FileSyncController] REFUSING write-back of {} — UNRESOLVABLE INGEST DROP: \
+                     {} of {} on-disk block(s) are absent from this ingest's projection AND their \
+                     own-file path could not be derived (name_chain failed loud — a prohibited \
+                     page-under-non-page topology). Nothing proves those blocks were preserved \
+                     elsewhere, so the write is refused; the on-disk file is left intact and \
+                     quarantined until a clean re-ingest. Unresolvable: {:?}",
+                    path.display(),
+                    unresolvable.len(),
+                    loss.source_block_count,
+                    unresolvable,
+                );
+            }
+            anyhow::bail!(
+                "[FileSyncController] REFUSING write-back of {} — ingest was lossy. The on-disk \
+                 file is left intact; the file is quarantined until a clean re-ingest. INGEST \
+                 DATA LOSS: write-back would DELETE {} of {} on-disk block(s) that did NOT \
+                 survive ingest, and the authority names no other file that owns them. Dropped \
+                 blocks:\n  {}",
+                path.display(),
+                loss.dropped.len(),
+                loss.source_block_count,
+                loss.dropped.join("\n  "),
+            );
         }
 
         if rendered != disk_content {
@@ -5659,13 +5682,28 @@ impl FileSyncController {
         )?;
         // The format grounds an absence against the sibling BYTE union, which
         // knows nothing about which blocks the authority still holds. A block
-        // the authority has lost is unprovable no matter whose bytes still
-        // mention it, so it re-enters the drop set here rather than being
-        // rescued by a destination file written before the loss.
-        for id in &grounding.authority_lost {
-            verdict
-                .dropped
-                .push(format!("{id}: the authority no longer holds this block"));
+        // the authority has lost is unprovable from a SIBLING's bytes — that
+        // file may have been written before the loss — so it re-enters the drop
+        // set here. It is still provable from THIS file's own projection: those
+        // are the bytes about to land on disk, so a block the render reproduces
+        // under a new id (the id-rebind an ingest performs) survives whatever
+        // the authority says about the old id.
+        if !grounding.authority_lost.is_empty() {
+            let own = self.format.writeback_drops(
+                path,
+                source,
+                rendered,
+                &[],
+                sanctioned_removals,
+                &self.root_dir,
+            )?;
+            for id in &grounding.authority_lost {
+                if own.dropped.iter().any(|d| d.starts_with(&format!("{id}:"))) {
+                    verdict
+                        .dropped
+                        .push(format!("{id}: the authority no longer holds this block"));
+                }
+            }
         }
         Ok((verdict, grounding.unresolvable))
     }

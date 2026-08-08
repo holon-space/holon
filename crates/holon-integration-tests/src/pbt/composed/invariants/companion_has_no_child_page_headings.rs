@@ -12,9 +12,9 @@
 //! files inline no `Page` doc-root (the default keystone), so it adds no false
 //! RED.
 //!
-//! B0 red-first: this is RED today (the per-file `ensure_ingest_lossless` guard
-//! refuses the de-inline as apparent block loss); B1's `SurvivingProjection`
-//! union makes it green. The deterministic reproduction lives in
+//! Green since the write-back guard grounds an absence against the store
+//! authority — the file that owns each absent block — instead of the
+//! companion's own projection. The deterministic reproduction lives in
 //! `frontend_slice::structural_pbt::folder_companion_writeback_deinlines_child_page`.
 
 use holon_pbt_core::RunMode;

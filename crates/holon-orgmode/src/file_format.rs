@@ -172,29 +172,6 @@ impl FileFormatAdapter for OrgFormatAdapter {
         changed
     }
 
-    fn check_writeback_lossless(
-        &self,
-        path: &Path,
-        source: &str,
-        rendered: &str,
-        sibling_renders: &[(&Path, &str)],
-        sanctioned_removals: &std::collections::HashSet<String>,
-        root: &Path,
-    ) -> Result<()> {
-        let mut surviving =
-            crate::writeback_guard::SurvivingProjection::from_rendered(path, rendered, root)?;
-        for (sibling_path, sibling_rendered) in sibling_renders {
-            surviving.union_rendered(sibling_path, sibling_rendered, root)?;
-        }
-        crate::writeback_guard::ensure_ingest_lossless(
-            path,
-            source,
-            &surviving,
-            sanctioned_removals,
-            root,
-        )
-    }
-
     fn writeback_drops(
         &self,
         path: &Path,

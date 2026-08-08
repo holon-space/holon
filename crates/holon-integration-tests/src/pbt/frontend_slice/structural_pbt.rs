@@ -1005,11 +1005,10 @@ mod teeth {
     /// child-note`); `my-notes.org` inlines its id as a heading. After
     /// settle, `my-notes.org` converges to the bare `#+ID: my-notes` shell
     /// (the `get_blocks` CTE excludes the `Page`-tagged child) while
-    /// `child-note` survives in its own file — no guard veto (the
-    /// block-driven writeback path never calls `ensure_ingest_lossless`;
-    /// empirical Fork B finding 2026-07-12), no loss. This documents that
-    /// the de-inline ALREADY works when the page owns a file — the plan's
-    /// original B1 guard-veto premise does not hold here.
+    /// `child-note` survives in its own file — no guard veto (the store
+    /// authority homes the absent child to that file, so its absence here
+    /// grounds as a move), no loss. This documents that the de-inline works
+    /// when the page owns a file.
     #[tokio::test(flavor = "multi_thread")]
     async fn folder_companion_deinlines_owned_child_page() {
         use holon_pbt_core::composition::CapInvariant;
