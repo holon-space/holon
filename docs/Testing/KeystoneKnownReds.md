@@ -209,6 +209,21 @@ list, but `turso_draw_reaches_the_feed_driven_writeback_path` never failed in
 any of the 3 runs, and neither of the two that did appear recurred in the
 clean run 3. That premise is not re-confirmed by this baseline.
 
+## Windowed suite (`harness = false` binaries) known reds
+
+The `harness = false` windowed/TUI binaries enrolled in the `nextest --list`
+collection protocol (`crates/holon-integration-tests/src/libtest_list.rs`) are
+suite members of a plain `cargo nextest run`, so a flake inside one of them
+aborts a windowed suite run. Rows here carry the same pass-with-note
+discipline as the sections above.
+`scripts/keystone-known-reds.sh` classifies composed-nightly logs only, so it
+does not consume these rows automatically — they are a manually-maintained
+baseline for judging windowed-suite runs.
+
+| Key | Status | Match pattern | Signature | Evidence | Task | Owner |
+| --- | --- | --- | --- | --- | --- | --- |
+| `tui-focus-propagate` | known-red | `\[ClickBlock\] focus did not propagate` | `frontends/tui/tests/tui_ui_pbt.rs` (via `common::pbt_main::run`) panics mid-scenario with `[ClickBlock] focus did not propagate` — a click seats no focus in the TUI frontend, so the following step asserts on unfocused state. | **PRE-REGISTERED, NOT YET OBSERVED IN A GATED RUN** (Martin's ruling, 2026-08-08). The signature is quoted from the enrollment commit `b3be6e9c`'s disclosed residual: `tui_ui_pbt` became a suite member carrying this focus-propagation flake, probed 2/2 green at the time. Registered ahead of its first firing so the first occurrence is a WARN pass-with-note instead of an aborted suite run. Because no payload has been decoded yet, the Signature column above is a PREDICTION — decode and correct it on the first real firing. | #5 | TUI windowed PBT (task #5) |
+
 ## Evidence corpus & the pattern-drift guard
 
 Every row's Evidence column must name a **decoded payload**, not a recollection.
