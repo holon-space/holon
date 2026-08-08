@@ -27,25 +27,12 @@ use validated::Validated;
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
-
-/// Canned template root id (matches `instantiate_template_tests` in
-/// operation_engine.rs).
-const TPL_ROOT: &str = "block:tpl";
-const TPL_CHILD: &str = "block:tpl-c1";
-
-/// The definition child's rich text: `DirectUserDriver::instantiate_template`
-/// seeds `see {{date}} now` with `see` bolded, so every instantiation exercises
-/// the mark-carrying path (`plan_instantiation` → `remap_marks`) rather than a
-/// marks-free template. The span sits entirely before the `{{date}}` slot at
-/// byte 4, so substitution leaves it where it is — instance and definition
-/// carry the identical span.
-fn tpl_child_marks() -> Option<Vec<holon_api::MarkSpan>> {
-    Some(vec![holon_api::MarkSpan::new(
-        0,
-        3,
-        holon_api::InlineMark::Bold,
-    )])
-}
+/// The canned template — ids, content, marks and the substitution model — is
+/// [`crate::template_fixture`], shared verbatim with the SUT driver that seeds
+/// it (`DirectUserDriver::instantiate_template`).
+use crate::template_fixture;
+use crate::template_fixture::TPL_CHILD;
+use crate::template_fixture::TPL_ROOT;
 
 /// Instantiate the canned template under an existing non-page block.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -70,6 +57,15 @@ impl InstantiateTemplate {
     /// resolution).
     fn context_key(&self) -> String {
         format!("pbt:{}:{}:{}", self.parent_id, self.date, self.mood)
+    }
+
+    /// The bindings this draw hands the template engine — ONE list read by both
+    /// the SUT dispatch and the reference's substitution model.
+    fn bindings(&self) -> Vec<(String, String)> {
+        vec![
+            ("date".to_string(), self.date.clone()),
+            ("mood".to_string(), self.mood.clone()),
+        ]
     }
 
     /// Valid instantiation targets: plain outline text blocks the user could
@@ -160,7 +156,7 @@ impl<R: RefLifecycle + RefBlockTree + RefBlockTreeMut + RefLayoutMutate> Transit
         if state.block_content(&tpl_root).is_none() {
             state.seed_template_definition(
                 &EntityUri::no_parent(),
-                "{{date}}",
+                template_fixture::TPL_ROOT_CONTENT,
                 None,
                 tpl_root.clone(),
             );
@@ -168,8 +164,8 @@ impl<R: RefLifecycle + RefBlockTree + RefBlockTreeMut + RefLayoutMutate> Transit
         if state.block_content(&tpl_child).is_none() {
             state.seed_template_definition(
                 &tpl_root,
-                "see {{date}} now",
-                tpl_child_marks(),
+                template_fixture::TPL_CHILD_CONTENT,
+                Some(template_fixture::tpl_child_marks()),
                 tpl_child,
             );
         }
@@ -189,13 +185,20 @@ impl<R: RefLifecycle + RefBlockTree + RefBlockTreeMut + RefLayoutMutate> Transit
         // without per-block snapshots, so a single `UndoLastMutation` removes the
         // WHOLE instantiation — matching the SUT's composite undo group. Per-block
         // snapshots would leave the instance root behind on undo.
+        // Substitution and mark remapping are MODELLED, not written down: a span
+        // that crosses or follows the `{{date}}` slot must stretch and shift the
+        // way `plan_instantiation` makes it. A literal expectation agrees with
+        // prod only while every span precedes the first slot.
+        let bindings = self.bindings();
+        let inst_root = template_fixture::instantiated_root(&bindings);
+        let inst_child = template_fixture::instantiated_child(&bindings);
         state.apply_instantiate_template(
             &self.parent_id,
             inst_root_id,
             inst_child_id,
-            &self.date,
-            &format!("see {} now", self.date),
-            tpl_child_marks(),
+            &inst_root.content,
+            &inst_child.content,
+            inst_child.marks,
             TPL_ROOT,
         );
     }
@@ -205,15 +208,11 @@ crate::cap_transition! {
     InstantiateTemplate: holon_pbt_core::capabilities::SutTemplateInstantiate,
     where R: [ RefLifecycle + RefBlockTree ],
     |me, _state, sut| {
-        let bindings = vec![
-            ("date".to_string(), me.date.clone()),
-            ("mood".to_string(), me.mood.clone()),
-        ];
         sut.instantiate_template(
             &EntityUri::from_raw(TPL_ROOT),
             &me.parent_id,
             &me.context_key(),
-            &bindings,
+            &me.bindings(),
         ).await;
     }
     sql_budget: |_me, state| {

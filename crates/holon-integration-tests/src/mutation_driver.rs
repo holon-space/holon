@@ -30,6 +30,7 @@ use holon_pbt_core::capabilities::SutBlockTreeWrite;
 use holon_pbt_core::capabilities::SutTemplateInstantiate;
 
 use crate::pbt::op_write_cap::IdResolver;
+use crate::template_fixture;
 
 /// Dispatches mutations directly via `BackendEngine::execute_operation`.
 /// Legacy driver — bypasses FrontendSession and ReactiveEngine.
@@ -309,8 +310,6 @@ impl UserDriver for DirectUserDriver {
     }
 }
 
-const TPL_CHILD: &str = "block:tpl-c1";
-
 /// Op-floor `SutTemplateInstantiate`: seeds the canned template blocks
 /// (idempotent `block.create`), then dispatches
 /// `block.instantiate_template` through the production engine.
@@ -334,11 +333,14 @@ impl SutTemplateInstantiate for DirectUserDriver {
             "parent_id".to_string(),
             Value::String(EntityUri::no_parent().to_string()),
         );
-        root_params.insert("content".to_string(), Value::String("{{date}}".to_string()));
+        root_params.insert(
+            "content".to_string(),
+            Value::String(template_fixture::TPL_ROOT_CONTENT.to_string()),
+        );
         root_params.insert("template".to_string(), Value::String("t".to_string()));
         root_params.insert(
             "template_vars".to_string(),
-            Value::String("date, mood=neutral".to_string()),
+            Value::String(template_fixture::TPL_VARS.to_string()),
         );
         self.synthetic_dispatch("block", "create", root_params)
             .await
@@ -346,7 +348,7 @@ impl SutTemplateInstantiate for DirectUserDriver {
                 panic!("[DirectUserDriver floor] seed tpl root {template_id} failed: {e:#}")
             });
 
-        let child_id = TPL_CHILD.to_string();
+        let child_id = template_fixture::TPL_CHILD.to_string();
         let mut child_params: HashMap<String, Value> = HashMap::new();
         child_params.insert("id".to_string(), Value::String(child_id.clone()));
         child_params.insert(
@@ -355,11 +357,11 @@ impl SutTemplateInstantiate for DirectUserDriver {
         );
         child_params.insert(
             "content".to_string(),
-            Value::String("see {{date}} now".to_string()),
+            Value::String(template_fixture::TPL_CHILD_CONTENT.to_string()),
         );
         child_params.insert(
             "marks".to_string(),
-            Value::String(r#"[{"start":0,"end":3,"kind":"Bold"}]"#.to_string()),
+            Value::String(template_fixture::tpl_child_marks_json()),
         );
         self.synthetic_dispatch("block", "create", child_params)
             .await

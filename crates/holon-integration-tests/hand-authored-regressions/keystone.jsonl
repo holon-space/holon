@@ -446,7 +446,8 @@
 #
 # --- a template instance inherits the definition child's marks (task #23-successor) ---------
 # ONE InstantiateTemplate is the whole reproduction. `DirectUserDriver::instantiate_template`
-# seeds the definition child `see {{date}} now` with `see` BOLD, and prod's `plan_instantiation`
+# seeds the definition child `see {{date}} now` with `see` BOLD and `{{date}} now` ITALIC (the
+# shared fixture crates/holon-integration-tests/src/template_fixture.rs), and prod's `plan_instantiation`
 # carries that mark onto the instance (`remap_marks`, unit-tested in
 # crates/holon-api/src/template_instantiation.rs). The reference minted the instance child via
 # `Block::new_text` — marks None — so inv-blocks-match-ref/{org,block_raw,matview} reported
@@ -455,9 +456,28 @@
 # originally surfaced by the 64-case composed run at
 # .claude/worktrees/agent-aa73d6025c345f27f/lane-logs/keystone-green-64.log:1817 once the
 # outdent abort (d1642fc2) stopped masking it.
-{"name": "template-instance-inherits-definition-marks", "description": "A single InstantiateTemplate on the Turso-only draw: the instance child must carry the definition child's Bold 0..3 mark, remapped across {{date}} substitution (the span sits before the slot, so remapping is the identity). RED before the oracle fix with marks sut=Some([Bold 0..3]) ref=None on the instance child; GREEN once the reference models template-mark inheritance.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": ["MCPServer"]}}, "transitions": [{"InstantiateTemplate": {"parent_id": "block:c1", "date": "krtvhl", "mood": "abcdef"}}]}
+{"name": "template-instance-inherits-definition-marks", "description": "A single InstantiateTemplate on the Turso-only draw: the instance child must carry the definition child's marks, remapped across {{date}} substitution. Bold 0..3 precedes the slot (identity); Italic 4..16 spans the slot AND the text after it, so it must stretch over the substituted value and shift its end (date=krtvhl, 6 scalars for an 8-scalar slot => Italic 4..14). RED before the oracle fix with marks sut=Some([Bold 0..3]) ref=None on the instance child; RED again with a hardcoded ref expectation once the crossing span was added (sut=Some([Bold 0..3, Italic 4..14]) ref=Some([Bold 0..3]), lane-logs/t8-a-red-crossing-mark.txt); GREEN once the reference COMPUTES the remap (template_fixture::instantiate).", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": ["MCPServer"]}}, "transitions": [{"InstantiateTemplate": {"parent_id": "block:c1", "date": "krtvhl", "mood": "abcdef"}}]}
 # --- padded raw link literal in bulk-created content ------------------------------------
 # Minimized from the 64-case composed run at
 # .claude/worktrees/agent-a53e6a7328cf365e6/lane-logs/keystone-64.log:597 (case 9, the first
 # red of the clean run); the drawn content for block:bulk-3-4 was the raw literal [[wJZ9  ]].
 {"name": "padded-raw-link-literal-renders-without-a-degraded-error", "description": "One bulk-created block whose content is the RAW link literal \"[[wJZ9  ]]\" with marks null -- the state every non-org write path (bulk add, MCP, editor cell) stores when a user types a link with a stray space. RED on inv-no-observed-errors with `[ERROR] holon_org_format::models:1289 org render is DEGRADED ... rung=\"Unrepresentable\"`: adoption trims the target (strip_link, inline_marks.rs:572), so the emitted raw bytes re-render as [[wJZ9]] and the ladder's immediate-fixed-point test read that one-step normalization as `NO emission of this block settles`. GREEN once render_candidates emits the ADOPTED form, which costs only the padding adoption was already taking and settles on the first cycle. Whitespace is the only discriminator -- [[wJZ9]] was Exact all along.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": ["MCPServer"]}}, "transitions": [{"CreateDocument": {"file_name": "doc_0.org"}}, {"BulkExternalAdd": {"doc_uri": "block:ref-doc-0", "blocks": [{"id": "block:bulk-3-0", "parent_id": "block:ref-doc-0", "content": "r imkbCh", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1786161835974, "updated_at": 1786161835974}, {"id": "block:bulk-3-4", "parent_id": "block:bulk-3-0", "content": "[[wJZ9  ]]", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1786161835975, "updated_at": 1786161835975}]}}, {"NavigateFocus": {"region": "main", "block_id": "block:ref-doc-0"}}]}
+#
+# --- splitting a marked block keeps BOTH halves rich under the Loro CRUD authority (task #8) --
+# Nothing covered the marks half of `BlockOperations::split_block` (crates/holon-core/src/traits.rs):
+# the new right-half block is created with `BlockContent::RichText { text, marks }` when marks fell
+# right of the cursor, and under the Loro-wired draw that create runs through the cell registry
+# (Peritext). The marked block is the template instance from the row above (`see krtvhl now`,
+# Bold 0..3 + Italic 4..14 — the only mark-carrying block the keystone can mint through production
+# ops); splitting at 6 straddles the Italic span. Default (omitted) wiring = full_headless =
+# `Wiring::full()`, so Loro is the CRDT authority.
+# Mutation-proved (prod is already fixed): withholding the RichText arm reds THIS row at
+# transition 2/2 on the right half (marks sut=None ref=Some([Italic 0..8])) while the
+# template row above stays GREEN — see lane-logs/t8-b-mutation-red-full.txt and
+# lane-logs/t8-b-mutation-isolation.txt.
+# NOTE (task #8, measured): the split's OTHER create route — the `!wrote_create_via_cell`
+# fallback — IS reached by the composed keystone, but only in SqlOnly-wired draws (8/8 reaches
+# on `SqlBlockOperations`, whose create honours the marks param, and always with right_marks==0),
+# never on `LoroBlockOperations`. A Loro-only draw carries neither `SutBlockTreeWrite` nor
+# `SutTemplateInstantiate`, so no draw both mints a marked block and splits it there.
+{"name": "split-of-a-marked-block-keeps-the-right-half-rich-under-loro", "description": "Instantiate the canned template under block:c1, then split its rich instance child (`see krtvhl now`, Bold 0..3 + Italic 4..14) at position 6 under the full_headless (Loro+Turso) wiring. `split_content_marks` partitions the spans and the right half's marks must reach the CRDT authority with the new block's create. Both halves must match the reference: left `see kr` keeps Bold 0..3 and the truncated Italic, right `tvhl now` carries Italic 0..8. RED when split_block's create withholds the RichText marks: right half marks sut=None ref=Some([Italic 0..8]).", "transitions": [{"InstantiateTemplate": {"parent_id": "block:c1", "date": "krtvhl", "mood": "abcdef"}}, {"SplitBlock": {"block_id": "block:0a50d900-c497-53b3-aba8-ef3018423f34", "position": 6}}]}
