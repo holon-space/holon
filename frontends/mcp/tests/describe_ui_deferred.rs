@@ -335,6 +335,120 @@ fn fan_out_expansion_is_bounded_and_exhaustion_is_disclosed() {
     });
 }
 
+const HOST: &str = "block:ctx-host";
+const KID_A: &str = "block:ctx-kid-a";
+const KID_B: &str = "block:ctx-kid-b";
+
+/// A host block with two children, anchored on the `sentinel:no_parent` root
+/// so the `block_with_path` recursion has its base case (and the parent FK a
+/// real referent) and the host therefore owns a real materialized path.
+async fn seed_nested_page(engine: &holon::api::BackendEngine) {
+    let table = holon::storage::BLOCK_WRITE_TABLE;
+    for sql in [
+        format!(
+            "INSERT OR IGNORE INTO {table} (id, parent_id) VALUES ('sentinel:no_parent', \
+             'sentinel:no_parent')"
+        ),
+        format!(
+            "INSERT INTO {table} (id, parent_id, content, content_type) VALUES ('{HOST}', \
+             'sentinel:no_parent', 'Host Page', 'text'), ('{KID_A}', '{HOST}', 'buy milk', \
+             'text'), ('{KID_B}', '{HOST}', 'see Journals now', 'text')"
+        ),
+    ] {
+        engine
+            .db_handle()
+            .execute(&sql, vec![])
+            .await
+            .expect("insert block fixture rows");
+    }
+}
+
+fn descendants_node(
+    services: &Arc<dyn holon_frontend::reactive::BuilderServices>,
+    context_id: &str,
+) -> ViewModel {
+    holon_frontend::shadow_builders::register_render_dsl_widget_names();
+    let render_expr =
+        holon_api::render_dsl::parse_render_dsl(r#"list(#{item_template: text(col("content"))})"#)
+            .expect("item template parses");
+    let prototype = services
+        .interpret(&render_expr, &holon_frontend::RenderContext::default())
+        .snapshot();
+    ViewModel {
+        kind: ViewKind::LiveQuery {
+            content: Box::new(prototype),
+            query: Some("from descendants".to_string()),
+            query_lang: Some("holon_prql".to_string()),
+            query_context_id: Some(context_id.to_string()),
+            render_expr: Some(render_expr),
+        },
+        ..ViewModel::empty()
+    }
+}
+
+/// A CONTEXT-DEPENDENT query must be expanded against the context's real path
+/// prefix. `from descendants` filters on `$context_path_prefix`; a context
+/// built without one binds the `__NO_PATH__/` sentinel, which matches no row —
+/// so `describe_ui` would report a populated nested page as empty while the
+/// window paints it fine, and our own dogfood instrumentation would lie.
+///
+/// Control-asserted twice (path exists, and the same query with a path-carrying
+/// context returns both children), so a red here is the EXPANSION's fault.
+#[test]
+fn expanded_descendants_query_resolves_the_contexts_path_prefix() {
+    runtime().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = fresh_engine(dir.path().join("fresh.db")).await;
+        seed_nested_page(&engine).await;
+
+        let host = holon_api::EntityUri::parse(HOST).expect("host uri");
+
+        // CONTROL 1: the host really has a path in `block_with_path`.
+        let qe: Arc<dyn holon_api::QueryEngine> = engine.clone();
+        let path = qe.lookup_block_path(&host).await.expect("host path lookup");
+        assert_eq!(
+            path, "/block:ctx-host",
+            "fixture must give the host a real materialized path, not the id fallback"
+        );
+
+        // CONTROL 2: with a path-carrying context the very same query returns
+        // both children through the very same engine entry point.
+        let control = qe
+            .execute_query(
+                "from descendants",
+                holon_api::QueryLanguage::HolonPrql,
+                HashMap::new(),
+                Some(holon_api::QueryContext::for_block_with_path(
+                    &host,
+                    None,
+                    path.clone(),
+                )),
+            )
+            .await
+            .expect("control descendants query");
+        assert_eq!(
+            control.len(),
+            2,
+            "fixture must supply 2 descendants before the expansion is judged; got {control:?}"
+        );
+
+        let services = services_for(engine);
+        let mut vm = descendants_node(&services, HOST);
+        let resolver = EngineResolver {
+            services: services.clone(),
+        };
+        resolve_deferred(&mut vm, DeferredPolicy::Expand(&resolver)).await;
+
+        let rendered = vm.pretty_print(0);
+        assert!(
+            rendered.contains("buy milk") && rendered.contains("see Journals now"),
+            "an expanded `from descendants` must render the context's real descendants — an \
+             unresolved path prefix binds the __NO_PATH__/ sentinel and reports the page as \
+             empty; got:\n{rendered}"
+        );
+    });
+}
+
 /// A failing query must name the failure. Falling back to the empty prototype
 /// would reintroduce exactly the bug this pass exists to fix.
 #[test]

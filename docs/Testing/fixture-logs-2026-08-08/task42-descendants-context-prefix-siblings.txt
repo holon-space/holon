@@ -1,0 +1,109 @@
+task #42 — `from descendants` is dead in the MCP describe_ui expander, for the
+same reason the gpui builder was dead (cd4cd93e).
+
+TRIGGER: code exploration in the #16/#27 chevron lane. cd4cd93e fixed the gpui
+builder and its commit message explicitly named sibling callers that pass
+`context_path_prefix: None` into the same engine arm. Confirmed independently by
+the #27 acceptance run, where `describe_ui` reported the nested page's rows as
+UNEVALUATED/empty while the real window painted them.
+
+MECHANISM (one sentence): `BackendEngine::bind_context_params`
+(crates/holon/src/api/backend_engine.rs:470-481) binds the literal string
+`"__NO_PATH__/"` for a `QueryContext` whose `context_path_prefix` is `None`, and
+the `descendants` PRQL stdlib entry (crates/holon/sql/prql_stdlib.prql:3-8) is
+`from block_with_path | filter (path | text.starts_with $context_path_prefix)`
+— so every context-dependent `from descendants` built by such a caller matches
+exactly zero rows, silently.
+
+SITE (the caller, pre-fix):
+  frontends/mcp/src/describe_ui_expand.rs:143   context_path_prefix: None
+
+NOT a site (checked, left alone): crates/holon-frontend/src/render_interpreter.rs:665
+builds the same None context, but its stream is immediately dropped
+(`match result { Ok(_stream) => ... with_data_rows(vec![]) }`) — it is a
+validate-by-doing compile check, and the platform layer starts the real watcher
+from the node's `query_context_id` prop. Rows never come from it.
+The sentinel arm itself (backend_engine.rs:470-481) is task #41, a pending
+ruling, and is untouched here.
+
+
+==============================================================================
+SITE 1 — MCP describe_ui. RED, then GREEN.
+==============================================================================
+
+Test: frontends/mcp/tests/describe_ui_deferred.rs
+      expanded_descendants_query_resolves_the_contexts_path_prefix
+
+Fixture: `sentinel:no_parent` anchor + `block:ctx-host` ("Host Page") with two
+children ("buy milk", "see Journals now"), inserted into BLOCK_WRITE_TABLE so
+the `block_with_path` recursion has its base case.
+Two CONTROLS run before the assertion, so a red is the expander's fault:
+  CONTROL 1  qe.lookup_block_path(block:ctx-host) == "/block:ctx-host"
+  CONTROL 2  qe.execute_query("from descendants", HolonPrql, {},
+             for_block_with_path(host, None, "/block:ctx-host")) -> 2 rows
+Both controls PASSED in the red run (the failure is the third assertion).
+
+--- RED (base behaviour, `context_path_prefix: None`) --------------------------
+$ cargo nextest run -p holon-mcp --test describe_ui_deferred --no-fail-fast
+
+ Nextest run ID 2fd3e1a3-e422-47bf-aeef-12202a85d021 with nextest profile: default
+    Starting 6 tests across 1 binary
+        PASS [   0.024s] (1/6) holon-mcp::describe_ui_deferred unforced_expand_toggle_content_is_marked_unevaluated
+        PASS [   0.031s] (2/6) holon-mcp::describe_ui_deferred fan_out_expansion_is_bounded_and_exhaustion_is_disclosed
+        PASS [   0.986s] (3/6) holon-mcp::describe_ui_deferred unexpanded_live_query_is_marked_unevaluated
+        PASS [   0.986s] (4/6) holon-mcp::describe_ui_deferred failed_expansion_surfaces_an_error_not_a_placeholder
+        PASS [   0.988s] (5/6) holon-mcp::describe_ui_deferred expanded_live_query_renders_the_querys_real_rows
+        FAIL [   1.090s] (6/6) holon-mcp::describe_ui_deferred expanded_descendants_query_resolves_the_contexts_path_prefix
+
+  stderr ───
+
+    thread 'expanded_descendants_query_resolves_the_contexts_path_prefix' (507115069) panicked at frontends/mcp/tests/describe_ui_deferred.rs:443:9:
+    an expanded `from descendants` must render the context's real descendants — an unresolved path prefix binds the __NO_PATH__/ sentinel and reports the page as empty; got:
+    live_query
+      list [0 items]
+
+────────────
+     Summary [   1.091s] 6 tests run: 5 passed, 1 failed, 0 skipped
+
+`list [0 items]` is the exact shape the #27 acceptance run saw: not an error,
+not an UNEVALUATED marker — a confidently empty page.
+
+--- FIX -----------------------------------------------------------------------
+frontends/mcp/src/describe_ui_expand.rs, EngineResolver::expand_live_query:
+the context is now built from a resolved path
+(`engine.lookup_block_path(&uri).await` -> `QueryContext::for_block_with_path`).
+The expander is already `async` with the engine in hand, so no thread hop is
+needed here (unlike the gpui builder's synchronous render pass).
+
+Failure arms, in this frontend's idiom — the REPLY is the instrument, so a
+degradation must be a field in the reply, not a log line:
+  * lookup failed  -> `Err` naming the block and the consequence; the existing
+    caller arm turns it into `ViewKind::Error` ("live_query expansion FAILED
+    (<lang>): context path prefix lookup for block '<id>' failed, so
+    context-dependent rows cannot be resolved: <cause> — query: <query>").
+  * NO query engine (Loro-only) -> UNCHANGED and already correct: the very
+    first statement of `expand_live_query` errors with "this session has no
+    query engine (no-Turso frontend)", which the same caller arm turns into a
+    visible `ViewKind::Error`. describe_ui cannot expand ANY live_query without
+    an engine, so unlike the gpui builder there is no partially-degraded
+    `Ok(None)` state to fall back to; the mode is disclosed as an error node,
+    never as empty content. Deliberately not converted to `Unevaluated`: this
+    matches the pass's existing contract for "expansion was attempted and could
+    not complete".
+
+--- GREEN ---------------------------------------------------------------------
+$ cargo nextest run -p holon-mcp --test describe_ui_deferred --no-fail-fast
+
+ Nextest run ID 66c3d644-068b-41b6-b8cd-335faf25f20d with nextest profile: default
+    Starting 6 tests across 1 binary
+        PASS [   0.031s] (1/6) holon-mcp::describe_ui_deferred unforced_expand_toggle_content_is_marked_unevaluated
+        PASS [   0.039s] (2/6) holon-mcp::describe_ui_deferred fan_out_expansion_is_bounded_and_exhaustion_is_disclosed
+        PASS [   1.037s] (3/6) holon-mcp::describe_ui_deferred unexpanded_live_query_is_marked_unevaluated
+        PASS [   1.044s] (4/6) holon-mcp::describe_ui_deferred failed_expansion_surfaces_an_error_not_a_placeholder
+        PASS [   1.048s] (5/6) holon-mcp::describe_ui_deferred expanded_live_query_renders_the_querys_real_rows
+        PASS [   1.161s] (6/6) holon-mcp::describe_ui_deferred expanded_descendants_query_resolves_the_contexts_path_prefix
+────────────
+     Summary [   1.161s] 6 tests run: 6 passed, 0 skipped
+
+
+==============================================================================

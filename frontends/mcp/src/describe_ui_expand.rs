@@ -133,16 +133,31 @@ impl DeferredResolver for EngineResolver {
             let language: holon_api::QueryLanguage = spec.query_lang.parse().map_err(|e| {
                 anyhow::anyhow!("unsupported query_lang '{}': {e}", spec.query_lang)
             })?;
-            let context = spec.query_context_id.map(|id| {
-                // ALLOW(entity_uri_from_raw): live_query node prop, same as the
-                // gpui builder's own reconstruction
-                let uri = holon_api::EntityUri::from_raw(id);
-                holon_frontend::QueryContext {
-                    current_block_id: Some(uri.clone()),
-                    context_parent_id: Some(uri),
-                    context_path_prefix: None,
+            // A context-dependent query (`from descendants`) filters on the
+            // context's `blocks_with_paths` prefix; a context without one binds
+            // the `__NO_PATH__/` sentinel and matches no row, so describe_ui
+            // would report a populated nested page as empty. Resolving it can
+            // fail, and the failure travels as an `Err` — the caller turns that
+            // into the reply's own error node, which is the instrument here.
+            let context = match spec.query_context_id {
+                Some(id) => {
+                    // ALLOW(entity_uri_from_raw): live_query node prop, same as
+                    // the gpui builder's own reconstruction
+                    let uri = holon_api::EntityUri::from_raw(id);
+                    let path = engine.lookup_block_path(&uri).await.map_err(|e| {
+                        anyhow::anyhow!(
+                            "context path prefix lookup for block '{uri}' failed, so \
+                             context-dependent rows cannot be resolved: {e:#}"
+                        )
+                    })?;
+                    Some(holon_frontend::QueryContext::for_block_with_path(
+                        &uri,
+                        Some(uri.clone()),
+                        path,
+                    ))
                 }
-            });
+                None => None,
+            };
 
             let rows = engine
                 .execute_query(spec.query, language, Default::default(), context)
