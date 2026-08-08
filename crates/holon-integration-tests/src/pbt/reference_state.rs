@@ -1673,11 +1673,19 @@ impl ReferenceState {
         inst_child_id: EntityUri,
         root_content: &str,
         child_content: &str,
+        child_marks: Option<Vec<holon_api::MarkSpan>>,
         template_id: &str,
     ) {
         self.push_undo_snapshot();
         self.insert_block_under_no_snapshot(target_parent, root_content, inst_root_id.clone());
-        self.insert_block_under_no_snapshot(&inst_root_id, child_content, inst_child_id);
+        self.insert_block_under_no_snapshot(&inst_root_id, child_content, inst_child_id.clone());
+        // An instance inherits the definition node's marks, remapped across the
+        // `{{var}}` substitution (`plan_instantiation` → `remap_marks`); a
+        // freshly minted plain block would model an instantiation that silently
+        // flattens the template's rich text.
+        if let Some(b) = self.domain.block_state.blocks.get_mut(&inst_child_id) {
+            b.marks = child_marks;
+        }
         // The engine stamps the instance ROOT (only) with the persisted
         // `instance_of` provenance property (`template_instantiation.rs`); it
         // org-round-trips like any property, so the oracle carries it or

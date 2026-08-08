@@ -350,6 +350,41 @@ fn block_op(op_name: &str, params: HashMap<String, Value>) -> Operation {
     Operation::new(EntityName::from("block"), op_name, "", params)
 }
 
+/// `block.create` params that carry their own meaning and must therefore never
+/// be flattened into the persisted properties blob — either because `create`
+/// routes them somewhere dedicated (content, marks, edge junctions, positional
+/// anchors) or because they are operation-control metadata.
+///
+/// Read by BOTH directions of the create path, which is what keeps them honest:
+/// `create` strips these from the props it writes, and
+/// `delete_inverse_create_params` strips them from the properties it splats
+/// back as params. A doc written before `marks` joined this list stores a stale
+/// `properties["marks"]`; without the second use the inverse would hand that
+/// string straight back to `create` as a real marks param and resurrect a plain
+/// block RICH (or fail on junk JSON).
+const CREATE_HANDLED_FIELDS: [&str; 15] = [
+    "parent_id",
+    "content",
+    // Flattened key-by-key by `create`, never stored verbatim.
+    "properties",
+    // Applied via Peritext, not stored as a property.
+    "marks",
+    "id",
+    "content_type",
+    "source_language",
+    "source_name",
+    "source_header_args",
+    "source_results",
+    // Edge fields routed to their junctions.
+    "tags",
+    "requires",
+    "advice_suppressed",
+    // Positional anchors. `after_block_id` is the canonical key every prod
+    // caller uses; `after` is the delete-inverse restore key.
+    holon_api::POSITION_AFTER_BLOCK_ID_PARAM,
+    "after",
+];
+
 /// Build the `set_field("content", Object{text, marks})` payload that restores
 /// a block's rich content (text AND marks) as ONE atomic value. Routed through
 /// the `content=Object` write path (`update_block_marked`), which clears every
@@ -706,7 +741,7 @@ impl CrudOperations<Block> for LoroBlockOperations {
         // `BlockContent`, and remember the marks to re-apply via Peritext once
         // the node exists (`create_block_with_properties` writes only the raw
         // text).
-        let (content, restore_marks): (String, Option<Vec<holon_api::MarkSpan>>) =
+        let (content, content_object_marks): (String, Option<Vec<holon_api::MarkSpan>>) =
             match fields.get("content") {
                 Some(Value::Object(obj)) => {
                     let text = obj
@@ -729,6 +764,52 @@ impl CrudOperations<Block> for LoroBlockOperations {
                     return Err(format!("create: unsupported content shape {other:?}").into());
                 }
             };
+
+        // A SEPARATE top-level `marks` param is the shape every non-inverse
+        // producer of rich text emits — org/markdown ingest (`block_params.rs`)
+        // and template instantiation (`plan_instantiation`, which remaps the
+        // definition's spans across `{{var}}` substitution). `SqlOperationProvider`
+        // honours it, so ignoring it here made the CRUD authority decide whether a
+        // block keeps its links and emphasis: under Loro every instantiated or
+        // ingested rich block was born plain.
+        let param_marks: Option<Vec<holon_api::MarkSpan>> = match fields.get("marks") {
+            // ALLOW(jsonb_as_string): op param, not a CDC row.
+            Some(Value::String(json)) => Some(
+                holon_api::marks_from_json(json)
+                    .map_err(|e| format!("create: 'marks' JSON parse error: {e}"))?,
+            ),
+            Some(Value::Null) | None => None,
+            Some(other) => {
+                return Err(format!("create: 'marks' must be a JSON string, got {other:?}").into());
+            }
+        };
+        let restore_marks = match (content_object_marks, param_marks) {
+            (Some(from_content), Some(from_param)) if from_content != from_param => {
+                return Err(format!(
+                    "create: content Object marks {from_content:?} disagree with the 'marks' \
+                     param {from_param:?} — refusing to pick a winner"
+                )
+                .into());
+            }
+            (from_content, from_param) => from_content.or(from_param),
+        };
+
+        // Marks are applied by Peritext AFTER the node exists, so an out-of-bounds
+        // span rejected down there would leave a half-created plain block behind.
+        // Reject it here instead — before any write — so an invalid create has
+        // exactly zero side effects. Offsets are Unicode-scalar, matching
+        // `canonicalize_marks_against` and `scalar_range_to_bytes`.
+        if let Some(marks) = &restore_marks {
+            let len = content.chars().count();
+            if let Some(bad) = marks.iter().find(|m| m.start > m.end || m.end > len) {
+                return Err(format!(
+                    "create: mark span {}..{} ({:?}) is not within content of {len} scalar(s) \
+                     ({content:?}) — refusing to create a block whose marks it cannot apply",
+                    bad.start, bad.end, bad.mark
+                )
+                .into());
+            }
+        }
 
         let content_type: ContentType = fields
             .get("content_type")
@@ -865,30 +946,8 @@ impl CrudOperations<Block> for LoroBlockOperations {
         // Set additional properties (excluding fields handled above and source block
         // fields)
         let mut props = HashMap::new();
-        let handled_fields = [
-            "parent_id",
-            "content",
-            "id",
-            "content_type",
-            "source_language",
-            "source_name",
-            "source_header_args",
-            "source_results",
-            // Edge fields routed to their junctions above (not the props blob).
-            "tags",
-            "requires",
-            "advice_suppressed",
-            // Positional anchors (applied below). `after_block_id` is the canonical
-            // key every prod caller uses; `after` is the delete-inverse restore key.
-            // Both are operation-control metadata — stripped here so they NEVER land
-            // in the persisted properties blob.
-            holon_api::POSITION_AFTER_BLOCK_ID_PARAM,
-            "after",
-            // Flattened below, not stored verbatim.
-            "properties",
-        ];
         for (key, value) in &fields {
-            if !handled_fields.contains(&key.as_ref()) {
+            if !CREATE_HANDLED_FIELDS.contains(&key.as_ref()) {
                 props.insert(key.to_string(), value.clone());
             }
         }
@@ -915,10 +974,10 @@ impl CrudOperations<Block> for LoroBlockOperations {
                 .map_err(|e| format!("Failed to set properties: {}", e))?;
         }
 
-        // Rich content restore (delete inverse): re-apply the captured marks via
-        // Peritext over the just-written text. `create_block_with_properties`
-        // wrote the raw text only, so a marked block would otherwise resurrect
-        // plain — lossy. `update_block_marked` rewrites text AND marks together.
+        // Apply the block's marks via Peritext over the just-written text —
+        // `create_block_with_properties` and `update_block` write raw text only,
+        // so a marked block would otherwise be born (or resurrect) plain.
+        // `update_block_marked` rewrites text AND marks together.
         if let Some(marks) = &restore_marks {
             backend
                 .update_block_marked(block.id.as_str(), &content, marks)
@@ -1164,7 +1223,15 @@ impl LoroBlockOperations {
                 ),
             );
         }
+        // Stored properties become params verbatim EXCEPT the ones `create`
+        // reads as instructions rather than data. `block.marks` above is the
+        // only source of truth for this block's marks; a `properties["marks"]`
+        // left by a doc written before that key was routed to Peritext would
+        // otherwise be handed back as a real marks param.
         for (key, value) in &block.properties {
+            if CREATE_HANDLED_FIELDS.contains(&key.as_str()) {
+                continue;
+            }
             params.insert(key.clone(), value.clone());
         }
         params.insert(
@@ -2129,6 +2196,107 @@ mod advice_dismiss_tests {
         let restored = backend.get_block(&anchor).await.expect("read");
         assert_eq!(restored.content, "a task");
         assert_eq!(restored.marks, None, "plain prior must restore plain");
+    }
+
+    /// `create` with a top-level `marks` param must persist the marks — the
+    /// shape org/markdown ingest and `plan_instantiation` emit. Ignoring it
+    /// made a rich block born plain under the Loro CRUD authority while the SQL
+    /// authority kept the marks (composed-keystone
+    /// `watch-rows-template-child-parent` RED, 2026-08-08).
+    #[tokio::test]
+    async fn create_applies_top_level_marks_param() {
+        let (ops, _dir, anchor) = ops_with_anchor().await;
+        let backend = ops.get_backend("").await.expect("backend");
+
+        let mut fields = holon_api::StorageEntity::new();
+        fields.insert("id".into(), Value::String("block:rich-create".into()));
+        fields.insert("parent_id".into(), Value::String(anchor.clone()));
+        fields.insert("content".into(), Value::String("see krtvhl now".into()));
+        fields.insert(
+            "marks".into(),
+            Value::String(holon_api::marks_to_json(&[bold(0, 3)])),
+        );
+        let (id, _result) = ops.create(fields).await.expect("create with marks");
+
+        let created = backend.get_block(&id).await.expect("read");
+        assert_eq!(created.content, "see krtvhl now");
+        assert_eq!(created.marks, Some(vec![bold(0, 3)]));
+        assert!(
+            !created.properties.contains_key("marks"),
+            "marks must not leak into the properties blob"
+        );
+    }
+
+    /// An out-of-bounds mark span must be rejected with ZERO side effects.
+    /// Marks are applied by Peritext only after the node exists, so validating
+    /// them late would leave a plain half-created block behind every failure.
+    #[tokio::test]
+    async fn create_with_out_of_bounds_marks_leaves_no_block() {
+        let (ops, _dir, anchor) = ops_with_anchor().await;
+        let backend = ops.get_backend("").await.expect("backend");
+
+        let mut fields = holon_api::StorageEntity::new();
+        fields.insert("id".into(), Value::String("block:half-born".into()));
+        fields.insert("parent_id".into(), Value::String(anchor.clone()));
+        fields.insert("content".into(), Value::String("short".into()));
+        fields.insert(
+            "marks".into(),
+            Value::String(holon_api::marks_to_json(&[bold(0, 99)])),
+        );
+
+        let err = ops
+            .create(fields)
+            .await
+            .expect_err("an unapplicable mark span must fail the create");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("0..99") && msg.contains("5"),
+            "error must name the span and the content length, got: {msg}"
+        );
+
+        assert!(
+            backend.get_block("block:half-born").await.is_err(),
+            "a rejected create must leave NO block behind"
+        );
+    }
+
+    /// The delete inverse must source marks from `block.marks` alone. A doc
+    /// written before `marks` was routed to Peritext carries a stale
+    /// `properties["marks"]`; splatting properties verbatim would hand it back
+    /// to `create` as a real marks param and resurrect a plain block RICH.
+    #[test]
+    fn delete_inverse_ignores_a_legacy_marks_property() {
+        let mut block = Block::new_text(
+            EntityUri::block("legacy"),
+            EntityUri::block("parent"),
+            "see krtvhl now".to_string(),
+        );
+        block.marks = None;
+        block.properties.insert(
+            "marks".to_string(),
+            Value::String(holon_api::marks_to_json(&[bold(0, 3)])),
+        );
+        block
+            .properties
+            .insert("effort".to_string(), Value::String("A".into()));
+
+        let params = LoroBlockOperations::delete_inverse_create_params(&block, None);
+
+        assert!(
+            !params.contains_key("marks"),
+            "a marks-free block's inverse must carry NO marks param, got {:?}",
+            params.get("marks")
+        );
+        assert!(
+            matches!(params.get("content"), Some(Value::String(s)) if s == "see krtvhl now"),
+            "content must stay the plain string form, got {:?}",
+            params.get("content")
+        );
+        assert_eq!(
+            params.get("effort"),
+            Some(&Value::String("A".into())),
+            "ordinary properties must still splat through"
+        );
     }
 
     /// A mark-only `set_field("marks", ...)` write must be reversible: the
