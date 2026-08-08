@@ -481,3 +481,28 @@
 # never on `LoroBlockOperations`. A Loro-only draw carries neither `SutBlockTreeWrite` nor
 # `SutTemplateInstantiate`, so no draw both mints a marked block and splits it there.
 {"name": "split-of-a-marked-block-keeps-the-right-half-rich-under-loro", "description": "Instantiate the canned template under block:c1, then split its rich instance child (`see krtvhl now`, Bold 0..3 + Italic 4..14) at position 6 under the full_headless (Loro+Turso) wiring. `split_content_marks` partitions the spans and the right half's marks must reach the CRDT authority with the new block's create. Both halves must match the reference: left `see kr` keeps Bold 0..3 and the truncated Italic, right `tvhl now` carries Italic 0..8. RED when split_block's create withholds the RichText marks: right half marks sut=None ref=Some([Italic 0..8]).", "transitions": [{"InstantiateTemplate": {"parent_id": "block:c1", "date": "krtvhl", "mood": "abcdef"}}, {"SplitBlock": {"block_id": "block:0a50d900-c497-53b3-aba8-ef3018423f34", "position": 6}}]}
+#
+# --- a wiki link AUTHORED IN THE UI is adopted at the write boundary (dogfood 2026-08-08 P1-2) ---
+# The creation slot commits the whole typed line through `block.create`, and that is the path
+# the dogfood caught: the block was BORN carrying `[[...]]` verbatim with `marks = NULL` and no
+# junction row, and only the NEXT boot's file re-ingest adopted it, rewriting the user's stored
+# characters with no action of theirs.
+# The set_field twin (keystrokes into an already-created block) is deliberately NOT a row here:
+# it is covered by `crates/holon/tests/live_edit_link_marks.rs`, and as a keystone row it trips
+# two model gaps unrelated to this fix — the reference's editor BUFFER keeps raw markup where the
+# SUT's `MutableText` holds the adopted label (the 2026-07-31 ORACLE row, still open), and the
+# per-keystroke `TypeChars` SQL budget does not scale with the typed length. Both are named in
+# the lane report.
+# The target is DANGLING on purpose (no such page exists in the seeded vault): a link whose
+# target page EXISTS is additionally rewritten to the resolved `[[block:<id>][Label]]` form by
+# the writeback, and the reference does not model link RESOLUTION — that oracle gap is named in
+# the lane report, and pinning it here would assert a divergence that is not this fix's subject.
+# RED before the fix (lane-logs/t12-keystone-RED.log): the reference did not run the org lens on
+# CreateBlockUnderFocus content, so `inv-blocks-match-ref/org` read
+#   block:wl0: content: sut="see Wiki Target Page now" ref="see [[Wiki Target Page]] now";
+#              marks: sut=Some([Link{Name{"Wiki Target Page"}}]) ref=None
+# — the model gap that made every link case inexpressible as a hand-authored row (BugFunnel
+# 2026-07-31 ORACLE row). The oracle is fixed FIRST (model states the spec: UI-authored text and
+# ingest converge on ONE representation), then the create boundary is fixed to reach it without
+# a file round-trip.
+{"name": "wiki-link-created-in-the-ui-is-adopted-at-the-write-boundary", "description": "dogfood 2026-08-08 P1-2: a block born from the creation slot with a typed `[[Wiki Target Page]]` must store the STRIPPED label plus a Link mark, like ingest — not raw markup with NULL marks that the next boot silently rewrites.", "transitions": [{"CreateBlockUnderFocus": {"content": "see [[Wiki Target Page]] now", "id": "block:wl0"}}]}

@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use holon::api::AuthoredInput;
 use holon::api::OperationDispatcher;
 use holon::core::SqlOperationProvider;
 use holon::storage::schema_module::EdgeFieldDescriptor;
@@ -122,11 +123,15 @@ fn wrapped_dispatcher(handle: DbHandle) -> OperationDispatcher {
     OperationDispatcher::new(vec![Arc::new(wrapper) as Arc<dyn OperationProvider>])
 }
 
+/// Both helpers dispatch as `AuthoredInput::Live` — they stand in for a person
+/// typing, which is what the engine declares for `OpOrigin::User`/`Agent`.
+/// Tests that must model a replayed inverse call `execute_operation` directly,
+/// exactly as `OperationEngine::replay` does.
 async fn create_block(d: &OperationDispatcher, entity: &EntityName, id: &str, content: &str) {
     let mut p: holon_api::StorageEntity = HashMap::new();
     p.insert("id".into(), Value::String(format!("block:{id}")));
     p.insert("content".into(), Value::String(content.to_string()));
-    d.execute_operation(entity, "create", p)
+    d.execute_operation_with_input(entity, "create", p, AuthoredInput::Live)
         .await
         .expect("create block");
 }
@@ -136,7 +141,7 @@ async fn set_content(d: &OperationDispatcher, entity: &EntityName, id: &str, con
     p.insert("id".into(), Value::String(format!("block:{id}")));
     p.insert("field".into(), Value::String("content".to_string()));
     p.insert("value".into(), Value::String(content.to_string()));
-    d.execute_operation(entity, "set_field", p)
+    d.execute_operation_with_input(entity, "set_field", p, AuthoredInput::Live)
         .await
         .expect("set_field content");
 }
@@ -412,4 +417,295 @@ async fn live_content_edit_id_link_resolves() {
         )],
         "an id-link resolves trivially to its target id"
     );
+}
+
+/// The CREATE half of the same boundary — the vector dogfood 2026-08-08 P1-2
+/// caught. Typing a link into the creation slot commits through `block.create`,
+/// not `set_field`, so a block can be BORN carrying raw markup. It must be
+/// adopted at that boundary exactly like an edit: stripped label in `content`,
+/// the `Link` mark in `marks`, a junction row, and a backlink once the target
+/// page exists.
+#[tokio::test(flavor = "multi_thread")]
+async fn creating_a_block_with_a_typed_link_adopts_it_at_the_write_boundary() {
+    let (_backend, handle) = TursoBackend::new_in_memory()
+        .await
+        .expect("in-memory turso");
+    setup_schema(&handle).await;
+    let d = dispatcher(handle.clone());
+    let entity: EntityName = ENTITY.to_string().into();
+
+    // The user types the whole line into the creation slot and presses Enter.
+    create_block(&d, &entity, "src", "see [[Linked Page Test]] now").await;
+
+    let (content, marks) = read_content_marks(&handle, "src").await;
+    assert_eq!(
+        content, "see Linked Page Test now",
+        "a born-with-a-link block must store the rendered label, not the raw [[...]] syntax \
+         (storing it raw is what the next boot's re-ingest silently rewrites)"
+    );
+    let marks = marks.expect("marks must be populated by the create boundary (was NULL — the bug)");
+    let parsed: Vec<MarkSpan> = holon_api::marks_from_json(&marks).expect("marks JSON round-trips");
+    assert_eq!(parsed.len(), 1, "one link mark");
+    assert!(
+        matches!(parsed[0].mark, InlineMark::Link { .. }),
+        "the extracted mark is a Link"
+    );
+    assert_eq!(
+        links_rows(&handle, "src").await,
+        vec![("Linked Page Test".to_string(), "page".to_string(), None)],
+        "a created wiki-name link must produce a dangling page-kind junction row"
+    );
+
+    let mut p: holon_api::StorageEntity = HashMap::new();
+    p.insert("id".into(), Value::String("block:page".to_string()));
+    p.insert(
+        "content".into(),
+        Value::String("Linked Page Test".to_string()),
+    );
+    p.insert(
+        "tags".into(),
+        Value::Array(vec![Value::String("Page".to_string())]),
+    );
+    d.execute_operation(&entity, "create", p)
+        .await
+        .expect("create page");
+    assert_eq!(
+        backlinks_rows(&handle, "page").await,
+        vec!["block:src".to_string()],
+        "backlinks matview must show the link the block was born with"
+    );
+}
+
+/// The adoption is a FIXED POINT: re-ingesting what the create boundary stored
+/// leaves it byte-identical. This is the half that kills the silent rewrite —
+/// the next boot re-parses the file the renderer wrote and finds nothing to
+/// change, so the user's characters stay put.
+#[tokio::test(flavor = "multi_thread")]
+async fn adopted_create_content_survives_a_re_ingest_unchanged() {
+    let (_backend, handle) = TursoBackend::new_in_memory()
+        .await
+        .expect("in-memory turso");
+    setup_schema(&handle).await;
+    let d = dispatcher(handle.clone());
+    let entity: EntityName = ENTITY.to_string().into();
+
+    create_block(&d, &entity, "src", "see [[Linked Page Test]] now").await;
+    let (content, marks) = read_content_marks(&handle, "src").await;
+    let spans: Vec<MarkSpan> =
+        holon_api::marks_from_json(&marks.expect("marks present")).expect("marks JSON");
+
+    // What the org writer puts on disk, and what re-reading it yields.
+    let on_disk = holon_org_format::render_inline_marks(&content, &spans);
+    let (reparsed, reparsed_marks) = holon_org_format::extract_inline_marks(&on_disk);
+    assert_eq!(
+        reparsed, content,
+        "a re-ingest of the rendered file must not change the stored content"
+    );
+    assert_eq!(
+        reparsed_marks, spans,
+        "a re-ingest of the rendered file must not change the stored marks"
+    );
+}
+
+/// The no-clobber contract: a caller that supplies its OWN `marks` has already
+/// parsed at its own boundary (org ingest's `build_block_params`,
+/// `split_block`'s partitioned spans). Those creates reach this same
+/// dispatcher, so re-parsing them here would fight the parse that produced
+/// them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_create_that_supplies_marks_is_not_reparsed() {
+    let (_backend, handle) = TursoBackend::new_in_memory()
+        .await
+        .expect("in-memory turso");
+    setup_schema(&handle).await;
+    let d = dispatcher(handle.clone());
+    let entity: EntityName = ENTITY.to_string().into();
+
+    // The ingest shape: an already-stripped label whose surviving `[[...]]` bytes
+    // are sealed as literal by a Verbatim mark covering them.
+    let sealed = vec![MarkSpan::new(4, 17, InlineMark::Verbatim)];
+    let mut p: holon_api::StorageEntity = HashMap::new();
+    p.insert("id".into(), Value::String("block:src".to_string()));
+    p.insert(
+        "content".into(),
+        Value::String("see [[Not A Link]] now".to_string()),
+    );
+    p.insert(
+        "marks".into(),
+        Value::String(holon_api::marks_to_json(&sealed)),
+    );
+    d.execute_operation_with_input(&entity, "create", p, AuthoredInput::Live)
+        .await
+        .expect("create with caller-supplied marks");
+
+    let (content, marks) = read_content_marks(&handle, "src").await;
+    assert_eq!(
+        content, "see [[Not A Link]] now",
+        "a caller that supplied marks keeps its content verbatim"
+    );
+    let parsed: Vec<MarkSpan> =
+        holon_api::marks_from_json(&marks.expect("supplied marks kept")).expect("marks JSON");
+    assert_eq!(parsed, sealed, "the supplied mark set must survive intact");
+    assert_eq!(
+        links_rows(&handle, "src").await,
+        vec![],
+        "a sealed literal must not be adopted into a junction row"
+    );
+}
+
+/// The inverse of a delete must restore the deleted BYTES, even when those
+/// bytes are markup the create boundary would otherwise adopt.
+///
+/// The trap this locks shut: `capture_row` filters `Value::Null` columns
+/// (`sql_operation_provider.rs`), so the delete-inverse of a marks-NULL row
+/// carries NO `marks` key at all — the shape that also arrives from raw
+/// pre-adoption blocks and from ingest. "No marks param" is therefore NOT
+/// evidence of "unparsed live typing", and adoption keyed on its absence
+/// rewrites the user's block during UNDO: `"see [[Journals]] now"` comes back
+/// as `"see Journals now"` with minted marks and a junction row, breaking the
+/// identity-preserving inverse contract (ADR 0024). Adoption is gated on the
+/// authoring ORIGIN instead, and `OperationEngine::replay` dispatches without
+/// one — so this replay path cannot reach it by construction.
+#[tokio::test(flavor = "multi_thread")]
+async fn undo_of_a_delete_restores_bytes_verbatim_even_when_adoption_would_apply() {
+    let (_backend, handle) = TursoBackend::new_in_memory()
+        .await
+        .expect("in-memory turso");
+    setup_schema(&handle).await;
+    let provider = sql_provider(handle.clone());
+    let d = dispatcher(handle.clone());
+    let entity: EntityName = ENTITY.to_string().into();
+
+    // A pre-adoption / ingest-shaped row: raw markup, NULL marks, written
+    // straight to the SQL authority the way org ingest writes it.
+    let mut p: holon_api::StorageEntity = HashMap::new();
+    p.insert("id".into(), Value::String("block:legacy".to_string()));
+    p.insert(
+        "content".into(),
+        Value::String("see [[Journals]] now".to_string()),
+    );
+    provider
+        .execute_operation(&entity, "create", p)
+        .await
+        .expect("seed legacy row");
+    let before = read_content_marks(&handle, "legacy").await;
+    assert_eq!(before.0, "see [[Journals]] now", "seeded verbatim");
+    assert_eq!(before.1, None, "seeded with NULL marks");
+
+    let mut dp: holon_api::StorageEntity = HashMap::new();
+    dp.insert("id".into(), Value::String("block:legacy".to_string()));
+    let res = d
+        .execute_operation(&entity, "delete", dp)
+        .await
+        .expect("delete");
+    let inverse = match res.undo {
+        holon_core::traits::UndoAction::Undo(op) => op,
+        other => panic!("leaf delete must be reversible, got {other:?}"),
+    };
+    assert_eq!(inverse.op_name, "create");
+    assert!(
+        !inverse.params.contains_key("marks"),
+        "capture_row drops NULL columns, so the inverse carries no marks param — this is the \
+         shape that must NOT be read as 'unparsed user typing'"
+    );
+
+    // Replay it exactly as `OperationEngine::replay` does: straight through the
+    // dispatcher, carrying no origin.
+    d.execute_operation(
+        &inverse.entity_name,
+        &inverse.op_name,
+        inverse
+            .params
+            .iter()
+            .map(|(k, v)| (std::sync::Arc::from(k.as_str()), v.clone()))
+            .collect(),
+    )
+    .await
+    .expect("replay inverse");
+
+    let after = read_content_marks(&handle, "legacy").await;
+    assert_eq!(
+        after.0, before.0,
+        "undo must restore the deleted bytes verbatim"
+    );
+    assert_eq!(after.1, before.1, "undo must not mint marks");
+    assert_eq!(
+        links_rows(&handle, "legacy").await,
+        vec![],
+        "undo must not mint a junction row"
+    );
+}
+
+/// The same trap on the EDIT arm, which has adopted since links-increment-3:
+/// the inverse of a content edit carries the block's PREVIOUS content, and for
+/// a pre-adoption block that previous content is raw markup. Undo must put
+/// those bytes back, not adopt them.
+///
+/// IGNORED, and the reason is a real fork rather than a missing line. The edit
+/// arm cannot simply be origin-gated like the create arm: `capture_row` filters
+/// NULL columns, so a content inverse cannot say "restore marks to NULL", and
+/// what actually clears stale marks on undo today is the adoption follow-up
+/// firing during replay (`undo_link_add_restores_prior_pair` in
+/// `undo_marks_consistency_repro.rs` fails the moment the arm is gated —
+/// measured, not predicted). Undo is therefore correct for adopted blocks and
+/// wrong for raw ones, and picking either behaviour is picking which population
+/// to break. The fix both tests would pass is inverses that carry their marks
+/// explicitly, i.e. `capture_row` emitting explicit NULLs — a change to every
+/// inverse in the system. Escalated in `lane-report-12.md`; un-ignore this test
+/// in the lane that makes that change.
+#[ignore = "blocked on inverses that carry marks explicitly (capture_row NULL filtering); see \
+            lane-report-12.md"]
+#[tokio::test(flavor = "multi_thread")]
+async fn undo_of_a_content_edit_restores_raw_previous_bytes() {
+    let (_backend, handle) = TursoBackend::new_in_memory()
+        .await
+        .expect("in-memory turso");
+    setup_schema(&handle).await;
+    let provider = sql_provider(handle.clone());
+    let d = dispatcher(handle.clone());
+    let entity: EntityName = ENTITY.to_string().into();
+
+    let mut p: holon_api::StorageEntity = HashMap::new();
+    p.insert("id".into(), Value::String("block:legacy".to_string()));
+    p.insert(
+        "content".into(),
+        Value::String("see [[Journals]] now".to_string()),
+    );
+    provider
+        .execute_operation(&entity, "create", p)
+        .await
+        .expect("seed legacy row");
+
+    let mut sp: holon_api::StorageEntity = HashMap::new();
+    sp.insert("id".into(), Value::String("block:legacy".to_string()));
+    sp.insert("field".into(), Value::String("content".to_string()));
+    sp.insert("value".into(), Value::String("replaced".to_string()));
+    let res = d
+        .execute_operation(&entity, "set_field", sp)
+        .await
+        .expect("edit");
+    let inverse = match res.undo {
+        holon_core::traits::UndoAction::Undo(op) => op,
+        other => panic!("content edit must be reversible, got {other:?}"),
+    };
+
+    d.execute_operation(
+        &inverse.entity_name,
+        &inverse.op_name,
+        inverse
+            .params
+            .iter()
+            .map(|(k, v)| (std::sync::Arc::from(k.as_str()), v.clone()))
+            .collect(),
+    )
+    .await
+    .expect("replay inverse");
+
+    let after = read_content_marks(&handle, "legacy").await;
+    assert_eq!(
+        after.0, "see [[Journals]] now",
+        "undo of an edit must restore the previous bytes verbatim"
+    );
+    assert_eq!(after.1, None, "undo of an edit must not mint marks");
+    assert_eq!(links_rows(&handle, "legacy").await, vec![]);
 }

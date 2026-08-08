@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use holon::api::AuthoredInput;
 use holon::api::OperationDispatcher;
 use holon::core::SqlOperationProvider;
 use holon::storage::schema_module::EdgeFieldDescriptor;
@@ -82,13 +83,15 @@ async fn create_block(d: &OperationDispatcher, entity: &EntityName, id: &str, co
     let mut p: StorageEntity = HashMap::new();
     p.insert("id".into(), Value::String(format!("block:{id}")));
     p.insert("content".into(), Value::String(content.to_string()));
-    d.execute_operation(entity, "create", p)
+    d.execute_operation_with_input(entity, "create", p, AuthoredInput::Live)
         .await
         .expect("create block");
 }
 
 /// Forward `set_field("content")` returning the captured inverse (the exact
-/// undo entry the engine would journal).
+/// undo entry the engine would journal). Dispatched as `AuthoredInput::Live` —
+/// this stands in for a person typing, which is what the engine declares for
+/// `OpOrigin::User`; the replay below deliberately does not.
 async fn set_content_capture_inverse(
     d: &OperationDispatcher,
     entity: &EntityName,
@@ -99,7 +102,7 @@ async fn set_content_capture_inverse(
     p.insert("id".into(), Value::String(format!("block:{id}")));
     p.insert("field".into(), Value::String("content".to_string()));
     p.insert("value".into(), Value::String(content.to_string()));
-    d.execute_operation(entity, "set_field", p)
+    d.execute_operation_with_input(entity, "set_field", p, AuthoredInput::Live)
         .await
         .expect("set_field content")
         .undo

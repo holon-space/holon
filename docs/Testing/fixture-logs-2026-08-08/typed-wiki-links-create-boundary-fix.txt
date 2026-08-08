@@ -1,0 +1,273 @@
+task #12 — dogfood P1-2 root cause and fix evidence (2026-08-08)
+================================================================
+Subject: `[[wiki links]]` authored in the UI produced no Link mark, no
+`block_links` row, no backlink — and the next app start silently rewrote the
+user's stored text. Evidence for the report itself:
+docs/Testing/fixture-logs-2026-08-08/dogfood-typed-wiki-links-not-parsed.txt
+
+
+A. WHAT THE SEAM ALREADY DID (measured, not assumed)
+----------------------------------------------------
+`OperationDispatcher` has parsed inline markup at the UI intent boundary since
+links-increment-3 — but ONLY for `set_field("content")`
+(operation_dispatcher.rs:793-823). That arm is sound; all 5 pre-existing tests
+in crates/holon/tests/live_edit_link_marks.rs pass at base:
+
+    running 5 tests
+    test live_content_edit_id_link_resolves ... ok
+    test live_content_edit_extracts_page_link_marks_and_junction ... ok
+    test live_content_edit_removing_link_clears_junction ... ok
+    test removing_a_link_clears_marks_through_the_wrapped_authority ... ok
+    test blur_recommit_of_stripped_label_preserves_marks ... ok
+    test result: ok. 5 passed; 0 failed        (lane-logs/t12-live-edit-link-marks-baseline.log)
+
+The keystone confirms the same at the composed level: typing a link into an
+already-created block reaches the store adopted (probe, default wiring):
+
+    disk: * see [[block:journals][Journals]]
+    sut content "see Journals now", marks [Link{Scheme{block:journals}}]
+                                            (lane-logs/t12-probe-typed-link-2.log)
+
+
+B. WHAT IT DID NOT DO — the create boundary (ROOT CAUSE)
+--------------------------------------------------------
+A block BORN from UI input never reached that arm. The creation slot commits the
+whole typed line through `block.create` (editor_view_model.rs: a creation
+placeholder returns no `set_field` intent — "its text commits via `create` on
+Enter"), and `create` was not parsed. Driven through the REAL dispatcher +
+SqlOperationProvider + the real LinkSchemaModule:
+
+    PROBE create: content="see [[Journals]] now" marks=None links=[]
+                                            (lane-logs/t12-probe-create.log)
+
+That is the dogfood signature exactly: raw text, NULL marks, zero junction rows
+— and therefore zero backlinks and nothing clickable. The file the renderer then
+writes still holds `[[Journals]]`, so the NEXT boot's re-ingest adopts it and
+rewrites the stored characters.
+
+
+C. WHY NO KEYSTONE DRAW CAUGHT IT (the escape, measured)
+--------------------------------------------------------
+Two independent gaps, both real:
+
+C1. COVERAGE — no draw creates a block whose content carries link markup. The
+    keystone's link coverage arrives through org ingest and BulkExternalAdd.
+
+C2. ENVIRONMENT — even with such a draw the keystone LAUNDERS the defect. Its
+    settle re-ingests the file it just wrote IN-SESSION, so the raw content is
+    adopted before any invariant looks. Prod does not re-ingest its own
+    write-back, which is why the user only sees the adoption at the next boot.
+    Measured on the unfixed base, both wirings:
+
+      default (Loro+Turso): sut="see Journals now" marks=[Link{Name{Journals}}]
+                            ref="see [[Journals]] now" marks=None
+                                            (lane-logs/t12-probe-create-keystone.log)
+      pinned SqlOnly:       sut="see Wiki Target Page now" marks=[Link{Name}]
+                            ref="see [[Wiki Target Page]] now" marks=None
+                                            (lane-logs/t12-probe-sqlonly-create.log)
+
+    The SUT is already at the adopted state at assertion time — via a file round
+    trip prod does not perform. So a keystone row cannot go red on the product
+    half; the decisive red for the fix is the crate-level one in (E).
+
+C3. A third, narrower coverage hole found while probing: the keystone cannot
+    TYPE AT ALL under the shipped SqlOnly default. `SutEditorMirrorWrite` is
+    withheld when Loro is off (components.rs:4013, the keystroke pipeline
+    resolves `MutableText` through the Loro-only `BlockCellRegistry`), so every
+    typed-keystroke transition is structurally absent from the mode the app
+    ships in and the dogfood ran in:
+
+      capability `SutEditorMirrorWrite` was selected but is absent from the
+      CapMap (selection/composition bug). Present: [... no SutEditorMirrorWrite]
+                                            (lane-logs/t12-probe-sqlonly.log)
+
+    Prod's SqlOnly editor is cell-free and works; the harness gate is stricter
+    than prod. Filed as its own follow-up, NOT closed by this lane.
+
+
+D. THE ORACLE GAP, FIXED FIRST (model-first)
+--------------------------------------------
+The reference did not run the org lens on `CreateBlockUnderFocus` content — the
+2026-07-31 ORACLE row ("blocks deterministic hand-authored replay of any link
+case"). It DID run it on the editor-commit path (`set_block_content` →
+`normalize_content_for_org_roundtrip`), so only the create path was unmodeled.
+Modeled first, in `ReferenceState::create_block_under_with_id`. Red before that,
+with the new row present (7 invariants):
+
+  inv-blocks-match-ref/block_raw, /org, /loro, /matview,
+  inv-block-content/block_raw, inv-block-content/sql, inv-displayed-text/viewmodel
+
+    block:wl0: content: sut="see Wiki Target Page now"
+                        ref="see [[Wiki Target Page]] now";
+               marks:   sut=Some([MarkSpan { start: 4, end: 20,
+                          mark: Link { target: Name { name: "Wiki Target Page" },
+                                       label: "Wiki Target Page" } }])
+                        ref=None
+                                            (lane-logs/t12-keystone-RED.log)
+
+
+E. THE RED THAT THE FIX TURNS GREEN (crate level, decisive)
+-----------------------------------------------------------
+Before (create arm disabled, everything else identical):
+
+    test creating_a_block_with_a_typed_link_adopts_it_at_the_write_boundary ... FAILED
+    assertion `left == right` failed: a born-with-a-link block must store the
+    rendered label, not the raw [[...]] syntax (storing it raw is what the next
+    boot's re-ingest silently rewrites)
+      left: "see [[Linked Page Test]] now"
+     right: "see Linked Page Test now"
+
+    test adopted_create_content_survives_a_re_ingest_unchanged ... FAILED
+    panicked at ...:490: marks present
+
+    test a_create_that_supplies_marks_is_not_reparsed ... ok   <- pre-passing guard
+    test result: FAILED. 6 passed; 2 failed  (lane-logs/t12-unit-RED.log)
+
+After:
+
+    test result: ok. 8 passed; 0 failed      (lane-logs/t12-unit-green.log)
+
+
+F. THE SILENT-REWRITE HALF, VERIFIED
+------------------------------------
+`adopted_create_content_survives_a_re_ingest_unchanged` renders what the store
+now holds to org bytes and re-parses them: content and marks both come back
+byte-identical, so the next boot's re-ingest finds nothing to change. The
+keystone row proves the same end to end — its settle performs exactly that
+write-back + re-ingest cycle and `inv-org-render-fixed-point` holds.
+
+RESIDUAL, stated plainly: text typed BEFORE this fix is stored raw in existing
+vaults, and the next ingest still adopts it. That is the documented adoption
+contract, not a regression — but it means an existing vault sees the one-time
+rewrite once more, after which it is stable.
+
+
+G'. THE FIRST FIX WAS REFUTED — ADOPTION IS GATED ON ORIGIN, NOT ON SHAPE
+-------------------------------------------------------------------------
+The first version of this fix adopted whenever the create params carried no
+`marks` key. Adversarial verification REFUTED that with a reproducible
+counterexample, and it is worth stating why the inference was wrong rather than
+just what changed.
+
+`SqlOperationProvider::capture_row` filters `Value::Null` columns when it builds
+an inverse. So the delete-inverse of ANY mark-free block — every block written
+before adoption existed, and every block org ingest wrote — arrives at the
+dispatcher as `create { id, content: "see [[Journals]] now" }` with no `marks`
+key: byte-for-byte the shape of freshly typed text. `OperationEngine::replay`
+dispatches exactly that. The guard passed, adoption ran, and UNDO restored
+`"see Journals now"` + minted marks + a junction row instead of the bytes it had
+deleted — breaking the identity-preserving inverse contract (ADR 0024).
+
+The absence of a `marks` param is NOT evidence of unparsed user typing. Adoption
+depends on PROVENANCE, which no shape test can recover. Both reds, and the A/B
+that attributes them:
+
+    undo_of_a_delete_restores_bytes_verbatim_even_when_adoption_would_apply
+      left: "see Journals now"   right: "see [[Journals]] now"     <- CAUSED here
+    undo_of_a_content_edit_restores_raw_previous_bytes
+      left: "see Journals now"   right: "see [[Journals]] now"     <- PRE-EXISTING
+                                            (lane-logs/t12-undo-RED.log)
+
+    with the create arm disabled (lane-logs/t12-undo-AB-create-arm-disabled.log):
+      undo_of_a_delete_... ... ok        <- so the create break is this lane's
+      undo_of_a_content_edit_... FAILED  <- so the edit break predates it
+                                            (links-increment-3, 2026-08-08)
+
+FIX: `AuthoredInput::{Live,Verbatim}` is passed explicitly into
+`OperationDispatcher::execute_operation_with_input`. The `OperationProvider`
+trait's `execute_operation` — the entry `replay` uses — delegates as `Verbatim`,
+so a replayed inverse is byte-identity-preserving BY CONSTRUCTION rather than by
+a guard that has to be right. `DispatchingOperationEngine::execute_operation`,
+the last holder of `OpOrigin`, maps `User`/`Agent` → `Live` and
+`Rule`/`Sync`/`Ingest` → `Verbatim`, right beside the `stamp_provenance` call
+that consumes the origin for the same reason. Both adoption arms (create AND the
+older set_field one) are gated, so the pre-existing edit twin is fixed too.
+
+    after: 10 passed; 0 failed          (lane-logs/t12-origin-fix-1.log)
+
+Populations verified NOT in the class, with their call chains:
+  - org ingest:      file_sync_controller.rs:3167 → BlockOrdering::apply_ingest_batch
+                     (block_ordering.rs:261) → SqlBlockOperations::update_in_tree
+                     → sql_ops.execute_operation_with_origin(EventOrigin::Org)
+                     — provider-direct, never reaches the dispatcher.
+  - markdown ingest: identical chain from holon-markdown/src/params.rs:16
+                     (which omits `marks` the same way) — provider-direct.
+  - split_block:     goes through `BlockOperations`, not the dispatcher.
+The false claim in the first version's code comment — that ingest and
+split_block "route through this dispatcher carrying their marks" — is corrected
+in the shipped comment.
+
+
+G. RESIDUAL FINDING, NOT FIXED HERE
+-----------------------------------
+A link TYPED to a page that EXISTS oscillates the org file: the writeback emits
+the resolved `[[block:journals][Journals]]` while SQL still holds the Name-form
+mark, so render != disk PERSISTED for 5s — a real echo-loop signature, observed
+in lane-logs/t12-probe-typed-link-2.log under the default wiring. Independent of
+this fix (it is on the set_field path, which already adopted). The reference does
+not model link RESOLUTION either, which is why the committed row uses a dangling
+target. Named in lane-report-12.md.
+
+
+§G'-CORRECTION (2026-08-08, round-2 verify)
+===========================================
+Two statements in §G' above are WRONG about what actually shipped. §G' is left
+standing as written — it is the record of what the fix looked like mid-lane, and
+the ledger row cites this file — so the corrections are stated here instead.
+
+WRONG #1: "Both adoption arms (create AND the older set_field one) are gated, so
+          the pre-existing edit twin is fixed too."
+TRUTH:    ONLY the create arm is gated. Gating the EDIT arm as well was written,
+          measured, and then DELIBERATELY REVERTED (operation_dispatcher.rs:637-666
+          carries the reasoning as a code comment).
+
+          Gating it regressed `undo_link_add_restores_prior_pair` in
+          crates/holon/tests/undo_marks_consistency_repro.rs:
+
+            post-undo: mark[0] Link { target: Name { name: "Project Falcon" },
+              label: "Project Falcon" } range [10,24) out of content bounds
+              (char_len=9, content="Review PR")
+
+          Mechanism: `capture_row` (sql_operation_provider.rs:1873) filters NULL
+          columns, so a content inverse cannot express "restore marks to NULL".
+          What clears stale marks on undo today is the adoption follow-up firing
+          DURING replay. So undo is correct for adopted blocks precisely because
+          replay re-parses, and wrong for raw ones for exactly the same reason —
+          gating picks which population to break. The resolution both cases need
+          is inverses that carry their marks explicitly (i.e. `capture_row`
+          emitting explicit NULLs), which changes every inverse in the system.
+
+          ESCALATED to Martin rather than guessed at; tracked as task #22.
+          `undo_of_a_content_edit_restores_raw_previous_bytes` is committed
+          #[ignore]d as the named defect and is the rung that closes it.
+
+WRONG #2: "after: 10 passed; 0 failed  (lane-logs/t12-origin-fix-1.log)"
+TRUTH:    9 passed; 0 failed; 1 ignored — the ignored one being the escalated edit
+          -arm test. Verbatim, from lane-logs/t12-marks-lane-three-3.log:
+
+            test undo_of_a_content_edit_restores_raw_previous_bytes ... ignored,
+              blocked on inverses that carry marks explicitly (capture_row NULL
+              filtering); see lane-report-12.md
+            test result: ok. 9 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out
+
+          The 10-passed line in §G' was true only of the intermediate state in
+          which BOTH arms were gated — the state that regressed the test above.
+
+          Forced with `-- --ignored`, the escalated test fails with the defect it
+          documents (lane-logs/t12-r2-ignored-signature.log):
+
+            thread 'undo_of_a_content_edit_restores_raw_previous_bytes' panicked at
+              crates/holon/tests/live_edit_link_marks.rs:705:5:
+              left: "see Journals now"
+             right: "see [[Journals]] now"
+            test result: FAILED. 0 passed; 1 failed; 0 ignored; 9 filtered out
+
+STILL ACCURATE in §G': the counterexample and its mechanism, the A/B attribution
+(create break caused here, edit break pre-existing), the origin mechanism and the
+by-construction argument for replay, and the populations-verified-not-in-the-class
+call chains (org ingest, markdown ingest, split_block).
+
+ALSO KNOWN, not fixed here: neither adoption arm checks `content_type`. A `Live`
+create of a source/code block whose text contains `*bold*` or `[[x]]` is stripped
+and marked like prose — symmetric with the pre-existing edit-arm behaviour, but
+extended to born-blocks by this lane. Residual, named in lane-report-12.md.
