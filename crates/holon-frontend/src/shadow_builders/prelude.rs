@@ -103,10 +103,19 @@ pub(crate) fn virtual_child_row(
 ///
 /// Used by collection builders in the static/snapshot path (signal
 /// re-interpretation) where items are eagerly interpreted from data rows.
+/// The `template` argument is the collection's `item_template` and is
+/// deliberately IGNORED: an affordance is a rendered row, not a block, so it
+/// renders through the read-only
+/// [`creation_affordance_template`](crate::reactive_view::creation_affordance_template)
+/// — never the editable item template — exactly as the streaming path does.
+/// The parameter stays for call-site symmetry with the item interpretation
+/// beside it.
 pub(crate) fn interpret_virtual_child(
     ba: &BA<'_>,
     template: &holon_api::render_types::RenderExpr,
 ) -> Option<ViewModel> {
+    let _ = template;
+    let template = &crate::reactive_view::creation_affordance_template();
     let slot = virtual_child_slot_from_arg(ba)?;
     // Bug 2A: parent the creation slot at the query's focus root (resolved from
     // the rendered rows), not the static container `slot.parent_id`. `None`

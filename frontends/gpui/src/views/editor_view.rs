@@ -19,7 +19,6 @@ use gpui_component::input::OutdentInline;
 use gpui_component::input::Paste;
 use gpui_component::menu::PopupMenuItem;
 use holon_api::widget_spec::DataRow;
-use holon_frontend::RowOrigin;
 use holon_frontend::cell::CursorBias;
 use holon_frontend::editor_view_model::ConvergeDirective;
 use holon_frontend::editor_view_model::EditorAction;
@@ -140,6 +139,10 @@ impl EditorView {
         let mut controller =
             EditorViewModel::new(operations, triggers, context_params, field, content.clone());
         controller.set_async_context(services.clone());
+        // The keystroke sink is where an empty-born block stops being reapable.
+        if let Some(newborns) = services.ephemeral_newborns() {
+            controller.set_ephemeral_newborns(newborns);
+        }
         // Attach a `Cell<String>` if the cell registry can resolve one.
         // Headless / stub / test paths leave it unattached and the VM's
         // pass-through CRDT methods become no-ops.
@@ -1047,7 +1050,6 @@ impl Render for EditorView {
                 let input = self.input.clone();
                 let services = self.services.clone();
                 let row_id = self.row_id.clone();
-                let editor_entity = editor_entity.clone();
                 move |enter: &Enter, window, cx: &mut App| {
                     // Two layered guards keep Enter on a Page-level editor
                     // from acting on behalf of a focused child:
@@ -1258,57 +1260,6 @@ impl Render for EditorView {
                             cx.notify(editor_entity_id);
                         }
                         EditorAction::None => {
-                            // The creation slot (`block:__virtual:<parent>`) has
-                            // no real block yet — Enter must ONLY commit/create
-                            // (`ViewEventHandler::handle_text_sync`'s
-                            // CreationPlaceholder arm), never dispatch a
-                            // structural op against the virtual id.
-                            // `structural_block_action`'s split_block would
-                            // target a block that (from the CRDT/SQL side) never
-                            // existed under this id — `dispatch_intent_chain`
-                            // would 404 it as "Block not found" even though the
-                            // commit itself succeeded. This mirrors the headless
-                            // PBT driver's `commit_creation_slot`, which never
-                            // chains a structural op either. Gate on the
-                            // editor's OWN row (the `ctrl` doing the commit),
-                            // not `target_id` — a momentarily stale
-                            // `focused_block` must not route a slot Enter into
-                            // the structural path.
-                            if RowOrigin::from_id(&row_id).is_creation_placeholder() {
-                                let live_text = input.read(cx).value().to_string();
-                                if let Some(commit) =
-                                    ctrl.lock().unwrap().commit_creation_slot(&live_text)
-                                {
-                                    services.dispatch_intent(commit);
-                                    // The render backstop (`converge_on_render`)
-                                    // only reconciles a no-cell editor's
-                                    // `InputState` on a focus edge — but focus
-                                    // stays on this same slot across the commit,
-                                    // so nothing would otherwise clear the
-                                    // committed text before the "type here to
-                                    // add a new block" placeholder repaints.
-                                    // Force convergence now (idempotent, same
-                                    // path the render backstop uses) instead of
-                                    // waiting for a blur/refocus that may never
-                                    // come.
-                                    let editor_entity = editor_entity.clone();
-                                    cx.spawn(async move |cx| {
-                                        let _ = cx.update_window(window_handle, |_, window, cx| {
-                                            editor_entity.update(cx, |this, cx| {
-                                                this.converge_input(
-                                                    "post_commit_clear",
-                                                    "",
-                                                    window,
-                                                    cx,
-                                                );
-                                            });
-                                        });
-                                    })
-                                    .detach();
-                                }
-                                cx.stop_propagation();
-                                return;
-                            }
                             // No popup active → split the block at the cursor.
                             // We can't rely on Enter bubbling to lib.rs's chord
                             // resolver: gpui-component's InputState consumes
@@ -1373,13 +1324,6 @@ impl Render for EditorView {
                         // Not at start — let InputState handle char delete.
                         return;
                     }
-                    // Creation slot: no real block to join — swallow the
-                    // structural gesture (`structural_block_action` asserts
-                    // against placeholder ids).
-                    if RowOrigin::from_id(&row_id).is_creation_placeholder() {
-                        cx.stop_propagation();
-                        return;
-                    }
                     // Backspace-at-0 → join. Decision shared with the headless
                     // mirror via `structural_block_action`.
                     if let Some(intent) = structural_block_action(EditorKey::Backspace, &row_id, 0)
@@ -1399,11 +1343,6 @@ impl Render for EditorView {
                 let input = self.input.clone();
                 let ctrl = self.controller.clone();
                 move |_: &IndentInline, _window, cx: &mut App| {
-                    // Creation slot: nothing to indent — swallow (see Backspace).
-                    if RowOrigin::from_id(&row_id).is_creation_placeholder() {
-                        cx.stop_propagation();
-                        return;
-                    }
                     if let Some(intent) = structural_block_action(EditorKey::Tab, &row_id, 0) {
                         let live_text = input.read(cx).value().to_string();
                         dispatch_structural_as_commit_point(&ctrl, &services, &live_text, intent);
@@ -1417,11 +1356,6 @@ impl Render for EditorView {
                 let input = self.input.clone();
                 let ctrl = self.controller.clone();
                 move |_: &OutdentInline, _window, cx: &mut App| {
-                    // Creation slot: nothing to outdent — swallow (see Backspace).
-                    if RowOrigin::from_id(&row_id).is_creation_placeholder() {
-                        cx.stop_propagation();
-                        return;
-                    }
                     if let Some(intent) = structural_block_action(EditorKey::BackTab, &row_id, 0) {
                         let live_text = input.read(cx).value().to_string();
                         // ADR 0028 D1: outdent of a direct page child is REJECTED
@@ -1472,12 +1406,6 @@ impl Render for EditorView {
                 let input = self.input.clone();
                 let ctrl = self.controller.clone();
                 move |_: &crate::TurnIntoPage, _window, cx: &mut App| {
-                    // Creation slot: no real block to convert — swallow (see
-                    // Backspace/indent).
-                    if RowOrigin::from_id(&row_id).is_creation_placeholder() {
-                        cx.stop_propagation();
-                        return;
-                    }
                     // Same op the slash-menu "Turn into page" entry runs
                     // (`execute_operation` with the `convert_block_to_page`
                     // descriptor). The descriptor maps `id -> target`; here we

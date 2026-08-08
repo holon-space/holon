@@ -158,16 +158,77 @@ impl SutBlockCreate for DirectUserDriver {
         content: &str,
         id: Option<&EntityUri>,
     ) {
+        let parent = self.resolve(parent).to_string();
+        let Some(uri) = id else {
+            return self.birth_via_creation_slot(&parent, content).await;
+        };
         let mut params: StorageEntity = HashMap::new();
-        params.insert(
-            "parent_id".into(),
-            Value::String(self.resolve(parent).to_string()),
-        );
+        params.insert("parent_id".into(), Value::String(parent));
         params.insert("content".into(), Value::String(content.to_string()));
-        if let Some(uri) = id {
-            params.insert("id".into(), Value::String(uri.to_string()));
-        }
+        params.insert("id".into(), Value::String(uri.to_string()));
         self.dispatch_block("create", params).await;
+    }
+}
+
+impl DirectUserDriver {
+    /// The op-floor mirror of the production creation-slot gesture (ruling C +
+    /// sub-ruling B). The UI births an empty block on focus as a non-user op
+    /// and writes the typed text separately; the op floor must do the SAME two
+    /// ops, or the two drivers would exhibit different undo granularity for one
+    /// transition and no single oracle could describe both.
+    ///
+    /// The birth deliberately omits `id`, so the provider's mint-when-absent
+    /// path stays covered; the minted id comes back in the op's response and
+    /// the content write targets it.
+    ///
+    /// UNMIRRORED HALF, stated rather than faked: the gesture also MOVES the
+    /// caret into the newborn, and the reference models that
+    /// (`birth_block_under_slot` sets `focused_block` + opens the editor). This
+    /// driver cannot mirror it — `DirectUserDriver` implements no focus or
+    /// editor capability at all (`SutBlockTreeWrite`, `SutBlockCreate`,
+    /// `SutTemplateInstantiate`, `SutBlockToPage`, `SutPageIdentity` and
+    /// `UserDriver`, none of them focus), so on this pin focus-reading
+    /// invariants are deselected as "cap absent" and cannot observe the
+    /// mismatch. Dispatching `navigation.focus` here would NOT fix it and would
+    /// be worse: production's birth moves only the in-memory focus authority
+    /// and never persists a nav-history row, so the op floor would then be
+    /// MORE eager than prod on a second axis. The moment a focus-reading cap
+    /// lands on this pin, that cap must move focus to the newborn here.
+    async fn birth_via_creation_slot(&self, parent: &str, content: &str) {
+        let mut birth: HashMap<String, Value> = HashMap::new();
+        birth.insert("parent_id".into(), Value::String(parent.to_string()));
+        birth.insert("content".into(), Value::String(String::new()));
+        let outcome = self
+            .engine
+            .execute_operation(
+                &EntityName::new("block"),
+                "create",
+                birth
+                    .into_iter()
+                    .map(|(k, v)| (std::sync::Arc::from(k.as_str()), v))
+                    .collect(),
+                holon_api::OpOrigin::Rule {
+                    transition_id: holon_frontend::creation_slot::BIRTH_TRANSITION_ID.to_string(),
+                },
+            )
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[DirectUserDriver floor] creation-slot birth failed: {e:#}")
+            });
+
+        let born = match outcome.response {
+            Some(Value::String(id)) => id,
+            other => panic!(
+                "[DirectUserDriver floor] creation-slot birth: block.create must return the \
+                 minted id as Value::String, got {other:?}"
+            ),
+        };
+
+        let mut write: StorageEntity = HashMap::new();
+        write.insert("id".into(), Value::String(born));
+        write.insert("field".into(), Value::String("content".into()));
+        write.insert("value".into(), Value::String(content.to_string()));
+        self.dispatch_block("set_field", write).await;
     }
 }
 

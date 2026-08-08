@@ -2468,6 +2468,14 @@ pub trait RefLayoutMutate {
     /// synthetic→real reconcile.
     fn create_block_under_with_id(&mut self, parent: &EntityUri, content: &str, id: EntityUri);
 
+    /// `CreateBlockUnderFocus{id: None}`: the creation-slot GESTURE, which is
+    /// two operations rather than one. Focus reaching the affordance births an
+    /// EMPTY block under `parent` as a non-user (undo-invisible) op, and the
+    /// text the user types is a separate undo-visible content write — so an
+    /// undo after this gesture reverts the text and leaves the empty block.
+    /// See `ReferenceState::birth_block_under_slot` for the spec citation.
+    fn birth_block_via_creation_slot(&mut self, parent: &EntityUri, content: &str);
+
     /// `InstantiateTemplate`: seed one template-DEFINITION block, mirroring the
     /// driver's idempotent `block.create`. `parent` is the block's REAL parent
     /// (the definition root for a definition child), so `parent_id` agrees with

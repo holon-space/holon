@@ -301,6 +301,10 @@ impl RefLayoutMutate for ReferenceState {
         ReferenceState::create_block_under_with_id(self, parent, content, id);
     }
 
+    fn birth_block_via_creation_slot(&mut self, parent: &EntityUri, content: &str) {
+        ReferenceState::birth_block_under_slot(self, parent, content);
+    }
+
     fn seed_template_definition(
         &mut self,
         parent: &EntityUri,

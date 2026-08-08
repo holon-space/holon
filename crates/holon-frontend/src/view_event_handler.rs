@@ -196,9 +196,9 @@ impl ViewEventHandler {
     /// Handle Tier 3 text sync (blur). If the value changed and we have a
     /// set_field operation, return Execute with the appropriate params.
     ///
-    /// Virtual entities (`virtual:{entity_type}:{parent_id}`) are materialized
-    /// via `{entity_type}.create` instead of `set_field`. After creation, the
-    /// CDC delivers the real entity and a new virtual row appears at the end.
+    /// Every id reaching here is a real block: a creation affordance mounts no
+    /// editor and is born before it can receive input (see
+    /// [`crate::creation_slot`]), so there is no materialize-on-edit case.
     ///
     /// **Phase 2 (Loro single-writer):** for `content` on real (non-virtual)
     /// entities, when a Loro content writer is active the per-keystroke
@@ -224,28 +224,6 @@ impl ViewEventHandler {
             .and_then(|v| v.as_string())
             .expect("ViewEventHandler context_params missing 'id'")
             .to_string();
-
-        if let crate::row_origin::RowOrigin::CreationPlaceholder {
-            entity_type,
-            parent,
-        } = crate::row_origin::RowOrigin::from_id(&id)
-        {
-            if new_value.is_empty() {
-                return PopupResult::NotActive;
-            }
-            let mut params = HashMap::new();
-            params.insert(
-                "parent_id".into(),
-                Value::String(parent.as_str().to_string()),
-            );
-            params.insert("content".into(), Value::String(new_value));
-            return PopupResult::Execute {
-                entity_name: EntityName::Named(entity_type),
-                op_name: "create".to_string(),
-                params,
-                strip_prefix_start: None,
-            };
-        }
 
         if self.field == "content" && self.loro_content_writer {
             return PopupResult::NotActive;

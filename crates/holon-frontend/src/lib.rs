@@ -189,6 +189,7 @@ pub fn journals_auto_create_blocks() -> Vec<holon_api::block::Block> {
 }
 pub mod command_provider;
 pub mod config;
+pub mod creation_slot;
 pub mod echo;
 pub mod editor_view_model;
 pub mod focus_path;
@@ -840,16 +841,31 @@ impl<T> FrontendSession<T> {
         op_name: &str,
         params: HashMap<String, Value>,
     ) -> Result<holon_api::OpOutcome> {
-        // A `FrontendSession` is, by construction, a user session: every op it
-        // dispatches is a direct user gesture. System-authored ops (rule
-        // firings, CRDT sync, org ingest) never route through here — they call
-        // the engine / providers directly with their own `OpOrigin`.
+        self.execute_operation_with_origin(entity_name, op_name, params, holon_api::OpOrigin::User)
+            .await
+    }
+
+    /// Execute an operation the session itself authored on the user's behalf
+    /// rather than at their direct gesture — the creation-slot birth and its
+    /// reaper (`OpOrigin::Rule`, ADR 0024's `fired-by` provenance slot). Such
+    /// ops must NOT enter the human undo stack: the user did not author the
+    /// empty block, so resurrecting it on Cmd-Z is noise.
+    ///
+    /// Everything else a `FrontendSession` dispatches is a direct user gesture
+    /// and goes through [`Self::execute_operation`].
+    pub async fn execute_operation_with_origin(
+        &self,
+        entity_name: &EntityName,
+        op_name: &str,
+        params: HashMap<String, Value>,
+        origin: holon_api::OpOrigin,
+    ) -> Result<holon_api::OpOutcome> {
         self.require_operation_engine()?
             .execute_operation(
                 entity_name,
                 op_name,
                 params.into_iter().map(|(k, v)| (k.into(), v)).collect(),
-                holon_api::OpOrigin::User,
+                origin,
             )
             .await
     }

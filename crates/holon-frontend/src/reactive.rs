@@ -407,6 +407,13 @@ pub trait BuilderServices: Send + Sync {
         None
     }
 
+    /// Shared handle to the reaper's registry of empty blocks born from a
+    /// creation affordance. `None` for stub/headless services, which mount no
+    /// affordance and so have nothing to reap.
+    fn ephemeral_newborns(&self) -> Option<Arc<crate::creation_slot::EphemeralNewborns>> {
+        None
+    }
+
     /// Shared provider cache for reactive value-fn row providers
     /// (`focus_chain`, `ops_of`, ...). Returns `None` for headless /
     /// stub services that don't own a cache; callers must fall back to
@@ -1668,6 +1675,10 @@ pub struct UiState {
     /// confuse a keymap match with an executed operation (see
     /// [`crate::dispatch_journal`]).
     dispatch_journal: Arc<crate::dispatch_journal::DispatchJournal>,
+    /// Empty blocks born by a creation affordance that have never carried
+    /// content — the only blocks the reaper may delete. See
+    /// [`crate::creation_slot`].
+    ephemeral_newborns: Arc<crate::creation_slot::EphemeralNewborns>,
 }
 
 impl UiState {
@@ -1683,7 +1694,13 @@ impl UiState {
             expanded_view_observed: Mutex::new(std::collections::HashSet::new()),
             op_failure_sink: Mutex::new(None),
             dispatch_journal: Arc::new(crate::dispatch_journal::DispatchJournal::new()),
+            ephemeral_newborns: Arc::new(crate::creation_slot::EphemeralNewborns::new()),
         }
+    }
+
+    /// Shared handle to the ephemeral-newborn registry (birth-on-focus).
+    pub fn ephemeral_newborns(&self) -> Arc<crate::creation_slot::EphemeralNewborns> {
+        self.ephemeral_newborns.clone()
     }
 
     /// Shared handle to this engine's dispatch journal.
@@ -2437,6 +2454,152 @@ impl ReactiveEngine {
         results
     }
 
+    /// Shared handle to the ephemeral-newborn registry — the editors this
+    /// engine mounts wire it into their keystroke sink.
+    pub fn ephemeral_newborns_handle(&self) -> Arc<crate::creation_slot::EphemeralNewborns> {
+        self.ui_state.ephemeral_newborns()
+    }
+
+    /// Focus reaching a creation affordance means: **be born**. Mints the id
+    /// frontend-side (ADR 0029: the minter is whoever authors the create),
+    /// seats the caret in the newborn, and fires ONE atomic `block.create`
+    /// with empty content — a valid contract value, so ADR 0030 D1's birth
+    /// contract is satisfied in a single firing.
+    ///
+    /// The caret is seated BEFORE the create resolves: the newborn's editor
+    /// mounts when its row lands and reads the armed seed, and the affordance
+    /// itself mounts no editor, so no keystroke in that window can be
+    /// misrouted into another block.
+    ///
+    /// Fails loud on a non-affordance id — reaching here with anything else is
+    /// a frontend routing bug, not user input.
+    fn birth_creation_affordance(&self, affordance_id: &str) -> Result<EntityUri> {
+        let crate::row_origin::RowOrigin::CreationPlaceholder {
+            entity_type,
+            parent,
+        } = crate::row_origin::RowOrigin::from_id(affordance_id)
+        else {
+            anyhow::bail!(
+                "birth_creation_affordance called with {affordance_id:?}, which is not a \
+                 creation affordance"
+            );
+        };
+        // Idempotent: a second focus on the same affordance re-enters the block
+        // the first one brought into existence. Without this, every re-click,
+        // focus restore and re-render that touches the affordance would mint
+        // another empty block.
+        if let Some(already) = self
+            .ui_state
+            .ephemeral_newborns
+            .already_born_at(affordance_id)
+        {
+            self.reap_untouched_newborns(Some(&already));
+            self.ui_state.set_focus_with_caret(already.clone(), 0);
+            return Ok(already);
+        }
+
+        let id = EntityUri::parse(&format!("{entity_type}:{}", uuid::Uuid::new_v4()))
+            .context("minting a creation-slot newborn id")?;
+
+        self.ui_state
+            .ephemeral_newborns
+            .record(affordance_id, id.clone());
+        // Any newborn we are leaving behind goes now — this focus move is the
+        // blur the reaper waits for.
+        self.reap_untouched_newborns(Some(&id));
+        // ALLOW(direct_focus_mutation): seating the caret in the block this
+        // very call is bringing into existence.
+        self.ui_state.set_focus_with_caret(id.clone(), 0);
+
+        let mut params: HashMap<String, holon_api::Value> = HashMap::new();
+        params.insert("id".into(), holon_api::Value::String(id.to_string()));
+        params.insert(
+            "parent_id".into(),
+            holon_api::Value::String(parent.as_str().to_string()),
+        );
+        params.insert("content".into(), holon_api::Value::String(String::new()));
+
+        let session = self.session.clone();
+        let entity = holon_api::EntityName::new(&entity_type);
+        let sink = self.ui_state.op_failure_sink_handle();
+        self.runtime_handle.spawn(async move {
+            if let Err(e) = session
+                .execute_operation_with_origin(
+                    &entity,
+                    "create",
+                    params,
+                    holon_api::OpOrigin::Rule {
+                        transition_id: crate::creation_slot::BIRTH_TRANSITION_ID.to_string(),
+                    },
+                )
+                .await
+            {
+                surface_op_failure(session.error_tracker(), &sink, "block", "create", &e);
+            }
+        });
+        Ok(id)
+    }
+
+    /// Delete every ephemeral newborn focus has genuinely left. `keep` is the
+    /// block focus moved TO — the caret is sitting in it, so it is never
+    /// reaped even while empty.
+    ///
+    /// Two independent proofs must agree before a delete goes out: membership
+    /// in [`crate::creation_slot::EphemeralNewborns`] (retired synchronously by
+    /// the keystroke sink, so any processed keystroke has already saved the
+    /// block) and the content last delivered from the store (so a write that
+    /// never passed through this frontend's editor — MCP, a peer, a rule —
+    /// also saves it).
+    pub(crate) fn reap_untouched_newborns(&self, keep: Option<&EntityUri>) {
+        for id in self.ui_state.ephemeral_newborns.take_all_except(keep) {
+            if let Some(content) = self.observed_content(&id) {
+                if !crate::creation_slot::reap_is_licensed_by_store(&content) {
+                    continue;
+                }
+            }
+            let mut params: HashMap<String, holon_api::Value> = HashMap::new();
+            params.insert("id".into(), holon_api::Value::String(id.to_string()));
+            let session = self.session.clone();
+            let sink = self.ui_state.op_failure_sink_handle();
+            self.runtime_handle.spawn(async move {
+                if let Err(e) = session
+                    .execute_operation_with_origin(
+                        &holon_api::EntityName::new("block"),
+                        "delete",
+                        params,
+                        holon_api::OpOrigin::Rule {
+                            transition_id: crate::creation_slot::REAP_TRANSITION_ID.to_string(),
+                        },
+                    )
+                    .await
+                {
+                    surface_op_failure(session.error_tracker(), &sink, "block", "delete", &e);
+                }
+            });
+        }
+    }
+
+    /// The `content` most recently delivered for `id` by any live watcher, or
+    /// `None` when no watcher has seen the row yet (a newborn blurred before
+    /// its create landed). `None` leaves the ephemeral-set proof to stand
+    /// alone — the block was created empty by this engine milliseconds ago and
+    /// no keystroke reached the sink.
+    fn observed_content(&self, id: &EntityUri) -> Option<String> {
+        let watched: Vec<EntityUri> = self.watchers.lock().unwrap().keys().cloned().collect();
+        for root in watched {
+            if let Some(row) = self.registry.get_or_create(&root).row_mutable(id) {
+                return Some(
+                    row.get_cloned()
+                        .get("content")
+                        .and_then(|v| v.as_string())
+                        .unwrap_or_default()
+                        .to_string(),
+                );
+            }
+        }
+        None
+    }
+
     /// Counting acquisition: ensure the watcher is running AND pin it with an
     /// RAII [`WatchGuard`]. Dropping the last guard aborts the watcher task
     /// and releases the block's reactive state. `services` must resolve
@@ -3114,6 +3277,26 @@ impl BuilderServices for ReactiveEngine {
     fn dispatch_intent(&self, intent: crate::operations::OperationIntent) {
         let journal = self.ui_state.dispatch_journal.clone();
         let journal_seq = journal.record(&intent);
+        // Focus reaching a creation affordance is not a navigation, it is a
+        // birth: the affordance has no row of its own, so the backend
+        // `navigation.focus` would have nothing to focus. The newborn takes
+        // the focus instead.
+        if let Some(affordance) = affordance_focus_target(&intent) {
+            match self.birth_creation_affordance(&affordance) {
+                Ok(_) => journal.settle(journal_seq, Ok(())),
+                Err(e) => {
+                    journal.settle(journal_seq, Err(format!("{e:#}")));
+                    surface_op_failure(
+                        self.session.error_tracker(),
+                        &self.ui_state.op_failure_sink_handle(),
+                        "block",
+                        "create",
+                        &e,
+                    );
+                }
+            }
+            return;
+        }
         if intent.entity_name == "preferences" && intent.op_name == "set" {
             if let (Some(key), Some(value)) = (
                 intent.params.get("key").and_then(|v| v.as_string()),
@@ -3498,6 +3681,7 @@ impl BuilderServices for ReactiveEngine {
     }
 
     fn set_focus_with_caret(&self, block: EntityUri, offset: usize) {
+        self.reap_untouched_newborns(Some(&block));
         self.ui_state.set_focus_with_caret(block, offset);
     }
 
@@ -3513,7 +3697,29 @@ impl BuilderServices for ReactiveEngine {
         Some(self.provider_cache.clone())
     }
 
+    fn ephemeral_newborns(&self) -> Option<Arc<crate::creation_slot::EphemeralNewborns>> {
+        Some(self.ui_state.ephemeral_newborns())
+    }
+
     fn set_focus(&self, block_id: Option<EntityUri>) {
+        // Focus reaching a creation affordance means: be born (see
+        // `birth_creation_affordance`). The affordance id never becomes the
+        // focus authority's value — the newborn does.
+        if let Some(id) = block_id.as_ref() {
+            if crate::row_origin::RowOrigin::from_id(id.as_str()).is_creation_placeholder() {
+                if let Err(e) = self.birth_creation_affordance(id.as_str()) {
+                    surface_op_failure(
+                        self.session.error_tracker(),
+                        &self.ui_state.op_failure_sink_handle(),
+                        "block",
+                        "create",
+                        &e,
+                    );
+                }
+                return;
+            }
+        }
+        self.reap_untouched_newborns(block_id.as_ref());
         // ALLOW(direct_focus_mutation): this IS the legitimate
         // BuilderServices::set_focus setter.
         self.ui_state.set_focus(block_id);
@@ -3943,6 +4149,19 @@ fn maybe_mirror_navigation_focus(ui_state: &UiState, intent: &crate::operations:
         )
         | Err(_) => {}
     }
+}
+
+/// The creation-affordance id a `navigation.focus` intent targets, if any.
+/// Such an intent must never reach the backend: an affordance is a rendered
+/// row, not a block, so there is nothing to focus until one is born.
+fn affordance_focus_target(intent: &crate::operations::OperationIntent) -> Option<String> {
+    if intent.entity_name != "navigation" || intent.op_name != "focus" {
+        return None;
+    }
+    let id = intent.params.get("block_id").and_then(|v| v.as_string())?;
+    crate::row_origin::RowOrigin::from_id(id)
+        .is_creation_placeholder()
+        .then(|| id.to_string())
 }
 
 /// Whether `op_name` removes its target block from the tree, so a focus sitting
@@ -4484,6 +4703,48 @@ mod tests {
     /// never the stale op-follow-up offset. This models the exact sequence GPUI
     /// `grab_focus_and_seed_caret` drives at the seed-lifecycle seam (the caret
     /// APPLY itself needs a GPUI window; the lifecycle is the bug).
+    fn focus_intent_on(block_id: &str) -> crate::operations::OperationIntent {
+        crate::operations::OperationIntent::new(
+            holon_api::EntityName::new("navigation"),
+            "focus".to_string(),
+            HashMap::from([(
+                "block_id".to_string(),
+                holon_api::Value::String(block_id.to_string()),
+            )]),
+        )
+    }
+
+    /// A `navigation.focus` aimed at a creation affordance must never reach the
+    /// backend: the affordance has no row, so the op would look up an id that
+    /// does not exist. It is diverted into a birth instead.
+    #[test]
+    fn focusing_a_creation_affordance_is_diverted_from_navigation() {
+        let intent = focus_intent_on("block:__virtual:page-1");
+        assert_eq!(
+            affordance_focus_target(&intent),
+            Some("block:__virtual:page-1".to_string()),
+            "focus on an affordance must be recognised as a birth, not a navigation"
+        );
+    }
+
+    /// ... and an ordinary focus is left completely alone.
+    #[test]
+    fn focusing_a_real_block_is_an_ordinary_navigation() {
+        assert_eq!(
+            affordance_focus_target(&focus_intent_on("block:page-1")),
+            None
+        );
+    }
+
+    /// The diversion keys on the OP, not merely on the id: an affordance id
+    /// arriving in some other operation is not silently turned into a create.
+    #[test]
+    fn only_navigation_focus_is_diverted() {
+        let mut delete = focus_intent_on("block:__virtual:page-1");
+        delete.op_name = "close".to_string();
+        assert_eq!(affordance_focus_target(&delete), None);
+    }
+
     #[test]
     fn caret_seed_is_single_use_so_a_later_click_is_not_yanked() {
         let ui = UiState::new();

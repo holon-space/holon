@@ -1624,6 +1624,85 @@ impl ReferenceState {
         self.recanon_and_rebuild();
     }
 
+    /// The creation-slot GESTURE's reference effect, which is not one op but
+    /// two, because a creation affordance is not a block (ruling C, 2026-08-08,
+    /// with sub-ruling B, 2026-08-09: "a creation slot becomes a real born
+    /// block the moment it can receive input").
+    ///
+    /// Focus reaching the affordance births an EMPTY block under `parent` as an
+    /// authority-only, non-user operation — `OpOrigin::Rule`, which by
+    /// definition pushes no undo entry (ADR 0030 D1: empty content is a valid
+    /// contract value, so the birth is total in one firing). The text the user
+    /// then types is an ordinary undo-visible content write. So
+    /// `UndoLastMutation` after this gesture reverts the TEXT and leaves
+    /// the empty block standing — it is not the user's create to undo. The
+    /// reaper collects such a block when focus leaves; the reference models
+    /// no reaper, so the empty block simply persists in the prediction,
+    /// which is the SUT's state before reaping.
+    ///
+    /// The born-equal arm ([`create_block_under_with_id`]) is NOT this: an
+    /// explicit id means the caller dispatched `block.create` directly, with no
+    /// affordance and no gesture, so it stays one user-origin create.
+    pub fn birth_block_under_slot(&mut self, parent: &EntityUri, content: &str) -> EntityUri {
+        let new_id = EntityUri::block(&format!(":create-{}", self.domain.block_state.next_id));
+
+        // The birth: undo-INVISIBLE, so no snapshot. Canonicalize before the
+        // snapshot so undo restores a canonical state.
+        self.insert_block_under_no_snapshot(parent, "", new_id.clone());
+        self.recanon_and_rebuild();
+
+        // The user's first keystroke: one undo-visible content write, snapshotted
+        // over a state that ALREADY contains the empty block. The second pass
+        // must NOT mint: the gesture creates exactly one block, so exactly one
+        // synthetic id is burned — a second `recanon_and_rebuild` here would
+        // advance the allocator twice and shift every later `create-N` /
+        // `split-N` id out from under the pinned cases.
+        self.push_undo_snapshot();
+        let (content, marks) = super::types::normalize_content_for_org_roundtrip_with(
+            content,
+            ContentType::Text,
+            &self.harness.link_classifier,
+        );
+        let block = self
+            .domain
+            .block_state
+            .blocks
+            .get_mut(&new_id)
+            .expect("birth_block_under_slot: the block just born must exist");
+        block.content = content;
+        block.marks = marks;
+        self.recanon_without_minting();
+
+        // The gesture MOVES the caret: focus reaching the affordance is what
+        // births the block, and the birth seats focus + caret in it (offset 0).
+        // The global in-memory focus mirror (ADR 0010) must follow, or
+        // `inv-focus-matches-ref` compares the pre-gesture focus root against
+        // the SUT's newborn.
+        self.ui.tab.focused_block = Some(new_id.clone());
+        // NOT MODELLED HERE, deliberately, and it is a KNOWN gap rather than an
+        // oversight: the birth also seats a CARET, so production has an editor
+        // open over the newborn, and `inv-editor-text/mirror` /
+        // `inv-editor-caret/mirror` therefore sit Unobservable (both sides
+        // absent) across this gesture. Opening the ref editor here reds
+        // `inv-editor-text/mirror` — ref "a" vs SUT MutableText "" — because the
+        // driver commits the text as a `set_field` and then seeds the mirror
+        // from the authority, and the cell it reads has not received the write
+        // at seed time. Closing this needs the driver to TYPE the text through
+        // the editor keystroke sink instead of dispatching `set_field`, which
+        // changes what the transition drives and is its own decision.
+        new_id
+    }
+
+    /// [`recanon_and_rebuild`](Self::recanon_and_rebuild) without advancing the
+    /// synthetic-id allocator. For the second pass of a multi-op gesture that
+    /// mints only ONE block.
+    fn recanon_without_minting(&mut self) {
+        let mut blocks: Vec<Block> = self.domain.block_state.blocks.values().cloned().collect();
+        crate::assign_reference_sequences_canonical(&mut blocks);
+        self.domain.block_state.blocks = blocks.into_iter().map(|b| (b.id.clone(), b)).collect();
+        self.rebuild_profile_tracking();
+    }
+
     /// Insert one text block under `parent` with `new_id`, WITHOUT pushing an
     /// undo snapshot and WITHOUT re-canonicalizing. The snapshot + recanon
     /// wrapper lives in the callers: `create_block_under_with_id` (one

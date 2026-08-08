@@ -284,13 +284,6 @@ fn focus_ring() -> Vec<String> {
 /// commit: structural ops are commit points (docs/Architecture/UI.md),
 /// and the chain guarantees the flush lands before the structural op.
 fn handle_structural_key(evt: &KeyboardEvent, entity_id: &str, prop_content: &str) {
-    // Creation slot (`block:__virtual:<parent>`): no real block exists, so no
-    // structural op applies (`structural_block_action` asserts against
-    // placeholder ids). The slot's create commit runs on blur via
-    // `handle_text_sync`'s CreationPlaceholder arm, not here.
-    if holon_frontend::RowOrigin::from_id(entity_id).is_creation_placeholder() {
-        return;
-    }
     let shift = evt.modifiers().shift();
     let key = match evt.key() {
         Key::Enter if !shift => {
