@@ -245,6 +245,7 @@ Detailed documentation lives in `docs/Architecture/`:
 | [integrations.md](Architecture/Integrations.md) | External System Pattern, MCP Client, Dependency Injection, Frontend Architecture |
 | [schema.md](Architecture/Schema.md) | Table/view-level schema reference: module registry, block base table + junctions + hydration matview, hierarchy, navigation, sync/operations/links/identity, graph EAV |
 | [engine.md](Architecture/Engine.md) | Standalone Petri-Net Engine, Fractional Indexing, Platform Support |
+| [simulation.md](Architecture/Simulation.md) | Hypothetical state: search / alternatives / preview regimes, twin-only search, use-case gallery, PN reification guards |
 | [sync.md](Architecture/Sync.md) | Loro CRDT, CollaborativeDoc, LoroBackend, sync wiring (LiveData<Block> + direct cache feeds), P2P, Consistency Model |
 | [replication.md](Architecture/Replication.md) | Target replication model: capability profiles, per-component base + 3-way merge, single-owner ordering, consolidator/sink roles, two transports |
 | [archlint.md](Architecture/Archlint.md) | Architecture linter (ast-grep YAML + ripgrep smells + dylint cdylib), Claude Code PostToolUse hook, ALLOW protocol, cargo arch-test wrapper |
