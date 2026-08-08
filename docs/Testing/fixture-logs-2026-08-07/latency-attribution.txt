@@ -1,0 +1,265 @@
+================================================================================
+LATENCY ATTRIBUTION — where the post-dispatch cost actually goes
+Lane LATENCY-GATE, 2026-08-07, base main=23948a91
+Deliverable of Part 2. REPORT ONLY — no fixes implemented.
+================================================================================
+
+SOURCES OF EVIDENCE
+  lane-logs/latency-calibration.log   deterministic replay, run 1
+  lane-logs/gate-green.log            deterministic replay, runs 2-3
+  lane-logs/gate-proven-red.log       deterministic replay, run 4
+  lane-logs/gate-green-final.log      deterministic replay, run 5
+  lane-logs/nav-probe.log             navigation-shape probe (4 docs, populate + revisit)
+  docs/Testing/BugFunnel.md           the 2026-08-07 dogfood rows being explained
+
+All replay numbers come from the SAME headless composed harness the keystone
+uses, driven by the deterministic corpus
+crates/holon-integration-tests/hand-authored-regressions/latency-ratchet.jsonl,
+at a 41-block state — comparable in scale to the dogfood's 31-block vault, so
+vault size is NOT a confounder between the two channels.
+
+METHOD NOTE — the debugger was not the right instrument here
+The brief asked for debugger-mcp attribution. The `debugger`-profile app build
+was started but was killed by the harness after ~45 min of a cold build under
+heavy machine contention (11 concurrent cargo processes from parallel lanes),
+and was not restarted because the existing `holon_latency` stage instrumentation
+answered the attribution question quantitatively and without perturbing the
+timings a breakpoint-based session would have distorted. Where the report says
+"not localized further", that is the honest boundary and a live-instance
+sampling session is the follow-up.
+
+================================================================================
+FINDING 1 — split_block's ~800ms is NOT in the shared pipeline
+================================================================================
+                        dogfood (windowed app)     headless replay (this lane)
+  dispatch    p50           45 ms                     28 ms
+  e2e         p50          803 ms                     39.5 - 55.5 ms
+  e2e         p95          944 ms                     45.2 - 100.9 ms  (5 runs)
+
+Same op, same dispatch cost, comparable vault size, ~10-20x difference in
+interaction->projection-visible.
+
+The headless channel exercises the whole shared pipeline: dispatch -> Loro
+commit -> LoroProjection resample -> Turso/matview CDC -> reactive mirror. The
+`stage=e2e` endpoint is identical in both channels (it closes on the tokio CDC
+actor, deliberately NOT at GPU frame-present — see the "SLO endpoint" disclosure
+in crates/holon-api/src/latency_e2e.rs).
+
+CONCLUSION: the ~800ms the dogfood attributed to "post-dispatch projection/paint"
+is not in projection. It is in the windowed layer that the headless channel does
+not have. Candidates, none yet discriminated: GPUI layout/render re-entrancy per
+commit, editor widget remount after the split mints a new block, or the app's
+org write-back against a real filesystem.
+
+WHY IT IS NOT LOCALIZED FURTHER: discriminating these needs a WINDOWED
+measurement, and the windowed channel is currently blocked — both `SplitBlock`
+and `NavigateFocus` drive click-to-focus in their windowed SUT bodies
+(transitions/split_block.rs, transitions/navigate_focus.rs), which is the exact
+mechanism failing in the 5 red windowed tests ("[ClickBlock] focus did not
+propagate", driver_input.rs:408). That is the registered follow-up this lane was
+told not to chase, and it now also gates split_block latency attribution.
+
+================================================================================
+FINDING 2 — the navigate 1364ms figure is measurement-fragile and should be
+            re-verified BEFORE any fix lane optimizes for it
+================================================================================
+This is the most consequential finding in the report, and it is a correction.
+
+What the replay measures per navigation, honestly:
+  action_total (harness, one sample per transition, n=24 per run)
+      p50 217 - 233 ms      p95 265 - 361 ms      (across calibration runs)
+  per-navigation SQL (inv-sql-budget): reads=0/26  writes=0/0  ddl=0/0
+
+So a switch to an already-materialized page costs ~230-360ms of wall while doing
+NO SQL at all. That is 1.2-1.8x over the 200ms SLO — real, worth fixing, but a
+long way from 6.8x.
+
+What the prod `stage=e2e` correlator reports in the same runs:
+  12 replayed NavigateFocus transitions produced ZERO e2e samples.
+  The e2e samples that DO appear (789, 872, 902, 971, 1194, 1517 ms) are on
+  block ids that are NOT the NavigateFocus targets — they are freshly-minted
+  document roots (UUIDs) and block:structural-page, i.e. auto-navigations into
+  pages that were not yet materialized.
+
+  24 replayed NavigateFocus transitions produce ZERO e2e samples per run; the
+  one `e2e.navigate` sample each run carries comes from an auto-navigation into
+  a not-yet-materialized page.
+
+Why this matters. The correlator starts a clock at navigate dispatch and closes
+it when any delivered CDC row carries the target id; for navigation the closing
+row is a CHILD carrying parent_id = target. If those rows arrive late — for a
+just-created document they arrive only after the org file is written and
+re-ingested — the clock keeps running across every unrelated transition the
+harness performs in between (each ~100-270 ms here). The reported "navigate
+latency" therefore includes work that is not the navigation.
+
+Two independent signals that this is happening:
+  - A 5x disagreement between two measurements of navigation in ONE process and
+    ONE run: action_total p50 ~230 ms vs the single e2e sample at 1194 ms.
+  - The e2e samples cluster exactly on not-yet-materialized pages, and vanish
+    entirely for warm switches — a latency that only exists when the page has to
+    be built is a materialization cost, not a switching cost.
+
+CONSEQUENCE FOR THE DOGFOOD ROW: the 1364 ms p50 / 1391 ms p95 (n=6) navigate
+figure came from this same correlator. Its tight spread was read as evidence of
+a deterministic per-switch cost; a systematic "close on whatever eventually
+touches this page" rule would also produce a tight spread. The figure may be
+measuring first-materialization plus interleaved work rather than a document
+switch. RECOMMENDATION: before a fix lane targets navigation, re-measure with a
+clock that closes on the navigation's OWN frame, and treat the ~230-360 ms
+action_total number as the defensible per-switch cost in the meantime.
+
+SECOND-ORDER FINDING (oracle coverage): because warm switches deliver no rows,
+they never close an entry and never emit `e2e`. The runtime latency-slo oracle
+consumes only `e2e`, so it observes only cold-materialization navigations and is
+blind to every warm switch. Whatever the warm-switch cost is, the oracle is not
+watching it. This is why the gate's navigation rung is `total.NavigateFocus` and
+not `e2e.navigate` (documented in docs/Testing/latency-ceilings.txt).
+
+================================================================================
+FINDING 2b — SplitBlock has a contention-sensitive SLOW MODE (bimodal), and it
+             is HANDED OVER, not investigated here
+================================================================================
+Discovered while calibrating the gate, confirmed independently by a verifier.
+It is a real reproducible observation about the split path, it belongs to the
+#37 latency investigation, and this lane deliberately did NOT chase it.
+
+WHAT WAS SEEN. Replaying the SAME deterministic corpus on the SAME unmodified
+tree, `total.SplitBlock` does not merely vary — it lands in one of two regimes:
+
+  fast regime   p50  99 - 125 ms    (lane-logs/accept-1..5.log, five runs)
+  middling      p50 149.5 ms, p95 399.0, max 474.0   (lane-logs/recal-3.log)
+  slow regime   p50 280.5 ms, p95 457.2, max 651.0   (verifier's run 3)
+
+Two things make this more than noise:
+  - The p50 moves 2.45x - 2.59x run to run, while the OTHER three rungs on the
+    identical replay move only 1.02x - 1.32x. Whatever this is, it is specific
+    to the split path, not general machine jitter.
+  - In the slow regime the distribution is SHIFTED, not stretched: the p50 more
+    than doubles rather than a few tail samples blowing out. That is the
+    signature of the whole operation taking a different path, not of one sample
+    being descheduled.
+The trigger correlates with concurrent build load, so the natural reading is an
+async/contention-sensitive path in split — a lock, a bounded wait, or a poll
+deadline that is usually won and sometimes lost.
+
+WHY IT MATTERS BEYOND THE GATE. FINDING 1 localises the dogfood's ~800ms
+split_block cost to the windowed layer because the headless pipeline measures
+40-100 ms. If split has a contention-sensitive slow mode, then a windowed app —
+which permanently contends with its own render loop — may be sitting in that
+slow mode by default. That would make FINDING 1 and FINDING 2b the same defect
+seen from two directions. This is a HYPOTHESIS worth testing early in whichever
+lane picks up split latency; it is not established here.
+
+WHAT THE NEXT LANE GETS. Reproduce by replaying
+crates/holon-integration-tests/hand-authored-regressions/latency-ratchet.jsonl
+(`just latency-gate` drives it) repeatedly while varying background build load;
+the SplitBlock rows print every run as report-only. Comparison logs above. The
+gate deliberately does NOT fail on these rungs until the mode is attributed —
+see docs/Testing/latency-ceilings.txt, which records the ceiling as BLOCKED ON
+this attribution rather than abandoned.
+
+================================================================================
+FINDING 3 — the historical dominators no longer dominate
+================================================================================
+Checked against the two standing hypotheses in project memory
+(crdt-latency-full-reprojection, latency-next-dominator-org-writeback):
+
+FULL REPROJECTION — no longer the dominator. Across all five runs:
+    projection share of total action wall:  16% - 23%
+    projection mode:  45-56 incremental  vs  8 full
+    full-pass reasons:  coldboot x8  [seed]  — and NOTHING else
+The four leak reasons (empty_pending_moved_frontier, unsettled, orphan,
+oversized) are absent in every run. Every full pass is a legitimate cold-boot
+seed. The incremental O(changed) fast path is carrying the workload as designed.
+
+CDC ROW DELIVERY — free. `stage=rows` measures p50/p95/max = 0.0 ms across
+130-166 batch applies. Not a suspect at this scale.
+
+MATVIEW DDL — a BOOT cost, not a per-action cost. `stage=matview_ddl` is
+n=218-219 with p95 101-147 ms and max 240-260 ms, which looks alarming until it
+is attributed: every per-action budget line in the replay reports ddl=0/0, for
+NavigateFocus and CreateDocument alike. The DDL is schema setup at boot. An
+early hypothesis that cold navigation pays for focus_descendants view creation
+is REJECTED by this evidence.
+
+ORG WRITE-BACK — not confirmed and not refuted here. The replay does exercise
+org rendering (inv-org-render-fixed-point is green every tick) and boot_file
+costs p95 95-136 ms, but no per-action write-back stage dominates. The app's
+real-filesystem write-back path remains a live candidate for FINDING 1's
+windowed-only cost, and the headless channel cannot settle it.
+
+================================================================================
+RANKED HYPOTHESES FOR THE FIX LANES
+================================================================================
+H1  (confidence: high on localization, none on cause)
+    split_block's ~800 ms lives in the windowed layer, not the pipeline.
+    Next step: unblock the windowed channel (the ClickBlock focus follow-up),
+    then measure split_block windowed with the same corpus. Until that lands,
+    any pipeline-side optimisation of split_block is optimising a path that
+    already costs 40-100 ms.
+
+H2  (confidence: high)
+    The navigate 1364 ms figure is not established as a per-switch cost.
+    Next step: fix the measurement before the mechanism — give navigation a
+    correlator that closes on its own frame, or measure it from action_total.
+    Then re-triage. Cost of getting this wrong: a fix lane spends itself on a
+    1.4s target that may be ~300 ms of real switching cost plus measurement
+    bleed.
+
+H2b (confidence: high that the mode is real; untested that it explains H1)
+    SplitBlock has a contention-sensitive bimodal slow mode (FINDING 2b).
+    Next step: attribute the mode — instrument the split path's waits/locks and
+    replay under controlled load. Test the cheap, high-value hypothesis first:
+    that the windowed app sits in the slow mode permanently because the render
+    loop is a constant contender, which would unify H1 and H2b.
+
+H3  (confidence: high, but it is a coverage gap not a latency bug)
+    The latency-slo oracle is blind to warm navigation entirely.
+    Next step: decide whether warm switches should emit an e2e sample at all
+    (they deliver no rows by design), or whether navigation needs a different
+    observable.
+
+H4  (confidence: medium)
+    Warm navigation costs ~230-360 ms with zero SQL. Since it is not query work
+    and not projection (H3 of Finding 3), the remaining candidates are reactive
+    fan-out / view-model rebuild and the harness's own settle machinery. The
+    per-transition sub-timers (apply/check/settle) all report 0 ms, so the cost
+    is inside the action->visible span and is not yet decomposed. This is the
+    cleanest target for a live-instance sampling session.
+
+================================================================================
+WHAT THIS REPORT DOES NOT ESTABLISH
+================================================================================
+  - No windowed measurement was taken (channel blocked, see FINDING 1).
+  - No debugger stack samples were taken (see METHOD NOTE).
+  - The dogfood's in-app numbers were not re-measured; they are quoted from
+    docs/Testing/BugFunnel.md and compared against this lane's replay.
+  - Absolute numbers here are from an unoptimised dev-profile build on a
+    contended machine. Cross-channel RATIOS (10-20x for split_block, 5x between
+    two navigate measurements) are the load-bearing evidence, not the absolute
+    milliseconds.
+
+================================================================================
+APPENDIX — measurement stability, and what it means for reading this report
+================================================================================
+A first version of the gate was REFUTED by a fresh-context verifier for
+flapping: three back-to-back runs on an unmodified tree exited 0 / 1 / 0. The
+cause was statistical, not a real latency change, and it is worth recording
+because it also bounds how much of THIS report's numbers to trust.
+
+`measure_latency.py` interpolates percentiles, so at n=12 the p95 is
+0.55*v[10] + 0.45*v[11] — the largest sample carries ~45% of the weight. One
+slow sample (max 689 ms) lifted total.NavigateFocus p95 to 533.9 ms while its
+p50 sat at 275.5 ms. Measured spread over three runs of identical code under
+two contending workspace builds:
+
+        p50   1.07x - 1.52x        p95   1.34x - 3.35x
+
+So: p50 figures in this report are reliable to roughly +/-50%; p95 figures are
+indicative only and a single p95 reading should never be treated as a
+measurement. The corpus was enlarged to n >= 20 per rung and the gate now judges
+p50 only (docs/Testing/latency-ceilings.txt explains the trade). None of the
+report's conclusions rest on a p95: FINDING 1 rests on a 10-20x p50 gap,
+FINDING 2 on a 5x disagreement between two statistics of the same event, and
+FINDING 3 on counts and shares rather than percentiles.

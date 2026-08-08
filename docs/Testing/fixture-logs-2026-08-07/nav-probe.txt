@@ -1,0 +1,744 @@
+
+running 9 tests
+test absent_initial_state_parses_as_none ... ok
+test recorded_env_flag_mismatch_is_reported ... ok
+test nested_unknown_wiring_field_is_loud - should panic ... ok
+test unknown_initial_state_field_is_loud - should panic ... ok
+test invalid_pinned_wiring_is_loud - should panic ... ok
+test mistyped_initial_state_key_is_loud - should panic ... ok
+test pinned_initial_state_round_trips_and_rebuilds_the_draw ... ok
+[2m2026-08-07T16:56:10.828585Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"block_derived" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.830369Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"block_raw" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.832185Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"operation" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.833322Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"sync_states" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:10.834277Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_block_raw_parent_id" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:10.835377Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"before" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:10.836432Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_operation_entity_name" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:10.838078Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_block_history_block" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:10.839049Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_operation_created_at" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:10.840142Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"file" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:10.841152Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_block_history_session" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:10.842072Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_file_parent_id" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:10.842975Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_block_history_at" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:10.843905Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_file_document_id" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:10.844801Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_block_history_day" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:10.845889Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"clock" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.847673Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_block_history_group" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.849232Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"task_blockers" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:10.851844Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"nodes" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:10.852269Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"block_link" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:10.853265Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"block_derived" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.854468Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"block_raw" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.855897Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"operation" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:10.856461Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"edges" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.857118Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"sync_states" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.857994Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"block_links" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.858489Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_block_raw_parent_id" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.859554Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"before" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:10.860373Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"automations_journal" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.860558Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_operation_entity_name" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:10.862066Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_block_history_block" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:10.862452Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"property_keys" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.863002Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_operation_created_at" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:10.864033Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"file" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:10.864656Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_block_links_source" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:10.865217Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_block_history_session" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.866165Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_file_parent_id" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:10.867135Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_block_history_at" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:10.868062Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_file_document_id" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:10.869059Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_block_history_day" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:10.870197Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"clock" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.871285Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_block_history_group" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:10.872203Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"task_blockers" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:10.873804Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"nodes" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.874159Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"block_link" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:10.876308Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"edges" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.877653Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"block_links" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.879886Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"automations_journal" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.881981Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"property_keys" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.883223Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_block_links_source" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.916328Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"trust_proposals" [3mms[0m[2m=[0m51
+[2m2026-08-07T16:56:10.918990Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"node_labels" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.920852Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_block_links_resolved" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.922831Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"node_props_int" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.925699Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_block_links_kind_target" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:10.927318Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"block_requires" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.929931Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"node_props_text" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:10.931630Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"block_redirects" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.933082Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_block_requires_required" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.934591Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"node_props_real" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.936022Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_block_redirects_to_id" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.937094Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"trust_proposals" [3mms[0m[2m=[0m53
+[2m2026-08-07T16:56:10.938024Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"block_tags" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.940480Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"node_labels" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.940638Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"node_props_bool" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:10.942245Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_block_links_resolved" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.944009Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"node_props_int" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.944335Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_block_tags_tag" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:10.945866Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"node_props_json" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.946379Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_block_links_kind_target" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:10.947870Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"block_requires" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.947955Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"advice_suppressed" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.949584Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"node_props_text" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.949837Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"edge_props_int" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.951030Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"block_redirects" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.952346Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_block_requires_required" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.953701Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"node_props_real" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.954990Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_block_redirects_to_id" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.956467Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"block_tags" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.961093Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"node_props_bool" [3mms[0m[2m=[0m4
+[2m2026-08-07T16:56:10.963646Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_block_tags_tag" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.965167Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"node_props_json" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.967490Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"advice_suppressed" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:10.969281Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"edge_props_int" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:11.032142Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"backlinks" [3mms[0m[2m=[0m82
+[2m2026-08-07T16:56:11.035481Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_advice_suppressed_lesson" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:11.037483Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"edge_props_text" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:11.040207Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"edge_props_real" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:11.042251Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"edge_props_bool" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:11.044246Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"edge_props_json" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:11.046122Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_edges_source" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:11.047822Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_edges_target" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:11.052858Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_edges_type" [3mms[0m[2m=[0m4
+[2m2026-08-07T16:56:11.055671Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_node_labels_label" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:11.060178Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_property_keys_key" [3mms[0m[2m=[0m3
+[2m2026-08-07T16:56:11.063849Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_node_props_int_key_value" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:11.065870Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_node_props_text_key_value" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:11.066132Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"backlinks" [3mms[0m[2m=[0m96
+[2m2026-08-07T16:56:11.068595Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_node_props_real_key_value" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:11.069256Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_advice_suppressed_lesson" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:11.070490Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_node_props_bool_key_value" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:11.071012Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"edge_props_text" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:11.072502Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_node_props_json_key_value" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:11.073615Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"edge_props_real" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:11.074764Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_edge_props_int_key_value" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:11.076308Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"edge_props_bool" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:11.077085Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_edge_props_text_key_value" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:11.078060Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"edge_props_json" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:11.079365Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_edge_props_real_key_value" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:11.079944Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_edges_source" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:11.082043Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_edge_props_bool_key_value" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:11.082764Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_edges_target" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:11.084372Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_edge_props_json_key_value" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:11.085950Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_edges_type" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:11.087478Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_node_labels_label" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:11.088196Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"block_requires_agg" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:11.090884Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_property_keys_key" [3mms[0m[2m=[0m3
+[2m2026-08-07T16:56:11.093396Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_node_props_int_key_value" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:11.093400Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"block_tags_agg" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:11.095459Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_node_props_text_key_value" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:11.097182Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_node_props_real_key_value" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:11.098368Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"advice_suppressed_agg" [3mms[0m[2m=[0m3
+[2m2026-08-07T16:56:11.098835Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_node_props_bool_key_value" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:11.101120Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_node_props_json_key_value" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:11.103391Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_edge_props_int_key_value" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:11.105862Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_edge_props_text_key_value" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:11.107703Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_edge_props_real_key_value" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:11.110611Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_edge_props_bool_key_value" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:11.112403Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_edge_props_json_key_value" [3mms[0m[2m=[0m1
+[2m2026-08-07T16:56:11.116064Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"block_requires_agg" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:11.120910Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"block_tags_agg" [3mms[0m[2m=[0m3
+[2m2026-08-07T16:56:11.125532Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"advice_suppressed_agg" [3mms[0m[2m=[0m3
+[2m2026-08-07T16:56:11.187501Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"block" [3mms[0m[2m=[0m87
+[2m2026-08-07T16:56:11.198165Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"navigation_history" [3mms[0m[2m=[0m5
+[2m2026-08-07T16:56:11.203296Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_navigation_history_region" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:11.215154Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"block" [3mms[0m[2m=[0m87
+[2m2026-08-07T16:56:11.224147Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"navigation_history" [3mms[0m[2m=[0m3
+[2m2026-08-07T16:56:11.366042Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"block_with_path" [3mms[0m[2m=[0m140
+[2m2026-08-07T16:56:11.368816Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"block_with_path" [3mms[0m[2m=[0m165
+[2m2026-08-07T16:56:11.389385Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"block_requirement_edges" [3mms[0m[2m=[0m22
+[2m2026-08-07T16:56:11.401011Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_navigation_history_region" [3mms[0m[2m=[0m11
+[2m2026-08-07T16:56:11.428572Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"block_requirement_edges" [3mms[0m[2m=[0m58
+[2m2026-08-07T16:56:11.502675Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"journal_day_pages" [3mms[0m[2m=[0m101
+[2m2026-08-07T16:56:11.506202Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"and" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:11.510165Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"journal_day_pages" [3mms[0m[2m=[0m81
+[2m2026-08-07T16:56:11.513691Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"and" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:11.531590Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"current_focus" [3mms[0m[2m=[0m23
+[2m2026-08-07T16:56:11.535212Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"current_focus" [3mms[0m[2m=[0m19
+[2m2026-08-07T16:56:11.559555Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"focus_roots" [3mms[0m[2m=[0m25
+[2m2026-08-07T16:56:11.572211Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"focus_roots" [3mms[0m[2m=[0m34
+[2m2026-08-07T16:56:11.721630Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"journal_feed" [3mms[0m[2m=[0m130
+[2m2026-08-07T16:56:11.743080Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"journal_feed" [3mms[0m[2m=[0m164
+[2m2026-08-07T16:56:11.743778Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"file" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:11.744104Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_file_parent_id" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:11.744474Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_file_document_id" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:11.745303Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"sync_states" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:11.759616Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"file" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:11.760258Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_file_parent_id" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:11.760588Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_file_document_id" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:11.761642Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"sync_states" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:11.840566Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_896c82d172bdae55" [3mms[0m[2m=[0m86
+[2m2026-08-07T16:56:11.846279Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_896c82d172bdae55" [3mms[0m[2m=[0m79
+[2m2026-08-07T16:56:11.927562Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_167c2bbd22b1d4fc" [3mms[0m[2m=[0m83
+[2m2026-08-07T16:56:11.929263Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"operation" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:11.936927Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m4 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:11.937047Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_operation_created_at" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:11.937124Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"document_blocks" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m5 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:11.940422Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_operation_entity_name" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:11.941414Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_167c2bbd22b1d4fc" [3mms[0m[2m=[0m92
+[2m2026-08-07T16:56:11.943725Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"operation" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:11.945222Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_operation_created_at" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:11.946138Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_parse" [3mms[0m[2m=[0m16 [3mblocks[0m[2m=[0m0 [3mpath[0m[2m=[0m/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpn62dDE/Journals.org
+[2m2026-08-07T16:56:11.946187Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_place_wait" [3mms[0m[2m=[0m0 [3mpath[0m[2m=[0m/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpn62dDE/Journals.org
+[2m2026-08-07T16:56:11.953252Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m4 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:11.953878Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"idx_operation_entity_name" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:11.955280Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"document_blocks" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m5 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:11.955786Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m8 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:11.956572Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"document_blocks" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m9 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:11.957774Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m1 [3mblocks[0m[2m=[0m1 [3msnapshot_ms[0m[2m=[0m1 [3mms[0m[2m=[0m11 [3mmode[0m[2m=[0m"full" [3mreason[0m[2m=[0m"coldboot"
+[2m2026-08-07T16:56:11.964522Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_parse" [3mms[0m[2m=[0m19 [3mblocks[0m[2m=[0m0 [3mpath[0m[2m=[0m/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpUH0s3T/Journals.org
+[2m2026-08-07T16:56:11.964568Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_place_wait" [3mms[0m[2m=[0m0 [3mpath[0m[2m=[0m/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpUH0s3T/Journals.org
+[2m2026-08-07T16:56:11.965609Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_file" [3mms[0m[2m=[0m35 [3mpath[0m[2m=[0m/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpn62dDE/Journals.org
+[2m2026-08-07T16:56:11.972162Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m1 [3mblocks[0m[2m=[0m1 [3msnapshot_ms[0m[2m=[0m1 [3mms[0m[2m=[0m7 [3mmode[0m[2m=[0m"full" [3mreason[0m[2m=[0m"coldboot"
+[2m2026-08-07T16:56:11.972608Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m8 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:11.972754Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"document_blocks" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m9 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:11.974024Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m14 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:11.976059Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"document_blocks" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m12 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:11.978552Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_file" [3mms[0m[2m=[0m34 [3mpath[0m[2m=[0m/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpUH0s3T/Journals.org
+[2m2026-08-07T16:56:11.987882Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_parse" [3mms[0m[2m=[0m22 [3mblocks[0m[2m=[0m3 [3mpath[0m[2m=[0m/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpn62dDE/forward-edge-page.org
+[2m2026-08-07T16:56:11.988265Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_place_wait" [3mms[0m[2m=[0m0 [3mpath[0m[2m=[0m/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpn62dDE/forward-edge-page.org
+[2m2026-08-07T16:56:11.988427Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m14 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:11.990279Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"document_blocks" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m12 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.003005Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_parse" [3mms[0m[2m=[0m24 [3mblocks[0m[2m=[0m3 [3mpath[0m[2m=[0m/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpUH0s3T/forward-edge-page.org
+[2m2026-08-07T16:56:12.003323Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_place_wait" [3mms[0m[2m=[0m0 [3mpath[0m[2m=[0m/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpUH0s3T/forward-edge-page.org
+[2m2026-08-07T16:56:12.008951Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"document_blocks" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m20 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.009003Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m4 [3mseq[0m[2m=[0m19 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.011501Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m4 [3mblocks[0m[2m=[0m5 [3msnapshot_ms[0m[2m=[0m1 [3mms[0m[2m=[0m23 [3mmode[0m[2m=[0m"full" [3mreason[0m[2m=[0m"coldboot"
+[2m2026-08-07T16:56:12.012025Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_feed_wait" [3mms[0m[2m=[0m0 [3mcaught_up[0m[2m=[0mtrue [3mskipped[0m[2m=[0mtrue [3msite[0m[2m=[0m"creates"
+[2m2026-08-07T16:56:12.024984Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"document_blocks" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m20 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.026280Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_file" [3mms[0m[2m=[0m60 [3mpath[0m[2m=[0m/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpn62dDE/forward-edge-page.org
+[2m2026-08-07T16:56:12.026418Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m4 [3mblocks[0m[2m=[0m5 [3msnapshot_ms[0m[2m=[0m1 [3mms[0m[2m=[0m23 [3mmode[0m[2m=[0m"full" [3mreason[0m[2m=[0m"coldboot"
+[2m2026-08-07T16:56:12.026821Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_feed_wait" [3mms[0m[2m=[0m0 [3mcaught_up[0m[2m=[0mtrue [3mskipped[0m[2m=[0mtrue [3msite[0m[2m=[0m"creates"
+[2m2026-08-07T16:56:12.033720Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m25 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.033747Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"document_blocks" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m23 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.034836Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m4 [3mseq[0m[2m=[0m19 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.050234Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_d77ac41ba85c1706" [3mms[0m[2m=[0m15
+[2m2026-08-07T16:56:12.052524Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_d77ac41ba85c1706" [3mms[0m[2m=[0m14
+[2m2026-08-07T16:56:12.055715Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_file" [3mms[0m[2m=[0m77 [3mpath[0m[2m=[0m/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpUH0s3T/forward-edge-page.org
+[2m2026-08-07T16:56:12.058620Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"undo_log" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:12.060201Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"undo_log" [3mms[0m[2m=[0m3
+[2m2026-08-07T16:56:12.064253Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"local_ui_state" [3mms[0m[2m=[0m2
+[2m2026-08-07T16:56:12.065820Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"local_ui_state" [3mms[0m[2m=[0m3
+[2m2026-08-07T16:56:12.070730Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_parse" [3mms[0m[2m=[0m44 [3mblocks[0m[2m=[0m3 [3mpath[0m[2m=[0m/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpn62dDE/structural-page.org
+[2m2026-08-07T16:56:12.070748Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m25 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.071032Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_place_wait" [3mms[0m[2m=[0m0 [3mpath[0m[2m=[0m/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpn62dDE/structural-page.org
+[2m2026-08-07T16:56:12.072167Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"document_blocks" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m23 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.090088Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_c002099a04e02ae8" [3mms[0m[2m=[0m18
+[2m2026-08-07T16:56:12.099882Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_c002099a04e02ae8" [3mms[0m[2m=[0m17
+[2m2026-08-07T16:56:12.105729Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_parse" [3mms[0m[2m=[0m49 [3mblocks[0m[2m=[0m3 [3mpath[0m[2m=[0m/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpUH0s3T/structural-page.org
+[2m2026-08-07T16:56:12.106028Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_place_wait" [3mms[0m[2m=[0m0 [3mpath[0m[2m=[0m/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpUH0s3T/structural-page.org
+[2m2026-08-07T16:56:12.108566Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m4 [3mseq[0m[2m=[0m28 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.108822Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"document_blocks" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m29 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.110709Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m4 [3mblocks[0m[2m=[0m9 [3msnapshot_ms[0m[2m=[0m20 [3mms[0m[2m=[0m39 [3mmode[0m[2m=[0m"full" [3mreason[0m[2m=[0m"coldboot"
+[2m2026-08-07T16:56:12.113371Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_feed_wait" [3mms[0m[2m=[0m0 [3mcaught_up[0m[2m=[0mtrue [3mskipped[0m[2m=[0mtrue [3msite[0m[2m=[0m"creates"
+[2m2026-08-07T16:56:12.123619Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m4 [3mseq[0m[2m=[0m28 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.125721Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m4 [3mblocks[0m[2m=[0m9 [3msnapshot_ms[0m[2m=[0m2 [3mms[0m[2m=[0m19 [3mmode[0m[2m=[0m"full" [3mreason[0m[2m=[0m"coldboot"
+[2m2026-08-07T16:56:12.125782Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_file" [3mms[0m[2m=[0m99 [3mpath[0m[2m=[0m/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpn62dDE/structural-page.org
+[2m2026-08-07T16:56:12.125842Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_feed_converge" [3mms[0m[2m=[0m0 [3mblocks[0m[2m=[0m6 [3mcaught_up[0m[2m=[0mtrue
+[2m2026-08-07T16:56:12.126206Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_feed_wait" [3mms[0m[2m=[0m0 [3mcaught_up[0m[2m=[0mtrue [3mskipped[0m[2m=[0mtrue [3msite[0m[2m=[0m"creates"
+[2m2026-08-07T16:56:12.129560Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"document_blocks" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m29 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.130354Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_ingest_total" [3mms[0m[2m=[0m200 [3mfiles[0m[2m=[0m3
+[2m2026-08-07T16:56:12.141511Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_file" [3mms[0m[2m=[0m85 [3mpath[0m[2m=[0m/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpUH0s3T/structural-page.org
+[2m2026-08-07T16:56:12.141572Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_feed_converge" [3mms[0m[2m=[0m0 [3mblocks[0m[2m=[0m6 [3mcaught_up[0m[2m=[0mtrue
+[2m2026-08-07T16:56:12.144763Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_ingest_total" [3mms[0m[2m=[0m200 [3mfiles[0m[2m=[0m3
+[2m2026-08-07T16:56:12.226503Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_1570347602dda3f9" [3mms[0m[2m=[0m33
+[2m2026-08-07T16:56:12.227016Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_1570347602dda3f9" [3mms[0m[2m=[0m32
+[2m2026-08-07T16:56:12.248075Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_dd27958f4ec0f8e7" [3mms[0m[2m=[0m19
+[2m2026-08-07T16:56:12.252106Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_dd27958f4ec0f8e7" [3mms[0m[2m=[0m19
+[2m2026-08-07T16:56:12.281858Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_e2453b3c0b29a253" [3mms[0m[2m=[0m27
+[2m2026-08-07T16:56:12.294411Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_e2453b3c0b29a253" [3mms[0m[2m=[0m28
+[2m2026-08-07T16:56:12.313662Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_9723e98751523135" [3mms[0m[2m=[0m27
+[2m2026-08-07T16:56:12.328077Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_9723e98751523135" [3mms[0m[2m=[0m27
+[2m2026-08-07T16:56:12.439526Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m17 [3mseq[0m[2m=[0m36 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.439939Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"document_blocks" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m34 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.440821Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m17 [3mblocks[0m[2m=[0m26 [3msnapshot_ms[0m[2m=[0m5 [3mms[0m[2m=[0m89 [3mmode[0m[2m=[0m"full" [3mreason[0m[2m=[0m"coldboot"
+[2m2026-08-07T16:56:12.443023Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"entity_keyed" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m41 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.443237Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"entity_keyed" [3mrows[0m[2m=[0m4 [3mseq[0m[2m=[0m40 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.444120Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"advice_rule_lessons_for_tasks" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.451202Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"document_blocks" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m34 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.454588Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"entity_keyed" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m41 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.454680Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"entity_keyed" [3mrows[0m[2m=[0m4 [3mseq[0m[2m=[0m40 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.455041Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"advice_rule_lessons_for_tasks" [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.455251Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m17 [3mblocks[0m[2m=[0m26 [3msnapshot_ms[0m[2m=[0m3 [3mms[0m[2m=[0m113 [3mmode[0m[2m=[0m"full" [3mreason[0m[2m=[0m"coldboot"
+[2m2026-08-07T16:56:12.455971Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m17 [3mseq[0m[2m=[0m36 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.494852Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_5ab4e2c0a31c2199" [3mms[0m[2m=[0m44
+[2m2026-08-07T16:56:12.507516Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_5ab4e2c0a31c2199" [3mms[0m[2m=[0m38
+[2m2026-08-07T16:56:12.521023Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_73bc8e79d8224f7" [3mms[0m[2m=[0m19
+[2m2026-08-07T16:56:12.532955Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_73bc8e79d8224f7" [3mms[0m[2m=[0m19
+[2m2026-08-07T16:56:12.541510Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_dfbc78a155107136" [3mms[0m[2m=[0m9
+[2m2026-08-07T16:56:12.645857Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_dfbc78a155107136" [3mms[0m[2m=[0m102
+[2m2026-08-07T16:56:12.648389Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_8a3c1fc12fd386b" [3mms[0m[2m=[0m102
+[2m2026-08-07T16:56:12.663359Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"document_blocks" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m44 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.663526Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m46 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.663654Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m46 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.666734Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m1 [3mblocks[0m[2m=[0m27 [3msnapshot_ms[0m[2m=[0m1 [3mms[0m[2m=[0m13 [3mmode[0m[2m=[0m"incremental" [3mreason[0m[2m=[0m"incremental"
+[2m2026-08-07T16:56:12.667632Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_8a3c1fc12fd386b" [3mms[0m[2m=[0m16
+[2m2026-08-07T16:56:12.684980Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"document_blocks" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m44 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.685610Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m46 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.686125Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m46 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:12.686181Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m1 [3mblocks[0m[2m=[0m27 [3msnapshot_ms[0m[2m=[0m2 [3mms[0m[2m=[0m13 [3mmode[0m[2m=[0m"incremental" [3mreason[0m[2m=[0m"incremental"
+[2m2026-08-07T16:56:12.839165Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_3af6a7e63443e520" [3mms[0m[2m=[0m89
+[2m2026-08-07T16:56:12.893722Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_2d2ca5bef1668418" [3mms[0m[2m=[0m92
+[2m2026-08-07T16:56:12.939636Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_2d2ca5bef1668418" [3mms[0m[2m=[0m87
+[2m2026-08-07T16:56:12.985660Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_3af6a7e63443e520" [3mms[0m[2m=[0m87
+[2m2026-08-07T16:56:13.058133Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_e428196fe987f068" [3mms[0m[2m=[0m101
+[2m2026-08-07T16:56:13.091366Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_e428196fe987f068" [3mms[0m[2m=[0m103
+[2m2026-08-07T16:56:13.146302Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_84a9f3620684f4dd" [3mms[0m[2m=[0m84
+[2m2026-08-07T16:56:13.169934Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_2461b8bb02a77f76" [3mms[0m[2m=[0m14
+[2m2026-08-07T16:56:13.196947Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_859e0dbfb7f5b43c" [3mms[0m[2m=[0m23
+[2m2026-08-07T16:56:13.202299Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_84a9f3620684f4dd" [3mms[0m[2m=[0m90
+[2m2026-08-07T16:56:13.226844Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_2461b8bb02a77f76" [3mms[0m[2m=[0m18
+[2m2026-08-07T16:56:13.248872Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_859e0dbfb7f5b43c" [3mms[0m[2m=[0m19
+[2m2026-08-07T16:56:13.288495Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_d347684b217f064b" [3mms[0m[2m=[0m88
+[2m2026-08-07T16:56:13.341958Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_d347684b217f064b" [3mms[0m[2m=[0m88
+[2m2026-08-07T16:56:13.388919Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_2f1ccf40b479d8fb" [3mms[0m[2m=[0m93
+[2m2026-08-07T16:56:13.439603Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_2f1ccf40b479d8fb" [3mms[0m[2m=[0m93
+[2m2026-08-07T16:56:13.562435Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_120528275324bee4" [3mms[0m[2m=[0m169
+[2m2026-08-07T16:56:13.610184Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m54 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:13.610263Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m57 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:13.625469Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"dispatch" [3maction[0m[2m=[0mfocus [3mblock[0m[2m=[0mnavigation [3mms[0m[2m=[0m334
+[2m2026-08-07T16:56:13.703955Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_120528275324bee4" [3mms[0m[2m=[0m260
+[2m2026-08-07T16:56:13.721718Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m54 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:13.730438Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m57 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:13.825787Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_81d8ff0247de31ff" [3mms[0m[2m=[0m178
+[2m2026-08-07T16:56:13.893290Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_81d8ff0247de31ff" [3mms[0m[2m=[0m150
+[2m2026-08-07T16:56:13.895028Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"dispatch" [3maction[0m[2m=[0mfocus [3mblock[0m[2m=[0mnavigation [3mms[0m[2m=[0m551
+[2m2026-08-07T16:56:14.261750Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_fbf85d2c596d5ec0" [3mms[0m[2m=[0m72
+[2m2026-08-07T16:56:14.384532Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"matview_ddl" [3mview[0m[2m=[0m"watch_view_fbf85d2c596d5ec0" [3mms[0m[2m=[0m87
+[2m2026-08-07T16:56:14.661039Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=0 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+[2m2026-08-07T16:56:14.706395Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"document_blocks" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m62 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:14.706539Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m65 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:14.708201Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m65 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:14.730514Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"document_blocks" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m70 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:14.730759Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m73 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:14.730918Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m73 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:14.732813Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m1 [3mblocks[0m[2m=[0m28 [3msnapshot_ms[0m[2m=[0m0 [3mms[0m[2m=[0m20 [3mmode[0m[2m=[0m"incremental" [3mreason[0m[2m=[0m"incremental"
+[2m2026-08-07T16:56:14.737312Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_parse" [3mms[0m[2m=[0m43 [3mblocks[0m[2m=[0m0 [3mpath[0m[2m=[0m/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpUH0s3T/lat_a.org
+[2m2026-08-07T16:56:14.737364Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_place_wait" [3mms[0m[2m=[0m0 [3mpath[0m[2m=[0m/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpUH0s3T/lat_a.org
+[2m2026-08-07T16:56:14.784897Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"action_total" [3maction[0m[2m=[0mCreateDocument [3mtotal_ms[0m[2m=[0m91
+[2m2026-08-07T16:56:14.803691Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=1 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+[2m2026-08-07T16:56:14.861171Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"e2e" [3maction[0m[2m=[0mcreate [3mblock[0m[2m=[0mblock:echoorigin [3msource[0m[2m=[0m"block" [3mms[0m[2m=[0m20
+[2m2026-08-07T16:56:14.861227Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"e2e" [3maction[0m[2m=[0mnavigate [3mblock[0m[2m=[0mblock:structural-page [3msource[0m[2m=[0m"block" [3mms[0m[2m=[0m1517
+[2m2026-08-07T16:56:14.861256Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m62 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:14.861382Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m62 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:14.865357Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m1 [3mblocks[0m[2m=[0m28 [3msnapshot_ms[0m[2m=[0m5 [3mms[0m[2m=[0m23 [3mmode[0m[2m=[0m"incremental" [3mreason[0m[2m=[0m"incremental"
+[2m2026-08-07T16:56:14.871528Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"dispatch" [3maction[0m[2m=[0mcreate [3mblock[0m[2m=[0mblock:echoorigin [3mms[0m[2m=[0m30
+[2m2026-08-07T16:56:15.007719Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"action_total" [3maction[0m[2m=[0mCreateBlockUnderFocus [3mtotal_ms[0m[2m=[0m168
+[2m2026-08-07T16:56:15.368823Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=2 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+[2m2026-08-07T16:56:15.487515Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"document_blocks" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m78 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:15.487687Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m81 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:15.488082Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m81 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:15.511081Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"document_blocks" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m86 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:15.511396Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m89 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:15.511553Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m89 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:15.520848Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m1 [3mblocks[0m[2m=[0m29 [3msnapshot_ms[0m[2m=[0m1 [3mms[0m[2m=[0m26 [3mmode[0m[2m=[0m"incremental" [3mreason[0m[2m=[0m"incremental"
+[2m2026-08-07T16:56:15.521802Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_parse" [3mms[0m[2m=[0m50 [3mblocks[0m[2m=[0m0 [3mpath[0m[2m=[0m/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpUH0s3T/lat_b.org
+[2m2026-08-07T16:56:15.521857Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_place_wait" [3mms[0m[2m=[0m0 [3mpath[0m[2m=[0m/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpUH0s3T/lat_b.org
+[2m2026-08-07T16:56:15.582027Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"action_total" [3maction[0m[2m=[0mCreateDocument [3mtotal_ms[0m[2m=[0m110
+[2m2026-08-07T16:56:15.769433Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=3 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+[2m2026-08-07T16:56:15.817483Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"e2e" [3maction[0m[2m=[0mcreate [3mblock[0m[2m=[0mblock:echochild [3msource[0m[2m=[0m"block" [3mms[0m[2m=[0m16
+[2m2026-08-07T16:56:15.817549Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m69 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:15.818190Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m69 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:15.820505Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m1 [3mblocks[0m[2m=[0m29 [3msnapshot_ms[0m[2m=[0m0 [3mms[0m[2m=[0m17 [3mmode[0m[2m=[0m"incremental" [3mreason[0m[2m=[0m"incremental"
+[2m2026-08-07T16:56:15.823910Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"dispatch" [3maction[0m[2m=[0mcreate [3mblock[0m[2m=[0mblock:echochild [3mms[0m[2m=[0m23
+[2m2026-08-07T16:56:15.844311Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m76 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:15.844489Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m76 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:15.846905Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m1 [3mblocks[0m[2m=[0m29 [3msnapshot_ms[0m[2m=[0m0 [3mms[0m[2m=[0m25 [3mmode[0m[2m=[0m"incremental" [3mreason[0m[2m=[0m"incremental"
+[2m2026-08-07T16:56:15.962008Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"action_total" [3maction[0m[2m=[0mCreateBlockUnderFocus [3mtotal_ms[0m[2m=[0m162
+[2m2026-08-07T16:56:16.211501Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=5 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+[2m2026-08-07T16:56:16.260525Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m97 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:16.260684Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m97 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:16.260525Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"document_blocks" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m94 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:16.282038Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m105 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:16.282439Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"document_blocks" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m102 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:16.282845Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m105 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:16.284420Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m1 [3mblocks[0m[2m=[0m30 [3msnapshot_ms[0m[2m=[0m0 [3mms[0m[2m=[0m18 [3mmode[0m[2m=[0m"incremental" [3mreason[0m[2m=[0m"incremental"
+[2m2026-08-07T16:56:16.288161Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_parse" [3mms[0m[2m=[0m41 [3mblocks[0m[2m=[0m0 [3mpath[0m[2m=[0m/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpUH0s3T/lat_c.org
+[2m2026-08-07T16:56:16.288205Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_place_wait" [3mms[0m[2m=[0m0 [3mpath[0m[2m=[0m/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpUH0s3T/lat_c.org
+[2m2026-08-07T16:56:16.340435Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"action_total" [3maction[0m[2m=[0mCreateDocument [3mtotal_ms[0m[2m=[0m93
+[2m2026-08-07T16:56:16.660091Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=6 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+[2m2026-08-07T16:56:16.749291Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"e2e" [3maction[0m[2m=[0mindent [3mblock[0m[2m=[0mblock:echochild [3msource[0m[2m=[0m"block" [3mms[0m[2m=[0m31
+[2m2026-08-07T16:56:16.749320Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m82 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:16.749363Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m82 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:16.753787Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m1 [3mblocks[0m[2m=[0m29 [3msnapshot_ms[0m[2m=[0m0 [3mms[0m[2m=[0m29 [3mmode[0m[2m=[0m"incremental" [3mreason[0m[2m=[0m"incremental"
+[2m2026-08-07T16:56:16.755107Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"dispatch" [3maction[0m[2m=[0mindent [3mblock[0m[2m=[0mblock:echochild [3mms[0m[2m=[0m37
+[2m2026-08-07T16:56:16.799460Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"action_total" [3maction[0m[2m=[0mIndent [3mtotal_ms[0m[2m=[0m98
+[2m2026-08-07T16:56:17.031888Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=7 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+[2m2026-08-07T16:56:17.100237Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m113 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:17.100565Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"document_blocks" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m110 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:17.100698Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m113 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:17.137223Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"document_blocks" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m118 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:17.137374Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m121 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:17.137534Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m121 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:17.143893Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m1 [3mblocks[0m[2m=[0m31 [3msnapshot_ms[0m[2m=[0m0 [3mms[0m[2m=[0m37 [3mmode[0m[2m=[0m"incremental" [3mreason[0m[2m=[0m"incremental"
+[2m2026-08-07T16:56:17.145666Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_parse" [3mms[0m[2m=[0m61 [3mblocks[0m[2m=[0m0 [3mpath[0m[2m=[0m/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpUH0s3T/lat_d.org
+[2m2026-08-07T16:56:17.145721Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"boot_place_wait" [3mms[0m[2m=[0m0 [3mpath[0m[2m=[0m/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpUH0s3T/lat_d.org
+[2m2026-08-07T16:56:17.192525Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"action_total" [3maction[0m[2m=[0mCreateDocument [3mtotal_ms[0m[2m=[0m109
+[2m2026-08-07T16:56:17.362427Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=8 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+[2m2026-08-07T16:56:17.510138Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"e2e" [3maction[0m[2m=[0mset_field [3mblock[0m[2m=[0mblock:echochild [3msource[0m[2m=[0m"block" [3mms[0m[2m=[0m17
+[2m2026-08-07T16:56:17.510206Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m89 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:17.510376Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m89 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:17.512746Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m1 [3mblocks[0m[2m=[0m29 [3msnapshot_ms[0m[2m=[0m0 [3mms[0m[2m=[0m18 [3mmode[0m[2m=[0m"incremental" [3mreason[0m[2m=[0m"incremental"
+[2m2026-08-07T16:56:17.515442Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"dispatch" [3maction[0m[2m=[0mset_field [3mblock[0m[2m=[0mblock:echochild [3mms[0m[2m=[0m23
+[2m2026-08-07T16:56:17.599697Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"e2e" [3maction[0m[2m=[0mset_field [3mblock[0m[2m=[0mblock:echochild [3msource[0m[2m=[0m"block" [3mms[0m[2m=[0m62
+[2m2026-08-07T16:56:17.600061Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m95 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:17.599743Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m95 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:17.602748Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m1 [3mblocks[0m[2m=[0m29 [3msnapshot_ms[0m[2m=[0m37 [3mms[0m[2m=[0m64 [3mmode[0m[2m=[0m"incremental" [3mreason[0m[2m=[0m"incremental"
+[2m2026-08-07T16:56:17.607084Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"dispatch" [3maction[0m[2m=[0mset_field [3mblock[0m[2m=[0mblock:echochild [3mms[0m[2m=[0m69
+[2m2026-08-07T16:56:17.651548Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"action_total" [3maction[0m[2m=[0mToggleState [3mtotal_ms[0m[2m=[0m179
+[2m2026-08-07T16:56:17.828189Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=10 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+[2m2026-08-07T16:56:17.923488Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m126 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:17.929603Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m129 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:17.936303Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"dispatch" [3maction[0m[2m=[0mfocus [3mblock[0m[2m=[0mnavigation [3mms[0m[2m=[0m29
+[2m2026-08-07T16:56:18.126688Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"action_total" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m264
+[2m2026-08-07T16:56:18.139170Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=10 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+[2m2026-08-07T16:56:18.207870Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"document_blocks" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m101 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:18.207978Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m105 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:18.208733Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m105 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:18.211296Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m1 [3mblocks[0m[2m=[0m30 [3msnapshot_ms[0m[2m=[0m0 [3mms[0m[2m=[0m21 [3mmode[0m[2m=[0m"incremental" [3mreason[0m[2m=[0m"incremental"
+[2m2026-08-07T16:56:18.235097Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m110 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:18.235256Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m110 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:18.237038Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"document_blocks" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m111 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:18.238649Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m1 [3mblocks[0m[2m=[0m30 [3msnapshot_ms[0m[2m=[0m0 [3mms[0m[2m=[0m27 [3mmode[0m[2m=[0m"incremental" [3mreason[0m[2m=[0m"incremental"
+[2m2026-08-07T16:56:18.265260Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m118 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:18.265339Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m118 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:18.269916Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m1 [3mblocks[0m[2m=[0m30 [3msnapshot_ms[0m[2m=[0m1 [3mms[0m[2m=[0m28 [3mmode[0m[2m=[0m"incremental" [3mreason[0m[2m=[0m"incremental"
+[2m2026-08-07T16:56:18.298179Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m125 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:18.298809Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m125 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:18.298886Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m1 [3mblocks[0m[2m=[0m30 [3msnapshot_ms[0m[2m=[0m0 [3mms[0m[2m=[0m28 [3mmode[0m[2m=[0m"incremental" [3mreason[0m[2m=[0m"incremental"
+[2m2026-08-07T16:56:18.384740Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"action_total" [3maction[0m[2m=[0mBlockToPage [3mtotal_ms[0m[2m=[0m206
+[2m2026-08-07T16:56:18.767647Z[0m [33m WARN[0m [2mholon_latency[0m[2m:[0m over the p95 SLO but within the machine-load slack [3mstage[0m[2m=[0m"settle_budget" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m264 [3mslo_ms[0m[2m=[0m200
+[2m2026-08-07T16:56:18.767703Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=14 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+[2m2026-08-07T16:56:18.809881Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"e2e" [3maction[0m[2m=[0mcreate [3mblock[0m[2m=[0mblock:k0 [3msource[0m[2m=[0m"block" [3mms[0m[2m=[0m11
+[2m2026-08-07T16:56:18.809910Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m134 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:18.809934Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"e2e" [3maction[0m[2m=[0mnavigate [3mblock[0m[2m=[0mblock:ee1c8d25-8b1d-d0e8-09fe-1a0674bcd779 [3msource[0m[2m=[0m"block" [3mms[0m[2m=[0m902
+[2m2026-08-07T16:56:18.810080Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m134 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:18.812474Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m1 [3mblocks[0m[2m=[0m32 [3msnapshot_ms[0m[2m=[0m0 [3mms[0m[2m=[0m13 [3mmode[0m[2m=[0m"incremental" [3mreason[0m[2m=[0m"incremental"
+[2m2026-08-07T16:56:18.816453Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"dispatch" [3maction[0m[2m=[0mcreate [3mblock[0m[2m=[0mblock:k0 [3mms[0m[2m=[0m18
+[2m2026-08-07T16:56:18.833030Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m141 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:18.833030Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m141 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:18.835807Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m1 [3mblocks[0m[2m=[0m32 [3msnapshot_ms[0m[2m=[0m0 [3mms[0m[2m=[0m23 [3mmode[0m[2m=[0m"incremental" [3mreason[0m[2m=[0m"incremental"
+[2m2026-08-07T16:56:18.953279Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"action_total" [3maction[0m[2m=[0mCreateBlockUnderFocus [3mtotal_ms[0m[2m=[0m156
+[2m2026-08-07T16:56:18.986256Z[0m [33m WARN[0m [2mholon_latency[0m[2m:[0m over the p95 SLO but within the machine-load slack [3mstage[0m[2m=[0m"settle_budget" [3maction[0m[2m=[0mBlockToPage [3mtotal_ms[0m[2m=[0m206 [3mslo_ms[0m[2m=[0m200
+[2m2026-08-07T16:56:18.986313Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=16 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+test echo_loop_block_to_page_child_render_leak_parked ... ok
+[2m2026-08-07T16:56:19.574579Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=16 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+[2m2026-08-07T16:56:19.713967Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m147 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:19.719937Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m150 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:19.725656Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"dispatch" [3maction[0m[2m=[0mfocus [3mblock[0m[2m=[0mnavigation [3mms[0m[2m=[0m22
+[2m2026-08-07T16:56:19.913887Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"action_total" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m243
+[2m2026-08-07T16:56:20.447706Z[0m [33m WARN[0m [2mholon_latency[0m[2m:[0m over the p95 SLO but within the machine-load slack [3mstage[0m[2m=[0m"settle_budget" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m243 [3mslo_ms[0m[2m=[0m200
+[2m2026-08-07T16:56:20.447760Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=16 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+[2m2026-08-07T16:56:20.492996Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"e2e" [3maction[0m[2m=[0mnavigate [3mblock[0m[2m=[0mblock:73d5a1d8-5e81-4af2-0979-131a26ef9d13 [3msource[0m[2m=[0m"block" [3mms[0m[2m=[0m789
+[2m2026-08-07T16:56:20.493053Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m155 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:20.493061Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"e2e" [3maction[0m[2m=[0mcreate [3mblock[0m[2m=[0mblock:k1 [3msource[0m[2m=[0m"block" [3mms[0m[2m=[0m10
+[2m2026-08-07T16:56:20.493110Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m155 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:20.495654Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m1 [3mblocks[0m[2m=[0m33 [3msnapshot_ms[0m[2m=[0m0 [3mms[0m[2m=[0m12 [3mmode[0m[2m=[0m"incremental" [3mreason[0m[2m=[0m"incremental"
+[2m2026-08-07T16:56:20.499345Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"dispatch" [3maction[0m[2m=[0mcreate [3mblock[0m[2m=[0mblock:k1 [3mms[0m[2m=[0m17
+[2m2026-08-07T16:56:20.516098Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m162 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:20.516098Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m162 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:20.518853Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m1 [3mblocks[0m[2m=[0m33 [3msnapshot_ms[0m[2m=[0m0 [3mms[0m[2m=[0m22 [3mmode[0m[2m=[0m"incremental" [3mreason[0m[2m=[0m"incremental"
+[2m2026-08-07T16:56:20.635661Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"action_total" [3maction[0m[2m=[0mCreateBlockUnderFocus [3mtotal_ms[0m[2m=[0m155
+[2m2026-08-07T16:56:21.154705Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=18 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+[2m2026-08-07T16:56:21.230527Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m168 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:21.235815Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m171 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:21.241670Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"dispatch" [3maction[0m[2m=[0mfocus [3mblock[0m[2m=[0mnavigation [3mms[0m[2m=[0m22
+[2m2026-08-07T16:56:21.446739Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"action_total" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m256
+[2m2026-08-07T16:56:22.023614Z[0m [33m WARN[0m [2mholon_latency[0m[2m:[0m over the p95 SLO but within the machine-load slack [3mstage[0m[2m=[0m"settle_budget" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m256 [3mslo_ms[0m[2m=[0m200
+[2m2026-08-07T16:56:22.023673Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=18 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+[2m2026-08-07T16:56:22.092442Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"e2e" [3maction[0m[2m=[0mcreate [3mblock[0m[2m=[0mblock:k2 [3msource[0m[2m=[0m"block" [3mms[0m[2m=[0m26
+[2m2026-08-07T16:56:22.092509Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"e2e" [3maction[0m[2m=[0mnavigate [3mblock[0m[2m=[0mblock:a3620d05-39b8-15cb-f280-8d8cf86bb3ab [3msource[0m[2m=[0m"block" [3mms[0m[2m=[0m872
+[2m2026-08-07T16:56:22.092542Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m176 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:22.093351Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m176 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:22.096345Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m1 [3mblocks[0m[2m=[0m34 [3msnapshot_ms[0m[2m=[0m6 [3mms[0m[2m=[0m28 [3mmode[0m[2m=[0m"incremental" [3mreason[0m[2m=[0m"incremental"
+[2m2026-08-07T16:56:22.111907Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"dispatch" [3maction[0m[2m=[0mcreate [3mblock[0m[2m=[0mblock:k2 [3mms[0m[2m=[0m45
+[2m2026-08-07T16:56:22.247672Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"action_total" [3maction[0m[2m=[0mCreateBlockUnderFocus [3mtotal_ms[0m[2m=[0m183
+[2m2026-08-07T16:56:23.011945Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=19 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+[2m2026-08-07T16:56:23.110170Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m183 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:23.115707Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m186 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:23.123979Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"dispatch" [3maction[0m[2m=[0mfocus [3mblock[0m[2m=[0mnavigation [3mms[0m[2m=[0m25
+[2m2026-08-07T16:56:23.314222Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"action_total" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m254
+[2m2026-08-07T16:56:24.011967Z[0m [33m WARN[0m [2mholon_latency[0m[2m:[0m over the p95 SLO but within the machine-load slack [3mstage[0m[2m=[0m"settle_budget" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m254 [3mslo_ms[0m[2m=[0m200
+[2m2026-08-07T16:56:24.012032Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=19 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+[2m2026-08-07T16:56:24.070898Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"e2e" [3maction[0m[2m=[0mcreate [3mblock[0m[2m=[0mblock:k3 [3msource[0m[2m=[0m"block" [3mms[0m[2m=[0m14
+[2m2026-08-07T16:56:24.070966Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"e2e" [3maction[0m[2m=[0mnavigate [3mblock[0m[2m=[0mblock:ed95c9b4-a264-01de-6f4b-484f15c3d1b3 [3msource[0m[2m=[0m"block" [3mms[0m[2m=[0m971
+[2m2026-08-07T16:56:24.070997Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m191 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:24.072147Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m191 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:24.073889Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m1 [3mblocks[0m[2m=[0m35 [3msnapshot_ms[0m[2m=[0m0 [3mms[0m[2m=[0m16 [3mmode[0m[2m=[0m"incremental" [3mreason[0m[2m=[0m"incremental"
+[2m2026-08-07T16:56:24.096776Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m197 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:24.097188Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"block" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m197 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:24.099379Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"projection" [3mops[0m[2m=[0m1 [3mblocks[0m[2m=[0m35 [3msnapshot_ms[0m[2m=[0m0 [3mms[0m[2m=[0m25 [3mmode[0m[2m=[0m"incremental" [3mreason[0m[2m=[0m"incremental"
+[2m2026-08-07T16:56:24.099691Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"dispatch" [3maction[0m[2m=[0mcreate [3mblock[0m[2m=[0mblock:k3 [3mms[0m[2m=[0m43
+[2m2026-08-07T16:56:24.238637Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"action_total" [3maction[0m[2m=[0mCreateBlockUnderFocus [3mtotal_ms[0m[2m=[0m184
+[2m2026-08-07T16:56:24.866293Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=21 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+[2m2026-08-07T16:56:24.949985Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m204 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:24.965665Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m207 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:24.972978Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"dispatch" [3maction[0m[2m=[0mfocus [3mblock[0m[2m=[0mnavigation [3mms[0m[2m=[0m34
+[2m2026-08-07T16:56:25.164738Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"action_total" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m255
+[2m2026-08-07T16:56:25.811375Z[0m [33m WARN[0m [2mholon_latency[0m[2m:[0m over the p95 SLO but within the machine-load slack [3mstage[0m[2m=[0m"settle_budget" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m255 [3mslo_ms[0m[2m=[0m200
+[2m2026-08-07T16:56:25.811435Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=21 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+[2m2026-08-07T16:56:25.916012Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m212 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:25.924002Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m215 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:25.932344Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"dispatch" [3maction[0m[2m=[0mfocus [3mblock[0m[2m=[0mnavigation [3mms[0m[2m=[0m34
+[2m2026-08-07T16:56:26.123000Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"action_total" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m268
+[2m2026-08-07T16:56:26.820875Z[0m [33m WARN[0m [2mholon_latency[0m[2m:[0m over the p95 SLO but within the machine-load slack [3mstage[0m[2m=[0m"settle_budget" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m268 [3mslo_ms[0m[2m=[0m200
+[2m2026-08-07T16:56:26.820996Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=21 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+[2m2026-08-07T16:56:26.903993Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m220 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:26.911804Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m223 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:26.918426Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"dispatch" [3maction[0m[2m=[0mfocus [3mblock[0m[2m=[0mnavigation [3mms[0m[2m=[0m25
+[2m2026-08-07T16:56:27.108548Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"action_total" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m245
+[2m2026-08-07T16:56:27.768184Z[0m [33m WARN[0m [2mholon_latency[0m[2m:[0m over the p95 SLO but within the machine-load slack [3mstage[0m[2m=[0m"settle_budget" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m245 [3mslo_ms[0m[2m=[0m200
+[2m2026-08-07T16:56:27.768241Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=21 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+[2m2026-08-07T16:56:27.848858Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m228 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:27.855876Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m231 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:27.862060Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"dispatch" [3maction[0m[2m=[0mfocus [3mblock[0m[2m=[0mnavigation [3mms[0m[2m=[0m24
+[2m2026-08-07T16:56:28.049572Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"action_total" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m239
+[2m2026-08-07T16:56:28.680627Z[0m [33m WARN[0m [2mholon_latency[0m[2m:[0m over the p95 SLO but within the machine-load slack [3mstage[0m[2m=[0m"settle_budget" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m239 [3mslo_ms[0m[2m=[0m200
+[2m2026-08-07T16:56:28.680685Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=21 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+[2m2026-08-07T16:56:28.763838Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m236 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:28.775084Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m239 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:28.780780Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"dispatch" [3maction[0m[2m=[0mfocus [3mblock[0m[2m=[0mnavigation [3mms[0m[2m=[0m27
+[2m2026-08-07T16:56:28.971302Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"action_total" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m245
+[2m2026-08-07T16:56:29.628624Z[0m [33m WARN[0m [2mholon_latency[0m[2m:[0m over the p95 SLO but within the machine-load slack [3mstage[0m[2m=[0m"settle_budget" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m245 [3mslo_ms[0m[2m=[0m200
+[2m2026-08-07T16:56:29.628686Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=21 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+[2m2026-08-07T16:56:29.715195Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m244 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:29.726153Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m247 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:29.733295Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"dispatch" [3maction[0m[2m=[0mfocus [3mblock[0m[2m=[0mnavigation [3mms[0m[2m=[0m29
+[2m2026-08-07T16:56:29.922246Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"action_total" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m246
+[2m2026-08-07T16:56:30.626375Z[0m [33m WARN[0m [2mholon_latency[0m[2m:[0m over the p95 SLO but within the machine-load slack [3mstage[0m[2m=[0m"settle_budget" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m246 [3mslo_ms[0m[2m=[0m200
+[2m2026-08-07T16:56:30.626438Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=21 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+[2m2026-08-07T16:56:30.729027Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m252 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:30.736322Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m255 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:30.742953Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"dispatch" [3maction[0m[2m=[0mfocus [3mblock[0m[2m=[0mnavigation [3mms[0m[2m=[0m29
+[2m2026-08-07T16:56:30.932521Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"action_total" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m256
+[2m2026-08-07T16:56:31.443787Z[0m [33m WARN[0m [2mholon_latency[0m[2m:[0m over the p95 SLO but within the machine-load slack [3mstage[0m[2m=[0m"settle_budget" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m256 [3mslo_ms[0m[2m=[0m200
+[2m2026-08-07T16:56:31.443839Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=21 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+[2m2026-08-07T16:56:31.532023Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m260 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:31.537887Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m263 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:31.547698Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"dispatch" [3maction[0m[2m=[0mfocus [3mblock[0m[2m=[0mnavigation [3mms[0m[2m=[0m29
+[2m2026-08-07T16:56:31.736650Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"action_total" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m258
+[2m2026-08-07T16:56:32.169899Z[0m [33m WARN[0m [2mholon_latency[0m[2m:[0m over the p95 SLO but within the machine-load slack [3mstage[0m[2m=[0m"settle_budget" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m258 [3mslo_ms[0m[2m=[0m200
+[2m2026-08-07T16:56:32.169948Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=21 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+[2m2026-08-07T16:56:32.233897Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m268 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:32.239377Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m271 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:32.244334Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"dispatch" [3maction[0m[2m=[0mfocus [3mblock[0m[2m=[0mnavigation [3mms[0m[2m=[0m18
+[2m2026-08-07T16:56:32.443331Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"action_total" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m239
+[2m2026-08-07T16:56:32.946572Z[0m [33m WARN[0m [2mholon_latency[0m[2m:[0m over the p95 SLO but within the machine-load slack [3mstage[0m[2m=[0m"settle_budget" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m239 [3mslo_ms[0m[2m=[0m200
+[2m2026-08-07T16:56:32.946620Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=21 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+[2m2026-08-07T16:56:33.011775Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m276 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:33.017337Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"rows" [3msource[0m[2m=[0m"focus_roots" [3mrows[0m[2m=[0m1 [3mseq[0m[2m=[0m279 [3mms[0m[2m=[0m0
+[2m2026-08-07T16:56:33.022267Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"dispatch" [3maction[0m[2m=[0mfocus [3mblock[0m[2m=[0mnavigation [3mms[0m[2m=[0m19
+[2m2026-08-07T16:56:33.210065Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m holon_latency [3mstage[0m[2m=[0m"action_total" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m228
+[2m2026-08-07T16:56:33.702558Z[0m [33m WARN[0m [2mholon_latency[0m[2m:[0m over the p95 SLO but within the machine-load slack [3mstage[0m[2m=[0m"settle_budget" [3maction[0m[2m=[0mNavigateFocus [3mtotal_ms[0m[2m=[0m228 [3mslo_ms[0m[2m=[0m200
+[2m2026-08-07T16:56:33.702607Z[0m [32m INFO[0m [2mholon_latency[0m[2m:[0m incremental=21 full=0 [] steady_leaks=0 [3mstage[0m[2m=[0m"reseed_oracle" [3msteady_leaks[0m[2m=[0m0
+test hand_authored_keystone_regressions ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.77s
+
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.pathfinder_simd
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.psm
+warning: workspace (manifest) generated 2 warnings
+warning: unused import: `crate::pbt::composed::harness::BurnedPairs`
+  --> crates/holon-integration-tests/src/pbt/composed/wide_e2e.rs:55:5
+   |
+55 | use crate::pbt::composed::harness::BurnedPairs;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `holon_pbt_core::capabilities::EntityUri`
+  --> crates/holon-integration-tests/src/pbt/invariants/bodies/every_page_has_its_own_file.rs:43:5
+   |
+43 | use holon_pbt_core::capabilities::EntityUri;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `holon_api::EntityRef`
+  --> crates/holon-integration-tests/src/pbt/invariants/bodies/undo_redo_reference_heal.rs:81:5
+   |
+81 | use holon_api::EntityRef;
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::collections::HashSet`
+  --> crates/holon-integration-tests/src/pbt/reference_state.rs:24:5
+   |
+24 | use std::collections::HashSet;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `holon_orgmode::models::OrgBlockExt`
+    --> crates/holon-integration-tests/src/pbt/reference_state.rs:1592:13
+     |
+1592 |         use holon_orgmode::models::OrgBlockExt;
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `seed_ref` is never used
+  --> crates/holon-integration-tests/src/pbt/composed/subsystem_seed.rs:81:15
+   |
+81 | pub(crate) fn seed_ref(blocks: Vec<Block>) -> ReferenceState {
+   |               ^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `seed_ref_with_editor` is never used
+   --> crates/holon-integration-tests/src/pbt/composed/subsystem_seed.rs:102:15
+    |
+102 | pub(crate) fn seed_ref_with_editor(
+    |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `ref_non_seed_ids` is never used
+   --> crates/holon-integration-tests/src/pbt/composed/subsystem_seed.rs:115:15
+    |
+115 | pub(crate) fn ref_non_seed_ids(state: &ReferenceState) -> BTreeSet<EntityUri> {
+    |               ^^^^^^^^^^^^^^^^
+
+warning: function `assert_ref_seeded` is never used
+   --> crates/holon-integration-tests/src/pbt/composed/subsystem_seed.rs:140:15
+    |
+140 | pub(crate) fn assert_ref_seeded(state: &ReferenceState, expected: &[EntityUri]) {
+    |               ^^^^^^^^^^^^^^^^^
+
+warning: `holon-integration-tests` (lib) generated 9 warnings (run `cargo fix --lib -p holon-integration-tests` to apply 5 suggestions)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `holon-integration-tests` (test "hand_authored_regressions") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.88s
+     Running tests/hand_authored_regressions.rs (target/debug/deps/hand_authored_regressions-54d3d1ad12e6a62d)
+
+thread 'invalid_pinned_wiring_is_loud' (452959870) panicked at crates/holon-integration-tests/tests/hand_authored_regressions.rs:125:13:
+<inline>: initial_state carries an INVALID wiring manifest Wiring { storage_adapters: {}, sync_adapters: {}, actors: {} }: wiring has no storage adapter (nothing to display/persist) — `init_state` only ever draws valid manifests, so this case could not have come from a real run
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'unknown_initial_state_field_is_loud' (452959875) panicked at crates/holon-integration-tests/tests/hand_authored_regressions.rs:227:9:
+hand-authored regression "<inline>":1 failed to parse: unknown field `seed`, expected `wiring` at line 1 column 135
+  line: {"name": "n", "transitions": [], "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}, "seed": 7}}
+
+thread 'mistyped_initial_state_key_is_loud' (452959871) panicked at crates/holon-integration-tests/tests/hand_authored_regressions.rs:235:9:
+hand-authored regression "<inline>":1: unknown top-level key "initail_state" — a mistyped key is SILENTLY DROPPED by serde, so this case would replay something other than what it names. Known keys: ["name", "description", "environment", "initial_state", "transitions"]
+  line: {"name": "n", "transitions": [], "initail_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}}
+[hand-authored regression] running case "nav-probe" (22 transitions)
+
+thread 'nested_unknown_wiring_field_is_loud' (452959872) panicked at crates/holon-integration-tests/tests/hand_authored_regressions.rs:245:5:
+assertion `left == right` failed: hand-authored regression "<inline>":1: `initial_state` does not round-trip — the authored JSON and the parsed value differ, so replaying this case would start from a DIFFERENT state than the run it pins
+  left: Object {"wiring": Object {"storage_adapters": Array [String("Turso")], "sync_adapters": Array [], "actors": Array [], "peers": Array [String("x")]}}
+ right: Object {"wiring": Object {"storage_adapters": Array [String("Turso")], "sync_adapters": Array [], "actors": Array []}}
+
+Running a test case with 5 transitions.
+[wide-e2e wiring] drawn: storage={Loro, Org, Markdown, Turso} sync={Todoist} actors={MCPServer, ActionEngine} -> booted storage={Loro, Org, Markdown, Turso} projections={ViewModel, EditorState}
+
+Running a test case with 22 transitions.
+[wide-e2e wiring] drawn: storage={Loro, Org, Markdown, Turso} sync={Todoist} actors={MCPServer, ActionEngine} -> booted storage={Loro, Org, Markdown, Turso} projections={ViewModel, EditorState}
+[RESEED-ORACLE] case summary: incremental=2 full=8 [coldboot=8] steady_leaks=0
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+
+Applying transition 1/22: CreateDocument(CreateDocument { file_name: "lat_a.org" })
+
+Applying transition 1/5: CreateBlockUnderFocus(CreateBlockUnderFocus { content: "origin", id: Some(EntityUri("block:echoorigin")) })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] CreateDocument: reads=0 (dedup 0)/12 writes=0/4 ddl=0/0 tol=64 max_q=0ms wall=94ms spans=0 rss=+0.2MB (cum=+0.2MB) state=b28/d4/w0/r4 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+
+Applying transition 2/22: CreateDocument(CreateDocument { file_name: "lat_b.org" })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] CreateBlockUnderFocus: reads=0 (dedup 0)/22 writes=0/2 ddl=0/0 tol=41 max_q=0ms wall=171ms spans=0 rss=+0.2MB (cum=+0.2MB) state=b28/d3/w0/r5 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+
+Applying transition 2/5: CreateBlockUnderFocus(CreateBlockUnderFocus { content: "child", id: Some(EntityUri("block:echochild")) })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] CreateDocument: reads=0 (dedup 0)/12 writes=0/4 ddl=0/0 tol=77 max_q=0ms wall=122ms spans=0 rss=+0.1MB (cum=+1.3MB) state=b29/d5/w0/r4 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+
+Applying transition 3/22: CreateDocument(CreateDocument { file_name: "lat_c.org" })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] CreateBlockUnderFocus: reads=0 (dedup 0)/22 writes=0/2 ddl=0/0 tol=42 max_q=0ms wall=165ms spans=0 rss=+0.2MB (cum=+1.2MB) state=b29/d3/w0/r6 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+
+Applying transition 3/5: Indent(Indent { block_id: EntityUri("block:echochild") })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] CreateDocument: reads=0 (dedup 0)/12 writes=0/4 ddl=0/0 tol=91 max_q=0ms wall=97ms spans=0 rss=+0.1MB (cum=+2.3MB) state=b30/d6/w0/r4 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+
+Applying transition 4/22: CreateDocument(CreateDocument { file_name: "lat_d.org" })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] Indent: reads=0 (dedup 0)/14 writes=0/3 ddl=0/0 tol=42 max_q=0ms wall=100ms spans=0 rss=+0.2MB (cum=+2.8MB) state=b29/d3/w0/r6 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+
+Applying transition 4/5: ToggleState(ToggleState { block_id: EntityUri("block:echochild"), new_state: Doing })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] CreateDocument: reads=0 (dedup 0)/12 writes=0/4 ddl=0/0 tol=106 max_q=0ms wall=112ms spans=0 rss=+0.0MB (cum=+4.1MB) state=b31/d7/w0/r4 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+
+Applying transition 5/22: NavigateFocus(NavigateFocus { region: Main, block_id: EntityUri("block:ref-doc-0") })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] ToggleState: reads=0 (dedup 0)/26 writes=0/3 ddl=0/0 tol=37 max_q=0ms wall=182ms spans=0 rss=+0.3MB (cum=+4.0MB) state=b29/d3/w0/r6 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+
+Applying transition 5/5: BlockToPage(BlockToPage { origin_id: EntityUri("block:echoorigin") })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] NavigateFocus: reads=0 (dedup 0)/26 writes=0/0 ddl=0/0 tol=16 max_q=0ms wall=267ms spans=0 rss=+0.1MB (cum=+4.8MB) state=b31/d7/w0/r1 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+
+Applying transition 6/22: CreateBlockUnderFocus(CreateBlockUnderFocus { content: "k0", id: Some(EntityUri("block:k0")) })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] BlockToPage: reads=0 (dedup 0)/42 writes=0/6 ddl=0/0 tol=24 max_q=0ms wall=209ms spans=0 rss=+0.5MB (cum=+4.9MB) state=b30/d3/w0/r7 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+[engagement summary] inv-active-watches-match-ref=6/6 inv-advice-matview-matches-ref/matview=6/6 inv-advice-rows-woven=6/6 inv-audience-never-over-approximates=6/6 inv-block-content/block_raw=6/6 inv-block-content/sql=6/6 inv-block-parent/block_raw=6/6 inv-blocks-match-ref/block_raw=6/6 inv-blocks-match-ref/loro=6/6 inv-blocks-match-ref/matview=6/6 inv-blocks-match-ref/org=6/6 inv-companion-has-no-child-page-headings=6/6 inv-display-placement-canonical-inert=0/6 inv-displayed-text/viewmodel=6/6 inv-editable-text-has-draggable=6/6 inv-editor-caret/mirror=3/6 inv-editor-text/mirror=3/6 inv-embedded-page-collapsed-lazy=1/6 inv-every-page-has-its-own-file=6/6 inv-focus-roots=6/6 inv-history-no-phantom-rows/block_history=6/6 inv-history-records-all-creates/block_history=6/6 inv-live-children-match-ref=6/6 inv-loro-children-match-ref=6/6 inv-loro-no-errors=6/6 inv-main-panel-rows-match-focus=6/6 inv-mark-bounds-within-content=6/6 inv-matview-consistent-with-recompute=6/6 inv-matview-consistent-with-ref/root_layout=6/6 inv-navigation-focus=6/6 inv-no-errors=6/6 inv-no-observed-errors=6/6 inv-no-orphan-blocks=6/6 inv-no-page-under-non-page=6/6 inv-no-parent-cycles=6/6 inv-no-steady-reseed-leak=6/6 inv-no-write-outside-vault-root=6/6 inv-org-render-fixed-point=6/6 inv-pair-view-selection-current-view=6/6 inv-settle-budget=6/6 inv-sidebar-page-tag-preserved=6/6 inv-source-language-iff-source=6/6 inv-sql-budget=6/6 inv-task-state-storage-coherence=6/6 inv-undo-redo-reference-heal=0/6 inv-viewmodel-decompiled-rows-match-query=0/6 inv-viewmodel-editable-text-triggers=6/6 inv-viewmodel-entity-ids-subset-of-data=6/6 inv-viewmodel-no-error-widgets=6/6 inv-viewmodel-root-matches-render-expr=6/6 inv-viewmodel-snapshot=6/6 inv-viewmodel-state-toggle-correct=6/6 inv-viewmodel-tree-virtual-slots=6/6 inv-watch-rows-match-ref=6/6
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] CreateBlockUnderFocus: reads=0 (dedup 0)/22 writes=0/2 ddl=0/0 tol=89 max_q=0ms wall=159ms spans=0 rss=+0.2MB (cum=+5.9MB) state=b32/d7/w0/r2 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+
+Applying transition 7/22: NavigateFocus(NavigateFocus { region: Main, block_id: EntityUri("block:ref-doc-1") })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] NavigateFocus: reads=0 (dedup 0)/26 writes=0/0 ddl=0/0 tol=16 max_q=0ms wall=245ms spans=0 rss=+0.0MB (cum=-3.1MB) state=b32/d7/w0/r1 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+
+Applying transition 8/22: CreateBlockUnderFocus(CreateBlockUnderFocus { content: "k1", id: Some(EntityUri("block:k1")) })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] CreateBlockUnderFocus: reads=0 (dedup 0)/22 writes=0/2 ddl=0/0 tol=91 max_q=0ms wall=157ms spans=0 rss=+0.1MB (cum=-3.1MB) state=b33/d7/w0/r2 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+
+Applying transition 9/22: NavigateFocus(NavigateFocus { region: Main, block_id: EntityUri("block:ref-doc-2") })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] NavigateFocus: reads=0 (dedup 0)/26 writes=0/0 ddl=0/0 tol=16 max_q=0ms wall=258ms spans=0 rss=+0.1MB (cum=-2.9MB) state=b33/d7/w0/r1 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+
+Applying transition 10/22: CreateBlockUnderFocus(CreateBlockUnderFocus { content: "k2", id: Some(EntityUri("block:k2")) })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] CreateBlockUnderFocus: reads=0 (dedup 0)/22 writes=0/2 ddl=0/0 tol=94 max_q=0ms wall=186ms spans=0 rss=+0.0MB (cum=-2.9MB) state=b34/d7/w0/r2 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+
+Applying transition 11/22: NavigateFocus(NavigateFocus { region: Main, block_id: EntityUri("block:ref-doc-3") })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] NavigateFocus: reads=0 (dedup 0)/26 writes=0/0 ddl=0/0 tol=16 max_q=0ms wall=257ms spans=0 rss=+0.0MB (cum=-2.9MB) state=b34/d7/w0/r1 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+
+Applying transition 12/22: CreateBlockUnderFocus(CreateBlockUnderFocus { content: "k3", id: Some(EntityUri("block:k3")) })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] CreateBlockUnderFocus: reads=0 (dedup 0)/22 writes=0/2 ddl=0/0 tol=96 max_q=0ms wall=186ms spans=0 rss=+0.0MB (cum=-2.9MB) state=b35/d7/w0/r2 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+
+Applying transition 13/22: NavigateFocus(NavigateFocus { region: Main, block_id: EntityUri("block:structural-page") })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] NavigateFocus: reads=0 (dedup 0)/26 writes=0/0 ddl=0/0 tol=16 max_q=0ms wall=258ms spans=0 rss=+0.0MB (cum=-2.9MB) state=b35/d7/w0/r4 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+
+Applying transition 14/22: NavigateFocus(NavigateFocus { region: Main, block_id: EntityUri("block:ref-doc-0") })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] NavigateFocus: reads=0 (dedup 0)/26 writes=0/0 ddl=0/0 tol=16 max_q=0ms wall=271ms spans=0 rss=+0.1MB (cum=-2.7MB) state=b35/d7/w0/r2 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+
+Applying transition 15/22: NavigateFocus(NavigateFocus { region: Main, block_id: EntityUri("block:ref-doc-1") })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] NavigateFocus: reads=0 (dedup 0)/26 writes=0/0 ddl=0/0 tol=16 max_q=0ms wall=247ms spans=0 rss=+0.1MB (cum=-2.6MB) state=b35/d7/w0/r2 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+
+Applying transition 16/22: NavigateFocus(NavigateFocus { region: Main, block_id: EntityUri("block:ref-doc-2") })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] NavigateFocus: reads=0 (dedup 0)/26 writes=0/0 ddl=0/0 tol=16 max_q=0ms wall=242ms spans=0 rss=+0.1MB (cum=-2.5MB) state=b35/d7/w0/r2 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+
+Applying transition 17/22: NavigateFocus(NavigateFocus { region: Main, block_id: EntityUri("block:ref-doc-3") })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] NavigateFocus: reads=0 (dedup 0)/26 writes=0/0 ddl=0/0 tol=16 max_q=0ms wall=248ms spans=0 rss=+0.1MB (cum=-2.2MB) state=b35/d7/w0/r2 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+
+Applying transition 18/22: NavigateFocus(NavigateFocus { region: Main, block_id: EntityUri("block:structural-page") })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] NavigateFocus: reads=0 (dedup 0)/26 writes=0/0 ddl=0/0 tol=16 max_q=0ms wall=249ms spans=0 rss=+0.1MB (cum=-2.0MB) state=b35/d7/w0/r4 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+
+Applying transition 19/22: NavigateFocus(NavigateFocus { region: Main, block_id: EntityUri("block:ref-doc-0") })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] NavigateFocus: reads=0 (dedup 0)/26 writes=0/0 ddl=0/0 tol=16 max_q=0ms wall=259ms spans=0 rss=+0.1MB (cum=-1.8MB) state=b35/d7/w0/r2 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+
+Applying transition 20/22: NavigateFocus(NavigateFocus { region: Main, block_id: EntityUri("block:ref-doc-1") })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] NavigateFocus: reads=0 (dedup 0)/26 writes=0/0 ddl=0/0 tol=16 max_q=0ms wall=260ms spans=0 rss=+0.0MB (cum=-1.6MB) state=b35/d7/w0/r2 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+
+Applying transition 21/22: NavigateFocus(NavigateFocus { region: Main, block_id: EntityUri("block:ref-doc-2") })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] NavigateFocus: reads=0 (dedup 0)/26 writes=0/0 ddl=0/0 tol=16 max_q=0ms wall=242ms spans=0 rss=+0.1MB (cum=-1.3MB) state=b35/d7/w0/r2 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+
+Applying transition 22/22: NavigateFocus(NavigateFocus { region: Main, block_id: EntityUri("block:ref-doc-3") })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] NavigateFocus: reads=0 (dedup 0)/26 writes=0/0 ddl=0/0 tol=16 max_q=0ms wall=229ms spans=0 rss=+0.1MB (cum=-1.2MB) state=b35/d7/w0/r2 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+[engagement summary] inv-active-watches-match-ref=23/23 inv-advice-matview-matches-ref/matview=23/23 inv-advice-rows-woven=23/23 inv-audience-never-over-approximates=23/23 inv-block-content/block_raw=23/23 inv-block-content/sql=23/23 inv-block-parent/block_raw=23/23 inv-blocks-match-ref/block_raw=23/23 inv-blocks-match-ref/loro=23/23 inv-blocks-match-ref/matview=23/23 inv-blocks-match-ref/org=23/23 inv-companion-has-no-child-page-headings=23/23 inv-display-placement-canonical-inert=0/23 inv-displayed-text/viewmodel=23/23 inv-editable-text-has-draggable=23/23 inv-editor-caret/mirror=0/23 inv-editor-text/mirror=0/23 inv-embedded-page-collapsed-lazy=0/23 inv-every-page-has-its-own-file=23/23 inv-focus-roots=23/23 inv-history-no-phantom-rows/block_history=23/23 inv-history-records-all-creates/block_history=23/23 inv-live-children-match-ref=23/23 inv-loro-children-match-ref=23/23 inv-loro-no-errors=23/23 inv-main-panel-rows-match-focus=23/23 inv-mark-bounds-within-content=23/23 inv-matview-consistent-with-recompute=23/23 inv-matview-consistent-with-ref/root_layout=23/23 inv-navigation-focus=23/23 inv-no-errors=23/23 inv-no-observed-errors=23/23 inv-no-orphan-blocks=23/23 inv-no-page-under-non-page=23/23 inv-no-parent-cycles=23/23 inv-no-steady-reseed-leak=23/23 inv-no-write-outside-vault-root=23/23 inv-org-render-fixed-point=23/23 inv-pair-view-selection-current-view=23/23 inv-settle-budget=23/23 inv-sidebar-page-tag-preserved=23/23 inv-source-language-iff-source=23/23 inv-sql-budget=23/23 inv-task-state-storage-coherence=23/23 inv-undo-redo-reference-heal=0/23 inv-viewmodel-decompiled-rows-match-query=0/23 inv-viewmodel-editable-text-triggers=23/23 inv-viewmodel-entity-ids-subset-of-data=23/23 inv-viewmodel-no-error-widgets=23/23 inv-viewmodel-root-matches-render-expr=23/23 inv-viewmodel-snapshot=23/23 inv-viewmodel-state-toggle-correct=23/23 inv-viewmodel-tree-virtual-slots=23/23 inv-watch-rows-match-ref=23/23
+[hand-authored regression] PASSED case "nav-probe"
