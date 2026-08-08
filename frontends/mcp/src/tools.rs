@@ -3429,11 +3429,20 @@ impl HolonMcpServer {
                        then the chord is dispatched as platform key events, so whichever \
                        registry owns the chord (structural or window-level) handles it exactly as \
                        in production. The chord is first looked up in the union registry \
-                       `list_keybindings` reports; an unbound chord is NOT dispatched. The \
-                       response's `status` is an enumerated state: `executed` (bound, focused, \
-                       pressed), `unbound` (bound in neither registry — nothing was sent), or \
-                       `bound_but_not_dispatched` (the driver declined to press it). Read the \
-                       chord from list_keybindings rather than hardcoding it."
+                       `list_keybindings` reports; an unbound chord is NOT dispatched. `matched` \
+                       reports what the KEYMAP matched; `dispatched` reports what actually ran, \
+                       each entry carrying its own `outcome` (succeeded / failed / pending) — \
+                       trust `dispatched`. `status`: `executed` (an action the chord matched ran \
+                       AND succeeded), `dispatched_but_failed` (it ran and returned an error, see \
+                       `detail`), `dispatched_outcome_pending` (it ran but had not reported an \
+                       outcome within 1.5s — NOT a success claim), `dispatched_other_action` \
+                       (something ran, but not what the chord matched — a shadowed-chord bug), \
+                       `bound_but_not_dispatched` (pressed, nothing ran), `unbound` (bound in \
+                       neither registry — nothing was sent). ATTRIBUTION is by press window: \
+                       everything dispatched between the press starting and returning is credited \
+                       to this chord, so presses are serialized and an unrelated background \
+                       dispatch landing in the window would appear here. Read the chord from \
+                       list_keybindings rather than hardcoding it."
     )]
     async fn send_key_chord(
         &self,
@@ -3514,7 +3523,25 @@ impl HolonMcpServer {
         let root_id = holon_frontend::focus_path::resolve_entity_id(&root_tree)
             .unwrap_or_else(|| entity_uri.clone());
 
-        let dispatched = driver
+        // What a keymap MATCHED and what the app DISPATCHED are two different
+        // claims, and reporting the first as the second hides every bug that
+        // shadows an action between the two (dogfood 2026-08-08: cmd+enter
+        // reported `cycle_task_state` while `split_block` ran). Bracket the
+        // press with a journal mark and report the dispatch truth.
+        let journal = services.dispatch_journal().ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                "send_key_chord cannot report what a chord dispatched: this session's services \
+                 expose no dispatch journal, so the reply would only be able to repeat the keymap \
+                 match",
+                None,
+            )
+        })?;
+        // Attribution is by press window, so only one press may be in flight:
+        // a concurrent call would take entries this one caused, and vice versa.
+        let _press_slot = self.debug.key_chord_press.lock().await;
+        let mark = journal.mark();
+
+        let pressed = driver
             .send_key_chord(&root_id, &root_tree, &entity_uri, &chord, HashMap::new())
             .await
             .map_err(|e| {
@@ -3526,6 +3553,52 @@ impl HolonMcpServer {
                     None,
                 )
             })?;
+
+        // Dispatch is fire-and-forget, so an outcome can legitimately still be
+        // unknown when the press returns. Give it a bounded chance to land;
+        // whatever is still pending is REPORTED as pending, never as success.
+        let read_back = |journal: &holon_frontend::dispatch_journal::DispatchJournal| {
+            journal.since(mark).map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!(
+                        "send_key_chord: reading back what {:?} dispatched failed: {e:#}",
+                        params.keys
+                    ),
+                    None,
+                )
+            })
+        };
+        let mut dispatched = read_back(&journal)?;
+        let settle_deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+        while dispatched.iter().any(|d| d.outcome.is_pending())
+            && std::time::Instant::now() < settle_deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            dispatched = read_back(&journal)?;
+        }
+
+        let matched_actions: Vec<&str> = matched.iter().map(|b| b.action.as_str()).collect();
+        let (status, detail) =
+            crate::key_chord_report::classify(pressed, &matched_actions, &dispatched);
+
+        let dispatched_json: Vec<serde_json::Value> = dispatched
+            .iter()
+            .map(|d| {
+                use holon_frontend::dispatch_journal::DispatchOutcome;
+                let (outcome, error) = match &d.outcome {
+                    DispatchOutcome::Pending => ("pending", None),
+                    DispatchOutcome::Succeeded => ("succeeded", None),
+                    DispatchOutcome::Failed(e) => ("failed", Some(e.clone())),
+                };
+                serde_json::json!({
+                    "entity": d.entity_name,
+                    "operation": d.op_name,
+                    "target": d.target,
+                    "outcome": outcome,
+                    "error": error,
+                })
+            })
+            .collect();
 
         let matched_json: Vec<serde_json::Value> = matched
             .iter()
@@ -3539,10 +3612,12 @@ impl HolonMcpServer {
             .collect();
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::json!({
-                "status": if dispatched { "executed" } else { "bound_but_not_dispatched" },
+                "status": status,
+                "detail": detail,
                 "keys": params.keys,
                 "entity_id": params.entity_id,
                 "matched": matched_json,
+                "dispatched": dispatched_json,
             })
             .to_string(),
         )]))

@@ -48,6 +48,7 @@ use holon_app::PendingWriteEventKind;
 use holon_app::PendingWriteStore;
 use holon_app::PendingWriteView;
 use holon_frontend::FrontendSession;
+use holon_frontend::dispatch_journal::DispatchJournal;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive::ReactiveEngine;
 
@@ -818,8 +819,13 @@ fn dispatch_undo_redo(
     rt_handle: tokio::runtime::Handle,
     share_state: Entity<ShareUiState>,
     window_handle: AnyWindowHandle,
+    journal: Arc<DispatchJournal>,
     async_cx: &AsyncApp,
 ) {
+    // Undo/redo run `FrontendSession::undo` directly — they never reach
+    // `dispatch_intent`, so without this the dispatch journal (and every
+    // reply reading it) would report a working cmd+z as "nothing ran".
+    let journal_seq = journal.record_window_action(if is_redo { "redo" } else { "undo" });
     let (tx, rx) = futures::channel::oneshot::channel::<Result<holon_api::UndoOutcome, String>>();
     rt_handle.spawn(async move {
         let result = if is_redo {
@@ -834,12 +840,17 @@ fn dispatch_undo_redo(
         .spawn(async move |cx| {
             let outcome = rx.await;
             let label = if is_redo { "redo" } else { "undo" };
+            // Every arm settles the journal entry: `Ok` = the action ran (an
+            // empty stack is a legitimate outcome of running it), `Err` =
+            // it did not do its job, verbatim reason attached.
             match outcome {
                 Ok(Ok(holon_api::UndoOutcome::Applied)) => {
                     tracing::debug!("[{label}] applied");
+                    journal.settle(journal_seq, Ok(()));
                 }
                 Ok(Ok(holon_api::UndoOutcome::Empty)) => {
                     tracing::debug!("[{label}] stack empty — no-op");
+                    journal.settle(journal_seq, Ok(()));
                 }
                 Ok(Ok(holon_api::UndoOutcome::NoChange)) => {
                     // Fail-loud: the entry was consumed but changed nothing
@@ -849,6 +860,10 @@ fn dispatch_undo_redo(
                     // real target underneath stays unreachable (BugFunnel
                     // 2026-07-13 undo row).
                     tracing::warn!("[{label}] entry made no observable change (no-op)");
+                    journal.settle(
+                        journal_seq,
+                        Err(format!("{label}: entry made no change (no-op)")),
+                    );
                     let _ = cx.update_window(window_handle, |_, _window, cx| {
                         share_state.update(cx, |s, cx| {
                             s.push_toast(DegradedToast {
@@ -864,6 +879,10 @@ fn dispatch_undo_redo(
                 }
                 Ok(Ok(holon_api::UndoOutcome::StaleDropped { reason })) => {
                     tracing::error!("[{label}] entry stale — dropped: {reason}");
+                    journal.settle(
+                        journal_seq,
+                        Err(format!("{label}: history entry stale — dropped ({reason})")),
+                    );
                     let _ = cx.update_window(window_handle, |_, _window, cx| {
                         share_state.update(cx, |s, cx| {
                             s.push_toast(DegradedToast {
@@ -881,6 +900,7 @@ fn dispatch_undo_redo(
                 }
                 Ok(Err(e)) => {
                     tracing::error!("[{label}] failed: {e}");
+                    journal.settle(journal_seq, Err(format!("{label}: {e}")));
                     let _ = cx.update_window(window_handle, |_, _window, cx| {
                         share_state.update(cx, |s, cx| {
                             s.push_toast(DegradedToast {
@@ -896,6 +916,10 @@ fn dispatch_undo_redo(
                 }
                 Err(_cancelled) => {
                     tracing::error!("[{label}] task dropped before responding");
+                    journal.settle(
+                        journal_seq,
+                        Err(format!("{label}: task dropped before responding")),
+                    );
                     let _ = cx.update_window(window_handle, |_, _window, cx| {
                         share_state.update(cx, |s, cx| {
                             s.push_toast(DegradedToast {
@@ -919,6 +943,7 @@ pub fn dispatch_undo(
     rt_handle: tokio::runtime::Handle,
     share_state: Entity<ShareUiState>,
     window_handle: AnyWindowHandle,
+    journal: Arc<DispatchJournal>,
     async_cx: &AsyncApp,
 ) {
     dispatch_undo_redo(
@@ -927,6 +952,7 @@ pub fn dispatch_undo(
         rt_handle,
         share_state,
         window_handle,
+        journal,
         async_cx,
     );
 }
@@ -936,6 +962,7 @@ pub fn dispatch_redo(
     rt_handle: tokio::runtime::Handle,
     share_state: Entity<ShareUiState>,
     window_handle: AnyWindowHandle,
+    journal: Arc<DispatchJournal>,
     async_cx: &AsyncApp,
 ) {
     dispatch_undo_redo(
@@ -944,6 +971,7 @@ pub fn dispatch_redo(
         rt_handle,
         share_state,
         window_handle,
+        journal,
         async_cx,
     );
 }

@@ -361,6 +361,16 @@ pub trait BuilderServices: Send + Sync {
         std::collections::BTreeMap::new()
     }
 
+    /// Journal of the operation intents this services instance dispatched.
+    ///
+    /// `None` means this instance does not observe its own dispatch (the stub
+    /// / headless impls). A caller that needs to report what a gesture DID
+    /// must then fail rather than fall back to reporting what a keymap
+    /// matched — the two are not the same claim.
+    fn dispatch_journal(&self) -> Option<Arc<crate::dispatch_journal::DispatchJournal>> {
+        None
+    }
+
     // ── UI state (focus, view mode) ─────────────────────────────────────
 
     /// Get the currently focused block ID.
@@ -1642,6 +1652,10 @@ pub struct UiState {
     /// into a visible toast. Additive to `error_tracker` +
     /// `tracing::error!`, never a replacement.
     op_failure_sink: Mutex<Option<OpFailureSink>>,
+    /// What this engine actually dispatched, for observers that must not
+    /// confuse a keymap match with an executed operation (see
+    /// [`crate::dispatch_journal`]).
+    dispatch_journal: Arc<crate::dispatch_journal::DispatchJournal>,
 }
 
 impl UiState {
@@ -1656,7 +1670,13 @@ impl UiState {
             expanded_view: Mutex::new(HashMap::new()),
             expanded_view_observed: Mutex::new(std::collections::HashSet::new()),
             op_failure_sink: Mutex::new(None),
+            dispatch_journal: Arc::new(crate::dispatch_journal::DispatchJournal::new()),
         }
+    }
+
+    /// Shared handle to this engine's dispatch journal.
+    pub fn dispatch_journal(&self) -> Arc<crate::dispatch_journal::DispatchJournal> {
+        self.dispatch_journal.clone()
     }
 
     /// Install the op-execution failure sink (frontend shell wiring). Each
@@ -3076,6 +3096,8 @@ impl BuilderServices for ReactiveEngine {
     }
 
     fn dispatch_intent(&self, intent: crate::operations::OperationIntent) {
+        let journal = self.ui_state.dispatch_journal.clone();
+        let journal_seq = journal.record(&intent);
         if intent.entity_name == "preferences" && intent.op_name == "set" {
             if let (Some(key), Some(value)) = (
                 intent.params.get("key").and_then(|v| v.as_string()),
@@ -3087,9 +3109,13 @@ impl BuilderServices for ReactiveEngine {
                 // read-only config dir on Android) must be disclosed, never
                 // abort the process. Callers with a UI seam (GPUI pref fields)
                 // use the fallible `set_preference` trait method to also toast.
-                if let Err(e) = self.session.set_preference(&pref_key, toml_value) {
-                    self.session.error_tracker().record_error();
-                    tracing::error!("Failed to persist preference {key}: {e:#}");
+                match self.session.set_preference(&pref_key, toml_value) {
+                    Ok(()) => journal.settle(journal_seq, Ok(())),
+                    Err(e) => {
+                        self.session.error_tracker().record_error();
+                        tracing::error!("Failed to persist preference {key}: {e:#}");
+                        journal.settle(journal_seq, Err(format!("{e:#}")));
+                    }
                 }
             }
             return;
@@ -3151,8 +3177,10 @@ impl BuilderServices for ReactiveEngine {
                     if let Some(target) = &clear_focus_target {
                         clear_focus_after_delete(&focused_block, target);
                     }
+                    journal.settle(journal_seq, Ok(()));
                 }
                 Err(e) => {
+                    journal.settle(journal_seq, Err(format!("{e:#}")));
                     // A refused/failed op writes nothing: retire its latency
                     // entry so no later unrelated delivery for the row closes
                     // it as a phantom sample.
@@ -3208,6 +3236,8 @@ impl BuilderServices for ReactiveEngine {
         &self,
         intent: crate::operations::OperationIntent,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+        let journal = self.ui_state.dispatch_journal.clone();
+        let journal_seq = journal.record(&intent);
         // Preference sets run inline — no async execute_operation path.
         // TODO: The extra handling of "preferences" is not nice
         if intent.entity_name == "preferences" && intent.op_name == "set" {
@@ -3219,10 +3249,14 @@ impl BuilderServices for ReactiveEngine {
                 let toml_value = crate::preferences::value_to_toml(value);
                 // Surface a persist failure to the sync caller instead of
                 // aborting — this path awaits the result (MCP/tests/driver).
-                return Box::pin(std::future::ready(
-                    self.session.set_preference(&pref_key, toml_value),
-                ));
+                let persisted = self.session.set_preference(&pref_key, toml_value);
+                journal.settle(
+                    journal_seq,
+                    persisted.as_ref().map(|_| ()).map_err(|e| format!("{e:#}")),
+                );
+                return Box::pin(std::future::ready(persisted));
             }
+            journal.settle(journal_seq, Ok(()));
             return Box::pin(std::future::ready(Ok(())));
         }
 
@@ -3267,12 +3301,16 @@ impl BuilderServices for ReactiveEngine {
             let outcome = session
                 .execute_operation(&intent.entity_name, &intent.op_name, intent.params)
                 .await;
-            if outcome.is_err() {
-                // A refused/failed op writes nothing: retire its latency entry
-                // so no later unrelated delivery for the row closes it as a
-                // phantom sample.
-                if let Some(target) = &latency_target {
-                    holon_api::latency_e2e::interaction_failed(&intent.op_name, target);
+            match &outcome {
+                Ok(_) => journal.settle(journal_seq, Ok(())),
+                Err(e) => {
+                    journal.settle(journal_seq, Err(format!("{e:#}")));
+                    // A refused/failed op writes nothing: retire its latency
+                    // entry so no later unrelated delivery for the row closes
+                    // it as a phantom sample.
+                    if let Some(target) = &latency_target {
+                        holon_api::latency_e2e::interaction_failed(&intent.op_name, target);
+                    }
                 }
             }
             let response = outcome.with_context(|| {
@@ -3309,6 +3347,8 @@ impl BuilderServices for ReactiveEngine {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<holon_core::Delivery>> + Send + 'static>,
     > {
+        let journal = self.ui_state.dispatch_journal.clone();
+        let journal_seq = journal.record(&intent);
         maybe_mirror_navigation_focus(&self.ui_state, &intent);
         // Deferred to op success (the Err arm returns without clearing, so a
         // refused delete keeps focus).
@@ -3346,9 +3386,11 @@ impl BuilderServices for ReactiveEngine {
                     if let Some(target) = &clear_focus_target {
                         clear_focus_after_delete(&focused_block, target);
                     }
+                    journal.settle(journal_seq, Ok(()));
                     Ok(response.delivery)
                 }
                 Err(e) => {
+                    journal.settle(journal_seq, Err(format!("{e:#}")));
                     // A refused/failed op writes nothing: retire its latency
                     // entry so no later unrelated delivery for the row closes
                     // it as a phantom sample.
@@ -3425,6 +3467,10 @@ impl BuilderServices for ReactiveEngine {
     #[tracing::instrument(level = "trace", skip_all)]
     fn key_bindings_snapshot(&self) -> std::collections::BTreeMap<String, holon_api::KeyChord> {
         self.key_bindings.lock_ref().clone()
+    }
+
+    fn dispatch_journal(&self) -> Option<Arc<crate::dispatch_journal::DispatchJournal>> {
+        Some(self.ui_state.dispatch_journal())
     }
 
     fn focused_block(&self) -> Option<EntityUri> {
