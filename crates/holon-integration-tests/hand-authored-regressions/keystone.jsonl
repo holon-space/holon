@@ -425,6 +425,17 @@
 # exactly the decoded 2026-07-31 payload (33 vs 31 blocks, both extras parented to block:ref-doc-2).
 {"name": "undo-over-reverts-file-ingested-content-blocks", "description": "F2 org-blocks-ref-diverge (task #76): a USER-origin CreateBlockUnderFocus snapshots pre-file oracle state; a WriteOrgFile external write is INGEST-origin (not undoable in prod); UndoLastMutation restores the pre-file oracle snapshot, dropping the file's CONTENT blocks oracle-side while prod KEEPS them -> spurious-on-SUT in inv-blocks-match-ref/{org,block_raw,matview} with only_in_ref empty. Oracle-side undo over-reverts file-ingested content blocks; the doc-root-only fix left this half open.", "transitions": [{"CreateBlockUnderFocus": {"content": "g", "id": "block:gen-0"}}, {"WriteOrgFile": {"filename": "doc_2.org", "blocks": [{"id": "block:ext-a", "parent_id": "block:gen-placeholder", "content": "external alpha", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 0, "updated_at": 0}, {"id": "block:ext-b", "parent_id": "block:gen-placeholder", "content": "external beta", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 0, "updated_at": 0}], "keyword_set": null}}, {"UndoLastMutation": null}]}
 
+#
+# --- task #30: outdent of a direct page child under the SqlOnly (no-Loro) draw ---------------
+# `block:c1` is a DIRECT CHILD of the seed page `block:structural-page`, so ADR 0028 D1 makes
+# the op engine refuse the outdent ("would escape its page container"). That refusal is the
+# CORRECT production behaviour and `outdent_apply_to_ref` models it as a no-op — but under a
+# Loro-less draw the composed builder installs `OpDispatchWriter` as `SutBlockTreeWrite`, and
+# its `execute` turned EVERY dispatch error into a panic, aborting the whole 64-case keystone
+# run at roughly case 13. Its keystroke twin already treated exactly this refusal as a no-op.
+# Pinning storage={Turso} reproduces the abort in ONE transition.
+{"name": "outdent-page-child-refusal-sqlonly", "description": "task #30: the ADR 0028 D1 page-boundary refusal must be a MODELLED NO-OP at the SqlOnly dispatch floor, not a run-aborting panic. Red before the fix: 'block/outdent operation failed: ... would escape its page container' at op_write_cap.rs OpDispatchWriter::execute.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"Outdent": {"block_id": "block:c1"}}]}
+#
 # ── known-reds entry 14: PinBlock read elevation = target beyond depth-20 cap ──
 # Measurement lane (task #7, 2026-08-04) + verifier round. GREEN control runs;
 # RED twin stays commented until the candidate set honours the depth-20 cap.

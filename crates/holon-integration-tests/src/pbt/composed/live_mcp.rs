@@ -596,7 +596,16 @@ impl SutBlockTreeWrite for LiveMcp {
     async fn apply_outdent(&self, id: &EntityUri) {
         let resolved = self.resolve(id);
         self.focus_editor(&resolved, "Outdent").await;
-        self.key("tab", &["shift"], "Outdent").await;
+        // The ADR 0028 D1 page-boundary refusal is a modelled no-op, not a driver
+        // failure — see `is_page_boundary_outdent_refusal`. Any OTHER keystroke
+        // error stays fail-loud.
+        if let Err(e) = self.driver.send_raw_keystroke("tab", &["shift"]).await {
+            let msg = format!("{e:#}");
+            assert!(
+                crate::pbt::op_write_cap::is_page_boundary_outdent_refusal(&msg),
+                "[Outdent] key tab [\"shift\"] over MCP failed: {msg}"
+            );
+        }
     }
 
     async fn apply_move_up(&self, id: &EntityUri) {

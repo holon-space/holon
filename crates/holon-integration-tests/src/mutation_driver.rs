@@ -114,7 +114,21 @@ impl SutBlockTreeWrite for DirectUserDriver {
     }
 
     async fn apply_outdent(&self, id: &EntityUri) {
-        self.dispatch_block("outdent", self.id_only(id)).await;
+        // The ADR 0028 D1 page-boundary refusal is a modelled no-op, not a floor
+        // failure — see `is_page_boundary_outdent_refusal`. Any OTHER dispatch
+        // error stays fail-loud.
+        let params: HashMap<String, Value> = self
+            .id_only(id)
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        if let Err(e) = self.synthetic_dispatch("block", "outdent", params).await {
+            let msg = format!("{e:#}");
+            assert!(
+                crate::pbt::op_write_cap::is_page_boundary_outdent_refusal(&msg),
+                "[DirectUserDriver floor] block/outdent failed: {msg}"
+            );
+        }
     }
 
     async fn apply_move_up(&self, id: &EntityUri) {
