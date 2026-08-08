@@ -1606,7 +1606,21 @@ impl ReferenceState {
         // it irreversible — that path would then need to skip this snapshot to
         // match, mirroring the join/slash-delete leaf gates.
         self.push_undo_snapshot();
-        self.insert_block_under_no_snapshot(parent, content, new_id);
+        // The org lens applies to a block BORN from UI input exactly as it does
+        // to one edited (`set_block_content`): the creation slot commits typed
+        // text, so raw `[[Page]]` / `*bold*` markup arrives here and the store
+        // adopts it into (label, marks) at the write boundary. Without this the
+        // oracle carried raw markup with `marks = None` and no link case was
+        // expressible as a hand-authored regression at all.
+        let (content, marks) = super::types::normalize_content_for_org_roundtrip_with(
+            content,
+            ContentType::Text,
+            &self.harness.link_classifier,
+        );
+        self.insert_block_under_no_snapshot(parent, &content, new_id.clone());
+        if let Some(b) = self.domain.block_state.blocks.get_mut(&new_id) {
+            b.marks = marks;
+        }
         self.recanon_and_rebuild();
     }
 

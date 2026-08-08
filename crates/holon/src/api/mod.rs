@@ -62,6 +62,7 @@ pub use holon_api::{
 pub use holon_api::{OperationDescriptor, OperationParam};
 pub use holon_service::HolonService;
 pub use memory_backend::MemoryBackend;
+pub use operation_dispatcher::AuthoredInput;
 pub use operation_dispatcher::OperationDispatcher;
 pub use operation_engine::DispatchingOperationEngine;
 pub use operation_engine::OperationEngine;

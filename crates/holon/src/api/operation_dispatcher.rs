@@ -52,6 +52,25 @@ pub struct OperationDispatcher {
     link_classifier: holon_api::link_parser::LinkTargetClassifier,
 }
 
+/// Whether the params reaching the dispatcher carry text a human or an agent
+/// JUST AUTHORED. Only that case adopts raw org markup in `content` into a
+/// stripped label plus a mark set.
+///
+/// This is PROVENANCE, and it cannot be recovered from the params' shape. The
+/// absence of a `marks` key proves nothing: `capture_row` filters NULL columns,
+/// so the delete-inverse of any mark-free block arrives looking exactly like
+/// freshly typed text. Reading that shape as "unparsed input" makes UNDO
+/// rewrite the very bytes it exists to restore (ADR 0024's identity-preserving
+/// inverse). The engine holds the origin and is the only place that can say.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AuthoredInput {
+    /// A live authoring intent (`OpOrigin::User` / `OpOrigin::Agent`):
+    /// `content` may hold raw `[[Page]]` / `*bold*` the author typed.
+    Live,
+    /// Everything else — undo/redo replay, inverse ops, rule- and sync-origin
+    /// writes, and every already-parsed write. Bytes travel untouched.
+    Verbatim,
+}
 impl OperationDispatcher {
     pub fn new(providers: Vec<Arc<dyn OperationProvider>>) -> Self {
         Self {
@@ -273,191 +292,6 @@ impl OperationDispatcher {
                 .into(),
         )
     }
-}
-
-/// Structural block ops that are knowingly double-advertised under Loro
-/// authority (SqlBlockOperations + LoroBlockOperations). A SEPARATE
-/// pre-existing duplicate from BugFunnel N1's CRUD dup; tolerated by the
-/// registry-uniqueness assertion until the structural-op authority/routing
-/// question is resolved.
-#[cfg(debug_assertions)]
-const STRUCTURAL_BLOCK_OP_DUP_ALLOWLIST: &[&str] = &[
-    "indent",
-    "outdent",
-    "move_block",
-    "move_to_position",
-    "move_up",
-    "move_down",
-    "split_block",
-    "join_block",
-    "restore_split",
-    "restore_join",
-    "embed_entity",
-    "delete_subtree",
-    "delete_keep_children",
-];
-
-/// Return the `entity::op` keys advertised more than once across `ops`.
-///
-/// Pure helper for the fail-loud registry-uniqueness invariant in
-/// [`OperationDispatcher::operations`]. Empty result == the invariant holds.
-/// Keyed on `(entity_name, name)` so per-provider `sync` ops (each carries a
-/// distinct `"<provider>.sync"` entity_name) never false-positive.
-fn duplicate_operations(ops: &[OperationDescriptor]) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    let mut dups = Vec::new();
-    for op in ops {
-        if !seen.insert((op.entity_name.as_str(), op.name.as_str())) {
-            dups.push(format!("{}::{}", op.entity_name, op.name));
-        }
-    }
-    dups
-}
-
-#[async_trait]
-impl OperationProvider for OperationDispatcher {
-    /// Get all operations from all registered providers
-    ///
-    /// Aggregates operations from all providers and includes wildcard
-    /// operations.
-    fn operations(&self) -> Vec<OperationDescriptor> {
-        let mut ops: Vec<OperationDescriptor> = self
-            .providers
-            .iter()
-            .flat_map(|provider| provider.operations())
-            .collect();
-
-        // Add wildcard sync operation if any provider has a "sync" operation
-        let has_sync_ops = ops.iter().any(|op| op.name == "sync");
-        if has_sync_ops {
-            ops.push(OperationDescriptor {
-                entity_name: "*".into(),
-                entity_short_name: "all".to_string(),
-                id_column: String::new(),
-                name: "sync".to_string(),
-                display_name: "Sync".to_string(),
-                description: "Sync registered syncable providers".to_string(),
-                required_params: vec![],
-                affected_fields: vec![],
-                param_mappings: vec![],
-                target_scope: holon_api::TargetScope::Global,
-                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
-                menu_exposure: holon_api::MenuExposure::NotListed {
-                    surface: holon_api::NonMenuSurface::External,
-                },
-                trigger: None,
-                bound_params: Default::default(),
-                precondition: None,
-            });
-
-            // Add wildcard full_sync operation (clear caches + sync)
-            // This is triggered by Ctrl+clicking the sync button in the UI
-            ops.push(OperationDescriptor {
-                entity_name: "*".into(),
-                entity_short_name: "all".to_string(),
-                id_column: String::new(),
-                name: "full_sync".to_string(),
-                display_name: "Full Sync".to_string(),
-                description: "Clear all caches, reset sync tokens, and re-sync from external \
-                              systems"
-                    .to_string(),
-                required_params: vec![],
-                affected_fields: vec![],
-                param_mappings: vec![],
-                target_scope: holon_api::TargetScope::Global,
-                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
-                menu_exposure: holon_api::MenuExposure::NotListed {
-                    surface: holon_api::NonMenuSurface::External,
-                },
-                trigger: None,
-                bound_params: Default::default(),
-                precondition: None,
-            });
-        }
-
-        // Registry-uniqueness invariant (fail-loud, debug/test builds): no two
-        // providers may advertise the same (entity, op) EXCEPT the known,
-        // pre-existing structural-block-op overlap. The registry unions provider
-        // `operations()` WITHOUT dedup and dispatch is first-registered-wins, so
-        // a stray duplicate leaks a second identical slash-menu entry (BugFunnel
-        // N1 — 12 block CRUD ops listed twice in SqlOnly). This fix removes the
-        // N1 CRUD duplicate at its source (holon_core::OperationSubset in
-        // holon-app turso_seams); the assertion guards against it regressing.
-        //
-        // The STRUCTURAL block ops (indent/outdent/split/join/move…) are ALSO
-        // double-advertised under Loro authority (SqlBlockOperations +
-        // LoroBlockOperations), a SEPARATE pre-existing dup surfaced by the
-        // keystone. Removing it is a structural-op authority/routing decision
-        // out of this fix's scope; it is explicitly tolerated here (named
-        // allowlist) so the guard stays loud for every OTHER duplicate.
-        #[cfg(debug_assertions)]
-        {
-            let unexpected: Vec<String> = duplicate_operations(&ops)
-                .into_iter()
-                .filter(|d| {
-                    !STRUCTURAL_BLOCK_OP_DUP_ALLOWLIST
-                        .contains(&d.strip_prefix("block::").unwrap_or(d))
-                })
-                .collect();
-            assert!(
-                unexpected.is_empty(),
-                "duplicate operation registrations (two providers advertise the same op — narrow \
-                 the redundant provider, see holon_core::OperationSubset): {unexpected:?}"
-            );
-        }
-
-        ops
-    }
-
-    /// Find operations that can be executed with given arguments
-    ///
-    /// Filters operations based on entity_name and available_args.
-    ///
-    /// Special handling for generic operations:
-    /// - `set_field`: Only requires "id" to be available (field and value are
-    ///   runtime parameters)
-    /// - Other operations: Require all parameters to be in available_args
-    fn find_operations(
-        &self,
-        entity_name: &EntityName,
-        available_args: &[String],
-    ) -> Vec<OperationDescriptor> {
-        // Filter operations from all providers
-        self.operations()
-            .into_iter()
-            .filter(|op| {
-                if op.entity_name != *entity_name {
-                    return false;
-                }
-
-                // Special case: set_field is a generic operation that can update any field
-                // It only needs "id" from the query columns; "field" and "value" are runtime
-                // parameters
-                if op.name == "set_field" {
-                    // Only require "id" to be available
-                    return op
-                        .required_params
-                        .iter()
-                        .any(|p| p.name == "id" && available_args.contains(&p.name));
-                }
-
-                // For other operations, a param is considered available if:
-                // 1. It's directly in available_args, OR
-                // 2. It has a param_mapping that can provide it at runtime
-                op.required_params.iter().all(|p| {
-                    // Direct availability
-                    if available_args.contains(&p.name) {
-                        return true;
-                    }
-                    // Can be provided via param_mapping at runtime
-                    op.param_mappings
-                        .iter()
-                        .any(|m| m.provides.contains(&p.name))
-                })
-            })
-            .collect()
-    }
-
     /// Execute an operation by routing to the correct provider
     ///
     /// # Arguments
@@ -474,11 +308,12 @@ impl OperationProvider for OperationDispatcher {
     /// - No provider is registered for the entity_name (or wildcard matches no
     ///   providers)
     /// - The provider's execute_operation returns an error
-    async fn execute_operation(
+    pub async fn execute_operation_with_input(
         &self,
         entity_name: &EntityName,
         op_name: &str,
         params: StorageEntity,
+        input: AuthoredInput,
     ) -> Result<OperationResult> {
         use tracing::Instrument;
         use tracing::debug;
@@ -765,31 +600,40 @@ impl OperationProvider for OperationDispatcher {
                         .map_err(|e| format!("intent boundary: {e}"))?;
                 }
 
-                // Links increment 3 — parse inline markup at the UI intent boundary.
+                // Adopt inline org markup a human or agent JUST AUTHORED — the one
+                // boundary where `[[Page]]` / `*bold*` in `content` becomes a stripped
+                // label plus a mark set, so UI-authored text reaches storage in the
+                // same shape ingest produces (marks populated, `block_links` junction
+                // derived, backlinks live).
                 //
-                // A live editor commit sends the block's content as RAW org markup
-                // (`[[Page]]`, `((block))`, `*bold*`) via `set_field("content")`.
-                // Ingest already splits such text into a stripped `content` label +
-                // a `marks` set at its own boundary (`extract_inline_marks` →
-                // `build_block_params`); the live-edit path did not, so typed links
-                // persisted as raw text with NULL `marks` and no `block_links`
-                // junction row — backlinks never populated for UI-authored links.
+                // Both write shapes are covered because a user reaches storage through
+                // both: `set_field("content")` when editing an existing block, and
+                // `create` when the creation slot commits a freshly typed line.
                 //
-                // Parse here with the SAME extractor ingest uses, then store the
-                // identical shape: the rendered label in `content` and the mark set
-                // in `marks`. Stripping the raw markup into the label ALWAYS happens
-                // (it is idempotent — re-stripping an already-stripped label is a
-                // no-op), so `content` never holds `[[…]]` syntax. Org-sync writes
-                // bypass this dispatcher (they call the CRUD seam directly with an
-                // already-stripped label + a separate `marks` param), so this only
-                // ever sees raw UI input — no double-strip, no clobber of ingest's
-                // marks.
+                // Not reached by ingest at all: org ingest writes through the provider
+                // seam directly (`SqlBlockOperations::create_in_tree` →
+                // `execute_operation_with_origin`), and `split_block` goes through
+                // `BlockOperations` — neither passes this dispatcher.
                 //
-                // The `marks` write itself is DERIVED and is decided further down,
-                // once the CRUD-authority provider is resolved, by comparing the
-                // extracted marks against the block's currently-stored marks (see
-                // `content_marks_followup`). That comparison — not this extraction —
-                // is what keeps the follow-up from firing spuriously.
+                // The `marks` write is DERIVED and is decided further down, once the
+                // CRUD-authority provider is resolved, by comparing the extracted marks
+                // against the block's currently-stored marks (see
+                // `content_marks_followup`). That comparison — not this extraction — is
+                // what keeps the follow-up from firing spuriously.
+                //
+                // This EDIT arm is deliberately NOT gated on `input`, unlike the `create`
+                // arm below, and the asymmetry is load-bearing: undo of a content edit
+                // currently DEPENDS on this arm running during replay. `capture_row`
+                // cannot express "restore this column to NULL" (it filters NULL columns),
+                // so a content inverse never carries the prior `marks`; what clears them
+                // is this follow-up firing on the replayed edit. Gate the arm and stale
+                // marks outlive the undo, pointing past the restored text — exactly what
+                // `undo_link_add_restores_prior_pair` catches. The cost of leaving it
+                // ungated is that replaying an inverse whose prior bytes are RAW markup
+                // re-parses them (the ignored
+                // `undo_of_a_content_edit_restores_raw_previous_bytes`); removing that
+                // cost needs inverses that carry marks explicitly — a `capture_row`
+                // change touching every inverse, escalated rather than guessed at here.
                 let content_edit: Option<(String, String, Vec<holon_api::MarkSpan>)> =
                     if resolved_entity_name == "block"
                         && op_name == "set_field"
@@ -821,6 +665,40 @@ impl OperationProvider for OperationDispatcher {
                     } else {
                         None
                     };
+
+                // The create half of the same boundary: a block born from the creation
+                // slot carries the typed line raw, so without this a typed `[[Page]]`
+                // was stored verbatim with NULL marks and no junction row, and only the
+                // NEXT boot's file re-ingest adopted it — rewriting the user's stored
+                // text with no action of theirs.
+                //
+                // A caller that supplies its own `marks` already parsed and is left
+                // alone (`instantiate_template` re-enters the engine carrying the
+                // definition's spans). Extraction yielding NO marks likewise changes
+                // nothing — which keeps a link with no representable label (`[[   ]]`)
+                // as the author's bytes instead of erasing them, the same
+                // empty-adoption rule `canonicalize_adopted_links` holds on the render
+                // side. Marks ride along in the create params rather than a follow-up
+                // write: the junction is derived from them in the provider's create arm.
+                if input == AuthoredInput::Live
+                    && resolved_entity_name == "block"
+                    && op_name == "create"
+                    && !params.contains_key("marks")
+                    && let Some(raw) = params
+                        .get("content")
+                        .and_then(|v| v.as_string())
+                        .map(str::to_string)
+                {
+                    let (label, marks) =
+                        holon_org_format::extract_inline_marks_with(&raw, &self.link_classifier);
+                    if !marks.is_empty() {
+                        params.insert("content".into(), holon_api::Value::String(label));
+                        params.insert(
+                            "marks".into(),
+                            holon_api::Value::String(holon_api::marks_to_json(&marks)),
+                        );
+                    }
+                }
 
                 if !available_ops
                     .iter()
@@ -1044,6 +922,214 @@ impl OperationProvider for OperationDispatcher {
         }
         .instrument(span)
         .await
+    }
+}
+
+/// Structural block ops that are knowingly double-advertised under Loro
+/// authority (SqlBlockOperations + LoroBlockOperations). A SEPARATE
+/// pre-existing duplicate from BugFunnel N1's CRUD dup; tolerated by the
+/// registry-uniqueness assertion until the structural-op authority/routing
+/// question is resolved.
+#[cfg(debug_assertions)]
+const STRUCTURAL_BLOCK_OP_DUP_ALLOWLIST: &[&str] = &[
+    "indent",
+    "outdent",
+    "move_block",
+    "move_to_position",
+    "move_up",
+    "move_down",
+    "split_block",
+    "join_block",
+    "restore_split",
+    "restore_join",
+    "embed_entity",
+    "delete_subtree",
+    "delete_keep_children",
+];
+
+/// Return the `entity::op` keys advertised more than once across `ops`.
+///
+/// Pure helper for the fail-loud registry-uniqueness invariant in
+/// [`OperationDispatcher::operations`]. Empty result == the invariant holds.
+/// Keyed on `(entity_name, name)` so per-provider `sync` ops (each carries a
+/// distinct `"<provider>.sync"` entity_name) never false-positive.
+fn duplicate_operations(ops: &[OperationDescriptor]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut dups = Vec::new();
+    for op in ops {
+        if !seen.insert((op.entity_name.as_str(), op.name.as_str())) {
+            dups.push(format!("{}::{}", op.entity_name, op.name));
+        }
+    }
+    dups
+}
+
+#[async_trait]
+impl OperationProvider for OperationDispatcher {
+    /// Get all operations from all registered providers
+    ///
+    /// Aggregates operations from all providers and includes wildcard
+    /// operations.
+    fn operations(&self) -> Vec<OperationDescriptor> {
+        let mut ops: Vec<OperationDescriptor> = self
+            .providers
+            .iter()
+            .flat_map(|provider| provider.operations())
+            .collect();
+
+        // Add wildcard sync operation if any provider has a "sync" operation
+        let has_sync_ops = ops.iter().any(|op| op.name == "sync");
+        if has_sync_ops {
+            ops.push(OperationDescriptor {
+                entity_name: "*".into(),
+                entity_short_name: "all".to_string(),
+                id_column: String::new(),
+                name: "sync".to_string(),
+                display_name: "Sync".to_string(),
+                description: "Sync registered syncable providers".to_string(),
+                required_params: vec![],
+                affected_fields: vec![],
+                param_mappings: vec![],
+                target_scope: holon_api::TargetScope::Global,
+                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::External,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
+            });
+
+            // Add wildcard full_sync operation (clear caches + sync)
+            // This is triggered by Ctrl+clicking the sync button in the UI
+            ops.push(OperationDescriptor {
+                entity_name: "*".into(),
+                entity_short_name: "all".to_string(),
+                id_column: String::new(),
+                name: "full_sync".to_string(),
+                display_name: "Full Sync".to_string(),
+                description: "Clear all caches, reset sync tokens, and re-sync from external \
+                              systems"
+                    .to_string(),
+                required_params: vec![],
+                affected_fields: vec![],
+                param_mappings: vec![],
+                target_scope: holon_api::TargetScope::Global,
+                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::External,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
+            });
+        }
+
+        // Registry-uniqueness invariant (fail-loud, debug/test builds): no two
+        // providers may advertise the same (entity, op) EXCEPT the known,
+        // pre-existing structural-block-op overlap. The registry unions provider
+        // `operations()` WITHOUT dedup and dispatch is first-registered-wins, so
+        // a stray duplicate leaks a second identical slash-menu entry (BugFunnel
+        // N1 — 12 block CRUD ops listed twice in SqlOnly). This fix removes the
+        // N1 CRUD duplicate at its source (holon_core::OperationSubset in
+        // holon-app turso_seams); the assertion guards against it regressing.
+        //
+        // The STRUCTURAL block ops (indent/outdent/split/join/move…) are ALSO
+        // double-advertised under Loro authority (SqlBlockOperations +
+        // LoroBlockOperations), a SEPARATE pre-existing dup surfaced by the
+        // keystone. Removing it is a structural-op authority/routing decision
+        // out of this fix's scope; it is explicitly tolerated here (named
+        // allowlist) so the guard stays loud for every OTHER duplicate.
+        #[cfg(debug_assertions)]
+        {
+            let unexpected: Vec<String> = duplicate_operations(&ops)
+                .into_iter()
+                .filter(|d| {
+                    !STRUCTURAL_BLOCK_OP_DUP_ALLOWLIST
+                        .contains(&d.strip_prefix("block::").unwrap_or(d))
+                })
+                .collect();
+            assert!(
+                unexpected.is_empty(),
+                "duplicate operation registrations (two providers advertise the same op — narrow \
+                 the redundant provider, see holon_core::OperationSubset): {unexpected:?}"
+            );
+        }
+
+        ops
+    }
+
+    /// Find operations that can be executed with given arguments
+    ///
+    /// Filters operations based on entity_name and available_args.
+    ///
+    /// Special handling for generic operations:
+    /// - `set_field`: Only requires "id" to be available (field and value are
+    ///   runtime parameters)
+    /// - Other operations: Require all parameters to be in available_args
+    fn find_operations(
+        &self,
+        entity_name: &EntityName,
+        available_args: &[String],
+    ) -> Vec<OperationDescriptor> {
+        // Filter operations from all providers
+        self.operations()
+            .into_iter()
+            .filter(|op| {
+                if op.entity_name != *entity_name {
+                    return false;
+                }
+
+                // Special case: set_field is a generic operation that can update any field
+                // It only needs "id" from the query columns; "field" and "value" are runtime
+                // parameters
+                if op.name == "set_field" {
+                    // Only require "id" to be available
+                    return op
+                        .required_params
+                        .iter()
+                        .any(|p| p.name == "id" && available_args.contains(&p.name));
+                }
+
+                // For other operations, a param is considered available if:
+                // 1. It's directly in available_args, OR
+                // 2. It has a param_mapping that can provide it at runtime
+                op.required_params.iter().all(|p| {
+                    // Direct availability
+                    if available_args.contains(&p.name) {
+                        return true;
+                    }
+                    // Can be provided via param_mapping at runtime
+                    op.param_mappings
+                        .iter()
+                        .any(|m| m.provides.contains(&p.name))
+                })
+            })
+            .collect()
+    }
+
+    /// Route an operation to the correct provider, treating the params as
+    /// VERBATIM: whatever bytes arrive are the bytes written.
+    ///
+    /// This is the identity-preserving entry point, and it is the one undo/redo
+    /// replay uses (`OperationEngine::replay`) — so a replayed inverse can
+    /// never be re-parsed into something other than what it restores. A
+    /// caller that knows its params carry freshly authored text asks for
+    /// adoption explicitly via
+    /// [`OperationDispatcher::execute_operation_with_input`].
+    ///
+    /// # Errors
+    /// Returns an error if no provider is registered for `entity_name` (or a
+    /// wildcard matches no providers), or if the provider's own
+    /// `execute_operation` fails.
+    async fn execute_operation(
+        &self,
+        entity_name: &EntityName,
+        op_name: &str,
+        params: StorageEntity,
+    ) -> Result<OperationResult> {
+        self.execute_operation_with_input(entity_name, op_name, params, AuthoredInput::Verbatim)
+            .await
     }
 }
 

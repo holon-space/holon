@@ -58,6 +58,7 @@ use holon_profiles::trust::TrustPolicy;
 use tokio::sync::RwLock;
 
 use crate::api::BackendEngine;
+use crate::api::operation_dispatcher::AuthoredInput;
 use crate::api::operation_dispatcher::OperationDispatcher;
 
 #[async_trait]
@@ -1694,6 +1695,18 @@ impl OperationEngine for DispatchingOperationEngine {
         // `block_raw.properties`, with no provider edits.
         let params = self.stamp_provenance(op_name, params, &origin);
 
+        // Same reason, second consumer of the origin this method is the last to
+        // hold: whether `content` may carry raw org markup the author just typed
+        // (`[[Page]]`, `*bold*`) is a fact about PROVENANCE, so only here can it
+        // be stated. A human or an agent is authoring; a rule, a peer merge, and
+        // ingest are not. Undo/redo replay never passes through this method at
+        // all (`replay` dispatches straight to the dispatcher), so a stored
+        // inverse is byte-identity-preserving by construction.
+        let input = match origin {
+            OpOrigin::User | OpOrigin::Agent { .. } => AuthoredInput::Live,
+            OpOrigin::Rule { .. } | OpOrigin::Sync | OpOrigin::Ingest => AuthoredInput::Verbatim,
+        };
+
         let forward_op = Operation::new(
             entity_name.clone(),
             op_name,
@@ -1706,7 +1719,7 @@ impl OperationEngine for DispatchingOperationEngine {
 
         let result = self
             .dispatcher
-            .execute_operation(entity_name, op_name, params)
+            .execute_operation_with_input(entity_name, op_name, params, input)
             .await
             .map_err(|e| {
                 anyhow::anyhow!("Operation '{op_name}' on entity '{entity_name}' failed: {e}")
