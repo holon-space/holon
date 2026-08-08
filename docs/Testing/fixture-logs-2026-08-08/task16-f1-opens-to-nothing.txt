@@ -369,3 +369,141 @@ cargo test -p holon-gpui --test nested_page_chevron_gate   6 passed / 0 failed
 bash scripts/bugfunnel-check.sh   ORACLE 61 exact across header / log / rows;
   COVERAGE 93-vs-96 pre-existing delta unchanged
 cargo fmt --all --check           clean
+
+
+========================================================================
+ROUND 6 — EARNED RED WITH A REAL ENGINE, AND THE ACTUAL ROOT CAUSE
+========================================================================
+
+Nothing above is rewritten. Fixture 3 boots a REAL `ReactiveEngine` +
+`FrontendSession` and attaches a real GPUI window over them (donor:
+frontends/gpui/tests/pbt_harness/windowed_wide.rs; the layer used is
+`compose_sut_windowed_base_seeded(&ComponentSet::full_headless(), ...)` with a
+purpose-built org seed, then the donor's window attach verbatim). Focus is set
+through `SutFocusWrite::apply_navigate_focus` — a production-shaped focus
+dispatch, not a synthesized SQL write.
+
+Test: frontends/gpui/tests/nested_page_real_engine.rs
+      `a_real_engine_nested_page_paints_its_children_when_opened`
+Vault: a Host Page with one ordinary child block and a nested page
+      "A Nested Page" carrying two children ("buy milk", "see Journals now") —
+      the live reproduction's shape.
+
+------------------------------------------------------------------------
+THE RED (verbatim) — with the round-3 routing fix PRESENT in the tree
+
+running 1 test
+engine focus after boot: Some("block:real-host-page")
+gate BEFORE: block_expanded_view(real-nested-page) = None, chevron glyph = Some("▶")
+chevron expand_toggle::real-nested-page: x=1204.0 y=184.0 w=20.0 h=32.0 -> click (1214.0, 200.0)
+gate AFTER: block_expanded_view(real-nested-page) = Some(true), chevron glyph = Some("▼")
+
+thread 'a_real_engine_nested_page_paints_its_children_when_opened' panicked at
+frontends/gpui/tests/nested_page_real_engine.rs:367:5:
+an opened nested page must PAINT its children through a REAL engine:
+["buy milk", "see Journals now"] is not among the painted text.
+gate = Some(true), chevron glyph = Some("▼")
+painted = ["▼", "A Nested Page", "", "▼", "Journals", "▼", "2026-01-15",
+           "real-host-page", "An ordinary host child", "structural-page"]
+
+test result: FAILED. 0 passed; 1 failed; finished in 14.86s
+
+The gate opens and survives: `block_expanded_view` None -> Some(true), glyph
+▶ -> ▼. Task #16's store unification holds. The row opens onto nothing.
+
+------------------------------------------------------------------------
+THE DELTA IS ONE ELEMENT, AND IT IS ZERO PIXELS TALL
+
+BEFORE — 112 elements; the nested-page row is intact:
+  tree_item#72                        | tree_item     | ""              | x=312  y=184 w=912 h=32
+  expand_toggle#71                    | expand_toggle | ""              | x=356  y=184 w=868 h=32
+  text-block:real-nested-page-content | text          | "A Nested Page" | x=380  y=184 w=96  h=26
+  expand_toggle::real-nested-page     | expand_toggle | "▶"             | x=1204 y=184 w=20  h=32
+
+AFTER — 113 elements. Exactly ONE new element, and it is the entire delta:
+  reactive_shell#73 | reactive_shell | "" | x=376.0 y=216.0 w=848.0 h=0.0
+
+Full content width (848 = the tree-indent-padded box), height ZERO, and
+NOTHING registered underneath it — no live_query, no tree_item, no
+rendered_text. This is a DIFFERENT failure from fixture 2's: there the
+tree_item shells existed with empty leaves; here there are no shells at all.
+
+------------------------------------------------------------------------
+ROOT CAUSE — a silent sentinel that GUARANTEES zero rows
+
+Two in-test probes run the SAME query the shipped `embedded_page` content node
+runs (block_profile.yaml:105-108, `live_query(#{prql: "from descendants", ...})`)
+against the live QueryEngine:
+
+  PROBE [builder-shaped ctx (context_path_prefix: None)]:
+      'from descendants' delivered 0 change(s)
+  PROBE: lookup_block_path(block:real-nested-page)
+      = "/block:real-host-page/block:real-nested-page"
+  PROBE [path-resolved ctx]:
+      'from descendants' delivered 2 change(s)
+
+The children exist and are reachable. The builder's context shape is what
+returns nothing.
+
+  frontends/gpui/src/render/builders/live_query.rs:72 hardcodes
+      context_path_prefix: None
+
+  crates/holon/src/api/backend_engine.rs:470-481 consumes that None:
+
+      None => {
+          // No path prefix means descendants queries won't match anything
+          // This is intentional - use for_block_with_path() to enable descendants
+          params.insert("context_path_prefix".into(),
+                        Value::String("__NO_PATH__/".to_string()));
+      }
+
+So a `from descendants` query issued through the gpui `live_query` builder is
+GUARANTEED to match zero rows — silently, by a sentinel-string default arm.
+No error, no warning, no degraded-mode banner. The empty collection then
+renders as the 0-height `reactive_shell` above.
+
+This is the repo's fail-loud rule inverted (priority 4: silently degrades to
+look fine), and it is why every symptom lines up: gate open, node present,
+zero children, ZERO ERROR LINES.
+
+The renderer and the round-3 routing fix are NOT implicated by this evidence:
+the rows never reach them.
+
+Secondary observation (a lead, not verified): `holon_service.rs:102`,
+`block_domain.rs:138` and `backend_engine.rs:1134` all use
+`for_block_with_path`, so the headless/service paths DO resolve the prefix.
+The two frontend `live_query` builders — gpui
+and MCP
+(frontends/mcp/src/describe_ui_expand.rs:143) — are the outliers.
+
+PERCEPTION note recorded with the red: gpui test targets install no tracing
+subscriber, so anything logged by this path is discarded. Even a loud log
+would not have been seen here.
+
+------------------------------------------------------------------------
+WHAT THIS DOES AND DOES NOT SAY ABOUT THE ROUND-3 ROUTING FIX
+
+It does NOT retract it. The routing fix is mutation-proven against a fixture
+whose live_query DID deliver rows, and it corrects a real 0-px shell class
+(`column::render` fixes the same class the same way, and names it). But it was
+NOT the cause of the live F1 symptom. Both statements are true, and the lane
+previously conflated them.
+
+------------------------------------------------------------------------
+CLASSIFICATION — ATTEMPT #4. ALL THREE EARLIER CALLS WERE WRONG.
+
+  round 3: ORACLE + secondary ENVIRONMENT (driver-vs-static masking) — REFUTED
+  round 4: "pure ORACLE, no environment gap"                          — WRONG
+  round 5: ENVIRONMENT = the fixture's `render_entity()` leaf is a silent stub
+           — TRUE OF FIXTURE 2, but not the whole story: fixture 3 resolves the
+           leaf for real and the rows still never arrive, one layer EARLIER.
+  round 6: the escape is a silent sentinel default in the query-context path
+           (`None` -> `"__NO_PATH__/"`), invisible to every fixture that
+           supplied its own `watch_query_live` and never exercised the real
+           context plumbing. ENVIRONMENT (harness never drove the real
+           context-resolution path) with a first-class PERCEPTION component
+           (the default arm degrades silently AND the frontend logs nowhere).
+
+Each attempt is kept verbatim. This one, like round 5's, ships with its
+falsifier: give the gpui builder a resolved `context_path_prefix`; if the
+children still do not paint, the cause is elsewhere again.
