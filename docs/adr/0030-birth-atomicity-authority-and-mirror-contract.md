@@ -77,11 +77,11 @@ re-entering through the mirror door:
    can tear is a contract violation, and a torn file is worse than a stale one
    because org files are also an ingest source: a torn mirror re-ingested becomes
    authority corruption. This clause covers every non-transactional durable mirror,
-   not only org files. Known inventory today: org write-back (`fs_port.rs:83` —
-   known-unsatisfied), sync-base JSON sidecars (`sync_base_store.rs:189` —
-   unsatisfied, and torn bases feed the 3-way diff exactly as torn org files feed
-   ingest), share snapshots and roster sidecars (unaudited), the content-hash /
-   `doc_home` persistence. Anything writing a durable derived artifact is in scope by
+   not only org files. Known inventory today: org write-back (`fs_port.rs` —
+   satisfied, see Enforcement), sync-base JSON sidecars (`sync_base_store.rs` —
+   satisfied through the same helper; torn bases feed the 3-way diff exactly as
+   torn org files feed ingest), share snapshots and roster sidecars (audited —
+   already tmp+fsync+rename), the content-hash / `doc_home` persistence. Anything writing a durable derived artifact is in scope by
    default; exemptions must be argued, not assumed. (The Loro snapshot writer already
    complies via `write_atomic`, `loro_document.rs:274` — the authority writer got
    this right; the mirror writers didn't.)
@@ -142,11 +142,28 @@ beyond the existing proof-gated paths may land.
   file-rescue outcome, never pass silently. Note the saga rejection leans on this:
   the intent log is redundant with the authority only when the authority is the
   first thing to become durable.
-- **Atomic file replacement:** `FsPort::write` in-place write
-  (`fs_port.rs:83`, used by `file_sync_controller.rs:6038`) must become
-  temp+rename. Tracked as its own remediation task; until it lands, D3.1 is
-  known-unsatisfied for file mirrors and this ADR's row in the tracking docs says
-  so.
+- **Atomic file replacement:** SATISFIED for every write through the port.
+  `FileSystem::write` now *contracts* atomic replacement and both adapters
+  implement it: `RealFileSystem` via `fs_port::write_atomic_blocking` (sibling
+  temp, target permissions carried over, rename over the target, temp dropped on
+  failure), the in-memory double via the same two steps with an injectable
+  commit-boundary failure. Every port caller inherits it — org write-back
+  (`file_sync_controller.rs`), ingest normalization write-back, image
+  materialization. The sync-base JSON sidecar (`sync_base_store.rs`) writes
+  through the same helper. The temp is invisible to ingest on two independent
+  counts (dot-prefixed → the `hidden(true)` walk skips it; non-`.org` → every
+  org-relevance filter tests the extension), and a backend that pairs both
+  rename sides now reads a from-outside-org-space rename as a `Create`, never as
+  a document re-home.
+  No `fsync` precedes the rename: on macOS that means `F_FULLFSYNC` on every
+  write-back, and surviving power loss with the *newest* mirror bytes is not
+  owed for an artifact re-derivable from the authority — what is owed (no reader
+  ever sees an interior) comes from the rename alone.
+  V5 discharged by inspection while auditing the callers: `SharedSnapshotStore`
+  already writes every artifact it owns (snapshot, peers roster, port,
+  generation) as tmp → `fsync` → rename. Still open: the write-outruns-authority
+  ORDERING hole above is untouched by this — atomic application says nothing about *when* the mirror
+  becomes durable relative to its authority commit.
 - **Mint ordering:** already satisfied; guarded by the existing identity tests.
 
 ## Consequences
@@ -191,7 +208,8 @@ beyond the existing proof-gated paths may land.
   `rekey_children_with_slot` mid-loop (mixed old/new keyspace: mis-ordering or
   benign later rekey?); V4 whether trust-gate proposal blocks leak into org
   write-back (D7 Open Decision 5 — if yes, a birth-adjacent mirror leak D3 must
-  name); V5 atomicity audit of `SharedSnapshotStore` and roster sidecar writes.
+  name); V5 atomicity audit of `SharedSnapshotStore` and roster sidecar writes —
+  DONE, all four artifacts already write tmp → `fsync` → rename.
 
 ## Alternatives rejected
 

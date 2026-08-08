@@ -1,0 +1,141 @@
+TASK #24 (ADR 0030 D3.1 atomic file mirrors) — watcher evidence
+================================================================
+
+== A. GROUND TRUTH: raw fs signals for ONE atomic write-back (live macOS FSEvents)
+Instrumented notify_event_to_signals over a real notify::RecommendedWatcher.
+Scenario: user moves a.org OUT of the vault, then a write-back replaces page.org.
+
+RAW SIGNALS: [
+    "Create(a.org)",
+    "RenameFrom(a.org)",
+    "Modify(a.org)",
+    "Modify(a.org)",
+    "Create(.page.org.holon-tmp-42493-0)",
+    "RenameFrom(.page.org.holon-tmp-42493-0)",
+    "Modify(.page.org.holon-tmp-42493-0)",
+    "Modify(.page.org.holon-tmp-42493-0)",
+    "Modify(.page.org.holon-tmp-42493-0)",
+    "RenameTo(page.org)",
+    "Create(page.org)",
+    "RenameTo(page.org)",
+    "Modify(page.org)",
+    "Modify(page.org)",
+]
+test change_source::tests::probe_raw_signals_for_an_atomic_write ... ok
+
+
+The temp's RenameFrom IS delivered, and it precedes the target's RenameTo.
+Being non-.org it was filtered as irrelevant, which left the user's pending
+From(a.org) armed for the target's To to claim.
+
+== B. THE ESCAPE on the PRODUCTION NotifyWatcher (verifier probe C, refuting round 1)
+PROBE C  in-place write-back after move-out: [
+    (
+        "a.org",
+        Create,
+    ),
+    (
+        "a.org",
+        Modify,
+    ),
+    (
+        "a.org",
+        Modify,
+    ),
+    (
+        "a.org",
+        Remove,
+    ),
+    (
+        "page.org",
+        Create,
+    ),
+    (
+        "page.org",
+        Modify,
+    ),
+    (
+        "page.org",
+        Modify,
+    ),
+    (
+        "page.org",
+        Modify,
+    ),
+]
+PROBE C   ATOMIC write-back after move-out: [
+    (
+        "a.org",
+        Create,
+    ),
+    (
+        "a.org",
+        Modify,
+    ),
+    (
+        "a.org",
+        Modify,
+    ),
+    (
+        ".page.org.holon-tmp-18076-0",
+        Create,
+    ),
+    (
+        ".page.org.holon-tmp-18076-0",
+        Modify,
+    ),
+    (
+        ".page.org.holon-tmp-18076-0",
+        Modify,
+    ),
+    (
+        ".page.org.holon-tmp-18076-0",
+        Modify,
+    ),
+    (
+        "page.org",
+        Rename {
+            from: "/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpUEZcBu/a.org",
+        },
+    ),
+    (
+        "page.org",
+        Create,
+    ),
+    (
+        "page.org",
+        Create,
+    ),
+    (
+        "page.org",
+        Modify,
+    ),
+    (
+        "page.org",
+        Modify,
+    ),
+]
+
+thread 'probe_c_moveout_then_writeback' (498138252) panicked at crates/holon-filesystem/tests/verify24_probe.rs:128:5:
+
+== C. ROUND-2 RED — 4 tests, incl. the live production-watcher one
+        FAIL [   0.011s] (2/5) holon-filesystem change_source::tests::a_stale_pending_from_still_surfaces_across_a_write_back
+    thread 'change_source::tests::a_stale_pending_from_still_surfaces_across_a_write_back' (498548610) panicked at crates/holon-filesystem/src/change_source.rs:663:9:
+    the moved-out page never got its Remove: [("/vault/.page.org.holon-tmp-5031-0", Create), ("/vault/page.org", Rename { from: "/vault/a.org" }), ("/vault/page.org", Create)]
+        FAIL [   0.011s] (3/5) holon-filesystem change_source::tests::a_both_sided_rename_from_our_temp_is_not_a_rehome
+    thread 'change_source::tests::a_both_sided_rename_from_our_temp_is_not_a_rehome' (498548609) panicked at crates/holon-filesystem/src/change_source.rs:718:9:
+    assertion `left == right` failed: [("/vault/page.org", Rename { from: "/vault/.page.org.holon-tmp-5032-0" })]
+        FAIL [   0.012s] (4/5) holon-filesystem change_source::tests::a_write_back_never_hijacks_a_pending_rename_from
+    thread 'change_source::tests::a_write_back_never_hijacks_a_pending_rename_from' (498548612) panicked at crates/holon-filesystem/src/change_source.rs:636:9:
+    the write-back was emitted as a document rename: [("/vault/.page.org.holon-tmp-5034-0", Create), ("/vault/page.org", Rename { from: "/vault/a.org" }), ("/vault/page.org", Create)]
+        FAIL [   3.356s] (5/5) holon-filesystem change_source::tests::a_live_write_back_after_a_move_out_does_not_rehome_the_moved_page
+    thread 'change_source::tests::a_live_write_back_after_a_move_out_does_not_rehome_the_moved_page' (498548611) panicked at crates/holon-filesystem/src/change_source.rs:754:9:
+    the write-back re-homed the moved-out page: [("a.org", Create), ("a.org", Modify), ("a.org", Modify), (".page.org.holon-tmp-5030-0", Create), (".page.org.holon-tmp-5030-0", Modify), (".page.org.holon-tmp-5030-0", Modify), (".page.org.holon-tmp-5030-0", Modify), ("page.org", Rename { from: "/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpm1vsz5/a.org" }), ("page.org", Create), ("page.org", Create), ("page.org", Modify), ("page.org", Modify)]
+     Summary [   3.357s] 5 tests run: 1 passed, 4 failed, 83 skipped
+        FAIL [   0.011s] (2/5) holon-filesystem change_source::tests::a_stale_pending_from_still_surfaces_across_a_write_back
+        FAIL [   0.011s] (3/5) holon-filesystem change_source::tests::a_both_sided_rename_from_our_temp_is_not_a_rehome
+        FAIL [   0.012s] (4/5) holon-filesystem change_source::tests::a_write_back_never_hijacks_a_pending_rename_from
+        FAIL [   3.356s] (5/5) holon-filesystem change_source::tests::a_live_write_back_after_a_move_out_does_not_rehome_the_moved_page
+
+== D. GREEN after the fix (full holon-filesystem crate)
+     Summary [   3.471s] 92 tests run: 92 passed (1 leaky), 0 skipped

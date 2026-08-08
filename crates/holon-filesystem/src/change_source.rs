@@ -216,9 +216,23 @@ fn notify_event_to_signals(
 /// The flushed `Remove` is additionally safety-netted at the controller
 /// (`on_file_deleted` id-based reunification), and any swallowed side is
 /// repaired by `poll_tracked_files` / `poll_new_files`.
+///
+/// ## Our own atomic write-backs are renames too
+///
+/// `FileSystem::write` replaces a file by renaming a sibling temp over it, so
+/// every write-back reaches this state machine as a `From` half on the temp and
+/// a `To` half on the target. Left unrecognized, the temp `From` is filtered as
+/// irrelevant while the target `To` claims whatever `From` happens to be
+/// pending — turning the most frequent signal in the system into a re-home of
+/// an unrelated document. So a temp `From` ARMS a self-replacement instead
+/// ([`fs_port::atomic_temp_target`]), and the matching `To` is emitted as the
+/// plain write it is, leaving the pending `From` untouched.
 #[derive(Debug, Default)]
 pub struct RenamePairing {
     pending_from: Option<(PathBuf, Instant)>,
+    /// Targets of in-flight atomic replacements, armed by their temp `From`
+    /// half. Several can be in flight at once (one per file being written).
+    self_replacements: Vec<(PathBuf, Instant)>,
 }
 
 impl RenamePairing {
@@ -269,26 +283,53 @@ impl RenamePairing {
         is_relevant: &dyn Fn(&Path) -> bool,
     ) -> Vec<(PathBuf, FileChangeKind)> {
         let mut out: Vec<(PathBuf, FileChangeKind)> = Vec::new();
-        let pending = &mut self.pending_from;
+        let Self {
+            pending_from: pending,
+            self_replacements,
+        } = self;
+        self_replacements.retain(|(_, at)| now.duration_since(*at) < RENAME_PAIR_WINDOW);
         match signal {
             RawFsSignal::RenameBoth { from, to } => {
-                // Self-contained pair; a concurrent pending is unrelated — leave
-                // it intact (it will pair with its own `To` or time out).
-                out.push((to.clone(), FileChangeKind::Rename { from: from.clone() }));
+                if crate::fs_port::atomic_temp_target(from).as_deref() == Some(to.as_path()) {
+                    // Our own replacement, delivered pre-paired (inotify).
+                    out.push((to.clone(), FileChangeKind::Create));
+                } else {
+                    // Self-contained pair; a concurrent pending is unrelated —
+                    // leave it intact (it pairs with its own `To` or times out).
+                    out.push((to.clone(), FileChangeKind::Rename { from: from.clone() }));
+                }
             }
             RawFsSignal::RenameFrom(p) => {
-                if is_relevant(p) {
+                if let Some(target) = crate::fs_port::atomic_temp_target(p) {
+                    // OUR write-back's source half. It must not become a pending
+                    // rename source, and — the whole point — it must not leave an
+                    // unrelated pending `From` exposed to its `To` half below.
+                    self_replacements.push((target, now));
+                } else if is_relevant(p) {
                     // A new source side. Supersede any existing pending, flushing
                     // it as a Remove (a distinct file that moved and never paired
                     // — safety-netted at the controller). Rare: one `mv` yields
                     // exactly one source side.
                     Self::flush_pending(pending, &mut out);
                     *pending = Some((p.clone(), now));
+                    // A real rename is under way: its `To` may land on a file we
+                    // just wrote, and pairing that `To` matters more than
+                    // recognizing a replacement whose own `To` has already passed.
+                    self_replacements.clear();
                 }
                 // Irrelevant source side: ignore, do NOT touch pending.
             }
             RawFsSignal::RenameTo(p) => {
-                if is_relevant(p) {
+                if !is_relevant(p) {
+                    // Irrelevant target side: ignore, do NOT touch pending.
+                } else if self_replacements.iter().any(|(t, _)| t == p) {
+                    // A write of `p`, not a rename onto it: emit what an
+                    // in-place write emitted and leave the pending `From` for
+                    // its own `To`. The slot stays armed so the duplicate `To`
+                    // fsevents coalescing produces is read the same way.
+                    Self::maybe_timeout_flush(pending, now, &mut out);
+                    out.push((p.clone(), FileChangeKind::Create));
+                } else {
                     match pending.take() {
                         // Pair at ANY age — the window bounds only the unpaired
                         // case, never a real pair whose `To` arrives late.
@@ -296,7 +337,6 @@ impl RenamePairing {
                         None => out.push((p.clone(), FileChangeKind::Create)),
                     }
                 }
-                // Irrelevant target side: ignore, do NOT touch pending.
             }
             RawFsSignal::Create(p) => {
                 if is_relevant(p) {
@@ -585,6 +625,225 @@ mod tests {
         assert!(
             !out.iter().any(|(_, k)| *k == FileChangeKind::Remove),
             "an irrelevant event must never flush the pending From, even when stale"
+        );
+    }
+
+    /// The raw-signal sequence the LIVE macOS watcher produces for one atomic
+    /// write-back to `page.org`, recorded from `notify_event_to_signals`
+    /// (lane-logs/task24-r2-rawsignals.txt). Our replacement announces itself
+    /// as a rename: a `From` half on the temp, a `To` half on the target.
+    fn atomic_writeback_signals(dir: &Path, target: &str) -> Vec<RawFsSignal> {
+        let target = dir.join(target);
+        let temp = crate::fs_port::atomic_temp_path(&target).unwrap();
+        vec![
+            RawFsSignal::Create(temp.clone()),
+            RawFsSignal::RenameFrom(temp),
+            RawFsSignal::RenameTo(target.clone()),
+            RawFsSignal::Create(target),
+        ]
+    }
+
+    fn drive(
+        pairing: &mut RenamePairing,
+        signals: &[RawFsSignal],
+        now: Instant,
+    ) -> Vec<(PathBuf, FileChangeKind)> {
+        signals
+            .iter()
+            .flat_map(|s| pairing.classify(s, now, &rel))
+            .collect()
+    }
+
+    /// A write-back's `To` half must never be read as the destination of an
+    /// unrelated pending rename. Live repro: the user moves `a.org` out of the
+    /// vault (its `From` buffers, its `To` is irrelevant), then any write-back
+    /// lands — and write-backs are the most frequent relevant signal there is.
+    #[test]
+    fn a_write_back_never_hijacks_a_pending_rename_from() {
+        let dir = Path::new("/vault");
+        let mut pairing = RenamePairing::new();
+        let now = Instant::now();
+
+        let moved_out = pairing.classify(&RawFsSignal::RenameFrom(dir.join("a.org")), now, &rel);
+        assert!(moved_out.is_empty(), "the From side only buffers");
+
+        let out = drive(
+            &mut pairing,
+            &atomic_writeback_signals(dir, "page.org"),
+            now,
+        );
+
+        assert!(
+            !out.iter()
+                .any(|(_, k)| matches!(k, FileChangeKind::Rename { .. })),
+            "the write-back was emitted as a document rename: {out:?}"
+        );
+        assert!(
+            out.iter().any(|(p, _)| *p == dir.join("page.org")),
+            "the write-back must still reach the target: {out:?}"
+        );
+    }
+
+    /// The pending `From` is not swallowed either: once it ages out, it still
+    /// surfaces as its own `Remove` — exactly what an in-place write produced.
+    #[test]
+    fn a_stale_pending_from_still_surfaces_across_a_write_back() {
+        let dir = Path::new("/vault");
+        let mut pairing = RenamePairing::new();
+        let t0 = Instant::now();
+        pairing.classify(&RawFsSignal::RenameFrom(dir.join("a.org")), t0, &rel);
+
+        let later = t0 + RENAME_PAIR_WINDOW + Duration::from_millis(1);
+        let out = drive(
+            &mut pairing,
+            &atomic_writeback_signals(dir, "page.org"),
+            later,
+        );
+
+        assert!(
+            out.contains(&(dir.join("a.org"), FileChangeKind::Remove)),
+            "the moved-out page never got its Remove: {out:?}"
+        );
+        assert!(
+            !out.iter()
+                .any(|(_, k)| matches!(k, FileChangeKind::Rename { .. })),
+            "{out:?}"
+        );
+    }
+
+    /// The suppression is scoped to OUR temp: a genuine rename onto the same
+    /// target still pairs, even when a write-back to it armed the recognition
+    /// moments earlier.
+    #[test]
+    fn a_genuine_rename_onto_a_written_back_target_still_pairs() {
+        let dir = Path::new("/vault");
+        let mut pairing = RenamePairing::new();
+        let now = Instant::now();
+
+        drive(
+            &mut pairing,
+            &atomic_writeback_signals(dir, "page.org"),
+            now,
+        );
+        pairing.classify(&RawFsSignal::RenameFrom(dir.join("other.org")), now, &rel);
+        let out = pairing.classify(&RawFsSignal::RenameTo(dir.join("page.org")), now, &rel);
+
+        assert_eq!(
+            out,
+            vec![(
+                dir.join("page.org"),
+                FileChangeKind::Rename {
+                    from: dir.join("other.org")
+                }
+            )],
+            "a real rename onto the target was degraded to a plain write"
+        );
+    }
+
+    /// Backends that pair both halves themselves (inotify) must read our
+    /// replacement the same way: a write, not a re-home.
+    #[test]
+    fn a_both_sided_rename_from_our_temp_is_not_a_rehome() {
+        let dir = Path::new("/vault");
+        let target = dir.join("page.org");
+        let mut pairing = RenamePairing::new();
+        let out = pairing.classify(
+            &RawFsSignal::RenameBoth {
+                from: crate::fs_port::atomic_temp_path(&target).unwrap(),
+                to: target.clone(),
+            },
+            Instant::now(),
+            &rel,
+        );
+        assert_eq!(out, vec![(target, FileChangeKind::Create)], "{out:?}");
+    }
+
+    /// End-to-end on the PRODUCTION watcher: the scenario as a user runs it.
+    #[tokio::test]
+    async fn a_live_write_back_after_a_move_out_does_not_rehome_the_moved_page() {
+        let outside = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let watcher = NotifyWatcher::new_unarmed().unwrap();
+        let mut rx = watcher.subscribe();
+        watcher.arm(&root).unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        std::fs::write(root.join("page.org"), b"* seed").unwrap();
+        std::fs::write(root.join("a.org"), b"* a").unwrap();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        while rx.try_recv().is_ok() {}
+
+        std::fs::rename(root.join("a.org"), outside.path().join("moved.txt")).unwrap();
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        crate::fs_port::write_atomic_blocking(&root.join("page.org"), b"* new").unwrap();
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        let mut seen = Vec::new();
+        while let Ok(change) = rx.try_recv() {
+            seen.push((
+                change
+                    .path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string(),
+                change.kind,
+            ));
+        }
+        assert!(
+            !seen
+                .iter()
+                .any(|(_, k)| matches!(k, FileChangeKind::Rename { .. })),
+            "the write-back re-homed the moved-out page: {seen:?}"
+        );
+        assert!(
+            seen.contains(&("a.org".to_string(), FileChangeKind::Remove)),
+            "the genuine move-out lost its Remove: {seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .any(|(n, k)| n == "page.org" && *k != FileChangeKind::Remove),
+            "the write-back never reached the target: {seen:?}"
+        );
+    }
+
+    /// The other half of the live guarantee: a genuine in-vault rename still
+    /// arrives as ONE atomic `Rename`, so the recognition above cannot have
+    /// bought its safety by suppressing real renames.
+    #[tokio::test]
+    async fn a_live_in_vault_rename_still_arrives_as_one_atomic_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let watcher = NotifyWatcher::new_unarmed().unwrap();
+        let mut rx = watcher.subscribe();
+        watcher.arm(&root).unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        crate::fs_port::write_atomic_blocking(&root.join("page.org"), b"* seed").unwrap();
+        std::fs::write(root.join("a.org"), b"* a").unwrap();
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        while rx.try_recv().is_ok() {}
+
+        std::fs::rename(root.join("a.org"), root.join("b.org")).unwrap();
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        let mut seen = Vec::new();
+        while let Ok(change) = rx.try_recv() {
+            seen.push((
+                change
+                    .path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string(),
+                change.kind,
+            ));
+        }
+        assert!(
+            seen.iter().any(|(n, k)| n == "b.org"
+                && matches!(k, FileChangeKind::Rename { from } if from.ends_with("a.org"))),
+            "the in-vault rename lost its pairing: {seen:?}"
         );
     }
 
