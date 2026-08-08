@@ -140,6 +140,33 @@ impl SimUserDriver {
             .map(|info| info.center())
     }
 
+    /// Mirror `GpuiUserDriver::text_center`: the center of the entity's TEXT
+    /// element, where a caret-seating click has to land.
+    ///
+    /// `bounds_center_f32`'s first key, `render-entity-{id}`, records no
+    /// bounds, so resolution falls through to `selectable-{id}` — a 16x24
+    /// bullet drag handle whose click never seats a caret. The text element is
+    /// what a user aims at, exists focused (`editable_text`) and unfocused
+    /// (`rendered_text`), and sits inside the focus wrapper, so the click
+    /// reaches both handlers.
+    fn text_center(&self, entity_id: &EntityUri) -> Option<(f32, f32)> {
+        self.pump();
+        let eid = entity_id.as_str();
+        let elements = self.bounds.all_elements();
+        ["editable_text", "rendered_text"]
+            .into_iter()
+            .find_map(|want| {
+                elements
+                    .iter()
+                    .find(|(_, i)| {
+                        i.entity_id.as_deref() == Some(eid)
+                            && i.widget_type.as_ref() == want
+                            && i.has_visible_area()
+                    })
+                    .map(|(_, i)| i.center())
+            })
+    }
+
     fn mouse_point(&self, entity_id: &EntityUri) -> Option<Point<Pixels>> {
         let (cx, cy) = self.bounds_center_f32(entity_id)?;
         Some(Point {
@@ -369,11 +396,30 @@ impl UserDriver for SimUserDriver {
         Ok(true)
     }
 
-    async fn click_entity(&self, entity_id: &EntityUri, _: &str) -> Result<(), anyhow::Error> {
-        let Some(pos) = self.mouse_point(entity_id) else {
+    /// A main-panel click is a caret-seating gesture, so it aims at the row's
+    /// text (`text_center`); sidebar rows navigate instead and keep the alias
+    /// chain. Falls back to the alias chain when the entity renders no text
+    /// element (page shells, non-block handles).
+    async fn click_entity(&self, entity_id: &EntityUri, region: &str) -> Result<(), anyhow::Error> {
+        let is_main = region
+            .parse::<Region>()
+            // ALLOW(unwrap_or): an unparseable region is the same "no sidebar
+            // scoping" case `GpuiUserDriver::require_click_center` treats as main.
+            .map(|r| r == Region::Main)
+            .unwrap_or(true);
+        let center = if is_main {
+            self.text_center(entity_id)
+        } else {
+            None
+        }
+        .or_else(|| self.bounds_center_f32(entity_id));
+        let Some((cx, cy)) = center else {
             anyhow::bail!("entity {entity_id} not in bounds");
         };
-        self.raw_click(pos);
+        self.raw_click(Point {
+            x: Pixels::from(cx),
+            y: Pixels::from(cy),
+        });
         Ok(())
     }
 
