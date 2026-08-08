@@ -1674,11 +1674,24 @@ pub struct RebindHandle {
     entity_cache: entity_view_registry::EntityCache,
     /// The live-engine cell the interaction pump reads (see [`LiveEngine`]).
     live_engine: LiveEngine,
+    /// The quick-open modal's state, so a caller can read the effect the
+    /// `open_search` chord produces. `None` if the window never built one.
+    search_ui: Option<Entity<search_ui::SearchUiState>>,
 }
 
 impl RebindHandle {
     pub fn window(&self) -> AnyWindowHandle {
         self.window
+    }
+
+    /// Whether the quick-open modal is open — the user-visible effect the
+    /// `open_search` chord exists to produce.
+    pub fn search_modal_open(&self, cx: &App) -> bool {
+        self.search_ui
+            .as_ref()
+            .expect("the window built a search modal")
+            .read(cx)
+            .open
     }
 
     /// Re-point the window at `session` + `engine`, re-seed the viewport from
@@ -1733,11 +1746,12 @@ pub fn launch_holon_window_rebindable(
         cx,
     )
     .map(
-        |(window, app_model, entity_cache, live_engine)| RebindHandle {
+        |(window, app_model, entity_cache, live_engine, search_ui)| RebindHandle {
             window,
             app_model,
             entity_cache,
             live_engine,
+            search_ui,
         },
     )
 }
@@ -1864,6 +1878,7 @@ fn launch_holon_window_impl(
     Entity<AppModel>,
     entity_view_registry::EntityCache,
     LiveEngine,
+    Option<Entity<search_ui::SearchUiState>>,
 )> {
     gpui_component::init(cx);
 
@@ -2367,28 +2382,39 @@ fn launch_holon_window_impl(
 
     // App-level cmd-K handler: open + focus the search modal. Registered
     // globally (like undo/redo) so it fires regardless of which element holds
-    // focus. Needs the window to focus the input, so it hops through
-    // `update_window`.
+    // focus.
+    //
+    // Focusing the input needs a `Window`, and this handler runs INSIDE the
+    // window's action dispatch — where GPUI has the window `take()`n out of
+    // `App::windows`, so an immediate `update_window` re-enters an empty slot
+    // and fails with "window not found". `defer` runs the hop at the end of
+    // the effect cycle, once the window is back; that is exactly what it is
+    // documented for.
     if let Some(search_entity) = search_entity_slot.get().cloned() {
         let journal_for_search = app_model.read(cx).engine.ui_state().dispatch_journal();
         cx.on_action(move |_: &OpenSearch, cx: &mut App| {
             let search_entity = search_entity.clone();
-            // Opening the panel IS the whole action, and it happens inside
-            // `update_window` — so the outcome is whether that hop ran.
+            // Opening the panel IS the whole action, so the deferred hop's
+            // result IS the outcome — hence the settle inside the defer. A
+            // window that dies before the effect flush leaves the entry
+            // Pending, which reads as "unknown", never as success.
             let seq = journal_for_search.record_window_action("open_search");
-            let opened = cx.update_window(wh, move |_, window, cx| {
-                search_entity.update(cx, |s, cx| {
-                    s.open(window, cx);
-                    cx.emit(search_ui::NotifySearchUi);
-                    cx.notify();
+            let journal = journal_for_search.clone();
+            cx.defer(move |cx| {
+                let opened = cx.update_window(wh, move |_, window, cx| {
+                    search_entity.update(cx, |s, cx| {
+                        s.open(window, cx);
+                        cx.emit(search_ui::NotifySearchUi);
+                        cx.notify();
+                    });
                 });
+                journal.settle(
+                    seq,
+                    opened
+                        .map(|_| ())
+                        .map_err(|e| format!("open_search: the window is gone: {e}")),
+                );
             });
-            journal_for_search.settle(
-                seq,
-                opened
-                    .map(|_| ())
-                    .map_err(|e| format!("open_search: the window is gone: {e}")),
-            );
             cx.stop_propagation();
         });
     }
@@ -2398,6 +2424,11 @@ fn launch_holon_window_impl(
     // target `history_id`, dispatches `navigation.activate`, and optimistically
     // updates the highlight. Registered globally (like undo/redo) so they fire
     // regardless of focus. Cleanly no-op when there are 0 tabs / no Nth tab.
+    //
+    // Both families work on the tab entity through `&mut App` alone — no
+    // `Window` is involved, so they must NOT hop through `update_window`: a
+    // handler invoked from the window's own action dispatch cannot re-enter
+    // that window (see the cmd-K handler above).
     if let Some(tab_entity) = tab_strip_entity_slot.get().cloned() {
         let tab_services: Arc<dyn BuilderServices> = app_model.read(cx).engine.clone();
 
@@ -2412,18 +2443,9 @@ fn launch_holon_window_impl(
                 let services = tab_services.clone();
                 let journal = tab_journal.clone();
                 cx.on_action(move |_: &$action, cx: &mut App| {
-                    let entity = entity.clone();
-                    let services = services.clone();
                     let seq = journal.record_window_action($name);
-                    let applied = cx.update_window(wh, move |_, _window, cx| {
-                        tab_strip::apply_cycle(&entity, &services, $delta, cx);
-                    });
-                    journal.settle(
-                        seq,
-                        applied
-                            .map(|_| ())
-                            .map_err(|e| format!("{}: the window is gone: {e}", $name)),
-                    );
+                    tab_strip::apply_cycle(&entity, &services, $delta, cx);
+                    journal.settle(seq, Ok(()));
                     cx.stop_propagation();
                 });
             }};
@@ -2437,18 +2459,9 @@ fn launch_holon_window_impl(
                 let services = tab_services.clone();
                 let journal = tab_journal.clone();
                 cx.on_action(move |_: &$action, cx: &mut App| {
-                    let entity = entity.clone();
-                    let services = services.clone();
                     let seq = journal.record_window_action($name);
-                    let applied = cx.update_window(wh, move |_, _window, cx| {
-                        tab_strip::apply_jump(&entity, &services, $n, cx);
-                    });
-                    journal.settle(
-                        seq,
-                        applied
-                            .map(|_| ())
-                            .map_err(|e| format!("{}: the window is gone: {e}", $name)),
-                    );
+                    tab_strip::apply_jump(&entity, &services, $n, cx);
+                    journal.settle(seq, Ok(()));
                     cx.stop_propagation();
                 });
             }};
@@ -2649,6 +2662,7 @@ fn launch_holon_window_impl(
         model_entity.get().unwrap().clone(),
         entity_cache,
         live_engine,
+        search_entity_slot.get().cloned(),
     ))
 }
 
