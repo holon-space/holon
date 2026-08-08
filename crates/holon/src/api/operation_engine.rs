@@ -132,6 +132,68 @@ pub struct DispatchingOperationEngine {
     /// a proposal emission. Defaults to [`TrustPolicy::trust_all`] — the gate
     /// is a no-op until a policy is configured.
     trust_policy: Arc<TrustPolicy>,
+    /// Per-entity serialization of the write-and-journal step (see
+    /// [`EntityWriteLocks`]).
+    entity_write_locks: EntityWriteLocks,
+}
+
+/// Serializes the write-and-journal step per entity.
+///
+/// Capturing an op's prior state, writing the new state, and pushing the undo
+/// entry are three steps that must be ONE step for a given entity: the editor
+/// spawns one un-awaited task per keystroke
+/// (`holon_frontend::operations::dispatch_operation`), so N writes to the same
+/// block are in flight at once. Interleaved, a later write reads a prior value
+/// the earlier write has already superseded (its stored inverse then skips
+/// characters) and entries land in completion rather than write order — both
+/// make every following undo fail its own precondition and be dropped.
+///
+/// Striped over a fixed table: two different entities serialize only on a hash
+/// collision, and the table never grows with the vault. The stripes are
+/// [`tokio::sync::Mutex`]es, whose FIFO fairness is what makes the write order
+/// equal the acquisition order (an unfair lock would preserve atomicity but not
+/// order, and the undo stack is an ordered structure).
+struct EntityWriteLocks {
+    stripes: Vec<tokio::sync::Mutex<()>>,
+}
+
+impl Default for EntityWriteLocks {
+    fn default() -> Self {
+        Self {
+            stripes: (0..64).map(|_| tokio::sync::Mutex::new(())).collect(),
+        }
+    }
+}
+
+impl EntityWriteLocks {
+    async fn lock(&self, entity_name: &str, id: &str) -> tokio::sync::MutexGuard<'_, ()> {
+        use std::hash::Hash;
+        use std::hash::Hasher;
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        entity_name.hash(&mut hasher);
+        id.hash(&mut hasher);
+        let stripe = (hasher.finish() % self.stripes.len() as u64) as usize;
+        self.stripes[stripe].lock().await
+    }
+
+    /// Lock the entity an op targets, named by the `id_key` param it uses
+    /// (`id` for ordinary ops, `target` for the block→page compound,
+    /// `canonical` for the merge). An op that names none — a `create` that
+    /// mints its own id — has no prior state to race for.
+    ///
+    /// Never call this while already holding a stripe: every hold in this
+    /// engine is a single, non-nested hold, which is what makes the
+    /// striping deadlock-free without a lock order.
+    async fn lock_target(
+        &self,
+        entity_name: &str,
+        params: &StorageEntity,
+        id_key: &str,
+    ) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        let id = params.get(id_key).and_then(Value::as_string)?;
+        Some(self.lock(entity_name, id).await)
+    }
 }
 
 /// The engine-level compound operation name: expands into `create` ops routed
@@ -293,6 +355,7 @@ impl DispatchingOperationEngine {
             history: None,
             template_source: None,
             trust_policy: Arc::new(TrustPolicy::trust_all()),
+            entity_write_locks: EntityWriteLocks::default(),
         }
     }
 
@@ -360,6 +423,7 @@ impl DispatchingOperationEngine {
             history: None,
             template_source: None,
             trust_policy: Arc::new(TrustPolicy::trust_all()),
+            entity_write_locks: EntityWriteLocks::default(),
         })
     }
 
@@ -449,6 +513,23 @@ impl DispatchingOperationEngine {
         history.record_batch(events).await
     }
 
+    /// Journal a completed step and persist the snapshot.
+    ///
+    /// Taking the entity's write guard by REFERENCE is the point of this
+    /// signature: the undo stack's order is the write order only while the step
+    /// that produced the entry still holds the entity, so releasing the stripe
+    /// before journaling stops compiling rather than silently reintroducing the
+    /// reorder. `None` is for ops that name no entity — a `create` that mints
+    /// its own id has no prior state to order against.
+    async fn journal_step(
+        &self,
+        _held: Option<&tokio::sync::MutexGuard<'_, ()>>,
+        entry: UndoEntry,
+    ) -> Result<()> {
+        self.undo_stack.write().await.push(entry);
+        self.persist().await
+    }
+
     /// Dispatch a stored op verbatim (used for inverse/forward replay). Never
     /// pushes an undo entry — replays bypass the push path by construction.
     /// Replay one undo/redo op through the dispatcher, returning the field
@@ -458,6 +539,18 @@ impl DispatchingOperationEngine {
     /// (identical-content set_field) must be reported
     /// as [`UndoOutcome::NoChange`], never as `Applied`.
     async fn replay(&self, op: &Operation) -> Result<Vec<FieldDelta>> {
+        // A replay writes the entity like any other write, so it queues behind
+        // the in-flight writes to that entity ([`EntityWriteLocks`]) instead of
+        // interleaving with one.
+        let id = op.params.get("id").and_then(Value::as_string);
+        let _write_guard = match id {
+            Some(id) => Some(
+                self.entity_write_locks
+                    .lock(op.entity_name.as_str(), id)
+                    .await,
+            ),
+            None => None,
+        };
         let result = self
             .dispatcher
             .execute_operation(
@@ -642,6 +735,21 @@ impl DispatchingOperationEngine {
 
         let block = EntityName::new("block");
 
+        // The origin block is read by the planner, rewritten by the
+        // constituents, and fingerprinted by the composite entry — a
+        // read-modify-write-journal over one entity, exactly the step
+        // [`EntityWriteLocks`] exists to make atomic. Held for the whole
+        // compound (the constituents dispatch straight to the dispatcher, so
+        // this hold never nests). DISCLOSED SCOPE: the other blocks a convert
+        // touches — the minted page, the re-homed children, the re-pointed
+        // linkers — get no stripe, so a concurrent write to one of THOSE can
+        // still race; the origin is the block a user is typing in when they
+        // reach for this chord, and one caret cannot be in two blocks.
+        let origin_guard = self
+            .entity_write_locks
+            .lock_target(block.as_str(), params, "target")
+            .await;
+
         // 1. Plan (read-only): origin content+marks, ordered children, resolved
         //    destination chain. Provider-side because it needs DB reads.
         let plan_result = self
@@ -654,6 +762,16 @@ impl DispatchingOperationEngine {
         })?;
         let plan = BlockToPagePlan::from_value(&plan_value)
             .map_err(|e| anyhow::anyhow!("convert_block_to_page: {e}"))?;
+
+        // The window a test must be able to force: everything this compound read
+        // above is about to be rewritten below. Holding the origin's stripe, a
+        // writer queued behind it cannot run here; drop the hold and this pause
+        // hands the block over, so the plan the constituents write from — and
+        // the inverse they journal — describes content the user has already
+        // moved past. Wide enough for a whole competing write, because that is
+        // the event being made forceable.
+        #[cfg(feature = "test-yield")]
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
         // RECOGNITION (resolve-before-mint, ADR 0029): before materializing the
         // destination page P, recognize whether `plan.page_id` is ALREADY held by
@@ -831,9 +949,16 @@ impl DispatchingOperationEngine {
                 precondition: Precondition::forward(&fp_changes),
                 redo_precondition: Precondition::inverse(&fp_changes),
             };
-            self.undo_stack.write().await.push(entry);
-            self.persist().await?;
+            // The second forced window: this entry describes state the
+            // constituents just wrote. Under the hold no other writer can reach
+            // the origin here; without it, a competing write overtakes and the
+            // entry is born stale — dropped by the very next undo.
+            #[cfg(feature = "test-yield")]
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            self.journal_step(origin_guard.as_ref(), entry).await?;
         }
+        // The origin's read-modify-write-journal step is complete.
+        drop(origin_guard);
 
         if let Some(history) = &self.history {
             self.record_history(
@@ -861,6 +986,19 @@ impl DispatchingOperationEngine {
 
         let block = EntityName::new("block");
 
+        // Same read-modify-write-journal step as the block→page compound, over
+        // the CANONICAL block: the planner reads its content, the content step
+        // rewrites it, and the composite entry fingerprints it. Held for the
+        // whole merge; the constituents dispatch straight to the dispatcher, so
+        // this hold never nests. DISCLOSED SCOPE: the duplicate and the moved
+        // children get no stripe — one hold at a time is what keeps the striping
+        // deadlock-free without a lock order, and the canonical is the block the
+        // merge rewrites in place.
+        let canonical_guard = self
+            .entity_write_locks
+            .lock_target(block.as_str(), params, "canonical")
+            .await;
+
         // 1. Plan (read-only). Every precondition is enforced here, so a refusal
         //    happens before the first write.
         let plan_result = self
@@ -873,6 +1011,10 @@ impl DispatchingOperationEngine {
             .ok_or_else(|| anyhow::anyhow!("merge_blocks: planner returned no plan payload"))?;
         let plan = MergeBlocksPlan::from_value(&plan_value)
             .map_err(|e| anyhow::anyhow!("merge_blocks: {e}"))?;
+
+        // Same forced window as the block→page compound: see there.
+        #[cfg(feature = "test-yield")]
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
         // Inverses are bucketed per STEP so undo can replay the steps in reverse,
         // each bucket in strict LIFO of its own forward ops (see the assembly).
@@ -1118,9 +1260,13 @@ impl DispatchingOperationEngine {
                 precondition: Precondition::forward(&fp_changes),
                 redo_precondition: Precondition::inverse(&fp_changes),
             };
-            self.undo_stack.write().await.push(entry);
-            self.persist().await?;
+            // Same second forced window as the block→page compound: see there.
+            #[cfg(feature = "test-yield")]
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            self.journal_step(canonical_guard.as_ref(), entry).await?;
         }
+        // The canonical's read-modify-write-journal step is complete.
+        drop(canonical_guard);
 
         if let Some(history) = &self.history {
             self.record_history(
@@ -1688,6 +1834,19 @@ impl OperationEngine for DispatchingOperationEngine {
                 .map(OpOutcome::proven);
         }
 
+        // Everything below — capture the prior state, write the new state,
+        // journal the inverse — is ONE step per entity (see
+        // [`EntityWriteLocks`]); the journal push must stay INSIDE the hold, or
+        // the stack's order is only whatever order the tasks happen to resume
+        // in. The compound interceptors above have already returned by here:
+        // each compound takes the stripe of the block it rewrites for its whole
+        // span, and its constituents go straight to the dispatcher, so no hold
+        // is ever nested.
+        let write_guard = self
+            .entity_write_locks
+            .lock_target(entity_name.as_str(), &params, "id")
+            .await;
+
         // Provenance stamping (ADR 0024 P8 / C2a): the dispatcher drops `origin`
         // before the write, so this is the last place holding it. For authoring
         // ops we inject a `_provenance` property into the params; it travels as
@@ -1775,9 +1934,11 @@ impl OperationEngine for DispatchingOperationEngine {
                 precondition: Precondition::forward(&result.changes),
                 redo_precondition: Precondition::inverse(&result.changes),
             };
-            self.undo_stack.write().await.push(entry);
-            self.persist().await?;
+            self.journal_step(write_guard.as_ref(), entry).await?;
         }
+        // The entity's write-and-journal step is complete; the history relation
+        // below is an append-only side record that orders itself.
+        drop(write_guard);
 
         // History relation (ADR 0024 P8 / C2b): append the op's field deltas to
         // the queryable op/effect stream. This is the append-only complement to

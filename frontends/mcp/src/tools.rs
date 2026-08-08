@@ -1111,7 +1111,7 @@ impl HolonMcpServer {
                     }
                     holon_api::UndoOutcome::Empty => (false, "Nothing to undo".to_string()),
                     holon_api::UndoOutcome::StaleDropped { reason } => {
-                        (false, format!("Undo skipped (stale): {reason}"))
+                        (false, holon_api::undo_step_dropped_detail("undo", &reason))
                     }
                     holon_api::UndoOutcome::NoChange => (
                         false,
@@ -1147,7 +1147,7 @@ impl HolonMcpServer {
                     }
                     holon_api::UndoOutcome::Empty => (false, "Nothing to redo".to_string()),
                     holon_api::UndoOutcome::StaleDropped { reason } => {
-                        (false, format!("Redo skipped (stale): {reason}"))
+                        (false, holon_api::undo_step_dropped_detail("redo", &reason))
                     }
                     holon_api::UndoOutcome::NoChange => (
                         false,
