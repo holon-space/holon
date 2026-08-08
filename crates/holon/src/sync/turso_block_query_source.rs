@@ -158,7 +158,12 @@ impl TursoBlockQuerySource {
                 ))
             },
         );
-        focus_roots.subscribe("focus_roots", roots_watch.stream);
+        // The source name is what tells the e2e correlator this mirror's rows
+        // are focus roots (a navigation's observable), not block rows.
+        focus_roots.subscribe(
+            holon_api::latency_e2e::FOCUS_ROOTS_SOURCE,
+            roots_watch.stream,
+        );
 
         Ok(Self {
             blocks,

@@ -3129,7 +3129,9 @@ impl BuilderServices for ReactiveEngine {
             holon_api::latency_e2e::interaction_dispatched(
                 &op_name,
                 target,
-                holon_api::latency_e2e::write_seq_from_params(&params),
+                holon_api::latency_e2e::Observable::BlockRow(
+                    holon_api::latency_e2e::write_seq_from_params(&params),
+                ),
             );
         }
         self.runtime_handle.spawn(async move {
@@ -3256,7 +3258,9 @@ impl BuilderServices for ReactiveEngine {
                 holon_api::latency_e2e::interaction_dispatched(
                     &intent.op_name,
                     target,
-                    holon_api::latency_e2e::write_seq_from_params(&intent.params),
+                    holon_api::latency_e2e::Observable::BlockRow(
+                        holon_api::latency_e2e::write_seq_from_params(&intent.params),
+                    ),
                 );
             }
             let t_dispatch = std::time::Instant::now();
@@ -3322,7 +3326,9 @@ impl BuilderServices for ReactiveEngine {
             holon_api::latency_e2e::interaction_dispatched(
                 &op_name,
                 target,
-                holon_api::latency_e2e::write_seq_from_params(&params),
+                holon_api::latency_e2e::Observable::BlockRow(
+                    holon_api::latency_e2e::write_seq_from_params(&params),
+                ),
             );
         }
         Box::pin(async move {
@@ -3822,11 +3828,15 @@ fn maybe_mirror_navigation_focus(ui_state: &UiState, intent: &crate::operations:
             // End-to-end latency: navigation is a first-class interaction.
             // Start the interaction clock keyed on the focused block; the
             // `latency_e2e` correlator closes it (stage="e2e", action="navigate")
-            // when the page's rows land in a LiveData mirror — a child row
-            // carries `parent_id = block_id`. Tokenless (reads carry no
-            // `write_seq`).
+            // when this block lands as the region's focus root — the delivery
+            // that IS the navigation. Block rows for the same id are a
+            // different observable and must never close it.
             if let Some(target) = block_id {
-                holon_api::latency_e2e::interaction_dispatched("navigate", target, None);
+                holon_api::latency_e2e::interaction_dispatched(
+                    "navigate",
+                    target,
+                    holon_api::latency_e2e::Observable::FocusRoot,
+                );
             }
             // ALLOW(entity_uri_from_raw): block_id from intent.params Value map
             // (operation-intent ingest)
