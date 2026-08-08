@@ -709,3 +709,122 @@ async fn undo_of_a_content_edit_restores_raw_previous_bytes() {
     assert_eq!(after.1, None, "undo of an edit must not mint marks");
     assert_eq!(links_rows(&handle, "legacy").await, vec![]);
 }
+
+/// A page named `name` with id `block:<id>`, so wiki-name links to it resolve.
+async fn create_page(d: &OperationDispatcher, entity: &EntityName, id: &str, name: &str) {
+    let mut p: holon_api::StorageEntity = HashMap::new();
+    p.insert("id".into(), Value::String(format!("block:{id}")));
+    p.insert("content".into(), Value::String(name.to_string()));
+    p.insert(
+        "tags".into(),
+        Value::Array(vec![Value::String("Page".to_string())]),
+    );
+    d.execute_operation(entity, "create", p)
+        .await
+        .expect("create page");
+}
+
+/// Ruling B — write-back emits the AUTHORED bytes, so re-ingesting its output
+/// is a fixed point for a RESOLVED link too.
+///
+/// The link resolves in `block_links` the moment it is typed, but the file
+/// keeps `[[Journals]]`. Feeding those bytes back through the write boundary
+/// (what the next boot's ingest does) leaves the `Name` mark and the
+/// `kind='page'` junction row exactly as they were — no `page`→`block` flip, so
+/// store and disk never disagree about the same link.
+///
+/// The bytes are the stored marks through `render_inline_marks`, which is what
+/// write-back emits: that `WritebackRenderer` applies no further transform is
+/// pinned by `holon-orgmode/tests/writeback_emits_authored_link_bytes.rs`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resolved_name_link_re_ingests_to_the_same_mark_and_junction() {
+    let (_backend, handle) = TursoBackend::new_in_memory()
+        .await
+        .expect("in-memory turso");
+    setup_schema(&handle).await;
+    let d = dispatcher(handle.clone());
+    let entity: EntityName = ENTITY.to_string().into();
+
+    create_page(&d, &entity, "journals", "Journals").await;
+    create_block(&d, &entity, "src", "see [[Journals]] now").await;
+
+    let (content, marks) = read_content_marks(&handle, "src").await;
+    let spans: Vec<MarkSpan> =
+        holon_api::marks_from_json(&marks.expect("marks present")).expect("marks JSON");
+    let junction = links_rows(&handle, "src").await;
+    assert_eq!(
+        junction,
+        vec![(
+            "Journals".to_string(),
+            "page".to_string(),
+            Some("block:journals".to_string())
+        )],
+        "typing a link to an EXISTING page must resolve in the junction immediately"
+    );
+
+    let on_disk = holon_org_format::render_inline_marks(&content, &spans);
+    assert_eq!(
+        on_disk, "see [[Journals]] now",
+        "write-back must put the authored name form on disk, not the resolved id"
+    );
+
+    // The next boot re-ingests those bytes through the write boundary.
+    set_content(&d, &entity, "src", &on_disk).await;
+
+    let (content_after, marks_after) = read_content_marks(&handle, "src").await;
+    assert_eq!(content_after, content, "re-ingest must not change content");
+    let spans_after: Vec<MarkSpan> =
+        holon_api::marks_from_json(&marks_after.expect("marks survive the re-ingest"))
+            .expect("marks JSON");
+    assert_eq!(spans_after, spans, "re-ingest must not rewrite the mark");
+    assert_eq!(
+        links_rows(&handle, "src").await,
+        junction,
+        "re-ingest must not flip the junction row from page-kind to block-kind"
+    );
+}
+
+/// The input side is untouched: a file already holding the RESOLVED form —
+/// legal authored input, and what every file written before ruling B carries —
+/// still ingests as a resolved block-kind link, and is its own fixed point.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resolved_form_link_on_disk_still_ingests_as_a_block_link() {
+    let (_backend, handle) = TursoBackend::new_in_memory()
+        .await
+        .expect("in-memory turso");
+    setup_schema(&handle).await;
+    let d = dispatcher(handle.clone());
+    let entity: EntityName = ENTITY.to_string().into();
+
+    create_page(&d, &entity, "journals", "Journals").await;
+    create_block(&d, &entity, "src", "see [[block:journals][Journals]] now").await;
+
+    let (content, marks) = read_content_marks(&handle, "src").await;
+    assert_eq!(content, "see Journals now");
+    let spans: Vec<MarkSpan> =
+        holon_api::marks_from_json(&marks.expect("marks present")).expect("marks JSON");
+    assert_eq!(
+        spans[0].mark,
+        InlineMark::Link {
+            target: holon_api::EntityRef::Scheme {
+                raw: "block:journals".to_string()
+            },
+            label: "Journals".to_string(),
+        },
+        "an id-form link keeps its authored id target"
+    );
+    assert_eq!(
+        links_rows(&handle, "src").await,
+        vec![(
+            "block:journals".to_string(),
+            "block".to_string(),
+            Some("block:journals".to_string())
+        )],
+        "an id-form link resolves trivially, exactly as before ruling B"
+    );
+    assert_eq!(
+        holon_org_format::render_inline_marks(&content, &spans),
+        "see [[block:journals][Journals]] now",
+        "and it is its own write-back fixed point"
+    );
+}

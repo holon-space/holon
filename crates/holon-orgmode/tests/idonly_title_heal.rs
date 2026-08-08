@@ -112,11 +112,6 @@ impl BlockReader for EmptyReader {
     async fn get_block_authoritative(&self, _: &EntityUri) -> anyhow::Result<Option<Block>> {
         Ok(None)
     }
-    /// No junction to resolve against — this double stores marks as given.
-    async fn resolve_link_marks(&self, _: &mut [Block]) -> anyhow::Result<()> {
-        Ok(())
-    }
-
     async fn iter_documents_with_blocks(&self) -> anyhow::Result<Vec<(EntityUri, Vec<Block>)>> {
         Ok(Vec::new())
     }

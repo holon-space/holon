@@ -63,6 +63,10 @@ The deterministic hash is computed at parse time. `target_id` is always known, e
 
 The link text in the content is **not rewritten** at this stage. It stays as the user typed it.
 
+**Org write-back emits the authored bytes** (ratified 2026-08-08, task #32). `[[Journals]]` stays `[[Journals]]` on disk even once the junction has resolved it to a real page: resolution lives in `block_links`, and the id-rewrite belongs to navigate (Phase 3). So the file, the stores and the marks all hold the same link form, and re-ingesting a file the renderer wrote changes nothing. The resolved form remains legal *input* — a file already carrying `[[block:<id>][Label]]` parses and resolves exactly as before, and is likewise re-emitted verbatim.
+
+Consequence, open: a name-form link does not follow a page RENAME — after the target page is renamed, clicking the link resolves the old name live and mints a new page. See the rename follow-up in `docs/Testing/BugFunnel.md`.
+
 ### Phase 3: Entity Creation (lazy, on navigate)
 
 The entity is created when the user **navigates to the link** (clicks it). Not on save — to avoid zombie entities.
@@ -239,7 +243,9 @@ Autocomplete enforces canonical casing: typing `projects/` matches the existing 
 
 ### Rename handling
 
-Renames require **zero link updates**. Since resolved links store only the ID and the display name is resolved at render time, renaming a document immediately updates how all links to it are displayed. No batch updates, no stale text.
+Renames require **zero link updates** for links in ID form: they store only the ID and resolve the display name at render time, so renaming a document immediately updates how every such link is displayed. No batch updates, no stale text.
+
+A link still in NAME form does not follow a rename — it names the old title, so clicking it after the rename resolves that name live and mints a new page. Since write-back keeps name-form links as authored (Phase 2), this is now the steady state for links the user never clicked, and rename-time link maintenance is an open follow-up (`docs/Testing/BugFunnel.md`).
 
 ## Architectural Boundaries
 

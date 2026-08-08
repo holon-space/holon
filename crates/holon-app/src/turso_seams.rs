@@ -178,90 +178,6 @@ impl CacheBlockReader {
     }
 }
 
-impl CacheBlockReader {
-    /// Links increment 2 — org-writeback resolved-link substitution.
-    ///
-    /// Upgrades dangling `Name` link marks to `Internal` for blocks whose
-    /// `block_links` row has resolved, so the file render emits the ratified
-    /// `[[<id>][<label>]]` form; re-ingest of that file then carries the
-    /// `Internal` mark through the normal write path, upgrading every store.
-    /// Render-time only — the stored marks are untouched here, and an
-    /// unresolved link keeps rendering as `[[<label>]]` (byte-stable).
-    async fn resolve_link_marks_impl(&self, blocks: &mut [Block]) -> anyhow::Result<()> {
-        use holon_api::EntityRef;
-        use holon_api::InlineMark;
-        let sources: Vec<String> = blocks
-            .iter()
-            .filter(|b| {
-                b.marks.as_ref().is_some_and(|ms| {
-                    ms.iter().any(|m| {
-                        matches!(
-                            &m.mark,
-                            InlineMark::Link {
-                                target: EntityRef::Name { .. },
-                                ..
-                            }
-                        )
-                    })
-                })
-            })
-            .map(|b| b.id.to_string())
-            .collect();
-        if sources.is_empty() {
-            return Ok(());
-        }
-        let in_list = sources
-            .iter()
-            .map(|s| format!("'{}'", s.replace('\'', "''")))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!(
-            "SELECT source_block_id, target, resolved_id FROM block_links WHERE kind = 'page' AND \
-             resolved_id IS NOT NULL AND source_block_id IN ({in_list})"
-        );
-        let rows = self
-            .cache
-            .db_handle()
-            .query(&sql, std::collections::HashMap::new())
-            .await
-            .map_err(|e| anyhow::anyhow!("[CacheBlockReader] block_links read failed: {e}"))?;
-        let mut resolved: std::collections::HashMap<(String, String), String> =
-            std::collections::HashMap::new();
-        for row in rows {
-            let get = |k: &str| -> anyhow::Result<String> {
-                row.get(k)
-                    .and_then(|v| v.as_string())
-                    .map(|s| s.to_string())
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("block_links row missing string column '{k}': {row:?}")
-                    })
-            };
-            resolved.insert(
-                (get("source_block_id")?, get("target")?),
-                get("resolved_id")?,
-            );
-        }
-        for b in blocks {
-            let bid = b.id.to_string();
-            let Some(marks) = b.marks.as_mut() else {
-                continue;
-            };
-            for span in marks {
-                if let InlineMark::Link { target, .. } = &mut span.mark {
-                    if let EntityRef::Name { name } = &*target {
-                        if let Some(rid) = resolved.get(&(bid.clone(), name.clone())) {
-                            // `rid` is a resolved block id from the junction —
-                            // already a schemed URI string, stored verbatim.
-                            *target = EntityRef::Scheme { raw: rid.clone() };
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
 #[async_trait::async_trait]
 impl BlockReader for CacheBlockReader {
     async fn get_blocks(&self, doc_id: &EntityUri) -> anyhow::Result<Vec<Block>> {
@@ -441,10 +357,6 @@ impl BlockReader for CacheBlockReader {
                 None => Ok(None),
             },
         }
-    }
-
-    async fn resolve_link_marks(&self, blocks: &mut [Block]) -> anyhow::Result<()> {
-        self.resolve_link_marks_impl(blocks).await
     }
 
     async fn iter_documents_with_blocks(&self) -> anyhow::Result<Vec<(EntityUri, Vec<Block>)>> {

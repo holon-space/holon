@@ -94,25 +94,6 @@ pub trait BlockReader: Send + Sync {
     /// Returns (doc_id, blocks) pairs. Path resolution is the caller's concern.
     async fn iter_documents_with_blocks(&self) -> Result<Vec<(EntityUri, Vec<Block>)>>;
 
-    /// Upgrade dangling `EntityRef::Name` link marks in `blocks` to the
-    /// resolved `EntityRef::Scheme` form, so the render emits the ratified
-    /// `[[<id>][<label>]]` instead of the bare `[[<label>]]`.
-    ///
-    /// # Why this is a render step and not part of the read
-    ///
-    /// The upgrade is **byte-visible in org output** but the stored marks are
-    /// never touched — it is a property of *rendering*, not of any particular
-    /// read. Hanging it off the reads instead made the output depend on where
-    /// the values happened to come from: a `Block` from `get_blocks` rendered
-    /// the resolved form, the byte-identical `Block` taken from the block feed
-    /// rendered the bare form. Applying it to the slice being rendered is what
-    /// makes value provenance stop mattering.
-    ///
-    /// Required, deliberately: a defaulted no-op is how a backend silently
-    /// loses the upgrade. An implementation that cannot resolve must say so
-    /// and state the consequence.
-    async fn resolve_link_marks(&self, blocks: &mut [Block]) -> Result<()>;
-
     /// Load `(file_id, content_hash)` pairs from the `file` table. Used by
     /// `FileSyncController` at startup to populate the projection-hash cache
     /// (`last_projection_hash`) before CDC has replayed file events into

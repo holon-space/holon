@@ -503,6 +503,66 @@ async fn create_page(
         .expect("create page");
 }
 
+/// Clicking a NAME-form link whose page already exists navigates to THAT page
+/// and creates nothing.
+///
+/// This is the whole reason write-back may keep the authored `[[Journals]]`
+/// bytes (task #32, ruling B): navigation resolves the name at click time,
+/// through the same `resolve_page_name` the junction uses, so the file never
+/// has to carry the id.
+#[tokio::test(flavor = "multi_thread")]
+async fn create_page_from_link_navigates_to_an_existing_page_without_creating_one() {
+    let (_backend, handle) = TursoBackend::new_in_memory()
+        .await
+        .expect("in-memory turso");
+    setup_schema(&handle).await;
+    let provider = provider(handle.clone());
+    let entity: EntityName = ENTITY.to_string().into();
+
+    create_page(
+        &provider,
+        &entity,
+        "block:journals",
+        "Journals",
+        "sentinel:no_parent",
+    )
+    .await;
+
+    let mut p = create_params("src", "see Journals now");
+    p.insert(
+        "marks".into(),
+        Value::String(name_link_marks("Journals", 4, 12)),
+    );
+    provider
+        .execute_operation(&entity, "create", p)
+        .await
+        .expect("create src");
+    assert_eq!(
+        link_resolved(&handle, "src").await.as_deref(),
+        Some("block:journals"),
+        "a name link to an existing page resolves in the junction at write time"
+    );
+
+    let before = block_count(&handle).await;
+    let mut op_params: holon_api::StorageEntity = HashMap::new();
+    op_params.insert("target".into(), Value::String("Journals".to_string()));
+    let result = provider
+        .execute_operation(&entity, "create_page_from_link", op_params)
+        .await
+        .expect("create_page_from_link");
+
+    assert_eq!(
+        result.response,
+        Some(Value::String("block:journals".to_string())),
+        "navigation must land on the EXISTING page, not a freshly minted one"
+    );
+    assert_eq!(
+        block_count(&handle).await,
+        before,
+        "no block may be created when the target page already exists"
+    );
+}
+
 /// Rename a page: an ordinary content edit on the existing entity (§5.3).
 async fn rename_page(
     provider: &SqlOperationProvider,

@@ -1,18 +1,14 @@
-//! The render-time link-mark upgrade belongs to the RENDER, not to the read
-//! that produced the values.
+//! Org write-back emits the user's AUTHORED link bytes, never a resolved form.
 //!
-//! `[[Some Page]]` is stored as a dangling `EntityRef::Name` mark. Once the
-//! `block_links` junction resolves it, write-back must emit the ratified
-//! `[[<id>][Some Page]]` form. That upgrade used to hang off
-//! `CacheBlockReader::get_blocks` / `get_block_authoritative`, which made the
-//! rendered BYTES depend on where the values came from — the identical `Block`
-//! taken from the block feed (whose matview projects `marks` verbatim) rendered
-//! the bare form instead.
+//! `[[Some Page]]` is stored as an `EntityRef::Name` mark and reaches disk as
+//! `[[Some Page]]` — even when the `block_links` junction has resolved it to a
+//! real block. Resolution lives in the junction; the id-rewrite belongs to
+//! NAVIGATE (`docs/Explanation/DESIGN_LINKS.md` Phase 2-3), not to write-back.
+//! An id-form mark (`[[block:…][Label]]`, equally legal authored input) is
+//! likewise rendered exactly as stored.
 //!
-//! These tests hand the controller values that are **feed-shaped** — marks left
-//! unresolved, exactly as the `home_by` holder will supply them after the
-//! Option C cutover — and pin that the file on disk still gets the resolved
-//! form, because the renderer applies the seam to whatever slice it renders.
+//! The render therefore takes the marks VERBATIM from the slice it is handed,
+//! so the bytes cannot depend on which read produced the values.
 
 #![cfg(feature = "di")]
 
@@ -36,36 +32,31 @@ use holon_orgmode::file_sync_controller::new_org_sync_controller;
 const LABEL: &str = "Linked Page";
 const RESOLVED_ID: &str = "block:550e8400-e29b-41d4-a716-446655440000";
 
-/// A block whose only content is a wiki link, stored the way every store
-/// stores it: a dangling `Name` target. This is the feed-shaped value.
-fn linking_block(id: &str, parent: &EntityUri) -> Block {
+/// A block whose only content is a wiki link, stored with the target the user
+/// authored — `Name` for `[[Label]]`, `Scheme` for `[[block:…][Label]]`.
+fn linking_block(id: &str, parent: &EntityUri, authored: EntityRef) -> Block {
     let mut b = Block::new_text(EntityUri::block(id), parent.clone(), LABEL);
     b.marks = Some(vec![MarkSpan {
         start: 0,
         end: LABEL.len(),
         mark: InlineMark::Link {
-            target: EntityRef::Name {
-                name: LABEL.to_string(),
-            },
+            target: authored,
             label: LABEL.to_string(),
         },
     }]);
     b
 }
 
-/// Stands in for `CacheBlockReader`: the stored marks are dangling, and the
-/// junction is consulted only through `resolve_link_marks`.
-///
-/// `resolves` off models a store that has no resolution for the link (or, for
-/// Loro, no junction at all) — the link must then keep rendering bare.
-struct JunctionReader {
+/// Stands in for `CacheBlockReader`. It has no way to reach the `block_links`
+/// junction from here, and that is the point: the render consumes stored marks
+/// only, so a store's resolution state cannot enter the file bytes.
+struct StoreReader {
     doc_id: EntityUri,
     blocks: Mutex<Vec<Block>>,
-    resolves: bool,
 }
 
 #[async_trait]
-impl BlockReader for JunctionReader {
+impl BlockReader for StoreReader {
     async fn get_blocks(&self, _: &EntityUri) -> anyhow::Result<Vec<Block>> {
         Ok(self.blocks.lock().unwrap().clone())
     }
@@ -93,30 +84,6 @@ impl BlockReader for JunctionReader {
             .iter()
             .find(|b| b.id == *id)
             .cloned())
-    }
-
-    /// The junction lookup, as `CacheBlockReader` does it: rewrite the TARGET
-    /// of every dangling `Name` link that has resolved, leaving the label and
-    /// the stored marks alone.
-    async fn resolve_link_marks(&self, blocks: &mut [Block]) -> anyhow::Result<()> {
-        if !self.resolves {
-            return Ok(());
-        }
-        for b in blocks {
-            let Some(marks) = b.marks.as_mut() else {
-                continue;
-            };
-            for span in marks {
-                if let InlineMark::Link { target, .. } = &mut span.mark {
-                    if matches!(target, EntityRef::Name { name } if name == LABEL) {
-                        *target = EntityRef::Scheme {
-                            raw: RESOLVED_ID.to_string(),
-                        };
-                    }
-                }
-            }
-        }
-        Ok(())
     }
 
     async fn iter_documents_with_blocks(&self) -> anyhow::Result<Vec<(EntityUri, Vec<Block>)>> {
@@ -155,7 +122,7 @@ impl DocumentManager for StubDocManager {
 }
 
 struct LiveOrderOrdering {
-    reader: Arc<JunctionReader>,
+    reader: Arc<StoreReader>,
 }
 
 #[async_trait]
@@ -212,23 +179,22 @@ fn prev_sibling(blocks: &[Block], block: &Block) -> Option<EntityUri> {
 
 struct Harness {
     controller: holon_filesystem::FileSyncController,
-    reader: Arc<JunctionReader>,
+    reader: Arc<StoreReader>,
     doc: Block,
     linker: Block,
     path: std::path::PathBuf,
     _tmp: tempfile::TempDir,
 }
 
-fn build_harness(resolves: bool) -> Harness {
+fn build_harness(authored: EntityRef) -> Harness {
     let doc_id = EntityUri::block("doc-1");
     let mut doc = Block::new_text(doc_id.clone(), EntityUri::no_parent(), "My Document");
     doc.set_page(true);
-    let linker = linking_block("b1", &doc_id);
+    let linker = linking_block("b1", &doc_id, authored);
 
-    let reader = Arc::new(JunctionReader {
+    let reader = Arc::new(StoreReader {
         doc_id: doc_id.clone(),
         blocks: Mutex::new(vec![linker.clone()]),
-        resolves,
     });
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().to_path_buf();
@@ -279,36 +245,33 @@ async fn write_back(h: &mut Harness) -> String {
     std::fs::read_to_string(&h.path).expect("write-back must have produced the file")
 }
 
-/// The load-bearing case: values arrive with marks UNRESOLVED (feed-shaped),
-/// and the file still gets the ratified form because the renderer — not the
-/// read — applies the upgrade.
+/// A name-form link reaches disk as the user typed it.
 #[tokio::test]
-async fn writeback_emits_the_resolved_form_for_feed_shaped_values() {
-    let mut h = build_harness(true);
-    let org = write_back(&mut h).await;
-    assert!(
-        org.contains(&format!("[[{RESOLVED_ID}][{LABEL}]]")),
-        "expected the ratified link form in the written org.\n--- file ---\n{org}"
-    );
-    assert!(
-        !org.contains(&format!("[[{LABEL}]]")),
-        "the bare form must not survive once the link has resolved.\n--- file ---\n{org}"
-    );
-}
-
-/// The negative half, so the seam cannot be satisfied by unconditionally
-/// rewriting links: a store with nothing to resolve renders the link exactly
-/// as authored. This is the documented `LoroBlockReader` behaviour.
-#[tokio::test]
-async fn an_unresolved_link_still_renders_bare() {
-    let mut h = build_harness(false);
+async fn a_name_form_link_writes_back_as_authored() {
+    let mut h = build_harness(EntityRef::Name {
+        name: LABEL.to_string(),
+    });
     let org = write_back(&mut h).await;
     assert!(
         org.contains(&format!("[[{LABEL}]]")),
-        "an unresolved link must render as authored.\n--- file ---\n{org}"
+        "write-back must emit the authored name form.\n--- file ---\n{org}"
     );
     assert!(
         !org.contains(RESOLVED_ID),
-        "nothing may invent a resolution.\n--- file ---\n{org}"
+        "nothing may substitute a resolved id for the authored name.\n--- file ---\n{org}"
+    );
+}
+
+/// The input side is untouched: an id-form link — legal authored input, and
+/// what every file written before this ruling holds — round-trips verbatim.
+#[tokio::test]
+async fn an_authored_id_link_writes_back_as_authored() {
+    let mut h = build_harness(EntityRef::Scheme {
+        raw: RESOLVED_ID.to_string(),
+    });
+    let org = write_back(&mut h).await;
+    assert!(
+        org.contains(&format!("[[{RESOLVED_ID}][{LABEL}]]")),
+        "an authored id link must survive write-back.\n--- file ---\n{org}"
     );
 }

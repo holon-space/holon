@@ -2010,12 +2010,11 @@ impl SutOrgRead for HeadlessFrontendComponent {
 
 /// `SutOrgRender` over the **production** render path (E1): render each tracked
 /// org file from the current SQL state through the same `CacheBlockReader`
-/// (doc-scoped recursive CTE ordered by `sort_key, id`) + the `block_links`
-/// link-mark upgrade + `OrgRenderer::render_document` the `FileSyncController`
-/// uses, and pair it with the on-disk bytes. The upgrade is what
-/// `WritebackRenderer::with_resolved_links` applies before EVERY production
-/// write, so omitting it here would compare a render prod never performs
-/// against bytes prod wrote. Binds `inv-org-render-fixed-point` (disk ==
+/// (doc-scoped recursive CTE ordered by `sort_key, id`) + `OrgRenderer::
+/// render_document` the `FileSyncController` uses, and pair it with the on-disk
+/// bytes. Marks go in VERBATIM, exactly as `WritebackRenderer` renders them —
+/// write-back emits authored link bytes, so no junction lookup belongs on
+/// either side of this comparison. Binds `inv-org-render-fixed-point` (disk ==
 /// rendered). Mirrors `TestContext::snapshot_org_render_pairs` but over the
 /// component's own injector + org_fs. The doc-block id per file is the parent
 /// the production parser reconstructs from the file's persisted `:ID:` drawer
@@ -2078,16 +2077,10 @@ impl SutOrgRender for HeadlessFrontendComponent {
             let Some(doc_block) = doc_blocks.get(doc_id.as_str()) else {
                 continue;
             };
-            let mut descendants = reader
+            let descendants = reader
                 .get_blocks(doc_id)
                 .await
                 .expect("SutOrgRender: get_blocks failed");
-            reader
-                .resolve_link_marks(&mut descendants)
-                .await
-                .unwrap_or_else(|e| {
-                    panic!("SutOrgRender: resolve_link_marks failed for doc {doc_id}: {e}")
-                });
             let rendered =
                 OrgRenderer::render_document(doc_block, &descendants, path, &doc_block.id);
             let disk = FileSystem::read_to_string(self.org_fs.as_ref(), path)
@@ -2111,19 +2104,10 @@ impl SutOrgRender for HeadlessFrontendComponent {
             let Some(doc_block) = doc_blocks.get(doc_uri.as_str()) else {
                 continue;
             };
-            let mut descendants = reader
+            let descendants = reader
                 .get_blocks(&doc_uri)
                 .await
                 .expect("SutOrgRender: get_blocks (materialized page) failed");
-            reader
-                .resolve_link_marks(&mut descendants)
-                .await
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "SutOrgRender: resolve_link_marks failed for materialized page \
-                         {doc_uri}: {e}"
-                    )
-                });
             let rendered =
                 OrgRenderer::render_document(doc_block, &descendants, &path, &doc_block.id);
             let disk = FileSystem::read_to_string(self.org_fs.as_ref(), &path)
