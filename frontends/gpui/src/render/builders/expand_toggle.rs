@@ -32,6 +32,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     };
 
     let expanded_handle = expanded.clone();
+    let seed_target = target_id.clone();
     let el_id = format!("expand-toggle-{}", target_id);
 
     // Dispatch the toggle as a real `set_field(collapsed)` op through the
@@ -69,6 +70,12 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
         .on_mouse_down(gpui::MouseButton::Left, move |_, window, _cx| {
             let new_val = !expanded_handle.get();
             expanded_handle.set(new_val);
+            // The `Mutable` above lives only as long as THIS view model, and a
+            // profile-driven row is re-synthesized on every resolve. The gate's
+            // durable authority is the view-local expansion store the builder
+            // seeds from, so the click has to land there too or the next
+            // structural rebuild discards it.
+            services.set_block_expanded_view(&seed_target, new_val);
             // Materialisation happens lazily on the next render when
             // `materialize_if_gated()` sees the open gate. No need to
             // call `services.interpret` here.
@@ -88,15 +95,18 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
         })
         .child(chevron.to_string());
 
-    // Register the chevron in the bounds registry under the canonical id
-    // so layout-PBT `ToggleCollapse` transitions can click it via
-    // `click_at_element(expand_toggle_id_for(target_id))`.
+    // Register the chevron under the canonical id so layout-PBT
+    // `ToggleCollapse` and the drivers can click it via
+    // `click_at_element(expand_toggle_id_for(target_id))`. The glyph travels
+    // with it because bounds alone cannot tell open from closed.
     let tracked_chevron = TransparentTracker::new(
         expand_toggle_id_for(&target_id),
         "expand_toggle",
         ctx.bounds_registry.clone(),
         chevron_el.into_any_element(),
-    );
+    )
+    .with_vm_node(Some(target_id.as_str()))
+    .with_displayed_text(chevron.to_string());
 
     let mut container = div().w_full().flex().flex_col();
 
