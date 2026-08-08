@@ -1,0 +1,62 @@
+dogfood-explorer 2026-08-08 — typed [[wiki links]] are never parsed; content
+mutates behind the user's back at the next app start
+=============================================================================
+App: main e1ba76e6, MCP 8710/8720, throwaway vault, loro=false (shipped default).
+
+A. EDITOR PATH — typing produces NO link at all
+   Typed into the outliner (real keystrokes via the MCP, 1 char per key):
+     "link to [[Some Page ]] here"   (the padded case)
+     "ctrl [[Other Page]] tail"      (unpadded, target does not exist)
+     "see [[Journals]] now"          (unpadded, target page EXISTS)
+
+   SQL after each (block view):
+     link to [[Some Page ]] here   marks=null
+     ctrl [[Other Page]] tail      marks=null
+     see [[Journals]] now          marks=null
+   block_links: rows[0]
+   backlinks  : rows[0]
+
+   So: no Link mark, no junction row, no backlink, no link styling and nothing
+   clickable — INCLUDING for a link whose target page exists.
+
+   The same typing path DOES produce marks for other kinds, so mark extraction
+   runs and only the link kind is missing:
+     typed "*bold* mid /ital/ end"
+       -> content "bold mid ital end"
+          marks [{0,4,Bold},{9,13,Italic}]
+
+B. INGEST PATH — the same text, written to an .org file, is parsed correctly
+   Notes.org authored on disk with "ingest link to [[Journals]] here":
+     content "ingest link to Journals here"
+     marks   [{15,23,Link,target={name:"Journals"},label:"Journals"}]
+     block_links: (block:ingest-link-block-1, "Journals", page, block:journals)
+   Padded "[[Journals ]]" ingests trimmed and resolved the same way, and the
+   write-back emits the resolved form "[[block:journals][Journals]]" (correct per
+   docs/Reference/ORG_SYNTAX.md — link targets are the documented scheme-carrying
+   exception). Ten sha samples over 10 s plus a forced re-ingest: byte-identical,
+   zero ERROR/WARN. The ingest side of the padded-link work is GREEN.
+
+C. THE CHURN — an app restart silently rewrites the user's text
+   The typed blocks were written to disk as literal "[[Some Page]]" etc. On the
+   NEXT app start those files are re-ingested, and the parser that the editor
+   skipped now runs:
+
+     block:faf06d6f…  "link to [[Some Page ]] here"  marks=null
+                  ->  "link to Some Page here"       marks=[{8,17,Link,…}]
+     block:f6a6126c…  "ctrl [[Other Page]] tail"     marks=null
+                  ->  "ctrl Other Page tail"         marks=[{5,15,Link,…}]
+     block:d34a115d…  "see [[Journals]] now"         marks=null
+                  ->  "see Journals now"             marks=[{4,12,Link,…}]
+
+     block_links after restart: rows[5] (was rows[0]) — the three typed links now
+     appear, two unresolved (resolved_id=null) and "Journals" resolved.
+     Journals/2026-08-08.org sha 342c6888… -> 483e489b…
+
+   Note the padded case loses its padding twice over: the renderer already wrote
+   "[[Some Page]]" to disk while SQL still held "[[Some Page ]]", so SQL and disk
+   disagreed for the whole session before the restart resolved it one way.
+
+   AFTER the restart everything works: links render underlined, a coordinate
+   click on "Journals" moved focus_roots.main to block:journals, and the
+   backlinks matview holds 3 rows. The feature is not missing — it is simply
+   never applied on the write path the user actually types through.
