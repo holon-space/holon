@@ -213,6 +213,83 @@ fn unmarked_markup_literal_reaches_a_fixed_point() {
     assert_fixed_point("the __default__ profile", &[], 3);
 }
 
+/// Raw `[[…]]` syntax sitting in UNMARKED content — what every non-org write
+/// path stores when a user types a link (bulk create, MCP, the editor cell).
+///
+/// Adoption normalizes the target and the label: `[[a  ]]` adopts to the
+/// content `a`, so the padded bytes are already spent by the time the file is
+/// re-read. The emission must therefore be the adopted form, which settles on
+/// the first cycle and costs nothing adoption was not taking anyway. Emitting
+/// the padded bytes instead makes the file disagree with its own re-parse.
+#[test]
+fn a_raw_link_with_a_padded_target_settles_immediately() {
+    assert_eq!(assert_settles_immediately("[[wJZ9  ]]", &[]), "[[wJZ9]]");
+}
+
+#[test]
+fn a_raw_link_with_a_padded_label_settles_immediately() {
+    assert_eq!(assert_settles_immediately("[[a][b ]]", &[]), "[[a][b]]");
+}
+
+/// Padding is the ONLY thing given up: the rung stays `Exact`, so no caller
+/// downstream of `RenderFidelity` is told the block lost content, and nothing
+/// is disclosed. Without this the fix could be satisfied by settling on a
+/// degraded rung.
+#[test]
+fn a_raw_link_with_a_padded_target_keeps_the_exact_rung() {
+    let mut block = Block::new_text(
+        EntityUri::block("padded-link"),
+        EntityUri::block("parent"),
+        "see [[wJZ9  ]] here",
+    );
+    block.marks = Some(Vec::new());
+    let (emitted, fidelity) = render_block_content_checked(&block);
+
+    assert_eq!(emitted, "see [[wJZ9]] here");
+    assert_eq!(fidelity, RenderFidelity::Exact);
+    assert_eq!(extract_inline_marks(&emitted).0, "see wJZ9 here");
+}
+
+/// A link that is ALREADY canonical must not be rewritten — the normalization
+/// is a repair, not a pass every link takes.
+#[test]
+fn a_canonical_raw_link_is_emitted_byte_for_byte() {
+    assert_eq!(
+        assert_settles_immediately("see [[a][b]] here", &[]),
+        "see [[a][b]] here"
+    );
+}
+
+/// A link that adopts to NOTHING is the one shape normalization must refuse.
+///
+/// Rewriting `[[   ]]` to what adoption leaves would emit the empty string:
+/// settled, `Exact`, silent — and the user's bytes gone with no disclosure.
+/// Settlement is not worth buying at that price, so these keep the raw bytes
+/// and stay on the loud rung. `ContentUnpreserved` is the assertion, not a
+/// tolerated leftover: the emission must SAY it could not represent this.
+#[test]
+fn a_link_that_adopts_to_nothing_keeps_its_bytes_and_stays_loud() {
+    for content in ["[[   ]]", "[[]]", "[[a][ ]]", "[[  ][  ]]", "a [[  ]] b"] {
+        let mut block = Block::new_text(
+            EntityUri::block("empty-adoption"),
+            EntityUri::block("parent"),
+            content,
+        );
+        block.marks = Some(Vec::new());
+        let (emitted, fidelity) = render_block_content_checked(&block);
+
+        assert_eq!(
+            emitted, content,
+            "{content:?}: the bytes must survive rather than be silently erased"
+        );
+        assert_eq!(
+            fidelity,
+            RenderFidelity::ContentUnpreserved,
+            "{content:?}: refusing to normalize must stay disclosed, not pass as Exact"
+        );
+    }
+}
+
 /// The 2026-08-07 dogfood payload, pinned as behaviour rather than as a bug.
 ///
 /// A `Code` mark on `b` between two LITERAL `~` characters is unrepresentable

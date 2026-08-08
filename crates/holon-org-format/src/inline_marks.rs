@@ -133,14 +133,82 @@ pub(crate) fn render_expecting(
 /// only thing standing between an unrepresentable block and an echo loop.
 pub(crate) fn render_candidates(content: &str, emit_marks: &[MarkSpan]) -> Vec<String> {
     let emit_marks = drop_duplicate_protective_marks(emit_marks);
-    let spans = quotable_markup_spans(content, &emit_marks);
+    let (content, emit_marks) = canonicalize_adopted_links(content, &emit_marks);
+    let spans = quotable_markup_spans(&content, &emit_marks);
     QUOTE_DELIMS
         .iter()
         .map(|delim| {
-            let (quoted, shifted) = quote_spans(content, &spans, *delim, &emit_marks);
+            let (quoted, shifted) = quote_spans(&content, &spans, *delim, &emit_marks);
             render_inline_marks(&quoted, &shifted)
         })
         .collect()
+}
+
+/// Rewrite each raw `[[…]]` literal in plain content to the bytes its own
+/// adoption re-renders as, re-anchoring `marks` across the length change.
+///
+/// Adoption ([`expected_reparse`]) normalizes what it takes: `[[a  ]]` adopts
+/// to the content `a`, so the padding is already spent the moment the file is
+/// re-read. Emitting the raw bytes therefore hands disk a form that re-renders
+/// differently — a state the ladder can only classify as "nothing settles" —
+/// while emitting the adopted form costs the same bytes and settles at once.
+///
+/// Two kinds of span are left alone, and both keep the loud rung:
+/// - one any mark overlaps — a mark has sealed it (the store has said those
+///   bytes are literal) or is anchored inside it;
+/// - one that adopts to NOTHING (`[[   ]]`, `[[a][ ]]`). "Rewrite it to what
+///   adoption leaves" would mean deleting the bytes, and an erasure nobody is
+///   told about is worse than the disclosed refusal to settle.
+fn canonicalize_adopted_links(content: &str, marks: &[MarkSpan]) -> (String, Vec<MarkSpan>) {
+    let mut out = String::with_capacity(content.len());
+    // (char position at the span's end, chars gained or lost there)
+    let mut deltas: Vec<(usize, isize)> = Vec::new();
+    let mut cursor = 0usize;
+    for (range, _) in link_adoptions(content) {
+        let raw = &content[range.clone()];
+        let start = content[..range.start].chars().count();
+        let end = content[..range.end].chars().count();
+        if marks.iter().any(|m| m.start < end && start < m.end) {
+            continue;
+        }
+        let (label, adopted_marks) = extract_inline_marks(raw);
+        let canonical = render_inline_marks(&label, &adopted_marks);
+        if canonical == raw || canonical.is_empty() {
+            continue;
+        }
+        out.push_str(&content[cursor..range.start]);
+        out.push_str(&canonical);
+        cursor = range.end;
+        deltas.push((
+            end,
+            canonical.chars().count() as isize - (end - start) as isize,
+        ));
+    }
+    if deltas.is_empty() {
+        return (content.to_string(), marks.to_vec());
+    }
+    out.push_str(&content[cursor..]);
+
+    // No mark boundary lies strictly inside a rewritten span (overlapping spans
+    // were skipped), so every boundary is wholly before or wholly after each
+    // delta and shifts by the sum of the ones it follows.
+    let shift = |pos: usize| -> usize {
+        let moved: isize = deltas
+            .iter()
+            .filter(|(at, _)| *at <= pos)
+            .map(|(_, d)| *d)
+            .sum();
+        (pos as isize + moved) as usize
+    };
+    let shifted = marks
+        .iter()
+        .map(|m| MarkSpan {
+            start: shift(m.start),
+            end: shift(m.end),
+            mark: m.mark.clone(),
+        })
+        .collect();
+    (out, shifted)
 }
 
 /// The parse-back form the render half is contractually required to produce —

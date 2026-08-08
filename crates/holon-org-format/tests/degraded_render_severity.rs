@@ -171,6 +171,39 @@ fn the_content_unpreserved_rung_still_errors_and_names_itself() {
     );
 }
 
+/// Raw `[[…]]` syntax with a padded target, stored unmarked — the shape the
+/// keystone hit on a bulk-created block. Adoption was always going to drop the
+/// padding, so emitting the adopted bytes is not a degradation at all: the
+/// terminal ERROR rung here would red `inv-no-observed-errors` for a block org
+/// represents perfectly well.
+#[test]
+fn a_padded_raw_link_is_not_a_degradation_at_all() {
+    let (fidelity, events) = render_capturing("severity-padded-link", "[[wJZ9  ]]", &[]);
+
+    assert_eq!(fidelity, RenderFidelity::Exact);
+    assert!(events.is_empty(), "unexpected disclosure: {events:?}");
+}
+
+/// The other side of that repair: a link adopting to NOTHING is NOT normalized,
+/// because the normalized form is the empty string. Emitting it would settle
+/// silently at `Exact` while deleting the user's bytes — the "degrades to look
+/// fine" outcome. The loud ERROR is the required answer here, so this test
+/// asserts the disclosure rather than its absence.
+#[test]
+fn a_link_that_adopts_to_nothing_still_errors() {
+    let (fidelity, events) = render_capturing("severity-empty-adoption", "[[   ]]", &[]);
+
+    assert_eq!(fidelity, RenderFidelity::ContentUnpreserved);
+    assert_eq!(
+        events,
+        vec![Captured {
+            level: Level::ERROR,
+            rung: Some("Unrepresentable".to_string()),
+        }],
+        "an unannounced erasure is worse than a disclosed refusal to settle"
+    );
+}
+
 /// An exact render says nothing at all — the disclosure is not chatter.
 #[test]
 fn an_exact_render_discloses_nothing() {
