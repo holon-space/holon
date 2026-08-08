@@ -676,3 +676,167 @@ fn an_opened_nested_page_paints_its_children(cx: &mut TestAppContext) {
         );
     }
 }
+
+// ── PROBE: the REAL shipped `embedded_page` profile ──────────────────────
+//
+// Every fixture above hand-writes its DSL. This probe loads the SHIPPED
+// `embedded_page` render string out of
+// `assets/default/types/block_profile.yaml` and reports what the materialised
+// content node actually IS at render time — the routing in
+// `render/builders/expand_toggle.rs` keys on `widget_name() ==
+// Some("live_query")`, so a wrapped node would silently take the `Panel`-shell
+// branch and collapse to 0px.
+
+/// The `render:` string of one `variants:` entry, extracted from the shipped
+/// yaml. No yaml crate is available to this test target, so this is a
+/// deterministic indent-driven extraction of the folded block, guarded by the
+/// caller's content assertions.
+fn shipped_render_expr(variant: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/default/types/block_profile.yaml");
+    let yaml = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("shipped profile yaml at {}: {e}", path.display()));
+
+    let mut lines = yaml.lines();
+    lines
+        .by_ref()
+        .find(|l| l.trim() == format!("- name: {variant}"))
+        .unwrap_or_else(|| panic!("variant {variant} in {}", path.display()));
+
+    let render_line = lines
+        .by_ref()
+        .take_while(|l| !l.trim().starts_with("- name:"))
+        .find(|l| l.trim_start().starts_with("render:"))
+        .unwrap_or_else(|| panic!("a render: key inside variant {variant}"));
+    assert_eq!(
+        render_line.trim(),
+        "render: >-",
+        "this extractor only understands the folded-block form"
+    );
+
+    let body_indent = render_line.len() - render_line.trim_start().len() + 2;
+    let body: Vec<&str> = lines
+        .take_while(|l| l.trim().is_empty() || l.len() - l.trim_start().len() >= body_indent)
+        .collect();
+    body.iter()
+        .map(|l| l.get(body_indent..).unwrap_or("").to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+/// One-level structural readout of a node, for the probe log.
+fn describe_node(label: &str, node: &ReactiveViewModel) {
+    let props: Vec<String> = node.props.lock_ref().keys().cloned().collect();
+    eprintln!(
+        "[probe] {label}: widget_name = {:?}, collection = {}, slot = {}, lazy_slot = {}, \
+         children = {}, props = {props:?}",
+        node.widget_name(),
+        node.collection.is_some(),
+        node.slot.is_some(),
+        node.lazy_slot.is_some(),
+        node.children.len(),
+    );
+}
+
+/// Render the given DSL in a real window, click the trailing chevron, and log
+/// the materialised content node plus the full painted set.
+fn probe_variant(cx: &mut TestAppContext, label: &str, dsl: &str) {
+    eprintln!("\n[probe] ===== variant {label} =====");
+    eprintln!("[probe] dsl =\n{dsl}");
+
+    let services = ExpandStoreServices::live();
+    holon_frontend::shadow_builders::register_render_dsl_widget_names();
+    let expr = holon_api::render_dsl::parse_render_dsl(dsl)
+        .unwrap_or_else(|e| panic!("shipped embedded_page DSL parses ({label}): {e}"));
+    let ctx = FrontendRenderContext::default().with_row(row_with(false));
+    let vm = Arc::new(services.interpret(&expr, &ctx));
+
+    let bounds = BoundsRegistry::new();
+    let (_view, mut vcx) = cx.add_window_view({
+        let bounds = bounds.clone();
+        let vm = vm.clone();
+        let services = services.clone() as Arc<dyn BuilderServices>;
+        move |_, _| {
+            ReactiveFixtureView::with_services_and_bounds(
+                vm,
+                services,
+                size(px(800.0), px(600.0)),
+                bounds,
+            )
+        }
+    });
+    vcx.run_until_parked();
+    bounds.flush();
+
+    let el_id = expand_toggle_id_for(TARGET);
+    let info = bounds
+        .all_elements()
+        .into_iter()
+        .find(|(id, _)| *id == el_id)
+        .map(|(_, i)| i)
+        .unwrap_or_else(|| panic!("no chevron registered under {el_id} ({label})"));
+    let center = gpui::point(
+        px(info.x + info.width / 2.0),
+        px(info.y + info.height / 2.0),
+    );
+
+    vcx.simulate_mouse_move(center, None, Default::default());
+    vcx.simulate_click(center, Default::default());
+    vcx.run_until_parked();
+    bounds.flush();
+
+    assert!(
+        vm.expanded.as_ref().expect("gate").get(),
+        "the chevron click must open the gate ({label}) — otherwise the readout below is \
+         about a missed hit-test, not about content shape"
+    );
+
+    match vm
+        .lazy_slot
+        .as_ref()
+        .expect("lazy slot")
+        .materialize_if_gated()
+    {
+        None => eprintln!("[probe] materialized widget_name = <NOT MATERIALIZED>"),
+        Some(node) => {
+            eprintln!(
+                "[probe] materialized widget_name = {:?}",
+                node.widget_name()
+            );
+            describe_node("materialized", &node);
+            for (i, child) in node.children.iter().enumerate() {
+                describe_node(&format!("materialized.child[{i}]"), child);
+            }
+        }
+    }
+
+    eprintln!("[probe] painted set ({label}):");
+    for (id, i) in bounds.all_elements() {
+        eprintln!(
+            "[probe]   ({id:?}, {:?}, {:?}, x={}, y={}, w={}, h={})",
+            i.widget_type, i.displayed_text, i.x, i.y, i.width, i.height
+        );
+    }
+}
+
+/// PROBE ONLY — it must PASS while printing, so the readout is obtained
+/// regardless of what the shapes turn out to be.
+#[gpui::test]
+fn real_profile_embedded_page_probe(cx: &mut TestAppContext) {
+    cx.update(|cx| gpui_component::init(cx));
+
+    let real = shipped_render_expr("embedded_page");
+    assert!(
+        real.contains("expand_toggle(") && real.contains("live_query("),
+        "mis-extracted the shipped embedded_page render string: {real:?}"
+    );
+
+    probe_variant(cx, "real-yaml", &real);
+    probe_variant(
+        cx,
+        "real-yaml-minus-render_entity",
+        &real.replace("render_entity()", r#"text(col("content"))"#),
+    );
+}
