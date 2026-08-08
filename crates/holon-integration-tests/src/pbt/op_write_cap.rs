@@ -40,6 +40,20 @@ use holon_frontend::user_driver::UserDriver;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
 use holon_pbt_core::capabilities::SutEdgeFieldWrite;
 
+/// True for the ADR 0028 D1 page-boundary refusal of `outdent` — the op engine
+/// declining to move a direct page child out of its page container.
+///
+/// Every `SutBlockTreeWrite` realization must treat this refusal as a NO-OP,
+/// not as a driver failure: it is the correct production outcome (prod shows a
+/// `CommandFailed` toast and leaves the tree unchanged) and
+/// `outdent_apply_to_ref` models the same no-op. Swallowing it does not blind
+/// the oracle — the reference decides page-ness independently, so an engine
+/// that refused an outdent the reference DID apply still diverges the tree
+/// comparison.
+pub fn is_page_boundary_outdent_refusal(msg: &str) -> bool {
+    msg.contains("escape its page container")
+}
+
 /// Shared oracle-synthetic → SUT-real id map. The composed runner accumulates
 /// split reconciliations into it; the writer resolves every incoming id through
 /// it before dispatching — exactly `E2ESut::resolve_uri`. A re-export, not a
@@ -83,11 +97,19 @@ impl OpDispatchWriter {
     }
 
     async fn execute(&self, op: &str, params: StorageEntity) {
+        if let Err(e) = self.try_execute(op, params).await {
+            panic!("block/{op} operation failed: {e}");
+        }
+    }
+
+    /// Dispatch without the fail-loud wrapper, for the one caller that has to
+    /// inspect a DOCUMENTED refusal ([`is_page_boundary_outdent_refusal`]).
+    async fn try_execute(&self, op: &str, params: StorageEntity) -> anyhow::Result<()> {
         let entity = "block".to_string().into();
         self.engine
             .execute_operation(&entity, op, params, holon_api::OpOrigin::User)
             .await
-            .unwrap_or_else(|e| panic!("block/{op} operation failed: {e}"));
+            .map(|_| ())
     }
 
     fn id_only(&self, id: &EntityUri) -> StorageEntity {
@@ -119,7 +141,17 @@ impl SutBlockTreeWrite for OpDispatchWriter {
     }
 
     async fn apply_outdent(&self, id: &EntityUri) {
-        self.execute("outdent", self.id_only(id)).await;
+        // The dispatch floor sees the ADR 0028 D1 page-boundary refusal RAW (its
+        // keystroke twin below sees the same refusal through the driver). It is a
+        // modelled no-op, not a failure — see `is_page_boundary_outdent_refusal`.
+        // Any OTHER dispatch error stays fail-loud.
+        if let Err(e) = self.try_execute("outdent", self.id_only(id)).await {
+            let msg = format!("{e:#}");
+            assert!(
+                is_page_boundary_outdent_refusal(&msg),
+                "block/outdent operation failed: {msg}"
+            );
+        }
     }
 
     async fn apply_move_up(&self, id: &EntityUri) {
@@ -315,19 +347,15 @@ impl SutBlockTreeWrite for KeystrokeBlockTreeWriter {
         // Shift+Tab → `outdent` (BackTab) in the `HeadlessEditorMirror`.
         let resolved = self.resolve(id);
         self.focus_editor(&resolved, "Outdent").await;
-        // ADR 0028 D1: outdenting a DIRECT CHILD OF A PAGE is REJECTED by the op
-        // engine — it would escape the page container into the enclosing page
-        // (the journals-phantom corruption). Prod surfaces a CommandFailed toast
-        // and leaves the tree unchanged; `outdent_apply_to_ref` models the SAME
-        // no-op. So a page-boundary rejection here is the CORRECT outcome, not a
-        // driver failure — swallow it as a no-op (matching the reference). Any
-        // OTHER dispatch error stays fail-loud.
+        // The ADR 0028 D1 page-boundary refusal is a modelled no-op, not a driver
+        // failure — see `is_page_boundary_outdent_refusal`. Any OTHER keystroke
+        // error stays fail-loud.
         if let Err(e) = self.driver.send_raw_keystroke("tab", &["shift"]).await {
             let msg = format!("{e:#}");
-            if msg.contains("escape its page container") {
-                return;
-            }
-            panic!("[Outdent/keystroke] tab [\"shift\"] failed: {msg}");
+            assert!(
+                is_page_boundary_outdent_refusal(&msg),
+                "[Outdent/keystroke] tab [\"shift\"] failed: {msg}"
+            );
         }
     }
 
