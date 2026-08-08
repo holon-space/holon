@@ -67,3 +67,8 @@ frontends/gpui/android/build-release-aab/
 # crates/holon-integration-tests/hand-authored-regressions/keystone.jsonl instead
 *.proptest-regressions
 **/proptest-regressions/*.txt
+
+# orchestrator lane artifacts — reports and per-lane logs never belong in revs
+# (ruled by Martin 2026-08-08; preserved copies go to the session scratchpad)
+lane-report-*.md
+lane-logs/
