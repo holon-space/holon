@@ -162,7 +162,9 @@ impl SyncBaseStore {
                 return;
             }
         }
-        if let Err(e) = std::fs::write(path, bytes) {
+        // ADR 0030 D3.1: a torn base sidecar feeds the 3-way diff exactly as a
+        // torn org file feeds ingest, so the same atomic replacement applies.
+        if let Err(e) = crate::fs_port::write_atomic_blocking(path, &bytes) {
             warn!(
                 "[SyncBaseStore] write sidecar {} failed: {e}",
                 path.display()

@@ -45,6 +45,8 @@ struct State {
     /// currently exists: a containment check must see the target of a write
     /// that was later removed or overwritten.
     write_targets: Vec<PathBuf>,
+    /// Armed by [`InMemoryFileSystem::fail_next_write_commit`].
+    fail_next_write_commit: bool,
 }
 
 pub struct InMemoryFileSystem {
@@ -67,6 +69,7 @@ impl InMemoryFileSystem {
                 dirs: BTreeSet::new(),
                 clock: 0,
                 write_targets: Vec::new(),
+                fail_next_write_commit: false,
             }),
             tx,
         }
@@ -90,6 +93,13 @@ impl InMemoryFileSystem {
     /// escaped the vault root is a defect even when the write itself failed.
     pub fn write_targets(&self) -> Vec<PathBuf> {
         self.lock().write_targets.clone()
+    }
+
+    /// Fail the NEXT `write` after its temp copy exists but before that copy
+    /// replaces the target — the crash window an in-place write would tear in.
+    /// The target must come out of it holding its complete previous bytes.
+    pub fn fail_next_write_commit(&self) {
+        self.lock().fail_next_write_commit = true;
     }
 
     /// Synchronous `create_dir_all` for non-async construction contexts
@@ -214,6 +224,7 @@ impl FileSystem for InMemoryFileSystem {
 
     async fn write(&self, path: &Path, contents: &[u8]) -> std::io::Result<()> {
         let path = normalize(path);
+        let temp = crate::fs_port::atomic_temp_path(&path)?;
         let (kind, tick) = {
             let mut st = self.lock();
             st.write_targets.push(path.clone());
@@ -232,19 +243,32 @@ impl FileSystem for InMemoryFileSystem {
             }
             st.clock += 1;
             let tick = st.clock;
-            let kind = if st.files.contains_key(&path) {
-                FileChangeKind::Modify
-            } else {
-                FileChangeKind::Create
-            };
+            // The temp side of the real adapter's temp+rename, so a test can
+            // fail the replacement at the commit boundary and see the target
+            // still hold its complete previous bytes (ADR 0030 D3.1).
             st.files.insert(
-                path.clone(),
+                temp.clone(),
                 FileEntry {
                     bytes: contents.to_vec(),
                     mtime_tick: tick,
                 },
             );
-            (kind, tick)
+            if st.fail_next_write_commit {
+                st.fail_next_write_commit = false;
+                st.files.remove(&temp);
+                return Err(std::io::Error::other(format!(
+                    "injected failure between temp write and rename (in-memory): {}",
+                    path.display()
+                )));
+            }
+            let entry = st.files.remove(&temp).expect("temp entry just inserted");
+            st.files.insert(path.clone(), entry);
+            // `Create`, not `Modify`, whether or not the target existed: an
+            // atomic replacement reaches the real watcher as the `To` half of a
+            // rename, which `RenamePairing` classifies as a Create. A double
+            // that emits a shape the production adapter never produces cannot
+            // be trusted to prove anything about the watcher.
+            (FileChangeKind::Create, tick)
         };
         // The "close" hook: the full content is committed before anyone is
         // notified. send only errors when there are no subscribers — fine.
@@ -355,7 +379,39 @@ mod tests {
         fs.write(Path::new("/holon-virtual/vault/a.org"), b"* B")
             .await
             .unwrap();
-        assert_eq!(rx.try_recv().unwrap().kind, FileChangeKind::Modify);
+        // Replacing an existing file announces a Create, matching the shape the
+        // production watcher derives from the rename that replacement performs.
+        assert_eq!(rx.try_recv().unwrap().kind, FileChangeKind::Create);
+    }
+
+    /// ADR 0030 D3.1 as the double must uphold it: a replacement that dies at
+    /// the commit boundary leaves the complete previous bytes visible, emits
+    /// no change, and leaves no temp behind.
+    #[tokio::test]
+    async fn a_failed_write_commit_leaves_the_previous_bytes_visible() {
+        let fs = InMemoryFileSystem::new();
+        let page = Path::new("/holon-virtual/vault/page.org");
+        fs.create_dir_all(Path::new("/holon-virtual/vault"))
+            .await
+            .unwrap();
+        fs.write(page, b"* Old complete").await.unwrap();
+        let mut rx = fs.subscribe();
+
+        fs.fail_next_write_commit();
+        let err = fs.write(page, b"* New complete").await.unwrap_err();
+        assert!(err.to_string().contains("temp write and rename"), "{err}");
+
+        assert_eq!(fs.read_to_string(page).await.unwrap(), "* Old complete");
+        assert!(rx.try_recv().is_err(), "a failed write announced a change");
+        let scanned = fs
+            .scan_directory(Path::new("/holon-virtual/vault"))
+            .await
+            .unwrap();
+        assert_eq!(scanned.files, vec![page.to_path_buf()]);
+
+        // Only the NEXT write fails; the double is not left permanently armed.
+        fs.write(page, b"* New complete").await.unwrap();
+        assert_eq!(fs.read_to_string(page).await.unwrap(), "* New complete");
     }
 
     #[tokio::test]
