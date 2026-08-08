@@ -266,7 +266,23 @@ impl EntityProfile {
     fn build_scope(&self, row: &HashMap<String, Value>, engine: &RhaiEngine) -> Scope<'static> {
         let mut scope = Scope::new();
 
+        // The computed pass below is the SOLE authority for these names in
+        // scope. A row that already carries them is an ALREADY-ENRICHED row
+        // (`ui_watcher::enrich_row` writes every computed field back, recording
+        // an unbound one as `Value::Null` to keep the row shape) — and seeding
+        // scope from that would turn typed ABSENCE into a `()` binding, which
+        // type-errors every condition that ANDs it. Recomputing is idempotent,
+        // so dropping the row's copy loses nothing.
+        let computed_names: BTreeSet<&str> = self
+            .computed_fields
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+
         for (key, value) in row {
+            if computed_names.contains(key.as_str()) {
+                continue;
+            }
             scope.push(key.clone(), value_to_dynamic(value));
 
             // Flatten `properties` object so inner fields (task_state, priority, etc.)
@@ -275,7 +291,9 @@ impl EntityProfile {
             if key == "properties" {
                 if let Value::Object(props) = value {
                     for (prop_key, prop_value) in props {
-                        if !row.contains_key(prop_key) {
+                        if !row.contains_key(prop_key)
+                            && !computed_names.contains(prop_key.as_str())
+                        {
                             scope.push(prop_key.clone(), value_to_dynamic(prop_value));
                         }
                     }
