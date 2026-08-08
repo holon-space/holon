@@ -155,11 +155,22 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
 
     if is_expanded {
         if let Some(content) = materialised {
+            // This container is content-sized (`flex_col`, no height), so a
+            // `live_query`'s `Panel` shape — shell `size_full` plus
+            // `height: relative(1.0)` — has no definite height to resolve
+            // against and collapses to 0 px, taking every row with it: the
+            // nested page opens onto nothing. Render it content-height, the
+            // same routing `column::render` uses for the same reason.
+            let content_el = if content.widget_name().as_deref() == Some("live_query") {
+                super::live_query::render_content_height(&content, ctx)
+            } else {
+                super::render(&content, ctx)
+            };
             container = container.child(
                 div()
                     .w_full()
                     .pl(px(ctx.style().tree_indent_px))
-                    .child(super::render(&content, ctx)),
+                    .child(content_el),
             );
         }
     }

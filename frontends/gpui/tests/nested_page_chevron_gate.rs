@@ -124,13 +124,62 @@ impl BuilderServices for ExpandStoreServices {
     ) -> Option<holon_api::RowProfile> {
         self.inner.resolve_profile(row)
     }
+    /// Ok + an immediately-closed stream: `shared_live_query_build` only checks
+    /// Ok-vs-Err before dropping it, so this is what lets a `live_query(...)`
+    /// build a real node instead of an error node.
     fn watch_query(
         &self,
-        query: &str,
-        lang: holon_api::QueryLanguage,
-        ctx: Option<holon_frontend::QueryContext>,
+        _query: &str,
+        _lang: holon_api::QueryLanguage,
+        _ctx: Option<holon_frontend::QueryContext>,
     ) -> anyhow::Result<holon_api::EnrichedChangeStream> {
-        self.inner.watch_query(query, lang, ctx)
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        Ok(tokio_stream::wrappers::ReceiverStream::new(rx))
+    }
+
+    /// Production-shaped: a DRIVER-BACKED collection whose `items` start EMPTY
+    /// and are filled by the driver `start_reactive_views` spawns. Mirrors
+    /// `ReactiveEngine::watch_query_live`, which starts the tree it returns.
+    fn watch_query_live(
+        &self,
+        _query: String,
+        _lang: holon_api::QueryLanguage,
+        item_template: RenderExpr,
+        _query_context: Option<holon_frontend::QueryContext>,
+        services: Arc<dyn BuilderServices>,
+    ) -> (holon_api::EntityUri, holon_frontend::LiveBlock) {
+        let provider: Arc<dyn holon_api::ReactiveRowProvider> = Arc::new(ChildRowProvider::new());
+        let view = holon_frontend::reactive_view::ReactiveView::new_collection(
+            holon_frontend::reactive_view::CollectionConfig {
+                layout: holon_frontend::reactive_view_model::CollectionVariant::list(0.0),
+                item_template,
+                sort_key: None,
+                virtual_child: None,
+                rules: Vec::new(),
+            },
+            provider,
+            None,
+            None,
+        );
+        let tree = ReactiveViewModel {
+            collection: Some(Arc::new(view)),
+            ..ReactiveViewModel::from_widget("list", HashMap::new())
+        };
+        holon_frontend::reactive_view::start_reactive_views(
+            &tree,
+            &services,
+            &self.inner.runtime_handle(),
+        );
+        let live_block = holon_frontend::LiveBlock {
+            tree,
+            structural_changes: Box::pin(futures::stream::pending()),
+            watch_guard: None,
+        };
+        // ALLOW(entity_uri_from_raw): synthetic canned-watcher key
+        (
+            holon_api::EntityUri::from_raw("query:nested-page-descendants"),
+            live_block,
+        )
     }
     fn widget_state(&self, id: &str) -> holon_frontend::WidgetState {
         self.inner.widget_state(id)
@@ -436,4 +485,194 @@ async fn an_external_fold_closes_the_nested_page_across_a_rebuild() {
         !rebuilt.expanded.as_ref().expect("gate").get(),
         "the rebuilt row must be closed after an external fold"
     );
+}
+
+// ── F1: an opened nested page must PAINT its children ───────────────────
+//
+// Dogfood 2026-08-08 finding F1: the chevron flips, `describe_ui` replaces the
+// UNEVALUATED node with a `live_query` node, and the window paints NOTHING.
+// Gate state and materialisation flags — what the tests above assert —
+// evidently do not imply painted child rows. This block asserts the painted
+// result.
+//
+// Faithfulness is the whole point here, so the fixture uses the REAL
+// `embedded_page` content shape (a `live_query`, not a static `text`) and a
+// DRIVER-BACKED collection: rows live behind a `ReactiveRowProvider` and appear
+// only once the view's driver runs, exactly as production's streaming
+// `watch_query_live` delivers them. The shared windowed harness
+// (`support::TestServices::watch_query_live`) instead hands back a
+// `new_static_with_layout` collection whose rows are ALREADY populated and
+// whose `start()` is a documented no-op — a fixture that paints without any
+// driver and therefore cannot see this bug at all.
+
+const EMBEDDED_PAGE_LIVE: &str = r#"expand_toggle(#{
+    hover_reveal_toggle: true,
+    header: text(col("content")),
+    content: live_query(#{
+        prql: "from descendants",
+        item_template: tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: text(col("content"))})
+    })
+})"#;
+
+/// The nested page's two real children, as the dogfood vault had them.
+const CHILD_ROWS: &[(&str, &str)] = &[
+    ("block:child-buy-milk", "buy milk"),
+    ("block:child-see-journals", "see Journals now"),
+];
+
+/// Rows behind a driver, like production's streaming rowset — NOT pre-populated
+/// into the view's `items`.
+struct ChildRowProvider {
+    rows: Vec<Arc<DataRow>>,
+}
+
+impl ChildRowProvider {
+    fn new() -> Self {
+        let rows = CHILD_ROWS
+            .iter()
+            .map(|(id, content)| {
+                let mut row = DataRow::new();
+                row.insert("id".into(), Value::String((*id).into()));
+                row.insert("content".into(), Value::String((*content).into()));
+                row.insert("parent_id".into(), Value::String(format!("block:{TARGET}")));
+                row.insert("sort_key".into(), Value::String("a0".into()));
+                Arc::new(row)
+            })
+            .collect();
+        Self { rows }
+    }
+}
+
+impl holon_api::ReactiveRowProvider for ChildRowProvider {
+    fn rows_snapshot(&self) -> Vec<Arc<DataRow>> {
+        self.rows.clone()
+    }
+
+    fn rows_signal_vec(
+        &self,
+    ) -> std::pin::Pin<Box<dyn futures_signals::signal_vec::SignalVec<Item = Arc<DataRow>> + Send>>
+    {
+        let v = futures_signals::signal_vec::MutableVec::new_with_values(self.rows.clone());
+        Box::pin(v.signal_vec_cloned())
+    }
+
+    fn keyed_rows_signal_vec(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn futures_signals::signal_vec::SignalVec<Item = (holon_api::RowKey, Arc<DataRow>)>
+                + Send,
+        >,
+    > {
+        let keyed: Vec<(holon_api::RowKey, Arc<DataRow>)> = self
+            .rows
+            .iter()
+            .map(|r| {
+                let id = r
+                    .get("id")
+                    .and_then(|v| v.as_string())
+                    .expect("provider row carries an id");
+                // ALLOW(entity_uri_from_raw): synthetic fixture row id
+                (
+                    (
+                        holon_api::EntityUri::from_raw(id),
+                        holon_api::Occurrence::Canonical,
+                    ),
+                    r.clone(),
+                )
+            })
+            .collect();
+        let v = futures_signals::signal_vec::MutableVec::new_with_values(keyed);
+        Box::pin(v.signal_vec_cloned())
+    }
+
+    fn cache_identity(&self) -> u64 {
+        0xF1_C0_DE
+    }
+}
+
+/// Every `text` node the window actually painted, by displayed text.
+fn painted_texts(bounds: &BoundsRegistry) -> Vec<String> {
+    bounds
+        .all_elements()
+        .into_iter()
+        .filter_map(|(_, i)| i.displayed_text.as_deref().map(str::to_string))
+        .collect()
+}
+
+/// THE DOGFOOD SYMPTOM AS A TEST: click the trailing chevron, then assert the
+/// nested page's children are on screen. Gate + materialisation flags are
+/// asserted first so a failure here cannot be confused with "the toggle did not
+/// flip" — if those pass and this fails, the gate opened onto nothing, which is
+/// exactly what Martin saw.
+#[gpui::test]
+fn an_opened_nested_page_paints_its_children(cx: &mut TestAppContext) {
+    cx.update(|cx| gpui_component::init(cx));
+    let services = ExpandStoreServices::live();
+
+    holon_frontend::shadow_builders::register_render_dsl_widget_names();
+    let expr = holon_api::render_dsl::parse_render_dsl(EMBEDDED_PAGE_LIVE)
+        .expect("embedded_page live DSL parses");
+    let ctx = FrontendRenderContext::default().with_row(row_with(false));
+    let vm = Arc::new(services.interpret(&expr, &ctx));
+
+    let bounds = BoundsRegistry::new();
+    let (_view, mut vcx) = cx.add_window_view({
+        let bounds = bounds.clone();
+        let vm = vm.clone();
+        let services = services.clone() as Arc<dyn BuilderServices>;
+        move |_, _| {
+            ReactiveFixtureView::with_services_and_bounds(
+                vm,
+                services,
+                size(px(800.0), px(600.0)),
+                bounds,
+            )
+        }
+    });
+    vcx.run_until_parked();
+    bounds.flush();
+
+    let el_id = expand_toggle_id_for(TARGET);
+    let info = bounds
+        .all_elements()
+        .into_iter()
+        .find(|(id, _)| *id == el_id)
+        .map(|(_, i)| i)
+        .unwrap_or_else(|| panic!("no chevron registered under {el_id}"));
+    let center = gpui::point(
+        px(info.x + info.width / 2.0),
+        px(info.y + info.height / 2.0),
+    );
+
+    vcx.simulate_mouse_move(center, None, Default::default());
+    vcx.simulate_click(center, Default::default());
+    vcx.run_until_parked();
+    bounds.flush();
+
+    // Preconditions: the affordance really opened. These are the assertions the
+    // round-1 tests made, and they are NOT the property under test.
+    assert!(
+        vm.expanded.as_ref().expect("gate").get(),
+        "precondition: the chevron click must open the gate"
+    );
+    assert!(
+        vm.lazy_slot
+            .as_ref()
+            .expect("lazy slot")
+            .materialize_if_gated()
+            .is_some(),
+        "precondition: the open gate must materialise the live_query content"
+    );
+
+    // THE PROPERTY: the page's children are on screen.
+    let painted = painted_texts(&bounds);
+    for (_, content) in CHILD_ROWS {
+        assert!(
+            painted.iter().any(|t| t.contains(content)),
+            "an opened nested page must PAINT its children: {content:?} is not among the \
+             painted text of the window. The gate is open and the content materialised, so \
+             the row opened onto nothing.\npainted = {painted:#?}"
+        );
+    }
 }
