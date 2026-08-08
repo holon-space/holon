@@ -30,6 +30,7 @@ use holon_api::InlineMark;
 use holon_api::MarkSpan;
 use holon_api::Value;
 use holon_core::OperationProvider;
+use holon_core::OperationWrapper;
 use holon_turso::schema_modules::CoreSchemaModule;
 use holon_turso::schema_modules::LinkSchemaModule;
 
@@ -71,15 +72,54 @@ async fn setup_schema(handle: &DbHandle) {
         .expect("LinkSchemaModule schema");
 }
 
-fn dispatcher(handle: DbHandle) -> OperationDispatcher {
-    let provider = Arc::new(SqlOperationProvider::with_edge_fields(
+fn sql_provider(handle: DbHandle) -> Arc<SqlOperationProvider> {
+    Arc::new(SqlOperationProvider::with_edge_fields(
         handle,
         TABLE.to_string(),
         ENTITY.to_string(),
         ENTITY.to_string(),
         vec![tags_descriptor()],
-    ));
-    OperationDispatcher::new(vec![provider as Arc<dyn OperationProvider>])
+    ))
+}
+
+fn dispatcher(handle: DbHandle) -> OperationDispatcher {
+    OperationDispatcher::new(vec![sql_provider(handle) as Arc<dyn OperationProvider>])
+}
+
+/// Sync target for the wrapper's type parameter. The prod SqlOnly wiring hands
+/// `OperationWrapper` a real org sync provider; nothing here asserts on sync,
+/// so the wrapper is built in passthrough mode with this as the phantom.
+struct NoSync;
+
+#[async_trait::async_trait]
+impl holon_core::traits::SyncableProvider for NoSync {
+    fn provider_name(&self) -> &str {
+        "no-sync"
+    }
+
+    async fn sync(
+        &self,
+        _: holon_api::StreamPosition,
+    ) -> holon_core::traits::Result<holon_api::StreamPosition> {
+        unreachable!("no test drives sync")
+    }
+
+    async fn sync_changes(
+        &self,
+        _: &[holon_core::traits::FieldDelta],
+    ) -> holon_core::traits::Result<()> {
+        Ok(())
+    }
+}
+
+/// The dispatcher as the SqlOnly composition root actually builds it: the SQL
+/// CRUD authority behind an [`OperationWrapper`] (`turso_seams.rs`), which is
+/// the member the operation registry holds. Anything the wrapper fails to
+/// forward is invisible to the dispatcher.
+fn wrapped_dispatcher(handle: DbHandle) -> OperationDispatcher {
+    let wrapper: OperationWrapper<NoSync> =
+        OperationWrapper::without_sync(sql_provider(handle) as Arc<dyn OperationProvider>);
+    OperationDispatcher::new(vec![Arc::new(wrapper) as Arc<dyn OperationProvider>])
 }
 
 async fn create_block(d: &OperationDispatcher, entity: &EntityName, id: &str, content: &str) {
@@ -306,6 +346,44 @@ async fn blur_recommit_of_stripped_label_preserves_marks() {
         links_rows(&handle, "src").await,
         vec![("Kept Page".to_string(), "page".to_string(), None)],
         "the junction row must survive the blur re-commit too",
+    );
+}
+
+/// Task #23 — the SAME link removal, driven through the wiring PROD actually
+/// registers. `live_content_edit_removing_link_clears_junction` above passes a
+/// BARE `SqlOperationProvider` to the dispatcher, so the ground-truth read
+/// reaches the SQL row; the composition root wraps that provider, and a
+/// wrapper that does not forward `read_block_content_marks` answers "I cannot
+/// read marks". The dispatcher then takes its fail-safe branch (never null on
+/// an unknown prior state) and the removed link's marks + junction row SURVIVE
+/// the edit — stale marks pointing into text that no longer holds a link.
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_a_link_clears_marks_through_the_wrapped_authority() {
+    let (_backend, handle) = TursoBackend::new_in_memory()
+        .await
+        .expect("in-memory turso");
+    setup_schema(&handle).await;
+    let d = wrapped_dispatcher(handle.clone());
+    let entity: EntityName = ENTITY.to_string().into();
+
+    create_block(&d, &entity, "src", "").await;
+    set_content(&d, &entity, "src", "[[Gone Page]]").await;
+    let (_, marks) = read_content_marks(&handle, "src").await;
+    assert!(marks.is_some(), "the link commit must populate marks");
+
+    set_content(&d, &entity, "src", "just plain text now").await;
+
+    let (content, marks) = read_content_marks(&handle, "src").await;
+    assert_eq!(content, "just plain text now");
+    assert_eq!(
+        marks, None,
+        "removing the link must clear marks even when the CRUD authority sits behind the \
+         registered OperationWrapper"
+    );
+    assert_eq!(
+        links_rows(&handle, "src").await,
+        vec![],
+        "the junction row must go with the marks"
     );
 }
 
