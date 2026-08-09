@@ -3244,6 +3244,15 @@ impl FileSyncController {
                 continue;
             }
             if let Some(old_block) = old_blocks.get(id) {
+                // Idempotence: keep a re-ingest that nobody edited from
+                // re-deriving a format field purely as a round-trip artifact of
+                // our own render (BugFunnel F4 — silent TODO promotion across
+                // restart). Only the updates pass consults this; a first-sight
+                // block never reaches here, so org interop is untouched.
+                let reconciled = self
+                    .format
+                    .reconcile_idempotent_reingest(old_block, new_block);
+                let new_block: &Block = reconciled.as_ref().unwrap_or(new_block);
                 // No-store conflict path: when the disk content for this block
                 // diverged from the base AND the store holds a competing edit,
                 // 3-way merge the two instead of clobbering with the disk value

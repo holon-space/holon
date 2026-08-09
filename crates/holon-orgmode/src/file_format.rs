@@ -110,6 +110,34 @@ impl FileFormatAdapter for OrgFormatAdapter {
         // so it is not part of this content-equivalence check.
     }
 
+    /// Idempotence guard (BugFunnel F4). A leading task keyword is an authoring
+    /// convention applied ONCE, at first sight — not a fact re-derived on every
+    /// boot. A plain block whose text merely starts with `TODO` renders to
+    /// `* TODO buy milk`; re-parsing that line hoists the keyword into
+    /// `task_state`, silently promoting persisted plain text to a task across a
+    /// restart. Detect exactly that round-trip and keep the block plain: the
+    /// stored block carried no `task_state`, and stripping the parsed keyword
+    /// from the STORED content reconstructs the parsed content byte-for-byte —
+    /// so nothing on disk changed but our own lossy render.
+    ///
+    /// A genuine on-disk keyword edit (`buy milk` → `TODO buy milk` typed into
+    /// the file) leaves the stored content WITHOUT the keyword, so the
+    /// reconstruction differs and the promotion stands — org interop preserved.
+    fn reconcile_idempotent_reingest(&self, stored: &Block, parsed: &Block) -> Option<Block> {
+        if stored.task_state().is_some() {
+            return None;
+        }
+        let promoted = parsed.task_state()?;
+        let rest = stored.content.strip_prefix(promoted.keyword.as_str())?;
+        if rest.trim_start() != parsed.content {
+            return None;
+        }
+        let mut plain = parsed.clone();
+        plain.set_task_state(None);
+        plain.content = stored.content.clone();
+        Some(plain)
+    }
+
     fn sync_document_metadata(&self, parsed: &Block, persisted: &mut Block) -> bool {
         let mut changed = false;
         let parsed_kws = parsed.todo_keywords();
