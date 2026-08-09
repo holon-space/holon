@@ -67,6 +67,7 @@ use holon_pbt_core::capabilities::RefEditorMirror;
 use holon_pbt_core::capabilities::RefEditorMirrorMut;
 use holon_pbt_core::capabilities::RefFocus;
 use holon_pbt_core::capabilities::RefFocusMut;
+use holon_pbt_core::capabilities::RefGlobalFocus;
 use holon_pbt_core::capabilities::RefLifecycle;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
@@ -405,6 +406,17 @@ impl RefFocus for EditorPureRef {
     }
     fn focused_cursor(&self, _: CapRegion) -> Option<CapCursor> {
         self.focus_cursor_main
+    }
+}
+
+/// The ADR-0010 global focus mirror is an engine-backed signal; this slice has
+/// no engine (its `focus_main` is the slice's own per-region focus, not that
+/// mirror). `None` is the documented pure-slice answer — it leaves
+/// `model_chord_click_focus`'s focus arm inert here, so the slice keeps
+/// deciding on its active editor alone.
+impl RefGlobalFocus for EditorPureRef {
+    fn global_focused_block(&self) -> Option<EntityUri> {
+        None
     }
 }
 

@@ -20,6 +20,7 @@ use holon_pbt_core::capabilities::RefBlockTreeMut;
 use holon_pbt_core::capabilities::RefEditorMirrorMut;
 use holon_pbt_core::capabilities::RefFocus;
 use holon_pbt_core::capabilities::RefFocusMut;
+use holon_pbt_core::capabilities::RefGlobalFocus;
 use holon_pbt_core::capabilities::RefLifecycle;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
 use holon_pbt_core::validation::Reason;
@@ -110,7 +111,7 @@ pub fn move_up_weighted_generator<R: RefBlockTree + RefFocus + RefLifecycle>(
 }
 
 pub fn move_up_apply_to_ref<
-    R: RefBlockTree + RefBlockTreeMut + RefFocus + RefFocusMut + RefEditorMirrorMut,
+    R: RefBlockTree + RefBlockTreeMut + RefFocus + RefGlobalFocus + RefFocusMut + RefEditorMirrorMut,
 >(
     block_id: &EntityUri,
     state: &mut R,
@@ -137,8 +138,15 @@ impl<R: RefBlockTree + RefFocus + RefLifecycle> TransitionFactory<R> for MoveUp 
     }
 }
 
-impl<R: RefBlockTree + RefBlockTreeMut + RefFocus + RefFocusMut + RefEditorMirrorMut + RefLifecycle>
-    TransitionRef<R> for MoveUp
+impl<
+    R: RefBlockTree
+        + RefBlockTreeMut
+        + RefFocus
+        + RefGlobalFocus
+        + RefFocusMut
+        + RefEditorMirrorMut
+        + RefLifecycle,
+> TransitionRef<R> for MoveUp
 {
     type Reason = Reason;
 

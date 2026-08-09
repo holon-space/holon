@@ -20,6 +20,7 @@ use holon_pbt_core::capabilities::RefBlockTreeMut;
 use holon_pbt_core::capabilities::RefEditorMirrorMut;
 use holon_pbt_core::capabilities::RefFocus;
 use holon_pbt_core::capabilities::RefFocusMut;
+use holon_pbt_core::capabilities::RefGlobalFocus;
 use holon_pbt_core::capabilities::RefLifecycle;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
 use holon_pbt_core::validation::Reason;
@@ -100,7 +101,7 @@ pub fn outdent_weighted_generator<R: RefBlockTree + RefLifecycle>(
 }
 
 pub fn outdent_apply_to_ref<
-    R: RefBlockTree + RefBlockTreeMut + RefFocus + RefFocusMut + RefEditorMirrorMut,
+    R: RefBlockTree + RefBlockTreeMut + RefFocus + RefGlobalFocus + RefFocusMut + RefEditorMirrorMut,
 >(
     block_id: &EntityUri,
     state: &mut R,
@@ -136,8 +137,15 @@ impl<R: RefBlockTree + RefLifecycle> TransitionFactory<R> for Outdent {
     }
 }
 
-impl<R: RefBlockTree + RefBlockTreeMut + RefFocus + RefFocusMut + RefEditorMirrorMut + RefLifecycle>
-    TransitionRef<R> for Outdent
+impl<
+    R: RefBlockTree
+        + RefBlockTreeMut
+        + RefFocus
+        + RefGlobalFocus
+        + RefFocusMut
+        + RefEditorMirrorMut
+        + RefLifecycle,
+> TransitionRef<R> for Outdent
 {
     type Reason = Reason;
 
