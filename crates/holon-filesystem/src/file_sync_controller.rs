@@ -5113,7 +5113,11 @@ impl FileSyncController {
                     None => anyhow::bail!(
                         "authoritative_name_chain({page_id}): non-page ancestor '{current}' while \
                          walking to root and subtree-root page '{root_page}' owns no resolvable \
-                         file — pages under non-pages are prohibited (interim ruling 2026-07-13)"
+                         file — a page's name-chain cannot be derived through a non-page ancestor, \
+                         so pages may nest only under pages (deliberate contract, ruled 2026-08-09; \
+                         see docs/Architecture/Model.md 'Page identity'). To fix: tag the ancestor \
+                         heading '{current}' with `:Page:`, or unnest this page so it sits directly \
+                         under a page (or the vault root)."
                     ),
                 }
             } else {

@@ -141,6 +141,34 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
     routed to SQL), and the unseeded-vault content case. Per-backing status
     lives in [Storage §Cells](Storage.md).
 
+## Page identity: name-chains derive only through page ancestors
+
+A page's identity — and the on-disk file it materializes to — is its
+**name-chain**: the titles of its page ancestors walked to the vault root
+(`Projects > Optimize RAG` → `Projects/Optimize RAG.org`). The chain is built
+by walking parent links and taking each ancestor's title as a path segment.
+
+**Pages nest only under pages. A `:Page:`-tagged heading under a non-page
+(plain) heading is refused at ingest** — a non-page ancestor contributes no
+name-chain segment, so the page's identity and file path cannot be derived
+through it. The refusal is topology-first and loud (it names the offending
+non-page ancestor and tells the author to either tag that ancestor `:Page:` or
+unnest the page), never a silent coercion to a plausible-but-colliding path and
+never a fake data-loss message.
+
+**This is a deliberate contract, not a limitation to be "fixed"** (Martin ruled
+Option A, 2026-08-09; keep-the-refusal, for identity-model simplicity — the
+earlier interim ruling 2026-07-13 in
+`docs/Proposals/PageHierarchy-2026-07-13.md` is now ratified). A future change
+must not silently legalize the topology; the refusal is pinned by
+`non_page_ancestor_fails_loud` (`crates/holon-filesystem/src/sync_ports.rs`) and
+by the controller-level `name_chain_error_propagation.rs`
+(`crates/holon-orgmode/tests/`).
+
+Refusal code sites: `DocumentManager::name_chain` and
+`FileSyncController::authoritative_name_chain` (both in
+`crates/holon-filesystem/src/`).
+
 ## Cell vs Mutable (the UI state cut)
 
 - `Cell<T>`, keyed `(uri, field, type)` (the registry cache key is
