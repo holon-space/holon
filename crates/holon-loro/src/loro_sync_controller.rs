@@ -1705,7 +1705,14 @@ pub fn block_to_params(snap: &SnapshotBlock) -> holon_api::StorageEntity {
         // dedicated params/paths above — never as flattened properties. A stray
         // edge key in `properties` (data pollution) would otherwise reach
         // SqlOperationProvider's edge partition as a non-Array and panic.
-        if EdgeField::is_edge_column(k) {
+        //
+        // Operation-control keys (`_order_rekeys`, …) are INSTRUCTIONS to the
+        // writer, never stored properties. This projection runs over a shared
+        // doc RECEIVED FROM A REMOTE PEER (`project_descendants_to_sql`), so a
+        // peer-supplied `_order_rekeys` would otherwise flatten onto params and
+        // reach the guarded writer as a live control key — a re-key primitive
+        // fed by untrusted data. Strip it here, at the projection boundary.
+        if EdgeField::is_edge_column(k) || holon_api::entity::is_operation_control_param(k) {
             continue;
         }
         params.entry(k.as_str().into()).or_insert_with(|| v.clone());
@@ -1803,8 +1810,10 @@ fn block_diff_params(old: &SnapshotBlock, new: &SnapshotBlock) -> holon_api::Sto
             // their dedicated Array params above — never as a flattened
             // property. A stray edge key in `properties` (legacy data pollution)
             // would otherwise reach SqlOperationProvider's edge partition as a
-            // non-Array and panic. Mirrors the guard in `block_to_params`.
-            if EdgeField::is_edge_column(k) {
+            // non-Array and panic. Operation-control keys are peer-untrusted
+            // writer instructions, stripped for the same reason as in
+            // `block_to_params`. Mirrors the guard there.
+            if EdgeField::is_edge_column(k) || holon_api::entity::is_operation_control_param(k) {
                 continue;
             }
             params.entry(k.as_str().into()).or_insert_with(|| v.clone());
@@ -1818,7 +1827,7 @@ fn block_diff_params(old: &SnapshotBlock, new: &SnapshotBlock) -> holon_api::Sto
         // one-shot silent data loss). `prepare_update` removes the key on this
         // sentinel; without it the merge only ever inserts.
         for k in old.properties.keys() {
-            if EdgeField::is_edge_column(k) {
+            if EdgeField::is_edge_column(k) || holon_api::entity::is_operation_control_param(k) {
                 continue;
             }
             if !new.properties.contains_key(k) {
@@ -1982,6 +1991,65 @@ mod marks_outbound_tests {
             *marks_val,
             Value::Null,
             "expected Null sentinel for cleared marks"
+        );
+    }
+
+    /// PROBE-C: a peer-supplied `_order_rekeys` property must NOT survive the
+    /// Loro→SQL projection. `project_descendants_to_sql` runs `block_to_params`
+    /// over a shared doc received from a remote peer; without the strip, the
+    /// control key flattens onto the params the guarded writer then interprets
+    /// — a re-key primitive fed by untrusted data.
+    #[test]
+    fn block_to_params_strips_a_peer_supplied_order_rekeys_property() {
+        let mut b = Block::new_text(
+            EntityUri::block("b1"),
+            EntityUri::no_parent(),
+            "hi".to_string(),
+        );
+        b.properties.insert(
+            holon_api::entity::ORDER_REKEYS_PARAM.to_string(),
+            Value::Object(std::collections::HashMap::from([(
+                "block:victim".to_string(),
+                Value::String("ZZZZ".to_string()),
+            )])),
+        );
+        let params = block_to_params(&SnapshotBlock {
+            block: b,
+            sort_key: "A0".to_string(),
+        });
+        assert!(
+            !params.contains_key(holon_api::entity::ORDER_REKEYS_PARAM),
+            "a peer-supplied control key must not reach the writer as a live params key; got \
+             {params:?}"
+        );
+    }
+
+    /// The diff path is the other projection door — a property that APPEARS
+    /// between snapshots (peer edit) must not carry the control key through
+    /// either.
+    #[test]
+    fn block_diff_params_strips_a_peer_supplied_order_rekeys_property() {
+        let old = block_with_marks("hi", None);
+        let mut new_block = Block::new_text(
+            EntityUri::block("b1"),
+            EntityUri::no_parent(),
+            "hi".to_string(),
+        );
+        new_block.properties.insert(
+            holon_api::entity::ORDER_REKEYS_PARAM.to_string(),
+            Value::Object(std::collections::HashMap::from([(
+                "block:victim".to_string(),
+                Value::String("ZZZZ".to_string()),
+            )])),
+        );
+        let new = SnapshotBlock {
+            block: new_block,
+            sort_key: "A0".to_string(),
+        };
+        let params = block_diff_params(&old, &new);
+        assert!(
+            !params.contains_key(holon_api::entity::ORDER_REKEYS_PARAM),
+            "the diff projection must strip a peer-supplied control key too; got {params:?}"
         );
     }
 

@@ -474,9 +474,37 @@ async fn read_assigned_to(
     }))
 }
 
-fn json_map_to_storage_entity(map: HashMap<String, serde_json::Value>) -> StorageEntity {
+/// Refuse a params key that the WRITER INTERPRETS rather than stores.
+///
+/// The operation-control namespace (`_order_rekeys`, `after_block_id`,
+/// `_routing_*`, `_expected_*`) is how in-process callers instruct the storage
+/// layer. Accepted from a client it becomes a set of write primitives the
+/// intent boundary otherwise refuses — `_order_rekeys` rewrites any row's
+/// `sort_key` with no `FieldDelta`, no inverse and no undo, which is precisely
+/// what `BlockWriteField::parse` refuses when it rejects `sort_key` (ADR 0005:
+/// the order key is internal). Refuse loudly rather than strip, so a client
+/// that meant something by the key learns it did nothing.
+fn reject_operation_control_key(key: &str) -> Result<(), rmcp::ErrorData> {
+    if holon_core::block_ordering::is_operation_control_param(key) {
+        return Err(rmcp::ErrorData::invalid_params(
+            format!(
+                "{key:?} is an internal operation-control parameter and cannot be set through \
+                 this tool — remove it"
+            ),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn json_map_to_storage_entity(
+    map: HashMap<String, serde_json::Value>,
+) -> Result<StorageEntity, rmcp::ErrorData> {
     map.into_iter()
-        .map(|(k, v)| (std::sync::Arc::from(k.as_str()), json_to_holon_value(v)))
+        .map(|(k, v)| {
+            reject_operation_control_key(&k)?;
+            Ok((std::sync::Arc::from(k.as_str()), json_to_holon_value(v)))
+        })
         .collect()
 }
 
@@ -1021,7 +1049,7 @@ impl HolonMcpServer {
         &self,
         Parameters(params): Parameters<ExecuteOperationParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let storage_entity = json_map_to_storage_entity(params.params);
+        let storage_entity = json_map_to_storage_entity(params.params)?;
 
         let response = self
             .service()
@@ -1498,7 +1526,7 @@ impl HolonMcpServer {
         &self,
         Parameters(params): Parameters<ExecuteCommandParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let mut storage_entity = json_map_to_storage_entity(params.params);
+        let mut storage_entity = json_map_to_storage_entity(params.params)?;
         storage_entity
             .entry("id".into())
             .or_insert_with(|| holon_api::Value::String(params.block_id.clone()));
@@ -1722,6 +1750,7 @@ impl HolonMcpServer {
         // round-trip stable.
         storage.insert("ID".into(), Value::String(new_id_bare.clone()));
         for (k, v) in params.properties.into_iter() {
+            reject_operation_control_key(&k)?;
             storage.insert(std::sync::Arc::from(k.as_str()), json_to_holon_value(v));
         }
 
@@ -4699,8 +4728,50 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("id".into(), serde_json::json!("block-1"));
         map.insert("priority".into(), serde_json::json!(3));
-        let entity = json_map_to_storage_entity(map);
+        let entity = json_map_to_storage_entity(map).expect("ordinary keys are accepted");
         assert_eq!(entity.get("id").unwrap(), &Value::String("block-1".into()));
         assert_eq!(entity.get("priority").unwrap(), &Value::Integer(3));
+    }
+
+    /// The MCP boundary must not let a client hand the storage layer an
+    /// instruction. `_order_rekeys` is the sharp one: accepted, it rewrites any
+    /// row's `sort_key` with no FieldDelta, no inverse and no undo — the write
+    /// `BlockWriteField::parse` already refuses under the name `sort_key`
+    /// (ADR 0005).
+    #[test]
+    fn json_map_to_storage_entity_refuses_operation_control_keys() {
+        // The two LIVE control keys. The predicate also covers the retired
+        // `_routing_*` / `_expected_*` prefixes; naming those here would
+        // reintroduce the literals archlint exists to keep out of the tree.
+        for key in [
+            holon_core::block_ordering::ORDER_REKEYS_PARAM,
+            holon_api::entity::POSITION_AFTER_BLOCK_ID_PARAM,
+        ] {
+            let mut map = HashMap::new();
+            map.insert(key.to_string(), serde_json::json!({"block:victim": "ZZZZ"}));
+            let err = json_map_to_storage_entity(map)
+                .err()
+                .unwrap_or_else(|| panic!("{key} must be refused at the boundary"));
+            assert!(
+                format!("{err:?}").contains(key),
+                "the refusal must name the offending key, got {err:?}"
+            );
+        }
+    }
+
+    /// The underscore prefix alone is NOT the rule: org source blocks carry
+    /// real underscore-named properties, and those must still flow through.
+    #[test]
+    fn json_map_to_storage_entity_keeps_underscore_named_block_properties() {
+        let mut map = HashMap::new();
+        map.insert(
+            "_source_header_args".into(),
+            serde_json::json!(":results raw"),
+        );
+        let entity = json_map_to_storage_entity(map).expect("a real block property is not control");
+        assert_eq!(
+            entity.get("_source_header_args").unwrap(),
+            &Value::String(":results raw".into())
+        );
     }
 }

@@ -11,6 +11,7 @@ mod tests {
     use holon_api::Value;
 
     use crate::block_ordering::BlockOrdering;
+    use crate::block_ordering::MintedPosition;
     use crate::block_ordering::OrderKeyMinting;
     use crate::fractional_index::gen_key_between;
     use crate::traits::*;
@@ -239,7 +240,7 @@ mod tests {
             &self,
             parent_id: &EntityUri,
             after_id: Option<&EntityUri>,
-        ) -> Result<String> {
+        ) -> Result<MintedPosition> {
             let (prev_key, next_key) = match after_id {
                 None => {
                     let first = self.sorted_children(parent_id.as_str()).into_iter().next();
@@ -257,7 +258,10 @@ mod tests {
                     (Some(after_block.sort_key), next_sib.map(|b| b.sort_key))
                 }
             };
+            // This double keeps every sibling key minted, so a position here
+            // never displaces one.
             gen_key_between(prev_key.as_deref(), next_key.as_deref())
+                .map(MintedPosition::alone)
                 .map_err(|e| format!("{e:#}").into())
         }
     }
@@ -270,7 +274,16 @@ mod tests {
             parent_id: &EntityUri,
             after_id: Option<&EntityUri>,
         ) -> Result<()> {
-            let new_sort_key = self.new_child_anchor(parent_id, after_id).await?;
+            // This double keeps every sibling key minted, so a position never
+            // displaces one and the re-key half is always empty.
+            let (new_sort_key, rekeys) = self
+                .new_child_anchor(parent_id, after_id)
+                .await?
+                .into_parts();
+            assert!(
+                rekeys.is_empty(),
+                "MemStore never produces an unkeyed sibling, so a position must displace nothing"
+            );
             let want = canon(uri.as_str());
             let mut blocks = self.blocks.lock().unwrap();
             let block = blocks

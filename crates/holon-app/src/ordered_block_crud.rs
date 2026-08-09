@@ -32,6 +32,7 @@ use holon_core::OperationProvider;
 use holon_core::OperationResult;
 use holon_core::Result;
 use holon_core::block_ordering::BlockOrdering;
+use holon_core::block_ordering::MintedPosition;
 use holon_core::block_ordering::OrderKeyMinting;
 
 /// Wraps the SqlOnly block-CRUD provider so placement-changing writes carry a
@@ -48,10 +49,14 @@ impl OrderedBlockCrud {
         Self { inner, order_owner }
     }
 
-    /// The key a block appended as `parent`'s last child must carry.
+    /// The position a block appended as `parent`'s last child must carry.
     /// `moving` is excluded from the anchor search so a re-parent does not
     /// try to anchor after itself.
-    async fn append_key(&self, parent: &EntityUri, moving: Option<&EntityUri>) -> Result<String> {
+    async fn append_key(
+        &self,
+        parent: &EntityUri,
+        moving: Option<&EntityUri>,
+    ) -> Result<MintedPosition> {
         let children = self.order_owner.children(parent).await?;
         let last = children
             .iter()
@@ -108,18 +113,23 @@ impl OperationProvider for OrderedBlockCrud {
                 if let Some(parent) = params.get("parent_id").and_then(|v| v.as_string()) {
                     // ALLOW(entity_uri_from_raw): op-dispatch parent id string → EntityUri
                     let parent = EntityUri::from_raw(parent);
-                    let key = self.append_key(&parent, None).await?;
-                    params.insert("sort_key".into(), Value::String(key));
+                    // Key AND any sibling re-key it is expressed against, so
+                    // both ride the create into its transaction (ADR 0030 D1).
+                    self.append_key(&parent, None)
+                        .await?
+                        .into_params(&mut params);
                 }
                 self.inner
                     .execute_operation(entity_name, op_name, params)
                     .await
             }
             // A re-parent moves the block into a sequence its old key has no
-            // meaning in, so it is appended to the new parent. The key is
-            // minted BEFORE the parent write, while the mover is still absent
-            // from the new sibling set, then written as its own field so both
-            // land through this same provider.
+            // meaning in, so it is appended to the new parent. The position is
+            // decided while the mover is still absent from the new sibling set,
+            // then parent, key and sibling re-keys are written as ONE placement
+            // — split across transactions, a mid-failure left the block
+            // re-parented under a key from its old parent's sequence
+            // (ADR 0030 D1).
             "set_field" if params.get("field").and_then(|v| v.as_string()) == Some("parent_id") => {
                 let (Some(id), Some(new_parent)) = (
                     params.get("id").and_then(|v| v.as_string()),
@@ -134,24 +144,18 @@ impl OperationProvider for OrderedBlockCrud {
                 let uri = EntityUri::from_raw(id);
                 // ALLOW(entity_uri_from_raw): op-dispatch id strings → EntityUri
                 let parent = EntityUri::from_raw(new_parent);
-                let key = self.append_key(&parent, Some(&uri)).await?;
+                let position = self.append_key(&parent, Some(&uri)).await?;
 
-                let result = self
-                    .inner
-                    .execute_operation(entity_name, op_name, params)
-                    .await?;
-
-                let mut sort_params: StorageEntity = StorageEntity::new();
-                sort_params.insert("id".into(), Value::String(uri.as_str().to_string()));
-                sort_params.insert("field".into(), Value::String("sort_key".to_string()));
-                sort_params.insert("value".into(), Value::String(key));
-                let mut result = result;
-                let sort_result = self
-                    .inner
-                    .execute_operation(entity_name, "set_field", sort_params)
-                    .await?;
-                result.changes.extend(sort_result.changes);
-                Ok(result)
+                let mut place_params: StorageEntity = StorageEntity::new();
+                place_params.insert("id".into(), Value::String(uri.as_str().to_string()));
+                place_params.insert(
+                    "parent_id".into(),
+                    Value::String(parent.as_str().to_string()),
+                );
+                position.into_params(&mut place_params);
+                self.inner
+                    .execute_operation(entity_name, "place", place_params)
+                    .await
             }
             _ => {
                 self.inner
@@ -360,5 +364,105 @@ mod tests {
             vec!["block:zzz".to_string(), "block:aaa".to_string()],
             "creation order must win; an id tiebreak means both rows took the column default"
         );
+    }
+
+    /// The re-key half of a create, end to end through this decorator.
+    ///
+    /// Appending under a parent whose children are NOT an insertable sequence
+    /// (here the SQL column default) has to re-mint them, and those re-keys
+    /// ride the create into its own transaction (ADR 0030 D1). Without them
+    /// the new block ties with the unkeyed row and the order falls through
+    /// to the id tiebreak — so this test fails if the re-keys are dropped
+    /// anywhere between the mint and the SQL writer.
+    #[tokio::test]
+    async fn a_create_carries_its_sibling_rekeys_all_the_way_into_the_row() {
+        let (handle, provider) = setup().await;
+        let entity: EntityName = EntityName::new("block");
+
+        insert_raw(&handle, "block:page", "sentinel:no_parent", "80").await;
+        // Unkeyed: not a position, so the append must re-key it in place.
+        insert_raw(&handle, "block:unkeyed", "block:page", "A0").await;
+
+        let mut params: StorageEntity = StorageEntity::new();
+        params.insert("id".into(), Value::String("block:appended".to_string()));
+        params.insert("parent_id".into(), Value::String("block:page".to_string()));
+        params.insert("content".into(), Value::String("appended".to_string()));
+        params.insert("content_type".into(), Value::String("text".to_string()));
+        provider
+            .execute_operation(&entity, "create", params)
+            .await
+            .expect("append under an unkeyed sibling set");
+
+        assert_eq!(
+            order_under(&handle, "block:page").await,
+            vec!["block:unkeyed".to_string(), "block:appended".to_string()],
+            "the appended block must sort LAST, which requires the unkeyed sibling to have been \
+             re-keyed by the same write"
+        );
+        let keys = sort_keys_under(&handle, "block:page").await;
+        assert!(
+            keys.iter().all(|k| k != "A0"),
+            "every sibling must hold a real position after the append, got {keys:?}"
+        );
+    }
+
+    /// The same for a RE-PARENT, which this decorator turns into one `place`.
+    ///
+    /// The mover joins a sibling set that is not an insertable sequence, so the
+    /// placement carries re-keys too — and parent, key and re-keys must all
+    /// land together.
+    #[tokio::test]
+    async fn a_reparent_carries_its_sibling_rekeys_into_one_placement() {
+        let (handle, provider) = setup().await;
+        let entity: EntityName = EntityName::new("block");
+
+        insert_raw(&handle, "block:from", "sentinel:no_parent", "80").await;
+        insert_raw(&handle, "block:to", "sentinel:no_parent", "8180").await;
+        insert_raw(&handle, "block:mover", "block:from", "80").await;
+        insert_raw(&handle, "block:unkeyed", "block:to", "A0").await;
+
+        let mut params: StorageEntity = StorageEntity::new();
+        params.insert("id".into(), Value::String("block:mover".to_string()));
+        params.insert("field".into(), Value::String("parent_id".to_string()));
+        params.insert("value".into(), Value::String("block:to".to_string()));
+        provider
+            .execute_operation(&entity, "set_field", params)
+            .await
+            .expect("re-parent into an unkeyed sibling set");
+
+        assert_eq!(
+            order_under(&handle, "block:to").await,
+            vec!["block:unkeyed".to_string(), "block:mover".to_string()],
+            "the moved block is appended after its new siblings, which requires the unkeyed one \
+             to have been re-keyed by the same placement"
+        );
+        assert!(
+            order_under(&handle, "block:from").await.is_empty(),
+            "the mover left its old parent"
+        );
+        let keys = sort_keys_under(&handle, "block:to").await;
+        assert!(
+            keys.iter().all(|k| k != "A0"),
+            "every sibling must hold a real position after the move, got {keys:?}"
+        );
+    }
+
+    async fn sort_keys_under(handle: &DbHandle, parent: &str) -> Vec<String> {
+        handle
+            .query(
+                &format!(
+                    "SELECT sort_key FROM block_raw WHERE parent_id = '{parent}' ORDER BY \
+                     sort_key, id"
+                ),
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("read keys")
+            .into_iter()
+            .filter_map(|r| {
+                r.get("sort_key")
+                    .and_then(|v| v.as_string().map(str::to_string))
+            })
+            .collect()
     }
 }

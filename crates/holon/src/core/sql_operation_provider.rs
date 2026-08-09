@@ -22,6 +22,8 @@ use holon_core::OperationProvider;
 use holon_core::OperationResult;
 use holon_core::OriginTaggedWrites;
 use holon_core::Result;
+use holon_core::block_ordering::MintedPosition;
+use holon_core::block_ordering::ORDER_REKEYS_PARAM;
 use holon_core::storage::types::StorageEntity;
 
 use crate::core::merge_blocks_plan;
@@ -29,7 +31,6 @@ use crate::storage::schema_module::EdgeFieldDescriptor;
 use crate::storage::sql_utils::value_to_sql_literal;
 use crate::storage::turso::DbHandle;
 use crate::sync::event_bus::EventOrigin;
-use crate::sync::event_bus::POSITION_AFTER_BLOCK_ID_PARAM;
 
 pub(crate) fn value_to_json(v: &Value) -> serde_json::Value {
     match v {
@@ -368,16 +369,15 @@ impl SqlOperationProvider {
                 if let Some(s) = value.as_string() {
                     existing_properties_json = Some(s.to_string());
                 }
-            } else if &**key == POSITION_AFTER_BLOCK_ID_PARAM
-                || key.starts_with("_routing_")
-                || key.starts_with("_expected_")
-            {
-                // Operation-control metadata (positional intent, routing
-                // hints, diff guards) — never persist. The positional
-                // intent is lifted onto the typed `Event` field in
-                // `prepare_create`. Other underscore-prefix keys (e.g.
-                // `_source_header_args`, `_source_results`) are real block
-                // properties and must flow through to `extra_props`.
+            } else if holon_core::block_ordering::is_operation_control_param(key) {
+                // Operation-control metadata (positional intent, sibling
+                // re-keys, routing hints, diff guards) — never persist. The
+                // positional intent is lifted onto the typed `Event` field in
+                // `prepare_create`, the re-keys into the op's own transaction
+                // (`order_rekey_statements`). The predicate is shared with the
+                // intent boundaries that REFUSE these keys, so the
+                // "interpreted, not stored" set has exactly one
+                // definition.
             } else if let Some(descriptor) = self.edge_fields.get(key.as_ref()) {
                 // Edge-typed field: must carry a Value::Array. Fail loud if
                 // a caller mis-types this — silently flowing to JSON would
@@ -440,6 +440,226 @@ impl SqlOperationProvider {
         }
 
         (sql_fields, extra_props, edge_field_params)
+    }
+
+    /// `UPDATE` of one TEXT column of one row, by id.
+    fn column_update_sql(&self, id: &str, column: &str, value: &str) -> String {
+        format!(
+            "UPDATE {table} SET {col} = '{val}' WHERE id = '{id}'",
+            table = self.table_name,
+            col = Self::quote_identifier(column),
+            val = value.replace('\'', "''"),
+            id = id.replace('\'', "''"),
+        )
+    }
+
+    /// The parent a `parent_id` param names, normalized so a root reads the
+    /// same whether it arrived as the sentinel, as SQL `NULL`, or as an absent
+    /// param — all three forms are in the store and in op params today.
+    fn normalized_parent(raw: Option<&str>) -> String {
+        match raw {
+            Some(p) if !p.is_empty() => p.to_string(),
+            _ => EntityUri::no_parent().to_string(),
+        }
+    }
+
+    /// The parent an operation EXPLICITLY names, for re-key authorization.
+    ///
+    /// `None` iff the `parent_id` key is ABSENT from params — a property-only
+    /// update carries no placement, so it names no parent and gets NO re-key
+    /// rights (a re-key touches the placed block's own siblings; there is no
+    /// placed block). A PRESENT key — including `Value::Null`, which a
+    /// root-level create/split carries — is an explicit placement and
+    /// normalizes to the root sentinel. This is the distinction
+    /// `and_then(Value::as_string)` erases: it maps both absent and
+    /// present-Null to `None`, which is what let an update silently inherit
+    /// root re-key rights over every top-level page.
+    fn op_target_parent(params: &StorageEntity) -> Option<String> {
+        params
+            .get("parent_id")
+            .map(|v| Self::normalized_parent(v.as_string()))
+    }
+
+    /// Decode [`ORDER_REKEYS_PARAM`] and PROVE its targets are the placed
+    /// block's own siblings, or refuse the whole operation.
+    ///
+    /// The param is internal — the order key is not writable at the intent
+    /// boundary (ADR 0005, `BlockWriteField` refuses `sort_key`) — but it rides
+    /// the same params map an outside caller can populate, so trusting it turns
+    /// every create into an unguarded "rewrite any row's sort_key" primitive
+    /// with no `FieldDelta`, no inverse and no undo. One indexed read proves
+    /// the whole set; it runs only when re-keys are actually present, which
+    /// is the rare not-an-insertable-sequence case.
+    async fn checked_order_rekeys(
+        &self,
+        params: &StorageEntity,
+        parent_id: Option<&str>,
+    ) -> Result<Vec<(String, String)>> {
+        let rekeys = MintedPosition::decode_rekeys(params.get(ORDER_REKEYS_PARAM))?;
+        self.prove_rekeys_are_siblings(&rekeys, parent_id).await?;
+        Ok(rekeys)
+    }
+
+    /// Every re-key target must be an existing child of `parent_id`. Applied to
+    /// EVERY re-key the writer is about to perform, whatever channel it arrived
+    /// on — an in-process mint and a params map get the same proof, so there is
+    /// no trusted path to keep in sync with an untrusted one.
+    async fn prove_rekeys_are_siblings(
+        &self,
+        rekeys: &[(String, String)],
+        parent_id: Option<&str>,
+    ) -> Result<()> {
+        if rekeys.is_empty() {
+            return Ok(());
+        }
+        // Re-key rights require the op to name its parent EXPLICITLY. `None`
+        // here is an absent `parent_id` — a property-only update, which places
+        // nothing and therefore has no siblings to re-key. Defaulting absence
+        // to root silently granted such an op re-key rights over every
+        // top-level page (item 2 of the round-2 security review).
+        let Some(parent) = parent_id else {
+            return Err(format!(
+                "{ORDER_REKEYS_PARAM} is present but the operation names no parent — an order \
+                 re-key touches only the placed block's OWN siblings, so the op must name the \
+                 parent it places under. A property-only update carries no placement and must \
+                 not carry re-keys."
+            )
+            .into());
+        };
+        let expected = Self::normalized_parent(Some(parent));
+        let in_list = rekeys
+            .iter()
+            .map(|(id, _)| format!("'{}'", id.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let rows = self
+            .db_handle
+            .query(
+                &format!(
+                    "SELECT id, parent_id FROM {} WHERE id IN ({in_list})",
+                    self.table_name
+                ),
+                HashMap::new(),
+            )
+            .await
+            .map_err(|e| format!("{ORDER_REKEYS_PARAM}: reading the target rows failed: {e}"))?;
+        let mut parents: HashMap<String, String> = HashMap::new();
+        for row in rows {
+            let Some(id) = row.get("id").and_then(|v| v.as_string()) else {
+                continue;
+            };
+            parents.insert(
+                id.to_string(),
+                Self::normalized_parent(row.get("parent_id").and_then(|v| v.as_string())),
+            );
+        }
+        for (id, _) in rekeys {
+            match parents.get(id) {
+                Some(actual) if actual == &expected => {}
+                Some(actual) => {
+                    return Err(format!(
+                        "{ORDER_REKEYS_PARAM} names {id}, whose parent is {actual}, but this \
+                         operation places under {expected} — an order re-key may only touch the \
+                         placed block's own siblings. The order key is internal (ADR 0005); it is \
+                         not settable through operation params."
+                    )
+                    .into());
+                }
+                None => {
+                    return Err(format!(
+                        "{ORDER_REKEYS_PARAM} names {id}, which is not a row in {} — an order \
+                         re-key may only touch existing siblings of the placed block.",
+                        self.table_name
+                    )
+                    .into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// [`checked_order_rekeys`](Self::checked_order_rekeys) as statements for
+    /// the op's OWN transaction (ADR 0030 D1: a create is total or refused with
+    /// zero side effects, and the re-key is part of the firing).
+    async fn order_rekey_statements(
+        &self,
+        params: &StorageEntity,
+        parent_id: Option<&str>,
+    ) -> Result<Vec<String>> {
+        Ok(self
+            .checked_order_rekeys(params, parent_id)
+            .await?
+            .iter()
+            .map(|(id, key)| self.column_update_sql(id, "sort_key", key))
+            .collect())
+    }
+
+    /// Write one placement — `parent_id`, `sort_key`, and the sibling re-keys
+    /// the key is expressed against — in ONE transaction.
+    ///
+    /// Parent and position are a single fact about a block: split across
+    /// transactions, a mid-failure leaves it re-parented while still carrying
+    /// the key it was minted in its OLD parent's sequence. The block parent FK
+    /// is `DEFERRABLE INITIALLY DEFERRED`, so it is checked at COMMIT and the
+    /// transaction rolls the whole placement back (an autocommit UPDATE would
+    /// keep the bad `parent_id` despite the raised error).
+    ///
+    /// Takes the [`MintedPosition`] whole rather than a key and a re-key list,
+    /// so a caller cannot hand over a position and keep half of it.
+    pub async fn place_row(
+        &self,
+        id: &str,
+        parent_id: &str,
+        position: MintedPosition,
+    ) -> Result<OperationResult> {
+        let (sort_key, rekeys) = position.into_parts();
+        let sort_key = sort_key.as_str();
+        self.prove_rekeys_are_siblings(&rekeys, Some(parent_id))
+            .await?;
+        let old_parent = self.read_field_old_value(id, "parent_id").await?;
+        let old_sort_key = self.read_field_old_value(id, "sort_key").await?;
+
+        let mut stmts: Vec<(String, Vec<turso::Value>)> = rekeys
+            .iter()
+            .map(|(sib, key)| (self.column_update_sql(sib, "sort_key", key), vec![]))
+            .collect();
+        stmts.push((self.column_update_sql(id, "parent_id", parent_id), vec![]));
+        stmts.push((self.column_update_sql(id, "sort_key", sort_key), vec![]));
+
+        if let Err(e) = self.db_handle.transaction(stmts).await {
+            let msg = e.to_string();
+            // This transaction writes `parent_id`, `sort_key` and sibling
+            // `sort_key`s — of which only `parent_id` carries an FK, so an FK
+            // failure here is unambiguously the parent (unlike the multi-FK
+            // create path).
+            if Self::is_fk_violation(&msg) {
+                return Err(Self::parent_not_found(id, parent_id));
+            }
+            return Err(format!(
+                "place {id} under {parent_id} at {sort_key} ({} sibling re-key(s)): {msg}",
+                rekeys.len()
+            )
+            .into());
+        }
+
+        // Undo restores the parent; the key follows from wherever the block
+        // then sits. Same shape the two-`set_field` placement produced.
+        let inverse = self.set_field_inverse(id, "parent_id", old_parent.clone());
+        let changes = vec![
+            FieldDelta::new(
+                id.to_string(),
+                "parent_id".to_string(),
+                old_parent,
+                Value::String(parent_id.to_string()),
+            ),
+            FieldDelta::new(
+                id.to_string(),
+                "sort_key".to_string(),
+                old_sort_key,
+                Value::String(sort_key.to_string()),
+            ),
+        ];
+        Ok(OperationResult::new(changes, inverse))
     }
 
     /// Build SQL statements that replace the edge-field rows for `id`.
@@ -2672,6 +2892,26 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 };
                 Ok(OperationResult::new(changes, inverse))
             }
+            // One placement, one transaction. The op-name channel exists
+            // because `OrderedBlockCrud` reaches this provider as a
+            // `dyn OperationProvider`; in-crate callers use `place_row`
+            // directly. Not advertised in `operations()` — it is the ordering
+            // seam's write primitive, not a dispatchable user intent.
+            "place" => {
+                let get = |key: &str| -> Result<String> {
+                    params
+                        .get(key)
+                        .and_then(|v| v.as_string())
+                        .map(str::to_string)
+                        .ok_or_else(|| format!("place: missing '{key}' parameter").into())
+                };
+                let rekeys = MintedPosition::decode_rekeys(params.get(ORDER_REKEYS_PARAM))?;
+                let position = MintedPosition::new(get("sort_key")?, rekeys);
+                // `place_row` proves the re-key targets are siblings of this
+                // parent before it writes anything.
+                self.place_row(&get("id")?, &get("parent_id")?, position)
+                    .await
+            }
             "create" => {
                 // Entity ids are `{entity}:{uuid}`. A create without an explicit
                 // id means "mint a fresh one" — the normal case for interactive
@@ -2754,11 +2994,18 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 // A transaction (unlike an autocommit statement) ROLLS BACK the
                 // offending row on that commit-time failure, so a rejected create
                 // leaves no partial row — integrity, not just a loud error.
+                // The sibling re-keys the new block's minted position needs
+                // ride the create so they commit or roll back WITH it — a
+                // refused create must leave the keyspace untouched (D1).
+                let target_parent = Self::op_target_parent(&params);
+                let rekey_statements = self
+                    .order_rekey_statements(&params, target_parent.as_deref())
+                    .await?;
                 let mut stmts = Vec::new();
                 stmts.extend(
-                    prepared
-                        .row_statements
+                    rekey_statements
                         .iter()
+                        .chain(&prepared.row_statements)
                         .chain(&prepared.edge_statements)
                         .chain(&link_statements)
                         .map(|s| (s.clone(), vec![])),
@@ -3699,6 +3946,13 @@ impl OriginTaggedWrites for SqlOperationProvider {
         let mut edge_sql: Vec<String> = Vec::new();
 
         for (op_name, params) in &operations {
+            // Sibling re-keys ride the op whose position needs them, into this
+            // batch's single transaction (D1). Collected before the prepare so
+            // a no-op `update` cannot drop them.
+            row_sql.extend(
+                self.order_rekey_statements(params, Self::op_target_parent(params).as_deref())
+                    .await?,
+            );
             let prepared = match op_name.as_str() {
                 "create" => self.prepare_create(params),
                 "update" => match self.prepare_update(params).await? {

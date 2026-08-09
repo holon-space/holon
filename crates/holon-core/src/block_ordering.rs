@@ -298,10 +298,11 @@ pub trait BlockOrdering: Send + Sync {
 /// `default_sort_key()` in Loro mode is thus unrepresentable, not just unused.
 #[async_trait]
 pub trait OrderKeyMinting: Send + Sync {
-    /// Compute the `sort_key` value for a NEW block being created under
-    /// `parent_id`, immediately after `after_id`, to persist verbatim in
-    /// `block.sort_key`. Implemented only by the `Store` consolidator's order
-    /// owner (the sole minter of fractional indices for its sibling sets).
+    /// Decide the position a NEW block created under `parent_id` immediately
+    /// after `after_id` will occupy. Implemented only by the `Store`
+    /// consolidator's order owner (the sole minter of fractional indices for
+    /// its sibling sets). Pure: it decides, the caller's firing transaction
+    /// writes.
     // Defining-module trait declaration (excluded at repo root; the exclude
     // glob misses the `.claude/worktrees/...` prefix, so annotate inline).
     // ALLOW(order_minting): trait-method declaration, not a mint call site.
@@ -309,7 +310,116 @@ pub trait OrderKeyMinting: Send + Sync {
         &self,
         parent_id: &EntityUri,
         after_id: Option<&EntityUri>,
-    ) -> Result<String>;
+    ) -> Result<MintedPosition>;
+}
+
+// The operation-control namespace lives in `holon-api` so the intent boundary
+// there (`BlockWriteField::parse`) shares ONE definition with the writers here
+// — a boundary crate cannot depend on this one. Re-exported so
+// `holon_core::block_ordering::{ORDER_REKEYS_PARAM,
+// is_operation_control_param}` keeps resolving for every existing caller.
+pub use holon_api::entity::ORDER_REKEYS_PARAM;
+pub use holon_api::entity::is_operation_control_param;
+
+/// A minted position: the `sort_key` the placed block must carry, plus the
+/// sibling re-keys that position is expressed in.
+///
+/// The two halves are one decision. A sibling set that is not an insertable
+/// sequence (ties, or a row carrying an unkeyed sentinel) has no slot to mint
+/// into until it is re-keyed, so the key means nothing unless the re-keys are
+/// durable with it. They therefore travel together and are written by the
+/// caller's firing transaction — writing them ahead of it is what let a refused
+/// create leave a rewritten keyspace behind (ADR 0030 D1).
+///
+/// The fields are PRIVATE and the type is deliberately not `Clone`: the
+/// `sort_key` is reachable only by consuming the position, through
+/// [`into_params`](Self::into_params) or [`into_parts`](Self::into_parts), and
+/// both hand over the re-keys in the same expression. Dropping them is then an
+/// explicit destructure, never an omission.
+#[derive(Debug, PartialEq, Eq)]
+pub struct MintedPosition {
+    sort_key: String,
+    rekeys: Vec<(String, String)>,
+}
+
+impl MintedPosition {
+    /// A position that displaces the given siblings.
+    pub fn new(sort_key: String, rekeys: Vec<(String, String)>) -> Self {
+        Self { sort_key, rekeys }
+    }
+
+    /// A position that displaces nothing — the common case, where the sibling
+    /// set already describes an insertable sequence.
+    pub fn alone(sort_key: String) -> Self {
+        Self {
+            sort_key,
+            rekeys: Vec::new(),
+        }
+    }
+
+    /// The siblings this position displaces. Read-only: it cannot yield the
+    /// key, so it does not re-open the "spend the key, forget the re-keys"
+    /// hole the private fields close.
+    pub fn rekeys(&self) -> &[(String, String)] {
+        &self.rekeys
+    }
+
+    /// Write this position into a create's params: the `sort_key` field and,
+    /// when the position displaces siblings, the re-keys that must land in the
+    /// same transaction.
+    pub fn into_params(self, params: &mut crate::storage::types::StorageEntity) {
+        let (sort_key, rekeys) = self.into_parts();
+        if let Some(rekeys) = Self::rekeys_param_of(&rekeys) {
+            params.insert(ORDER_REKEYS_PARAM.into(), rekeys);
+        }
+        params.insert("sort_key".into(), holon_api::Value::String(sort_key));
+    }
+
+    /// Both halves at once, for the writer that puts them in one transaction
+    /// itself rather than through a params map.
+    pub fn into_parts(self) -> (String, Vec<(String, String)>) {
+        (self.sort_key, self.rekeys)
+    }
+
+    /// The [`ORDER_REKEYS_PARAM`] value for a bare re-key list — for the
+    /// batched append, whose per-parent re-key is not attached to any single
+    /// block's minted key.
+    pub fn rekeys_param_of(rekeys: &[(String, String)]) -> Option<holon_api::Value> {
+        if rekeys.is_empty() {
+            return None;
+        }
+        Some(holon_api::Value::Object(
+            rekeys
+                .iter()
+                .map(|(id, key)| (id.clone(), holon_api::Value::String(key.clone())))
+                .collect(),
+        ))
+    }
+
+    /// Read back what [`rekeys_param_of`](Self::rekeys_param_of) wrote. A
+    /// malformed value is the caller's bug and is reported as such — never
+    /// skipped, or a placement would silently land in a keyspace nobody
+    /// re-keyed. Decoding says nothing about whether the targets are
+    /// legitimate; that proof is the writer's (`checked_order_rekeys`).
+    pub fn decode_rekeys(value: Option<&holon_api::Value>) -> Result<Vec<(String, String)>> {
+        let Some(value) = value else {
+            return Ok(Vec::new());
+        };
+        let holon_api::Value::Object(map) = value else {
+            return Err(format!(
+                "{ORDER_REKEYS_PARAM} must be a Value::Object of block id → sort_key, got {value:?}"
+            )
+            .into());
+        };
+        let mut out = Vec::with_capacity(map.len());
+        for (id, key) in map {
+            let key = key.as_string().ok_or_else(|| {
+                format!("{ORDER_REKEYS_PARAM}[{id}] must be a String sort_key, got {key:?}")
+            })?;
+            out.push((id.clone(), key.to_string()));
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]

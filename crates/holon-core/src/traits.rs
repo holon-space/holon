@@ -1303,7 +1303,7 @@ where
                      from order_key_minter()"
                 )
             })?;
-            let new_sort_key = minter
+            let position = minter
                 .new_child_anchor(&parent_for_anchor, Some(id)) // ALLOW(order_minting): routed through the sibling-set owner's OrderKeyMinting seam
                 // via order_key_minter() above, not minted locally
                 .await?;
@@ -1327,7 +1327,9 @@ where
                     Value::Null
                 }
             });
-            new_block_fields.insert("sort_key".into(), Value::String(new_sort_key));
+            // Key AND the sibling re-keys it is expressed against, so both land
+            // in the create's OWN transaction (ADR 0030 D1).
+            position.into_params(&mut new_block_fields);
             // Positional intent for Full (Loro) mode. The literal key here
             // must match `event_bus::POSITION_AFTER_BLOCK_ID_PARAM` over in the
             // `holon` crate — we can't depend on it from `holon-core`, so the
@@ -1706,7 +1708,7 @@ where
                      from order_key_minter()"
                 )
             })?;
-            let new_sort_key = minter // ALLOW(order_minting): routed through the sibling-set owner's OrderKeyMinting seam
+            let position = minter // ALLOW(order_minting): routed through the sibling-set owner's OrderKeyMinting seam
                 .new_child_anchor(block_parent, after_id)
                 .await?;
             let mut fields = crate::storage::types::StorageEntity::new();
@@ -1716,7 +1718,9 @@ where
                 "parent_id".into(),
                 Value::String(block_parent.as_str().to_string()),
             );
-            fields.insert("sort_key".into(), Value::String(new_sort_key));
+            // Key AND the sibling re-keys it is expressed against, so both land
+            // in the create's OWN transaction (ADR 0030 D1).
+            position.into_params(&mut fields);
             let (_new_id, create_result) = self.create(fields).await?;
             changes.extend(create_result.changes);
         }
