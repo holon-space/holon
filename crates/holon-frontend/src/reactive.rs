@@ -4025,7 +4025,7 @@ fn hash_query(query: &str, lang: QueryLanguage, ctx: &Option<crate::QueryContext
     if let Some(ctx) = ctx {
         format!("{:?}", ctx.current_block_id).hash(&mut hasher);
         format!("{:?}", ctx.context_parent_id).hash(&mut hasher);
-        ctx.context_path_prefix.hash(&mut hasher);
+        ctx.path_context.hash(&mut hasher);
     }
     hasher.finish()
 }

@@ -86,25 +86,32 @@ impl HolonService {
     // ── Query operations ──────────────────────────────────────────────
 
     /// Build a `QueryContext` from explicit context_id / context_parent_id.
+    ///
+    /// `None` context_id means "no filter" → `Ok(None)` (the caller queries
+    /// unscoped). A context_id whose path cannot be resolved is an `Err` (#45),
+    /// surfaced as a visible degraded banner — never a fabricated `/{id}` path
+    /// that would silently mis-scope descendants.
     pub async fn build_context(
         &self,
         context_id: Option<&str>,
         context_parent_id: Option<&str>,
-    ) -> Option<QueryContext> {
-        let id = context_id?;
+    ) -> Result<Option<QueryContext>> {
+        let Some(id) = context_id else {
+            return Ok(None);
+        };
         let uri = EntityUri::parse(id).expect("context_id is not a valid EntityUri");
         let path = self
             .engine
             .blocks()
             .lookup_block_path(&uri)
             .await
-            .unwrap_or_else(|_| format!("/{}", id));
-        Some(QueryContext::for_block_with_path(
+            .with_context(|| format!("cannot build query context for block '{id}'"))?;
+        Ok(Some(QueryContext::for_block_with_path(
             &uri,
             context_parent_id
                 .map(|s| EntityUri::parse(s).expect("context_parent_id is not a valid EntityUri")),
             path,
-        ))
+        )))
     }
 
     /// Compile a query (PRQL / GQL / SQL) to its final SQL form without

@@ -16,26 +16,23 @@ fn error_text(msg: String) -> PlyWidget {
 }
 
 /// The `blocks_with_paths` path of `id` — what a context-dependent query
-/// matches its `$context_path_prefix` against. An unresolved prefix binds a
-/// sentinel that matches no row, so neither outcome is silent: `Err` is painted
-/// by the caller, `Ok(None)` is logged at WARN.
+/// matches its `$context_path_prefix` against. An unresolvable path is an
+/// `Err`, painted by the caller as a visible degraded banner: there is no
+/// silent-empty context (no `for_block` sentinel), because a
+/// fabricated-or-absent prefix is exactly the six-round chevron class (#27).
 ///
 /// Blocking, on a joined-immediately thread so `block_on` stays legal wherever
 /// the synchronous render pass runs. Only reached when the watch entry is new.
-fn resolve_block_path(
-    ctx: &RenderContext,
-    id: &holon_api::EntityUri,
-) -> Result<Option<String>, String> {
+fn resolve_block_path(ctx: &RenderContext, id: &holon_api::EntityUri) -> Result<String, String> {
     // A services impl can watch queries without offering the path lookup
-    // (`query_engine()` defaults to `None`). Degraded, so it is announced:
-    // that impl's context-dependent queries stay unresolved.
+    // (`query_engine()` defaults to `None`). That is a degraded mode for a
+    // context-dependent query, so it fails loud rather than binding an
+    // unfiltered/empty context that would silently return the wrong rows.
     let Some(engine) = ctx.services.query_engine() else {
-        tracing::warn!(
-            block = %id,
-            "live_query: no query engine to resolve the context path prefix — `from descendants` \
-             under this block will match no row"
-        );
-        return Ok(None);
+        return Err(format!(
+            "live_query({id}): no query engine to resolve the context path prefix — `from \
+             descendants` under this block cannot be scoped"
+        ));
     };
     let rt = ctx.services.runtime_handle();
     std::thread::scope(|s| {
@@ -43,7 +40,6 @@ fn resolve_block_path(
             .join()
             .unwrap()
     })
-    .map(Some)
     .map_err(|e| format!("live_query({id}): context path prefix lookup failed: {e:#}"))
 }
 
@@ -111,13 +107,12 @@ pub fn build_query(
                     // ALLOW(entity_uri_from_raw): render-spec context arg or
                     // query row 'id'
                     let uri = holon_api::EntityUri::from_raw(id);
-                    resolve_block_path(ctx, &uri).map(|path| match path {
-                        Some(path) => holon_frontend::QueryContext::for_block_with_path(
+                    resolve_block_path(ctx, &uri).map(|path| {
+                        holon_frontend::QueryContext::for_block_with_path(
                             &uri,
                             Some(uri.clone()),
                             path,
-                        ),
-                        None => holon_frontend::QueryContext::for_block(&uri, Some(uri.clone())),
+                        )
                     })
                 });
                 let state = match resolved.transpose() {

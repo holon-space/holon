@@ -39,26 +39,26 @@ pub(crate) fn render_content_height(
 }
 
 /// The `blocks_with_paths` path of `id` — what a context-dependent query
-/// matches its `$context_path_prefix` against. An unresolved prefix binds a
-/// sentinel that matches no row, so neither outcome is silent: `Err` is painted
-/// by the caller, `Ok(None)` is logged at WARN.
+/// matches its `$context_path_prefix` against. An unresolvable path is an
+/// `Err`, painted by the caller as a visible degraded banner: there is no
+/// silent-empty context (no `for_block` sentinel), because a
+/// fabricated-or-absent prefix is exactly the six-round chevron class (#27).
 ///
 /// Blocking, on a joined-immediately thread so `block_on` stays legal wherever
 /// the synchronous render pass runs. Only reached on an entity-cache MISS.
 fn resolve_block_path(
     services: &std::sync::Arc<dyn holon_frontend::reactive::BuilderServices>,
     id: &holon_api::EntityUri,
-) -> Result<Option<String>, String> {
+) -> Result<String, String> {
     // A services impl can watch queries without offering the path lookup
-    // (`query_engine()` defaults to `None`). Degraded, so it is announced:
-    // that impl's context-dependent queries stay unresolved.
+    // (`query_engine()` defaults to `None`). That is a degraded mode for a
+    // context-dependent query, so it fails loud rather than binding an
+    // unfiltered/empty context that would silently return the wrong rows.
     let Some(engine) = services.query_engine() else {
-        tracing::warn!(
-            block = %id,
-            "live_query: no query engine to resolve the context path prefix — `from descendants` \
-             under this block will match no row"
-        );
-        return Ok(None);
+        return Err(format!(
+            "live_query({id}): no query engine to resolve the context path prefix — `from \
+             descendants` under this block cannot be scoped"
+        ));
     };
     let rt = services.runtime_handle();
     std::thread::scope(|s| {
@@ -66,7 +66,6 @@ fn resolve_block_path(
             .join()
             .unwrap()
     })
-    .map(Some)
     .map_err(|e| format!("live_query({id}): context path prefix lookup failed: {e:#}"))
 }
 
@@ -110,9 +109,9 @@ fn render_placed(
             // Resolving the context's path prefix costs a blocking matview
             // read, so it happens only on a cache MISS — and before the entry
             // is created, so a failure can paint instead of having to produce
-            // an entity. `from descendants` matches on that prefix; a context
-            // without one binds a sentinel that matches no row, so an embedded
-            // page would open onto nothing.
+            // an entity. `from descendants` matches on that prefix; if it cannot
+            // be resolved the builder paints a degraded banner rather than
+            // opening the embedded page onto silently-empty rows.
             let cached = ctx.local.get_typed::<ReactiveShell>(&cache_key);
             let query_context = match cached {
                 Some(_) => None,
@@ -120,15 +119,12 @@ fn render_placed(
                     let resolved = query_context_id.as_ref().map(|id| {
                         // ALLOW(entity_uri_from_raw): render-spec live_query node props
                         let uri = holon_api::EntityUri::from_raw(id);
-                        resolve_block_path(&services, &uri).map(|path| match path {
-                            Some(path) => holon_frontend::QueryContext::for_block_with_path(
+                        resolve_block_path(&services, &uri).map(|path| {
+                            holon_frontend::QueryContext::for_block_with_path(
                                 &uri,
                                 Some(uri.clone()),
                                 path,
-                            ),
-                            None => {
-                                holon_frontend::QueryContext::for_block(&uri, Some(uri.clone()))
-                            }
+                            )
                         })
                     });
                     match resolved.transpose() {

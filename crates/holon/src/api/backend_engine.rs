@@ -433,8 +433,9 @@ impl BackendEngine {
     /// data. Bind context parameters to the parameter map
     ///
     /// Adds `$context_id`, `$context_local_id`, `$context_parent_id`, and
-    /// `$context_path_prefix` parameters based on QueryContext. None values are
-    /// bound as Value::Null.
+    /// `$context_path_prefix` parameters based on QueryContext. Absent id
+    /// values are bound as Value::Null; the path prefix is the context's
+    /// PathContext (empty string when `Unfiltered`).
     ///
     /// `$context_local_id` is the same id with its URI scheme stripped
     /// (`cc-session:abc` -> `abc`). Connector mirrors store the entity's own
@@ -467,19 +468,14 @@ impl BackendEngine {
                 params.insert("context_parent_id".into(), Value::Null);
             }
         }
-        match &context.context_path_prefix {
-            Some(prefix) => {
-                params.insert("context_path_prefix".into(), Value::String(prefix.clone()));
-            }
-            None => {
-                // No path prefix means descendants queries won't match anything
-                // This is intentional - use for_block_with_path() to enable descendants
-                params.insert(
-                    "context_path_prefix".into(),
-                    Value::String("__NO_PATH__/".to_string()),
-                );
-            }
-        }
+        // `Unfiltered` binds an empty prefix so `text.starts_with` matches every
+        // row; `Under(prefix)` binds the resolved subtree prefix. The former
+        // "no prefix" `None` — which bound a zero-row sentinel — is gone: an
+        // unresolvable path never reaches here, it is an `Err` at resolution.
+        params.insert(
+            "context_path_prefix".into(),
+            Value::String(context.path_context.prefix_literal().to_string()),
+        );
     }
 
     /// Execute a SQL query and return the result set
@@ -1463,5 +1459,72 @@ mod tests {
         // Verify we get OperationDescriptor objects with proper properties
         assert!(ops.iter().all(|op| op.entity_name == "block"));
         assert!(ops.iter().any(|op| !op.name.is_empty()));
+    }
+
+    /// Ruling C / #41: a root (no-filter) context must bind an UNFILTERED path
+    /// predicate — an empty prefix that `text.starts_with` matches on every row
+    /// — NEVER the `__NO_PATH__/` sentinel that silently matched zero rows (the
+    /// six-round nested-page chevron class, #27). The sentinel must be
+    /// unrepresentable after the PathContext split.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn root_context_binds_unfiltered_path_prefix_not_sentinel() {
+        let engine = create_test_engine().await.unwrap();
+        let mut params = HashMap::new();
+        engine.bind_context_params(&mut params, &QueryContext::root());
+        assert_eq!(
+            params.get("context_path_prefix"),
+            Some(&Value::String(String::new())),
+            "root/unfiltered context must bind an empty prefix (matches every row)"
+        );
+        for v in params.values() {
+            if let Value::String(s) = v {
+                assert!(
+                    !s.contains("__NO_PATH__"),
+                    "the __NO_PATH__ sentinel leaked into a bound param: {s:?}"
+                );
+            }
+        }
+    }
+
+    /// Ruling C / #41: the actual `from descendants` SQL, bound under a root
+    /// (unfiltered) context, must carry NO `__NO_PATH__/` sentinel. The
+    /// sentinel made the path predicate match zero rows (silent-empty); an
+    /// empty prefix makes `text.starts_with` match every row instead. This
+    /// is the compile- seam enforcement the chevron hunt lacked
+    /// (`block_with_path` is not populated in the unit test engine, so this
+    /// asserts on the bound query text rather than a live matview row set).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn descendants_under_root_binds_no_sentinel_predicate() {
+        let engine = create_test_engine().await.unwrap();
+        let raw_sql = engine
+            .compile_to_sql("from descendants", QueryLanguage::HolonPrql)
+            .expect("PRQL compile");
+        let mut params = HashMap::new();
+        engine.bind_context_params(&mut params, &QueryContext::root());
+        let inlined = BackendEngine::inline_parameters(&raw_sql, &params);
+
+        assert!(
+            !inlined.contains("__NO_PATH__"),
+            "root descendants query must not carry the silent-empty sentinel, got:\n{inlined}"
+        );
+        let lowered = inlined.to_lowercase();
+        assert!(
+            lowered.contains("path") && lowered.contains("like"),
+            "expected a `path LIKE …` descendants predicate, got:\n{inlined}"
+        );
+    }
+
+    /// #45: a missing block's path lookup must FAIL LOUD, never fabricate
+    /// `/{id}`. A fabricated path silently mis-scopes descendants queries onto
+    /// a path that no other block shares.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lookup_block_path_errs_on_missing_block_not_fabricated() {
+        let engine = create_test_engine().await.unwrap();
+        let missing = EntityUri::block("does-not-exist-9f3a");
+        let result = engine.blocks().lookup_block_path(&missing).await;
+        assert!(
+            result.is_err(),
+            "missing-block path lookup must Err (fail loud), got fabricated: {result:?}"
+        );
     }
 }

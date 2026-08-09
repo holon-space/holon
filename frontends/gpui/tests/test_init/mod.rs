@@ -6,8 +6,8 @@
 //! was discarded by `tracing`'s no-op global dispatcher before anything could
 //! read it. That made the "falls back VISIBLY" tier of the error philosophy
 //! unenforceable here: a degradation could announce itself perfectly and the
-//! windowed suite would still be green and silent (the `__NO_PATH__/` sentinel
-//! survived six rounds of #27 this way).
+//! windowed suite would still be green and silent (a silent-empty context-path
+//! resolution once survived six rounds of #27 this way).
 //!
 //! Declaring `mod test_init;` in a test file is the whole wiring — the
 //! constructor below runs before `main`/the libtest harness, so the subscriber

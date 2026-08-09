@@ -61,10 +61,15 @@ impl<'a> BlockDomain<'a> {
             return Ok(path.clone());
         }
 
-        // ALLOW(fallback): pre-existing comment-only — block_id used as path when
-        // block_with_path lookup races Block not in block_with_path yet - use
-        // block_id as the path
-        Ok(format!("/{}", block_id))
+        // Fail loud (#45): a missing `block_with_path` row means the block's
+        // path is UNKNOWN. Fabricating `/{block_id}` silently scopes a
+        // descendants query onto a path no other block shares — the same
+        // silent-empty class as the deleted `__NO_PATH__/` sentinel. The caller
+        // surfaces this Err as a visible degraded banner.
+        anyhow::bail!(
+            "block '{block_id}' has no path in block_with_path — its descendants path cannot be \
+             resolved (the matview may not yet reflect a just-created block)"
+        )
     }
 
     /// Render a block by its ID.
