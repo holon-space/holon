@@ -537,3 +537,14 @@
 # ... reference model cursor_byte=1, SUT tracked caret=0`; GREEN once the two predicates are one.
 # The random keystone finds this only ~1 run in 3, which is why it is pinned here.
 {"name": "birth-then-chord-loses-the-caret", "description": "task #58: after the creation-slot birth gesture (id:null) seats focus in the newborn WITHOUT opening a reference editor, the first chord op on that newborn must NOT re-seed the reference caret to end-of-text -- the SUT's click is skipped (already focused) and its caret stays at the birth-armed 0. Pins model_chord_click_focus against the user_driver.rs skip predicate it mirrors.", "initial_state": {"wiring": {"storage_adapters": ["Loro", "Turso"], "sync_adapters": [], "actors": ["MCPServer", "ActionEngine"]}}, "transitions": [{"CreateBlockUnderFocus": {"content": "a", "id": null}}, {"Indent": {"block_id": "block::create-0"}}]}
+#
+# --- Enter on the block a caret-0 split just created, in the SHIPPED SqlOnly default ----------
+# Keystone-found (2026-08-09 SqlOnly typing-coverage lane), NOVEL. Position-0 semantics are fixed
+# by `BlockOperations::split_block` and mirrored by `ReferenceState::split_block`: the ORIGINAL
+# block keeps `content[..0]` == "" and the NEW block, placed directly after it, takes the whole
+# text. `split_block`'s focus response then seats the caret at offset 0 of the NEW block, so the
+# next Enter repeats the shape one block down.
+# The chord (not a second `SplitBlock` op) is load-bearing: the op alone is GREEN here -- the
+# defect needs the editor buffer the keystroke path opens on the split-created block.
+# Pinned to storage={Turso} (no Loro) because it is the cell-free editor sink that breaks.
+{"name": "split-at-caret-zero-then-enter-sqlonly", "description": "SqlOnly caret-0 split followed by Enter on the split-created block: the block the caret sits in must empty and hand its text to the block Enter creates, which must render its own main-panel row. Red signatures before the fix include inv-displayed-text/viewmodel, inv-block-content/{sql,block_raw}, inv-blocks-match-ref/{org,block_raw,matview}, inv-block-parent/block_raw and inv-main-panel-rows-match-focus.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"SplitBlock": {"block_id": "block:parent", "position": 0}}, {"PressKey": {"chord": ["enter"]}}]}
