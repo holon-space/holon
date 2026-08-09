@@ -167,20 +167,47 @@ beyond the existing proof-gated paths may land.
   position is now a pure decision — `OrderKeyMinting::new_child_anchor` returns a
   `MintedPosition` (`holon-core/src/block_ordering.rs`): the `sort_key` plus the
   sibling re-keys the key is expressed against. Both halves travel to the write
-  that consumes them (`MintedPosition::into_params`, the `_order_rekeys`
-  operation-control param) and the SQL writer lifts the re-keys into the SAME
+  that consumes them and the SQL writer lifts the re-keys into the SAME
   transaction as the create, the batch, or the placement
-  (`SqlOperationProvider::order_rekey_statements` / `place_row`,
-  `crates/holon/src/core/sql_operation_provider.rs`). Placement is one
-  transaction over `parent_id`, `sort_key` and the re-keys, so a mid-failure can
-  no longer leave a block re-parented under a key from its old parent's sequence.
-  The type is what enforces it: `into_params` consumes `self`, so a caller cannot
-  spend the key and drop the re-keys.
+  (`SqlOperationProvider::{create_row, place_row, apply_position}` and the batch
+  `BatchOp.position`, `crates/holon/src/core/sql_operation_provider.rs`).
+  Placement is one transaction over `parent_id`, `sort_key` and the re-keys, so a
+  mid-failure can no longer leave a block re-parented under a key from its old
+  parent's sequence.
+
+  **Amendment (2026-08-09, Ruling B — typed re-key channel).** The re-keys
+  originally travelled as the `_order_rekeys` *operation-control param*, packed
+  into the caller-supplied `StorageEntity` by `MintedPosition::into_params` and
+  read back by `SqlOperationProvider::order_rekey_statements`. Because the SQL
+  writer INTERPRETED that map key, a peer- or MCP-supplied `_order_rekeys`
+  property was a latent "rewrite any row's `sort_key`" primitive, defended only
+  by filters at every data→params boundary (MCP, the Loro→SQL projection ×3,
+  `BlockWriteField::parse`). Those filters compensated for a channel that should
+  never have existed. The re-keys are now a TYPED field: `MintedPosition` travels
+  whole (`into_parts`) to `create_row` / `place_row`, and per-op through
+  `BatchOp { position: Option<MintedPosition> }`; the map codec
+  (`into_params` / `decode_rekeys` / `order_rekey_statements`) is deleted. A data
+  key literally named `_order_rekeys` is now inert — the writer never reads it, so
+  it cannot reach the re-key channel (parse-don't-validate: the illegal state is
+  unrepresentable). `prove_rekeys_are_siblings` survives as the in-process
+  backstop against a MINTING bug and is called on `position.rekeys()` in all
+  three typed sinks. The boundary filters and `is_operation_control_param` are
+  KEPT unchanged as defense-in-depth (they no longer guard the *sole* protection).
+  The Loro→SQL projection builds every `BatchOp` with `position: None` — it never
+  mints re-keys — so an untrusted peer's `_order_rekeys` property is structurally
+  unable to become a re-key, not merely filtered.
+
+  The type still enforces both-halves-or-neither: `MintedPosition` is not `Clone`
+  and its `sort_key` is reachable only by consuming it via `into_parts`, so a
+  caller cannot spend the key and drop the re-keys.
   Regression tests (`sql_block_operations.rs`):
   `a_refused_create_leaves_no_sibling_rekey_behind` (red before: the re-keyed
   sibling read back `"7F80"` where the untouched keyspace says `"A0"`) and
   `a_refused_placement_leaves_neither_half_of_the_move_behind` (red before: the
-  block sat under the NEW parent after the placement was refused).
+  block sat under the NEW parent after the placement was refused); the typed
+  channel is proven inert to a params-map `_order_rekeys` by
+  `a_params_map_order_rekeys_key_is_inert_at_the_writer`, and the peer-projection
+  path by the consolidator test naming a victim block.
 
 ## Consequences
 

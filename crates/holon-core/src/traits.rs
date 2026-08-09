@@ -62,6 +62,51 @@ impl EventOrigin {
     }
 }
 
+/// One operation in a batch write, with its ordering position carried as a
+/// TYPED field structurally separate from the data `params` map.
+///
+/// `position` is `Some` only when the op mints a placement (a `create`/`place`
+/// whose sibling set had to be re-keyed to open an insertable slot). The
+/// re-keys live inside the
+/// [`MintedPosition`](crate::block_ordering::MintedPosition), NOT as a `String`
+/// key in `params`, so a peer- or MCP-supplied property can never become a
+/// re-key instruction to the writer (ADR 0030 D4, amended; Ruling B). The
+/// Loro→SQL projection therefore constructs every `BatchOp` with `position:
+/// None` — it never mints re-keys, so an attacker-controlled
+/// re-key is unrepresentable on that path, not merely filtered.
+#[derive(Debug)]
+pub struct BatchOp {
+    pub op_name: String,
+    pub params: holon_api::StorageEntity,
+    pub position: Option<crate::block_ordering::MintedPosition>,
+}
+
+impl BatchOp {
+    /// A data-only op (`update`/`delete`, or a `create`/`place` whose sibling
+    /// set was already an insertable sequence). No re-keys.
+    pub fn data(op_name: impl Into<String>, params: holon_api::StorageEntity) -> Self {
+        Self {
+            op_name: op_name.into(),
+            params,
+            position: None,
+        }
+    }
+
+    /// A placement op carrying a minted position (its `sort_key` + the sibling
+    /// re-keys the key is expressed against).
+    pub fn placed(
+        op_name: impl Into<String>,
+        params: holon_api::StorageEntity,
+        position: crate::block_ordering::MintedPosition,
+    ) -> Self {
+        Self {
+            op_name: op_name.into(),
+            params,
+            position: Some(position),
+        }
+    }
+}
+
 /// Common operation provider interface.
 ///
 /// Providers that support entity operations implement this trait.
@@ -180,11 +225,12 @@ pub trait OriginTaggedWrites: OperationProvider {
     ) -> Result<OperationResult>;
 
     /// Execute a batch of operations and tag the resulting events with
-    /// `origin`.
+    /// `origin`. Each [`BatchOp`] carries its ordering position typed, so
+    /// re-keys never ride the `params` map.
     async fn execute_batch_with_origin(
         &self,
         entity_name: &EntityName,
-        operations: Vec<(String, holon_api::StorageEntity)>,
+        operations: Vec<BatchOp>,
         origin: EventOrigin,
     ) -> Result<Vec<OperationResult>>;
 }
@@ -538,7 +584,14 @@ where
     async fn set_field(&self, id: &str, field: &str, value: Value) -> Result<OperationResult>;
 
     /// Create new entity (returns new ID, changes, and inverse operation for
-    /// undo)
+    /// undo).
+    ///
+    /// The block's ordering placement is NOT a field here: the store-owner impl
+    /// (`SqlBlockOperations`) mints its `sort_key` and any sibling re-keys
+    /// itself — anchored on the `after_block_id` positional-intent param when
+    /// present, else appended — and threads them TYPED (a `MintedPosition`)
+    /// into the concrete writer's transaction. Re-keys therefore never ride
+    /// a `String` key in `fields` (ADR 0030 D4, amended; Ruling B).
     #[holon_macros::boundary_behavior(private_only)]
     async fn create(
         &self,
@@ -744,6 +797,37 @@ where
             .await?
             .map(|b| b.is_page())
             .unwrap_or(false))
+    }
+
+    /// Create a block AT a pre-minted
+    /// [`MintedPosition`](crate::block_ordering::MintedPosition) — its
+    /// `sort_key` AND the sibling re-keys the key is expressed against,
+    /// carried TYPED (never as an `_order_rekeys` params key).
+    /// `split_block` / `restore_split` mint a position through the
+    /// `OrderKeyMinting` seam and hand it here so neither half is lost (ADR
+    /// 0030 D1/D4, amended; Ruling B).
+    ///
+    /// The default packs the `sort_key` and delegates to
+    /// [`create`](CrudOperations::create). It fails LOUD if the position
+    /// displaces siblings: a store whose minter can re-key (the SQL order
+    /// owner) MUST override this to apply the re-keys in the create's own
+    /// transaction. Stores whose minter never displaces — the in-memory
+    /// test substrate, whose `new_child_anchor` returns
+    /// `MintedPosition::alone` — use the default safely.
+    async fn create_at(
+        &self,
+        mut fields: crate::storage::types::StorageEntity,
+        position: crate::block_ordering::MintedPosition,
+    ) -> Result<(String, OperationResult)> {
+        let (sort_key, rekeys) = position.into_parts();
+        assert!(
+            rekeys.is_empty(),
+            "the default create_at cannot apply {} sibling re-key(s) atomically — a displacing \
+             order owner must override create_at to fire them in the create's transaction",
+            rekeys.len()
+        );
+        fields.insert("sort_key".into(), Value::String(sort_key));
+        self.create(fields).await
     }
 }
 
@@ -1284,30 +1368,12 @@ where
             // authority — the SQL `create` path is the only way to persist
             // the new block. Disclosed and intentional.
             //
-            // sort_key for the new block: mint it here, on the SqlOnly branch
-            // ONLY — this is the sole path that persists a `sort_key` directly.
-            // The key comes through the `OrderKeyMinting` seam, which exists
-            // exclusively on the `Store` consolidator's order owner. The Loro
-            // path (`wrote_create_via_cell == true`) never reaches this branch
-            // and, by construction, has no minter to reach: the fractional index
-            // is authoritative in the tree and `apply_create` derives it from
-            // `position_after_block_id` (Replication.md §5).
-            let parent_for_anchor = block
-                .parent_id()
-                .cloned()
-                .unwrap_or_else(EntityUri::no_parent);
-            let minter = self.order_key_minter().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "split_block's SqlOnly create path requires an OrderKeyMinting seam (the \
-                     Store consolidator's order owner) — this BlockOperations impl returned None \
-                     from order_key_minter()"
-                )
-            })?;
-            let position = minter
-                .new_child_anchor(&parent_for_anchor, Some(id)) // ALLOW(order_minting): routed through the sibling-set owner's OrderKeyMinting seam
-                // via order_key_minter() above, not minted locally
-                .await?;
-
+            // The new block's position is pre-minted below through the
+            // `OrderKeyMinting` seam and handed to `create_at` TYPED. The Loro
+            // path (`wrote_create_via_cell == true`) never reaches this branch:
+            // the fractional index is authoritative in the tree and
+            // `apply_create` derives it from `position_after_block_id`
+            // (Replication.md §5).
             let mut new_block_fields = crate::storage::types::StorageEntity::new();
             new_block_fields.insert("id".into(), Value::String(new_block_id.clone()));
             new_block_fields.insert("content".into(), Value::String(content_after));
@@ -1327,9 +1393,6 @@ where
                     Value::Null
                 }
             });
-            // Key AND the sibling re-keys it is expressed against, so both land
-            // in the create's OWN transaction (ADR 0030 D1).
-            position.into_params(&mut new_block_fields);
             // Positional intent for Full (Loro) mode. The literal key here
             // must match `event_bus::POSITION_AFTER_BLOCK_ID_PARAM` over in the
             // `holon` crate — we can't depend on it from `holon-core`, so the
@@ -1346,7 +1409,27 @@ where
             new_block_fields.insert("completed".into(), Value::Boolean(false));
             new_block_fields.insert("block_type".into(), Value::String("text".to_string()));
 
-            let (_new_block_id, create_result) = self.create(new_block_fields).await?;
+            // Pre-mint the new block's position through the OrderKeyMinting seam
+            // (the SqlOnly Store order owner; the in-memory test substrate
+            // supplies one too), then hand it to `create_at` TYPED: `sort_key`
+            // AND the sibling re-keys the key is expressed against, landing in
+            // the create's OWN transaction (ADR 0030 D1/D4, amended). The
+            // re-keys never ride a `_order_rekeys` params key.
+            let parent_for_anchor = block
+                .parent_id()
+                .cloned()
+                .unwrap_or_else(EntityUri::no_parent);
+            let minter = self.order_key_minter().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "split_block's SqlOnly create path requires an OrderKeyMinting seam (the \
+                     Store consolidator's order owner) — this BlockOperations impl returned None \
+                     from order_key_minter()"
+                )
+            })?;
+            let position = minter
+                .new_child_anchor(&parent_for_anchor, Some(id)) // ALLOW(order_minting): routed through the sibling-set owner's OrderKeyMinting seam
+                .await?;
+            let (_new_block_id, create_result) = self.create_at(new_block_fields, position).await?;
             changes.extend(create_result.changes);
         } else {
             // Loro (cell) create path emits no FieldDelta of its own. Fingerprint
@@ -1701,6 +1784,12 @@ where
         let mut changes = Vec::new();
         if !wrote_via_cell {
             // ALLOW(fallback): SqlOnly / synthetic store — no Loro authority.
+            // Pre-mint the restored block's position through the OrderKeyMinting
+            // seam (anchored after `after_id`, or FIRST when it is `None`) and
+            // hand it to `create_at` TYPED — sort_key AND any sibling re-keys, in
+            // the create's own transaction (ADR 0030 D1/D4, amended). A
+            // deterministic minter reproduces the original key byte-for-byte
+            // between the same neighbours; re-keys never ride a params key.
             let minter = self.order_key_minter().ok_or_else(|| {
                 anyhow::anyhow!(
                     "restore_split's SqlOnly create path requires an OrderKeyMinting seam (the \
@@ -1718,10 +1807,7 @@ where
                 "parent_id".into(),
                 Value::String(block_parent.as_str().to_string()),
             );
-            // Key AND the sibling re-keys it is expressed against, so both land
-            // in the create's OWN transaction (ADR 0030 D1).
-            position.into_params(&mut fields);
-            let (_new_id, create_result) = self.create(fields).await?;
+            let (_new_id, create_result) = self.create_at(fields, position).await?;
             changes.extend(create_result.changes);
         }
 

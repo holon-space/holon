@@ -417,10 +417,18 @@ fn spawn_projection_worker(
                         )));
                     }
                     let entity = EntityName::new("block");
+                    // SECURITY (Ruling B): shared-doc projection ops carry
+                    // `position: None` — the Loro tree owns order, this sink
+                    // never mints re-keys, so a peer block's `_order_rekeys`
+                    // property is structurally unable to reach the re-key channel.
+                    let batch: Vec<holon_core::BatchOp> = ops
+                        .into_iter()
+                        .map(|(op_name, params)| holon_core::BatchOp::data(op_name, params))
+                        .collect();
                     if let Err(e) = sql_ops
                         .execute_batch_with_origin(
                             &entity,
-                            ops,
+                            batch,
                             crate::event_bus::EventOrigin::Loro,
                         )
                         .await
@@ -3872,12 +3880,12 @@ mod tests {
         async fn execute_batch_with_origin(
             &self,
             _: &EntityName,
-            operations: Vec<(String, StorageEntity)>,
+            operations: Vec<holon_core::BatchOp>,
             _: crate::event_bus::EventOrigin,
         ) -> Result<Vec<OperationResult>> {
             let mut out = Vec::with_capacity(operations.len());
-            for (op, params) in operations {
-                self.apply(&op, params);
+            for op in operations {
+                self.apply(&op.op_name, op.params);
                 out.push(OperationResult::irreversible(vec![]));
             }
             Ok(out)
@@ -3917,7 +3925,7 @@ mod tests {
         async fn execute_batch_with_origin(
             &self,
             _: &EntityName,
-            _: Vec<(String, StorageEntity)>,
+            _: Vec<holon_core::BatchOp>,
             _: crate::event_bus::EventOrigin,
         ) -> Result<Vec<OperationResult>> {
             Err(err("stub sql: batch write failure"))

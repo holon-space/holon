@@ -239,6 +239,8 @@ pub trait BlockOrdering: Send + Sync {
     /// snapshot would otherwise pin a stale copy. Returns how many were
     /// refreshed. Default: `Ok(0)` — no separate authority to reconcile
     /// (SqlOnly / test stubs).
+    // ALLOW(unused_param): trait default; the name documents the override's
+    // contract.
     async fn reseed_content(&self, _blocks: &[(EntityUri, String)]) -> Result<usize> {
         Ok(0)
     }
@@ -364,61 +366,14 @@ impl MintedPosition {
         &self.rekeys
     }
 
-    /// Write this position into a create's params: the `sort_key` field and,
-    /// when the position displaces siblings, the re-keys that must land in the
-    /// same transaction.
-    pub fn into_params(self, params: &mut crate::storage::types::StorageEntity) {
-        let (sort_key, rekeys) = self.into_parts();
-        if let Some(rekeys) = Self::rekeys_param_of(&rekeys) {
-            params.insert(ORDER_REKEYS_PARAM.into(), rekeys);
-        }
-        params.insert("sort_key".into(), holon_api::Value::String(sort_key));
-    }
-
-    /// Both halves at once, for the writer that puts them in one transaction
-    /// itself rather than through a params map.
+    /// Both halves at once, handed to the typed ordering-write seam
+    /// (`SqlOperationProvider::create_row` / `place_row` / the batch writer)
+    /// that puts them in one transaction. The re-keys NEVER enter a
+    /// `String`-keyed params map: a data key structurally cannot be the re-key
+    /// channel, so the writer cannot be tricked into rewriting a foreign row's
+    /// `sort_key` by a peer- or MCP-supplied property (ADR 0030 D4, amended).
     pub fn into_parts(self) -> (String, Vec<(String, String)>) {
         (self.sort_key, self.rekeys)
-    }
-
-    /// The [`ORDER_REKEYS_PARAM`] value for a bare re-key list — for the
-    /// batched append, whose per-parent re-key is not attached to any single
-    /// block's minted key.
-    pub fn rekeys_param_of(rekeys: &[(String, String)]) -> Option<holon_api::Value> {
-        if rekeys.is_empty() {
-            return None;
-        }
-        Some(holon_api::Value::Object(
-            rekeys
-                .iter()
-                .map(|(id, key)| (id.clone(), holon_api::Value::String(key.clone())))
-                .collect(),
-        ))
-    }
-
-    /// Read back what [`rekeys_param_of`](Self::rekeys_param_of) wrote. A
-    /// malformed value is the caller's bug and is reported as such — never
-    /// skipped, or a placement would silently land in a keyspace nobody
-    /// re-keyed. Decoding says nothing about whether the targets are
-    /// legitimate; that proof is the writer's (`checked_order_rekeys`).
-    pub fn decode_rekeys(value: Option<&holon_api::Value>) -> Result<Vec<(String, String)>> {
-        let Some(value) = value else {
-            return Ok(Vec::new());
-        };
-        let holon_api::Value::Object(map) = value else {
-            return Err(format!(
-                "{ORDER_REKEYS_PARAM} must be a Value::Object of block id → sort_key, got {value:?}"
-            )
-            .into());
-        };
-        let mut out = Vec::with_capacity(map.len());
-        for (id, key) in map {
-            let key = key.as_string().ok_or_else(|| {
-                format!("{ORDER_REKEYS_PARAM}[{id}] must be a String sort_key, got {key:?}")
-            })?;
-            out.push((id.clone(), key.to_string()));
-        }
-        Ok(out)
     }
 }
 

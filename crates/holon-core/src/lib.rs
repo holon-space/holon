@@ -57,6 +57,7 @@ pub use operation_log::OperationLogEntry;
 pub use operation_log::OperationStatus;
 pub use operation_subset::OperationSubset;
 pub use operation_wrapper::OperationWrapper;
+pub use traits::BatchOp;
 pub use traits::BlockDataSourceHelpers;
 pub use traits::BlockEntity;
 pub use traits::BlockOperations;

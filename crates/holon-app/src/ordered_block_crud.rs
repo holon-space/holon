@@ -22,6 +22,7 @@
 
 use std::sync::Arc;
 
+use holon::core::SqlOperationProvider;
 use holon::core::sql_block_operations::SqlBlockOperations;
 use holon_api::EntityName;
 use holon_api::EntityUri;
@@ -42,11 +43,23 @@ use holon_core::block_ordering::OrderKeyMinting;
 pub struct OrderedBlockCrud {
     inner: Arc<dyn OperationProvider>,
     order_owner: Arc<SqlBlockOperations>,
+    /// The SAME concrete provider as `inner`, kept typed so placement writes
+    /// hand a `MintedPosition` to `create_row` / `place_row` directly — the
+    /// re-keys travel TYPED, never as an `_order_rekeys` params key (Ruling B).
+    sql: Arc<SqlOperationProvider>,
 }
 
 impl OrderedBlockCrud {
-    pub fn new(inner: Arc<dyn OperationProvider>, order_owner: Arc<SqlBlockOperations>) -> Self {
-        Self { inner, order_owner }
+    pub fn new(
+        inner: Arc<dyn OperationProvider>,
+        order_owner: Arc<SqlBlockOperations>,
+        sql: Arc<SqlOperationProvider>,
+    ) -> Self {
+        Self {
+            inner,
+            order_owner,
+            sql,
+        }
     }
 
     /// The position a block appended as `parent`'s last child must carry.
@@ -109,19 +122,21 @@ impl OperationProvider for OrderedBlockCrud {
             // explicit position is appended as that parent's last child — the
             // creation slot's contract ("type here" adds to the end).
             "create" if !params.contains_key("sort_key") => {
-                let mut params = params;
-                if let Some(parent) = params.get("parent_id").and_then(|v| v.as_string()) {
+                let position = if let Some(parent) = params
+                    .get("parent_id")
+                    .and_then(|v| v.as_string())
+                    .map(str::to_string)
+                {
                     // ALLOW(entity_uri_from_raw): op-dispatch parent id string → EntityUri
-                    let parent = EntityUri::from_raw(parent);
-                    // Key AND any sibling re-key it is expressed against, so
-                    // both ride the create into its transaction (ADR 0030 D1).
-                    self.append_key(&parent, None)
-                        .await?
-                        .into_params(&mut params);
-                }
-                self.inner
-                    .execute_operation(entity_name, op_name, params)
-                    .await
+                    let parent = EntityUri::from_raw(&parent);
+                    // Key AND any sibling re-key it is expressed against, carried
+                    // TYPED into the create's transaction (ADR 0030 D1) — never
+                    // an `_order_rekeys` params key (Ruling B).
+                    Some(self.append_key(&parent, None).await?)
+                } else {
+                    None
+                };
+                self.sql.create_row(params, position).await
             }
             // A re-parent moves the block into a sequence its old key has no
             // meaning in, so it is appended to the new parent. The position is
@@ -145,16 +160,11 @@ impl OperationProvider for OrderedBlockCrud {
                 // ALLOW(entity_uri_from_raw): op-dispatch id strings → EntityUri
                 let parent = EntityUri::from_raw(new_parent);
                 let position = self.append_key(&parent, Some(&uri)).await?;
-
-                let mut place_params: StorageEntity = StorageEntity::new();
-                place_params.insert("id".into(), Value::String(uri.as_str().to_string()));
-                place_params.insert(
-                    "parent_id".into(),
-                    Value::String(parent.as_str().to_string()),
-                );
-                position.into_params(&mut place_params);
-                self.inner
-                    .execute_operation(entity_name, "place", place_params)
+                // Parent + key + sibling re-keys are ONE placement in ONE
+                // transaction; `place_row` takes the `MintedPosition` whole, so
+                // the re-keys travel TYPED (ADR 0030 D1/D4, amended).
+                self.sql
+                    .place_row(uri.as_str(), parent.as_str(), position)
                     .await
             }
             _ => {
@@ -207,7 +217,11 @@ mod tests {
                 .expect("cache"),
         );
         let order_owner = Arc::new(SqlBlockOperations::new(sql_ops.clone(), cache));
-        let provider = OrderedBlockCrud::new(sql_ops as Arc<dyn OperationProvider>, order_owner);
+        let provider = OrderedBlockCrud::new(
+            sql_ops.clone() as Arc<dyn OperationProvider>,
+            order_owner,
+            sql_ops,
+        );
         (handle, provider)
     }
 
@@ -317,7 +331,11 @@ mod tests {
     #[tokio::test]
     async fn read_block_content_marks_reaches_the_inner_provider() {
         let (_handle, sql_backed) = setup().await;
-        let decorated = OrderedBlockCrud::new(Arc::new(MarksReader), sql_backed.order_owner);
+        let decorated = OrderedBlockCrud::new(
+            Arc::new(MarksReader),
+            sql_backed.order_owner,
+            sql_backed.sql,
+        );
 
         assert_eq!(
             decorated
