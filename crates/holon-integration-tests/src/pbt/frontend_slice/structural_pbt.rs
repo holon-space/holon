@@ -2549,8 +2549,9 @@ entities:
     /// focus-handoff fold). Split `c1`, then `TypeChars` DIRECTLY — with NO
     /// intervening `FocusEditableText`. The only thing that makes the
     /// keystroke land on the new block is the composed write's production
-    /// focus-handoff (`OpDispatchWriter`'s `dispatch_intent_sync` →
-    /// `apply_structural_focus`), which moves the SUT's `focused_block` onto
+    /// focus-handoff (`dispatch_intent_sync` → `apply_structural_focus`; this
+    /// slice boots `full_headless`, so `KeystrokeBlockTreeWriter` carries
+    /// it), which moves the SUT's `focused_block` onto
     /// the split-created block — exactly as `SplitBlock::apply_to_ref` does
     /// via `set_focus` + `open_active_editor`. Were the handoff absent (the
     /// old blur regime), this would panic ("no focused block") or type into

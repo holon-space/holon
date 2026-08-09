@@ -68,7 +68,7 @@ pub type IdResolver = holon_pbt_core::types::DocUriMap;
 /// runner driving this must reconcile the oracle's synthetic `block::split-N`
 /// against the minted id (the EXP-2/3 `ComposedRunner`).
 pub struct OpDispatchWriter {
-    engine: Arc<BackendEngine>,
+    sink: DispatchSink,
     /// Synthetic→real id map. Empty (`new`) ⇒ identity resolution (every id
     /// passes through), which is correct for fixed-id slices. A multi-tick
     /// composed runner over an id-minting backend shares a populated map
@@ -77,18 +77,52 @@ pub struct OpDispatchWriter {
     resolver: IdResolver,
 }
 
+/// Which production dispatch seam the writer's ops travel.
+///
+/// The two are NOT interchangeable for the structural focus movers: only the
+/// frontend seam runs `apply_structural_focus`, which reads `split_block` /
+/// `join_block`'s focus response (new block, caret 0) and moves the in-memory
+/// focus authority — the handoff the desktop app performs on every Enter and
+/// the one `SplitBlock::apply_to_ref` mirrors. A writer on the storage seam
+/// leaves `focused_block` on the pre-split block, so the next keystroke lands
+/// somewhere the oracle never sent it.
+enum DispatchSink {
+    /// Storage rung: no frontend is booted, so there is no focus authority to
+    /// move and the op engine is the whole system under test.
+    Storage(Arc<BackendEngine>),
+    /// Frontend rung: `dispatch_intent_sync`, the seam GPUI's keychord handler
+    /// and MCP `send_key_chord` dispatch through. (MCP's raw-op tools
+    /// `execute_operation`/`execute_command` go through `HolonService` below
+    /// this seam and deliberately do not move UI focus.)
+    Frontend(Arc<ReactiveEngine>),
+}
+
 impl OpDispatchWriter {
     /// Identity resolution (fixed-id slices: oracle id == store id).
     pub fn new(engine: Arc<BackendEngine>) -> Self {
         Self {
-            engine,
+            sink: DispatchSink::Storage(engine),
             resolver: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
     /// Share a populated id map with the composed runner (id-minting backends).
     pub fn with_resolver(engine: Arc<BackendEngine>, resolver: IdResolver) -> Self {
-        Self { engine, resolver }
+        Self {
+            sink: DispatchSink::Storage(engine),
+            resolver,
+        }
+    }
+
+    /// The frontend-rung writer: same ops, dispatched through the booted
+    /// `ReactiveEngine` so the structural focus handoff happens. Used wherever
+    /// a frontend exists but the keystroke writer cannot be — SqlOnly, where
+    /// `KeystrokeBlockTreeWriter` has no `MutableText` to press against.
+    pub fn with_frontend(reactive: Arc<ReactiveEngine>, resolver: IdResolver) -> Self {
+        Self {
+            sink: DispatchSink::Frontend(reactive),
+            resolver,
+        }
     }
 
     /// Resolve an oracle-space id to its SUT-space id.
@@ -105,11 +139,25 @@ impl OpDispatchWriter {
     /// Dispatch without the fail-loud wrapper, for the one caller that has to
     /// inspect a DOCUMENTED refusal ([`is_page_boundary_outdent_refusal`]).
     async fn try_execute(&self, op: &str, params: StorageEntity) -> anyhow::Result<()> {
-        let entity = "block".to_string().into();
-        self.engine
-            .execute_operation(&entity, op, params, holon_api::OpOrigin::User)
-            .await
-            .map(|_| ())
+        let entity: holon_api::EntityName = "block".to_string().into();
+        match &self.sink {
+            DispatchSink::Storage(engine) => engine
+                .execute_operation(&entity, op, params, holon_api::OpOrigin::User)
+                .await
+                .map(|_| ()),
+            DispatchSink::Frontend(reactive) => {
+                reactive
+                    .dispatch_intent_sync(holon_frontend::operations::OperationIntent::new(
+                        entity,
+                        op.to_string(),
+                        params
+                            .into_iter()
+                            .map(|(k, v)| (k.to_string(), v))
+                            .collect(),
+                    ))
+                    .await
+            }
+        }
     }
 
     fn id_only(&self, id: &EntityUri) -> StorageEntity {
@@ -445,5 +493,104 @@ impl SutEdgeFieldWrite for EdgeFieldWriter {
             .execute_operation(&entity, "set_field", params, holon_api::OpOrigin::User)
             .await
             .unwrap_or_else(|e| panic!("block/set_field({field}) on {rid} failed: {e:#}"));
+    }
+}
+
+#[cfg(test)]
+mod split_focus_handoff_tests {
+    use std::collections::BTreeSet;
+    use std::time::Duration;
+
+    use holon_pbt_core::capabilities::SutBackend;
+
+    use super::*;
+    use crate::pbt::frontend_slice::components::HeadlessFrontendComponent;
+
+    const SETTLE: Duration = Duration::from_millis(400);
+
+    async fn ids_and_contents(comp: &HeadlessFrontendComponent) -> BTreeMap<EntityUri, String> {
+        comp.block_raw_snapshot()
+            .await
+            .into_iter()
+            .map(|b| (b.id.clone(), b.content.clone()))
+            .collect()
+    }
+
+    fn id_of(rows: &BTreeMap<EntityUri, String>, content: &str) -> EntityUri {
+        rows.iter()
+            .find(|(_, c)| c.as_str() == content)
+            .unwrap_or_else(|| panic!("no block with content {content:?} in {rows:?}"))
+            .0
+            .clone()
+    }
+
+    /// Both rungs of [`OpDispatchWriter`], over ONE SqlOnly frontend (Loro off
+    /// — the shipped default), on the op whose result carries a focus
+    /// target.
+    ///
+    /// The storage rung must NOT move focus (it dispatches below the frontend
+    /// that owns it); the frontend rung MUST — `split_block` hands the caret to
+    /// the block it created, at offset 0, and that handoff is the whole reason
+    /// a following keystroke lands where the user is looking. The position-0
+    /// content routing is asserted alongside it: the split block empties, the
+    /// new one takes the text.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn split_hands_focus_to_the_new_block_only_on_the_frontend_rung() {
+        let comp = HeadlessFrontendComponent::new(
+            &[("doc0.org", "#+ID: ref-doc-0\n* Alpha\n* Beta\n")],
+            SETTLE,
+        )
+        .await;
+        let before = ids_and_contents(&comp).await;
+        let alpha = id_of(&before, "Alpha");
+        let beta = id_of(&before, "Beta");
+        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+
+        let focus_before = comp.reactive().focused_block();
+        OpDispatchWriter::with_resolver(comp.engine(), resolver.clone())
+            .apply_split_block(&alpha, 0)
+            .await;
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(
+            comp.reactive().focused_block(),
+            focus_before,
+            "the storage rung dispatches below the frontend: it has no focus authority to move"
+        );
+
+        let mid = ids_and_contents(&comp).await;
+        OpDispatchWriter::with_frontend(comp.reactive(), resolver)
+            .apply_split_block(&beta, 0)
+            .await;
+        tokio::time::sleep(SETTLE).await;
+        let after = ids_and_contents(&comp).await;
+
+        let minted: BTreeSet<EntityUri> = after
+            .keys()
+            .filter(|id| !mid.contains_key(*id))
+            .cloned()
+            .collect();
+        assert_eq!(minted.len(), 1, "one block minted by the split: {minted:?}");
+        let new_block = minted.into_iter().next().expect("one minted id");
+
+        assert_eq!(
+            comp.reactive().focused_block(),
+            Some(new_block.clone()),
+            "the frontend rung must apply split_block's focus response"
+        );
+        assert_eq!(
+            comp.reactive().peek_caret_seed(&new_block),
+            Some(0),
+            "the caret rides to the new block at offset 0"
+        );
+        assert_eq!(
+            after.get(&beta).map(String::as_str),
+            Some(""),
+            "a split at position 0 leaves the split block empty"
+        );
+        assert_eq!(
+            after.get(&new_block).map(String::as_str),
+            Some("Beta"),
+            "a split at position 0 hands the whole text to the new block"
+        );
     }
 }

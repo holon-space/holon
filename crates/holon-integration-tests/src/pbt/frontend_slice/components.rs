@@ -4018,8 +4018,13 @@ impl HeadlessFrontendComponent {
             // The dispatch floor still has to share the runner's id map: a
             // `split_block` op mints a NEW id, and the per-tick reconcile pairs
             // the oracle's synthetic id to it through exactly this resolver.
-            Some(resolver) => Arc::new(OpDispatchWriter::with_resolver(
-                self.engine.clone(),
+            // The dispatch floor rides the FRONTEND seam, not the bare op
+            // engine: `dispatch_intent_sync` is what applies `split_block`'s
+            // focus response, so the SUT's focused block follows the split the
+            // way the desktop app's does — and the way the oracle's
+            // `set_focus` + `open_active_editor` already model.
+            Some(resolver) => Arc::new(OpDispatchWriter::with_frontend(
+                self.reactive(),
                 resolver.clone(),
             )),
             None => Arc::new(OpDispatchWriter::new(self.engine.clone())),
