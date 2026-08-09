@@ -5057,6 +5057,7 @@ dependencies = [
  "futures-signals",
  "holon-expr",
  "holon-macros",
+ "holon-pattern",
  "once_cell",
  "opentelemetry",
  "proptest 1.11.0",
@@ -5608,6 +5609,17 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
+name = "holon-pattern"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
  "workspace-hack 0.1.0",
 ]
 

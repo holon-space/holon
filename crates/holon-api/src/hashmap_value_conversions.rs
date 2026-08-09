@@ -1,93 +1,18 @@
-//! Conversions between HashMap types and Value.
+//! Entity-macro coverage for the HashMap <-> Value conversions.
 //!
-//! These implementations enable the Entity macro to work with HashMap fields
-//! directly, with automatic JSON serialization to/from TEXT in the database.
-
-use std::collections::HashMap;
-
-use crate::Value;
-
-// ============================================================================
-// Required trait implementations for HashMap<String, String> to work with
-// Entity macro
-// ============================================================================
-
-impl From<HashMap<String, String>> for Value {
-    fn from(map: HashMap<String, String>) -> Self {
-        Value::Object(
-            map.into_iter()
-                .map(|(k, v)| (k, Value::String(v)))
-                .collect(),
-        )
-    }
-}
-
-impl TryFrom<Value> for HashMap<String, String> {
-    type Error = Box<dyn std::error::Error + Send + Sync>;
-
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        match value {
-            Value::Object(obj) => obj
-                .into_iter()
-                .map(|(k, v)| match v {
-                    Value::String(s) => Ok((k, s)),
-                    _ => Err(format!("Value for key '{}' is not a string", k).into()),
-                })
-                .collect(),
-            Value::Null => Ok(HashMap::new()),
-            _ => Err("Value is not an object".into()),
-        }
-    }
-}
-
-// ============================================================================
-// Required trait implementations for HashMap<String, Value> to work with Entity
-// macro
-// ============================================================================
-
-impl TryFrom<Value> for HashMap<String, Value> {
-    type Error = Box<dyn std::error::Error + Send + Sync>;
-
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        match value {
-            Value::Object(obj) => Ok(obj),
-            Value::Null => Ok(HashMap::new()),
-            Value::Json(s) | Value::String(s) => {
-                if s.is_empty() {
-                    return Ok(HashMap::new());
-                }
-                let json: serde_json::Value = serde_json::from_str(&s).map_err(|e| {
-                    format!(
-                        "HashMap<String,Value>::try_from JSON parse failed for {:?}: {}",
-                        s, e
-                    )
-                })?;
-                match json {
-                    serde_json::Value::Object(obj) => Ok(obj
-                        .into_iter()
-                        .map(|(k, v)| (k, Value::from_json_value(v)))
-                        .collect()),
-                    other => Err(format!(
-                        "HashMap<String,Value>::try_from expected JSON object, got {:?}",
-                        other
-                    )
-                    .into()),
-                }
-            }
-            other => {
-                Err(format!("HashMap<String,Value>::try_from cannot convert {:?}", other).into())
-            }
-        }
-    }
-}
+//! The conversions themselves live in `holon-pattern` (they are impls on
+//! `Value` with no local type); these tests exercise them through the `Entity`
+//! derive, which only exists here.
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use holon_macros::Entity;
     use serde::Deserialize;
     use serde::Serialize;
 
-    use super::*;
+    use crate::Value;
     use crate::entity::IntoEntity;
     use crate::entity::TryFromEntity;
 

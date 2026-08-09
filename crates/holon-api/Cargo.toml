@@ -17,6 +17,7 @@ serde_json.workspace = true
 chrono.workspace = true
 holon-expr.workspace = true
 holon-macros.workspace = true
+holon-pattern.workspace = true
 rhai = { version = "1", features = ["sync"] }
 opentelemetry.workspace = true
 thiserror.workspace = true
