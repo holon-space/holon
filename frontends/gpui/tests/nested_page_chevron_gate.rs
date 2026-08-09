@@ -66,6 +66,17 @@ struct ExpandStoreServices {
     /// the live-follow tests set it, because a subscription that never runs is
     /// a line with no coverage.
     live_follow: bool,
+    /// A per-fixture current-thread runtime whose handle backs every spawn
+    /// (collection driver, live-follow subscription). `Some` only in the
+    /// windowed (`#[gpui::test]`) constructor: the shared `StubBuilderServices`
+    /// runtime is multi-thread, so a spawned driver runs on a `stub-builder-
+    /// services` worker whose activity gpui's `TestScheduler` detects mid
+    /// `run_until_parked` and panics "Your test is not deterministic". A
+    /// current-thread runtime keeps that work on the test thread, and `pump`
+    /// drives it deterministically between the click and the paint read. The
+    /// `#[tokio::test]` paths keep `None` — they need the ambient multi-thread
+    /// runtime `settle().await` drives.
+    windowed_rt: Option<Arc<tokio::runtime::Runtime>>,
 }
 
 impl ExpandStoreServices {
@@ -75,17 +86,63 @@ impl ExpandStoreServices {
             interpreter: Arc::new(holon_frontend::shadow_builders::build_shadow_interpreter()),
             store: Arc::new(Mutex::new(HashMap::new())),
             live_follow: false,
+            windowed_rt: None,
         })
     }
 
-    /// Same store, but the live-follow subscription runs.
+    /// Same store, but the live-follow subscription runs. For `#[tokio::test]`
+    /// paths that `settle().await` under the ambient multi-thread runtime.
     fn live() -> Arc<Self> {
         Arc::new(Self {
             inner: StubBuilderServices::new(),
             interpreter: Arc::new(holon_frontend::shadow_builders::build_shadow_interpreter()),
             store: Arc::new(Mutex::new(HashMap::new())),
             live_follow: true,
+            windowed_rt: None,
         })
+    }
+
+    /// Live-follow, but every spawn lands on a fixture-owned current-thread
+    /// runtime the test drives with `pump` — so the collection driver runs on
+    /// the test thread, never on a `stub-builder-services` worker gpui's
+    /// `TestScheduler` would flag mid `run_until_parked`. Use in the windowed
+    /// (`#[gpui::test]`) tests.
+    fn live_windowed() -> Arc<Self> {
+        Arc::new(Self {
+            inner: StubBuilderServices::new(),
+            interpreter: Arc::new(holon_frontend::shadow_builders::build_shadow_interpreter()),
+            store: Arc::new(Mutex::new(HashMap::new())),
+            live_follow: true,
+            windowed_rt: Some(Arc::new(
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("fixture current-thread runtime"),
+            )),
+        })
+    }
+
+    /// The handle every spawn (driver, live-follow subscription) uses. The
+    /// windowed runtime when present; otherwise the shared multi-thread stub.
+    fn spawn_handle(&self) -> tokio::runtime::Handle {
+        match &self.windowed_rt {
+            Some(rt) => rt.handle().clone(),
+            None => self.inner.runtime_handle(),
+        }
+    }
+
+    /// Drive the windowed runtime on the calling (test) thread so the spawned
+    /// collection driver reaches its initial population before the paint read.
+    /// A no-op without a windowed runtime. Runs entirely before the next
+    /// `run_until_parked`, so gpui never observes off-thread activity.
+    fn pump(&self) {
+        if let Some(rt) = &self.windowed_rt {
+            rt.block_on(async {
+                for _ in 0..512 {
+                    tokio::task::yield_now().await;
+                }
+            });
+        }
     }
 
     fn stored(&self) -> HashMap<String, bool> {
@@ -107,6 +164,7 @@ impl BuilderServices for ExpandStoreServices {
             interpreter: self.interpreter.clone(),
             store: self.store.clone(),
             live_follow: self.live_follow,
+            windowed_rt: self.windowed_rt.clone(),
         })
     }
     fn get_block_data(
@@ -129,9 +187,9 @@ impl BuilderServices for ExpandStoreServices {
     /// build a real node instead of an error node.
     fn watch_query(
         &self,
-        _query: &str,
-        _lang: holon_api::QueryLanguage,
-        _ctx: Option<holon_frontend::QueryContext>,
+        _: &str,
+        _: holon_api::QueryLanguage,
+        _: Option<holon_frontend::QueryContext>,
     ) -> anyhow::Result<holon_api::EnrichedChangeStream> {
         let (_tx, rx) = tokio::sync::mpsc::channel(1);
         Ok(tokio_stream::wrappers::ReceiverStream::new(rx))
@@ -142,10 +200,10 @@ impl BuilderServices for ExpandStoreServices {
     /// `ReactiveEngine::watch_query_live`, which starts the tree it returns.
     fn watch_query_live(
         &self,
-        _query: String,
-        _lang: holon_api::QueryLanguage,
+        _: String,
+        _: holon_api::QueryLanguage,
         item_template: RenderExpr,
-        _query_context: Option<holon_frontend::QueryContext>,
+        _: Option<holon_frontend::QueryContext>,
         services: Arc<dyn BuilderServices>,
     ) -> (holon_api::EntityUri, holon_frontend::LiveBlock) {
         let provider: Arc<dyn holon_api::ReactiveRowProvider> = Arc::new(ChildRowProvider::new());
@@ -165,11 +223,7 @@ impl BuilderServices for ExpandStoreServices {
             collection: Some(Arc::new(view)),
             ..ReactiveViewModel::from_widget("list", HashMap::new())
         };
-        holon_frontend::reactive_view::start_reactive_views(
-            &tree,
-            &services,
-            &self.inner.runtime_handle(),
-        );
+        holon_frontend::reactive_view::start_reactive_views(&tree, &services, &self.spawn_handle());
         let live_block = holon_frontend::LiveBlock {
             tree,
             structural_changes: Box::pin(futures::stream::pending()),
@@ -198,10 +252,10 @@ impl BuilderServices for ExpandStoreServices {
         self.inner.present_op(op, ctx_params)
     }
     fn runtime_handle(&self) -> tokio::runtime::Handle {
-        self.inner.runtime_handle()
+        self.spawn_handle()
     }
     fn try_runtime_handle(&self) -> Option<tokio::runtime::Handle> {
-        self.live_follow.then(|| self.inner.runtime_handle())
+        self.live_follow.then(|| self.spawn_handle())
     }
     fn search_link_candidates(
         &self,
@@ -608,7 +662,7 @@ fn painted_texts(bounds: &BoundsRegistry) -> Vec<String> {
 #[gpui::test]
 fn an_opened_nested_page_paints_its_children(cx: &mut TestAppContext) {
     cx.update(|cx| gpui_component::init(cx));
-    let services = ExpandStoreServices::live();
+    let services = ExpandStoreServices::live_windowed();
 
     holon_frontend::shadow_builders::register_render_dsl_widget_names();
     let expr = holon_api::render_dsl::parse_render_dsl(EMBEDDED_PAGE_LIVE)
@@ -647,6 +701,12 @@ fn an_opened_nested_page_paints_its_children(cx: &mut TestAppContext) {
 
     vcx.simulate_mouse_move(center, None, Default::default());
     vcx.simulate_click(center, Default::default());
+    vcx.run_until_parked();
+    // The click materialised the live_query content and spawned its collection
+    // driver onto the fixture runtime; drive that runtime on THIS thread so the
+    // driver populates `items` before the paint read below, then re-render so
+    // gpui observes the populated collection.
+    services.pump();
     vcx.run_until_parked();
     bounds.flush();
 
@@ -746,7 +806,7 @@ fn probe_variant(cx: &mut TestAppContext, label: &str, dsl: &str) {
     eprintln!("\n[probe] ===== variant {label} =====");
     eprintln!("[probe] dsl =\n{dsl}");
 
-    let services = ExpandStoreServices::live();
+    let services = ExpandStoreServices::live_windowed();
     holon_frontend::shadow_builders::register_render_dsl_widget_names();
     let expr = holon_api::render_dsl::parse_render_dsl(dsl)
         .unwrap_or_else(|e| panic!("shipped embedded_page DSL parses ({label}): {e}"));
@@ -784,6 +844,10 @@ fn probe_variant(cx: &mut TestAppContext, label: &str, dsl: &str) {
 
     vcx.simulate_mouse_move(center, None, Default::default());
     vcx.simulate_click(center, Default::default());
+    vcx.run_until_parked();
+    // Drive the spawned collection driver on the test thread before the readout,
+    // then re-render — see `an_opened_nested_page_paints_its_children`.
+    services.pump();
     vcx.run_until_parked();
     bounds.flush();
 
