@@ -2259,11 +2259,17 @@ impl HeadlessFrontendComponent {
             .reactive
             .focused_block()
             .expect("[apply_move_cursor] no focused block — FocusEditableText must run first");
-        let services: &dyn BuilderServices = self.reactive.as_ref();
-        let text = services
-            .editable_text(&block, "content")
-            .map(|c| c.current())
-            .unwrap_or_default();
+        // Same precedence `HeadlessEditorMirror::handle_keystroke` walks: the
+        // block's editor VM buffer is the authority, and it is the ONLY source in
+        // SqlOnly mode (no Loro cell, so `editable_text` is `Err` there and a
+        // blanket `unwrap_or_default` would convert every position against `""`).
+        let text = self.driver.editor_live_text(&block).unwrap_or_else(|| {
+            let services: &dyn BuilderServices = self.reactive.as_ref();
+            services
+                .editable_text(&block, "content")
+                .map(|c| c.current())
+                .unwrap_or_default()
+        });
         assert!(
             text.is_char_boundary(byte_position),
             "[apply_move_cursor] byte_position {byte_position} not a char boundary of {text:?}"
@@ -4006,15 +4012,15 @@ impl HeadlessFrontendComponent {
         // default), so `keystroke_writer_with`'s fail-loud resolver assert
         // never trips here.
         //
-        // The keystroke pipeline resolves the block's editable `MutableText`
-        // through the `BlockCellRegistry`, which exists only when the CRDT is
-        // on — so a SqlOnly build (`crdt.enabled = false`, the shipped default)
-        // also takes the dispatch floor. Advertising the keystroke writer there
-        // would admit `SplitBlock`/`TypeChars` into the alphabet and then fail
-        // mid-run with "editable_text not configured".
-        let editor_wired = self.loro_doc_store().is_some();
+        // `KeystrokeBlockTreeWriter::apply_split_block` converts its byte
+        // position to `right` presses against the block's editable `MutableText`,
+        // resolved through the `BlockCellRegistry` — which exists only when the
+        // CRDT is on. So a SqlOnly build (`crdt.enabled = false`, the shipped
+        // default) takes the dispatch floor; advertising the keystroke writer
+        // there would fail mid-run with "no editable content cell".
+        let cells_wired = self.loro_doc_store().is_some();
         let block_tree: Arc<dyn SutBlockTreeWrite> = match self.resolver.get() {
-            Some(_) if editor_wired => Arc::new(self.keystroke_writer_with(driver.clone())),
+            Some(_) if cells_wired => Arc::new(self.keystroke_writer_with(driver.clone())),
             // The dispatch floor still has to share the runner's id map: a
             // `split_block` op mints a NEW id, and the per-tick reconcile pairs
             // the oracle's synthetic id to it through exactly this resolver.
@@ -4033,13 +4039,15 @@ impl HeadlessFrontendComponent {
         // `SutFocusWrite`/`SutEditorMirrorWrite`/`SutMutate`: the driver-bound shim
         // that delegates to the component's `*_via` bodies (sidebar-click
         // focus, editor keystrokes, `state_toggle` clicks) so the whole family
-        // rides ONE driver. `SutEditorMirrorWrite` is the editor-keystroke half,
-        // so it is hosted only when the editor cells exist.
+        // rides ONE driver. `SutEditorMirrorWrite` is hosted in BOTH storage
+        // modes: a keystroke routes through `HeadlessEditorMirror`'s cell-free
+        // `EditorViewModel` → `vm_commit_edit` → `set_field("content")`, which is
+        // exactly the sink production GPUI uses when no Loro cell is attached
+        // (`crdt.enabled = false`, the shipped default). Withholding it here left
+        // that mode's typing path with zero keystone coverage (tasks #20/#52).
         let shim = Arc::new(DriverBoundFrontendWrite::new(self.clone(), driver));
         caps.insert(shim.clone() as Arc<dyn SutFocusWrite>);
-        if editor_wired {
-            caps.insert(shim.clone() as Arc<dyn SutEditorMirrorWrite>);
-        }
+        caps.insert(shim.clone() as Arc<dyn SutEditorMirrorWrite>);
         caps.insert(shim as Arc<dyn SutMutate>);
     }
 }

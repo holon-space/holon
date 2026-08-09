@@ -412,12 +412,13 @@ async fn compose_sut_seeded_impl(
         // engine dispatches. Org-only draws never reach this arm, so they omit
         // the cap and the history invariants deselect honestly.
         caps.insert(comp.clone() as Arc<dyn SutHistory>);
-        // The editor READ cap (the WRITE cap is in `register`). Selects the
-        // `inv-editor-{text,caret}-matches-ref` invariants — added only when the config
-        // drives the editor, so non-editor frontend configs keep their selection.
-        if has_editor {
-            caps.insert(comp.clone() as Arc<dyn SutEditorMirrorRead>);
-        }
+        // The editor READ cap (the WRITE cap rides the gesture rung). Selects the
+        // `inv-editor-{text,caret}-matches-ref` invariants. Hosted on EVERY frontend
+        // arm, not just Loro ones: the reads come from the driver's
+        // `HeadlessEditorMirror` (per-block editor VM buffer + caret map), which
+        // exists in both storage modes, and they degrade to `Unobservable` when no
+        // editor is open — so the SqlOnly typing path gets the same oracle.
+        caps.insert(comp.clone() as Arc<dyn SutEditorMirrorRead>);
         // `SutFixtureFs` (write_org_file into the session's watched org_root) —
         // admits `WriteOrgFile` into the composed alphabet. This is the ONLY
         // transition that can mint an advice-rule block (ADR 0022 step 4), so

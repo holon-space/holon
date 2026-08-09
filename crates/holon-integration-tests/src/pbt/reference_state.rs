@@ -715,11 +715,24 @@ impl ReferenceState {
     /// the headless atomic-editor capability (the single editor-transition
     /// gate; see [`RefLifecycle::has_editor_buffer`]). Inherent mirror of
     /// the trait method so transition bodies holding a concrete
-    /// `&ReferenceState` can read it without importing the trait. Derived
-    /// from the wiring's UI actor (the editor's `InputState`/buffer host),
-    /// not Loro-as-storage or an env var.
+    /// `&ReferenceState` can read it without importing the trait.
+    ///
+    /// Two honest sources, never Loro-as-storage or an env var:
+    /// - `Actor::UI` — a real window hosts the editor's `InputState`. The only
+    ///   source for refs with no composed SUT behind them (the fixed-wiring lib
+    ///   slices), so their gating is unchanged.
+    /// - the composed SUT actually hosting `SutEditorMirrorWrite`.
+    ///   `compose_sut` FORBIDS `Actor::UI` (a GPUI window has thread affinity),
+    ///   so the manifest alone can never admit an editor transition into the
+    ///   composed keystone — yet its frontend arm runs the production
+    ///   `HeadlessEditorMirror` in BOTH storage modes. Reading the cap set
+    ///   makes the gate say what it means: "an editor is drivable here".
     pub fn has_editor_buffer(&self) -> bool {
         self.harness.wiring.has_actor(holon_pbt_core::Actor::UI)
+            || (self.harness.cap_set.is_some()
+                && self.caps_available(&[holon_pbt_core::composition::CapId::of::<
+                    dyn holon_pbt_core::capabilities::SutEditorMirrorWrite,
+                >()]))
     }
 
     pub fn mutable_text_enabled() -> bool {
