@@ -44,6 +44,10 @@ holon-api.workspace = true
 # pull the `holon` engine re-enable `engine` via feature unification.
 holon-advice = { path = "../holon-advice", default-features = false }
 holon-oracles.workspace = true
+# The live task-keyword promotion rule (`detect_keyword_promotion`) lives beside
+# the org parser and the keyword vocabulary it must agree with; the editor VM is
+# its typing-side call site.
+holon-org-format.workspace = true
 holon-pbt-core = { path = "../holon-pbt-core", optional = true }
 async-trait.workspace = true
 futures.workspace = true

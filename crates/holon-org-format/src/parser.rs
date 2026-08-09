@@ -773,14 +773,13 @@ fn process_headlines(
             .todo_keyword()
             .map(|t| TaskState::from_keyword_with_done_list(t.as_ref(), done_keywords));
 
-        // Extract title using title_raw() and remove TODO keyword if present
-        let mut title = headline.title_raw().trim().to_string();
-        if let Some(ref todo) = task_state {
-            let kw = todo.keyword.as_str();
-            if title.starts_with(kw) {
-                title = title[kw.len()..].trim_start().to_string();
-            }
-        }
+        // `title_raw()` is the HEADLINE_TITLE node, and the parser consumes the
+        // TODO keyword into its own token BEFORE building that node — so the
+        // keyword is already gone. Stripping it again here would delete a
+        // keyword the title legitimately OWNS: `* TODO TODO x` is a TODO task
+        // whose text is `TODO x`, and re-stripping turns it into `x` on every
+        // read of the file.
+        let title = headline.title_raw().trim().to_string();
 
         // Extract priority (Token contains just the letter like "A")
         let priority = headline.priority().map(|t| {
@@ -1917,6 +1916,23 @@ mod tests {
             Some(TaskState::active("DONE"))
         );
         assert!(!result.blocks[0].is_completed());
+    }
+
+    /// A task whose TEXT begins with a keyword is a legal, reachable state:
+    /// promote a block with `TODO `, then type `TODO x` into it. Its headline
+    /// is `* TODO TODO x` and it must read back with the keyword in
+    /// `task_state` and `TODO x` — not `x` — as content, or every read of the
+    /// file deletes another word.
+    #[test]
+    fn a_task_whose_text_starts_with_a_keyword_keeps_that_word() {
+        let result = parse_test_org("* TODO TODO x\n");
+
+        assert_eq!(result.blocks.len(), 1);
+        assert_eq!(
+            result.blocks[0].task_state().map(|t| t.keyword.clone()),
+            Some("TODO".to_string())
+        );
+        assert_eq!(result.blocks[0].content, "TODO x");
     }
 
     #[test]

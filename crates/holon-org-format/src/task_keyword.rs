@@ -81,6 +81,11 @@ impl TaskKeywordVocabulary {
 pub struct Promotion {
     pub keyword: TaskState,
     pub stripped: String,
+    /// Bytes the promotion removes from the FRONT of the typed text: the
+    /// keyword plus exactly the whitespace it consumed. Carried rather than
+    /// re-derived, so a caller shifting carets never has to assume `stripped`
+    /// is still a suffix of what was typed.
+    pub consumed_prefix: usize,
 }
 
 /// `s` is `KEYWORD`, then at least one ASCII whitespace, then the rest.
@@ -119,9 +124,11 @@ pub fn detect_keyword_promotion(
     if keyword_headed(prior_content, vocabulary).is_some() {
         return None;
     }
+    let stripped = rest.trim_start();
     Some(Promotion {
+        consumed_prefix: keyword.keyword.len() + (rest.len() - stripped.len()),
         keyword,
-        stripped: rest.trim_start().to_string(),
+        stripped: stripped.to_string(),
     })
 }
 

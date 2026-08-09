@@ -95,4 +95,7 @@ impl RefSqlCardinality for ReferenceState {
     fn last_open_tab_activated(&self) -> bool {
         self.ui.tab.last_open_tab_activated
     }
+    fn content_writes_reach_sql(&self) -> bool {
+        !self.enable_loro()
+    }
 }

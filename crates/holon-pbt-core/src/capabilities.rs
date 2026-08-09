@@ -351,6 +351,13 @@ pub trait RefEditorMirrorMut: RefEditorMirror {
     fn delete_backward(&mut self, count: usize);
     fn move_cursor(&mut self, byte_position: usize);
 
+    /// Replace the active editor's text and caret wholesale, because the view
+    /// model rewrote its own buffer instead of adopting what was typed (a live
+    /// task-keyword promotion strips the keyword out of the visible text).
+    /// Required, not defaulted: a silent no-op here would leave the mirror
+    /// holding text prod no longer shows.
+    fn reseed_active_editor(&mut self, text: &str, cursor: usize);
+
     /// Clear the dirty flag after a commit. Default no-op for models
     /// without dirty tracking.
     fn mark_active_editor_committed(&mut self) {}
@@ -2715,6 +2722,12 @@ pub trait RefSqlCardinality {
     /// switches on it because the two branches issue different SQL, and the
     /// post-apply state cannot tell them apart.
     fn last_open_tab_activated(&self) -> bool;
+
+    /// True iff a block-content write reaches SQL as a write — i.e. SQL, not
+    /// Loro, holds block CRUD. Per-keystroke write budgets fork on it: in the
+    /// Loro arm the content lands in the CRDT and only the undo journal is a
+    /// SQL write, in the SqlOnly arm both are.
+    fn content_writes_reach_sql(&self) -> bool;
 }
 
 /// Reference-side typed block surface for `inv-backend-blocks-match-ref`.

@@ -304,6 +304,34 @@ pub trait BuilderServices: Send + Sync {
         Box::pin(std::future::ready(Ok(holon_core::Delivery::Proven)))
     }
 
+    /// Dispatch an intent and await the operation's own RESPONSE PAYLOAD.
+    ///
+    /// For callers whose optimistic UI must be undone when the engine declines.
+    /// The live task-keyword promotion strips the keyword out of the editor
+    /// before the write is confirmed; the compound's refusal payload carries
+    /// the text it committed verbatim, and that is the only thing that can put
+    /// the keyword back. Fire-and-forget dispatch cannot carry it, and no
+    /// amount of pre-dispatch freshness checking can replace it: the read and
+    /// the engine's guard are not one transaction, so a concurrent writer can
+    /// always turn an accepted proposal into a refusal.
+    ///
+    /// Default: LOUD, not `Ok(None)`. A services impl that cannot return an
+    /// operation result must say so — a caller would read a missing payload as
+    /// "accepted" and keep its optimistic state.
+    fn dispatch_intent_awaiting_result(
+        &self,
+        intent: crate::operations::OperationIntent,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Option<holon_api::Value>>> + Send + 'static>,
+    > {
+        let name = format!("{}.{}", intent.entity_name, intent.op_name);
+        Box::pin(std::future::ready(Err(anyhow::anyhow!(
+            "dispatch_intent_awaiting_result({name}) is not implemented by this \
+             BuilderServices; a caller that needs the operation's payload cannot \
+             fall back to fire-and-forget"
+        ))))
+    }
+
     /// Follow a click on a *dangling* wiki-link — a `[[Name]]` mark whose
     /// target does not yet resolve to a block. Creates the page chain for
     /// `target` (via the `create_page_from_link` op), then navigates `region`
@@ -3600,6 +3628,63 @@ impl BuilderServices for ReactiveEngine {
                     // the caller ALSO surfaces it as a visible toast.
                     session.error_tracker().record_error();
                     tracing::error!("dispatch_intent_awaitable: {entity_name}.{op_name}: {e:#}");
+                    Err(e)
+                }
+            }
+        })
+    }
+
+    fn dispatch_intent_awaiting_result(
+        &self,
+        intent: crate::operations::OperationIntent,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Option<holon_api::Value>>> + Send + 'static>,
+    > {
+        let journal = self.ui_state.dispatch_journal.clone();
+        let journal_seq = journal.record(&intent);
+        maybe_mirror_navigation_focus(&self.ui_state, &intent);
+        let session = self.session.clone();
+        let (focused_block, caret_seed) = self.ui_state.focus_handles();
+        let entity_name = intent.entity_name.clone();
+        let op_name = intent.op_name.clone();
+        let params = intent.params;
+        let latency_target = params
+            .get("id")
+            .and_then(|v| v.as_string())
+            .map(String::from);
+        if let Some(target) = &latency_target {
+            holon_api::latency_e2e::interaction_dispatched(
+                &op_name,
+                target,
+                holon_api::latency_e2e::Observable::BlockRow(
+                    holon_api::latency_e2e::write_seq_from_params(&params),
+                ),
+            );
+        }
+        Box::pin(async move {
+            match session
+                .execute_operation(&entity_name, &op_name, params)
+                .await
+            {
+                Ok(outcome) => {
+                    apply_structural_focus(
+                        &focused_block,
+                        &caret_seed,
+                        &op_name,
+                        &outcome.response,
+                    );
+                    journal.settle(journal_seq, Ok(()));
+                    Ok(outcome.response)
+                }
+                Err(e) => {
+                    journal.settle(journal_seq, Err(format!("{e:#}")));
+                    if let Some(target) = &latency_target {
+                        holon_api::latency_e2e::interaction_failed(&op_name, target);
+                    }
+                    session.error_tracker().record_error();
+                    tracing::error!(
+                        "dispatch_intent_awaiting_result: {entity_name}.{op_name}: {e:#}"
+                    );
                     Err(e)
                 }
             }

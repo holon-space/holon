@@ -24,6 +24,7 @@ use holon_frontend::editor_view_model::ConvergeDirective;
 use holon_frontend::editor_view_model::EditorAction;
 use holon_frontend::editor_view_model::EditorKey;
 use holon_frontend::editor_view_model::EditorViewModel;
+use holon_frontend::editor_view_model::TaskKeywordAtKeystroke;
 use holon_frontend::editor_view_model::structural_block_action;
 use holon_frontend::input::InputAction;
 use holon_frontend::input::WidgetInput;
@@ -213,6 +214,13 @@ impl EditorView {
             let ctrl = controller.clone();
             let services_clone = services.clone();
             let row_id_for_blur = row_id.clone();
+            // The keyword-promotion trigger reads the block's task state from
+            // the row AT THE KEYSTROKE that would use it. Cloned here rather
+            // than taken from the content subscription's handle: that one is
+            // dropped for cell-attached editors (the CRDT owns content), while
+            // `task_state` has no second source — an editor that cannot see it
+            // proposes promotions on blocks that are already tasks.
+            let task_row = data.clone();
             cx.subscribe_in(
                 &input,
                 window,
@@ -298,9 +306,61 @@ impl EditorView {
                         // The write_seq stamp happens INSIDE `apply_local_edit`
                         // before this dispatch, so a fast CDC echo cannot race a
                         // not-yet-recorded seq.
-                        match ctrl.lock().unwrap().apply_local_edit(&text) {
-                            Ok(Some(intent)) => services_clone.dispatch_intent(intent),
-                            Ok(None) => {}
+                        // Read the block's task keyword from the row only when
+                        // this keystroke would actually consult it (a
+                        // keyword-headed one, at most one per promotion), and
+                        // read it NOW rather than remembering it — a task
+                        // toggle between two keystrokes would make a remembered
+                        // copy stale exactly when the guard runs.
+                        let task_keyword = if ctrl.lock().unwrap().attempts_promotion(&text) {
+                            TaskKeywordAtKeystroke::Read(task_row.as_ref().and_then(|row| {
+                                row.get_cloned()
+                                    .get("task_state")
+                                    .and_then(|v| v.as_string())
+                                    .map(str::to_string)
+                            }))
+                        } else {
+                            TaskKeywordAtKeystroke::Unread
+                        };
+                        let local_edit = ctrl.lock().unwrap().apply_local_edit(&text, task_keyword);
+                        match local_edit {
+                            Ok(edit) => match (edit.intent, edit.rewrite) {
+                                // A live task-keyword promotion. The keyword
+                                // already left the visible text — the re-entrant
+                                // Change that triggers sees `new_text == buffer`
+                                // and is a no-op — but the strip is OPTIMISTIC:
+                                // the read that authorised it and the engine's
+                                // guard are not one transaction, so this
+                                // dispatch is AWAITED and a refusal puts the
+                                // keyword back.
+                                (Some(intent), Some(rewrite)) => {
+                                    this.apply_buffer_rewrite(&rewrite, window, cx);
+                                    let pending =
+                                        services_clone.dispatch_intent_awaiting_result(intent);
+                                    cx.spawn(async move |this, cx| {
+                                        let outcome = pending.await.and_then(|payload| {
+                                            holon_frontend::editor_view_model::PromotionOutcome::parse(payload)
+                                        });
+                                        let _ = cx.update(|cx| {
+                                            let Some(view) = this.upgrade() else {
+                                                return;
+                                            };
+                                            for window_handle in cx.windows() {
+                                                let _ = window_handle.update(cx, |_, window, cx| {
+                                                    view.update(cx, |this, cx| {
+                                                        this.settle_promotion(
+                                                            &outcome, &rewrite, window, cx,
+                                                        );
+                                                    });
+                                                });
+                                            }
+                                        });
+                                    })
+                                    .detach();
+                                }
+                                (Some(intent), None) => services_clone.dispatch_intent(intent),
+                                (None, _) => {}
+                            },
                             Err(e) => {
                                 tracing::error!("apply_local_edit failed: {e}");
                             }
@@ -744,7 +804,92 @@ impl EditorView {
         });
         // The VM buffer was already synced to `target` above, so the deferred
         // re-entrant Change sees `new_text == buffer` → `apply_local_edit`
-        // returns `None` → no spurious write-back.
+        // returns an empty edit → no spurious write-back.
+    }
+
+    /// Land the engine's verdict on a promotion whose keyword this editor has
+    /// already stripped from the visible field.
+    ///
+    /// On a refusal — or on an error, which is likewise no promotion — the
+    /// keyword goes back: the engine committed the typed text verbatim, and
+    /// anything typed while the answer was in flight is kept after it. Silence
+    /// here would be the original data-loss bug with extra steps, so the
+    /// failure arm restores too rather than logging and walking away.
+    pub(crate) fn settle_promotion(
+        &mut self,
+        outcome: &anyhow::Result<holon_frontend::editor_view_model::PromotionOutcome>,
+        rewrite: &holon_frontend::editor_view_model::BufferRewrite,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use holon_frontend::editor_view_model::PromotionOutcome;
+        use holon_frontend::editor_view_model::PromotionResidue;
+        let residue = match outcome {
+            Ok(PromotionOutcome::Promoted) => return,
+            Ok(PromotionOutcome::Refused { content, reason }) => {
+                tracing::warn!(
+                    target: "editor.task_keyword_promotion",
+                    row_id = %self.row_id,
+                    refusal = %reason,
+                    "promotion refused after the keyword was stripped; restoring the typed text"
+                );
+                PromotionResidue::EngineStored(content.clone())
+            }
+            Err(e) => {
+                tracing::error!(
+                    target: "editor.task_keyword_promotion",
+                    row_id = %self.row_id,
+                    "promotion dispatch failed ({e:#}); restoring the typed text"
+                );
+                // The op may have written nothing at all, so the typed text
+                // goes back on screen AND is committed — a keystroke is never
+                // lost to a failed dispatch.
+                PromotionResidue::NothingStored(rewrite.typed.clone())
+            }
+        };
+        let restore = self
+            .controller
+            .lock()
+            .unwrap()
+            .restore_refused_promotion(&rewrite.text, &residue);
+        let Some(restore) = restore else {
+            return; // an external converge landed here; its text is authority
+        };
+        let input = self.input.clone();
+        let caret = input.read(cx).cursor() + rewrite.stripped_prefix;
+        input.update(cx, |state, cx| {
+            state.set_value(&restore.text, window, cx);
+            let pos = state
+                .text()
+                .offset_to_position(preserved_caret(caret, &restore.text));
+            state.set_cursor_position(pos, window, cx);
+        });
+        if let Some(intent) = restore.intent {
+            self.services.dispatch_intent(intent);
+        }
+    }
+
+    /// Re-seed the visible `InputState` from a VM buffer the VM rewrote itself
+    /// (live task-keyword promotion). The caret moves back by exactly the
+    /// stripped prefix so it keeps its position within the surviving text.
+    pub(crate) fn apply_buffer_rewrite(
+        &mut self,
+        rewrite: &holon_frontend::editor_view_model::BufferRewrite,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = self.input.clone();
+        let caret = input
+            .read(cx)
+            .cursor()
+            .saturating_sub(rewrite.stripped_prefix);
+        input.update(cx, |state, cx| {
+            state.set_value(&rewrite.text, window, cx);
+            let pos = state
+                .text()
+                .offset_to_position(preserved_caret(caret, &rewrite.text));
+            state.set_cursor_position(pos, window, cx);
+        });
     }
 }
 
