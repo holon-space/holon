@@ -1,8 +1,9 @@
 //! In-memory OpenTelemetry span collection for integration tests.
 //!
 //! The tracing subscriber is global (per-process), initialized once via
-//! `SpanCollector::global()`. What it COLLECTS is not global: both captured
-//! problems (ERROR events + panics) and finished SPANS are routed to the
+//! `SpanCollector::global()`. What it COLLECTS is not global: captured
+//! problems (ERROR events + panics), captured WARNINGS, and finished SPANS
+//! are routed to the
 //! [`TestScope`] that OWNS the emitting thread, so parallel tests in one
 //! binary can neither be blamed for each other's failures nor charged for
 //! each other's SQL. Each PBT transition calls `reset()` to clear its own
@@ -53,6 +54,12 @@ pub struct CapturedProblem {
 pub enum ProblemKind {
     ErrorLog,
     Panic,
+    /// A WARN-level event — a DISCLOSED degradation, not a failure. Routed to a
+    /// separate window ([`SpanCollector::captured_warnings`]) so it is
+    /// assertable on demand without ever reddening
+    /// `inv-no-observed-errors`, which several legitimate warnings (profile
+    /// DEGRADED, stale-home retire refusal) would otherwise break.
+    WarnLog,
 }
 
 impl std::fmt::Display for CapturedProblem {
@@ -60,6 +67,7 @@ impl std::fmt::Display for CapturedProblem {
         let kind = match self.kind {
             ProblemKind::ErrorLog => "ERROR",
             ProblemKind::Panic => "PANIC",
+            ProblemKind::WarnLog => "WARN",
         };
         let loc = self.location.as_deref().unwrap_or("?");
         write!(f, "[{kind}] {} ({loc}): {}", self.target, self.message)
@@ -72,11 +80,15 @@ type ProblemSink = Arc<Mutex<Vec<CapturedProblem>>>;
 /// Shared, resettable sink for finished spans — one per [`TestScope`].
 type SpanSink = Arc<Mutex<Vec<SpanData>>>;
 
-/// A `tracing` layer that routes every ERROR-level EVENT to the scope owning
-/// the emitting thread. Events (not spans) are what `tracing::error!(...)`
+/// A `tracing` layer that routes every ERROR- and WARN-level EVENT to the scope
+/// owning the emitting thread. Events (not spans) are what `tracing::error!(…)`
 /// emits; the OTel layer only captures spans, so a bare `error!` would
 /// otherwise be invisible to assertions.
-struct ErrorCaptureLayer;
+///
+/// ERROR lands in the problem window (fails `inv-no-observed-errors`); WARN
+/// lands in a separate warning window that is only read when a test asks — the
+/// "falls back VISIBLY" tier of the error philosophy is observable, not fatal.
+struct ProblemCaptureLayer;
 
 #[derive(Default)]
 struct MessageVisitor {
@@ -94,11 +106,13 @@ impl tracing::field::Visit for MessageVisitor {
     }
 }
 
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ErrorCaptureLayer {
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ProblemCaptureLayer {
     fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
-        if *event.metadata().level() != tracing::Level::ERROR {
-            return;
-        }
+        let kind = match *event.metadata().level() {
+            tracing::Level::ERROR => ProblemKind::ErrorLog,
+            tracing::Level::WARN => ProblemKind::WarnLog,
+            _ => return,
+        };
         let mut v = MessageVisitor::default();
         event.record(&mut v);
         let meta = event.metadata();
@@ -114,7 +128,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ErrorCaptureLayer 
             _ => None,
         };
         route_problem(CapturedProblem {
-            kind: ProblemKind::ErrorLog,
+            kind,
             target: meta.target().to_string(),
             message,
             location,
@@ -154,8 +168,21 @@ enum ThreadRole {
 struct ScopeRegistry {
     next_id: u64,
     sinks: HashMap<TestScope, ProblemSink>,
+    /// WARN-level events, kept apart from `sinks` so reading one window can
+    /// never be mistaken for reading the other.
+    warns: HashMap<TestScope, ProblemSink>,
     spans: HashMap<TestScope, SpanSink>,
     threads: HashMap<std::thread::ThreadId, ThreadRole>,
+}
+
+impl ScopeRegistry {
+    /// The window a problem of `kind` belongs in.
+    fn window(&self, kind: ProblemKind) -> &HashMap<TestScope, ProblemSink> {
+        match kind {
+            ProblemKind::WarnLog => &self.warns,
+            ProblemKind::ErrorLog | ProblemKind::Panic => &self.sinks,
+        }
+    }
 }
 
 static SCOPES: Mutex<Option<ScopeRegistry>> = Mutex::new(None);
@@ -191,6 +218,7 @@ pub fn begin_test_scope() -> TestScope {
     with_registry(|reg| {
         if let Some(ThreadRole::Driver(old)) = reg.threads.get(&me).copied() {
             reg.sinks.remove(&old);
+            reg.warns.remove(&old);
             reg.spans.remove(&old);
             reg.threads.retain(|_, role| {
                 !matches!(role, ThreadRole::Driver(s) | ThreadRole::Worker(s) if *s == old)
@@ -199,6 +227,7 @@ pub fn begin_test_scope() -> TestScope {
         reg.next_id += 1;
         let scope = TestScope(reg.next_id);
         reg.sinks.insert(scope, Arc::new(Mutex::new(Vec::new())));
+        reg.warns.insert(scope, Arc::new(Mutex::new(Vec::new())));
         reg.spans.insert(scope, Arc::new(Mutex::new(Vec::new())));
         reg.threads.insert(me, ThreadRole::Driver(scope));
         bump_registry_generation();
@@ -298,26 +327,46 @@ pub fn unregister_worker_thread() {
 /// A thread owned by NO scope cannot be attributed; it is routed to the sole
 /// active scope when there is exactly one (unambiguous), and otherwise reported
 /// on stderr — disclosed, never silent, and never blamed on a bystander test.
+///
+/// Only an unattributable PROBLEM gets that stderr line. An unattributable WARN
+/// is already on stderr verbatim from the fmt layer, and calling a disclosed
+/// degradation a "problem" in the one place a human reads it contradicts the
+/// ERROR-reds/WARN-observable split this module encodes.
+fn unattributed_disclosure(
+    problem: &CapturedProblem,
+    active_scopes: usize,
+    thread_name: &str,
+) -> Option<String> {
+    if problem.kind == ProblemKind::WarnLog {
+        return None;
+    }
+    Some(format!(
+        "[test_tracing] UNATTRIBUTED PROBLEM on thread {thread_name} — {active_scopes} test \
+         scopes active, cannot blame one: {problem}"
+    ))
+}
+
 fn route_problem(problem: CapturedProblem) {
     let me = std::thread::current().id();
+    let kind = problem.kind;
     let sink = with_registry(|reg| match reg.threads.get(&me).copied() {
         Some(ThreadRole::Driver(scope) | ThreadRole::Worker(scope)) => Some(
-            reg.sinks
+            reg.window(kind)
                 .get(&scope)
                 .expect("owning scope's sink must exist while the thread is registered")
                 .clone(),
         ),
         None => {
-            if reg.sinks.len() == 1 {
-                reg.sinks.values().next().cloned()
+            if reg.window(kind).len() == 1 {
+                reg.window(kind).values().next().cloned()
             } else {
-                eprintln!(
-                    "[test_tracing] UNATTRIBUTED PROBLEM on thread {:?} ({}) — {} test scopes \
-                     active, cannot blame one: {problem}",
-                    me,
+                if let Some(line) = unattributed_disclosure(
+                    &problem,
+                    reg.window(kind).len(),
                     std::thread::current().name().unwrap_or("<unnamed>"),
-                    reg.sinks.len(),
-                );
+                ) {
+                    eprintln!("{line}");
+                }
                 None
             }
         }
@@ -336,6 +385,16 @@ fn scope_sink(scope: TestScope) -> ProblemSink {
         reg.sinks
             .get(&scope)
             .unwrap_or_else(|| panic!("{scope:?} has been retired; no sink to read"))
+            .clone()
+    })
+}
+
+/// The WARN window of `scope`. Same use-after-free contract as [`scope_sink`].
+fn scope_warns(scope: TestScope) -> ProblemSink {
+    with_registry(|reg| {
+        reg.warns
+            .get(&scope)
+            .unwrap_or_else(|| panic!("{scope:?} has been retired; no warning window to read"))
             .clone()
     })
 }
@@ -551,18 +610,23 @@ impl SpanCollector {
                 tracing_opentelemetry::OpenTelemetryLayer::new(global::tracer("holon-pbt"))
                     .with_filter(otel_filter);
 
-            // ERROR-only filter: registers interest in ERROR alone, so it does
-            // NOT raise the registry's global max-level and resurrect the hot
-            // DEBUG `interpret`-span cost the OTel filter above deliberately drops.
-            let error_capture =
-                ErrorCaptureLayer.with_filter(tracing_subscriber::filter::LevelFilter::ERROR);
+            // WARN-and-above filter: still below the OTel layer's `info`, so it
+            // does NOT raise the registry's global max-level and cannot
+            // resurrect the hot DEBUG `interpret`-span cost the OTel filter
+            // above deliberately drops.
+            let problem_capture =
+                ProblemCaptureLayer.with_filter(tracing_subscriber::filter::LevelFilter::WARN);
 
             let registry = tracing_subscriber::registry()
                 .with(otel_layer)
-                .with(error_capture)
+                .with(problem_capture)
                 .with(
+                    // STDERR, never stdout: a `harness = false` test binary's
+                    // stdout carries libtest's machine-readable list protocol,
+                    // and nextest aborts the whole run when a log line lands in
+                    // it. nextest captures stderr per test, so nothing is lost.
                     tracing_subscriber::fmt::layer()
-                        .with_test_writer()
+                        .with_writer(std::io::stderr)
                         .with_filter(
                             EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
                         ),
@@ -666,6 +730,10 @@ impl SpanCollector {
             .lock()
             .expect("problem sink lock poisoned")
             .clear();
+        scope_warns(scope)
+            .lock()
+            .expect("warning window lock poisoned")
+            .clear();
     }
 
     /// Problems (ERROR-level tracing events + panics on this scope's threads)
@@ -682,6 +750,22 @@ impl SpanCollector {
     /// Count of problems captured since the last [`SpanCollector::reset`].
     pub fn problem_count(&self) -> usize {
         self.captured_problems().len()
+    }
+
+    /// WARN-level events captured since the last [`SpanCollector::reset`], for
+    /// the scope owning the calling thread.
+    ///
+    /// Deliberately NOT read by `inv-no-observed-errors`: a WARN is the
+    /// DISCLOSED-degradation tier of the error philosophy (profile DEGRADED,
+    /// stale-home retire refusal), so it must be assertable without being
+    /// fatal. A test that requires a degradation to be announced asserts a
+    /// warning is HERE; a test that requires a clean path asserts a specific
+    /// warning is ABSENT.
+    pub fn captured_warnings(&self) -> Vec<CapturedProblem> {
+        scope_warns(current_scope())
+            .lock()
+            .expect("warning window lock poisoned")
+            .clone()
     }
 
     /// All spans the CALLING THREAD's scope collected since its last reset.
@@ -1472,30 +1556,73 @@ mod capture_tests {
 
     use super::*;
 
-    /// The ERROR-capture layer records ERROR events and IGNORES lower levels —
-    /// verified against a THREAD-LOCAL subscriber whose layer routes into this
-    /// test's OWN scope, so it never lands in another test's sink.
+    /// A problem no scope can be charged is disclosed on stderr — but a WARN is
+    /// NOT, because the fmt layer already printed it verbatim and calling a
+    /// disclosed degradation a "PROBLEM" is the mislabelling this split exists
+    /// to prevent.
     #[test]
-    fn error_capture_layer_records_only_error_events() {
+    fn only_unattributable_problems_get_the_stderr_disclosure() {
+        let make = |kind| CapturedProblem {
+            kind,
+            target: "t".into(),
+            message: "m".into(),
+            location: None,
+        };
+
+        let err = unattributed_disclosure(&make(ProblemKind::ErrorLog), 2, "worker")
+            .expect("an unattributable ERROR must be disclosed");
+        assert!(err.contains("UNATTRIBUTED PROBLEM"), "{err}");
+        assert!(
+            unattributed_disclosure(&make(ProblemKind::Panic), 2, "worker").is_some(),
+            "an unattributable PANIC must be disclosed"
+        );
+        assert_eq!(
+            unattributed_disclosure(&make(ProblemKind::WarnLog), 2, "worker"),
+            None,
+            "a WARN is disclosed by the fmt layer, never relabelled a PROBLEM"
+        );
+    }
+
+    /// The capture layer separates the two tiers of the error philosophy: an
+    /// ERROR is a problem (reddens `inv-no-observed-errors`), a WARN is a
+    /// disclosed degradation that lands in its own window, and INFO and below
+    /// are ignored. Verified against a THREAD-LOCAL subscriber whose layer
+    /// routes into this test's OWN scope, so it never lands in another test's
+    /// sink.
+    #[test]
+    fn capture_layer_splits_errors_from_warnings() {
         let collector = SpanCollector::global();
         begin_test_scope();
         let subscriber = tracing_subscriber::registry()
-            .with(ErrorCaptureLayer.with_filter(tracing_subscriber::filter::LevelFilter::ERROR));
+            .with(ProblemCaptureLayer.with_filter(tracing_subscriber::filter::LevelFilter::WARN));
         tracing::subscriber::with_default(subscriber, || {
-            tracing::warn!("ignored warning");
+            tracing::info!("ignored info");
+            tracing::warn!("disclosed degradation");
             tracing::error!("captured boom");
         });
         let got = collector.captured_problems();
         assert_eq!(
             got.len(),
             1,
-            "only the ERROR event is recorded; got {got:?}"
+            "only the ERROR event is a problem; got {got:?}"
         );
         assert_eq!(got[0].kind, ProblemKind::ErrorLog);
         assert!(
             got[0].message.contains("captured boom"),
             "message captured: {:?}",
             got[0].message
+        );
+        let warnings = collector.captured_warnings();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "the WARN lands in the warning window, not the problem window; got {warnings:?}"
+        );
+        assert_eq!(warnings[0].kind, ProblemKind::WarnLog);
+        assert!(
+            warnings[0].message.contains("disclosed degradation"),
+            "warning message captured: {:?}",
+            warnings[0].message
         );
     }
 

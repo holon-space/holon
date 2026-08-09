@@ -5243,6 +5243,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "ctor",
  "dioxus-devtools",
  "fluxdi",
  "futures",

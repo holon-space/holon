@@ -273,3 +273,7 @@ fn outline_reserves_the_height_a_grown_band_paints(cx: &mut TestAppContext) {
 
     assert_band_and_sibling_disjoint(&bounds, BAND_ROWS, "after growth");
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

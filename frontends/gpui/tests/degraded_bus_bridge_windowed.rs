@@ -123,3 +123,7 @@ fn shipped_window_launch_subscribes_to_the_degraded_bus_in_sql_only_mode() {
     std::mem::forget(app);
     std::mem::forget(env);
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

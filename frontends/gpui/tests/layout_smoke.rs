@@ -336,3 +336,7 @@ fn sibling_overlap_ignores_unrelated_subtrees() {
     assert_no_sibling_overlap(&snap, "two-cards", &[]);
     assert_containment(&snap, "two-cards", &[]);
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

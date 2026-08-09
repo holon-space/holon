@@ -254,3 +254,7 @@ fn general_e2e_composed_pbt_windowed() {
         Err(e) => panic!("[4b-loop] windowed PBT failed (shrunk): {e}"),
     }
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

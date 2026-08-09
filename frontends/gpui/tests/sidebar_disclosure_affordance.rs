@@ -441,3 +441,7 @@ fn collapsed_halo_does_not_shift_layout(cx: &mut TestAppContext) {
         "collapsed halo must not change the chevron's box — it is background paint, not layout"
     );
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

@@ -1235,3 +1235,7 @@ fn page_with_a_nested_band_scrolls_to_its_last_row() {
     std::mem::forget(app);
     std::mem::forget(page.env);
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

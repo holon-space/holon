@@ -220,3 +220,7 @@ fn scrolling_reveals_below_fold_outline_row(cx: &mut TestAppContext) {
          and the PBT drive layer rely on must keep advancing the visible window."
     );
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

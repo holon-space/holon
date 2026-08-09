@@ -150,3 +150,7 @@ fn blur_commits_pending_text() {
     std::mem::forget(visual);
     std::mem::forget(cx);
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

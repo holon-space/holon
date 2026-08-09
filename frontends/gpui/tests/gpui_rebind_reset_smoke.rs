@@ -196,3 +196,7 @@ fn rebind_reset_smoke() {
     std::mem::forget(sut1);
     std::mem::forget(sut2);
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

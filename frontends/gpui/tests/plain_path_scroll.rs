@@ -522,3 +522,7 @@ fn accordion_through_shell_renders_bounded_not_error(cx: &mut TestAppContext) {
         "accordion routed through the per-block shell should be a BOUNDED footer          (>100px), but was {acc_h}px — the placement-error div. The accordion          split in columns::render does not fire because the flow child is a          live_block, not a column."
     );
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

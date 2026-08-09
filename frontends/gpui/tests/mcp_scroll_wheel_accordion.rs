@@ -211,3 +211,7 @@ fn mcp_scroll_reveals_below_fold_backlink_in_accordion(cx: &mut TestAppContext) 
         "MCP ScrollWheel must lower to a single ScrollWheel PlatformInput, got {wheel:?}"
     );
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

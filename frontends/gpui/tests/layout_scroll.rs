@@ -535,3 +535,7 @@ fn columns_child_viewport_is_scrollable(cx: &mut TestAppContext) {
          `flex_1 relative → absolute size_full` wrapper chain). See `builders/columns.rs`."
     );
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

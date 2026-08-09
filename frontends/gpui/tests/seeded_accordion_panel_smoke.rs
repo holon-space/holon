@@ -341,3 +341,7 @@ fn seeded_main_panel_renders_capped_accordion_split(cx: &mut TestAppContext) {
         "at least some outline rows must sit ABOVE the pinned accordion footer (main region)."
     );
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

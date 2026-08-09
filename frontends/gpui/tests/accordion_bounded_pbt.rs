@@ -359,3 +359,7 @@ fn accordion_visible_height(bounds: &BoundsRegistry) -> Option<f32> {
         .find(|(_, info)| info.widget_type.as_ref() == "accordion")
         .map(|(_, info)| info.height)
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

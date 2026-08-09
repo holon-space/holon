@@ -114,3 +114,7 @@ fn snapshot_nested_col_of_col(cx: &mut TestAppContext) {
     let snap = render_fixture(cx, Arc::new(fixture));
     insta::assert_snapshot!(snap.structural_dump());
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;
