@@ -27,6 +27,75 @@ use std::time::Duration;
 use holon_api::Value;
 use holon_integration_tests::TestEnvironment;
 use holon_loro::LoroBackend;
+use holon_loro::loro_document::LoroDocument;
+
+/// Live tree-node count read from a SETTLED snapshot.
+///
+/// `snapshot_blocks_from_doc_settled` reports `settled = false` when a live
+/// node is transiently skipped because its meta/`STABLE_ID` is mid-commit (an
+/// in-flight create/move commits the node and its meta in separate doc-state
+/// steps, so a concurrent reader can momentarily see the node without its
+/// meta). The public `LoroBackend::snapshot_blocks` discards that bool, so a
+/// bare `.len()` under-reports at such an instant. Retry until the read is
+/// settled so the count is the tree's true, stable size.
+async fn settled_node_count(doc: &LoroDocument) -> usize {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let (blocks, settled) = doc
+            .with_read(|d| Ok(holon_loro::snapshot_blocks_from_doc_settled(d)))
+            .expect("read settled Loro snapshot");
+        if settled {
+            return blocks.len();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Loro snapshot never settled (last unsettled count {})",
+            blocks.len()
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+fn is_iso_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b.iter().enumerate().all(|(i, c)| {
+            if i == 4 || i == 7 {
+                *c == b'-'
+            } else {
+                c.is_ascii_digit()
+            }
+        })
+}
+
+/// Drain the ONE async boot mutation that races this test: the
+/// `daily_journal` auto-create rule (`when: not
+/// block_exists("Journals/{date}")`, `crates/holon-frontend/src/lib.rs`) fires
+/// off the clock scheduler AFTER boot and mints today's journal page as a new
+/// Loro tree node — an independent write, unrelated to the split under test. If
+/// `nodes_before` is snapshotted before it lands and `nodes_after` after, the
+/// count grows by one (`20 != 21`). The journal page is the only node whose
+/// content is a bare `YYYY-MM-DD` date, so awaiting an ISO-date node
+/// deterministically waits for that rule to fire without coupling to the
+/// clock's exact value or timezone.
+async fn wait_for_journal_seeded(doc: &LoroDocument) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let (blocks, settled) = doc
+            .with_read(|d| Ok(holon_loro::snapshot_blocks_from_doc_settled(d)))
+            .expect("read settled Loro snapshot");
+        if settled && blocks.values().any(|b| is_iso_date(&b.block.content)) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "daily_journal auto-create never seeded a journal node into the Loro tree"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
 
 #[test]
 fn split_block_on_sql_only_block_succeeds_without_poisoning_loro_tree() {
@@ -68,6 +137,11 @@ async fn run_test(runtime: Arc<tokio::runtime::Runtime>) {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
+    // Drain the async Loro projection so the tree has reached its final size
+    // before we snapshot it. Mirrors the quiescence idiom the other Loro
+    // integration tests use to defeat the seed-in-flight race.
+    env.wait_for_loro_quiescence(Duration::from_secs(10)).await;
+
     let doc_root = env
         .resolve_page_uri_by_name("vault.org")
         .await
@@ -103,12 +177,16 @@ async fn run_test(runtime: Arc<tokio::runtime::Runtime>) {
         .get_global_doc()
         .await
         .expect("global Loro doc");
-    let backend = LoroBackend::from_document(global_doc);
+    let backend = LoroBackend::from_document(global_doc.clone());
     assert!(
         backend.resolve_to_tree_id(stranded_id).await.is_none(),
         "precondition violated: stranded block unexpectedly has a Loro node"
     );
-    let nodes_before = backend.snapshot_blocks().await.len();
+    // Let the async daily-journal auto-create land BEFORE we baseline the tree
+    // size, so its node is counted in both `nodes_before` and `nodes_after`
+    // and cannot masquerade as split-induced growth.
+    wait_for_journal_seeded(&global_doc).await;
+    let nodes_before = settled_node_count(&global_doc).await;
 
     // The live repro: Cmd+Enter → block.split_block through the real engine.
     let mut split_params = HashMap::new();
@@ -152,7 +230,7 @@ async fn run_test(runtime: Arc<tokio::runtime::Runtime>) {
         backend.resolve_to_tree_id(stranded_id).await.is_none(),
         "split must not have minted a Loro node for the stranded block"
     );
-    let nodes_after = backend.snapshot_blocks().await.len();
+    let nodes_after = settled_node_count(&global_doc).await;
     assert_eq!(
         nodes_before, nodes_after,
         "split on a SQL-only block must not mutate the Loro tree"
