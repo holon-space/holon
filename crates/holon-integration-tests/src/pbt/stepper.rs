@@ -153,8 +153,13 @@ pub fn run_sequence<S: Stepper>(
 /// the alphabet gate in `aggregate_transitions` (`transition_dispatch.rs`), but
 /// value-level so it can be evaluated during replay. Relies on the value-level
 /// `E2ETransition::required_wiring` + `required_caps` added in
-/// `transition_dispatch.rs`.
-fn transition_applicable(ref_state: &ReferenceState, transition: &E2ETransition) -> bool {
+/// `transition_dispatch.rs`. Also the shrink-time gate: `WideE2EMachine`'s
+/// `preconditions` calls it so a shrunk initial state cannot keep a transition
+/// its CapMap has no provider for.
+pub(crate) fn transition_applicable(
+    ref_state: &ReferenceState,
+    transition: &E2ETransition,
+) -> bool {
     transition
         .required_wiring()
         .satisfied_by(&ref_state.harness.wiring)
