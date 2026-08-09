@@ -1602,7 +1602,16 @@ impl ReferenceStateMachine for WideE2EMachine {
     }
 
     fn preconditions(state: &Self::State, transition: &Self::Transition) -> bool {
-        transition.preconditions(state).is_good()
+        // The alphabet gate comes FIRST, not just the ref-side precondition.
+        // `init_state` draws the wiring, so the library shrinks it — and
+        // `preconditions` is the only filter it re-applies to already-drawn
+        // transitions against the shrunk state (transition value-trees are built
+        // from the ORIGINAL state and can never be regenerated). Without the gate
+        // a shrink toward the cheap Loro-only backend keeps a transition the
+        // shrunk CapMap has no provider for, and the run dies in `CapMap::expect`
+        // instead of shrinking the divergence it was chasing.
+        crate::pbt::stepper::transition_applicable(state, transition)
+            && transition.preconditions(state).is_good()
     }
 
     fn apply(mut state: Self::State, transition: &Self::Transition) -> Self::State {
@@ -1907,6 +1916,7 @@ mod tests {
 
     use super::*;
     use crate::pbt::transitions::AddPeer;
+    use crate::pbt::transitions::CreateDocument;
     use crate::pbt::transitions::MergeFromPeer;
     use crate::pbt::transitions::PeerEdit;
     use crate::pbt::transitions::SyncWithPeer;
@@ -2030,6 +2040,183 @@ mod tests {
                  seed landed); ran: {ran:?}"
             );
         });
+    }
+
+    /// SHRINK-SAFETY: `preconditions` is the ONLY filter proptest-state-machine
+    /// re-applies when it shrinks the initial state, so it must reproduce the
+    /// alphabet gate `aggregate_transitions` applies at generation time
+    /// (`required_wiring` + `required_caps`). Without that, shrinking the drawn
+    /// wiring toward the cheap Loro-only backend keeps a transition the shrunk
+    /// CapMap cannot host — `CapMap::expect::<dyn SutAppLifecycle>` then aborts
+    /// the whole shrink ("selected but absent from the CapMap").
+    ///
+    /// `CreateDocument` is the sharpest witness: its ref precondition is only
+    /// `app_started`, which the composed oracle sets at seed time for EVERY
+    /// wiring, so nothing else can reject it.
+    #[test]
+    fn shrunk_wiring_rejects_a_transition_its_capmap_cannot_host() {
+        let narrow = Wiring::custom(vec![StorageAdapter::Loro], vec![], vec![]);
+        let shrunk = wide_e2e_ref_for(&narrow);
+        let transition = E2ETransition::CreateDocument(CreateDocument {
+            file_name: "shrink-probe.org".to_string(),
+        });
+
+        assert!(
+            !shrunk.caps_available(&transition.required_caps()),
+            "premise: a Loro-only draw composes no frontend component, so its CapMap has no \
+             SutAppLifecycle"
+        );
+        assert!(
+            <E2ETransition as TransitionRef<ReferenceState>>::preconditions(&transition, &shrunk)
+                .is_good(),
+            "premise: the ref-side precondition (app_started) holds for every wiring, so the cap \
+             gate is the only thing that can reject this transition"
+        );
+
+        assert!(
+            !<WideE2EMachine as ReferenceStateMachine>::preconditions(&shrunk, &transition),
+            "shrink acceptance must mirror the generation gate: a transition whose caps the \
+             shrunk wiring cannot provide has to be rejected, otherwise the shrink boots a SUT \
+             that panics in CapMap::expect"
+        );
+    }
+
+    /// The same law over the WHOLE alphabet, sampled from the widest wiring's
+    /// generator and re-checked against a narrower (shrunk) initial state: no
+    /// sampled transition may pass `preconditions` under a wiring that gates it
+    /// out. Catches a future transition that reintroduces the same escape.
+    #[test]
+    fn no_gated_out_transition_survives_a_shrunk_initial_state() {
+        use proptest::strategy::ValueTree;
+        use proptest::test_runner::TestRunner;
+
+        let wide = wide_e2e_ref();
+        let narrow = wide_e2e_ref_for(&Wiring::custom(vec![StorageAdapter::Loro], vec![], vec![]));
+        let strategy = crate::pbt::transitions::aggregate_transitions(&wide);
+        let mut runner = TestRunner::deterministic();
+        let mut checked = 0usize;
+        for _ in 0..600 {
+            let transition = strategy
+                .new_tree(&mut runner)
+                .expect("aggregate_transitions must produce a value")
+                .current();
+            if narrow.caps_available(&transition.required_caps())
+                && transition
+                    .required_wiring()
+                    .satisfied_by(&narrow.harness.wiring)
+            {
+                continue;
+            }
+            checked += 1;
+            assert!(
+                !<WideE2EMachine as ReferenceStateMachine>::preconditions(&narrow, &transition),
+                "{} is gated out of the shrunk wiring but survives its preconditions — the \
+                 shrink-abort escape",
+                transition.variant_name()
+            );
+        }
+        assert!(
+            checked > 0,
+            "non-vacuity: the sample must contain transitions the narrow wiring gates out"
+        );
+    }
+
+    /// END-TO-END over the REAL shrink loop, with a REAL failing property — the
+    /// only faithful reproduction, because a bare `simplify()` walk deletes
+    /// every transition before it ever reaches the `InitialState` phase (a
+    /// shrink is only kept when the case still FAILS, which needs a failing
+    /// property).
+    ///
+    /// The stand-in for a known-red divergence is "a `{Loro, Turso}` draw whose
+    /// sequence carries a lifecycle transition". That draw is the one the
+    /// wiring shrinker can actually narrow past a capability: dropping Turso
+    /// leaves the valid `{Loro}` manifest, whose `ComponentSet` has no frontend
+    /// component and therefore no `SutAppLifecycle` — while the lifecycle
+    /// transition, being what the failure needs, is retained. (A Turso-ONLY
+    /// draw cannot shrink at all: removing Turso leaves zero storage adapters
+    /// and `Wiring::validate` rejects it.) The body asserts what the composed
+    /// runner assumes — every carried transition is hostable by the CapMap this
+    /// initial state boots — so a violation surfaces as that assertion instead
+    /// of as the `CapMap::expect` abort it causes in a real run.
+    ///
+    /// NONDETERMINISTIC by construction: `TestRunner::new` seeds randomly, so
+    /// which draw carries the trigger varies (~30s). Fail-safe rather than
+    /// flaky-green — a seed that never draws a triggering sequence fails on the
+    /// `expected the trigger to fail the property` arm instead of passing
+    /// vacuously.
+    #[test]
+    fn the_shrinker_never_yields_a_sequence_its_capmap_cannot_host() {
+        use proptest::test_runner::Config;
+        use proptest::test_runner::TestCaseError;
+        use proptest::test_runner::TestError;
+        use proptest::test_runner::TestRunner;
+
+        const TRIGGER: &str = "trigger: a shrinkable-wiring draw carries a lifecycle transition";
+        let lifecycle_cap = holon_pbt_core::composition::CapId::of::<
+            dyn holon_pbt_core::capabilities::SutAppLifecycle,
+        >();
+
+        let mut runner = TestRunner::new(Config {
+            cases: 512,
+            max_shrink_iters: 8192,
+            ..Config::default()
+        });
+        let outcome = runner.run(
+            &WideE2EMachine::sequential_strategy(2..10usize),
+            |(initial, transitions, seen)| {
+                for transition in &transitions {
+                    // The library's own runner counts every transition it reaches;
+                    // the shrinker uses that count to drop never-executed steps.
+                    // Skipping it would make this walk shrink differently from a
+                    // real run.
+                    if let Some(seen) = seen.as_ref() {
+                        seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    if !crate::pbt::stepper::transition_applicable(&initial, transition) {
+                        panic!(
+                            "the shrinker kept {} under wiring {:?}, whose CapMap cannot host it \
+                             — a real run aborts here in CapMap::expect",
+                            transition.variant_name(),
+                            initial.harness.wiring,
+                        );
+                    }
+                }
+                let carries_lifecycle = transitions
+                    .iter()
+                    .any(|t| t.required_caps().contains(&lifecycle_cap));
+                let wiring = &initial.harness.wiring;
+                let shrinkable_past_the_cap = wiring.has_storage(StorageAdapter::Loro)
+                    && wiring.has_storage(StorageAdapter::Turso);
+                if carries_lifecycle && shrinkable_past_the_cap {
+                    return Err(TestCaseError::fail(TRIGGER));
+                }
+                Ok(())
+            },
+        );
+
+        match outcome {
+            // The trigger must be what fails, and it must survive to the minimal
+            // case — that is the proof the shrink ran WITH the lifecycle
+            // transition retained while everything else, the wiring included,
+            // was minimized.
+            Err(TestError::Fail(reason, (initial, transitions, _))) => {
+                assert!(
+                    reason.message().contains(TRIGGER),
+                    "the shrink must end on the trigger, not on the applicability abort: {reason}"
+                );
+                assert!(
+                    transitions
+                        .iter()
+                        .any(|t| t.required_caps().contains(&lifecycle_cap)),
+                    "non-vacuity: the minimized sequence must still carry the lifecycle transition"
+                );
+                assert!(
+                    initial.caps_available(&[lifecycle_cap]),
+                    "the minimized initial state must be a wiring that can HOST what it carries"
+                );
+            }
+            other => panic!("expected the trigger to fail the property, got {other:?}"),
+        }
     }
 
     /// **Feed-driven write-back reachability** — the direct negation of the
