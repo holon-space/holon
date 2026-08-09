@@ -99,6 +99,11 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         invariants::mark_bounds_within_content::wire(),
         invariants::viewmodel_no_error_widgets::wire(),
         invariants::task_state_storage_coherence::wire(),
+        // The mode-independent task-state oracle: SQL projection vs the ref.
+        // The coherence sibling above also needs `SutLoroTaskState`, so it
+        // deselects in the SqlOnly arm; this one needs only the SQL projection
+        // and therefore compares `task_state` in the shipped default too.
+        invariants::task_state_matches_ref::wire(),
         // Windowed (E4): selected only by the windowed slice
         // (`window_slice::window_wide`), which supplies `SutLayout` +
         // `SutViewSelection` / `SutRenderer` over a live gpui `TestPlatform` window.

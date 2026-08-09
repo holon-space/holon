@@ -80,6 +80,28 @@ impl FakeStore {
         let row = guard.get_mut(&key).unwrap();
         row.insert("content".into(), holon_api::Value::String(content.into()));
     }
+
+    /// Apply HALF A's outcome directly to the store: the stripped content plus
+    /// the promoted `task_state` — the two writes
+    /// `block.promote_task_keyword` performs.
+    fn apply_promotion(&self, bare: &str, promotion: &holon_org_format::Promotion) {
+        self.set_content(bare, &promotion.stripped);
+        let mut guard = self.blocks.lock().unwrap();
+        let key = guard
+            .values()
+            .find(|r| row_field(r, "id").ends_with(bare))
+            .map(|r| row_field(r, "id").to_string())
+            .unwrap_or_else(|| panic!("no store row for block ending in {bare:?}"));
+        let row = guard.get_mut(&key).unwrap();
+        row.insert(
+            "task_state".into(),
+            holon_api::Value::String(promotion.keyword.keyword.clone()),
+        );
+        row.insert(
+            "task_state_category".into(),
+            holon_api::Value::String(promotion.keyword.category.as_str().to_string()),
+        );
+    }
 }
 
 #[async_trait]
@@ -320,4 +342,56 @@ async fn a_genuine_on_disk_keyword_edit_still_promotes() {
         "a real disk edit that adds a leading keyword must promote to a task"
     );
     assert_eq!(store.content_of("milk-block"), "buy milk");
+}
+
+/// G12 — HALF A composed with HALF B is a fixed point. The live promotion
+/// strips the keyword into `task_state`; the renderer puts it back on the line;
+/// re-ingesting that line must leave the block exactly where the promotion left
+/// it — one keyword on disk, one `task_state`, `buy milk` as content — and the
+/// detector must refuse to fire a second time on the re-ingested text.
+#[tokio::test]
+async fn halfa_then_halfb_is_a_fixed_point() {
+    use holon_org_format::TaskKeywordVocabulary;
+    use holon_org_format::detect_keyword_promotion;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let vocabulary = TaskKeywordVocabulary::default();
+
+    let store = FakeStore::default();
+    ingest(&store, &root, PLAIN).await;
+    assert_eq!(store.task_state_of("milk-block"), None, "seeded plain");
+
+    // HALF A: the author prepends the keyword; the detector fires once.
+    let promotion = detect_keyword_promotion("buy milk", None, "TODO buy milk", &vocabulary)
+        .expect("HALF A must promote the authoring gesture");
+    store.apply_promotion("milk-block", &promotion);
+    assert_eq!(store.content_of("milk-block"), "buy milk");
+
+    // The renderer re-emits `keyword + ' ' + content`; re-ingest that render.
+    ingest(&store, &root, PROJECTED_WITH_KEYWORD).await;
+
+    assert_eq!(
+        store.task_state_of("milk-block").as_deref(),
+        Some("TODO"),
+        "the promoted task must survive the round trip"
+    );
+    assert_eq!(
+        store.content_of("milk-block"),
+        "buy milk",
+        "the keyword must NOT be re-absorbed into the content"
+    );
+
+    // And the detector itself is at rest: the block now carries a task_state,
+    // so no further keystroke can re-promote it.
+    assert_eq!(
+        detect_keyword_promotion(
+            "buy milk",
+            Some(&promotion.keyword),
+            "TODO buy milk",
+            &vocabulary
+        ),
+        None,
+        "a promoted block must never re-promote"
+    );
 }

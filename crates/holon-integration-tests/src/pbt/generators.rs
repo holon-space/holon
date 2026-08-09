@@ -234,8 +234,48 @@ pub fn edit_content_strategy() -> BoxedStrategy<String> {
 /// zero-keystroke transition is unobservable on both sides. Extended mode
 /// mixes multi-byte codepoints into the keystroke stream, stressing the
 /// byte-vs-keystroke conversions in the split/caret path.
+/// Is the live task-keyword-promotion arm armed? DEFAULT OFF, because the
+/// production half (task #64 Inc 3, the editor-VM wiring) has not landed: with
+/// the arm on, the reference promotes and the SUT does not, so
+/// `inv-task-state-matches-ref` is red BY DESIGN. Arm it with
+/// `HOLON_PBT_TASK_KEYWORD_PROMOTION=1` to reproduce that red; it must be
+/// removed — not merely flipped — once the promotion is live in the editor.
+///
+/// The gate covers BOTH halves of the model (this generator arm and
+/// `type_chars_apply_to_ref`'s promotion), so an off run cannot promote in the
+/// reference even if a draw happens to type a keyword.
+pub fn task_keyword_promotion_armed() -> bool {
+    std::env::var("HOLON_PBT_TASK_KEYWORD_PROMOTION").is_ok_and(|v| v == "1")
+}
+
+/// Text that types a leading task keyword — the authoring gesture task #64
+/// promotes. `"TODO "` (bare keyword + the space that commits it) and
+/// `"TODO <word>"` (paste / prepend shape) are the two forms the guard
+/// distinguishes.
+fn task_keyword_prefix_strategy() -> BoxedStrategy<String> {
+    let keyword = prop::sample::select(holon_org_format::models::DEFAULT_ACTIVE_KEYWORDS.to_vec());
+    prop_oneof![
+        1 => keyword.clone().prop_map(|k| format!("{k} ")),
+        1 => (keyword, "[a-z]{2,5}").prop_map(|(k, w)| format!("{k} {w}")),
+    ]
+    .boxed()
+}
+
 pub fn typing_text_strategy() -> BoxedStrategy<String> {
     let base = "[a-z]{1,4}".prop_map(|s| s).boxed();
+    if task_keyword_promotion_armed() {
+        return prop_oneof![
+            5 => base,
+            5 => prop::collection::vec(extended_char(), 1..=4)
+                .prop_map(|cs| cs.into_iter().collect::<String>()),
+            2 => "[a-z]{2,5}".prop_map(|w| format!("[[{w}]]")),
+            2 => "[a-z]{2,5}".prop_map(|w| {
+                format!("[[{}:{w}]]", crate::pbt::transitions::register_entity_scheme::LINKED_SCHEME)
+            }),
+            4 => task_keyword_prefix_strategy(),
+        ]
+        .boxed();
+    }
     prop_oneof![
         5 => base,
         5 => prop::collection::vec(extended_char(), 1..=4)

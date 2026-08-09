@@ -289,6 +289,22 @@ pub trait RefBlockTreeMut: RefBlockTree {
     /// panicking. Only `StaleExternalRewrite` (composed environment)
     /// reaches this.
     fn remint_block(&mut self, old_id: &EntityUri) -> EntityUri;
+
+    /// The block's task-state keyword, if this reference models task state at
+    /// all. Only the live task-keyword promotion reads it.
+    fn block_task_state(&self, _: &EntityUri) -> Option<String> {
+        None
+    }
+
+    /// Apply a live task-keyword promotion: `id`'s content becomes `stripped`
+    /// and its task state becomes `keyword`, as ONE authoring step.
+    ///
+    /// Returns `false` for a reference that does not model task state, so the
+    /// caller leaves the text alone rather than stripping a keyword into
+    /// nowhere — the degradation is a return value, not a silent no-op.
+    fn promote_block_task_keyword(&mut self, _: &EntityUri, _: &str, _: &str) -> bool {
+        false
+    }
 }
 
 // ─── Reference-side: EditorMirror ────────────────────────────────────

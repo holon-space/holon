@@ -216,6 +216,13 @@ const CONVERT_BLOCK_TO_PAGE_OP: &str = "convert_block_to_page";
 /// [`UndoEntry`].
 const MERGE_BLOCKS_OP: &str = "merge_blocks";
 
+/// The engine-level compound that promotes a just-authored leading task keyword
+/// (`TODO buy milk`) into `task_state = TODO` + `content = buy milk`. Composed
+/// from two ordinary `set_field`s so the whole promotion is ONE reversible
+/// [`UndoEntry`] — a single Cmd-Z restores both the text and the absent task
+/// state.
+pub const PROMOTE_TASK_KEYWORD_OP: &str = "promote_task_keyword";
+
 /// The id of the child that parks a merged-away block's body when BOTH sides
 /// carried content. Derived from the duplicate's id so a merge is idempotent
 /// in the id it mints and the block is greppable back to its origin.
@@ -975,6 +982,246 @@ impl DispatchingOperationEngine {
         }
 
         Ok(Some(Value::String(plan.page_id)))
+    }
+
+    /// One constituent of the promotion compound, dispatched straight to the
+    /// dispatcher (so the compound's stripe is never re-entered) and returning
+    /// its forward op, its inverse and its field deltas.
+    async fn dispatch_promotion_constituent(
+        &self,
+        params: StorageEntity,
+    ) -> Result<(Operation, Operation, Vec<FieldDelta>)> {
+        let block = EntityName::new("block");
+        let forward = Operation::new(
+            block.clone(),
+            "set_field",
+            "set_field",
+            params
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+        );
+        let result = self
+            .dispatcher
+            .execute_operation(&block, "set_field", params)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("promote_task_keyword: constituent set_field failed: {e}")
+            })?;
+        let inverse = match result.undo {
+            UndoAction::Undo(inv) => inv,
+            UndoAction::DeclaredIrreversible(reason) => bail!(
+                "promote_task_keyword: constituent set_field is irreversible ({reason}) — \
+                 refusing to ship a partial-undo promotion"
+            ),
+            UndoAction::Undeclared => bail!(
+                "promote_task_keyword: constituent set_field returned an Undeclared undo \
+                 classification"
+            ),
+        };
+        Ok((forward, inverse, result.changes))
+    }
+
+    /// The guard's view of live state: the block's persisted content and the
+    /// keyword of its `task_state`, if any. Fails loud on a missing block —
+    /// promoting a row that is not there would write a ghost.
+    async fn read_promotion_prior_state(&self, id: &str) -> Result<(String, Option<String>)> {
+        let reader = self.reader.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "promote_task_keyword needs a live-state reader to evaluate its guard; this \
+                 engine was built without one"
+            )
+        })?;
+        if reader.field_value(id, "id").await?.is_none() {
+            bail!("promote_task_keyword: block {id} does not exist");
+        }
+        let content = reader
+            .field_value(id, "content")
+            .await?
+            .and_then(|v| v.as_string().map(str::to_string))
+            .unwrap_or_default();
+        let keyword = match reader.field_value(id, "properties").await? {
+            None | Some(Value::Null) => None,
+            Some(Value::Object(map)) => map
+                .get("task_state")
+                .and_then(|v| v.as_string().map(str::to_string)),
+            Some(Value::String(json)) | Some(Value::Json(json)) if !json.trim().is_empty() => {
+                let parsed: serde_json::Value = serde_json::from_str(&json).map_err(|e| {
+                    anyhow::anyhow!("promote_task_keyword: corrupt properties JSON on {id}: {e}")
+                })?;
+                parsed
+                    .get("task_state")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            }
+            Some(Value::String(_)) | Some(Value::Json(_)) => None,
+            Some(other) => bail!(
+                "promote_task_keyword: block {id} has a non-object `properties` value {other:?}"
+            ),
+        };
+        Ok((content, keyword))
+    }
+
+    /// Execute the live task-keyword promotion. See
+    /// [`PROMOTE_TASK_KEYWORD_OP`]. Params: `id`, `typed` (the FULL text
+    /// the author committed, keyword included), `keyword` (the caller's
+    /// proposal) and an optional `write_seq` forwarded to the content write
+    /// so the caller still recognises its own echo.
+    ///
+    /// The `typed` text is what makes the refusal lossless: when the guard
+    /// declines, the compound still commits that text verbatim, so a keystroke
+    /// is never lost and the caller never sees an `Err` for a correct decision.
+    async fn run_promote_task_keyword(
+        &self,
+        params: &StorageEntity,
+        origin: &OpOrigin,
+    ) -> Result<Option<Value>> {
+        use holon_api::TaskState;
+        use holon_org_format::TaskKeywordVocabulary;
+        use holon_org_format::detect_keyword_promotion;
+        use holon_org_format::keyword_headed;
+
+        use crate::core::task_keyword_promotion::PromotionRefusal;
+
+        let string_param = |key: &str| -> Result<String> {
+            params
+                .get(key)
+                .and_then(|v| v.as_string())
+                .map(str::to_string)
+                .ok_or_else(|| anyhow::anyhow!("promote_task_keyword: missing '{key}' param"))
+        };
+        let id = string_param("id")?;
+        let typed = string_param("typed")?;
+        let proposed = string_param("keyword")?;
+        let write_seq = params.get("write_seq").cloned();
+
+        // The block is read by the guard and rewritten by the constituents — a
+        // read-modify-write-journal over ONE entity, the step
+        // [`EntityWriteLocks`] makes atomic. Held for the whole compound; the
+        // constituents go straight to the dispatcher, so the hold never nests.
+        let write_guard = self
+            .entity_write_locks
+            .lock_target("block", params, "id")
+            .await;
+
+        // Defaults only, deliberately: a document's own `#+TODO:` vocabulary is
+        // not plumbed here yet, and the refusal path below is what makes that
+        // upgrade lossless rather than a behaviour change.
+        let vocabulary = TaskKeywordVocabulary::default();
+        let (prior_content, prior_keyword) = self.read_promotion_prior_state(&id).await?;
+        let prior_state = prior_keyword.as_deref().map(TaskState::from_keyword);
+
+        let promotion =
+            detect_keyword_promotion(&prior_content, prior_state.as_ref(), &typed, &vocabulary);
+        let refusal = match &promotion {
+            Some(p) if p.keyword.keyword == proposed => None,
+            Some(p) => Some(PromotionRefusal::ProposalDisagrees {
+                proposed: proposed.clone(),
+                resolved: p.keyword.keyword.clone(),
+            }),
+            None if prior_keyword.is_some() => Some(PromotionRefusal::AlreadyTasked {
+                current: prior_keyword.clone().unwrap_or_default(),
+            }),
+            None if keyword_headed(&typed, &vocabulary).is_none() => {
+                Some(PromotionRefusal::NotKeywordHeaded {
+                    vocabulary: vocabulary.all_keywords(),
+                })
+            }
+            None => Some(PromotionRefusal::PriorContentAlreadyKeywordHeaded {
+                prior: prior_content.clone(),
+            }),
+        };
+
+        let set_field_params = |field: &str, value: &str| {
+            let mut p = StorageEntity::new();
+            p.insert("id".into(), Value::String(id.clone()));
+            p.insert("field".into(), Value::String(field.to_string()));
+            p.insert("value".into(), Value::String(value.to_string()));
+            if field == "content"
+                && let Some(seq) = &write_seq
+            {
+                p.insert("write_seq".into(), seq.clone());
+            }
+            p
+        };
+
+        let (forwards, inverses, all_changes, payload) = match refusal {
+            Some(reason) => {
+                // A guard that declines is a DECISION, disclosed as data and as
+                // a WARN — never an Err and never a dropped keystroke.
+                tracing::warn!(
+                    block = %id,
+                    proposed_keyword = %proposed,
+                    refusal = reason.as_str(),
+                    "promote_task_keyword refused ({reason}); committing the typed text verbatim \
+                     as a plain content edit"
+                );
+                let (fwd, inv, ch) = self
+                    .dispatch_promotion_constituent(set_field_params("content", &typed))
+                    .await?;
+                let mut payload = std::collections::HashMap::new();
+                payload.insert("outcome".to_string(), Value::String("refused".into()));
+                payload.insert(
+                    "reason".to_string(),
+                    Value::String(reason.as_str().to_string()),
+                );
+                payload.insert("detail".to_string(), Value::String(reason.to_string()));
+                payload.insert("content".to_string(), Value::String(typed.clone()));
+                (vec![fwd], vec![inv], ch, payload)
+            }
+            None => {
+                let promotion = promotion.expect("no refusal implies a promotion");
+                let (c_fwd, c_inv, mut ch) = self
+                    .dispatch_promotion_constituent(set_field_params(
+                        "content",
+                        &promotion.stripped,
+                    ))
+                    .await?;
+                let (t_fwd, t_inv, t_ch) = self
+                    .dispatch_promotion_constituent(set_field_params(
+                        "task_state",
+                        &promotion.keyword.keyword,
+                    ))
+                    .await?;
+                ch.extend(t_ch);
+                let mut payload = std::collections::HashMap::new();
+                payload.insert("outcome".to_string(), Value::String("promoted".into()));
+                payload.insert(
+                    "keyword".to_string(),
+                    Value::String(promotion.keyword.keyword.clone()),
+                );
+                payload.insert("content".to_string(), Value::String(promotion.stripped));
+                // Inverses leaf-first: reverse the forward order, so undo drops
+                // the task state before restoring the text it was derived from.
+                (vec![c_fwd, t_fwd], vec![t_inv, c_inv], ch, payload)
+            }
+        };
+
+        if origin.is_user() {
+            let entry = UndoEntry {
+                ops: forwards,
+                inverse_ops: inverses,
+                origin: OpOrigin::User,
+                group_id: 0,
+                precondition: Precondition::forward(&all_changes),
+                redo_precondition: Precondition::inverse(&all_changes),
+            };
+            self.journal_step(write_guard.as_ref(), entry).await?;
+        }
+        drop(write_guard);
+
+        if let Some(history) = &self.history {
+            self.record_history(
+                history.as_ref(),
+                "block",
+                PROMOTE_TASK_KEYWORD_OP,
+                origin,
+                &all_changes,
+            )
+            .await?;
+        }
+
+        Ok(Some(Value::Object(payload)))
     }
 
     /// Execute the duplicate-identity merge. See [`MERGE_BLOCKS_OP`]. Params:
@@ -1823,6 +2070,17 @@ impl OperationEngine for DispatchingOperationEngine {
         if op_name == CONVERT_BLOCK_TO_PAGE_OP && entity_name.as_str() == "block" {
             return self
                 .run_convert_block_to_page(&params, &origin)
+                .await
+                .map(OpOutcome::proven);
+        }
+
+        // Engine-level compound: live task-keyword promotion. Guard-then-fire —
+        // the guard is re-evaluated here against live state, so the view-model's
+        // proposal is advisory and a refusal degrades to the ordinary content
+        // commit rather than losing the keystroke.
+        if op_name == PROMOTE_TASK_KEYWORD_OP && entity_name.as_str() == "block" {
+            return self
+                .run_promote_task_keyword(&params, &origin)
                 .await
                 .map(OpOutcome::proven);
         }

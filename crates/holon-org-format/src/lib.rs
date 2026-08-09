@@ -25,6 +25,7 @@ pub mod link_parser;
 pub mod models;
 pub mod org_renderer;
 pub mod parser;
+pub mod task_keyword;
 
 // Flat re-exports — mirrors what holon-orgmode used to export directly
 
@@ -58,3 +59,7 @@ pub use org_renderer::OrgRenderer;
 pub use parser::ParseResult;
 pub use parser::parse_org_file;
 pub use parser::parse_org_file_with;
+pub use task_keyword::Promotion;
+pub use task_keyword::TaskKeywordVocabulary;
+pub use task_keyword::detect_keyword_promotion;
+pub use task_keyword::keyword_headed;

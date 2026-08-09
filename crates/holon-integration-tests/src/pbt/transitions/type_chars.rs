@@ -93,6 +93,39 @@ where
     R: RefEditorMirrorMut + RefBlockTreeMut + RefFocus + RefLifecycle,
 {
     state.type_chars(text);
+    // Live task-keyword promotion (task #64): typing `TODO ` at the head of a
+    // block that is not yet a task is an authoring gesture applied ONCE, so it
+    // is a function of the delta, not of the text. The editor BUFFER keeps the
+    // typed text (the view-model's own commit is what strips it), only the
+    // committed block changes — so this models the storage effect alone.
+    if crate::pbt::generators::task_keyword_promotion_armed()
+        && let Some(block_id) = state.active_editor_block()
+        && let Some(typed) = state.active_editor_text().map(str::to_owned)
+    {
+        let prior_content = state
+            .block_content(&block_id)
+            .map(str::to_owned)
+            .unwrap_or_default();
+        let prior_state = state
+            .block_task_state(&block_id)
+            .map(|k| holon_api::TaskState::from_keyword(&k));
+        let promotion = holon_org_format::detect_keyword_promotion(
+            &prior_content,
+            prior_state.as_ref(),
+            &typed,
+            &holon_org_format::TaskKeywordVocabulary::default(),
+        );
+        if let Some(promotion) = promotion
+            && state.promote_block_task_keyword(
+                &block_id,
+                &promotion.keyword.keyword,
+                &promotion.stripped,
+            )
+        {
+            state.mark_active_editor_committed();
+            return;
+        }
+    }
     // The GPUI editor now always commits typed text: when Loro is
     // enabled the per-keystroke pipeline writes through the Cell into
     // the Loro doc, and when no cell is attached (SqlOnly / no-Loro

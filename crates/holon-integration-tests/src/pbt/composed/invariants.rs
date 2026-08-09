@@ -70,6 +70,7 @@ pub mod source_language;
 /// both require the OTel span collector; the `pbt` feature always enables it).
 #[cfg(feature = "otel-testing")]
 pub mod sql_budget;
+pub mod task_state_matches_ref;
 pub mod task_state_storage_coherence;
 pub mod two_instance_convergence;
 pub mod undo_redo_reference_heal;
