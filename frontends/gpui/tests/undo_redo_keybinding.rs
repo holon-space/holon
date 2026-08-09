@@ -164,3 +164,7 @@ fn undo_redo_chords_resolve_without_editor_focus() {
     app.run_until_parked();
     std::mem::forget(app);
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

@@ -200,3 +200,7 @@ fn same_seq_substantive_truncation_still_converges(cx: &mut TestAppContext) {
          write_seq) must still converge — the trailing-space fix must not swallow it"
     );
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

@@ -728,3 +728,7 @@ fn m2_wheel_over_footer_does_not_scroll_outer(cx: &mut TestAppContext) {
 // guards against here. A full nested-collection reproduction belongs in
 // `panel_scroll_spike.rs` (real `ReactiveShell` path), not this pure-layout
 // spike, so it is documented rather than re-implemented.
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

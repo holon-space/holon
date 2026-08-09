@@ -205,3 +205,7 @@ fn sidebar_page_icon_centers_on_the_first_line_of_a_wrapped_row(cx: &mut TestApp
     });
     assert_on_first_line(&snap, icon, "sidebar page icon");
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

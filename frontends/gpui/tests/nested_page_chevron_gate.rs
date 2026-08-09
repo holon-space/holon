@@ -840,3 +840,7 @@ fn real_profile_embedded_page_probe(cx: &mut TestAppContext) {
         &real.replace("render_entity()", r#"text(col("content"))"#),
     );
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

@@ -497,3 +497,7 @@ fn main_panel_collection_view_paints_nonzero_height_in_column(cx: &mut TestAppCo
         first.height
     );
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

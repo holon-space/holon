@@ -260,3 +260,7 @@ fn replays_on_composition_end_after_deferred_converge(cx: &mut TestAppContext) {
          when the marked range clears (Amendment 3)."
     );
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

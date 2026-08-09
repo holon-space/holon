@@ -371,3 +371,7 @@ fn a_real_engine_nested_page_paints_its_children_when_opened() {
         engine.block_expanded_view(NESTED_PAGE),
     );
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

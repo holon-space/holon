@@ -227,3 +227,7 @@ fn left_sidebar_without_view_mode_switcher_scrolls(cx: &mut TestAppContext) {
         "plain (no switcher) sidebar must scroll: page-{FAR_IX} still clipped ({after})"
     );
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

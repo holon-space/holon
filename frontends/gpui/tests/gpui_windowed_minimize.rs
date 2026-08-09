@@ -157,3 +157,7 @@ fn main() {
         .unwrap_or_else(|e| panic!("[minimize-window] save {out_path:?}: {e}"));
     eprintln!("[minimize-window] wrote minimized capture to {out_path}");
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

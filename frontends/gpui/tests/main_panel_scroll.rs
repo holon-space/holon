@@ -172,3 +172,7 @@ fn wheel_scrolls_eager_content_height_main_panel(cx: &mut TestAppContext) {
          wrapper (matching the shrink-drawer sidebar branch)."
     );
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

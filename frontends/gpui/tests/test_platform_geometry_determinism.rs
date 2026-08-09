@@ -300,3 +300,7 @@ fn test_platform_geometry_is_real_and_deterministic() {
         first.distinct_entities
     );
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

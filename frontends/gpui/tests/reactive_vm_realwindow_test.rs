@@ -207,3 +207,7 @@ fn main() {
 
     test_thread.join().expect("test thread panicked");
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;
