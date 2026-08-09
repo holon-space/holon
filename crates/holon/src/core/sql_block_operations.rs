@@ -45,7 +45,6 @@ use holon_core::Result;
 use holon_core::UnknownOperationError;
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::block_ordering::MintedPosition;
-use holon_core::block_ordering::ORDER_REKEYS_PARAM;
 use holon_core::block_ordering::OrderKeyMinting;
 use holon_core::cell_registry::EntityCellRegistry;
 use holon_core::fractional_index::default_sort_key;
@@ -343,6 +342,23 @@ impl BlockDataSourceHelpers<Block> for SqlBlockOperations {
     /// escape into `journals` during tag-propagation lag (journals-phantom).
     async fn is_page_authoritative(&self, id: &holon_api::EntityUri) -> Result<bool> {
         self.sql_ops.block_is_page(id.as_str()).await
+    }
+
+    /// The SQL order owner CAN displace siblings, so it overrides the default
+    /// `create_at` to apply the position's re-keys atomically with the row via
+    /// `create_row` — the typed create seam (no `_order_rekeys` params key).
+    async fn create_at(
+        &self,
+        fields: holon_api::StorageEntity,
+        position: MintedPosition,
+    ) -> Result<(String, OperationResult)> {
+        let id = fields
+            .get("id")
+            .and_then(|v| v.as_string())
+            .map(String::from)
+            .ok_or_else(|| "SqlBlockOperations::create_at: missing 'id'".to_string())?;
+        let result = self.sql_ops.create_row(fields, Some(position)).await?;
+        Ok((id, result))
     }
 }
 impl BlockOperations<Block> for SqlBlockOperations {
@@ -693,7 +709,7 @@ impl BlockOrdering for SqlBlockOperations {
             // create-default-then-rekey window that let a concurrent reader (or
             // the PBT invariant) see a half-applied sibling order. Updates keep
             // their key; position changes route through `place`.
-            if op == "create"
+            let position = if op == "create"
                 && let Some(parent) = params
                     .get("parent_id")
                     .and_then(|v| v.as_string())
@@ -702,11 +718,15 @@ impl BlockOrdering for SqlBlockOperations {
                 // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation params dict
                 let parent_uri = EntityUri::from_raw(&parent);
                 let after_uri = after.as_deref().map(EntityUri::from_raw);
-                let position = self
-                    .new_child_anchor(&parent_uri, after_uri.as_ref())
-                    .await?;
-                position.into_params(&mut params);
-            }
+                // The minted position (key + sibling re-keys) travels TYPED into
+                // create_row's transaction; never a `_order_rekeys` params key.
+                Some(
+                    self.new_child_anchor(&parent_uri, after_uri.as_ref())
+                        .await?,
+                )
+            } else {
+                None
+            };
             if let Some(after_id) = after {
                 params.insert(
                     crate::sync::event_bus::POSITION_AFTER_BLOCK_ID_PARAM.into(),
@@ -714,9 +734,13 @@ impl BlockOrdering for SqlBlockOperations {
                 );
             }
             let entity = EntityName::new(Block::entity_name());
-            self.sql_ops
-                .execute_operation_with_origin(&entity, op, params, EventOrigin::Org)
-                .await?;
+            if op == "create" {
+                self.sql_ops.create_row(params, position).await?;
+            } else {
+                self.sql_ops
+                    .execute_operation_with_origin(&entity, op, params, EventOrigin::Org)
+                    .await?;
+            }
         }
         Ok(())
     }
@@ -757,7 +781,7 @@ impl BlockOrdering for SqlBlockOperations {
         if self.cell_registry.has_loro_backing() {
             tracing::warn!(
                 block_id = %id, // ALLOW(fallback): disclosed degraded-mode warning, transitional path
-                "SQL delete fallback in Loro mode — block was unseeded. \
+                "SQL delete on the degraded path in Loro mode — block was unseeded. \
                  Transitional; re-seed adoption eliminates unseeded blocks."
             );
         }
@@ -815,11 +839,11 @@ impl BlockOrdering for SqlBlockOperations {
         }
 
         let entity = EntityName::new(Block::entity_name());
-        let mut batch: Vec<(String, StorageEntity)> = Vec::with_capacity(ops.len());
+        let mut batch: Vec<holon_core::BatchOp> = Vec::with_capacity(ops.len());
         // Per-parent last-assigned sort_key cursor, seeded lazily from the DB
         // sibling set the first time a parent is touched.
         let mut parent_cursor: HashMap<String, Option<String>> = HashMap::new();
-        for (op, mut params) in ops {
+        for (op, params) in ops {
             let id = params
                 .get("id")
                 .and_then(|v| v.as_string())
@@ -837,12 +861,19 @@ impl BlockOrdering for SqlBlockOperations {
                     } else {
                         "create"
                     };
-                    if real_op == "create"
+                    let position = if real_op == "create"
                         && let Some(parent) = params
                             .get("parent_id")
                             .and_then(|v| v.as_string())
                             .map(str::to_string)
                     {
+                        // Sibling re-keys are minted by US over the projected
+                        // sibling set, on the FIRST create under each parent —
+                        // never sourced from the op's own params. They travel
+                        // TYPED on this op's position into the batch's single
+                        // transaction (ADR 0030 D1), so a peer property can
+                        // never become a re-key (Ruling B).
+                        let mut rekeys: Vec<(String, String)> = Vec::new();
                         if !parent_cursor.contains_key(&parent) {
                             let existing = self.sibling_keys(&parent).await?;
                             // The batch appends after the LAST sibling. If the
@@ -850,14 +881,10 @@ impl BlockOrdering for SqlBlockOperations {
                             // place first (order-preserving) and seed from the
                             // last sibling's NEW key — skipping an unkeyed row
                             // instead would silently place every ingested block
-                            // before it. The re-key rides THIS op into the
-                            // batch's single transaction (ADR 0030 D1).
+                            // before it.
                             let seed = if Self::needs_rekey(&existing) {
                                 let plan = Self::plan_rekey_with_slot(&existing, existing.len())?;
-                                if let Some(rekeys) = MintedPosition::rekeys_param_of(&plan.rekeys)
-                                {
-                                    params.insert(ORDER_REKEYS_PARAM.into(), rekeys);
-                                }
+                                rekeys = plan.rekeys.clone();
                                 existing.len().checked_sub(1).map(|i| plan.keys[i].clone())
                             } else {
                                 existing.last().map(|(_, k)| k.clone())
@@ -879,11 +906,16 @@ impl BlockOrdering for SqlBlockOperations {
                             },
                         )?;
                         *cursor = Some(key.clone());
-                        params.insert("sort_key".into(), Value::String(key));
+                        Some(MintedPosition::new(key, rekeys))
+                    } else {
+                        None
+                    };
+                    match position {
+                        Some(p) => batch.push(holon_core::BatchOp::placed(real_op, params, p)),
+                        None => batch.push(holon_core::BatchOp::data(real_op, params)),
                     }
-                    batch.push((real_op.to_string(), params));
                 }
-                "delete" => batch.push(("delete".to_string(), params)),
+                "delete" => batch.push(holon_core::BatchOp::data("delete", params)),
                 other => {
                     return Err(format!("apply_ingest_batch: unknown op {other:?}").into());
                 }
@@ -1043,7 +1075,6 @@ impl CrudOperations<Block> for SqlBlockOperations {
     }
 
     async fn create(&self, fields: holon_api::StorageEntity) -> Result<(String, OperationResult)> {
-        let entity = EntityName::new(Block::entity_name());
         let id = fields
             .get("id")
             .and_then(|v| v.as_string())
@@ -1070,34 +1101,39 @@ impl CrudOperations<Block> for SqlBlockOperations {
         // here too would mix `gen_key_between` values with Loro-fi values in
         // the same column — the exact keyspace-mixing bug class invariant 10
         // warns about.
-        let mut fields = fields;
-        if !fields.contains_key("sort_key")
+        let fields = fields;
+        let position = if !fields.contains_key("sort_key")
             && matches!(self.consolidator(), Consolidator::Store)
-            && let Some(parent_id) = fields.get("parent_id").and_then(|v| v.as_string())
+            && let Some(parent_id) = fields
+                .get("parent_id")
+                .and_then(|v| v.as_string())
+                .map(str::to_string)
         {
             // Append = anchor after the LAST sibling, whatever its key looks
             // like. Routing through `mint_child_key` means an unkeyed sibling
             // gets re-minted in place and the new block still lands after it;
             // anchoring on the greatest minted key instead would skip the
-            // unkeyed row and silently place the new block BEFORE it.
-            let last_id = self.sibling_keys(parent_id).await?.pop().map(|(id, _)| id);
+            // unkeyed row and silently place the new block BEFORE it. Positional
+            // (after-a-specific-block) creates come through `create_at`, not
+            // here — `split_block` / `restore_split` pre-mint and call that.
+            let last_id = self.sibling_keys(&parent_id).await?.pop().map(|(id, _)| id);
             // ALLOW(order_minting): sanctioned SqlOnly order-owner mint site
             // (Replication.md §5), same file/gate as `new_child_anchor`.
             let minted = self
-                .mint_child_key(parent_id, last_id.as_deref())
+                .mint_child_key(&parent_id, last_id.as_deref())
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
                     format!("SqlBlockOperations::create: mint sort_key: {e:#}").into()
                 })?;
-            // Key AND its sibling re-keys, so a refused create leaves the
-            // keyspace untouched (ADR 0030 D1).
-            minted.into_params(&mut fields);
-        }
+            // The key AND its sibling re-keys travel TYPED into create_row's
+            // transaction, so a refused create leaves the keyspace untouched
+            // (ADR 0030 D1) and no `_order_rekeys` params key ever exists.
+            Some(minted)
+        } else {
+            None
+        };
 
-        let result = self
-            .sql_ops
-            .execute_operation(&entity, "create", fields)
-            .await?;
+        let result = self.sql_ops.create_row(fields, position).await?;
         Ok((id, result))
     }
 
@@ -1898,16 +1934,10 @@ mod tests {
             .new_child_anchor(&parent, Some(&origin))
             .await
             .expect("anchor the new half of a split after its origin");
-        // The key is reachable only by consuming the position, so read it the
-        // way production does — out of the params the position writes itself.
+        // The key is reachable only by consuming the position (typed) — the way
+        // production does when it hands the whole `MintedPosition` to the writer.
         let projected = apply_rekeys(ordered_siblings(&handle, "block:parent").await, &position);
-        let mut minted_params: StorageEntity = std::collections::HashMap::new();
-        position.into_params(&mut minted_params);
-        let new_key = minted_params
-            .get("sort_key")
-            .and_then(|v| v.as_string())
-            .expect("a minted position always writes a sort_key")
-            .to_string();
+        let (new_key, _rekeys) = position.into_parts();
 
         // The anchor DECIDES; the create's transaction writes (ADR 0030 D1).
         assert_eq!(
@@ -1959,8 +1989,6 @@ mod tests {
     /// append anchors on nothing and the new block sorts FIRST.
     #[tokio::test]
     async fn create_appends_after_a_single_unkeyed_sibling() {
-        use holon_core::CrudOperations;
-
         let (_backend, ops, handle) = setup_sql_block_ops().await;
 
         insert_raw(&handle, "block:parent", "sentinel:no_parent", "8180").await;
@@ -1976,8 +2004,6 @@ mod tests {
     /// drops the new block into the MIDDLE of the sequence.
     #[tokio::test]
     async fn create_appends_after_a_mixed_keyed_and_unkeyed_sibling_set() {
-        use holon_core::CrudOperations;
-
         let (_backend, ops, handle) = setup_sql_block_ops().await;
 
         insert_raw(&handle, "block:parent", "sentinel:no_parent", "8180").await;
@@ -2139,19 +2165,15 @@ mod tests {
         );
     }
 
-    /// The `_order_rekeys` channel is INTERNAL, and the writer proves that
-    /// rather than trusting it.
-    ///
-    /// The param rides the same `StorageEntity` an outside caller can populate
-    /// — MCP `block.create` copies caller `properties` into it — so without a
-    /// proof every create is an unguarded "rewrite any row's `sort_key`"
-    /// primitive: no `FieldDelta`, no inverse, no undo, and a bypass of the
-    /// intent boundary's explicit refusal of `sort_key` (ADR 0005). Shaped
-    /// exactly like the MCP path: a caller-supplied JSON object naming a block
-    /// that is NOT a sibling of the created block.
+    /// The `prove_rekeys_are_siblings` backstop still refuses a re-key that
+    /// targets a block outside the placed block's own parent — now on the TYPED
+    /// channel. Re-keys reach `create_row` as a `MintedPosition`, never a
+    /// params map key, so this guards a MINTING bug (the only way a wrong
+    /// target can still arise once the data namespace cannot carry
+    /// re-keys).
     #[tokio::test]
-    async fn a_create_param_cannot_rekey_an_unrelated_block() {
-        use holon_core::CrudOperations;
+    async fn a_typed_create_rekey_cannot_target_a_non_sibling() {
+        use holon_core::block_ordering::MintedPosition;
 
         let (_backend, ops, handle) = setup_sql_block_ops().await;
 
@@ -2174,21 +2196,18 @@ mod tests {
             "content_type".into(),
             holon_api::Value::String("text".to_string()),
         );
-        // Exactly the shape `Value::from_json_value` produces for a JSON object
-        // passed as an MCP `properties` entry.
-        fields.insert(
-            holon_core::block_ordering::ORDER_REKEYS_PARAM.into(),
-            holon_api::Value::Object(std::collections::HashMap::from([(
-                "block:victim".to_string(),
-                holon_api::Value::String("ZZZZ".to_string()),
-            )])),
-        );
 
+        // A minted position whose re-key names a block under a DIFFERENT parent.
+        let position = MintedPosition::new(
+            "M0".to_string(),
+            vec![("block:victim".to_string(), "ZZZZ".to_string())],
+        );
         let err = ops
-            .create(fields)
+            .sql_ops
+            .create_row(fields, Some(position))
             .await
             .err()
-            .expect("a create must not be able to re-key a block that is not its sibling");
+            .expect("a typed re-key must not touch a block outside the placed block's parent");
         let msg = err.to_string();
         assert!(
             msg.contains("block:victim") && msg.contains("sibling"),
@@ -2206,31 +2225,43 @@ mod tests {
         );
     }
 
-    /// The same proof guards a PLACEMENT, which reaches the writer through the
-    /// `\"place\"` op with its own caller-shaped params map.
+    /// STRUCTURAL IMPOSSIBILITY (Ruling B): a `_order_rekeys` key sitting in
+    /// the caller-supplied params map is INERT — the writer never reads it,
+    /// so it cannot re-key anyone.
+    ///
+    /// RED before this lane: the writer decoded the key and REFUSED the create
+    /// (naming block:victim). GREEN after: the key is ordinary ignored data
+    /// (the boundary filters still strip it as defense-in-depth, but even
+    /// reaching the writer it has no effect), the create succeeds, and the
+    /// victim is untouched.
     #[tokio::test]
-    async fn a_placement_param_cannot_rekey_an_unrelated_block() {
+    async fn a_params_map_order_rekeys_key_is_inert_at_the_writer() {
+        use holon_core::CrudOperations;
+
         let (_backend, ops, handle) = setup_sql_block_ops().await;
 
-        insert_raw(&handle, "block:pa", "sentinel:no_parent", "1000").await;
-        insert_raw(&handle, "block:pb", "sentinel:no_parent", "2000").await;
-        insert_raw(&handle, "block:mover", "block:pa", "80").await;
-        insert_raw(&handle, "block:victim", "block:pa", "8180").await;
+        insert_raw(&handle, "block:parent", "sentinel:no_parent", "8180").await;
+        insert_raw(&handle, "block:mine", "block:parent", "80").await;
+        insert_raw(&handle, "block:victim", "sentinel:no_parent", "80").await;
 
-        let mut params: StorageEntity = std::collections::HashMap::new();
-        params.insert(
+        let mut fields: StorageEntity = std::collections::HashMap::new();
+        fields.insert(
             "id".into(),
-            holon_api::Value::String("block:mover".to_string()),
+            holon_api::Value::String("block:attacker".to_string()),
         );
-        params.insert(
+        fields.insert(
             "parent_id".into(),
-            holon_api::Value::String("block:pb".to_string()),
+            holon_api::Value::String("block:parent".to_string()),
         );
-        params.insert(
-            "sort_key".into(),
-            holon_api::Value::String("80".to_string()),
+        fields.insert("content".into(), holon_api::Value::String("hi".to_string()));
+        fields.insert(
+            "content_type".into(),
+            holon_api::Value::String("text".to_string()),
         );
-        params.insert(
+        // Exactly the shape `Value::from_json_value` produces for an MCP
+        // `properties` entry naming a NON-sibling — inert, the writer has no
+        // params re-key channel.
+        fields.insert(
             holon_core::block_ordering::ORDER_REKEYS_PARAM.into(),
             holon_api::Value::Object(std::collections::HashMap::from([(
                 "block:victim".to_string(),
@@ -2238,12 +2269,44 @@ mod tests {
             )])),
         );
 
-        use holon_core::OperationProvider;
+        ops.create(fields)
+            .await
+            .expect("the create succeeds; the map key is inert, not interpreted");
+        assert_eq!(
+            read_sort_key(&handle, "block:victim").await,
+            "80",
+            "the params-map _order_rekeys must have NO effect — the writer never reads it"
+        );
+        assert!(
+            row_exists(&handle, "block:attacker").await,
+            "the create landed normally despite the inert key"
+        );
+    }
 
-        let entity = holon_api::EntityName::new(Block::entity_name());
+    /// The same backstop guards a PLACEMENT on the typed channel: `place_row`
+    /// takes a `MintedPosition`, and a re-key naming a block outside the target
+    /// parent is refused.
+    #[tokio::test]
+    async fn a_typed_placement_rekey_cannot_target_a_non_sibling() {
+        use holon_core::block_ordering::MintedPosition;
+
+        let (_backend, ops, handle) = setup_sql_block_ops().await;
+
+        insert_raw(&handle, "block:pa", "sentinel:no_parent", "1000").await;
+        insert_raw(&handle, "block:pb", "sentinel:no_parent", "2000").await;
+        insert_raw(&handle, "block:mover", "block:pa", "80").await;
+        // A block under the OLD parent — not a sibling of the mover's new home.
+        insert_raw(&handle, "block:victim", "block:pa", "8180").await;
+
+        // The placement moves block:mover under block:pb, but its position's
+        // re-key names block:victim, which lives under block:pa.
+        let position = MintedPosition::new(
+            "80".to_string(),
+            vec![("block:victim".to_string(), "ZZZZ".to_string())],
+        );
         let err = ops
             .sql_ops
-            .execute_operation(&entity, "place", params)
+            .place_row("block:mover", "block:pb", position)
             .await
             .err()
             .expect("a placement must not re-key a block outside its target sibling set");
@@ -2264,16 +2327,15 @@ mod tests {
         );
     }
 
-    /// Re-key rights require the op to name its parent EXPLICITLY.
-    ///
-    /// A batch UPDATE that changes only a property carries no `parent_id`
-    /// param. Defaulting that absence to the root sentinel silently granted the
-    /// op re-key rights over the ENTIRE top-level set — every page. The
-    /// reported vector: an update naming no parent, carrying
-    /// `_order_rekeys` for a top-level page.
+    /// Re-key rights require the op to name its parent EXPLICITLY, on the typed
+    /// channel too: a batch op that carries re-keys (a `BatchOp` with a
+    /// `position`) but no `parent_id` names no placement, so
+    /// `prove_rekeys_are_siblings` refuses it — no op inherits root re-key
+    /// rights over the ENTIRE top-level set.
     #[tokio::test]
-    async fn an_update_naming_no_parent_cannot_rekey_a_top_level_page() {
+    async fn an_update_carrying_rekeys_but_no_parent_is_refused() {
         use holon_core::OriginTaggedWrites;
+        use holon_core::block_ordering::MintedPosition;
 
         let (_backend, ops, handle) = setup_sql_block_ops().await;
         insert_raw(&handle, "block:page", "sentinel:no_parent", "80").await;
@@ -2288,13 +2350,11 @@ mod tests {
             "content".into(),
             holon_api::Value::String("edited".to_string()),
         );
-        // No parent_id — the property-only update names no placement.
-        params.insert(
-            holon_core::block_ordering::ORDER_REKEYS_PARAM.into(),
-            holon_api::Value::Object(std::collections::HashMap::from([(
-                "block:page".to_string(),
-                holon_api::Value::String("ZZZZ".to_string()),
-            )])),
+        // No parent_id — the op names no placement, yet its position carries a
+        // re-key of a top-level page.
+        let position = MintedPosition::new(
+            "M0".to_string(),
+            vec![("block:page".to_string(), "ZZZZ".to_string())],
         );
 
         let entity = holon_api::EntityName::new(Block::entity_name());
@@ -2302,12 +2362,12 @@ mod tests {
             .sql_ops
             .execute_batch_with_origin(
                 &entity,
-                vec![("update".to_string(), params)],
+                vec![holon_core::BatchOp::placed("update", params, position)],
                 crate::sync::event_bus::EventOrigin::Org,
             )
             .await
             .err()
-            .expect("an update naming no parent must not inherit root re-key rights");
+            .expect("an op naming no parent must not inherit root re-key rights");
         assert!(
             err.to_string().contains("names no parent"),
             "the refusal must explain that no parent was named, got: {err}"
@@ -2319,13 +2379,73 @@ mod tests {
         );
     }
 
+    /// LOAD-BEARING (Ruling B, #2): the batch writer ignores a `_order_rekeys`
+    /// key sitting in an op's params when its typed `position` is `None` — the
+    /// exact shape the Loro→SQL projection produces for an untrusted PEER block
+    /// (the consolidator always builds `BatchOp::data`, position `None`).
+    ///
+    /// RED before this lane: the batch decoded the params key and, because the
+    /// peer create is root-level and so is the victim, the re-key PASSED the
+    /// same-parent proof and rewrote block:victim to "ZZZZ" — the round-2
+    /// root-rekey exploit. GREEN after: the key is inert, the victim untouched.
+    #[tokio::test]
+    async fn a_projection_batchop_ignores_a_peer_supplied_order_rekeys_key() {
+        use holon_core::OriginTaggedWrites;
+
+        let (_backend, ops, handle) = setup_sql_block_ops().await;
+        insert_raw(&handle, "block:victim", "sentinel:no_parent", "80").await;
+
+        // A create op as the Loro projection builds it: params may carry ANY
+        // peer property (incl. a smuggled `_order_rekeys`); position is None.
+        let mut params: StorageEntity = std::collections::HashMap::new();
+        params.insert(
+            "id".into(),
+            holon_api::Value::String("block:peerblock".to_string()),
+        );
+        params.insert("parent_id".into(), holon_api::Value::Null);
+        params.insert(
+            "content".into(),
+            holon_api::Value::String("peer".to_string()),
+        );
+        params.insert(
+            "content_type".into(),
+            holon_api::Value::String("text".to_string()),
+        );
+        params.insert(
+            "sort_key".into(),
+            holon_api::Value::String("90".to_string()),
+        );
+        params.insert(
+            holon_core::block_ordering::ORDER_REKEYS_PARAM.into(),
+            holon_api::Value::Object(std::collections::HashMap::from([(
+                "block:victim".to_string(),
+                holon_api::Value::String("ZZZZ".to_string()),
+            )])),
+        );
+
+        let entity = holon_api::EntityName::new(Block::entity_name());
+        ops.sql_ops
+            .execute_batch_with_origin(
+                &entity,
+                vec![holon_core::BatchOp::data("create", params)],
+                crate::sync::event_bus::EventOrigin::Loro,
+            )
+            .await
+            .expect("the projection batch applies; the peer _order_rekeys key is inert");
+        assert_eq!(
+            read_sort_key(&handle, "block:victim").await,
+            "80",
+            "a peer-supplied _order_rekeys must NEVER re-key the victim on the projection path"
+        );
+    }
+
     /// The guard's non-existent-target arm returns `Err`, never a silent skip:
     /// a re-key naming a row that does not exist is a caller bug, and a
     /// placement that silently proceeded would land in a keyspace it did not
     /// actually re-key.
     #[tokio::test]
-    async fn a_rekey_naming_a_nonexistent_target_is_refused() {
-        use holon_core::CrudOperations;
+    async fn a_typed_rekey_naming_a_nonexistent_target_is_refused() {
+        use holon_core::block_ordering::MintedPosition;
 
         let (_backend, ops, handle) = setup_sql_block_ops().await;
         insert_raw(&handle, "block:parent", "sentinel:no_parent", "8180").await;
@@ -2345,18 +2465,17 @@ mod tests {
             "content_type".into(),
             holon_api::Value::String("text".to_string()),
         );
-        fields.insert(
-            holon_core::block_ordering::ORDER_REKEYS_PARAM.into(),
-            holon_api::Value::Object(std::collections::HashMap::from([(
-                "block:ghost".to_string(),
-                holon_api::Value::String("ZZZZ".to_string()),
-            )])),
-        );
 
-        let err =
-            ops.create(fields).await.err().expect(
-                "a re-key naming a non-existent target must be refused, not silently skipped",
-            );
+        let position = MintedPosition::new(
+            "M0".to_string(),
+            vec![("block:ghost".to_string(), "ZZZZ".to_string())],
+        );
+        let err = ops
+            .sql_ops
+            .create_row(fields, Some(position))
+            .await
+            .err()
+            .expect("a re-key naming a non-existent target must be refused, not silently skipped");
         assert!(
             err.to_string().contains("not a row in"),
             "the refusal must say the target is not a row, got: {err}"

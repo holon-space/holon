@@ -916,6 +916,7 @@ impl Module for OrgModeModule {
                         let ordered = Arc::new(OrderedBlockCrud::new(
                             sql_ops.clone() as Arc<dyn OperationProvider>,
                             order_owner,
+                            sql_ops.clone(),
                         )) as Arc<dyn OperationProvider>;
                         let wrapper = OperationWrapper::new(ordered, Some(sync_provider));
                         Arc::new(wrapper) as Arc<dyn OperationProvider>

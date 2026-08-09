@@ -17,6 +17,7 @@ use holon_api::PAGE_TAG;
 use holon_api::ParentNotFound;
 use holon_api::TypeHint;
 use holon_api::Value;
+use holon_core::BatchOp;
 use holon_core::FieldDelta;
 use holon_core::OperationProvider;
 use holon_core::OperationResult;
@@ -370,14 +371,15 @@ impl SqlOperationProvider {
                     existing_properties_json = Some(s.to_string());
                 }
             } else if holon_core::block_ordering::is_operation_control_param(key) {
-                // Operation-control metadata (positional intent, sibling
-                // re-keys, routing hints, diff guards) — never persist. The
-                // positional intent is lifted onto the typed `Event` field in
-                // `prepare_create`, the re-keys into the op's own transaction
-                // (`order_rekey_statements`). The predicate is shared with the
-                // intent boundaries that REFUSE these keys, so the
-                // "interpreted, not stored" set has exactly one
-                // definition.
+                // Operation-control metadata (positional intent, routing hints,
+                // diff guards) — never persist. The positional intent is lifted
+                // onto the typed `Event` field in `prepare_create`. Sibling
+                // re-keys no longer ride this map at all — they travel TYPED on
+                // the op's `MintedPosition` (`apply_position`), so a
+                // `_order_rekeys` key here is inert; the predicate keeps
+                // stripping it as defense-in-depth (Ruling B; ADR 0030 D4).
+                // Shared with the intent boundaries that REFUSE these keys, so
+                // the "interpreted, not stored" set has exactly one definition.
             } else if let Some(descriptor) = self.edge_fields.get(key.as_ref()) {
                 // Edge-typed field: must carry a Value::Array. Fail loud if
                 // a caller mis-types this — silently flowing to JSON would
@@ -480,24 +482,36 @@ impl SqlOperationProvider {
             .map(|v| Self::normalized_parent(v.as_string()))
     }
 
-    /// Decode [`ORDER_REKEYS_PARAM`] and PROVE its targets are the placed
-    /// block's own siblings, or refuse the whole operation.
+    /// Apply a TYPED [`MintedPosition`] to a create/place/batch op: inject its
+    /// `sort_key` onto `params` and return the sibling re-key `UPDATE`
+    /// statements, after PROVING every re-key target is a real sibling of the
+    /// op's placement parent
+    /// ([`prove_rekeys_are_siblings`](Self::prove_rekeys_are_siblings)).
     ///
-    /// The param is internal — the order key is not writable at the intent
-    /// boundary (ADR 0005, `BlockWriteField` refuses `sort_key`) — but it rides
-    /// the same params map an outside caller can populate, so trusting it turns
-    /// every create into an unguarded "rewrite any row's sort_key" primitive
-    /// with no `FieldDelta`, no inverse and no undo. One indexed read proves
-    /// the whole set; it runs only when re-keys are actually present, which
-    /// is the rare not-an-insertable-sequence case.
-    async fn checked_order_rekeys(
+    /// The re-keys arrive as a typed field, never as an `ORDER_REKEYS_PARAM`
+    /// key in the `params` map, so a peer- or MCP-supplied property can never
+    /// become a "rewrite any row's sort_key" instruction — the write primitive
+    /// is unreachable from the data namespace by construction (ADR 0030 D4,
+    /// amended; Ruling B). `prove_rekeys_are_siblings` remains as the
+    /// in-process backstop against a MINTING bug (a mis-targeted re-key),
+    /// which typing the channel does not rule out.
+    async fn apply_position(
         &self,
-        params: &StorageEntity,
-        parent_id: Option<&str>,
-    ) -> Result<Vec<(String, String)>> {
-        let rekeys = MintedPosition::decode_rekeys(params.get(ORDER_REKEYS_PARAM))?;
-        self.prove_rekeys_are_siblings(&rekeys, parent_id).await?;
-        Ok(rekeys)
+        params: &mut StorageEntity,
+        position: Option<MintedPosition>,
+    ) -> Result<Vec<String>> {
+        let Some(position) = position else {
+            return Ok(Vec::new());
+        };
+        let parent = Self::op_target_parent(params);
+        let (sort_key, rekeys) = position.into_parts();
+        self.prove_rekeys_are_siblings(&rekeys, parent.as_deref())
+            .await?;
+        params.insert("sort_key".into(), Value::String(sort_key));
+        Ok(rekeys
+            .iter()
+            .map(|(id, key)| self.column_update_sql(id, "sort_key", key))
+            .collect())
     }
 
     /// Every re-key target must be an existing child of `parent_id`. Applied to
@@ -578,22 +592,6 @@ impl SqlOperationProvider {
         Ok(())
     }
 
-    /// [`checked_order_rekeys`](Self::checked_order_rekeys) as statements for
-    /// the op's OWN transaction (ADR 0030 D1: a create is total or refused with
-    /// zero side effects, and the re-key is part of the firing).
-    async fn order_rekey_statements(
-        &self,
-        params: &StorageEntity,
-        parent_id: Option<&str>,
-    ) -> Result<Vec<String>> {
-        Ok(self
-            .checked_order_rekeys(params, parent_id)
-            .await?
-            .iter()
-            .map(|(id, key)| self.column_update_sql(id, "sort_key", key))
-            .collect())
-    }
-
     /// Write one placement — `parent_id`, `sort_key`, and the sibling re-keys
     /// the key is expressed against — in ONE transaction.
     ///
@@ -660,6 +658,245 @@ impl SqlOperationProvider {
             ),
         ];
         Ok(OperationResult::new(changes, inverse))
+    }
+
+    /// Execute a block/entity `create` with its ordering placement carried
+    /// TYPED (`position`) rather than as a `_order_rekeys` key in `params`.
+    ///
+    /// This is the single create implementation. The generic
+    /// `execute_operation`/`execute_operation_with_origin` "create" arm
+    /// delegates here with `position: None` (a create arriving through the
+    /// stringly dispatch carries no placement and can re-key nothing); the
+    /// ordering seams (`SqlBlockOperations::create`, `OrderedBlockCrud`) call
+    /// it with `Some(MintedPosition)` so the `sort_key` and sibling re-keys
+    /// land in this create's OWN transaction (ADR 0030 D1/D4, amended).
+    ///
+    /// `pub` (like [`place_row`](Self::place_row)) so the ordering decorator
+    /// `OrderedBlockCrud` in `holon-app` can hand it a typed position directly.
+    pub async fn create_row(
+        &self,
+        params: StorageEntity,
+        position: Option<MintedPosition>,
+    ) -> Result<OperationResult> {
+        // Entity ids are `{entity}:{uuid}`. A create without an explicit
+        // id means "mint a fresh one" — the normal case for interactive
+        // block creation and Rhai `block.create(..)` actions. Only split
+        // and seeds supply an id. Mint here (mirroring `split_block`) so
+        // the op's postcondition — a row with a valid id — holds for every
+        // caller, instead of panicking a background worker whose crash the
+        // UI silently swallows.
+        let mut params = params;
+        // Identity is minted / recognized through the single authority
+        // (ADR 0029 D1c) — the active consolidator's `identity_minter`,
+        // not inlined here. A create without an `id` mints a fresh
+        // unique-random one (the interactive / Rhai hot path); a SUPPLIED
+        // id is a caller-DERIVED value (e.g. a page's `PageId::for_path`)
+        // that must be RECOGNIZED against its current holder before it can
+        // `INSERT ... ON CONFLICT(id) DO UPDATE`-land, so a rename (id
+        // preserved, title changed) is never silently clobbered. The
+        // former inline pre-SELECT collision guard is SUBSUMED into
+        // `mint`, which uses the single-source `recognize_derived_id`
+        // predicate (D1b interim fail-loud). Content-gated exactly as
+        // before: with no title there is nothing to recognize.
+        let minter =
+            self.identity_minter()
+                .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
+                    "SqlOnly create requires an IdentityMinting seam (the Turso mint authority)"
+                        .into()
+                })?;
+        let create_id: holon_api::identity_minting::CreateId =
+            match params.get("id").and_then(|v| v.as_string()) {
+                Some(existing) => {
+                    let carried = holon_api::identity_minting::CarriedId::from_stored(
+                        // ALLOW(entity_uri_from_raw): id is a validated create param
+                        EntityUri::from_raw(existing),
+                    );
+                    if let Some(content) = params.get("content").and_then(|v| v.as_string()) {
+                        // Recognize the carried id against its store
+                        // holder; Err(IdentityCollision) on a rename
+                        // clobber. The blessed MintedId is discarded — the
+                        // CarriedId witness is the create id.
+                        let content = content.to_string();
+                        let carried_id = carried.as_entity_uri().clone();
+                        minter
+                            .mint(holon_api::identity_minting::IdentityInput::carried(
+                                carried_id, content,
+                            ))
+                            .await?;
+                    }
+                    holon_api::identity_minting::CreateId::Carried(carried)
+                }
+                None => holon_api::identity_minting::CreateId::Minted(
+                    minter
+                        .mint(holon_api::identity_minting::IdentityInput::UniqueRandom)
+                        .await?,
+                ),
+            };
+        let id = create_id.as_str().to_string();
+        params.insert("id".into(), Value::String(id.clone()));
+        // The minted position (its `sort_key` + the sibling re-keys the
+        // key is expressed against) arrives TYPED — never a params map
+        // key. Inject the key and collect the re-key UPDATEs BEFORE
+        // prepare_create, so the new row carries the real key and the
+        // re-keys ride the create's OWN transaction (ADR 0030 D1: a
+        // refused create leaves the keyspace untouched).
+        let rekey_statements = self.apply_position(&mut params, position).await?;
+        let prepared = self.prepare_create(&params);
+        // block_links junction (links increment 2): derived from the
+        // marks param, written in the SAME transaction as the row +
+        // edge junctions. A Page-tagged create also re-resolves
+        // dangling name links it satisfies.
+        let mut link_statements: Vec<String> = Vec::new();
+        if self.entity_name == "block" {
+            if let Some(marks) = params.get("marks") {
+                link_statements.extend(self.block_link_statements(&id, marks).await?);
+            }
+            if Self::params_tag_page(&params)
+                && let Some(content) = params.get("content").and_then(|v| v.as_string())
+            {
+                link_statements.extend(Self::page_reresolve_statements(&id, content));
+            }
+            if let Some(merged_from) = params.get(merge_blocks_plan::MERGED_FROM_FIELD) {
+                link_statements.extend(Self::block_redirect_statements(&id, merged_from)?);
+            }
+        }
+        // Run the create atomically in one transaction. The block parent
+        // FK is DEFERRABLE INITIALLY DEFERRED, so it is checked at COMMIT.
+        // A transaction (unlike an autocommit statement) ROLLS BACK the
+        // offending row on that commit-time failure, so a rejected create
+        // leaves no partial row — integrity, not just a loud error.
+        // `rekey_statements` (from the typed position above) ride the create
+        // so they commit or roll back WITH it (D1).
+        let mut stmts = Vec::new();
+        stmts.extend(
+            rekey_statements
+                .iter()
+                .chain(&prepared.row_statements)
+                .chain(&prepared.edge_statements)
+                .chain(&link_statements)
+                .map(|s| (s.clone(), vec![])),
+        );
+        if let Err(e) = self.db_handle.transaction(stmts).await {
+            let msg = e.to_string();
+            if Self::is_fk_violation(&msg) {
+                let parent = params
+                    .get("parent_id")
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_default();
+                // A create transaction enforces TWO kinds of FK: the
+                // block's own parent FK (deferred, checked at COMMIT) and
+                // the junction/edge SOURCE FKs. The fork's error text is
+                // only "FOREIGN KEY constraint failed" — it names no
+                // constraint — so we must not assume it was the parent.
+                // Blindly mapping every create-time FK failure to
+                // `ParentNotFound` sent TWO debugging rounds down the
+                // wrong path (dogfood 2026-07-10: the real cause was a
+                // dangling `block_requires.required_id` target FK, yet the
+                // error claimed the parent — which existed — was missing).
+                // Attribute accurately: only claim `ParentNotFound` when
+                // the parent row is genuinely absent; otherwise surface a
+                // precise error naming the SQL that actually failed.
+                let parent_present = !parent.is_empty() && self.block_row_exists(parent).await?;
+                if !parent_present {
+                    return Err(Self::parent_not_found(&id, parent));
+                }
+                return Err(format!(
+                    "create for {id}: a foreign-key constraint failed but the parent \
+                             {parent} EXISTS — a junction/edge source FK or another constraint \
+                             rejected the write, NOT the parent. Failing statements: {:#?}. \
+                             Underlying: {msg}",
+                    prepared
+                        .row_statements
+                        .iter()
+                        .chain(&prepared.edge_statements)
+                        .collect::<Vec<_>>()
+                )
+                .into());
+            }
+            return Err(format!("Failed to execute SQL: {}", msg).into());
+        }
+        // After INSERT OR IGNORE, read back the actual row to detect
+        // whether the insert was ignored (duplicate name+parent_id).
+        // Return the actual DB id so the caller knows which UUID won.
+        let select_sql = format!(
+            "SELECT id FROM {} WHERE id = '{}'",
+            self.table_name,
+            id.replace('\'', "''")
+        );
+        let inserted = match self.db_handle.query(&select_sql, HashMap::new()).await {
+            Ok(rows) => rows.into_iter().next().is_some(),
+            Err(e) => {
+                tracing::error!(
+                    "[SqlOp] SELECT after INSERT failed for '{}': {} — treating as not \
+                             inserted",
+                    id,
+                    e,
+                );
+                false
+            }
+        };
+
+        let response = if !inserted {
+            // Our id doesn't exist → INSERT was ignored. With the unique
+            // (parent_id, name) index gone, this branch only triggers on
+            // primary-key collision; resolve by id alone.
+            let block_id = params.get("id").and_then(|v| v.as_string());
+            match block_id {
+                Some(bid) => {
+                    let find_sql = format!(
+                        "SELECT id FROM {} WHERE id = '{}'",
+                        self.table_name,
+                        bid.replace('\'', "''"),
+                    );
+                    let existing_id = self
+                        .db_handle
+                        .query(&find_sql, HashMap::new())
+                        .await
+                        .ok() // ALLOW(ok): id-collision lookup tolerance // ALLOW(fallback):
+                        // comment-only mention, not a real degraded path
+                        .and_then(|rows| rows.into_iter().next())
+                        .and_then(|row| row.get("id").cloned());
+                    existing_id.map(|v| match v {
+                        Value::String(s) => Value::String(s),
+                        other => Value::String(format!("{:?}", other)),
+                    })
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        // Inverse of a genuine create = delete the minted/supplied id
+        // (identity-preserving, ADR 0024). An IGNORED insert created
+        // nothing, so undoing it must NOT delete the pre-existing row —
+        // that path is declared irreversible. Forward fingerprint: the
+        // `id` column is present post-create (absent → `Value::Null`
+        // pre-create), so undo drops loudly if the row vanished under it.
+        let mut result = if inserted {
+            let inverse = Operation::from_params(
+                EntityName::new(&self.entity_name),
+                "delete",
+                "delete",
+                [("id".to_string(), Value::String(id.clone()))],
+            );
+            OperationResult::new(
+                vec![FieldDelta::new(
+                    id.clone(),
+                    "id",
+                    Value::Null,
+                    Value::String(id.clone()),
+                )],
+                inverse,
+            )
+        } else {
+            OperationResult::declared_irreversible(
+                Vec::new(),
+                "create: insert ignored (row already existed)",
+            )
+        };
+        result.response = response;
+        Ok(result)
     }
 
     /// Build SQL statements that replace the edge-field rows for `id`.
@@ -2892,11 +3129,12 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 };
                 Ok(OperationResult::new(changes, inverse))
             }
-            // One placement, one transaction. The op-name channel exists
-            // because `OrderedBlockCrud` reaches this provider as a
-            // `dyn OperationProvider`; in-crate callers use `place_row`
-            // directly. Not advertised in `operations()` — it is the ordering
-            // seam's write primitive, not a dispatchable user intent.
+            // One placement, one transaction. `OrderedBlockCrud` now reaches the
+            // concrete `place_row` directly with a TYPED `MintedPosition`, so
+            // this dispatchable arm carries NO sibling re-keys: it can only set
+            // the placed block's OWN `sort_key`. A `_order_rekeys` key in the
+            // params map is inert here — the writer never reads it (Ruling B).
+            // Not advertised in `operations()`.
             "place" => {
                 let get = |key: &str| -> Result<String> {
                     params
@@ -2905,234 +3143,11 @@ impl OriginTaggedWrites for SqlOperationProvider {
                         .map(str::to_string)
                         .ok_or_else(|| format!("place: missing '{key}' parameter").into())
                 };
-                let rekeys = MintedPosition::decode_rekeys(params.get(ORDER_REKEYS_PARAM))?;
-                let position = MintedPosition::new(get("sort_key")?, rekeys);
-                // `place_row` proves the re-key targets are siblings of this
-                // parent before it writes anything.
+                let position = MintedPosition::alone(get("sort_key")?);
                 self.place_row(&get("id")?, &get("parent_id")?, position)
                     .await
             }
-            "create" => {
-                // Entity ids are `{entity}:{uuid}`. A create without an explicit
-                // id means "mint a fresh one" — the normal case for interactive
-                // block creation and Rhai `block.create(..)` actions. Only split
-                // and seeds supply an id. Mint here (mirroring `split_block`) so
-                // the op's postcondition — a row with a valid id — holds for every
-                // caller, instead of panicking a background worker whose crash the
-                // UI silently swallows.
-                let mut params = params;
-                // Identity is minted / recognized through the single authority
-                // (ADR 0029 D1c) — the active consolidator's `identity_minter`,
-                // not inlined here. A create without an `id` mints a fresh
-                // unique-random one (the interactive / Rhai hot path); a SUPPLIED
-                // id is a caller-DERIVED value (e.g. a page's `PageId::for_path`)
-                // that must be RECOGNIZED against its current holder before it can
-                // `INSERT ... ON CONFLICT(id) DO UPDATE`-land, so a rename (id
-                // preserved, title changed) is never silently clobbered. The
-                // former inline pre-SELECT collision guard is SUBSUMED into
-                // `mint`, which uses the single-source `recognize_derived_id`
-                // predicate (D1b interim fail-loud). Content-gated exactly as
-                // before: with no title there is nothing to recognize.
-                let minter = self.identity_minter().ok_or_else(
-                    || -> Box<dyn std::error::Error + Send + Sync> {
-                        "SqlOnly create requires an IdentityMinting seam (the Turso mint authority)"
-                            .into()
-                    },
-                )?;
-                let create_id: holon_api::identity_minting::CreateId =
-                    match params.get("id").and_then(|v| v.as_string()) {
-                        Some(existing) => {
-                            let carried = holon_api::identity_minting::CarriedId::from_stored(
-                                // ALLOW(entity_uri_from_raw): id is a validated create param
-                                EntityUri::from_raw(existing),
-                            );
-                            if let Some(content) = params.get("content").and_then(|v| v.as_string())
-                            {
-                                // Recognize the carried id against its store
-                                // holder; Err(IdentityCollision) on a rename
-                                // clobber. The blessed MintedId is discarded — the
-                                // CarriedId witness is the create id.
-                                let content = content.to_string();
-                                let carried_id = carried.as_entity_uri().clone();
-                                minter
-                                    .mint(holon_api::identity_minting::IdentityInput::carried(
-                                        carried_id, content,
-                                    ))
-                                    .await?;
-                            }
-                            holon_api::identity_minting::CreateId::Carried(carried)
-                        }
-                        None => holon_api::identity_minting::CreateId::Minted(
-                            minter
-                                .mint(holon_api::identity_minting::IdentityInput::UniqueRandom)
-                                .await?,
-                        ),
-                    };
-                let id = create_id.as_str().to_string();
-                params.insert("id".into(), Value::String(id.clone()));
-                let prepared = self.prepare_create(&params);
-                // block_links junction (links increment 2): derived from the
-                // marks param, written in the SAME transaction as the row +
-                // edge junctions. A Page-tagged create also re-resolves
-                // dangling name links it satisfies.
-                let mut link_statements: Vec<String> = Vec::new();
-                if self.entity_name == "block" {
-                    if let Some(marks) = params.get("marks") {
-                        link_statements.extend(self.block_link_statements(&id, marks).await?);
-                    }
-                    if Self::params_tag_page(&params)
-                        && let Some(content) = params.get("content").and_then(|v| v.as_string())
-                    {
-                        link_statements.extend(Self::page_reresolve_statements(&id, content));
-                    }
-                    if let Some(merged_from) = params.get(merge_blocks_plan::MERGED_FROM_FIELD) {
-                        link_statements.extend(Self::block_redirect_statements(&id, merged_from)?);
-                    }
-                }
-                // Run the create atomically in one transaction. The block parent
-                // FK is DEFERRABLE INITIALLY DEFERRED, so it is checked at COMMIT.
-                // A transaction (unlike an autocommit statement) ROLLS BACK the
-                // offending row on that commit-time failure, so a rejected create
-                // leaves no partial row — integrity, not just a loud error.
-                // The sibling re-keys the new block's minted position needs
-                // ride the create so they commit or roll back WITH it — a
-                // refused create must leave the keyspace untouched (D1).
-                let target_parent = Self::op_target_parent(&params);
-                let rekey_statements = self
-                    .order_rekey_statements(&params, target_parent.as_deref())
-                    .await?;
-                let mut stmts = Vec::new();
-                stmts.extend(
-                    rekey_statements
-                        .iter()
-                        .chain(&prepared.row_statements)
-                        .chain(&prepared.edge_statements)
-                        .chain(&link_statements)
-                        .map(|s| (s.clone(), vec![])),
-                );
-                if let Err(e) = self.db_handle.transaction(stmts).await {
-                    let msg = e.to_string();
-                    if Self::is_fk_violation(&msg) {
-                        let parent = params
-                            .get("parent_id")
-                            .and_then(|v| v.as_string())
-                            .unwrap_or_default();
-                        // A create transaction enforces TWO kinds of FK: the
-                        // block's own parent FK (deferred, checked at COMMIT) and
-                        // the junction/edge SOURCE FKs. The fork's error text is
-                        // only "FOREIGN KEY constraint failed" — it names no
-                        // constraint — so we must not assume it was the parent.
-                        // Blindly mapping every create-time FK failure to
-                        // `ParentNotFound` sent TWO debugging rounds down the
-                        // wrong path (dogfood 2026-07-10: the real cause was a
-                        // dangling `block_requires.required_id` target FK, yet the
-                        // error claimed the parent — which existed — was missing).
-                        // Attribute accurately: only claim `ParentNotFound` when
-                        // the parent row is genuinely absent; otherwise surface a
-                        // precise error naming the SQL that actually failed.
-                        let parent_present =
-                            !parent.is_empty() && self.block_row_exists(parent).await?;
-                        if !parent_present {
-                            return Err(Self::parent_not_found(&id, parent));
-                        }
-                        return Err(format!(
-                            "create for {id}: a foreign-key constraint failed but the parent \
-                             {parent} EXISTS — a junction/edge source FK or another constraint \
-                             rejected the write, NOT the parent. Failing statements: {:#?}. \
-                             Underlying: {msg}",
-                            prepared
-                                .row_statements
-                                .iter()
-                                .chain(&prepared.edge_statements)
-                                .collect::<Vec<_>>()
-                        )
-                        .into());
-                    }
-                    return Err(format!("Failed to execute SQL: {}", msg).into());
-                }
-                // After INSERT OR IGNORE, read back the actual row to detect
-                // whether the insert was ignored (duplicate name+parent_id).
-                // Return the actual DB id so the caller knows which UUID won.
-                let select_sql = format!(
-                    "SELECT id FROM {} WHERE id = '{}'",
-                    self.table_name,
-                    id.replace('\'', "''")
-                );
-                let inserted = match self.db_handle.query(&select_sql, HashMap::new()).await {
-                    Ok(rows) => rows.into_iter().next().is_some(),
-                    Err(e) => {
-                        tracing::error!(
-                            "[SqlOp] SELECT after INSERT failed for '{}': {} — treating as not \
-                             inserted",
-                            id,
-                            e,
-                        );
-                        false
-                    }
-                };
-
-                let response = if !inserted {
-                    // Our id doesn't exist → INSERT was ignored. With the unique
-                    // (parent_id, name) index gone, this branch only triggers on
-                    // primary-key collision; resolve by id alone.
-                    let block_id = params.get("id").and_then(|v| v.as_string());
-                    match block_id {
-                        Some(bid) => {
-                            let find_sql = format!(
-                                "SELECT id FROM {} WHERE id = '{}'",
-                                self.table_name,
-                                bid.replace('\'', "''"),
-                            );
-                            let existing_id = self
-                                .db_handle
-                                .query(&find_sql, HashMap::new())
-                                .await
-                                .ok() // ALLOW(ok): id-collision lookup tolerance // ALLOW(fallback):
-                                // pre-existing comment-only mention; not a real fallback.
-                                .and_then(|rows| rows.into_iter().next())
-                                .and_then(|row| row.get("id").cloned());
-                            existing_id.map(|v| match v {
-                                Value::String(s) => Value::String(s),
-                                other => Value::String(format!("{:?}", other)),
-                            })
-                        }
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
-
-                // Inverse of a genuine create = delete the minted/supplied id
-                // (identity-preserving, ADR 0024). An IGNORED insert created
-                // nothing, so undoing it must NOT delete the pre-existing row —
-                // that path is declared irreversible. Forward fingerprint: the
-                // `id` column is present post-create (absent → `Value::Null`
-                // pre-create), so undo drops loudly if the row vanished under it.
-                let mut result = if inserted {
-                    let inverse = Operation::from_params(
-                        EntityName::new(&self.entity_name),
-                        "delete",
-                        "delete",
-                        [("id".to_string(), Value::String(id.clone()))],
-                    );
-                    OperationResult::new(
-                        vec![FieldDelta::new(
-                            id.clone(),
-                            "id",
-                            Value::Null,
-                            Value::String(id.clone()),
-                        )],
-                        inverse,
-                    )
-                } else {
-                    OperationResult::declared_irreversible(
-                        Vec::new(),
-                        "create: insert ignored (row already existed)",
-                    )
-                };
-                result.response = response;
-                Ok(result)
-            }
+            "create" => self.create_row(params, None).await,
             "update" => {
                 let mut prepared = self.prepare_update(&params).await?;
                 // block_links junction (links increment 2): a marks-carrying
@@ -3924,7 +3939,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
     async fn execute_batch_with_origin(
         &self,
         entity_name: &EntityName,
-        operations: Vec<(String, StorageEntity)>,
+        operations: Vec<BatchOp>,
         _: EventOrigin,
     ) -> Result<Vec<OperationResult>> {
         assert_eq!(
@@ -3939,27 +3954,53 @@ impl OriginTaggedWrites for SqlOperationProvider {
             return Ok(Vec::new());
         }
 
+        // Precompute the op/id manifest and count BEFORE the loop consumes the
+        // ops (each `BatchOp` owns a non-`Clone` `MintedPosition`).
+        let count = operations.len();
+        let manifest: Vec<String> = operations
+            .iter()
+            .take(40)
+            .map(|op| {
+                let id = op
+                    .params
+                    .get("id")
+                    .and_then(|v| v.as_string())
+                    .unwrap_or("?");
+                let parent = op
+                    .params
+                    .get("parent_id")
+                    .and_then(|v| v.as_string())
+                    .unwrap_or("-");
+                format!("{}:{id}<-{parent}", op.op_name)
+            })
+            .collect();
+
         // Phase 1: Prepare all operations (may involve async DB reads for delete
         // cascade), collecting block_raw ROW statements separately from EDGE
         // (junction) statements.
         let mut row_sql: Vec<String> = Vec::new();
         let mut edge_sql: Vec<String> = Vec::new();
 
-        for (op_name, params) in &operations {
-            // Sibling re-keys ride the op whose position needs them, into this
-            // batch's single transaction (D1). Collected before the prepare so
-            // a no-op `update` cannot drop them.
-            row_sql.extend(
-                self.order_rekey_statements(params, Self::op_target_parent(params).as_deref())
-                    .await?,
-            );
+        for op in operations {
+            let BatchOp {
+                op_name,
+                mut params,
+                position,
+            } = op;
+            // The op's TYPED position (Some only for a placement the projection
+            // or ingest minted) injects the `sort_key` and returns the sibling
+            // re-key UPDATEs, into this batch's single transaction (D1). Re-keys
+            // NEVER arrive as a `params` map key — a peer property cannot become
+            // one (Ruling B). Collected before the prepare so a no-op `update`
+            // cannot drop them.
+            row_sql.extend(self.apply_position(&mut params, position).await?);
             let prepared = match op_name.as_str() {
-                "create" => self.prepare_create(params),
-                "update" => match self.prepare_update(params).await? {
+                "create" => self.prepare_create(&params),
+                "update" => match self.prepare_update(&params).await? {
                     Some(p) => p,
                     None => continue,
                 },
-                "delete" => self.prepare_delete(params).await?,
+                "delete" => self.prepare_delete(&params).await?,
                 other => return Err(format!("Unknown batch operation: {}", other).into()),
             };
             row_sql.extend(prepared.row_statements);
@@ -3981,7 +4022,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 if let Some(marks) = params.get("marks") {
                     edge_sql.extend(self.block_link_statements(id, marks).await?);
                 }
-                if Self::params_tag_page(params)
+                if Self::params_tag_page(&params)
                     && let Some(content) = params.get("content").and_then(|v| v.as_string())
                 {
                     edge_sql.extend(Self::page_reresolve_statements(id, content));
@@ -4007,8 +4048,6 @@ impl OriginTaggedWrites for SqlOperationProvider {
             .map(|s| (s, vec![]))
             .collect();
 
-        let count = operations.len();
-
         // Phase 2: Execute all SQL in a single transaction
         tracing::debug!(
             "[SqlOperationProvider] Executing batch: {} operations, {} SQL statements",
@@ -4018,21 +4057,10 @@ impl OriginTaggedWrites for SqlOperationProvider {
         let _tx_t0 = std::time::Instant::now();
         let _sql_count = all_sql.len();
         self.db_handle.transaction(all_sql).await.map_err(|e| {
-            // Enrich with the op/id manifest — a deferred-FK failure only
-            // surfaces at COMMIT with no row context, which made the
-            // 2026-07-11 keystone FK RED undiagnosable from the log alone.
-            let manifest: Vec<String> = operations
-                .iter()
-                .take(40)
-                .map(|(op, p)| {
-                    let id = p.get("id").and_then(|v| v.as_string()).unwrap_or("?");
-                    let parent = p
-                        .get("parent_id")
-                        .and_then(|v| v.as_string())
-                        .unwrap_or("-");
-                    format!("{op}:{id}<-{parent}")
-                })
-                .collect();
+            // Enrich with the op/id manifest (precomputed before the ops were
+            // consumed) — a deferred-FK failure only surfaces at COMMIT with no
+            // row context, which made the 2026-07-11 keystone FK RED
+            // undiagnosable from the log alone.
             format!(
                 "Batch transaction failed: {} (ops[{}]: {})",
                 e,
@@ -4651,7 +4679,7 @@ mod two_phase_fk_tests {
         b.insert("id".into(), Value::String("block:B".to_string()));
         b.insert("content".into(), Value::String("B".to_string()));
 
-        let ops = vec![("create".to_string(), a), ("create".to_string(), b)];
+        let ops = vec![BatchOp::data("create", a), BatchOp::data("create", b)];
         provider
             .execute_batch_with_origin(&EntityName::new("block"), ops, EventOrigin::Loro)
             .await

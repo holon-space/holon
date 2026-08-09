@@ -150,7 +150,7 @@ impl OriginTaggedWrites for ToggleFailSink {
     async fn execute_batch_with_origin(
         &self,
         entity_name: &EntityName,
-        operations: Vec<(String, StorageEntity)>,
+        operations: Vec<holon_core::BatchOp>,
         _: EventOrigin,
     ) -> DatasourceResult<Vec<OperationResult>> {
         assert_eq!(entity_name, "block", "sink only knows the 'block' entity");
@@ -161,8 +161,9 @@ impl OriginTaggedWrites for ToggleFailSink {
         }
 
         let mut blocks = self.blocks.lock().unwrap();
-        for (op_name, params) in &operations {
-            match op_name.as_str() {
+        for op in &operations {
+            let params = &op.params;
+            match op.op_name.as_str() {
                 "create" | "update" => {
                     let id = params
                         .get("id")
