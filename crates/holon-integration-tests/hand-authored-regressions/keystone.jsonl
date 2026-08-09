@@ -524,3 +524,16 @@
 # that the authored form is what settles. Same transitions, same invariants; only the byte the
 # fixed point converges on changed, which is exactly what a regression row should notice.
 {"name": "wiki-link-to-an-existing-page-reaches-an-org-fixed-point", "description": "task #21, re-ruled by #32 (B): a wiki link typed to a page that EXISTS must reach an org render/disk fixed point on the AUTHORED bytes -- `[[Journals]]` on disk, `Name` marks in every store, resolution only in the block_links junction. Nothing may substitute the resolved id at write-back.", "transitions": [{"CreateBlockUnderFocus": {"content": "see [[Journals]] now", "id": "block:wl1"}}]}
+#
+# --- birth-then-chord loses the caret (task #58; keystone-smoke red ~1 run in 3) ---------------
+# The reference's chord-click model and the SUT's driver must decide "no click happened" from the
+# SAME state. The SUT skips its click-time caret seed when `engine.focused_block() == entity`
+# (user_driver.rs `click_entity_with_modifiers` / `send_key_chord`); the ref used to skip only
+# when the block was its ACTIVE EDITOR. #36's creation-slot birth seats focus AND a caret seed at
+# 0 without mounting a ref editor -- a focus-without-editor state that had never existed -- so a
+# chord op on the newborn re-seeded the ref caret to end-of-text while the SUT's Tab adopted the
+# armed 0. TWO transitions are the whole bug: the `id: null` arm drives the birth gesture, the
+# Indent is the first chord op on the newborn. RED at main 4d8b58b7 with `inv-editor-caret/mirror
+# ... reference model cursor_byte=1, SUT tracked caret=0`; GREEN once the two predicates are one.
+# The random keystone finds this only ~1 run in 3, which is why it is pinned here.
+{"name": "birth-then-chord-loses-the-caret", "description": "task #58: after the creation-slot birth gesture (id:null) seats focus in the newborn WITHOUT opening a reference editor, the first chord op on that newborn must NOT re-seed the reference caret to end-of-text -- the SUT's click is skipped (already focused) and its caret stays at the birth-armed 0. Pins model_chord_click_focus against the user_driver.rs skip predicate it mirrors.", "initial_state": {"wiring": {"storage_adapters": ["Loro", "Turso"], "sync_adapters": [], "actors": ["MCPServer", "ActionEngine"]}}, "transitions": [{"CreateBlockUnderFocus": {"content": "a", "id": null}}, {"Indent": {"block_id": "block::create-0"}}]}

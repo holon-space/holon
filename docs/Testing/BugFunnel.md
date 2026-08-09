@@ -782,7 +782,23 @@ Notes:
   per content edit); a keystone p95<200ms writeback invariant remains the open
   gap.
 - Successes are not escapes: the editor-caret divergence was *found by* the
-  keystone oracle and does not belong here.
+  keystone oracle and does not belong here. It has now recurred twice, and both
+  faces are the same class — the reference's chord-click model and the SUT's
+  driver deciding "no click happened" from DIFFERENT state, so the ref re-seeds
+  the caret to end-of-text while the SUT leaves it alone. Face 1 was
+  `SplitBlock → <chord op>` (ref end-of-text vs SUT 0); face 2 (2026-08-09,
+  task #58, `inv-editor-caret/mirror … cursor_byte=<content.len()>, SUT tracked
+  caret=0`, ~1 in 3 keystone-smoke runs) was triggered by #36's creation-slot
+  birth, which seats focus and a caret seed at 0 WITHOUT mounting a reference
+  editor — a focus-without-editor state that had never existed before, and on
+  which the ref's active-editor-only guard silently stopped mirroring the SUT's
+  `engine.focused_block()` guard. Fixed by making the two predicates one
+  (`model_chord_click_focus` in `crates/holon-integration-tests/src/pbt/
+  transitions/mod.rs`, which now cites the two `user_driver.rs` sites it must
+  track); the deterministic lock is the `birth-then-chord-loses-the-caret`
+  hand-authored case. Still not escapes — the keystone caught both — but any
+  third face is a signal that this pair of predicates needs one owner rather
+  than two comments.
 - The 2026-07-06 "iOS Focus/Blur never fire → tap doesn't move `focused_block`,
   keyboard/commit dead" premise (memory `ios-text-2-causes`) was VERIFIED FIXED
   on 2026-07-09 against the live iOS sim with real `idb` finger taps: a tap moves

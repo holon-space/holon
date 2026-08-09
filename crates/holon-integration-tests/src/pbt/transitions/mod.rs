@@ -41,17 +41,30 @@
 /// their ref applies so `inv-focus-matches-ref` and editor-state invariants
 /// see the same focus move the SUT's real input pipeline produced.
 ///
-/// When the block's editor is ALREADY active, no driver clicks: the GPUI
-/// driver skips its click-to-focus (the chord goes to the focused editor
-/// directly, like a real user) and headless drivers never click at all —
-/// so the ref must leave the editor and its caret untouched. Re-seeding
-/// the caret to end-of-text here diverged from every SUT after
-/// `SplitBlock → <chord op>` on the freshly-focused new block
-/// (`inv-editor-caret/mirror`: ref end-of-text vs SUT 0).
+/// When no click happens, the ref must leave the editor and its caret
+/// untouched. THE SKIP PREDICATE IS THE SUT'S, VERBATIM: both production
+/// click paths seed the caret only under
+/// `self.engine.focused_block().as_ref() != Some(entity_id)` — grep that
+/// expression in `holon-frontend/src/user_driver.rs`; it occurs exactly
+/// twice, in `ReactiveEngineDriver::click_entity_with_modifiers` and
+/// `send_key_chord`, and both cite this function by name. Read those two
+/// sites before touching this one; a predicate that drifts from them
+/// re-opens the divergence class below.
+///
+/// Guarding on the ACTIVE EDITOR alone is NOT that predicate. It coincided
+/// with it only while every ref focus move also opened an editor; the
+/// creation-slot birth (`birth_block_under_slot`) seats focus and a caret
+/// seed at 0 WITHOUT mounting a ref editor, so a chord op on the newborn
+/// re-seeded the ref caret to end-of-text while the SUT's click was skipped
+/// and its Tab adopted the armed 0 (`inv-editor-caret/mirror`: ref
+/// `content.len()` vs SUT 0). The earlier `SplitBlock → <chord op>` face of
+/// the same class is why the editor arm exists; both arms are kept because
+/// either state alone means "no click".
 pub fn model_chord_click_focus<
     R: holon_pbt_core::capabilities::RefBlockTree
         + holon_pbt_core::capabilities::RefBlockTreeMut
         + holon_pbt_core::capabilities::RefFocus
+        + holon_pbt_core::capabilities::RefGlobalFocus
         + holon_pbt_core::capabilities::RefFocusMut
         + holon_pbt_core::capabilities::RefEditorMirrorMut,
 >(
@@ -61,7 +74,9 @@ pub fn model_chord_click_focus<
     use holon_pbt_core::capabilities::CapCursor;
     use holon_pbt_core::capabilities::CapRegion;
     use holon_pbt_core::capabilities::commit_active_editor_if_dirty;
-    if state.active_editor_block().as_ref() == Some(block_id) {
+    if state.global_focused_block().as_ref() == Some(block_id)
+        || state.active_editor_block().as_ref() == Some(block_id)
+    {
         return;
     }
     // Click-away BLURS the previously focused editor; in SqlOnly prod's
