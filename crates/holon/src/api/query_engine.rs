@@ -230,6 +230,21 @@ impl QueryEngine for BackendEngine {
                 .map(str::to_string)
         }))
     }
+
+    async fn block_task_state_by_id(&self, id: &EntityUri) -> Result<Option<String>> {
+        use crate::storage::BLOCK_WRITE_TABLE;
+        let escaped = id.to_string().replace('\'', "''");
+        let sql = format!(
+            "SELECT json_extract(properties, '$.task_state') AS task_state FROM \
+             {BLOCK_WRITE_TABLE} WHERE id = '{escaped}'"
+        );
+        let rows = BackendEngine::execute_query(self, sql, HashMap::new(), None).await?;
+        Ok(rows.into_iter().next().and_then(|r| {
+            r.get("task_state")
+                .and_then(|v| v.as_string())
+                .map(str::to_string)
+        }))
+    }
 }
 
 /// Parse `(id, label)` search rows into typed [`LinkCandidate`]s, failing loud

@@ -28,6 +28,9 @@ use holon_api::Value;
 use crate::editor_caret;
 use crate::editor_view_model::EditorKey;
 use crate::editor_view_model::EditorViewModel;
+use crate::editor_view_model::PromotionOutcome;
+use crate::editor_view_model::PromotionResidue;
+use crate::editor_view_model::TaskKeywordAtKeystroke;
 use crate::editor_view_model::structural_block_action;
 use crate::operations::OperationIntent;
 use crate::reactive::BuilderServices;
@@ -183,25 +186,86 @@ impl HeadlessEditorMirror {
     /// dispatch the resulting `set_field("content")` intent through the real op
     /// pipeline (`dispatch_intent_sync`). The lock is released BEFORE the await
     /// so no VM guard is held across the dispatch.
+    /// Returns the bytes the VM stripped off the FRONT of `new_text` (a live
+    /// task-keyword promotion), which the caller subtracts from the caret it
+    /// was about to record — the headless analogue of a GPUI editor re-seeding
+    /// `InputState` from the VM buffer.
     async fn vm_commit_edit(
         &self,
         engine: &Arc<ReactiveEngine>,
         block_id: &str,
         seed: &str,
         new_text: &str,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         self.ensure_editor(block_id, seed);
-        let intent = {
+        // The block's task keyword is READ HERE, at the keystroke that would
+        // use it — never remembered across keystrokes, because a task-toggle
+        // click between two keystrokes would make a remembered copy stale
+        // exactly when the promotion guard consults it. `attempts_promotion`
+        // keeps the read off the hot path: it is true only for a keyword-headed
+        // keystroke, at most one per promotion.
+        let task_keyword = {
+            let attempts = {
+                let eds = self.editors.lock().unwrap();
+                eds.get(block_id)
+                    .expect("ensure_editor just guaranteed a VM for this block")
+                    .attempts_promotion(new_text)
+            };
+            if attempts {
+                TaskKeywordAtKeystroke::Read(self.sql_task_keyword(engine, block_id).await?)
+            } else {
+                TaskKeywordAtKeystroke::Unread
+            }
+        };
+        let edit = {
             let mut eds = self.editors.lock().unwrap();
             let vm = eds
                 .get_mut(block_id)
                 .expect("ensure_editor just guaranteed a VM for this block");
-            vm.apply_local_edit(new_text)?
+            vm.apply_local_edit(new_text, task_keyword)?
         };
-        if let Some(intent) = intent {
+        let Some(intent) = edit.intent else {
+            return Ok(0);
+        };
+        let Some(rewrite) = edit.rewrite else {
+            // Ordinary content commit — nothing optimistic to take back.
+            engine.dispatch_intent_sync(intent).await?;
+            return Ok(0);
+        };
+        // A PROMOTING keystroke. The strip already happened in the buffer, so
+        // this dispatch is awaited for its payload: only the engine can say
+        // whether the promotion stood, and only its verbatim `content` can put
+        // the keyword back if it did not. No lock is held here — the VM mutex
+        // was released above, and the compound's own entity write-lock is taken
+        // and dropped INSIDE the engine, so awaiting it cannot self-deadlock.
+        let outcome = PromotionOutcome::parse(
+            engine
+                .dispatch_intent_awaiting_result(intent)
+                .await
+                .context("live task-keyword promotion")?,
+        )?;
+        let PromotionOutcome::Refused { content, reason } = outcome else {
+            return Ok(rewrite.stripped_prefix);
+        };
+        tracing::warn!(
+            target: "editor.task_keyword_promotion",
+            block = %block_id,
+            refusal = %reason,
+            "promotion refused after the editor had already stripped the keyword; \
+             restoring the typed text"
+        );
+        let restore = {
+            let mut eds = self.editors.lock().unwrap();
+            let vm = eds
+                .get_mut(block_id)
+                .expect("ensure_editor just guaranteed a VM for this block");
+            vm.restore_refused_promotion(&rewrite.text, &PromotionResidue::EngineStored(content))
+        };
+        if let Some(intent) = restore.and_then(|r| r.intent) {
             engine.dispatch_intent_sync(intent).await?;
         }
-        Ok(())
+        // The keyword is back in the buffer, so the caret must not move back.
+        Ok(0)
     }
 
     /// Converge one editor's buffer against the settled SQL authority (Inc 4 —
@@ -311,6 +375,23 @@ impl HeadlessEditorMirror {
             .block_content_by_id(&uri)
             .await?
             .unwrap_or_default())
+    }
+
+    /// The block's stored task keyword — the same fact a live frontend reads
+    /// off the row projection that renders the task affordance. `None` for a
+    /// plain block. Query errors propagate (fail loud): guessing `None` here
+    /// would re-arm the promotion trigger on a block that is already a task.
+    async fn sql_task_keyword(
+        &self,
+        engine: &Arc<ReactiveEngine>,
+        block_id: &str,
+    ) -> Result<Option<String>> {
+        let uri = holon_api::EntityUri::parse(block_id)
+            .with_context(|| format!("headless mirror got a non-URI block id {block_id:?}"))?;
+        let query_engine = engine.session().query_engine().with_context(|| {
+            format!("headless mirror task_state read for {block_id} needs the Turso query engine")
+        })?;
+        query_engine.block_task_state_by_id(&uri).await
     }
 
     /// Route a single keystroke through the same logical pipeline GPUI's
@@ -434,9 +515,10 @@ impl HeadlessEditorMirror {
                 let new_cursor_byte = editor_caret::move_left(&current_text, cursor_byte);
                 let mut new_text = current_text.clone();
                 new_text.replace_range(new_cursor_byte..cursor_byte, "");
-                self.vm_commit_edit(engine, &block_id, &current_text, &new_text)
+                let stripped = self
+                    .vm_commit_edit(engine, &block_id, &current_text, &new_text)
                     .await?;
-                self.set_cursor(&block_id, occ, new_cursor_byte);
+                self.set_cursor(&block_id, occ, new_cursor_byte.saturating_sub(stripped));
             }
             "enter" if !has_ctrl_alt_cmd && !has_shift => {
                 // LogSeq parity: if the cursor sits after a `/cmd` that matches a
@@ -480,9 +562,14 @@ impl HeadlessEditorMirror {
                 let inserted = ch.to_string();
                 let mut new_text = current_text.clone();
                 new_text.insert_str(cursor_byte, &inserted);
-                self.vm_commit_edit(engine, &block_id, &current_text, &new_text)
+                let stripped = self
+                    .vm_commit_edit(engine, &block_id, &current_text, &new_text)
                     .await?;
-                self.set_cursor(&block_id, occ, cursor_byte + inserted.len());
+                self.set_cursor(
+                    &block_id,
+                    occ,
+                    (cursor_byte + inserted.len()).saturating_sub(stripped),
+                );
             }
             _ => {
                 tracing::trace!(

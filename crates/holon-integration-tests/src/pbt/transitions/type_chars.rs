@@ -85,32 +85,55 @@ pub fn type_chars_weighted_generator<R: RefEditorMirror + RefFocus + RefLifecycl
     })
 }
 
-/// Ref-state apply for `TypeChars`, capability-bound. Mirrors the
-/// original reference-state-specific apply exactly: type into the active
+/// Ref-state apply for `TypeChars`, capability-bound: type into the active
 /// editor, then commit through to block content.
+///
+/// ONE KEYSTROKE AT A TIME, deliberately. Prod delivers `text` as N separate
+/// keystrokes, each of which runs the whole sink (`apply_local_edit` → commit),
+/// and live task-keyword promotion is a function of the DELTA — so a model that
+/// applied `text` as one edit would compute a different promotion than the run
+/// it is judging. `TODO  milk` (two spaces) is the smallest witness: prod
+/// promotes on the FIRST space, when the block is still `TODO `, and the second
+/// space is then ordinary text; a one-shot model sees `TODO  milk` whole and
+/// trims both spaces away. Everything else here is per-keystroke for the same
+/// reason.
 pub fn type_chars_apply_to_ref<R>(text: &str, state: &mut R)
 where
     R: RefEditorMirrorMut + RefBlockTreeMut + RefFocus + RefLifecycle,
 {
-    state.type_chars(text);
-    // Live task-keyword promotion (task #64): typing `TODO ` at the head of a
-    // block that is not yet a task is an authoring gesture applied ONCE, so it
-    // is a function of the delta, not of the text. The editor BUFFER keeps the
-    // typed text (the view-model's own commit is what strips it), only the
-    // committed block changes — so this models the storage effect alone.
-    if crate::pbt::generators::task_keyword_promotion_armed()
-        && let Some(block_id) = state.active_editor_block()
+    for ch in text.chars() {
+        type_one_char_to_ref(&ch.to_string(), state);
+    }
+}
+
+/// One keystroke: insert it, then either promote or commit the buffer as
+/// ordinary content.
+fn type_one_char_to_ref<R>(ch: &str, state: &mut R)
+where
+    R: RefEditorMirrorMut + RefBlockTreeMut + RefFocus + RefLifecycle,
+{
+    let prior_buffer = state.active_editor_text().unwrap_or_default().to_owned();
+    state.type_chars(ch);
+    // Live task-keyword promotion (task #64): the keystroke that makes a block
+    // keyword-headed is an authoring gesture, not text — the keyword becomes
+    // `task_state` and leaves the content.
+    //
+    // ONE decision, on the guard inputs the ENGINE uses (the block's task state
+    // and the editor's prior text). Prod's trigger runs this same guard on the
+    // same inputs, which is what keeps the engine's refusal path unreachable
+    // from typing — and it must stay that way: the view model strips its buffer
+    // before the write is confirmed, so a refusal it did not predict would let
+    // the next keystroke commit the stripped text over the engine's verbatim
+    // commit, deleting what was typed.
+    if let Some(block_id) = state.active_editor_block()
         && let Some(typed) = state.active_editor_text().map(str::to_owned)
+        && let Some(caret) = state.active_editor_cursor()
     {
-        let prior_content = state
-            .block_content(&block_id)
-            .map(str::to_owned)
-            .unwrap_or_default();
         let prior_state = state
             .block_task_state(&block_id)
             .map(|k| holon_api::TaskState::from_keyword(&k));
         let promotion = holon_org_format::detect_keyword_promotion(
-            &prior_content,
+            &prior_buffer,
             prior_state.as_ref(),
             &typed,
             &holon_org_format::TaskKeywordVocabulary::default(),
@@ -122,6 +145,12 @@ where
                 &promotion.stripped,
             )
         {
+            // The keyword left the visible text, so every caret offset moves
+            // back by exactly the prefix the promotion consumed.
+            state.reseed_active_editor(
+                &promotion.stripped,
+                caret.saturating_sub(promotion.consumed_prefix),
+            );
             state.mark_active_editor_committed();
             return;
         }
@@ -180,17 +209,31 @@ crate::cap_transition! {
     |me, _state, sut| {
         sut.apply_type_chars(&me.text).await;
     }
-    sql_budget: |_me, _state| {
-        // Bimodal over 6 dedup samples (d=3): 7 when the keystroke only
-        // touches the editor buffer (n=3), 15 when it commits and the write
-        // reaches storage (n=3) — `backend.execute_operation ▸
-        // dispatcher.execute_operation` plus `home.locate`
-        // (+ `home.resolve_doc`), `home.prev_sibling` and
-        // `org.on_block_feed ▸ org.on_block_changed`. The committing mode is
-        // the budget; `REACTIVE_BASE` alone never covered it.
+    sql_budget: |me, state| {
+        // TypeChars is N keystrokes and EVERY keystroke commits through the
+        // editor VM, so the cost is linear in the text — the former flat
+        // `REACTIVE_BASE + 10` was measured on short strings only.
+        //
+        // Dedup reads, samples (chars → reads): Loro 1→7, 5→14, 9→19;
+        // SqlOnly 3→12, 9→19; and the promoting draw ("TODO milk") 9→24 in
+        // both arms — its middle keystroke reads the block's task keyword,
+        // then runs the guard and the compound's two constituents.
+        // `REACTIVE_BASE + 2·chars` covers every one with the tolerance
+        // UNCHANGED at 5.
+        //
+        // Writes fork on who holds block CRUD: in Loro the content lands in
+        // the CRDT and only the undo journal reaches SQL (chars), in SqlOnly
+        // both do (2·chars). The promoting keystroke adds one more write in
+        // the SqlOnly arm (measured 19 vs 18) — inside the untouched
+        // tolerance, not a widening of it.
+        let chars = me.text.chars().count();
         ExpectedSql {
-            reads: REACTIVE_BASE + 10,
-            writes: 0,
+            reads: REACTIVE_BASE + 2 * chars,
+            writes: if state.content_writes_reach_sql() {
+                2 * chars
+            } else {
+                chars
+            },
             ddl: 0,
             tolerance: 5,
         }

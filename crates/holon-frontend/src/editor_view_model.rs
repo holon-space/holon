@@ -42,6 +42,130 @@ use crate::reactive::BuilderServices;
 use crate::view_event_handler::HandleResult;
 use crate::view_event_handler::ViewEventHandler;
 
+/// The VM kept a buffer OTHER than the text the caller handed it: a live
+/// task-keyword promotion stripped `stripped_prefix` bytes off the front, so
+/// the visible field and its caret must follow the VM, not the keystroke.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BufferRewrite {
+    /// The VM's new authoritative buffer — what the field must display.
+    pub text: String,
+    /// Bytes removed from the FRONT. The caller moves its caret back by this
+    /// much (saturating at 0); every offset in the field shifts by it.
+    pub stripped_prefix: usize,
+    /// What the keystroke actually produced, keyword and all. Kept so a caller
+    /// that never learns the engine's verdict (a failed dispatch) can still put
+    /// the user's text back.
+    pub typed: String,
+}
+
+/// What one local (user-typed) edit produced: the intent to dispatch, and —
+/// when the VM did not adopt the typed text verbatim — the rewrite the caller
+/// must apply to the visible field.
+///
+/// A present `rewrite` marks a PROMOTING keystroke, and those are the ones the
+/// caller must dispatch with
+/// [`crate::reactive::BuilderServices::dispatch_intent_awaiting_result`]:
+/// the strip is optimistic, so its refusal has to come back. Ordinary content
+/// commits stay fire-and-forget.
+#[derive(Debug, Clone, Default)]
+pub struct LocalEdit {
+    pub intent: Option<OperationIntent>,
+    pub rewrite: Option<BufferRewrite>,
+}
+
+impl LocalEdit {
+    fn intent(intent: OperationIntent) -> Self {
+        Self {
+            intent: Some(intent),
+            rewrite: None,
+        }
+    }
+}
+
+/// What the `block.promote_task_keyword` compound decided, parsed from its
+/// disclosure payload at the boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromotionOutcome {
+    Promoted,
+    /// The engine's guard declined. `content` is the text it committed
+    /// VERBATIM, and putting that back on screen is the whole point of
+    /// awaiting the payload.
+    Refused {
+        content: String,
+        reason: String,
+    },
+}
+
+impl PromotionOutcome {
+    /// Parse the compound's payload. Fails loud on a shape it does not
+    /// recognise: a caller that read "not refused" out of a payload it could
+    /// not understand would keep an optimistically stripped buffer forever.
+    pub fn parse(payload: Option<Value>) -> Result<Self> {
+        let Some(Value::Object(map)) = payload else {
+            return Err(anyhow!(
+                "promote_task_keyword returned no disclosure payload; the editor \
+                 cannot tell an accepted promotion from a refused one"
+            ));
+        };
+        let field = |key: &str| map.get(key).and_then(|v| v.as_string()).map(str::to_string);
+        match field("outcome").as_deref() {
+            Some("promoted") => Ok(Self::Promoted),
+            Some("refused") => Ok(Self::Refused {
+                content: field("content").ok_or_else(|| {
+                    anyhow!("promote_task_keyword refusal carries no `content` to restore")
+                })?,
+                reason: field("reason").unwrap_or_else(|| "unknown".to_string()),
+            }),
+            other => Err(anyhow!(
+                "promote_task_keyword returned an unknown outcome {other:?}"
+            )),
+        }
+    }
+}
+
+/// What the store holds when a promotion did not stand — the difference
+/// decides whether the restore also has to write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromotionResidue {
+    /// The engine REFUSED and committed this text verbatim. Only a keystroke
+    /// that raced the refusal makes a further commit necessary.
+    EngineStored(String),
+    /// The dispatch produced no verdict (it failed), so nothing was written:
+    /// the restored text must be committed by us or the keystroke is lost.
+    /// An `Err` arriving AFTER the engine stored a successful promotion also
+    /// lands here and re-commits the keyword onto the already-tasked block —
+    /// duplication over loss, deliberately.
+    NothingStored(String),
+}
+
+impl PromotionResidue {
+    fn text(&self) -> &str {
+        match self {
+            Self::EngineStored(t) | Self::NothingStored(t) => t,
+        }
+    }
+
+    fn needs_commit(&self, suffix_empty: bool) -> bool {
+        match self {
+            Self::EngineStored(_) => !suffix_empty,
+            Self::NothingStored(_) => true,
+        }
+    }
+}
+
+/// How to put the visible field back after a refused promotion.
+#[derive(Debug, Clone)]
+pub struct PromotionRestore {
+    /// The text the field must show again — the engine's verbatim commit, plus
+    /// anything typed after the optimistic strip.
+    pub text: String,
+    /// A content commit the caller must dispatch, present ONLY when keystrokes
+    /// raced the refusal and made the restored text differ from what the engine
+    /// stored. `None` on the common path: the engine's own verbatim commit
+    /// already IS the restored text.
+    pub intent: Option<OperationIntent>,
+}
+
 /// Actions the frontend should execute after calling EditorViewModel methods.
 ///
 /// The controller decides *what* to do; the frontend decides *how* to do it
@@ -143,8 +267,8 @@ impl std::fmt::Debug for EditorAction {
 /// Instruction the convergence decision hands back to the adapter: set the
 /// visible editor buffer (`InputState`) to the backend authority.
 ///
-/// `target` is the SqlOnly authority text and doubles as the fallback the
-/// adapter's `converge_input` uses when no Loro cell is attached; a
+/// `target` is the SqlOnly authority text, and it is also what the adapter's
+/// `converge_input` applies when no Loro cell is attached; a
 /// cell-attached editor re-reads the *live* cell authority at apply time, so a
 /// composition committed during an IME deferral is merged, never reverted.
 /// `seq` is the write-ordering high-water this convergence accepted — it lets a
@@ -199,6 +323,24 @@ pub struct EditorViewModel {
     ephemeral_newborns: Option<Arc<crate::creation_slot::EphemeralNewborns>>,
 }
 
+/// The block's task keyword as of THIS keystroke, supplied by the caller.
+///
+/// The view model deliberately does not remember it. Any non-editor write —
+/// the task-toggle widget, a peer, an agent — changes `task_state` under an
+/// open editor, and a remembered copy would be stale exactly when the guard
+/// consults it. Making the value an argument makes the stale case
+/// unrepresentable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskKeywordAtKeystroke {
+    /// The caller read the authority: the block carries this keyword (or none).
+    Read(Option<String>),
+    /// The caller read nothing, which [`EditorViewModel::attempts_promotion`]
+    /// told it was fine. Reaching the promotion guard with this is a caller
+    /// bug; the keystroke then commits as ordinary content — never lost, and
+    /// reported at WARN.
+    Unread,
+}
+
 impl EditorViewModel {
     pub fn new(
         operations: Vec<OperationWiring>,
@@ -218,6 +360,27 @@ impl EditorViewModel {
             pending_directive: None,
             ephemeral_newborns: None,
         }
+    }
+
+    /// Would this keystroke ATTEMPT a live task-keyword promotion? Pure, cheap
+    /// and authority-free: it runs only the two guards that need no read (the
+    /// typed text is keyword-headed, the prior buffer was not).
+    ///
+    /// This is the caller's read gate. `true` obliges it to read the block's
+    /// CURRENT task keyword and pass it to [`Self::apply_local_edit`]; `false`
+    /// means [`TaskKeywordAtKeystroke::Unread`] is correct and no read is owed.
+    /// A keyword-headed keystroke is rare — one per promotion, none while
+    /// typing ordinary prose — so the authority read stays off the hot path.
+    pub fn attempts_promotion(&self, new_text: &str) -> bool {
+        new_text != self.buffer
+            && self.handler.context_id().is_some()
+            && holon_org_format::detect_keyword_promotion(
+                &self.buffer,
+                None,
+                new_text,
+                &holon_org_format::TaskKeywordVocabulary::default(),
+            )
+            .is_some()
     }
 
     /// Wire the reaper's registry so the first non-empty keystroke can retire
@@ -346,7 +509,15 @@ impl EditorViewModel {
     ///   `write_seq`, records it as `last_local_seq`, and returns
     ///   `Ok(Some(set_field intent))` so the typed text lands in the backend
     ///   before the next transition.
-    /// - **Unchanged text**: returns `Ok(None)`.
+    /// - **Promoting keystroke** (either mode): see
+    ///   [`Self::promote_task_keyword`] — the VM suppresses its own commit and
+    ///   returns the `promote_task_keyword` intent plus the [`BufferRewrite`]
+    ///   the caller applies to the visible field.
+    /// - **Unchanged text**: returns an empty [`LocalEdit`].
+    ///
+    /// `task_keyword` is the block's task state AS OF THIS KEYSTROKE. Ask
+    /// [`Self::attempts_promotion`] first: it is the only case that reads the
+    /// value, and the only case that obliges the caller to fetch it.
     ///
     /// This is also where an empty-born block stops being reapable: the first
     /// non-empty text retires it from
@@ -358,11 +529,18 @@ impl EditorViewModel {
     /// RAW-seam hook: the `set_field` intent path is the single point where the
     /// dispatcher re-extracts inline marks on commit; keep it the sole commit
     /// funnel so raw→stripped extraction has exactly one home.
-    pub fn apply_local_edit(&mut self, new_text: &str) -> Result<Option<OperationIntent>> {
+    pub fn apply_local_edit(
+        &mut self,
+        new_text: &str,
+        task_keyword: TaskKeywordAtKeystroke,
+    ) -> Result<LocalEdit> {
         if new_text == self.buffer {
-            return Ok(None);
+            return Ok(LocalEdit::default());
         }
         self.retire_from_the_reaper(new_text);
+        if let Some(promotion) = self.promote_task_keyword(new_text, task_keyword) {
+            return Ok(promotion);
+        }
         if self.cell.is_some() {
             // Cell mode: apply the delta through the CRDT unless the cell
             // already holds this text (our own echo).
@@ -372,13 +550,13 @@ impl EditorViewModel {
                 }
             }
             self.buffer = new_text.to_string();
-            return Ok(None);
+            return Ok(LocalEdit::default());
         }
         // No cell (SqlOnly / no-Loro mode).
         let id = self.handler.context_id().map(str::to_string);
         self.buffer = new_text.to_string();
         let Some(id) = id else {
-            return Ok(None);
+            return Ok(LocalEdit::default());
         };
         // Stamp a monotonic ordering token on this content write and record it
         // as our last local sequence BEFORE the caller dispatches, so a fast
@@ -390,11 +568,138 @@ impl EditorViewModel {
         params.insert("field".into(), Value::String("content".to_string()));
         params.insert("value".into(), Value::String(new_text.to_string()));
         params.insert("write_seq".into(), Value::Integer(seq.get()));
-        Ok(Some(OperationIntent::new(
+        Ok(LocalEdit::intent(OperationIntent::new(
             "block".into(),
             "set_field".into(),
             params,
         )))
+    }
+
+    /// Live task-keyword promotion (task #64 HALF A): typing a leading `TODO `
+    /// into a block that was not keyword-headed is an authoring gesture, not
+    /// text — the block becomes a task and the keyword leaves the content.
+    ///
+    /// Runs BEFORE the cell/no-cell fork and, on a hit, is the whole keystroke:
+    /// the VM suppresses its own commit (no CRDT delta in Full mode, no
+    /// `set_field` in SqlOnly) so the `promote_task_keyword` compound is the
+    /// SOLE writer of both fields, through whichever provider is the CRUD
+    /// authority in that mode. The `write_seq` stamp is the ordinary content
+    /// stamp — the compound forwards it to the content constituent, so the
+    /// echo of a promoting keystroke is recognised like any other.
+    ///
+    /// Put the keyword back after the engine REFUSED the promotion and
+    /// committed `committed` (the typed text) verbatim.
+    ///
+    /// This is what makes the optimistic strip recoverable rather than
+    /// load-bearing. The trigger's guard read and the engine's guard are not
+    /// one transaction — nothing holds the block between them — so a
+    /// concurrent writer can always turn an accepted proposal into a refusal,
+    /// no matter how fresh the read was. Awaiting the refusal and undoing the
+    /// strip retires that whole class instead of narrowing it.
+    ///
+    /// `stripped` is what the strip left behind. Anything typed since sits
+    /// AFTER it, so re-inserting the prefix keeps those keystrokes too: the
+    /// user loses neither the keyword nor the characters that raced the
+    /// refusal. Returns `None` only when the buffer no longer starts with
+    /// `stripped` — an external converge landed here, and its text is the
+    /// authority, not ours.
+    ///
+    /// [`PromotionResidue`] says whether the store already holds the text; the
+    /// returned `intent` is present exactly when it does not.
+    pub fn restore_refused_promotion(
+        &mut self,
+        stripped: &str,
+        residue: &PromotionResidue,
+    ) -> Option<PromotionRestore> {
+        let suffix = self.buffer.strip_prefix(stripped)?.to_string();
+        let text = format!("{}{suffix}", residue.text());
+        self.buffer = text.clone();
+        let intent = residue
+            .needs_commit(suffix.is_empty())
+            .then(|| {
+                let id = self.handler.context_id()?.to_string();
+                let seq = holon_api::write_seq::next();
+                self.last_local_seq = seq.get();
+                let mut params = HashMap::new();
+                params.insert("id".into(), Value::String(id));
+                params.insert("field".into(), Value::String("content".to_string()));
+                params.insert("value".into(), Value::String(text.clone()));
+                params.insert("write_seq".into(), Value::Integer(seq.get()));
+                Some(OperationIntent::new(
+                    "block".into(),
+                    "set_field".into(),
+                    params,
+                ))
+            })
+            .flatten();
+        Some(PromotionRestore { text, intent })
+    }
+
+    /// PROPOSE WHAT THE ENGINE WILL PROBABLY ACCEPT, AND BE ABLE TO TAKE IT
+    /// BACK. The trigger runs the same guard the engine runs, on the block's
+    /// task keyword AS THE CALLER JUST READ IT plus the prior content and the
+    /// typed text, so a refusal is rare. It is not impossible: the read and the
+    /// engine's guard are not one transaction, and any concurrent writer of
+    /// `task_state` — a peer, an agent, a rule — can land between them.
+    ///
+    /// That is why the caller must AWAIT this intent and hand a refusal to
+    /// [`Self::restore_refused_promotion`]. Freshness makes the refusal rare;
+    /// only the un-strip makes it harmless, and the difference is whether the
+    /// user's keyword survives.
+    ///
+    /// The refusal path is also the authority's backstop for a document
+    /// `#+TODO:` the trigger does not know yet (Inc 5).
+    fn promote_task_keyword(
+        &mut self,
+        new_text: &str,
+        task_keyword: TaskKeywordAtKeystroke,
+    ) -> Option<LocalEdit> {
+        let id = self.handler.context_id()?.to_string();
+        let keyword = match task_keyword {
+            TaskKeywordAtKeystroke::Read(keyword) => keyword,
+            TaskKeywordAtKeystroke::Unread => {
+                if self.attempts_promotion(new_text) {
+                    tracing::warn!(
+                        target: "editor.task_keyword_promotion",
+                        block = %id,
+                        "keystroke would promote but its caller read no task keyword; \
+                         committing as ordinary content (attempts_promotion was not consulted)"
+                    );
+                }
+                return None;
+            }
+        };
+        let prior_state = keyword.as_deref().map(holon_api::TaskState::from_keyword);
+        let promotion = holon_org_format::detect_keyword_promotion(
+            &self.buffer,
+            prior_state.as_ref(),
+            new_text,
+            &holon_org_format::TaskKeywordVocabulary::default(),
+        )?;
+        let stripped_prefix = promotion.consumed_prefix;
+        let seq = holon_api::write_seq::next();
+        self.last_local_seq = seq.get();
+        self.buffer = promotion.stripped.clone();
+        let mut params = HashMap::new();
+        params.insert("id".into(), Value::String(id));
+        params.insert("typed".into(), Value::String(new_text.to_string()));
+        params.insert(
+            "keyword".into(),
+            Value::String(promotion.keyword.keyword.clone()),
+        );
+        params.insert("write_seq".into(), Value::Integer(seq.get()));
+        Some(LocalEdit {
+            intent: Some(OperationIntent::new(
+                "block".into(),
+                "promote_task_keyword".into(),
+                params,
+            )),
+            rewrite: Some(BufferRewrite {
+                text: promotion.stripped,
+                stripped_prefix,
+                typed: new_text.to_string(),
+            }),
+        })
     }
 
     /// Decide how to react to a SqlOnly data-sync echo (`new_value` carrying
@@ -1333,7 +1638,8 @@ mod tests {
 
         let mut vm = block_vm("block:newborn-1");
         vm.set_ephemeral_newborns(newborns.clone());
-        vm.apply_local_edit("h").expect("keystroke");
+        vm.apply_local_edit("h", TaskKeywordAtKeystroke::Unread)
+            .expect("keystroke");
 
         assert!(
             !newborns.is_ephemeral(&id),
@@ -1351,8 +1657,10 @@ mod tests {
 
         let mut vm = block_vm("block:newborn-1");
         vm.set_ephemeral_newborns(newborns.clone());
-        vm.apply_local_edit("h").expect("typed");
-        vm.apply_local_edit("").expect("cleared");
+        vm.apply_local_edit("h", TaskKeywordAtKeystroke::Unread)
+            .expect("typed");
+        vm.apply_local_edit("", TaskKeywordAtKeystroke::Unread)
+            .expect("cleared");
 
         assert!(!newborns.is_ephemeral(&id));
     }
@@ -1443,13 +1751,221 @@ mod tests {
     fn data_sync_own_canonicalized_echo_adopts_baseline_without_directive() {
         let mut vm = test_controller();
         // Type a trailing space through the buffer sink; records a fresh seq.
-        vm.apply_local_edit("foo ").unwrap();
+        vm.apply_local_edit("foo ", TaskKeywordAtKeystroke::Unread)
+            .unwrap();
         let seq = vm.last_local_seq();
         assert!(
             vm.converge_from_data_sync("foo", Some(seq)).is_none(),
             "own canonicalized echo must not converge (would delete the space)"
         );
         assert_eq!(vm.buffer(), "foo ", "typed buffer kept as-is");
+    }
+
+    /// Task #64: the keystroke that makes the buffer keyword-headed emits the
+    /// `promote_task_keyword` intent carrying the FULL typed text, strips the
+    /// keyword out of the VM's own buffer, and reports the prefix the caller
+    /// must subtract from its caret.
+    #[test]
+    fn the_committing_space_promotes_and_strips() {
+        let mut vm = test_controller();
+        vm.set_buffer_from_authority("TODO", 0);
+        let edit = vm
+            .apply_local_edit("TODO milk", TaskKeywordAtKeystroke::Read(None))
+            .expect("keystroke");
+        let intent = edit.intent.expect("a promotion must dispatch the compound");
+        assert_eq!(intent.entity_name, "block");
+        assert_eq!(intent.op_name, "promote_task_keyword");
+        assert_eq!(intent.params["typed"], Value::String("TODO milk".into()));
+        assert_eq!(intent.params["keyword"], Value::String("TODO".into()));
+        assert_eq!(
+            intent.params["write_seq"],
+            Value::Integer(vm.last_local_seq()),
+            "the compound must carry the stamp the echo guard compares against"
+        );
+        let rewrite = edit.rewrite.expect("the buffer was rewritten");
+        assert_eq!(rewrite.text, "milk");
+        assert_eq!(rewrite.stripped_prefix, 5);
+        assert_eq!(vm.buffer(), "milk");
+    }
+
+    /// The promotion is one-shot: with the keyword already out of the buffer,
+    /// the next keystroke is an ordinary content commit.
+    #[test]
+    fn the_keystroke_after_a_promotion_is_an_ordinary_commit() {
+        let mut vm = test_controller();
+        vm.set_buffer_from_authority("TODO", 0);
+        vm.apply_local_edit("TODO milk", TaskKeywordAtKeystroke::Read(None))
+            .expect("promotes");
+        let edit = vm
+            .apply_local_edit("milkx", TaskKeywordAtKeystroke::Unread)
+            .expect("keystroke");
+        assert!(edit.rewrite.is_none(), "nothing left to strip");
+        let intent = edit.intent.expect("ordinary content commit");
+        assert_eq!(intent.op_name, "set_field");
+        assert_eq!(intent.params["value"], Value::String("milkx".into()));
+    }
+
+    /// The read gate: only a keyword-headed keystroke obliges the caller to
+    /// read the authority, so ordinary typing never pays for one.
+    #[test]
+    fn only_a_keyword_headed_keystroke_owes_an_authority_read() {
+        let mut vm = test_controller();
+        vm.set_buffer_from_authority("TODO", 0);
+
+        assert!(vm.attempts_promotion("TODO milk"));
+        assert!(!vm.attempts_promotion("TODOx"), "not keyword-headed");
+        assert!(!vm.attempts_promotion("TODO"), "unchanged text");
+
+        vm.set_buffer_from_authority("TODO list ideas", 0);
+        assert!(
+            !vm.attempts_promotion("TODO list ideasX"),
+            "prior buffer is already keyword-headed — the delta condition"
+        );
+    }
+
+    /// The staleness case the cached keyword got wrong: something else made
+    /// this block a task while the editor was open. The keyword is read at the
+    /// keystroke, so the guard sees it and the text is committed as-is.
+    #[test]
+    fn a_block_that_became_a_task_under_the_editor_is_not_promoted() {
+        let mut vm = test_controller();
+        vm.set_buffer_from_authority("TODO", 0);
+
+        let edit = vm
+            .apply_local_edit(
+                "TODO milk",
+                TaskKeywordAtKeystroke::Read(Some("TODO".to_string())),
+            )
+            .expect("keystroke");
+
+        assert!(
+            edit.rewrite.is_none(),
+            "nothing may be stripped: the block is already a task"
+        );
+        assert_eq!(edit.intent.expect("ordinary commit").op_name, "set_field");
+        assert_eq!(vm.buffer(), "TODO milk");
+    }
+
+    /// A refused promotion puts the keyword back. On the common path the
+    /// engine already stored exactly that text, so no further commit is owed.
+    #[test]
+    fn a_refused_promotion_restores_the_typed_text() {
+        let mut vm = test_controller();
+        vm.set_buffer_from_authority("TODO", 0);
+        let edit = vm
+            .apply_local_edit("TODO milk", TaskKeywordAtKeystroke::Read(None))
+            .expect("keystroke");
+        let rewrite = edit.rewrite.expect("promoting keystroke");
+        assert_eq!(vm.buffer(), "milk", "precondition: the strip happened");
+
+        let restore = vm
+            .restore_refused_promotion(
+                &rewrite.text,
+                &PromotionResidue::EngineStored("TODO milk".to_string()),
+            )
+            .expect("the buffer still starts with the stripped text");
+
+        assert_eq!(restore.text, "TODO milk");
+        assert_eq!(vm.buffer(), "TODO milk");
+        assert!(
+            restore.intent.is_none(),
+            "the engine's verbatim commit already IS the restored text"
+        );
+    }
+
+    /// Typing does not stop while the verdict is in flight. A keystroke that
+    /// landed after the strip sits AFTER the stripped text, so the restore
+    /// re-inserts the keyword and KEEPS it — and owes a commit, because the
+    /// engine's verbatim text is no longer what the user has.
+    #[test]
+    fn a_keystroke_racing_the_refusal_survives_it() {
+        let mut vm = test_controller();
+        vm.set_buffer_from_authority("TODO", 0);
+        let edit = vm
+            .apply_local_edit("TODO ", TaskKeywordAtKeystroke::Read(None))
+            .expect("keystroke");
+        let rewrite = edit.rewrite.expect("promoting keystroke");
+        // The verdict is still in flight; the user types on.
+        vm.apply_local_edit("z", TaskKeywordAtKeystroke::Unread)
+            .expect("racing keystroke");
+
+        let restore = vm
+            .restore_refused_promotion(
+                &rewrite.text,
+                &PromotionResidue::EngineStored("TODO ".to_string()),
+            )
+            .expect("restores");
+
+        assert_eq!(
+            restore.text, "TODO z",
+            "the keyword AND the raced keystroke"
+        );
+        let intent = restore
+            .intent
+            .expect("the engine stored `TODO `, not `TODO z`, so a commit is owed");
+        assert_eq!(intent.params["value"], Value::String("TODO z".into()));
+    }
+
+    /// A dispatch that never produced a verdict wrote nothing, so the restore
+    /// must commit the text itself — a keystroke is not lost to a failed op.
+    #[test]
+    fn a_promotion_that_never_answered_still_commits_the_typed_text() {
+        let mut vm = test_controller();
+        vm.set_buffer_from_authority("TODO", 0);
+        let edit = vm
+            .apply_local_edit("TODO milk", TaskKeywordAtKeystroke::Read(None))
+            .expect("keystroke");
+        let rewrite = edit.rewrite.expect("promoting keystroke");
+
+        let restore = vm
+            .restore_refused_promotion(
+                &rewrite.text,
+                &PromotionResidue::NothingStored(rewrite.typed.clone()),
+            )
+            .expect("restores");
+
+        assert_eq!(restore.text, "TODO milk");
+        assert_eq!(
+            restore
+                .intent
+                .expect("nothing was stored, so the restore must write")
+                .params["value"],
+            Value::String("TODO milk".into())
+        );
+    }
+
+    /// A caller that skipped the read cannot promote by accident. Fail-safe,
+    /// not silent: the keystroke commits as ordinary content and the mistake
+    /// is logged.
+    #[test]
+    fn an_unread_keyword_never_promotes() {
+        let mut vm = test_controller();
+        vm.set_buffer_from_authority("TODO", 0);
+
+        let edit = vm
+            .apply_local_edit("TODO milk", TaskKeywordAtKeystroke::Unread)
+            .expect("keystroke");
+
+        assert!(edit.rewrite.is_none());
+        assert_eq!(edit.intent.expect("ordinary commit").op_name, "set_field");
+        assert_eq!(vm.buffer(), "TODO milk", "the keystroke is never lost");
+    }
+
+    /// A block whose text merely starts with a keyword-shaped word keeps being
+    /// edited as text — the delta condition, not the content, decides.
+    #[test]
+    fn typing_on_an_already_keyword_headed_buffer_does_not_promote() {
+        let mut vm = test_controller();
+        vm.set_buffer_from_authority("TODO list ideas", 0);
+        let edit = vm
+            .apply_local_edit("TODO list ideasX", TaskKeywordAtKeystroke::Read(None))
+            .expect("keystroke");
+        assert!(edit.rewrite.is_none());
+        assert_eq!(
+            edit.intent.expect("ordinary commit").op_name,
+            "set_field",
+            "guard 3 keeps this a plain content edit"
+        );
     }
 
     /// Amendment 3: a directive deferred during an IME composition replays

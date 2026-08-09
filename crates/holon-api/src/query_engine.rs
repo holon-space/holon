@@ -101,6 +101,14 @@ pub trait QueryEngine: Send + Sync {
     /// `None` when the row hasn't materialised yet.
     async fn block_content_by_id(&self, id: &EntityUri) -> Result<Option<String>>;
 
+    /// Non-settling read of a single block's stored task keyword
+    /// (`properties.task_state`), the companion of
+    /// [`Self::block_content_by_id`]. An editor needs it to run the live
+    /// keyword-promotion guard the engine runs — a block that is already a task
+    /// must not be proposed for promotion. `None` for a plain block or a row
+    /// that hasn't materialised.
+    async fn block_task_state_by_id(&self, id: &EntityUri) -> Result<Option<String>>;
+
     /// ONE-SHOT, non-watching read: compile + execute `query` exactly once and
     /// return its current rows. Unlike [`Self::watch_query`], this sets up
     /// **no** materialized view and **no** CDC stream.

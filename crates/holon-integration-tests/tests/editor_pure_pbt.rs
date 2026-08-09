@@ -417,6 +417,10 @@ impl RefEditorMirrorMut for EditorPureRef {
     fn move_cursor(&mut self, byte_position: usize) {
         self.editor.cursor = byte_position.min(self.editor.text.len());
     }
+    fn reseed_active_editor(&mut self, text: &str, cursor: usize) {
+        self.editor.text = text.to_string();
+        self.editor.cursor = cursor.min(self.editor.text.len());
+    }
 }
 
 impl RefFocus for EditorPureRef {

@@ -5210,6 +5210,7 @@ dependencies = [
  "holon-filesystem",
  "holon-macros",
  "holon-oracles",
+ "holon-org-format",
  "holon-pbt-core",
  "libc",
  "memory-stats",

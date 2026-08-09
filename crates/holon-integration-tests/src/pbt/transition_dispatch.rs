@@ -449,6 +449,9 @@ mod cap_transition_generic_arm_selftest {
             fn last_open_tab_activated(&self) -> bool {
                 false
             }
+            fn content_writes_reach_sql(&self) -> bool {
+                false
+            }
         }
 
         let sql = DummyGenericTransition.expected_sql(&DummyRef);

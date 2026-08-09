@@ -201,6 +201,14 @@ pub struct TestServices {
     /// click test assert WHICH operation a click chose (or that it chose none)
     /// — the stub's own `dispatch_intent` only logs.
     dispatched_intents: std::sync::Mutex<Vec<OperationIntent>>,
+    /// When set, `editable_text` hands this cell to every editor, so the
+    /// fixture builds a CELL-ATTACHED (Loro/Full-arm) `EditorView` instead of
+    /// the no-cell SqlOnly one. `None` keeps the historical behaviour.
+    editable_cell: Option<holon_core::cell::Cell<String>>,
+    /// Makes `block.promote_task_keyword` answer `refused`, echoing the typed
+    /// text back exactly as the real compound's lossless-refusal path does.
+    /// Lets a fixture drive the refusal-recovery branch without a live engine.
+    pub refuse_promotions: std::sync::atomic::AtomicBool,
 }
 
 impl TestServices {
@@ -215,6 +223,28 @@ impl TestServices {
             caret_seed: std::sync::Mutex::new(None),
             focused: std::sync::Mutex::new(None),
             dispatched_intents: std::sync::Mutex::new(Vec::new()),
+            editable_cell: None,
+            refuse_promotions: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    /// A fixture whose editors attach `cell` — the Full/Loro arm, where the
+    /// CRDT owns content and the per-row DataRow content subscription is
+    /// dropped. Editor code that differs between the arms (anything gated on
+    /// `has_cell()`) is only reachable through this constructor.
+    pub fn with_editable_cell(cell: holon_core::cell::Cell<String>) -> Arc<Self> {
+        Arc::new(Self {
+            inner: holon_frontend::reactive::StubBuilderServices::new(),
+            popup_results: std::sync::Mutex::new(Vec::new()),
+            registry: Arc::new(BlockTreeRegistry::new()),
+            drawer_states: std::sync::Mutex::new(std::collections::HashMap::new()),
+
+            quiescent_runtime: false,
+            caret_seed: std::sync::Mutex::new(None),
+            focused: std::sync::Mutex::new(None),
+            dispatched_intents: std::sync::Mutex::new(Vec::new()),
+            editable_cell: Some(cell),
+            refuse_promotions: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -240,6 +270,8 @@ impl TestServices {
             caret_seed: std::sync::Mutex::new(None),
             focused: std::sync::Mutex::new(None),
             dispatched_intents: std::sync::Mutex::new(Vec::new()),
+            editable_cell: None,
+            refuse_promotions: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -257,6 +289,8 @@ impl TestServices {
             caret_seed: std::sync::Mutex::new(None),
             focused: std::sync::Mutex::new(None),
             dispatched_intents: std::sync::Mutex::new(Vec::new()),
+            editable_cell: None,
+            refuse_promotions: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -286,6 +320,71 @@ impl TestServices {
 impl BuilderServices for TestServices {
     fn interpret(&self, expr: &RenderExpr, ctx: &FrontendRenderContext) -> ReactiveViewModel {
         self.inner.interpret(expr, ctx)
+    }
+    /// Stands in for the `block.promote_task_keyword` compound: records the
+    /// intent, then answers with the SAME disclosure payload the real engine
+    /// builds — `promoted`, or `refused` echoing the typed text verbatim when
+    /// [`TestServices::refuse_promotions`] is set. Any other op is recorded and
+    /// answered with no payload.
+    fn dispatch_intent_awaiting_result(
+        &self,
+        intent: OperationIntent,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Option<holon_api::Value>>> + Send + 'static>,
+    > {
+        self.dispatched_intents.lock().unwrap().push(intent.clone());
+        if intent.op_name != "promote_task_keyword" {
+            return Box::pin(std::future::ready(Ok(None)));
+        }
+        let typed = intent
+            .params
+            .get("typed")
+            .and_then(|v| v.as_string())
+            .unwrap_or_default()
+            .to_string();
+        let refused = self
+            .refuse_promotions
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let mut payload = std::collections::HashMap::new();
+        if refused {
+            payload.insert(
+                "outcome".to_string(),
+                holon_api::Value::String("refused".into()),
+            );
+            payload.insert(
+                "reason".to_string(),
+                holon_api::Value::String("already_tasked".into()),
+            );
+            payload.insert("content".to_string(), holon_api::Value::String(typed));
+        } else {
+            payload.insert(
+                "outcome".to_string(),
+                holon_api::Value::String("promoted".into()),
+            );
+            payload.insert(
+                "keyword".to_string(),
+                holon_api::Value::String("TODO".into()),
+            );
+        }
+        Box::pin(std::future::ready(Ok(Some(holon_api::Value::Object(
+            payload,
+        )))))
+    }
+
+    /// Hands out the fixture's cell when one was configured
+    /// ([`TestServices::with_editable_cell`]); otherwise the trait default's
+    /// error keeps editors in the no-cell SqlOnly arm.
+    fn editable_text(
+        &self,
+        block_id: &EntityUri,
+        field: &str,
+    ) -> Result<holon_core::cell::Cell<String>> {
+        match &self.editable_cell {
+            Some(cell) => Ok(cell.clone()),
+            None => Err(anyhow::anyhow!(
+                "TestServices has no editable cell for {block_id}.{field}"
+            )),
+        }
     }
     /// Deliberately loud rather than delegating to `inner.clone_arc()`: the
     /// recorded drawer/caret/focus state lives in THIS instance's mutexes, so

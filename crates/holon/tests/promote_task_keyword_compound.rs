@@ -427,3 +427,46 @@ async fn a_disagreeing_proposal_is_refused_rather_than_silently_corrected() {
         Some("TODO buy milk")
     );
 }
+
+// ---------------------------------------------------------------------------
+// P1 = A — promotion is a TYPING gesture, not a property of the text
+// ---------------------------------------------------------------------------
+
+/// RULING P1=A. An agent, an MCP client or the org re-ingest writing the very
+/// same characters through `block.set_field` must NOT promote: the block keeps
+/// the keyword as literal content and stays plain. Only the editor's keystroke
+/// sink calls the detector.
+///
+/// This pins the asymmetry so that a future promotion bolted onto `set_field`
+/// (the tempting "make it work everywhere" change) reds here instead of
+/// silently rewriting every agent-authored line that starts with `TODO `.
+#[tokio::test(flavor = "multi_thread")]
+async fn set_field_never_promotes_however_the_text_looks() {
+    let engine = block_engine().await;
+    create_block(&engine, "block:agent", "").await;
+
+    let mut params: StorageEntity = HashMap::new();
+    params.insert("id".into(), Value::String("block:agent".into()));
+    params.insert("field".into(), Value::String("content".into()));
+    params.insert("value".into(), Value::String("TODO x".into()));
+    engine
+        .execute_operation(
+            &EntityName::new("block"),
+            "set_field",
+            params,
+            OpOrigin::Sync,
+        )
+        .await
+        .expect("set_field content");
+
+    assert_eq!(
+        col(&engine, "block:agent", "content").await.as_deref(),
+        Some("TODO x"),
+        "a non-editor write must store the text verbatim, keyword and all"
+    );
+    assert_eq!(
+        prop(&engine, "block:agent", "task_state").await,
+        None,
+        "P1=A: only typing promotes — set_field must leave the block plain"
+    );
+}
