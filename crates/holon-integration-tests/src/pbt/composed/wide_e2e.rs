@@ -1334,6 +1334,22 @@ pub fn authority_routing_disclosure(wiring: &Wiring) -> String {
 /// back toward zero.
 pub const MIN_SQL_CRUD_DRAW_SHARE: f64 = 1.0 / 8.0;
 
+/// The floor on the share of GENERATED SqlOnly cases that must commit at least
+/// one typed edit into block content — see
+/// `sqlonly_generated_cases_commit_typed_edits_into_block_content`.
+/// [`MIN_SQL_CRUD_DRAW_SHARE`] only proves the shipped-default mode is drawn;
+/// this proves the mode can be TYPED in, which is the coverage both the
+/// post-split sibling-order and the stale-marks prod bugs escaped through.
+///
+/// A COLLAPSE DETECTOR, not a target — set well below the measurement so
+/// binomial noise cannot flake it. Measured over 64 cases × 40 steps: SqlOnly
+/// 0.109 against a Loro control of 0.094, i.e. the two modes are at parity and
+/// ~10% is simply what the SHARED generator offers (a case must draw
+/// `FocusEditableText` and then `TypeChars` before anything blurs the editor).
+/// Raising the rate is a generator question, not a mode question; this floor
+/// only catches a return to the zero SqlOnly had.
+pub const MIN_SQLONLY_TYPING_CASE_SHARE: f64 = 1.0 / 32.0;
+
 /// Resolve a drawn manifest into the `ComponentSet` the composed SUT boots.
 ///
 /// `Projection::EditorState` is selected IFF the resolved manifest wires
@@ -2390,6 +2406,189 @@ mod tests {
                 ran.contains(&"inv-blocks-match-ref/block_raw"),
                 "the block-id comparison must RUN over the seeded SqlOnly SUT (non-vacuity proof \
                  the seed landed); ran: {ran:?}"
+            );
+        });
+    }
+
+    /// The shipped-default draw used by the two typing-engagement guards below
+    /// (`{Org, Turso}`, no Loro ⇒ `crdt.enabled = false`).
+    fn sqlonly_wiring() -> Wiring {
+        Wiring::custom(
+            vec![StorageAdapter::Org, StorageAdapter::Turso],
+            vec![],
+            vec![],
+        )
+    }
+
+    /// Content fingerprint of the reference working tree — what "a typed edit
+    /// reached block content" is measured against.
+    fn ref_block_contents(state: &ReferenceState) -> BTreeMap<EntityUri, String> {
+        state
+            .domain
+            .block_state
+            .blocks
+            .iter()
+            .map(|(id, b)| (id.clone(), b.content.clone()))
+            .collect()
+    }
+
+    /// **Tasks #20 / #52 — the shipped default must be TYPEABLE, per case.**
+    ///
+    /// The keystone's alphabet is narrowed by the composed SUT's cap set
+    /// (`aggregate_transitions` → `caps_available`). A SqlOnly draw that hosts
+    /// no `SutEditorMirrorWrite` drops
+    /// `TypeChars`/`DeleteBackward`/`MoveCursor` entirely, so the mode the
+    /// desktop app actually ships had ZERO typing coverage — the escape
+    /// route of both the post-split sibling-order and the stale-marks prod
+    /// bugs.
+    ///
+    /// Measured over GENERATED cases (the real `aggregate_transitions`
+    /// alphabet under the real SqlOnly cap set, stepped on the reference): a
+    /// case counts only when a drawn `TypeChars` actually CHANGED reference
+    /// block content — i.e. the keystroke committed through
+    /// `commit_active_editor_if_changed`, not merely sat in an editor buffer.
+    /// The SUT half of that claim (the same commit landing in `block_raw`
+    /// through the production editor sink) is
+    /// `sqlonly_typing_commits_through_the_editor_sink_into_block_raw`.
+    #[test]
+    fn sqlonly_generated_cases_commit_typed_edits_into_block_content() {
+        use proptest::strategy::Strategy;
+        use proptest::strategy::ValueTree;
+        use proptest::test_runner::TestRunner;
+
+        use crate::pbt::transitions::aggregate_transitions;
+
+        // Cases × steps mirror the live keystone's `sequential_strategy(1..40)`.
+        const CASES: usize = 64;
+        const STEPS: usize = 40;
+
+        /// Share of generated cases in which a drawn `TypeChars` actually
+        /// CHANGED reference block content.
+        fn committed_typing_share(base: &ReferenceState) -> (usize, f64) {
+            let mut runner = TestRunner::deterministic();
+            let mut typed_cases = 0usize;
+            for _ in 0..CASES {
+                let mut state = base.clone();
+                let mut committed = false;
+                for _ in 0..STEPS {
+                    let transition = aggregate_transitions(&state)
+                        .new_tree(&mut runner)
+                        .expect("aggregate_transitions must produce a value")
+                        .current();
+                    let typing = transition.variant_name() == "TypeChars";
+                    let before = typing.then(|| ref_block_contents(&state));
+                    transition.apply_to_ref(&mut state);
+                    if let Some(before) = before {
+                        committed |= ref_block_contents(&state) != before;
+                    }
+                }
+                if committed {
+                    typed_cases += 1;
+                }
+            }
+            (typed_cases, typed_cases as f64 / CASES as f64)
+        }
+
+        let wiring = sqlonly_wiring();
+        assert!(
+            !set_for_wiring(&wiring).has_projection(Projection::EditorState),
+            "premise: this draw runs the shipped default (SQL block-CRUD authority)"
+        );
+        // Boots one composed SqlOnly SUT to read its real cap set (cached).
+        let (sql_cases, sql_share) = committed_typing_share(&wide_e2e_ref_for(&wiring));
+        eprintln!(
+            "[sqlonly-typing-engagement] {sql_cases}/{CASES} ({sql_share:.3}) cases committed a \
+             typed edit into block content"
+        );
+        assert!(
+            sql_share >= MIN_SQLONLY_TYPING_CASE_SHARE,
+            "shipped-default TYPING coverage floor: only {sql_cases}/{CASES} ({sql_share:.3}) \
+             generated SqlOnly cases committed a typed edit into block content, below the \
+             {MIN_SQLONLY_TYPING_CASE_SHARE:.3} floor — the keystone cannot type in the mode the \
+             desktop app ships (crdt.enabled defaults to false), so no property covers its \
+             editor→`set_field(\"content\")` write path"
+        );
+    }
+
+    /// The SUT half of the engagement claim: a keystroke on a SqlOnly composed
+    /// SUT must travel the PRODUCTION editor sink (`ReactiveEngineDriver` →
+    /// `HeadlessEditorMirror` → the cell-free `EditorViewModel` →
+    /// `vm_commit_edit` → `set_field("content")`) and land in `block_raw`, with
+    /// the reference in lockstep so the composed catalog compares it.
+    #[test]
+    fn sqlonly_typing_commits_through_the_editor_sink_into_block_raw() {
+        use holon_pbt_core::capabilities::SutBackend;
+
+        use crate::pbt::transitions::FocusEditableText;
+        use crate::pbt::transitions::TypeChars;
+
+        let wiring = sqlonly_wiring();
+        let mut oracle = wide_e2e_ref_for(&wiring);
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("build multi-thread runtime");
+        rt.block_on(async {
+            let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+            let (mut caps, _handle, scaffold) = boot_and_seed_wide(&resolver, &oracle).await;
+
+            let target = fixed_ids().c1;
+            let focus = FocusEditableText {
+                block_id: target.clone(),
+            };
+            focus.apply_to_ref(&mut oracle);
+            TransitionImpl::apply_to_sut(&focus, &oracle, &mut caps).await;
+
+            let typed = TypeChars {
+                text: "Zq".to_string(),
+            };
+            typed.apply_to_ref(&mut oracle);
+            TransitionImpl::apply_to_sut(&typed, &oracle, &mut caps).await;
+            tokio::time::sleep(SETTLE).await;
+
+            let expected = oracle
+                .domain
+                .block_state
+                .blocks
+                .get(&target)
+                .expect("the typed target is in the reference tree")
+                .content
+                .clone();
+            assert!(
+                expected.contains("Zq"),
+                "premise: the reference committed the typed text; got {expected:?}"
+            );
+            let sut_content = SutBackend::block_raw_snapshot(&caps)
+                .await
+                .into_iter()
+                .find(|b| b.id == target)
+                .map(|b| b.content)
+                .expect("the typed target must exist in block_raw");
+            assert_eq!(
+                sut_content, expected,
+                "a SqlOnly keystroke must commit through the editor sink into `block_raw` — the \
+                 shipped default's `set_field(\"content\")` write path"
+            );
+
+            let report = <WideE2E as ComposedSlice>::run_report(
+                &caps,
+                &resolver,
+                &BurnedPairs::new(),
+                &std::collections::BTreeSet::new(),
+                &scaffold,
+                &oracle,
+            )
+            .await;
+            assert!(
+                report.failures().is_empty(),
+                "SqlOnly focus+type must stay green; failures: {:?}",
+                report.failures()
+            );
+            assert!(
+                report.ran_ids().contains(&"inv-block-content/block_raw"),
+                "non-vacuity: the committed-content comparison must RUN over the typed SqlOnly \
+                 block; ran: {:?}",
+                report.ran_ids()
             );
         });
     }
