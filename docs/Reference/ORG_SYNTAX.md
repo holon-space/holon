@@ -183,6 +183,12 @@ emit:
   `[[{today}]]` link target. Companion de-inline (a rule-created child page would
   otherwise stay inlined in the `Journals.org` companion) is handled by the Fork B
   B1 writeback sweep.
+- **A `Page`-tagged heading may nest only under another page.** A `:Page:` under a
+  plain (non-page) heading is refused at ingest — its `<name-chain>` cannot be
+  derived through a non-page ancestor, which contributes no path segment. This is a
+  deliberate identity-model contract (ruled 2026-08-09), not a limitation; see
+  [Architecture/Model.md § Page identity](../Architecture/Model.md) and the refusal
+  site `DocumentManager::name_chain` (`crates/holon-filesystem/src/sync_ports.rs`).
 - The block is **program-marked** (`is_program`) so it renders as a rule card, not
   as query content. A malformed body surfaces a loud `RuleStatus::ParseError` on
   the card. The parser is `holon_advice::holon_rule::parse_holon_rule`.

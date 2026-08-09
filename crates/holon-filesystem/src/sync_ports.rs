@@ -303,8 +303,12 @@ pub trait DocumentManager: Send + Sync {
             } else if !is_self {
                 anyhow::bail!(
                     "name_chain({doc_id}): non-page ancestor '{current_id}' found while walking \
-                     to root — pages under non-pages are prohibited (interim ruling 2026-07-13); \
-                     chain so far (root-to-here, reversed at return) = {:?}",
+                     to root — a page's name-chain (its identity and its on-disk file path) \
+                     cannot be derived through a non-page ancestor, so pages may nest only under \
+                     pages (deliberate contract, ruled 2026-08-09; see docs/Architecture/Model.md \
+                     'Page identity'). To fix: tag the ancestor heading '{current_id}' with \
+                     `:Page:`, or unnest this page so it sits directly under a page (or the vault \
+                     root). Chain so far (root-to-here, reversed at return) = {:?}",
                     chain
                 );
             }
@@ -694,8 +698,16 @@ mod name_chain_tests {
         assert_eq!(chain, vec!["projects".to_string(), "todo".to_string()]);
     }
 
-    /// `A(page) > b1(non-page) > P(page)` — the prohibited topology. Before the
+    /// `A(page) > b1(non-page) > P(page)` — the refused topology. Before the
     /// fix this returned `Ok(["A","P"])`; now it fails loud naming `b1`.
+    ///
+    /// **This guards a DELIBERATE contract, not an incidental limitation**
+    /// (Martin ruled Option A, 2026-08-09 — keep the refusal; see
+    /// `docs/Architecture/Model.md` § Page identity). A future change must not
+    /// silently legalize a page under a non-page: the error must (i) name the
+    /// offending non-page ancestor, (ii) name the topology (pages nest only
+    /// under pages), and (iii) tell the author how to fix it. It must NOT read
+    /// as a data-loss / truncated-ingest message, and it must NOT return `Ok`.
     #[tokio::test]
     async fn non_page_ancestor_fails_loud() {
         let a = page("A", EntityUri::no_parent(), "projects");
@@ -708,10 +720,21 @@ mod name_chain_tests {
             .await
             .expect_err("a page under a non-page ancestor must fail loud, not coerce a path");
         let msg = format!("{err:#}");
+        // (i) names the offending non-page ancestor.
         assert!(
             msg.contains("non-page ancestor") && msg.contains(b1.id.as_str()),
             "error must name the offending non-page ancestor '{}'; got: {msg}",
             b1.id
+        );
+        // (ii) names the topology contract, (iii) tells the fix — so the author
+        // is not left guessing and a reader cannot mistake it for data loss.
+        assert!(
+            msg.contains("pages may nest only under pages"),
+            "error must name the topology contract (pages nest only under pages); got: {msg}"
+        );
+        assert!(
+            msg.contains(":Page:") && msg.contains("unnest"),
+            "error must tell the author how to fix it (tag `:Page:` or unnest); got: {msg}"
         );
     }
 
