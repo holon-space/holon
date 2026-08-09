@@ -110,7 +110,7 @@ pub fn dismiss_advice_descriptor(
         boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
         trigger: None,
         bound_params: std::collections::HashMap::new(),
-        precondition: None,
+        guard: holon_api::pattern::OpGuard::None,
     }
 }
 
@@ -201,6 +201,6 @@ fn tag_descriptor(
         boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
         trigger: None,
         bound_params: std::collections::HashMap::new(),
-        precondition: None,
+        guard: holon_api::pattern::OpGuard::None,
     }
 }

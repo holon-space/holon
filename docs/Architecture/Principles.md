@@ -508,7 +508,10 @@ OperationDescriptor {
     name: "set_completion",
     required_params: ["id", "completed"],
     affected_fields: ["completed"],
-    precondition: Some(PreconditionChecker { ... }),
+    // Relational guard (ADR 0031 P6=A) parsed from `#[require("…")]` at
+    // macro-expansion time. Parameter validity lives in the params' TypeHints,
+    // never here. Ops declaring nothing carry `OpGuard::None`.
+    guard: OpGuard::parse("has_tag(\"Page\") and parent(not has_tag(\"Page\"))"),
 }
 ```
 

@@ -223,7 +223,12 @@ pub struct OperationDescriptor {
     pub param_mappings: Vec<ParamMapping>,
     pub trigger: Option<Trigger>,
     pub bound_params: HashMap<String, Value>,
-    pub precondition: Option<Arc<Box<PreconditionChecker>>>,
+    /// The declared precondition (ADR 0031). Non-defaultable: an op that
+    /// declares nothing carries `OpGuard::None`, a stated fact rather than an
+    /// absence. Plain serializable data — a relational guard from the Pattern
+    /// AST, parsed by `#[require("…")]` at macro-expansion time, never a
+    /// closure.
+    pub guard: OpGuard,
 }
 ```
 

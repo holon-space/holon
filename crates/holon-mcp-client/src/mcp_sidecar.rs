@@ -1,10 +1,8 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
 
 use holon_api::entity::FieldSchema;
 use holon_api::entity::TypeDefinition;
-use holon_api::render_types::PreconditionChecker;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -483,6 +481,13 @@ pub struct ParamOverride {
 
 /// A Rhai expression validated at parse time. Guarantees the expression
 /// compiles.
+///
+/// **DEPRECATED and IGNORED.** Parsing it keeps a malformed expression a loud
+/// load-time failure, and nothing else consumes it. It cannot become a
+/// descriptor guard: it is parameter-shaped, and ADR 0031 P6=A makes guards
+/// relational predicates over the state an op touches. Add no new
+/// `precondition:` keys — use a relational `#[require("…")]`, or the
+/// parameter's own `TypeHint`.
 #[derive(Debug, Clone)]
 pub struct RhaiPrecondition(String);
 
@@ -493,31 +498,6 @@ impl RhaiPrecondition {
             .compile_expression(expr)
             .map_err(|e| format!("invalid Rhai precondition '{expr}': {e}"))?;
         Ok(Self(expr.to_string()))
-    }
-
-    pub fn to_checker(&self) -> Arc<Box<PreconditionChecker>> {
-        let expr = self.0.clone();
-        Arc::new(Box::new(move |fields| {
-            let engine = rhai::Engine::new();
-            let mut scope = rhai::Scope::new();
-            for (k, v) in fields {
-                if let Some(b) = v.downcast_ref::<bool>() {
-                    scope.push(k.clone(), *b);
-                } else if let Some(s) = v.downcast_ref::<String>() {
-                    scope.push(k.clone(), s.clone());
-                } else if let Some(n) = v.downcast_ref::<f64>() {
-                    scope.push(k.clone(), *n);
-                } else if let Some(n) = v.downcast_ref::<i64>() {
-                    scope.push(k.clone(), *n);
-                }
-            }
-            let ast = engine
-                .compile_expression(&expr)
-                .map_err(|e| format!("Rhai compile error: {e}"))?;
-            engine
-                .eval_ast::<bool>(&ast)
-                .map_err(|e| format!("Rhai eval error for '{expr}': {e}"))
-        }))
     }
 }
 

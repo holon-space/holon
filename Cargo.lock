@@ -5428,6 +5428,7 @@ dependencies = [
  "async-trait",
  "holon-api",
  "holon-core",
+ "holon-pattern",
  "proc-macro2",
  "quote",
  "serde_json",
@@ -5444,6 +5445,7 @@ dependencies = [
  "holon-api",
  "holon-core",
  "holon-macros",
+ "serde_json",
  "workspace-hack 0.1.0",
 ]
 

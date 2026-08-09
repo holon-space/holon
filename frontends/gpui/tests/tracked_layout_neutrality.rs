@@ -98,7 +98,7 @@ fn click_wiring() -> OperationWiring {
             menu_exposure: holon_api::MenuExposure::NotListed {
                 surface: holon_api::NonMenuSurface::Test,
             },
-            precondition: None,
+            guard: holon_api::pattern::OpGuard::None,
         },
     }
 }

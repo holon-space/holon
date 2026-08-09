@@ -76,7 +76,7 @@ fn answer_wiring(
             menu_exposure: holon_api::MenuExposure::NotListed {
                 surface: holon_api::NonMenuSurface::PointerGesture,
             },
-            precondition: None,
+            guard: holon_api::pattern::OpGuard::None,
         },
     }
 }

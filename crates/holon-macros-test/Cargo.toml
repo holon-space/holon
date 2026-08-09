@@ -19,3 +19,6 @@ holon-api.workspace = true
 holon-core.workspace = true
 async-trait.workspace = true
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+
+[dev-dependencies]
+serde_json.workspace = true

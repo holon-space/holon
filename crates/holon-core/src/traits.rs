@@ -2835,7 +2835,7 @@ pub fn generate_sync_operation(provider_name: &str) -> OperationDescriptor {
         },
         trigger: None,
         bound_params: std::collections::HashMap::new(),
-        precondition: None,
+        guard: holon_api::pattern::OpGuard::None,
     }
 }
 

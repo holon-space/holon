@@ -2508,7 +2508,7 @@ impl OperationProvider for SqlOperationProvider {
                 },
                 trigger: None,
                 bound_params: Default::default(),
-                precondition: None,
+                guard: holon_api::pattern::OpGuard::None,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -2527,7 +2527,7 @@ impl OperationProvider for SqlOperationProvider {
                 },
                 trigger: None,
                 bound_params: Default::default(),
-                precondition: None,
+                guard: holon_api::pattern::OpGuard::None,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -2550,7 +2550,7 @@ impl OperationProvider for SqlOperationProvider {
                 },
                 trigger: None,
                 bound_params: Default::default(),
-                precondition: None,
+                guard: holon_api::pattern::OpGuard::None,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -2576,7 +2576,7 @@ impl OperationProvider for SqlOperationProvider {
                 },
                 trigger: None,
                 bound_params: Default::default(),
-                precondition: None,
+                guard: holon_api::pattern::OpGuard::None,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -2602,7 +2602,7 @@ impl OperationProvider for SqlOperationProvider {
                 },
                 trigger: None,
                 bound_params: Default::default(),
-                precondition: None,
+                guard: holon_api::pattern::OpGuard::None,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -2625,7 +2625,7 @@ impl OperationProvider for SqlOperationProvider {
                 },
                 trigger: None,
                 bound_params: Default::default(),
-                precondition: None,
+                guard: holon_api::pattern::OpGuard::None,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -2655,7 +2655,7 @@ impl OperationProvider for SqlOperationProvider {
                 },
                 trigger: None,
                 bound_params: Default::default(),
-                precondition: None,
+                guard: holon_api::pattern::OpGuard::None,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -2680,7 +2680,7 @@ impl OperationProvider for SqlOperationProvider {
                 },
                 trigger: None,
                 bound_params: Default::default(),
-                precondition: None,
+                guard: holon_api::pattern::OpGuard::None,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -2703,7 +2703,7 @@ impl OperationProvider for SqlOperationProvider {
                 },
                 trigger: None,
                 bound_params: Default::default(),
-                precondition: None,
+                guard: holon_api::pattern::OpGuard::None,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -2733,7 +2733,7 @@ impl OperationProvider for SqlOperationProvider {
                 },
                 trigger: None,
                 bound_params: Default::default(),
-                precondition: None,
+                guard: holon_api::pattern::OpGuard::None,
             },
         ];
 

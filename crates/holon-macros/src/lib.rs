@@ -385,9 +385,9 @@ pub fn operation(_: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// No-op proc macro for #[require(...)] attribute
-/// This allows the attribute to be recognized by Rust's parser
-/// The actual processing is done by the operations_trait macro
+/// No-op proc macro for `#[require("<guard>")]`, so Rust's parser accepts the
+/// attribute. `operations_trait` does the real work: it parses the guard string
+/// with the Pattern parser at expansion time (ADR 0031 P2).
 #[proc_macro_attribute]
 pub fn require(_: TokenStream, item: TokenStream) -> TokenStream {
     // Just return the item unchanged - the operations_trait macro will process the
