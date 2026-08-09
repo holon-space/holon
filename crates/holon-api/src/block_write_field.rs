@@ -134,6 +134,17 @@ impl BlockWriteField {
             "tags" => Ok(Self::Tags),
             "task_state" => Ok(Self::TaskState),
             "parent_id" => Ok(Self::ParentId),
+            // An operation-control key that slipped past the specific arms above
+            // (`_order_rekeys`, `_routing_*`) is an INSTRUCTION to the writer,
+            // never a property. Accepted as a `Property`, a
+            // `set_field(field="_order_rekeys", value=<object>)` would smuggle
+            // the control key into the `properties` column in VALUE position,
+            // where the key-position filter cannot see it and the Loro→SQL
+            // projection later re-injects it as a live params key. Refuse it
+            // here, at the same boundary that already refuses `sort_key`.
+            other if crate::entity::is_operation_control_param(other) => {
+                Err(BlockWriteFieldError::StorageInternal(other.to_string()))
+            }
             other => Ok(Self::Property(PropertyKey(other.to_string()))),
         }
     }
@@ -196,6 +207,27 @@ mod tests {
                 "_expected_content".to_string()
             ))
         );
+    }
+
+    /// The order-rekey control key must not be writable as a property in VALUE
+    /// position. `set_field(field="_order_rekeys", value=<object>)` would
+    /// otherwise land the control key inside `properties` where the SQL
+    /// provider's key-position filter cannot strip it, and the Loro→SQL
+    /// projection would re-inject it as a live params key on the next flush.
+    #[test]
+    fn operation_control_keys_are_rejected() {
+        // Reference the consts, not the literals — the routing/expected prefixes
+        // are archlint-guarded string forms.
+        for field in [
+            crate::entity::ORDER_REKEYS_PARAM,
+            crate::entity::ROUTING_DOC_URI_KEY,
+            crate::entity::POSITION_AFTER_BLOCK_ID_PARAM,
+        ] {
+            assert!(
+                BlockWriteField::parse(field).is_err(),
+                "{field} is operation-control metadata and must be refused at the intent boundary"
+            );
+        }
     }
 
     #[test]

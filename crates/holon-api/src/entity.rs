@@ -580,6 +580,37 @@ pub const ROUTING_DOC_URI_KEY: &str = "_routing_doc_uri";
 /// from the persisted row.
 pub const POSITION_AFTER_BLOCK_ID_PARAM: &str = "after_block_id";
 
+/// Operation-control param carrying a minted position's sibling re-keys to the
+/// write that consumes the key, so both land in ONE transaction (ADR 0030 D1).
+/// Never persisted: the SQL writer lifts it into statements and drops it.
+///
+/// INTERNAL. It travels in the same params map an outside caller can populate,
+/// so a writer acting on it MUST prove its targets rather than trust them, and
+/// every intent boundary MUST refuse it — see [`is_operation_control_param`].
+pub const ORDER_REKEYS_PARAM: &str = "_order_rekeys";
+
+/// True for the params keys a writer INTERPRETS rather than stores: positional
+/// intent, sibling re-keys, routing hints, diff guards.
+///
+/// This is the operation-control namespace. It is the set the SQL provider's
+/// `partition_params` refuses to PERSIST, AND the set every intent boundary
+/// (`BlockWriteField::parse`, the MCP tool boundary, the Loro→SQL projection)
+/// must refuse to ACCEPT — these keys are instructions, so taking one from
+/// outside hands the caller a writer primitive the boundary otherwise refuses
+/// (ADR 0005 keeps the order key out of `BlockWriteField` for the same reason).
+/// One definition so the persist-side strip and the accept-side refusal cannot
+/// drift.
+///
+/// Underscore-prefixed keys are NOT all control: `_source_header_args` and
+/// `_source_results` are real block properties and must keep flowing through,
+/// which is why this is a named set and not a prefix test.
+pub fn is_operation_control_param(key: &str) -> bool {
+    key == ORDER_REKEYS_PARAM
+        || key == POSITION_AFTER_BLOCK_ID_PARAM
+        || key.starts_with("_routing_")
+        || key.starts_with("_expected_")
+}
+
 // =============================================================================
 // Graph schema intermediate types
 // =============================================================================

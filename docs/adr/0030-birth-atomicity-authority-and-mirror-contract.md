@@ -34,11 +34,9 @@ accident). Until D7 lands, the dispatcher's create arms carry the contract manua
 
 Two qualifications. (i) "Zero side effects" is enforced by the firing transaction's
 rollback; any step that writes OUTSIDE that transaction is part of the firing and must
-move inside it or be independently harmless. Known violations today, tracked as
-remediation: the order-mint rebalance (`rekey_children_with_slot`,
-`sql_block_operations.rs:161`) rewrites sibling keys in per-row transactions before
-the create INSERT — an FK-refused create leaves them behind — and SqlOnly `place()`
-(`:414`) splits one placement into two transactions. (ii) Guard evaluation and firing
+move inside it or be independently harmless. The two known violations are REMEDIATED
+(see Enforcement → Order-mint atomicity): the order-mint rebalance no longer writes at
+all, and one placement is now one transaction. (ii) Guard evaluation and firing
 are atomic only under the one-consolidator-per-vault serialization (Model.md Layer 2);
 the guard's reads (sibling scan, holder recognition) are valid at fire time by that
 assumption, not by isolation. Deferred-FK validation at commit with rollback is a
@@ -165,6 +163,24 @@ beyond the existing proof-gated paths may land.
   ORDERING hole above is untouched by this — atomic application says nothing about *when* the mirror
   becomes durable relative to its authority commit.
 - **Mint ordering:** already satisfied; guarded by the existing identity tests.
+- **Order-mint atomicity:** SATISFIED for the SQL block authority. Minting a
+  position is now a pure decision — `OrderKeyMinting::new_child_anchor` returns a
+  `MintedPosition` (`holon-core/src/block_ordering.rs`): the `sort_key` plus the
+  sibling re-keys the key is expressed against. Both halves travel to the write
+  that consumes them (`MintedPosition::into_params`, the `_order_rekeys`
+  operation-control param) and the SQL writer lifts the re-keys into the SAME
+  transaction as the create, the batch, or the placement
+  (`SqlOperationProvider::order_rekey_statements` / `place_row`,
+  `crates/holon/src/core/sql_operation_provider.rs`). Placement is one
+  transaction over `parent_id`, `sort_key` and the re-keys, so a mid-failure can
+  no longer leave a block re-parented under a key from its old parent's sequence.
+  The type is what enforces it: `into_params` consumes `self`, so a caller cannot
+  spend the key and drop the re-keys.
+  Regression tests (`sql_block_operations.rs`):
+  `a_refused_create_leaves_no_sibling_rekey_behind` (red before: the re-keyed
+  sibling read back `"7F80"` where the untouched keyspace says `"A0"`) and
+  `a_refused_placement_leaves_neither_half_of_the_move_behind` (red before: the
+  block sat under the NEW parent after the placement was refused).
 
 ## Consequences
 
@@ -204,12 +220,38 @@ beyond the existing proof-gated paths may land.
   boot-time Loro→SQL re-projection (would make SQL divergence self-healing — cite it,
   or the D3 ordering hole widens); V2 measure the actual per-op ordering of
   `save_doc` vs subscription-driven projection and org write-back (is the
-  mirror-outruns-authority window real on the scheduler?); V3 crash-injection over
-  `rekey_children_with_slot` mid-loop (mixed old/new keyspace: mis-ordering or
-  benign later rekey?); V4 whether trust-gate proposal blocks leak into org
+  mirror-outruns-authority window real on the scheduler?); V3 — DONE, see the
+  validation log below; V4 whether trust-gate proposal blocks leak into org
   write-back (D7 Open Decision 5 — if yes, a birth-adjacent mirror leak D3 must
   name); V5 atomicity audit of `SharedSnapshotStore` and roster sidecar writes —
   DONE, all four artifacts already write tmp → `fsync` → rename.
+
+## Validation log
+
+**V3 — crash-injection over the order re-key mid-loop. Answer: MIS-ORDERING, not a
+benign later re-key — but only for some keyspaces, which is worse than either horn
+of the question.**
+
+Evidence (`crates/holon/src/core/sql_block_operations.rs`, two tests). The writer
+applied its per-row `set_field("sort_key")` calls in sibling order, so the durable
+residue of a crash is exactly a PREFIX of the plan; both tests replay prefixes
+directly.
+
+- `a_partially_applied_rekey_misorders_siblings` — siblings `alpha "7080"`,
+  `beta "7080"` (the tie that fires the re-key), `gamma "7180"`. `gen_n_keys`
+  spreads its output around the middle of the space, so the new keys land ABOVE
+  these. ONE applied re-key (`alpha`) is enough: the parent reads back
+  `beta, gamma, alpha`.
+- `a_partially_applied_rekey_over_unkeyed_siblings_keeps_the_order` — the common
+  shape (`"A0"`/`"A1"`, the unkeyed sentinels, which sort ABOVE every minted key)
+  survives every prefix with its order intact.
+
+So the cost is not "eventual re-key fixes it": a crash can leave the vault durably
+mis-ordered, and whether it does depends on where the existing keys sit relative to
+the generator's output — not on anything the writer controls or can test for. That
+is the argument for folding the re-key into the firing transaction rather than
+merely making the loop restartable, and it retires "partial application degrades
+benignly" as a defence for any future keyspace rewrite.
 
 ## Alternatives rejected
 
