@@ -218,6 +218,7 @@ pub use pattern::{
 // Re-export predicate types
 pub use predicate::Predicate;
 // Re-export query context
+pub use query_context::PathContext;
 pub use query_context::QueryContext;
 // Re-export reactive types
 pub use reactive::{

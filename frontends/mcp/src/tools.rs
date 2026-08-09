@@ -31,7 +31,7 @@ use crate::types::*;
 async fn extract_context_from_params(
     service: &HolonService,
     params: &HashMap<String, serde_json::Value>,
-) -> Option<holon_api::QueryContext> {
+) -> anyhow::Result<Option<holon_api::QueryContext>> {
     let context_id = params.get("context_id").and_then(|v| v.as_str());
     let context_parent_id = params.get("context_parent_id").and_then(|v| v.as_str());
     service.build_context(context_id, context_parent_id).await
@@ -731,7 +731,10 @@ impl HolonMcpServer {
                 params.context_id.as_deref(),
                 params.context_parent_id.as_deref(),
             )
-            .await;
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("Failed to resolve context: {e:#}"), None)
+            })?;
 
         let mut holon_params = HashMap::new();
         for (k, v) in &params.params {
@@ -833,7 +836,10 @@ impl HolonMcpServer {
                 params.context_id.as_deref(),
                 params.context_parent_id.as_deref(),
             )
-            .await;
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("Failed to resolve context: {e:#}"), None)
+            })?;
 
         let mut holon_params = HashMap::new();
         for (k, v) in &params.params {
@@ -870,7 +876,11 @@ impl HolonMcpServer {
         &self,
         Parameters(params): Parameters<WatchQueryParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let context = extract_context_from_params(&self.service(), &params.params).await;
+        let context = extract_context_from_params(&self.service(), &params.params)
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("Failed to resolve context: {e:#}"), None)
+            })?;
 
         let mut holon_params = HashMap::new();
         for (k, v) in &params.params {
@@ -2835,7 +2845,10 @@ impl HolonMcpServer {
                 params.context_id.as_deref(),
                 params.context_parent_id.as_deref(),
             )
-            .await;
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("Failed to resolve context: {e:#}"), None)
+            })?;
 
         let mut holon_params = HashMap::new();
         for (k, v) in &params.params {

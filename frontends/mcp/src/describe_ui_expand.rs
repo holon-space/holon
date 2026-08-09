@@ -134,11 +134,11 @@ impl DeferredResolver for EngineResolver {
                 anyhow::anyhow!("unsupported query_lang '{}': {e}", spec.query_lang)
             })?;
             // A context-dependent query (`from descendants`) filters on the
-            // context's `blocks_with_paths` prefix; a context without one binds
-            // the `__NO_PATH__/` sentinel and matches no row, so describe_ui
-            // would report a populated nested page as empty. Resolving it can
-            // fail, and the failure travels as an `Err` — the caller turns that
-            // into the reply's own error node, which is the instrument here.
+            // context's `blocks_with_paths` prefix; resolving that prefix can
+            // fail, and the failure travels as an `Err` (never a fabricated
+            // path) — the caller turns that into the reply's own error node,
+            // which is the instrument here. A missing `context_id` means no
+            // filter, so the query runs unscoped.
             let context = match spec.query_context_id {
                 Some(id) => {
                     // ALLOW(entity_uri_from_raw): live_query node prop, same as

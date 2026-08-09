@@ -662,7 +662,9 @@ pub fn shared_live_query_build<W>(
         crate::QueryContext {
             current_block_id: Some(uri.clone()),
             context_parent_id: Some(uri),
-            context_path_prefix: None,
+            // Validation-only context (the watch is started and immediately
+            // dropped); descendants scoping is irrelevant here, so unfiltered.
+            path_context: crate::PathContext::Unfiltered,
         }
     });
 

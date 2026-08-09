@@ -321,7 +321,7 @@ fn a_real_engine_nested_page_paints_its_children_when_opened() {
     let nested = EntityUri::block(NESTED_PAGE);
     if let Some(qe) = engine.query_engine() {
         probe_descendants(
-            "builder-shaped ctx (context_path_prefix: None)",
+            "builder-shaped ctx (unfiltered path)",
             &qe,
             &runtime,
             holon_api::QueryContext::for_block(&nested, Some(host.clone())),

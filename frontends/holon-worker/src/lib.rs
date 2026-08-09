@@ -845,7 +845,7 @@ mod backend {
                 let result = runtime.block_on(async {
                     let context = service
                         .build_context(context_id.as_deref(), context_parent_id.as_deref())
-                        .await;
+                        .await?;
                     service.execute_query(&query, lang, params, context).await
                 })?;
 

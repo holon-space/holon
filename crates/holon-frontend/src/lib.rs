@@ -257,6 +257,7 @@ pub use editor_view_model::{EditorAction, EditorKey, EditorViewModel};
 use holon_api::EntityName;
 use holon_api::EntityUri;
 pub use holon_api::OperationDescriptor;
+pub use holon_api::PathContext;
 pub use holon_api::ProviderAuthStatus;
 pub use holon_api::QueryContext;
 pub use holon_api::UiEvent;

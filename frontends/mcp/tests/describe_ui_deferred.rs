@@ -387,10 +387,11 @@ fn descendants_node(
 }
 
 /// A CONTEXT-DEPENDENT query must be expanded against the context's real path
-/// prefix. `from descendants` filters on `$context_path_prefix`; a context
-/// built without one binds the `__NO_PATH__/` sentinel, which matches no row —
-/// so `describe_ui` would report a populated nested page as empty while the
-/// window paints it fine, and our own dogfood instrumentation would lie.
+/// prefix. `from descendants` filters on `$context_path_prefix`; if the
+/// expansion failed to resolve that prefix the lookup now returns an `Err`
+/// (never a fabricated path), so `describe_ui` surfaces a visible error rather
+/// than reporting a populated nested page as empty while the window paints it
+/// fine — our own dogfood instrumentation must not lie.
 ///
 /// Control-asserted twice (path exists, and the same query with a path-carrying
 /// context returns both children), so a red here is the EXPANSION's fault.
@@ -443,8 +444,7 @@ fn expanded_descendants_query_resolves_the_contexts_path_prefix() {
         assert!(
             rendered.contains("buy milk") && rendered.contains("see Journals now"),
             "an expanded `from descendants` must render the context's real descendants — an \
-             unresolved path prefix binds the __NO_PATH__/ sentinel and reports the page as \
-             empty; got:\n{rendered}"
+             unresolved path prefix must surface as an Err, never silently empty; got:\n{rendered}"
         );
     });
 }
