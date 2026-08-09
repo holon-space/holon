@@ -523,6 +523,9 @@ impl DispatchingOperationEngine {
     /// its own id has no prior state to order against.
     async fn journal_step(
         &self,
+        // ALLOW(unused_param): the held guard IS the compile-time evidence the
+        // stripe lock is held during journaling; naming it for use would let the
+        // step release the stripe early without a compile error (task #29).
         _held: Option<&tokio::sync::MutexGuard<'_, ()>>,
         entry: UndoEntry,
     ) -> Result<()> {
