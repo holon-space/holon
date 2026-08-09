@@ -52,7 +52,11 @@ computed:
   is_program: 'is_rule_head || (is_source && rule_sibling(parent_id) != ())'
   # A rule using the retired `action` language — surfaced loud on the card.
   is_legacy_rule: 'source_language == "action"'
-  todo_states: 'if is_def_var("document_id") && document_id != () { let d = document(document_id); if d != () { d.todo_keywords } else { () } } else { () }'
+  # No live source of a document's custom TODO keywords: `document_id` and the
+  # `document` lookup were retired with the `doc:` scheme (ADR 0014), so this
+  # field yields () and `state_toggle` uses its default keyword cycle. Restoring
+  # per-document cycles needs a registered `document` live entity (own task).
+  todo_states: '()'
   is_page_row: 'tags != () && tags.contains("\"Page\"")'
   # Bullet glyph by disclosure state (Logseq convention): a COLLAPSED block —
   # which always has hidden children — keeps the ringed `orgmode` fisheye; every
