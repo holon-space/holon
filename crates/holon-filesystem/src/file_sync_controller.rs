@@ -488,6 +488,31 @@ impl std::fmt::Display for StaleHomeOwner {
     }
 }
 
+/// The proof that let a VANISHED file's document be cascade-deleted — or the
+/// reason there was none. The disk twin of [`StaleHomeOwner`]: that one gates a
+/// delete of bytes, this one gates a delete of the blocks those bytes held.
+/// Only the two proven variants reach a `delete_in_tree`; `Refused` carries the
+/// disclosure text, so a refusal can never be silent.
+enum CascadeAuthority {
+    /// The vanished file's own last projection named this document as its root.
+    ItsOwnLastProjection,
+    /// Our home record puts this document's file at exactly the vanished path.
+    OurHomeRecord,
+    Refused(String),
+}
+
+impl std::fmt::Display for CascadeAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ItsOwnLastProjection => {
+                f.write_str("its own last projection rooted this document")
+            }
+            Self::OurHomeRecord => f.write_str("our home record puts this document's file here"),
+            Self::Refused(reason) => write!(f, "REFUSED: {reason}"),
+        }
+    }
+}
+
 pub struct FileSyncController {
     /// What we last wrote to (or confirmed on) disk, per file.
     /// Uses CanonicalPath to resolve macOS /var → /private/var symlinks,
@@ -1205,18 +1230,14 @@ impl FileSyncController {
     ///   Loro tree node. `Some(false)` is the reset hole — SQL kept the row but
     ///   the Loro tree was reset to empty — so refuse the skip and re-ingest.
     ///
-    /// A file the fast path can even reach was rendered by Holon (its hash
-    /// matched a hash we stamped), so it always carries `#+ID:`. If it somehow
-    /// does not, we cannot cheaply resolve the root block, so we refuse the
-    /// skip and let the full ingest resolve identity — never skip blind.
-    async fn content_present_in_all_stores(&self, disk_content: &str) -> Result<bool> {
-        let Some(bare) = self.format.doc_id_from_content(disk_content) else {
-            return Ok(false);
-        };
-        let root = EntityUri::block(&bare);
+    /// Takes the doc-root the CALLER parsed out of the file: a fast path that
+    /// cannot name the document can neither prove this nor record where the
+    /// document lives, so the id is resolved once, before the gate, and its
+    /// absence makes the whole fast path unreachable.
+    async fn content_present_in_all_stores(&self, root: &EntityUri) -> Result<bool> {
         let present = self
             .ordering
-            .in_tree(&root)
+            .in_tree(root)
             .await
             .map_err(|e| anyhow::anyhow!("[FileSyncController] in_tree({root}): {e:#}"))?;
         // None → no separate tree (SqlOnly): SQL is the only active store.
@@ -1422,11 +1443,11 @@ impl FileSyncController {
         // projected the file, fall back to name-chain lookup (get-only — a
         // deletion must never mint page blocks).
         let last = self.last_projection.get(canonical).cloned();
-        let document = match last
+        let rooted_here = last
             .as_deref()
-            .and_then(|l| self.format.doc_id_from_content(l))
-        {
-            Some(bare) => self.doc_manager.get_by_id(&EntityUri::block(&bare)).await?,
+            .and_then(|l| self.format.doc_id_from_content(l));
+        let document = match &rooted_here {
+            Some(bare) => self.doc_manager.get_by_id(&EntityUri::block(bare)).await?,
             None => {
                 let rel_path = path.strip_prefix(&self.root_dir).map_err(|e| {
                     anyhow::anyhow!(
@@ -1528,10 +1549,32 @@ impl FileSyncController {
             }
         }
 
+        // Ownership proof before ANY cascade, the block-side twin of the retire's
+        // `stale_home_ownership`. Identity taken from the vanished file's own
+        // last projection is self-proving; identity taken from the name chain is
+        // a GUESS and must be backed by a home record.
+        let authority = if rooted_here.is_some() {
+            CascadeAuthority::ItsOwnLastProjection
+        } else {
+            self.cascade_authority(&document_uri, canonical).await
+        };
+        if let CascadeAuthority::Refused(reason) = &authority {
+            warn!(
+                vanished_file = %path.display(),
+                document = %document_uri,
+                "[FileSyncController] REFUSED to cascade-delete the document a vanished file \
+                 resolved to: {reason}. Its blocks STAY in the store — a name match is not \
+                 evidence that this document ever lived at this path, and cascading on one \
+                 deletes a live document's content. The vanished path is dropped from tracking.",
+            );
+            self.forget_file_state(canonical);
+            return Ok(());
+        }
+
         let blocks = self.block_reader.get_blocks(&document_uri).await?;
         info!(
             "[FileSyncController] File deleted externally: {} — cascade-deleting document {} ({} \
-             blocks)",
+             blocks; authority: {authority})",
             path.display(),
             document_uri,
             blocks.len(),
@@ -2279,10 +2322,10 @@ impl FileSyncController {
         let disk_content = match self.fs.read_to_string(path).await {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // External deletion (user removed the file outside Holon):
-                // cascade-delete the document's blocks. No echo-suppression
-                // needed — no Holon code path removes org files, so a vanished
-                // file is always an external deletion.
+                // The file is gone. Usually the user removed it outside Holon and
+                // its document's blocks cascade — but a page rename's retire also
+                // removes a file, so `on_file_deleted` proves the vanished path
+                // owned the document before deleting anything.
                 return self.on_file_deleted(path, &canonical).await;
             }
             Err(e) => {
@@ -2336,7 +2379,19 @@ impl FileSyncController {
         // parse + render every file on every boot to confirm "skip" — a
         // guaranteed cost per boot we don't pay here.
         let disk_hash = self.projection_hash(&disk_content);
-        if let Some(stored) = self.last_projection_hash.get(&canonical) {
+        // Both of the fast path's obligations — proving the content is present
+        // in every active store, and recording where the document lives — need
+        // the document's identity, so it is parsed ONCE here and its absence
+        // makes the skip unreachable. A file the fast path can reach was
+        // rendered by Holon (its hash matched one we stamped), so it carries
+        // `#+ID:`; one that somehow does not takes the full ingest, which
+        // resolves identity properly.
+        let disk_root = self
+            .format
+            .doc_id_from_content(&disk_content)
+            .map(|bare| EntityUri::block(&bare));
+        if let (Some(stored), Some(root)) = (self.last_projection_hash.get(&canonical), &disk_root)
+        {
             // Invariant: fast-path skip requires the content present in EVERY
             // active store, not just SQL. The matching hash proves the SQL side;
             // `content_present_in_all_stores` additionally proves the Loro side
@@ -2351,7 +2406,7 @@ impl FileSyncController {
             // next degradation class through the same skip. Store-health repair
             // is a separate, unconditional concern owned by
             // `heal_title_less_doc_roots` (boot sweep) + the file-watch heal seam.
-            if stored == &disk_hash && self.content_present_in_all_stores(&disk_content).await? {
+            if stored == &disk_hash && self.content_present_in_all_stores(root).await? {
                 debug!(
                     "[FileSyncController] Skipping {} — disk hash matches stored \
                      file.content_hash and content present in all active stores (cold-boot fast \
@@ -2359,13 +2414,11 @@ impl FileSyncController {
                     path.display()
                 );
                 // The skip bypasses the ingest that would normally record where
-                // this document lives, so record it from the header alone —
-                // otherwise a page renamed later in a session that booted an
-                // unchanged vault has no previous home to retire and stays
-                // DOUBLE-HOMED.
-                if let Some(bare) = self.format.doc_id_from_content(&disk_content) {
-                    self.note_doc_home(&EntityUri::block(&bare), path);
-                }
+                // this document lives, so record it here — otherwise a page
+                // renamed later in a session that booted an unchanged vault has
+                // no previous home to retire and stays DOUBLE-HOMED, and a
+                // deletion of this path has no ownership proof to cascade on.
+                self.note_doc_home(root, path);
                 self.last_projection.insert(canonical.clone(), disk_content);
                 return Ok(());
             }
@@ -5331,6 +5384,46 @@ impl FileSyncController {
                     .to_string(),
             )),
         }
+    }
+
+    /// Whether the blocks of the document a VANISHED file resolved to are that
+    /// file's to cascade-delete.
+    ///
+    /// Reached only when the vanished path had no last projection to read an
+    /// `#+ID:` from, so the document was resolved by the path's NAME CHAIN —
+    /// which finds whatever page answers to that name today, not the page whose
+    /// bytes went away. A page rename that retires its old home produces
+    /// exactly that shape: the vacated name is free, and a FILELESS page
+    /// carrying it (rule-minted, freshly converted, or simply not
+    /// materialized yet) answers the lookup while never having lived there.
+    /// So the guess must be backed by a home record — `doc_home` in every
+    /// mode, plus the Loro-only alias registry — that puts the document's
+    /// file at exactly this path.
+    async fn cascade_authority(
+        &self,
+        document_uri: &EntityUri,
+        canonical: &CanonicalPath,
+    ) -> CascadeAuthority {
+        if self.doc_home.get(document_uri) == Some(canonical) {
+            return CascadeAuthority::OurHomeRecord;
+        }
+        let alias = match &self.alias_registrar {
+            Some(registrar) => registrar.resolve_alias_to_path(document_uri).await,
+            None => None,
+        };
+        if alias.as_deref().map(CanonicalPath::new).as_ref() == Some(canonical) {
+            return CascadeAuthority::OurHomeRecord;
+        }
+        let known_home = self
+            .doc_home
+            .get(document_uri)
+            .map(|home| home.as_path_buf().display().to_string())
+            .or_else(|| alias.map(|p| p.display().to_string()))
+            .unwrap_or_else(|| "NO file at all — the document is fileless".to_string());
+        CascadeAuthority::Refused(format!(
+            "the vanished path resolved to it by NAME only, and our home record puts its file at \
+             {known_home}"
+        ))
     }
 
     /// Every file that currently claims to home `page_id`, deduplicated and
