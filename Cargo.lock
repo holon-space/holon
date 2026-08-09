@@ -5314,6 +5314,7 @@ dependencies = [
  "holon-mcp",
  "holon-mcp-client",
  "holon-oracles",
+ "holon-org-format",
  "holon-orgmode",
  "holon-pbt-core",
  "holon-profiles",

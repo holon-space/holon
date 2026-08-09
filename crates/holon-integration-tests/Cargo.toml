@@ -21,6 +21,7 @@ test-infra = [
     "dep:holon-frontend",
     "dep:holon-app",
     "dep:holon-orgmode",
+    "dep:holon-org-format",
     "dep:holon-core",
     "dep:holon-profiles",
     "dep:holon-turso",
@@ -97,6 +98,7 @@ holon = { workspace = true, features = ["test-helpers", "testing"], optional = t
 holon-frontend = { workspace = true, optional = true }
 holon-app = { workspace = true, optional = true }
 holon-orgmode = { workspace = true, optional = true }
+holon-org-format = { workspace = true, optional = true }
 holon-core = { workspace = true, optional = true }
 holon-profiles = { workspace = true, optional = true }
 holon-turso = { workspace = true, optional = true }

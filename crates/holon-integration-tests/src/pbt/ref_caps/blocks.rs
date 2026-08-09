@@ -210,6 +210,41 @@ impl RefBlockTreeMut for ReferenceState {
         }
     }
 
+    fn block_task_state(&self, id: &EntityUri) -> Option<String> {
+        let uri = parse_id_must(id);
+        self.domain
+            .block_state
+            .blocks
+            .get(&uri)?
+            .properties
+            .get("task_state")
+            .and_then(|v| v.as_string().map(str::to_owned))
+    }
+
+    fn promote_block_task_keyword(
+        &mut self,
+        id: &EntityUri,
+        keyword: &str,
+        stripped: &str,
+    ) -> bool {
+        self.set_block_content(id, stripped);
+        let uri = parse_id_must(id);
+        let Some(block) = self.domain.block_state.blocks.get_mut(&uri) else {
+            return false;
+        };
+        block.properties.insert(
+            "task_state".to_string(),
+            holon_api::Value::String(keyword.to_string()),
+        );
+        block.properties.insert(
+            "task_state_category".to_string(),
+            holon_api::Value::String(
+                holon_api::TaskState::category_str_for_keyword(keyword).to_string(),
+            ),
+        );
+        true
+    }
+
     fn split_block(&mut self, id: &EntityUri, position: usize) -> EntityUri {
         let uri = parse_id_must(id);
         let new_uri = ReferenceState::split_block(self, &uri, position);

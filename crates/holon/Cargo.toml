@@ -172,6 +172,10 @@ name = "undo_inverse_wave1"
 required-features = ["test-helpers"]
 
 [[test]]
+name = "promote_task_keyword_compound"
+required-features = ["test-helpers"]
+
+[[test]]
 name = "undo_inverse_wave2"
 required-features = ["test-helpers"]
 
