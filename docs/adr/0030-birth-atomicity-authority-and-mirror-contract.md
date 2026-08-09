@@ -3,9 +3,9 @@
 Date: 2026-08-08. Status: accepted (Martin, after senior-review with codebase validation;
 amended same day per an independent second review that verified every cited mechanism
 against the code — amendments corrected claims of fact and scope, no Decision reversed).
-Companion to ADR 0029 (identity minting) and the D7 unified-transition design
-(`~/.claude/plans/holon-45-agent-op-revert-design-2026-08-07.md`, pending ratification —
-this ADR's contract is designed to fold into the D7 catalog when D7 lands).
+Companion to ADR 0029 (identity minting) and ADR 0031 (the Holon-native transition
+catalog, which records the ratified D7 decision — this ADR's contract is designed to
+fold into that catalog).
 
 ## Problem
 
@@ -28,9 +28,10 @@ contract (every required facet: id, content, marks, order, tags, …) is the
 transition's guard, validated in full BEFORE any write; the firing is one write
 transaction in the entity's authority store. Creates are total, or they are refused
 with zero side effects. This is one instance of the general rule that user-intent
-operations are PN transitions; the enforcement point is the D7 reification machinery
-(macros generate guard-then-fire, so an author cannot write a partial birth by
-accident). Until D7 lands, the dispatcher's create arms carry the contract manually.
+operations are PN transitions; the enforcement point is the reification machinery of
+ADR 0031 (macros generate guard-then-fire, so an author cannot write a partial birth by
+accident). Until that machinery's guard gate lands, the dispatcher's create arms carry
+the contract manually.
 
 Two qualifications. (i) "Zero side effects" is enforced by the firing transaction's
 rollback; any step that writes OUTSIDE that transaction is part of the firing and must
@@ -117,12 +118,13 @@ ones. A "mirror" is a mirror only facet-wise; blind full-file regeneration from 
 store is a data-loss bug, not a repair. Today the split exists only as
 parser/renderer behavior (`models.rs:53-57`, `:853-913` — no registry answers "who
 owns this facet"), so repair-by-re-derivation for file mirrors is BLOCKED on reifying
-this declaration (target: the D7 catalog). Until then, no automated file repair
-beyond the existing proof-gated paths may land.
+this declaration (target: the ADR 0031 catalog — whether it folds in there is ADR 0031's
+deferred-open ruling P4). Until then, no automated file repair beyond the existing
+proof-gated paths may land.
 
 ## Enforcement
 
-- **Guard-then-fire:** D7 macros once ratified; until then, create arms validate
+- **Guard-then-fire:** the ADR 0031 macros; until their guard gate lands, create arms validate
   the full birth contract before the first write (the marks F3 fix is the
   pattern). Keystone invariant target: no observer ever sees an entity that fails
   its type's birth contract.
@@ -233,16 +235,17 @@ beyond the existing proof-gated paths may land.
 
 ## Open questions
 
-- D7 ratification decides where the per-type birth contracts live concretely (the
-  transition catalog) and brings the macro enforcement; this ADR stands without it
-  but is enforced manually until then.
+- RESOLVED by ADR 0031: the per-type birth contracts live in the Holon-native
+  transition catalog, which also brings the macro enforcement. This ADR is enforced
+  manually until that catalog's guard gate lands.
 - Ingest currently records file ownership AFTER accepting a file
   (`file_sync_controller.rs:2367`) and gates only on echo-suppression/hash — with
   D3.1's atomic writes this is acceptable (nothing torn can come from our writer;
   what remains on disk is user intent by definition), but the ownership-before-
   ingest question stays open alongside the reunification residual (#34).
 - Facet-level authority declarations (D5) exist today as code behavior, not as a
-  readable registry; whether to reify them (likely into the D7 catalog) is open.
+  readable registry; whether to reify them into the ADR 0031 catalog is open — carried
+  there as ruling P4, deferred.
 - Validations owed (from the second review): V1 whether Loro mode performs a full
   boot-time Loro→SQL re-projection (would make SQL divergence self-healing — cite it,
   or the D3 ordering hole widens); V2 measure the actual per-op ordering of

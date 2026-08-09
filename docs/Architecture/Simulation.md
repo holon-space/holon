@@ -1,11 +1,10 @@
 # Simulation & Hypothetical State
 
-Status: design note. The underlying rulings (D5 scenario store, D7 catalog
-substrate) are PENDING RATIFICATION in the #45 decision doc
-(`~/.claude/plans/holon-45-agent-op-revert-design-2026-08-07.md`, D5 addendum).
-This file holds the durable reasoning and the use-case gallery; when D5/D7 are
-ratified, the schema specifics move to [Schema.md](Schema.md) and this note
-stays as the conceptual map.
+Status: design note. The catalog-substrate ruling is RATIFIED and recorded as
+[ADR 0031](../adr/0031-native-transition-catalog-and-macro-reification.md); the D5
+scenario store is still PENDING RATIFICATION. This file holds the durable reasoning and
+the use-case gallery; as each lands, the schema specifics move to
+[Schema.md](Schema.md) and this note stays as the conceptual map.
 
 ## The three regimes
 
@@ -79,7 +78,11 @@ Classify a new idea by regime before designing anything for it.
 This gallery is deliberately open — add new cases *with their regime* so the
 substrate decision is made consciously.
 
-## Relation to the PN reification (D7)
+## Relation to the PN reification (ADR 0031)
+
+Ratified and recorded in
+[ADR 0031](../adr/0031-native-transition-catalog-and-macro-reification.md): the catalog
+is Holon-native and macro-reified, and this engine is fed FROM it rather than being it.
 
 User-intent operations as PN transitions pays off as vocabulary plus a shared
 catalog, under three standing guards: no PN runtime in the live dispatch path
