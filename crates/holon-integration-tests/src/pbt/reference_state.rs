@@ -1456,9 +1456,16 @@ impl ReferenceState {
     /// Split a block at the given byte position, mirroring
     /// `traits.rs::split_block`.
     ///
-    /// Original block keeps `content[..position].trim_end()`.
-    /// New block gets `content[position..].trim_start()` with a synthetic ID.
-    /// Returns the synthetic ID of the newly created block.
+    /// The id follows the TEXT. For `position > 0` the original keeps
+    /// `content[..position].trim_end()` and a fresh synthetic id takes the tail
+    /// in a new block below it. For `position == 0` the original keeps ALL the
+    /// text — so backlinks, marks and `:ID:`-addressed references stay on the
+    /// block the text is still in — and the fresh synthetic id goes to the
+    /// EMPTY block inserted ABOVE.
+    ///
+    /// Returns the id of the LOWER block, which is always the split's focus
+    /// target: the minted id for `position > 0`, the original at `position ==
+    /// 0`.
     pub fn split_block(&mut self, block_id: &EntityUri, position: usize) -> EntityUri {
         use holon_orgmode::models::OrgBlockExt;
 
@@ -1489,20 +1496,30 @@ impl ReferenceState {
                 },
         } = holon_api::split_content_marks(&content, &origin_marks, position);
 
-        // Update original block: truncated content + left-partition marks.
+        // Identity follows the text: a position-0 split leaves the whole text on
+        // `block_id` and gives the minted id the empty side, so the two sides
+        // swap roles relative to a mid-text split.
+        let at_start = position == 0;
+        let (kept_content, kept_marks, minted_content, minted_marks) = if at_start {
+            (content_after, right_marks, content_before, left_marks)
+        } else {
+            (content_before, left_marks, content_after, right_marks)
+        };
+
         {
             let orig = self.domain.block_state.blocks.get_mut(block_id).unwrap();
-            orig.content = content_before;
-            orig.marks = (!left_marks.is_empty()).then_some(left_marks);
+            orig.content = kept_content;
+            orig.marks = (!kept_marks.is_empty()).then_some(kept_marks);
         }
 
         // Create new block with synthetic ID
         let new_id = EntityUri::block(&format!(":split-{}", self.domain.block_state.next_id));
-        let mut new_block = Block::new_text(new_id.clone(), parent_id.clone(), content_after);
-        new_block.marks = (!right_marks.is_empty()).then_some(right_marks);
-        // Place after original: shift every sibling already at or after this
-        // position one slot down before inserting, so the new block lands
-        // uniquely between the original and the next existing sibling.
+        let mut new_block = Block::new_text(new_id.clone(), parent_id.clone(), minted_content);
+        new_block.marks = (!minted_marks.is_empty()).then_some(minted_marks);
+        // Slot the new block directly ABOVE the original at a position-0 split
+        // (it is the empty one) and directly BELOW it otherwise: shift every
+        // sibling already at or after that slot one position down before
+        // inserting, so the new block lands uniquely between its neighbours.
         //
         // Without the shift the new block ends up sharing `original_seq + 1`
         // with whatever sibling occupied that slot; `recanon_and_rebuild` then
@@ -1512,14 +1529,18 @@ impl ReferenceState {
         // lands the new block strictly between the two — mirror that ordering
         // here so chord-op chains (e.g. SplitBlock → MoveUp → Indent) compute
         // the same `previous_sibling`.
-        let shift_threshold = original_seq + 1;
+        let slot = if at_start {
+            original_seq
+        } else {
+            original_seq + 1
+        };
         for sibling in self.domain.block_state.blocks.values_mut() {
-            if sibling.parent_id == parent_id && sibling.sequence() >= shift_threshold {
+            if sibling.parent_id == parent_id && sibling.sequence() >= slot {
                 let s = sibling.sequence();
                 sibling.set_sequence(s + 1);
             }
         }
-        new_block.set_sequence(shift_threshold);
+        new_block.set_sequence(slot);
 
         // Track in block_documents with same doc_uri as original
         let doc_uri = self
@@ -1539,7 +1560,7 @@ impl ReferenceState {
             .blocks
             .insert(new_id.clone(), new_block);
         self.recanon_and_rebuild();
-        new_id
+        if at_start { block_id.clone() } else { new_id }
     }
 
     /// Re-mint `old_id` with a FRESH synthetic `block::split-N` id: move the

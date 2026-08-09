@@ -228,6 +228,36 @@ impl HeadlessEditorMirror {
         Ok(())
     }
 
+    /// Re-seat an ALREADY-tracked caret from a freshly armed caret seed —
+    /// the headless twin of GPUI's focus-subscription
+    /// `grab_focus_and_seed_caret` on a re-notified focus arrival.
+    ///
+    /// A structural op is authoritative about the caret, including when its
+    /// focus response names the block whose editor is already open: a
+    /// position-0 split keeps the text (and the caret) on the ORIGINAL id, so
+    /// nothing "mounts" to consume the seed and the tracked caret would sit
+    /// wherever the user last left it — end-of-text, so the next keystroke
+    /// appends instead of prepending. Only re-seats a caret this mirror
+    /// actually tracks; an unopened editor's seed stays armed for its mount.
+    /// The seed is single-use, so it is consumed here exactly as the mount
+    /// path consumes it.
+    pub fn adopt_armed_caret_seed(
+        &self,
+        engine: &Arc<ReactiveEngine>,
+        block_uri: &holon_api::EntityUri,
+    ) {
+        let Some(offset) = engine.peek_caret_seed(block_uri) else {
+            return;
+        };
+        let block_id = block_uri.to_string();
+        let occ = None;
+        if self.tracked_cursor_at(&block_id, occ).is_none() {
+            return;
+        }
+        self.set_cursor(&block_id, occ, offset);
+        engine.consume_caret_seed(block_uri);
+    }
+
     /// Mirror a user click on a block: seed the tracked caret for
     /// `block_uri` to end-of-text. Chord dispatch clicks the entity before
     /// pressing the chord, which re-opens its editor at the click position

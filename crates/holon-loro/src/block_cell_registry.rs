@@ -1269,6 +1269,62 @@ mod tests {
         Ok(())
     }
 
+    /// The Loro arm of a position-0 split of a PARENTLESS block: `split_block`
+    /// anchors the minted empty block on the origin's predecessor, and a
+    /// parentless origin has none, so `create_block_via_cells` creates it and
+    /// then asserts the first slot with `write_position(new, no_parent, None)`.
+    /// Tree roots must accept that — a refusal there is a fail-loud abort of an
+    /// ordinary Enter-at-start, and the minted block landing anywhere but first
+    /// puts the empty block BELOW the text it was inserted above.
+    #[test]
+    fn first_slot_position_among_roots_is_expressible_for_a_parentless_split() -> Result<()> {
+        let doc = make_loro_doc_with_block("root-a");
+        let registry = BlockCellRegistry::with_loro_doc(doc.clone());
+        let rt = tokio::runtime::Runtime::new()?;
+        let no_parent = EntityUri::no_parent();
+        let minted = EntityUri::block("minted-empty");
+
+        let wrote = rt.block_on(registry.create_entity(
+            &no_parent,
+            None,
+            &minted,
+            holon_api::BlockContent::text(""),
+            &std::collections::HashMap::new(),
+            &Tags::default(),
+            &[],
+            &[],
+        ))?;
+        assert!(wrote, "a root create must take the Loro route");
+
+        let placed = rt.block_on(registry.write_position(&minted, no_parent.as_str(), None))?;
+        assert!(
+            placed,
+            "the first slot among roots must be expressible — `create_block_via_cells` treats a \
+             refusal as a hard error"
+        );
+
+        use crate::loro_backend::LoroMapExt;
+        let tree = doc.get_tree(TREE_NAME);
+        let roots: Vec<String> = tree
+            .roots()
+            .into_iter()
+            .map(|node| {
+                tree.get_meta(node)
+                    .expect("root node has meta")
+                    .get_typed(STABLE_ID, |v| v.as_string().map(|s| s.to_string()))
+                    .expect("root node carries a stable id")
+            })
+            .collect();
+        assert_eq!(roots.len(), 2, "one root per block: {roots:?}");
+        assert!(
+            roots[0].ends_with("minted-empty"),
+            "the minted block must sit FIRST among the roots, above the text it split off: \
+             {roots:?}"
+        );
+        assert!(roots[1].ends_with("root-a"), "{roots:?}");
+        Ok(())
+    }
+
     /// Splitting a block that has no Loro tree node (unseeded vault, synthetic
     /// SQL-only row) must fall back to the SQL create path WITHOUT mutating
     /// the tree. The pre-guard regression: `create_entity` used to mint a

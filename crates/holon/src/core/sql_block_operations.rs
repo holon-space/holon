@@ -1900,6 +1900,44 @@ mod tests {
             .collect()
     }
 
+    /// The SqlOnly arm of a position-0 split of a PARENTLESS block. Such a
+    /// block's predecessor is `None` (`get_prev_sibling` returns `None` for a
+    /// null `parent_id`), so `split_block` anchors the minted empty block with
+    /// `new_child_anchor(sentinel:no_parent, None)` — the first slot among the
+    /// ROOTS. No keystone draw reaches this (nothing splits a parentless
+    /// block), so the ordering is pinned directly: the minted key must sort
+    /// strictly BEFORE the existing root, or the "empty block above the text"
+    /// contract inverts at the vault's top level.
+    #[tokio::test]
+    async fn root_slot_anchor_sorts_before_the_first_root() {
+        use holon_core::block_ordering::OrderKeyMinting;
+
+        let (_backend, ops, handle) = setup_sql_block_ops().await;
+        insert_raw(&handle, "block:first-root", "sentinel:no_parent", "80").await;
+        insert_raw(&handle, "block:second-root", "sentinel:no_parent", "81").await;
+        let before = ordered_siblings(&handle, "sentinel:no_parent").await;
+
+        let position = ops
+            .new_child_anchor(&EntityUri::no_parent(), None)
+            .await
+            .expect("anchor the minted empty block first among the roots");
+        let projected = apply_rekeys(before.clone(), &position);
+        // The anchor DECIDES; the create's transaction writes (ADR 0030 D1).
+        assert_eq!(
+            ordered_siblings(&handle, "sentinel:no_parent").await,
+            before,
+            "anchoring must not write: the re-key belongs to the firing transaction"
+        );
+
+        let (new_key, _rekeys) = position.into_parts();
+        for (id, key) in &projected {
+            assert!(
+                new_key < *key,
+                "the minted key {new_key:?} must sort before every existing root ({id} at {key:?})"
+            );
+        }
+    }
+
     /// The SqlOnly `split_block` failure: `new_child_anchor` anchored on the
     /// raw column value of the sibling that follows the split origin. When
     /// that sibling still carries the SQL default `"A0"` — one unkeyed row,

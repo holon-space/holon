@@ -4271,9 +4271,16 @@ fn apply_structural_focus(
 ) {
     if let Some((block, offset)) = structural_focus_target(op_name, response) {
         caret_seed.set(Some((block.clone(), offset)));
-        if focused_block.get_cloned().as_ref() != Some(&block) {
-            focused_block.set(Some(block));
-        }
+        // Re-notify even when the target is ALREADY focused. A position-0
+        // split's focus response names the block the caret is in (the id
+        // follows the text), and the seed is applied on focus ARRIVAL — the
+        // GPUI editor re-seats from `grab_focus_and_seed_caret` in its focus
+        // subscription. Suppressing the duplicate notification swallowed the
+        // caret move, leaving the caret at end-of-text after Enter-at-start.
+        // Only `split_block` / `join_block` reach here (`structural_focus_target`
+        // returns `None` for every other op), so the extra notification is
+        // confined to the ops whose whole point is to move the caret.
+        focused_block.set(Some(block));
     }
 }
 
