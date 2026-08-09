@@ -857,6 +857,12 @@ fn read_content_via_cells(
 /// events `EventOrigin::Other("sql")`, which the post-3.3-flip gate
 /// drops as an unmigrated chord-op write.
 ///
+/// `after_id` is the new block's predecessor, `None` meaning FIRST child —
+/// the same reading `write_position` and `OrderKeyMinting::new_child_anchor`
+/// use. `create_entity`'s own `None` means "leave it where the create landed"
+/// (its tree-level append, which the org reconciler relies on), so the first
+/// slot is asserted here with an explicit `write_position` after the create.
+///
 /// Returns `Ok(false)` when no cell route is available (synthetic
 /// stores, SqlOnly mode); caller invokes `BlockOperations::create`. //
 /// ALLOW(fallback): doc describes default path
@@ -870,18 +876,33 @@ async fn create_block_via_cells(
     let Some(reg) = registry else {
         return Ok(false);
     };
-    reg.create_entity(
-        parent_id,
-        after_id,
-        new_id,
-        content,
-        &std::collections::HashMap::<String, holon_api::Value>::new(),
-        &Tags::default(),
-        &[],
-        &[],
-    )
-    .await
-    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })
+    let wrote = reg
+        .create_entity(
+            parent_id,
+            after_id,
+            new_id,
+            content,
+            &std::collections::HashMap::<String, holon_api::Value>::new(),
+            &Tags::default(),
+            &[],
+            &[],
+        )
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+    if wrote && after_id.is_none() {
+        let placed = reg
+            .write_position(new_id, parent_id.as_str(), None)
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+        if !placed {
+            return Err(anyhow::anyhow!(
+                "create_block_via_cells({new_id}): the cell route created the block but refused \
+                 to place it first under {parent_id} — sibling order would silently diverge"
+            )
+            .into());
+        }
+    }
+    Ok(wrote)
 }
 
 /// Authoritative block delete through the cell registry.
@@ -1211,6 +1232,11 @@ where
     /// the original block to content before the cursor. The new block
     /// appears directly below the original block using fractional indexing.
     ///
+    /// Identity follows the text: at `position == 0` the original block keeps
+    /// the WHOLE text (and its marks, backlinks and `:ID:` references) and the
+    /// newly minted block is the EMPTY one, inserted directly ABOVE. Focus
+    /// always lands on the text-bearing lower block at caret 0.
+    ///
     /// # Parameters
     /// * `id` - Block ID to split
     /// * `position` - Character position to split at (as i64, will be converted
@@ -1295,6 +1321,19 @@ where
                 },
         } = holon_api::split_content_marks(content, &origin_marks, position);
 
+        // Identity follows the TEXT. At a position-0 split `id` keeps the whole
+        // text — with its marks, the `block_links` backlink rows derived from
+        // them, and every `:ID:`-addressed reference — and the minted id takes
+        // the EMPTY block inserted ABOVE. At any other position the prefix keeps
+        // `id` and the minted id takes the tail below it. Either way the block
+        // the reader still sees the referenced text in keeps the referenced id.
+        let at_start = position == 0;
+        let (kept_content, kept_marks, minted_content, minted_marks) = if at_start {
+            (content_after, right_marks, content_before, left_marks)
+        } else {
+            (content_before, left_marks, content_after, right_marks)
+        };
+
         // Generate new block ID. Mirror the rest of the system's URI
         // convention: SQL `block.id` stores the prefixed form (`block:UUID`)
         // because `EntityUri::block(uuid)` serializes as `Value::String("block:UUID")`
@@ -1332,33 +1371,41 @@ where
             .cloned()
             .unwrap_or_else(EntityUri::no_parent);
         let new_block_uri = EntityUri::block(&new_block_uuid);
-        let after_uri = id.clone();
+        // Slot for the minted block: directly ABOVE the origin at a position-0
+        // split (anchored on the origin's predecessor, `None` = first child),
+        // directly below it otherwise. Both create seams read `None` as
+        // first-child.
+        let after_uri: Option<EntityUri> = if at_start {
+            self.get_prev_sibling(id).await?.map(|b| b.id().clone())
+        } else {
+            Some(id.clone())
+        };
         let wrote_create_via_cell = create_block_via_cells(
             self.cells(),
             &parent_for_split,
-            Some(&after_uri),
+            after_uri.as_ref(),
             &new_block_uri,
-            // The new half of a split carries the marks that fell to the RIGHT
-            // of the split point (rebased by `split_content_marks`). RichText
-            // when there are marks so the cell registry applies them via
-            // Peritext; plain Text otherwise (a source-block split is not a
+            // The minted block carries whichever mark partition went with its
+            // half of the text (empty at a position-0 split). RichText when
+            // there are marks so the cell registry applies them via Peritext;
+            // plain Text otherwise (a source-block split is not a
             // user-reachable op).
-            if right_marks.is_empty() {
-                holon_api::BlockContent::text(content_after.clone())
+            if minted_marks.is_empty() {
+                holon_api::BlockContent::text(minted_content.clone())
             } else {
                 holon_api::BlockContent::RichText {
-                    text: content_after.clone(),
-                    marks: right_marks.clone(),
+                    text: minted_content.clone(),
+                    marks: minted_marks.clone(),
                 }
             },
         )
         .await?;
 
         tracing::trace!(
-            "[split_block] new_block_id={} parent={} after={} wrote_create_via_cell={}",
+            "[split_block] new_block_id={} parent={} after={:?} wrote_create_via_cell={}",
             new_block_id,
             parent_for_split.as_str(),
-            after_uri.as_str(),
+            after_uri.as_ref().map(EntityUri::as_str),
             wrote_create_via_cell,
         );
 
@@ -1376,14 +1423,14 @@ where
             // (Replication.md §5).
             let mut new_block_fields = crate::storage::types::StorageEntity::new();
             new_block_fields.insert("id".into(), Value::String(new_block_id.clone()));
-            new_block_fields.insert("content".into(), Value::String(content_after));
-            if !right_marks.is_empty() {
-                // Marks that fell to the RIGHT of the split. The SqlOnly create
-                // path writes the `marks` column AND derives the `block_links`
+            new_block_fields.insert("content".into(), Value::String(minted_content.clone()));
+            if !minted_marks.is_empty() {
+                // The minted block's mark partition. The SqlOnly create path
+                // writes the `marks` column AND derives the `block_links`
                 // junction from this param (links increment 2).
                 new_block_fields.insert(
                     "marks".into(),
-                    Value::String(holon_api::marks_to_json(&right_marks)),
+                    Value::String(holon_api::marks_to_json(&minted_marks)),
                 );
             }
             new_block_fields.insert("parent_id".into(), {
@@ -1400,8 +1447,15 @@ where
             // prepare_create` strips it from SQL fields and from the event
             // payload, and lifts the value onto the typed
             // `Event::position_after_block_id` field that `apply_create`
-            // reads.
-            new_block_fields.insert("after_block_id".into(), Value::String(id_str.to_string()));
+            // reads. Absent when the minted block is the parent's new FIRST
+            // child (a position-0 split of the first sibling) — there is no
+            // predecessor to name.
+            if let Some(after) = after_uri.as_ref() {
+                new_block_fields.insert(
+                    "after_block_id".into(),
+                    Value::String(after.as_str().to_string()),
+                );
+            }
             new_block_fields.insert("created_at".into(), Value::Integer(now));
             new_block_fields.insert("updated_at".into(), Value::Integer(now));
             new_block_fields.insert("collapsed".into(), Value::Boolean(false));
@@ -1427,7 +1481,7 @@ where
                 )
             })?;
             let position = minter
-                .new_child_anchor(&parent_for_anchor, Some(id)) // ALLOW(order_minting): routed through the sibling-set owner's OrderKeyMinting seam
+                .new_child_anchor(&parent_for_anchor, after_uri.as_ref()) // ALLOW(order_minting): routed through the sibling-set owner's OrderKeyMinting seam
                 .await?;
             let (_new_block_id, create_result) = self.create_at(new_block_fields, position).await?;
             changes.extend(create_result.changes);
@@ -1443,11 +1497,11 @@ where
                 new_block_id.clone(),
                 "content",
                 Value::Null,
-                Value::String(content_after.clone()),
+                Value::String(minted_content.clone()),
             ));
         }
 
-        // Update current block with truncated content. `set_field("content")`
+        // Write the origin's half of the split. `set_field("content")`
         // is the single content-write seam: it routes through the cell registry
         // (Loro in Full mode) and falls back to a direct SQL write when no cell
         // route exists (SqlOnly, synthetic test store, block not yet in the Loro
@@ -1456,45 +1510,47 @@ where
         // resets that block's Peritext marks, so marks are re-established by the
         // dedicated `set_field("marks")` write below.
         let content_result = self
-            .set_field(id_str, "content", Value::String(content_before))
+            .set_field(id_str, "content", Value::String(kept_content))
             .await?;
         changes.extend(content_result.changes);
 
-        // Re-establish the retained block's marks as the LEFT partition. The
-        // pre-fix code wrote only `content`, leaving the `marks` column STALE:
-        // spans computed against the pre-split content, now out of bounds — the
-        // `scalar_range_to_bytes` crash condition and the dogfood 2026-07-20
-        // link-loss. We fire this write exactly when the origin HAD marks (so a
-        // plain-text split is byte-unchanged and the synthetic in-memory test
-        // store — which models no marks — is untouched). `set_field("marks")`
-        // routes to the SQL authority (write_field returns `false` for `marks`),
-        // which writes the column AND re-derives the `block_links` junction. A
-        // now-empty left partition is written as `Null` to CLEAR the column (the
-        // case where every mark moved to the new right block). In Loro/Full mode
-        // this lands in the SQL projection but not Peritext — a documented
-        // follow-up; the SqlOnly desktop path (the reported repro) is correct.
+        // Re-establish the origin's marks as ITS partition. Writing only
+        // `content` leaves the `marks` column STALE: spans computed against the
+        // pre-split content, now out of bounds — the `scalar_range_to_bytes`
+        // crash condition and the dogfood 2026-07-20 link-loss. We fire this
+        // write exactly when the origin HAD marks (so a plain-text split is
+        // byte-unchanged and the synthetic in-memory test store — which models
+        // no marks — is untouched). `set_field("marks")` routes to the SQL
+        // authority (write_field returns `false` for `marks`), which writes the
+        // column AND re-derives the `block_links` junction. An empty partition
+        // is written as `Null` to CLEAR the column (every mark went to the
+        // minted block). In Loro/Full mode this lands in the SQL projection but
+        // not Peritext — a documented follow-up; the SqlOnly desktop path (the
+        // reported repro) is correct.
         if !origin_marks.is_empty() {
-            let left_marks_value = if left_marks.is_empty() {
+            let kept_marks_value = if kept_marks.is_empty() {
                 Value::Null
             } else {
-                Value::String(holon_api::marks_to_json(&left_marks))
+                Value::String(holon_api::marks_to_json(&kept_marks))
             };
-            let marks_result = self.set_field(id_str, "marks", left_marks_value).await?;
+            let marks_result = self.set_field(id_str, "marks", kept_marks_value).await?;
             changes.extend(marks_result.changes);
         }
 
-        // Focus moves to the new block at caret offset 0. This is returned in
-        // the op response (not dispatched as a backend `editor_focus`
-        // follow-up): the frontend reads it off the result and moves the
-        // in-memory focus authority in-process, so focus never round-trips
-        // through the Turso `editor_cursor` cache (ADR 0010).
+        // Focus moves to the TEXT-bearing lower block at caret offset 0 — the
+        // minted block for a mid-text split, the origin itself at position 0.
+        // This is returned in the op response (not dispatched as a backend
+        // `editor_focus` follow-up): the frontend reads it off the result and
+        // moves the in-memory focus authority in-process, so focus never
+        // round-trips through the Turso `editor_cursor` cache (ADR 0010).
         //
-        // Inverse: collapse the split. `restore_join` deletes the new block and
-        // resets the original block's content to its EXACT pre-split value
+        // Inverse: collapse the split. `restore_join` deletes the minted block
+        // and resets the origin's content to its EXACT pre-split value
         // (`content_owned`, captured before the prefix/suffix whitespace trim) —
         // so the untrimmed original is restored byte-for-byte, not the trimmed
-        // `content_before`. Its own returned inverse re-splits deterministically
-        // (same new-block id) so redo re-applies.
+        // half. Its own returned inverse re-splits deterministically (same
+        // minted id, same slot — `restore_split` re-anchors on the minted
+        // block's recorded predecessor) so redo re-applies.
         use crate::__operations_block_operations;
         Ok(OperationResult::new(
             changes,
@@ -1508,7 +1564,10 @@ where
                 &new_block_uri,
             ),
         )
-        .with_response(focus_response(&new_block_id, 0)))
+        .with_response(focus_response(
+            if at_start { id_str } else { &new_block_id },
+            0,
+        )))
     }
 
     /// Join a block into its merge target.
@@ -1803,9 +1862,18 @@ where
             let mut fields = crate::storage::types::StorageEntity::new();
             fields.insert("id".into(), Value::String(block_id.as_str().to_string()));
             fields.insert("content".into(), Value::String(block_content.clone()));
+            // A parentless block is stored with a NULL `parent_id` — the
+            // `no_parent` sentinel is the in-memory stand-in `restore_join`
+            // recorded, not a storable value. `split_block`'s own create writes
+            // `Null` here, so writing the sentinel string instead would make a
+            // redo re-create the block under a parent it never had.
             fields.insert(
                 "parent_id".into(),
-                Value::String(block_parent.as_str().to_string()),
+                if block_parent.is_no_parent() {
+                    Value::Null
+                } else {
+                    Value::String(block_parent.as_str().to_string())
+                },
             );
             let (_new_id, create_result) = self.create_at(fields, position).await?;
             changes.extend(create_result.changes);

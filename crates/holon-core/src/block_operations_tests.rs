@@ -707,6 +707,9 @@ mod tests {
     }
 
     #[tokio::test]
+    /// At a position-0 split the id follows the text: `A` keeps the whole
+    /// string and the minted block is the EMPTY one, inserted ABOVE it — so
+    /// anything addressing `A` still resolves to the text.
     async fn split_block_at_start() {
         let store = MemStore::new();
         insert_block(&store, "P", None, None);
@@ -721,14 +724,69 @@ mod tests {
         store.split_block(&EntityUri::block("A"), 0).await.unwrap();
 
         let a = store.get("block:A").unwrap();
-        assert_eq!(a.content, "");
+        assert_eq!(a.content, "Hello");
 
         let children = store.sorted_children("P");
-        let new_block = children
-            .iter()
-            .find(|b| b.id.as_str() != "block:A")
-            .unwrap();
-        assert_eq!(new_block.content, "Hello");
+        assert_eq!(children.len(), 2);
+        assert_eq!(
+            children[1].id,
+            EntityUri::block("A"),
+            "the minted empty block sits ABOVE the text-bearing original"
+        );
+        assert_eq!(children[0].content, "");
+    }
+
+    #[tokio::test]
+    /// A position-0 split of a PARENTLESS block. Its predecessor is `None`
+    /// (`get_prev_sibling` short-circuits on a null `parent_id`), so both
+    /// create arms take the first-slot branch — a branch no keystone draw
+    /// reaches. Identity routing must be the same as anywhere else: the
+    /// text keeps the original id, the minted block is the empty one, and
+    /// the inverse round- trips. Root ORDER is pinned where it is real —
+    /// `SqlBlockOperations:: root_slot_anchor_sorts_before_the_first_root`
+    /// and the Loro registry's
+    /// `first_slot_position_among_roots_is_expressible_for_a_parentless_split`
+    /// — because this in-memory store models parentless as a null `parent_id`
+    /// rather than the `sentinel:no_parent` rows the real minter scans.
+    async fn split_block_at_start_of_a_parentless_block_routes_identity_and_undoes() {
+        let store = MemStore::new();
+        store.insert(TestBlock {
+            id: EntityUri::block("R"),
+            parent_id: None,
+            sort_key: gen_key_between(None, None).unwrap(),
+            content: "Rooted".to_string(),
+            tags: holon_api::Tags::default(),
+        });
+        let before = snapshot(&store);
+
+        let split = store.split_block(&EntityUri::block("R"), 0).await.unwrap();
+        assert_eq!(
+            store.get("R").unwrap().content,
+            "Rooted",
+            "the text keeps the original id even at the top level"
+        );
+        let minted = store
+            .get_all()
+            .await
+            .expect("read the store")
+            .into_iter()
+            .find(|b| b.id.as_str() != "block:R")
+            .expect("the split minted a block");
+        assert_eq!(minted.content, "", "the minted block is the empty one");
+        assert_eq!(
+            minted.parent_id, None,
+            "the minted block stays parentless, like its origin"
+        );
+
+        let after_split = snapshot(&store);
+        let undo_result = apply_inverse(&store, &split.undo).await;
+        assert_eq!(snapshot(&store), before);
+        apply_inverse(&store, &undo_result.undo).await;
+        assert_eq!(
+            snapshot(&store),
+            after_split,
+            "redo must re-apply the parentless position-0 split byte-identically"
+        );
     }
 
     #[tokio::test]
@@ -1207,24 +1265,52 @@ mod tests {
 
     #[tokio::test]
     async fn split_block_at_start_undo_restores_exact_pre_op_state() {
-        // Boundary: split at 0 truncates A to "" and puts all content in the new
-        // block. Undo must delete the new block and restore A's content.
+        // Boundary: split at 0 leaves all the content on A and inserts an empty
+        // block above it. Undo must delete that block and leave A untouched —
+        // including its sort_key, which the insert-above re-anchoring must not
+        // have disturbed.
+        //
+        // The LEADING WHITESPACE is load-bearing. A position-0 split still
+        // `trim_start`s the text, and that trim now lands on the id the caret
+        // sits in, so the undo's content-restore leg has real work to do:
+        // A must come back as "  Hello", not the trimmed "Hello". Without it
+        // the origin already holds its final bytes and an inverse that never
+        // wrote content would pass unnoticed.
         let store = MemStore::new();
         insert_block(&store, "P", None, None);
         store.insert(TestBlock {
             id: EntityUri::block("A"),
             parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(None, None).unwrap(),
-            content: "Hello".to_string(),
+            content: "  Hello".to_string(),
             tags: holon_api::Tags::default(),
         });
         let before = snapshot(&store);
 
         let split = store.split_block(&EntityUri::block("A"), 0).await.unwrap();
-        assert_eq!(store.get("A").unwrap().content, "");
+        assert_eq!(
+            store.get("A").unwrap().content,
+            "Hello",
+            "the text stays on A, trimmed"
+        );
 
-        apply_inverse(&store, &split.undo).await;
+        let after_split = snapshot(&store);
+        let undo_result = apply_inverse(&store, &split.undo).await;
+        assert_eq!(
+            store.get("A").unwrap().content,
+            "  Hello",
+            "undo must restore the UNTRIMMED pre-split bytes onto A"
+        );
         assert_eq!(snapshot(&store), before);
+
+        // Redo re-splits deterministically: same minted id, same empty block in
+        // the same slot above A.
+        apply_inverse(&store, &undo_result.undo).await;
+        assert_eq!(
+            snapshot(&store),
+            after_split,
+            "redo must re-apply the position-0 split byte-identically"
+        );
     }
 
     #[tokio::test]

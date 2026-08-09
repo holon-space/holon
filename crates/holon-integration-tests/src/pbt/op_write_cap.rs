@@ -530,12 +530,12 @@ mod split_focus_handoff_tests {
     ///
     /// The storage rung must NOT move focus (it dispatches below the frontend
     /// that owns it); the frontend rung MUST — `split_block` hands the caret to
-    /// the block it created, at offset 0, and that handoff is the whole reason
+    /// the TEXT-bearing block at offset 0, and that handoff is the whole reason
     /// a following keystroke lands where the user is looking. The position-0
-    /// content routing is asserted alongside it: the split block empties, the
-    /// new one takes the text.
+    /// identity routing is asserted alongside it: the text (and therefore the
+    /// caret) stays on the ORIGINAL id and the minted block is the empty one.
     #[tokio::test(flavor = "multi_thread")]
-    async fn split_hands_focus_to_the_new_block_only_on_the_frontend_rung() {
+    async fn split_hands_focus_to_the_text_bearing_block_only_on_the_frontend_rung() {
         let comp = HeadlessFrontendComponent::new(
             &[("doc0.org", "#+ID: ref-doc-0\n* Alpha\n* Beta\n")],
             SETTLE,
@@ -574,23 +574,24 @@ mod split_focus_handoff_tests {
 
         assert_eq!(
             comp.reactive().focused_block(),
-            Some(new_block.clone()),
-            "the frontend rung must apply split_block's focus response"
+            Some(beta.clone()),
+            "the frontend rung must apply split_block's focus response, which at position 0 names \
+             the ORIGINAL block — the one that still holds the text"
         );
         assert_eq!(
-            comp.reactive().peek_caret_seed(&new_block),
+            comp.reactive().peek_caret_seed(&beta),
             Some(0),
-            "the caret rides to the new block at offset 0"
+            "the caret sits at offset 0 of the text-bearing block"
         );
         assert_eq!(
             after.get(&beta).map(String::as_str),
-            Some(""),
-            "a split at position 0 leaves the split block empty"
+            Some("Beta"),
+            "a split at position 0 keeps the whole text on the original id"
         );
         assert_eq!(
             after.get(&new_block).map(String::as_str),
-            Some("Beta"),
-            "a split at position 0 hands the whole text to the new block"
+            Some(""),
+            "the minted block is the empty one inserted above"
         );
     }
 }

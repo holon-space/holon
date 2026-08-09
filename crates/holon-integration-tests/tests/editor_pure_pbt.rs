@@ -275,24 +275,38 @@ impl RefBlockTreeMut for EditorPureRef {
             b.content = text.to_string();
         }
     }
+    /// The id follows the text: at position 0 `id` keeps the whole string and
+    /// the minted block is the empty one sorted BEFORE it, so the returned
+    /// focus target is `id` itself.
     fn split_block(&mut self, id: &EntityUri, position: usize) -> EntityUri {
         let new_id = self.fresh_id();
-        let (parent, tail, new_sort_key) = {
+        let at_start = position == 0;
+        let (parent, minted_content, new_sort_key) = {
             let b = self.blocks.get_mut(id).expect("split target exists");
             let position = position.min(b.content.len());
             let tail = b.content.split_off(position);
-            (b.parent.clone(), tail, format!("{}m", b.sort_key))
+            if at_start {
+                // The minted (empty) block takes the origin's slot and the
+                // origin steps one slot down, so it ends up BELOW.
+                let stepped_key = format!("{}m", b.sort_key);
+                let minted_key = std::mem::replace(&mut b.sort_key, stepped_key);
+                let minted = std::mem::replace(&mut b.content, tail);
+                (b.parent.clone(), minted, minted_key)
+            } else {
+                let sort_key = format!("{}m", b.sort_key);
+                (b.parent.clone(), tail, sort_key)
+            }
         };
         self.blocks.insert(
             new_id.clone(),
             PureBlock {
                 parent,
-                content: tail,
+                content: minted_content,
                 sort_key: new_sort_key,
                 is_text: true,
             },
         );
-        new_id
+        if at_start { id.clone() } else { new_id }
     }
 
     // ALLOW(unused_param): trait signature requires old_id, unreachable arm below
@@ -302,6 +316,12 @@ impl RefBlockTreeMut for EditorPureRef {
              environment"
         )
     }
+    /// Mirrors `ReferenceState::join_block`, INCLUDING the child re-parenting:
+    /// the joined-away block's children move onto the merge target. Dropping
+    /// them orphans a subtree, which `inv-tree-structural-integrity` catches.
+    /// Their relative order among the target's existing children is not
+    /// modelled — this slice checks structure and cursor, not sibling
+    /// order.
     fn join_block(&mut self, id: &EntityUri) -> usize {
         let into = self.previous_sibling(id).unwrap_or_else(|| {
             self.blocks
@@ -309,6 +329,11 @@ impl RefBlockTreeMut for EditorPureRef {
                 .and_then(|b| b.parent.clone())
                 .expect("join_block: no prev sibling AND no parent")
         });
+        for block in self.blocks.values_mut() {
+            if block.parent.as_ref() == Some(id) {
+                block.parent = Some(into.clone());
+            }
+        }
         let appended = self.blocks.remove(id).expect("join target exists").content;
         let into_block = self.blocks.get_mut(&into).expect("join destination exists");
         let cursor_at_join = into_block.content.len();

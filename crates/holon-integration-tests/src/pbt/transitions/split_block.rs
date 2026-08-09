@@ -261,17 +261,18 @@ pub fn split_block_apply_to_ref<
     // Full/Loro divergence of 2026-06-11).
     commit_active_editor_if_dirty(state);
     state.push_undo_snapshot();
-    let new_block_id = state.split_block(block_id, position);
-    // Production returns the new block as the focus target (caret 0) in
-    // `split_block`'s op response; the frontend applies it in-process
-    // (`traits.rs::split_block` → `focus_response`, ADR 0010). Mirror that so
-    // subsequent transitions and post-step invariants see the right
-    // focused block.
+    let focus_target = state.split_block(block_id, position);
+    // Production returns the TEXT-bearing lower block as the focus target
+    // (caret 0) in `split_block`'s op response; the frontend applies it
+    // in-process (`traits.rs::split_block` → `focus_response`, ADR 0010). At a
+    // position-0 split that block is `block_id` itself — the id follows the
+    // text. Mirror that so subsequent transitions and post-step invariants see
+    // the right focused block.
     let new_content = state
-        .block_content(&new_block_id)
+        .block_content(&focus_target)
         .unwrap_or_default()
         .to_string();
-    state.set_focus(CapRegion::Main, new_block_id.clone(), CapCursor::default());
+    state.set_focus(CapRegion::Main, focus_target.clone(), CapCursor::default());
     // That focus move also makes the new block the ACTIVE editor at
     // caret 0 — not just the navigation focus. A subsequent `PressKey(Enter)`
     // therefore splits the new block, not the block the prior
@@ -279,7 +280,7 @@ pub fn split_block_apply_to_ref<
     // stale, so PressKey(Enter) re-splits the old target and its content
     // diverges from prod (which left that block untouched) — the
     // settled-consistent `inv-blocks-match-ref` content divergence.
-    state.open_active_editor(new_block_id, new_content, 0);
+    state.open_active_editor(focus_target, new_content, 0);
 }
 
 // ── E2E trait impls (delegate to _cap fns) ────────────────────────

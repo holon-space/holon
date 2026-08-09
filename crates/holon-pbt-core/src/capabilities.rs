@@ -244,8 +244,11 @@ pub trait RefBlockTreeMut: RefBlockTree {
     /// and any future direct-write transitions.
     fn set_block_content(&mut self, id: &EntityUri, text: &str);
 
-    /// Split `id` at `position`. Returns the id of the newly-created
-    /// block holding the tail.
+    /// Split `id` at `position`. Returns the id of the LOWER block — the one
+    /// holding the tail text, which is also the split's focus target. Identity
+    /// follows the text: that is the newly-minted block for `position > 0`, but
+    /// `id` itself at `position == 0` (there the minted id goes to the EMPTY
+    /// block inserted ABOVE, so references to `id` keep resolving to the text).
     fn split_block(&mut self, id: &EntityUri, position: usize) -> EntityUri;
 
     /// Join `id` into its previous sibling (or parent if no previous

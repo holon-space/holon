@@ -215,10 +215,12 @@ impl SutBlockTreeWrite for MemoryBackendComponent {
         self.move_block(id, parent, Some(next)).await;
     }
 
-    /// `ReferenceState::split_block`: original keeps
-    /// `content[..pos].trim_end()`, a new `:split-N` sibling gets
-    /// `content[pos..].trim_start()`, placed right after the original. `N`
-    /// mirrors the oracle's `next_id` (`set_next_split_id`).
+    /// `ReferenceState::split_block`: the id follows the text. The original
+    /// keeps `content[..pos].trim_end()` and a new `:split-N` sibling holding
+    /// `content[pos..].trim_start()` lands right after it — except at `pos ==
+    /// 0`, where the original keeps the whole text and the `:split-N` sibling
+    /// is the EMPTY one, landing right BEFORE it. `N` mirrors the oracle's
+    /// `next_id` (`set_next_split_id`).
     async fn apply_split_block(&self, id: &EntityUri, position: usize) {
         let block = self.block(id).await;
         let parent = block.parent_id.clone();
@@ -229,9 +231,21 @@ impl SutBlockTreeWrite for MemoryBackendComponent {
         );
         let before = content[..position].trim_end().to_string();
         let after = content[position..].trim_start().to_string();
+        let at_start = position == 0;
+        let (kept, minted) = if at_start {
+            (after, before)
+        } else {
+            (before, after)
+        };
+        // Read the anchor BEFORE the create so it names a pre-split sibling.
+        let anchor = if at_start {
+            self.prev_sibling(id).await
+        } else {
+            Some(id.clone())
+        };
 
         self.backend
-            .update_block(id.as_str(), BlockContent::text(&before))
+            .update_block(id.as_str(), BlockContent::text(&kept))
             .await
             .unwrap_or_else(|e| panic!("apply_split_block: update original failed: {e}"));
 
@@ -242,18 +256,18 @@ impl SutBlockTreeWrite for MemoryBackendComponent {
         self.backend
             .create_block(
                 parent.clone(),
-                BlockContent::text(&after),
+                BlockContent::text(&minted),
                 Some(new_id.clone()),
             )
             .await
             .unwrap_or_else(|e| panic!("apply_split_block: create new block failed: {e}"));
         // `create_block` appends to the end of the parent's children; relocate to
-        // immediately after the original to match the oracle's ordering. Skip for a
+        // the oracle's slot (`anchor` == None means first child). Skip for a
         // virtual (`no_parent`/sentinel) parent — `MemoryBackend::move_block` rejects
         // a virtual target, and top-level sibling order is not invariant-checked
         // (the new block keeps the original's `no_parent` parent either way).
         if !parent.is_no_parent() && !parent.is_sentinel() {
-            self.move_block(&new_id, parent, Some(id.clone())).await;
+            self.move_block(&new_id, parent, anchor).await;
         }
     }
 

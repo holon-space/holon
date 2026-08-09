@@ -521,6 +521,13 @@ impl ReactiveEngineDriver {
     /// the projection fixed point so the buffer reflects the settled echo.
     pub async fn converge_editors(&self) -> Result<()> {
         if let Some(block) = self.engine.focused_block() {
+            // A structural op may have armed a caret seed for an editor that
+            // is already open (a position-0 split keeps the caret on the
+            // ORIGINAL id), in which case nothing mounts to apply it. GPUI
+            // re-seats from its focus subscription; do the same here before
+            // converging the buffer.
+            self.editor_mirror
+                .adopt_armed_caret_seed(&self.engine, &block);
             self.editor_mirror
                 .converge_editor(&self.engine, &block.to_string())
                 .await?;
