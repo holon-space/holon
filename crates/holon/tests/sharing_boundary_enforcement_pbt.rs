@@ -153,7 +153,7 @@ fn descriptor(op_name: &str, behavior: BoundaryBehavior) -> OperationDescriptor 
         },
         trigger: None,
         bound_params: Default::default(),
-        precondition: None,
+        guard: holon_api::pattern::OpGuard::None,
     }
 }
 

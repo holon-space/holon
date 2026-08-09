@@ -467,7 +467,7 @@ mod tests {
                 },
                 trigger: None,
                 bound_params: Default::default(),
-                precondition: None,
+                guard: holon_api::pattern::OpGuard::None,
             },
         }
     }
@@ -687,7 +687,7 @@ mod tests {
                 },
                 trigger: None,
                 bound_params: Default::default(),
-                precondition: None,
+                guard: holon_api::pattern::OpGuard::None,
             },
         };
         let items = CommandProvider::build_command_items(&[convert], &context(), "");

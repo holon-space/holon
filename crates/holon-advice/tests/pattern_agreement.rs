@@ -225,6 +225,48 @@ fn advice_has_tag_fixture_agreement() {
     assert_eq!(inmem, sql, "advice guard: in-memory ≡ SQL");
 }
 
+/// The ADR 0031 parent predicate — `page_under_non_page`, the relational form
+/// of the shared chokepoint `page_under_non_page_prohibited` — must agree
+/// across both evaluators, INCLUDING the root case a `parent(..)` hop decides
+/// by existence rather than by the inner predicate.
+#[test]
+fn page_under_non_page_fixture_agreement() {
+    let guard =
+        parse_holon_rule("name: r\nwhen: 'has_tag(\"Page\") and parent(not has_tag(\"Page\"))'\n")
+            .expect("parses")
+            .guard;
+    assert_eq!(guard.subject, Subject::Block);
+
+    let world = InMemoryWorld::new(
+        vec![
+            // A root page: no parent ⇒ legal, so it must NOT bind.
+            wb("root", "Root", None, &["Page"], None),
+            // A page under a page ⇒ legal.
+            wb("ok", "OK", Some("root"), &["Page"], None),
+            // A plain block under a page ⇒ legal (not a page itself).
+            wb("plain", "Plain", Some("root"), &[], None),
+            // A page under a NON-page ⇒ the prohibited topology.
+            wb("bad", "Bad", Some("plain"), &["Page"], None),
+            // A plain block under a non-page ⇒ legal.
+            wb("also", "Also", Some("plain"), &[], None),
+        ],
+        "2026-07-10",
+    );
+    let inmem = inmem_bindings(&guard, &world);
+    let sql = rt().block_on(sql_bindings(&guard, &world));
+    assert_eq!(
+        inmem,
+        vec!["bad".to_string()],
+        "only the page under a non-page parent"
+    );
+    assert_eq!(
+        inmem,
+        sql,
+        "parent predicate: in-memory ≡ SQL\nsql = {}",
+        guard.to_sql(&CurrentSchema)
+    );
+}
+
 // ─── The property test (agreement across generated worlds) ────────────────
 
 const NAMES: &[&str] = &[
@@ -324,10 +366,21 @@ fn block_body_strategy() -> impl Strategy<Value = Pattern> {
             })
         }),
     ];
-    recursive_bool(leaf)
+    // `Parent` joins the recursion so the oracle stays TOTAL over the
+    // block-driven grammar: every leaf is reachable under a parent hop and
+    // every parent hop under And/Or/Not.
+    leaf.prop_recursive(3, 12, 3, |inner| {
+        prop_oneof![
+            inner.clone().prop_map(|p| Pattern::Not(Box::new(p))),
+            inner.clone().prop_map(|p| Pattern::Parent(Box::new(p))),
+            prop::collection::vec(inner.clone(), 1..3).prop_map(Pattern::And),
+            prop::collection::vec(inner, 1..3).prop_map(Pattern::Or),
+        ]
+    })
 }
 
-/// Wrap a leaf strategy in bounded And/Or/Not nesting.
+/// Wrap a leaf strategy in bounded And/Or/Not nesting. No `Parent`: it is
+/// block-driven, so it is illegal under the clock subject.
 fn recursive_bool(
     leaf: impl Strategy<Value = Pattern> + 'static,
 ) -> impl Strategy<Value = Pattern> {

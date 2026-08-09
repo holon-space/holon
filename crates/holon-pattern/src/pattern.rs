@@ -128,6 +128,15 @@ pub enum Pattern {
     /// with the subject row; `Not(BlockExists(..))` is the inhibitor /
     /// anti-join arc.
     BlockExists(PathPattern),
+    /// The subject block HAS a parent AND that parent satisfies the inner
+    /// pattern. Block-driven only.
+    ///
+    /// Existential, not implicative: a root block never matches, so
+    /// `parent(not has_tag("Page"))` means "has a parent, which is not a page"
+    /// — the shape `page_under_non_page_prohibited` needs, where a parentless
+    /// block is legal. A 2-valued `EXISTS` in SQL, so it stays sound under
+    /// `Not`.
+    Parent(Box<Pattern>),
     And(Vec<Pattern>),
     Or(Vec<Pattern>),
     Not(Box<Pattern>),
@@ -153,6 +162,42 @@ pub enum Subject {
 pub struct Guard {
     pub subject: Subject,
     pub body: Pattern,
+}
+
+/// An operation's declared precondition (ADR 0031). Non-defaultable, with
+/// [`OpGuard::None`] as the explicit "this op declares no precondition" — a
+/// stated fact, never an absence, so an `OperationDescriptor` cannot be silent
+/// about its guard.
+///
+/// A separate type from [`Guard`] rather than a `None` variant on it: a
+/// `holon_rule` always HAS a guard, and adding an unguarded variant to `Guard`
+/// would make that illegal state representable at every rule site.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OpGuard {
+    /// Declares no precondition. Always enabled.
+    None,
+    /// The declared relational precondition (P6=A: predicates over the state
+    /// the op touches; parameter validity belongs in typed params).
+    Declared { guard: Guard },
+}
+
+impl OpGuard {
+    /// Parse a guard string into a declared op guard. The `#[require("…")]`
+    /// macro calls this at expansion time, so a parse error is a compile error.
+    pub fn parse(input: &str) -> Result<OpGuard, GuardParseError> {
+        Ok(OpGuard::Declared {
+            guard: Guard::parse(input)?,
+        })
+    }
+
+    /// The declared guard, or `None` when the op declares no precondition.
+    pub fn guard(&self) -> Option<&Guard> {
+        match self {
+            OpGuard::None => Option::None,
+            OpGuard::Declared { guard } => Some(guard),
+        }
+    }
 }
 
 // ─── In-memory world + evaluation ─────────────────────────────────────────
@@ -288,6 +333,19 @@ impl Pattern {
                 block.tags.iter().any(|t| t == tag)
             }
             Pattern::BlockExists(path) => path_exists(path, world),
+            Pattern::Parent(inner) => {
+                let block = match row {
+                    SubjectRow::Block(b) => b,
+                    SubjectRow::Clock => {
+                        panic!("Pattern::Parent is block-driven; illegal under a Clock subject")
+                    }
+                };
+                block
+                    .parent_id
+                    .as_deref()
+                    .and_then(|pid| world.block_by_id(pid))
+                    .is_some_and(|parent| inner.matches(&SubjectRow::Block(parent), world))
+            }
             Pattern::And(ps) => ps.iter().all(|p| p.matches(row, world)),
             Pattern::Or(ps) => ps.iter().any(|p| p.matches(row, world)),
             Pattern::Not(p) => !p.matches(row, world),
@@ -425,12 +483,31 @@ impl SchemaAbstraction for CurrentSchema {
 struct SqlCtx<'a> {
     schema: &'a dyn SchemaAbstraction,
     /// The subject alias and, for a clock subject, the resolved `{today}` SQL.
-    subject: SqlSubject<'a>,
+    subject: SqlSubject,
+    /// How many [`Pattern::Parent`] hops deep we are; keeps the ancestor
+    /// aliases (`par1`, `par2`, …) distinct along a nesting chain.
+    parent_depth: usize,
 }
 
-enum SqlSubject<'a> {
+impl<'a> SqlCtx<'a> {
+    /// The context one `parent(...)` hop up, binding the ancestor alias.
+    fn up(&self) -> (String, SqlCtx<'a>) {
+        let depth = self.parent_depth + 1;
+        let alias = format!("par{depth}");
+        (
+            alias.clone(),
+            SqlCtx {
+                schema: self.schema,
+                subject: SqlSubject::Block { alias },
+                parent_depth: depth,
+            },
+        )
+    }
+}
+
+enum SqlSubject {
     /// Block-driven: `alias` binds the subject block; no builtin is resolvable.
-    Block { alias: &'a str },
+    Block { alias: String },
     /// Clock-driven: `today_sql` (e.g. `c.today`) resolves
     /// [`BuiltinRef::Today`].
     Clock { today_sql: String },
@@ -451,6 +528,7 @@ impl Guard {
                     subject: SqlSubject::Clock {
                         today_sql: format!("c.{col}"),
                     },
+                    parent_depth: 0,
                 };
                 format!(
                     "SELECT c.{col} AS binding\nFROM {clock} c\nWHERE {}",
@@ -461,7 +539,10 @@ impl Guard {
                 let block = schema.block_relation();
                 let ctx = SqlCtx {
                     schema,
-                    subject: SqlSubject::Block { alias: "b" },
+                    subject: SqlSubject::Block {
+                        alias: "b".to_string(),
+                    },
+                    parent_depth: 0,
                 };
                 format!(
                     "SELECT {} AS binding\nFROM {block} b\nWHERE {}",
@@ -495,6 +576,19 @@ impl Pattern {
                 ctx.schema.has_tag_exists(alias, tag)
             }
             Pattern::BlockExists(path) => block_exists_sql(path, ctx),
+            Pattern::Parent(inner) => {
+                let SqlSubject::Block { alias } = &ctx.subject else {
+                    panic!("Pattern::Parent is block-driven; illegal under a Clock subject")
+                };
+                let (par, up) = ctx.up();
+                format!(
+                    "EXISTS (SELECT 1 FROM {} {par} WHERE {} = {} AND {})",
+                    ctx.schema.block_relation(),
+                    ctx.schema.id_column(&par),
+                    ctx.schema.parent_id_column(alias),
+                    inner.to_sql(&up),
+                )
+            }
             Pattern::And(ps) => {
                 if ps.is_empty() {
                     return "1".to_string();
@@ -625,7 +719,7 @@ pub enum GuardParseError {
     UnexpectedToken { token: String },
     #[error("unexpected end of guard expression (expected {expected})")]
     UnexpectedEnd { expected: String },
-    #[error("unknown guard function {name:?} (expected `block_exists` or `has_tag`)")]
+    #[error("unknown guard function {name:?} (expected `block_exists`, `has_tag` or `parent`)")]
     UnknownFunction { name: String },
     #[error("unknown builtin {name:?} (expected `today`)")]
     UnknownBuiltin { name: String },
@@ -644,7 +738,7 @@ impl Guard {
     /// block-driven. Rejects mixing a builtin with a block predicate.
     ///
     /// Grammar: `not`, `and`, `or`, parentheses, and the guard functions
-    /// `block_exists("path")` and `has_tag("tag")`.
+    /// `block_exists("path")`, `has_tag("tag")` and `parent(<expr>)`.
     pub fn parse(input: &str) -> Result<Guard, GuardParseError> {
         Guard::from_body(parse_guard_body(input)?)
     }
@@ -678,13 +772,13 @@ fn pattern_uses_builtin(p: &Pattern) -> bool {
             .iter()
             .any(|s| matches!(s, PathSegment::Builtin(_))),
         Pattern::And(ps) | Pattern::Or(ps) => ps.iter().any(pattern_uses_builtin),
-        Pattern::Not(p) => pattern_uses_builtin(p),
+        Pattern::Not(p) | Pattern::Parent(p) => pattern_uses_builtin(p),
     }
 }
 
 fn pattern_uses_block_predicate(p: &Pattern) -> bool {
     match p {
-        Pattern::Field { .. } | Pattern::HasTag(_) => true,
+        Pattern::Field { .. } | Pattern::HasTag(_) | Pattern::Parent(_) => true,
         Pattern::BlockExists(_) => false,
         Pattern::And(ps) | Pattern::Or(ps) => ps.iter().any(pattern_uses_block_predicate),
         Pattern::Not(p) => pattern_uses_block_predicate(p),
@@ -839,6 +933,16 @@ impl TokenParser {
         })?;
         if self.bump().as_deref() != Some("(") {
             return Err(GuardParseError::UnexpectedToken { token: name });
+        }
+        // `parent` takes a nested predicate, not a string argument.
+        if name == "parent" {
+            let inner = self.parse_or()?;
+            if self.bump().as_deref() != Some(")") {
+                return Err(GuardParseError::UnexpectedEnd {
+                    expected: "closing `)`".to_string(),
+                });
+            }
+            return Ok(Pattern::Parent(Box::new(inner)));
         }
         let arg = self.bump().ok_or(GuardParseError::UnexpectedEnd {
             expected: "a string argument".to_string(),
@@ -1023,6 +1127,104 @@ mod tests {
                 name: "frobnicate".to_string()
             }
         );
+    }
+
+    /// `page_under_non_page` in the guard grammar. The predicate the shared
+    /// chokepoint
+    /// `holon_core::block_op_catalog::page_under_non_page_prohibited`
+    /// computes from two booleans, expressed relationally.
+    const PAGE_UNDER_NON_PAGE: &str = "has_tag(\"Page\") and parent(not has_tag(\"Page\"))";
+
+    #[test]
+    fn parent_guard_parses_and_is_block_driven() {
+        let g = Guard::parse(PAGE_UNDER_NON_PAGE).unwrap();
+        assert_eq!(g.subject, Subject::Block);
+        assert_eq!(
+            g.body,
+            Pattern::And(vec![
+                Pattern::HasTag("Page".to_string()),
+                Pattern::Parent(Box::new(Pattern::Not(Box::new(Pattern::HasTag(
+                    "Page".to_string()
+                ))))),
+            ])
+        );
+    }
+
+    /// The relational guard reproduces the chokepoint truth table, INCLUDING
+    /// the parentless case: a root page has no parent, so `parent(..)` is
+    /// existentially false — legal, exactly as `parent_is_page = None` is.
+    #[test]
+    fn parent_guard_reproduces_the_chokepoint_truth_table() {
+        let g = Guard::parse(PAGE_UNDER_NON_PAGE).unwrap();
+        // (child tags, parent) → prohibited?
+        let cases: [(&[&str], Option<&[&str]>, bool); 6] = [
+            (&["Page"], Some(&[]), true),        // page under non-page
+            (&["Page"], Some(&["Page"]), false), // page under page
+            (&[], Some(&[]), false),             // non-page under non-page
+            (&[], Some(&["Page"]), false),       // non-page under page
+            (&["Page"], None, false),            // root page
+            (&[], None, false),                  // root non-page
+        ];
+        for (child_tags, parent_tags, prohibited) in cases {
+            let mut blocks = vec![WorldBlock {
+                id: "c".to_string(),
+                name: "child".to_string(),
+                parent_id: parent_tags.map(|_| "p".to_string()),
+                properties: HashMap::new(),
+                tags: child_tags.iter().map(|s| s.to_string()).collect(),
+            }];
+            if let Some(pt) = parent_tags {
+                blocks.push(WorldBlock {
+                    id: "p".to_string(),
+                    name: "parent".to_string(),
+                    parent_id: None,
+                    properties: HashMap::new(),
+                    tags: pt.iter().map(|s| s.to_string()).collect(),
+                });
+            }
+            let world = InMemoryWorld::new(blocks, "2026-08-10");
+            let bound = g
+                .evaluate(&world)
+                .bindings
+                .contains(&Binding::Block("c".to_string()));
+            assert_eq!(
+                bound, prohibited,
+                "child {child_tags:?} under parent {parent_tags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parent_to_sql_is_a_two_valued_exists_on_the_parent_row() {
+        let g = Guard::parse(PAGE_UNDER_NON_PAGE).unwrap();
+        let sql = g.to_sql(&CurrentSchema);
+        assert!(sql.contains("FROM block par1"), "ancestor alias: {sql}");
+        assert!(
+            sql.contains("par1.id = b.parent_id"),
+            "correlated on the subject's parent: {sql}"
+        );
+        assert!(
+            sql.contains("EXISTS ("),
+            "existential, so a root never matches: {sql}"
+        );
+    }
+
+    /// Nested hops must not collide on one alias.
+    #[test]
+    fn nested_parent_hops_get_distinct_aliases() {
+        let g = Guard::parse("parent(parent(has_tag(\"Page\")))").unwrap();
+        let sql = g.to_sql(&CurrentSchema);
+        assert!(sql.contains("par1.id = b.parent_id"), "{sql}");
+        assert!(sql.contains("par2.id = par1.parent_id"), "{sql}");
+    }
+
+    #[test]
+    fn op_guard_none_round_trips_as_a_stated_fact() {
+        let json = serde_json::to_string(&OpGuard::None).unwrap();
+        assert_eq!(json, r#"{"kind":"none"}"#);
+        let back: OpGuard = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, OpGuard::None);
+        assert!(back.guard().is_none());
     }
 
     #[test]

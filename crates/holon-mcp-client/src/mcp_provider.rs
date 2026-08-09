@@ -310,10 +310,6 @@ impl McpOperationProvider {
                 })
                 .unwrap_or_default();
 
-            let precondition = tool_config
-                .and_then(|tc| tc.precondition.as_ref())
-                .map(|p| p.to_checker());
-
             let descriptor = OperationDescriptor {
                 entity_name: entity_name.clone().into(),
                 entity_short_name: entity_config.short_name_or(&entity_name),
@@ -324,7 +320,11 @@ impl McpOperationProvider {
                 required_params,
                 affected_fields,
                 param_mappings,
-                precondition,
+                // A sidecar's Rhai `precondition:` is parameter-shaped, which
+                // ADR 0031 P6=A makes illegal as a descriptor guard (guards are
+                // relational). It stays a parse-time-validated declaration on
+                // the sidecar; nothing ever evaluated it from here.
+                guard: holon_api::pattern::OpGuard::None,
                 target_scope: holon_api::TargetScope::Block,
                 boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
                 menu_exposure: holon_api::MenuExposure::NotListed {

@@ -333,7 +333,7 @@ fn default_block_operations() -> Vec<holon_api::render_types::OperationDescripto
             },
             trigger: None,
             bound_params: Default::default(),
-            precondition: None,
+            guard: holon_api::pattern::OpGuard::None,
         },
         OperationDescriptor {
             entity_name: entity_name.clone().into(),
@@ -355,7 +355,7 @@ fn default_block_operations() -> Vec<holon_api::render_types::OperationDescripto
             },
             trigger: None,
             bound_params: Default::default(),
-            precondition: None,
+            guard: holon_api::pattern::OpGuard::None,
         },
     ]
 }

@@ -1276,15 +1276,31 @@ async fn move_block(&self, id: &str, parent_id: &str, after_block_id: Option<&st
 async fn set_completion(&self, id: &str, completed: bool) -> Result<Option<Operation>>;
 ```
 
-**`#[require(expr)]`**
+**`#[require("<guard>")]`**
 
-Compile-time precondition that generates runtime validation:
+A declared precondition. The string is a guard expression parsed by the Pattern
+parser **at macro-expansion time** (ADR 0031 P2), so a parse error is a compile error
+and the emitted `OperationDescriptor::guard` is plain serializable data — never a
+closure. The parser hard-errors on any guard literal over 80 characters; several
+`#[require]`s on one method conjoin, which is the composition escape hatch.
+
+Guards are **relational only** (ADR 0031 P6=A): a predicate over the state the op
+touches. Parameter validity (`non-empty`, `1..=5`) belongs in the parameter's
+`TypeHint`, never in a guard — a parameter predicate has no relation to iterate, so
+it has no meaning under `to_sql()` and would punch a hole in the mutation-proven
+in-memory ≡ SQL agreement oracle.
 
 ```rust
-#[require(priority >= 1)]
-#[require(priority <= 5)]
+// `page_under_non_page`: this block is a page whose parent is not one.
+#[require("has_tag(\"Page\")")]
+#[require("parent(not has_tag(\"Page\"))")]
 async fn set_priority(&self, id: &str, priority: i64) -> Result<Option<Operation>>;
 ```
+
+Grammar: `not` / `and` / `or`, parentheses, and the guard functions
+`block_exists("path")`, `has_tag("tag")` and `parent(<expr>)`. A method with no
+`#[require]` gets `OpGuard::None` — a stated "declares no precondition", not an
+absence.
 
 ### Type Inference
 
@@ -1319,7 +1335,7 @@ OperationDescriptor {
     param_mappings: vec![
         ParamMapping { from: "completed", provides: vec!["completed"], ... }
     ],
-    precondition: None,
+    guard: OpGuard::None,
 }
 ```
 
@@ -1435,7 +1451,7 @@ MCP Server (e.g. ai.todoist.net/mcp)
 │  • descriptors (cached)     │     │  • entity mapping        │
 │  • tool_name_map            │     │  • affected_fields       │
 │  • peer (rmcp connection)   │     │  • triggered_by          │
-│  • _connection (keep-alive) │     │  • preconditions (Rhai)  │
+│  • _connection (keep-alive) │     │  • precondition (ignored)│
 └──────────┬──────────────────┘     │  • param_overrides       │
            │                        └──────────────────────────┘
            │  implements OperationProvider
@@ -1448,8 +1464,8 @@ MCP Server (e.g. ai.todoist.net/mcp)
 | Component | File | Purpose |
 |-----------|------|---------|
 | `McpOperationProvider` | `mcp_provider.rs` | Connects to MCP server, caches `OperationDescriptor`s from tool schemas, executes tools via `call_tool`. Holds `McpRunningService` to keep the connection alive. |
-| `McpSidecar` | `mcp_sidecar.rs` | YAML config that patches UI affordances onto MCP tools: entity mapping, `affected_fields`, `triggered_by`, `precondition` (Rhai), `param_overrides`. |
-| `RhaiPrecondition` | `mcp_sidecar.rs` | Parse-don't-validate wrapper: Rhai expressions are validated at YAML deserialization time. Invalid syntax fails immediately, not at operation execution. |
+| `McpSidecar` | `mcp_sidecar.rs` | YAML config that patches UI affordances onto MCP tools: entity mapping, `affected_fields`, `triggered_by`, `param_overrides`, and the DEPRECATED `precondition` (see below). |
+| `RhaiPrecondition` | `mcp_sidecar.rs` | **Deprecated, ignored.** Parse-don't-validate wrapper: the Rhai expression is still syntax-checked at YAML deserialization time, so a malformed one fails loudly at load. Nothing reads it beyond that — it reaches no descriptor and gates no operation. |
 | `mcp_schema_mapping` | `mcp_schema_mapping.rs` | Converts JSON Schema types to `TypeHint` (String, Bool, Number, OneOf, EntityId via overrides). Walks `inputSchema.properties` to build `Vec<OperationParam>`. |
 | `connect_mcp()` | `mcp_provider.rs` | Establishes Streamable HTTP connection to an MCP server, returns `Peer<RoleClient>` + `McpRunningService`. |
 
@@ -1473,7 +1489,8 @@ tools:
     triggered_by:
       - from: completed
         provides: [ids]
-    precondition: "completed == false"  # validated as Rhai at load time
+    # DEPRECATED and IGNORED — syntax-checked at load, then unused. See below.
+    precondition: "completed == false"
   update-tasks:
     entity: todoist_tasks
     affected_fields: [content, description, priority, dueString, labels]
@@ -1482,7 +1499,16 @@ tools:
     display_name: Create Task
 ```
 
-Tools without sidecar entries still appear as operations, but with no gesture bindings (affected_fields, triggered_by, preconditions).
+Tools without sidecar entries still appear as operations, but with no gesture bindings (affected_fields, triggered_by).
+
+**On `precondition:` — deprecated and ignored.** The key is still parsed and its Rhai
+syntax validated, so an invalid expression fails loudly at load; nothing consumes it
+past that point. It never reached a descriptor guard even before ADR 0031 (the
+descriptor's closure field had zero readers), and it cannot reach one now: it is
+parameter-shaped, which P6=A makes illegal as a guard — guards are relational
+predicates over the state an op touches. Do not add new `precondition:` keys. An MCP
+tool needing a real precondition gets a relational `#[require("…")]` on the operation,
+or its parameter constraint expressed in the param's `TypeHint`.
 
 #### Tool Name Normalization
 

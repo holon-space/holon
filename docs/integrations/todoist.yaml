@@ -83,6 +83,8 @@ tools:
     triggered_by:
       - from: completed
         provides: [ids]
+    # DEPRECATED and IGNORED: syntax-checked at load, then unused. Guards are
+    # relational (ADR 0031 P6=A); this is parameter-shaped. Add no new ones.
     precondition: "completed == false"
     undo:
       reversible: false

@@ -136,9 +136,8 @@ consequences follow and are binding:
   `#[require]`, not a separate cleanup.
 
 `to_sql()` is already built, so the catalog inherits SQL compilation rather than
-deferring it. What is NOT inherited is a subject for op parameters: today's Pattern
-subjects are `Block` and `Clock`, and op preconditions over parameters have no
-representation. Extending the subject set is an open design point — see below.
+deferring it. The subject set is NOT extended for op parameters: guards are
+relational-only (P6=A, ruled below).
 
 `holon-engine`'s own guards stay Rhai. User-authored YAML nets keep Rhai until a
 separate ruling says otherwise; the catalog's guards are the Pattern AST, and the
@@ -166,17 +165,38 @@ revision**. Ops outside the set legitimately carry the fail-closed variant. This
 unification guard (3) made operational and it is the mitigation for catalog
 untruthfulness: the set may never outrun its oracle.
 
-### Open: the subject of an op-precondition guard
+### Ruled: op-precondition guards are RELATIONAL-ONLY (P6=A)
 
-`holon_api::pattern::Subject` is `Block | Clock`, and a guard evaluates by iterating that
-relation and returning bindings — "enabled" means at least one binding. An op
+`holon_pattern::pattern::Subject` is `Block | Clock`, and a guard evaluates by iterating
+that relation and returning bindings — "enabled" means at least one binding. An op
 precondition such as "this parameter is non-empty" iterates nothing and binds nothing.
-Whether the catalog's guards gain a parameter subject in the same AST (and what
-`to_sql()` means for it), or whether op preconditions are always expressed as relational
-predicates over the state the op touches, is an OPEN design point that the first
-increment must settle before it retargets `#[require]`. It is recorded here rather than
-silently decided because the choice constrains the SQL side of the ADR 0024 agreement
-oracle, which is mutation-proven and must not be weakened.
+The open question was whether the catalog's guards gain a parameter subject.
+
+**They do not.** A guard is a predicate over the state the op touches; **parameter
+validity belongs in the typed params and NEVER in a guard subject.** Two reasons:
+
+- **The oracle stays total.** A parameter subject has no relation to iterate, so it has
+  no meaning under `to_sql()`. It would have to be carved out of the mutation-proven
+  in-memory ≡ SQL agreement PBT, and a grammar with a hole is a grammar whose oracle
+  proves less than it appears to. Every leaf reachable from a guard string is dual
+  evaluated, with no exceptions.
+- **Typed params already own it.** `OperationParam` carries a `TypeHint`, and the
+  parse-don't-validate rule makes the parameter's own type the place where "non-empty" /
+  "in 1..=5" is enforced. Restating it in a guard would be a second, weaker,
+  drift-prone copy of a constraint the type system can hold.
+
+The consequence is concrete: the pre-existing `#[require]` fixtures were all
+parameter-shaped (`!id.is_empty()`, `priority >= 1`) and are therefore illegal under
+this ruling. They are rewritten as relational predicates
+(`crates/holon-macros-test/src/lib.rs`).
+
+The increment that lands the retarget adds exactly one leaf to serve the first real
+relational need: `Pattern::Parent(Box<Pattern>)` — "the subject block HAS a parent and
+that parent satisfies the inner pattern". It is existential, not implicative, so a
+parentless block never matches and `parent(not has_tag("Page"))` means "has a
+non-page parent" — precisely the shape `page_under_non_page_prohibited` needs, where a
+root page is legal. It compiles to a 2-valued `EXISTS` correlated on `parent_id`, so it
+stays sound under `Not`, and it is covered by the agreement PBT like every other leaf.
 
 ### Deferred-open: facet authority (P4)
 
@@ -192,6 +212,23 @@ repair-by-re-derivation for file mirrors stays blocked exactly as ADR 0030 state
 - The guard is ordinary serializable data: it round-trips through serde, participates in
   `PartialEq` and prints in `Debug`. A serde round-trip test on the descriptor with its
   guard intact is the certificate that the dual-consumer requirement stays reachable.
+- **A declared guard reads the CURRENT state; the chokepoints read the PROPOSED one.
+  Inc 3 must not confuse them.** A declared `parent(...)` guard evaluates the subject
+  block's EXISTING `parent_id` — it detects a block that IS already in a violating
+  topology. The three hand-wired chokepoints
+  (`holon_core::traits` ~:2263, `sql_operation_provider` ~:3810,
+  `loro_block_operations` ~:204) ask a different question: they evaluate the
+  PROSPECTIVE parent of a move that has not happened yet. So Inc 3's dispatcher gate
+  MUST evaluate guards against the **post-image of the proposed op** (or bind the
+  prospective parent explicitly as the guard's subject), and must NEVER naively swap
+  the declared guard into those call sites — under the current topology the guard is
+  trivially false for the very move the chokepoint exists to refuse. What IS already
+  proven is the equivalence of the two predicates over a given topology:
+  `parent_guard_reproduces_the_chokepoint_truth_table`
+  (`crates/holon-pattern/src/pattern.rs`) reproduces all six
+  `(child_is_page, parent_is_page)` cases of `page_under_non_page_prohibited`,
+  including the parentless case. That is the semantic bridge; supplying the right
+  state to evaluate against is Inc 3's job.
 - Guard evaluation is a single generated gate at the one routing point, not codegen
   inside each provider. Totality is delivered by the provider's write transaction and
   its rollback (ADR 0030's own position: "total or refused" is delivered by the

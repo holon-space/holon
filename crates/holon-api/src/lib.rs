@@ -216,7 +216,7 @@ pub use link_candidate::QuickOpenResults;
 // Re-export the dual-evaluated Pattern guard AST (ADR 0024 Phase-2 spike)
 pub use pattern::{
     BuiltinRef, CmpOp, CurrentSchema, FieldRef, Guard, GuardParseError, GuardResult, InMemoryWorld,
-    Operand, PathPattern, PathSegment, Pattern, SchemaAbstraction, Subject, WorldBlock,
+    OpGuard, Operand, PathPattern, PathSegment, Pattern, SchemaAbstraction, Subject, WorldBlock,
 };
 // Re-export predicate types
 pub use predicate::Predicate;
@@ -243,9 +243,9 @@ pub use render_eval::resolve_args;
 // Re-export render types
 pub use render_types::{
     Arg, BinaryOperator, BoundaryBehavior, ClickModifiers, MenuExposure, NonMenuSurface, Operation,
-    OperationDescriptor, OperationParam, OperationWiring, ParamMapping, PickerKind,
-    PreconditionChecker, RenderExpr, RenderProfile, RenderVariant, RenderableItem, RowProfile,
-    RowTemplate, SurfaceSet, TargetScope, Trigger, TypeHint, ViewSpec, extract_widget_names,
+    OperationDescriptor, OperationParam, OperationWiring, ParamMapping, PickerKind, RenderExpr,
+    RenderProfile, RenderVariant, RenderableItem, RowProfile, RowTemplate, SurfaceSet, TargetScope,
+    Trigger, TypeHint, ViewSpec, extract_widget_names,
 };
 // Re-export streaming types
 pub use streaming::{

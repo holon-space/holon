@@ -66,7 +66,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             },
             trigger: None,
             bound_params: Default::default(),
-            precondition: None,
+            guard: holon_api::pattern::OpGuard::None,
         },
         OperationDescriptor {
             entity_name: ENTITY_NAME.into(),
@@ -93,7 +93,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             },
             trigger: None,
             bound_params: Default::default(),
-            precondition: None,
+            guard: holon_api::pattern::OpGuard::None,
         },
         OperationDescriptor {
             entity_name: ENTITY_NAME.into(),
@@ -116,7 +116,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             },
             trigger: None,
             bound_params: Default::default(),
-            precondition: None,
+            guard: holon_api::pattern::OpGuard::None,
         },
         OperationDescriptor {
             entity_name: ENTITY_NAME.into(),
@@ -135,7 +135,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             },
             trigger: None,
             bound_params: Default::default(),
-            precondition: None,
+            guard: holon_api::pattern::OpGuard::None,
         },
         OperationDescriptor {
             entity_name: ENTITY_NAME.into(),
@@ -154,7 +154,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             },
             trigger: None,
             bound_params: Default::default(),
-            precondition: None,
+            guard: holon_api::pattern::OpGuard::None,
         },
         OperationDescriptor {
             entity_name: ENTITY_NAME.into(),
@@ -173,7 +173,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             },
             trigger: None,
             bound_params: Default::default(),
-            precondition: None,
+            guard: holon_api::pattern::OpGuard::None,
         },
         OperationDescriptor {
             entity_name: ENTITY_NAME.into(),
@@ -203,7 +203,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             },
             trigger: None,
             bound_params: Default::default(),
-            precondition: None,
+            guard: holon_api::pattern::OpGuard::None,
         },
         OperationDescriptor {
             entity_name: ENTITY_NAME.into(),
@@ -233,7 +233,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             },
             trigger: None,
             bound_params: Default::default(),
-            precondition: None,
+            guard: holon_api::pattern::OpGuard::None,
         },
     ];
     manual_ops

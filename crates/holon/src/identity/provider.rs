@@ -450,7 +450,7 @@ impl IdentityProvider {
             },
             trigger: None,
             bound_params: Default::default(),
-            precondition: None,
+            guard: holon_api::pattern::OpGuard::None,
         }
     }
 

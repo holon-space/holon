@@ -1345,7 +1345,7 @@ mod tests {
                         action_bar: false,
                     },
                 },
-                precondition: None,
+                guard: holon_api::pattern::OpGuard::None,
             },
         });
 
@@ -1406,7 +1406,7 @@ mod tests {
                     menu_exposure: holon_api::MenuExposure::NotListed {
                         surface: holon_api::NonMenuSurface::Test,
                     },
-                    precondition: None,
+                    guard: holon_api::pattern::OpGuard::None,
                 },
             },
             OperationWiring {
@@ -1433,7 +1433,7 @@ mod tests {
                             action_bar: false,
                         },
                     },
-                    precondition: None,
+                    guard: holon_api::pattern::OpGuard::None,
                 },
             },
         ];
@@ -1567,7 +1567,7 @@ mod tests {
                 menu_exposure: holon_api::MenuExposure::NotListed {
                     surface: holon_api::NonMenuSurface::Test,
                 },
-                precondition: None,
+                guard: holon_api::pattern::OpGuard::None,
             },
         });
 
@@ -1634,7 +1634,7 @@ mod tests {
                 menu_exposure: holon_api::MenuExposure::NotListed {
                     surface: holon_api::NonMenuSurface::Test,
                 },
-                precondition: None,
+                guard: holon_api::pattern::OpGuard::None,
             },
         });
 

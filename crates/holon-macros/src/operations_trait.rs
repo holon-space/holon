@@ -1,3 +1,9 @@
+use holon_pattern::pattern::BuiltinRef;
+use holon_pattern::pattern::Guard;
+use holon_pattern::pattern::OpGuard;
+use holon_pattern::pattern::PathSegment;
+use holon_pattern::pattern::Pattern;
+use holon_pattern::pattern::Subject;
 use proc_macro2::TokenStream;
 use quote::format_ident;
 use quote::quote;
@@ -61,11 +67,6 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
     // Result/UnknownOperationError live there, and every other crate (including
     // holon) reaches them via holon_core::.
     let is_internal = pkg_name == "holon-core";
-    let crate_path = if is_internal {
-        quote! { crate }
-    } else {
-        quote! { holon_core }
-    };
 
     // Determine the Operation type path - Operation is now in holon-api
     // All crates should use holon_api::Operation
@@ -180,19 +181,19 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                 description.clone()
             };
 
-            // Extract and generate precondition if present
-            let precondition_field =
-                if let Some(precondition_tokens) = extract_require_precondition(&method.attrs) {
-                    let precondition_closure =
-                        generate_precondition_closure(method, &precondition_tokens, &crate_path);
-                    quote! {
-                        precondition: Some(#precondition_closure),
-                    }
-                } else {
-                    quote! {
-                        precondition: None,
-                    }
-                };
+            // The declared guard (ADR 0031): `#[require("…")]` literals are
+            // parsed HERE, at expansion time, and emitted as the declarative
+            // `OpGuard` value. A parse error is a compile error.
+            let guard_field = match extract_require_guard(&method.attrs) {
+                Ok(guard) => {
+                    let expr = op_guard_tokens(&guard);
+                    quote! { guard: #expr, }
+                }
+                Err(err) => {
+                    let err = err.to_compile_error();
+                    quote! { guard: { #err }, }
+                }
+            };
 
             // Extract affected fields from #[operation(affects = [...])] attribute
             let affected_fields = extract_affected_fields(&method.attrs);
@@ -290,7 +291,7 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                         target_scope: holon_api::TargetScope::Block,
                         trigger: None,
                         bound_params: ::std::collections::HashMap::new(),
-                        #precondition_field
+                        #guard_field
                     }
                 }
             }
@@ -1073,34 +1074,6 @@ pub fn extract_doc_comments(attrs: &[syn::Attribute]) -> String {
     docs.join(" ")
 }
 
-/// Extract require precondition tokens from attributes
-fn extract_require_precondition(attrs: &[syn::Attribute]) -> Option<proc_macro2::TokenStream> {
-    let mut preconditions = Vec::new();
-
-    for attr in attrs {
-        let is_require = attr.path().is_ident("require")
-            || (attr.path().segments.len() == 2
-                && attr.path().segments[0].ident == "holon_macros"
-                && attr.path().segments[1].ident == "require");
-
-        if is_require && let Meta::List(meta_list) = &attr.meta {
-            preconditions.push(meta_list.tokens.clone());
-        }
-    }
-
-    if preconditions.is_empty() {
-        None
-    } else if preconditions.len() == 1 {
-        Some(preconditions[0].clone())
-    } else {
-        let mut combined = preconditions[0].clone();
-        for prec in preconditions.iter().skip(1) {
-            combined = quote! { (#combined) && (#prec) };
-        }
-        Some(combined)
-    }
-}
-
 use crate::attr_parser::ParsedEnumFrom;
 use crate::attr_parser::ParsedParamMapping;
 use crate::attr_parser::{self};
@@ -1113,173 +1086,145 @@ fn extract_enum_from(attrs: &[syn::Attribute]) -> Option<ParsedEnumFrom> {
     attr_parser::extract_enum_from(attrs)
 }
 
-/// Generate precondition closure code for a method
-fn generate_precondition_closure(
-    method: &syn::TraitItemFn,
-    precondition_tokens: &proc_macro2::TokenStream,
-    _crate_path: &proc_macro2::TokenStream, /* ALLOW(unused_param): kept for symmetry with
-                                             * sibling generators */
-) -> proc_macro2::TokenStream {
-    let mut param_declarations = Vec::new();
+/// rustfmt's `format_strings` mangles long literals, and a corrupted guard that
+/// still parses is worse than a broken build (ADR 0031 P2). Guards compose by
+/// named sub-pattern instead.
+const MAX_GUARD_LITERAL_LEN: usize = 80;
 
-    for arg in method.sig.inputs.iter().skip(1) {
-        if let FnArg::Typed(pat_type) = arg {
-            let param_name_ident = match &*pat_type.pat {
-                Pat::Ident(pat_ident) => pat_ident.ident.clone(),
-                _ => {
-                    let name_str = extract_param_name(&pat_type.pat);
-                    syn::Ident::new(&name_str, proc_macro2::Span::call_site())
-                }
+/// Parse every `#[require("…")]` on a method into the declared [`OpGuard`].
+///
+/// ADR 0031 P2: the literal is parsed HERE, at expansion time, so a parse error
+/// is a compile error. P6=A: the guard is RELATIONAL — a predicate over the
+/// state the op touches. Parameter validity belongs in typed params, never in a
+/// guard, so there is no parameter subject to bind.
+///
+/// Several `#[require]`s conjoin, which is also the composition escape hatch
+/// for the length lint.
+fn extract_require_guard(attrs: &[syn::Attribute]) -> syn::Result<OpGuard> {
+    let mut bodies = Vec::new();
+
+    for attr in attrs {
+        let is_require = attr.path().is_ident("require")
+            || (attr.path().segments.len() == 2
+                && attr.path().segments[0].ident == "holon_macros"
+                && attr.path().segments[1].ident == "require");
+        if !is_require {
+            continue;
+        }
+        let Meta::List(meta_list) = &attr.meta else {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "#[require] takes one guard string: #[require(\"has_tag(\\\"Page\\\")\")]",
+            ));
+        };
+        let lit: syn::LitStr = syn::parse2(meta_list.tokens.clone()).map_err(|_| {
+            syn::Error::new_spanned(
+                &meta_list.tokens,
+                "#[require] takes a guard STRING literal parsed by the Pattern parser (ADR 0031 \
+                 P2), not a Rust expression",
+            )
+        })?;
+        let text = lit.value();
+        if text.len() > MAX_GUARD_LITERAL_LEN {
+            return Err(syn::Error::new_spanned(
+                &lit,
+                format!(
+                    "guard literal is {} characters, over the {MAX_GUARD_LITERAL_LEN}-character \
+                     limit — rustfmt mangles long literals and a corrupted guard may still parse. \
+                     Split it across several #[require(\"…\")] attributes (they conjoin).",
+                    text.len()
+                ),
+            ));
+        }
+        let body = holon_pattern::pattern::parse_guard_body(&text)
+            .map_err(|e| syn::Error::new_spanned(&lit, format!("invalid guard: {e}")))?;
+        bodies.push(body);
+    }
+
+    if bodies.is_empty() {
+        return Ok(OpGuard::None);
+    }
+    let body = if bodies.len() == 1 {
+        bodies.pop().expect("len == 1")
+    } else {
+        Pattern::And(bodies)
+    };
+    // Subject inference (and the mixed-subject rejection) is the parser's, so
+    // the `#[require]` surface and the `when:` sugar yield identical guards.
+    let guard = Guard::from_body(body).map_err(|e| {
+        syn::Error::new_spanned(
+            attrs
+                .first()
+                .expect("bodies non-empty ⇒ an attribute exists"),
+            format!("invalid guard: {e}"),
+        )
+    })?;
+    Ok(OpGuard::Declared { guard })
+}
+
+/// Emit the parsed guard as a literal constructor expression. The macro's
+/// output is plain, serializable data (ADR 0031's dual-consumer requirement) —
+/// no closure, nothing to run at construction time.
+fn op_guard_tokens(guard: &OpGuard) -> proc_macro2::TokenStream {
+    match guard {
+        OpGuard::None => quote! { holon_api::pattern::OpGuard::None },
+        OpGuard::Declared { guard } => {
+            let subject = match guard.subject {
+                Subject::Clock => quote! { holon_api::pattern::Subject::Clock },
+                Subject::Block => quote! { holon_api::pattern::Subject::Block },
             };
-            let param_name_str = param_wire_name(&param_name_ident.to_string());
-            let (type_str, is_required) = infer_type(&pat_type.ty);
-            let is_optional = !is_required;
-            let type_str_cleaned = type_str.replace(" ", "");
-
-            let is_ref_type = matches!(&*pat_type.ty, syn::Type::Reference(_));
-
-            let type_conversion = if type_str_cleaned == "String" || type_str_cleaned == "&str" {
-                if is_optional {
-                    quote! {
-                        let #param_name_ident: Option<String> = match params.get(#param_name_str) {
-                            None => None,
-                            Some(any_val) => match any_val.downcast_ref::<holon_api::Value>()
-                                .ok_or_else(|| format!("Parameter '{}' is not a Value", #param_name_str))? {
-                                holon_api::Value::Null => None,
-                                v => Some(v.as_string().map(|s| s.to_string())
-                                    .ok_or_else(|| format!("Invalid type for optional parameter '{}' (expected String)", #param_name_str))?),
-                            },
-                        };
-                    }
-                } else {
-                    quote! {
-                        let #param_name_ident: String = params.get(#param_name_str)
-                            .and_then(|any_val| {
-                                any_val.downcast_ref::<holon_api::Value>()
-                                    .and_then(|v| v.as_string().map(|s| s.to_string()))
-                            })
-                            .ok_or_else(|| format!("Missing or invalid parameter '{}' (expected String)", #param_name_str))?;
-                    }
+            let body = pattern_tokens(&guard.body);
+            quote! {
+                holon_api::pattern::OpGuard::Declared {
+                    guard: holon_api::pattern::Guard { subject: #subject, body: #body },
                 }
-            } else if type_str_cleaned == "bool" {
-                if is_optional {
-                    quote! {
-                        let #param_name_ident: Option<bool> = match params.get(#param_name_str) {
-                            None => None,
-                            Some(any_val) => match any_val.downcast_ref::<holon_api::Value>()
-                                .ok_or_else(|| format!("Parameter '{}' is not a Value", #param_name_str))? {
-                                holon_api::Value::Null => None,
-                                v => Some(v.as_bool()
-                                    .ok_or_else(|| format!("Invalid type for optional parameter '{}' (expected bool)", #param_name_str))?),
-                            },
-                        };
-                    }
-                } else {
-                    quote! {
-                        let #param_name_ident: bool = params.get(#param_name_str)
-                            .and_then(|any_val| {
-                                any_val.downcast_ref::<holon_api::Value>()
-                                    .and_then(|v| v.as_bool())
-                            })
-                            .ok_or_else(|| format!("Missing or invalid parameter '{}' (expected bool)", #param_name_str))?;
-                    }
-                }
-            } else if type_str_cleaned.starts_with("i64") {
-                if is_optional {
-                    quote! {
-                        let #param_name_ident: Option<i64> = match params.get(#param_name_str) {
-                            None => None,
-                            Some(any_val) => match any_val.downcast_ref::<holon_api::Value>()
-                                .ok_or_else(|| format!("Parameter '{}' is not a Value", #param_name_str))? {
-                                holon_api::Value::Null => None,
-                                v => Some(v.as_i64()
-                                    .ok_or_else(|| format!("Invalid type for optional parameter '{}' (expected i64)", #param_name_str))?),
-                            },
-                        };
-                    }
-                } else {
-                    quote! {
-                        let #param_name_ident: i64 = params.get(#param_name_str)
-                            .and_then(|any_val| {
-                                any_val.downcast_ref::<holon_api::Value>()
-                                    .and_then(|v| v.as_i64())
-                            })
-                            .ok_or_else(|| format!("Missing or invalid parameter '{}' (expected i64)", #param_name_str))?;
-                    }
-                }
-            } else if type_str_cleaned.starts_with("i32") {
-                if is_optional {
-                    quote! {
-                        let #param_name_ident: Option<i32> = match params.get(#param_name_str) {
-                            None => None,
-                            Some(any_val) => match any_val.downcast_ref::<holon_api::Value>()
-                                .ok_or_else(|| format!("Parameter '{}' is not a Value", #param_name_str))? {
-                                holon_api::Value::Null => None,
-                                v => Some(v.as_i64().map(|i| i as i32)
-                                    .ok_or_else(|| format!("Invalid type for optional parameter '{}' (expected i32)", #param_name_str))?),
-                            },
-                        };
-                    }
-                } else {
-                    quote! {
-                        let #param_name_ident: i32 = params.get(#param_name_str)
-                            .and_then(|any_val| {
-                                any_val.downcast_ref::<holon_api::Value>()
-                                    .and_then(|v| v.as_i64().map(|i| i as i32))
-                            })
-                            .ok_or_else(|| format!("Missing or invalid parameter '{}' (expected i32)", #param_name_str))?;
-                    }
-                }
-            } else if is_optional && type_str_cleaned.contains("DateTime") {
-                quote! {
-                    let #param_name_ident: Option<chrono::DateTime<chrono::Utc>> = match params.get(#param_name_str) {
-                        None => None,
-                        Some(any_val) => match any_val.downcast_ref::<holon_api::Value>()
-                            .ok_or_else(|| format!("Parameter '{}' is not a Value", #param_name_str))? {
-                            holon_api::Value::Null => None,
-                            v => Some(v.as_datetime()
-                                .ok_or_else(|| format!("Invalid type for optional parameter '{}' (expected DateTime)", #param_name_str))?),
-                        },
-                    };
-                }
-            } else {
-                if is_optional {
-                    quote! {
-                        let #param_name_ident: Option<holon_api::Value> = params.get(#param_name_str)
-                            .and_then(|any_val| {
-                                any_val.downcast_ref::<holon_api::Value>().cloned()
-                            });
-                    }
-                } else {
-                    quote! {
-                        let #param_name_ident: holon_api::Value = params.get(#param_name_str)
-                            .and_then(|any_val| {
-                                any_val.downcast_ref::<holon_api::Value>().cloned()
-                            })
-                            .ok_or_else(|| format!("Missing parameter '{}' (expected Value)", #param_name_str))?;
-                    }
-                }
-            };
-
-            param_declarations.push(type_conversion);
-
-            if is_ref_type && (type_str_cleaned == "String" || type_str_cleaned == "&str") {
-                // String handling for references
             }
         }
     }
+}
 
-    quote! {
-        {
-            use std::sync::Arc;
-            use std::any::Any;
-            use std::collections::HashMap;
-
-            Arc::new(Box::new(move |params: &HashMap<String, Box<dyn Any + Send + Sync>>| -> std::result::Result<bool, String> {
-                #(#param_declarations)*
-                Ok(#precondition_tokens)
-            }) as Box<holon_api::PreconditionChecker>)
+fn pattern_tokens(pattern: &Pattern) -> proc_macro2::TokenStream {
+    match pattern {
+        Pattern::HasTag(tag) => quote! { holon_api::pattern::Pattern::HasTag(#tag.to_string()) },
+        Pattern::BlockExists(path) => {
+            let segs = path.segments.iter().map(|s| match s {
+                PathSegment::Lit(l) => {
+                    quote! { holon_api::pattern::PathSegment::Lit(#l.to_string()) }
+                }
+                PathSegment::Builtin(BuiltinRef::Today) => quote! {
+                    holon_api::pattern::PathSegment::Builtin(
+                        holon_api::pattern::BuiltinRef::Today,
+                    )
+                },
+            });
+            quote! {
+                holon_api::pattern::Pattern::BlockExists(holon_api::pattern::PathPattern {
+                    segments: vec![#(#segs),*],
+                })
+            }
         }
+        Pattern::Parent(inner) => {
+            let inner = pattern_tokens(inner);
+            quote! { holon_api::pattern::Pattern::Parent(Box::new(#inner)) }
+        }
+        Pattern::Not(inner) => {
+            let inner = pattern_tokens(inner);
+            quote! { holon_api::pattern::Pattern::Not(Box::new(#inner)) }
+        }
+        Pattern::And(ps) => {
+            let ps = ps.iter().map(pattern_tokens);
+            quote! { holon_api::pattern::Pattern::And(vec![#(#ps),*]) }
+        }
+        Pattern::Or(ps) => {
+            let ps = ps.iter().map(pattern_tokens);
+            quote! { holon_api::pattern::Pattern::Or(vec![#(#ps),*]) }
+        }
+        // The guard-string grammar has no field syntax, and the parser is the
+        // only producer of the patterns reaching here.
+        Pattern::Field { .. } => unreachable!(
+            "Pattern::Field is unreachable from a #[require] guard string: the grammar is \
+             not/and/or over block_exists, has_tag and parent"
+        ),
     }
 }
 

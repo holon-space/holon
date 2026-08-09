@@ -997,7 +997,7 @@ impl OperationProvider for OperationDispatcher {
                 },
                 trigger: None,
                 bound_params: Default::default(),
-                precondition: None,
+                guard: holon_api::pattern::OpGuard::None,
             });
 
             // Add wildcard full_sync operation (clear caches + sync)
@@ -1021,7 +1021,7 @@ impl OperationProvider for OperationDispatcher {
                 },
                 trigger: None,
                 bound_params: Default::default(),
-                precondition: None,
+                guard: holon_api::pattern::OpGuard::None,
             });
         }
 
@@ -1255,7 +1255,7 @@ mod tests {
             },
             trigger: None,
             bound_params: Default::default(),
-            precondition: None,
+            guard: holon_api::pattern::OpGuard::None,
         }
     }
 

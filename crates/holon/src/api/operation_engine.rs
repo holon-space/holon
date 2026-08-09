@@ -1623,7 +1623,7 @@ impl DispatchingOperationEngine {
             trigger: None,
             bound_params: Default::default(),
             affected_fields: vec![],
-            precondition: None,
+            guard: holon_api::pattern::OpGuard::None,
         }
     }
 
@@ -1669,7 +1669,7 @@ impl DispatchingOperationEngine {
             trigger: None,
             bound_params: Default::default(),
             affected_fields: vec![],
-            precondition: None,
+            guard: holon_api::pattern::OpGuard::None,
         }
     }
 
@@ -1723,7 +1723,7 @@ impl DispatchingOperationEngine {
             boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
             trigger: None,
             bound_params: Default::default(),
-            precondition: None,
+            guard: holon_api::pattern::OpGuard::None,
         }
     }
 
