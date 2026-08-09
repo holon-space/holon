@@ -185,6 +185,11 @@ pub use entity::{
 pub use entity_uri::EntityUri;
 // Re-export CompiledExpr from holon-expr for FieldLifetime::Computed
 pub use holon_expr::CompiledExpr;
+// Re-export the free-function extractor + its unoptimized-compile engine: the
+// profile boot path proves every entity-lookup a bundled computed field calls
+// is registered on the engine.
+pub use holon_expr::referenced_functions;
+pub use holon_expr::unoptimized_engine;
 // Re-export inline-mark types (rich text)
 pub use inline_mark::{
     DerivedLink, EntityRef, InlineMark, LinkKind, MarkClass, MarkSpan, SplitContentMarks,

@@ -369,6 +369,15 @@ pub fn create_default_registry() -> Result<Arc<TypeRegistry>> {
     ] {
         let profile = parse_profile_yaml(yaml)
             .with_context(|| "Failed to parse bundled profile YAML".to_string())?;
+        // Fail LOUD at boot if a bundled computed field calls a lookup the engine
+        // never registers — otherwise it errors at eval and silently degrades to
+        // () at WARN, inverting every condition it feeds.
+        crate::validate_lookups_registered(&profile).with_context(|| {
+            format!(
+                "bundled profile '{}' references an unregistered lookup function",
+                profile.entity_name
+            )
+        })?;
         if create_type {
             registry
                 .register(TypeDefinition::new(&profile.entity_name, vec![]))

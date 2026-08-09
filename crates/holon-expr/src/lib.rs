@@ -35,6 +35,17 @@ pub fn bounded_engine() -> Engine {
     engine
 }
 
+/// A compile-only engine with optimization DISABLED, for STATIC ANALYSIS of an
+/// expression's source structure ([`referenced_functions`]). The default Full
+/// optimizer folds an unreachable or standalone unregistered call out of the
+/// AST — so an optimized AST hides lookups the source still names. Registration
+/// validation must see them all, hence no optimization.
+pub fn unoptimized_engine() -> Engine {
+    let mut engine = Engine::new();
+    engine.set_optimization_level(rhai::OptimizationLevel::None);
+    engine
+}
+
 /// A pre-compiled Rhai expression: source kept for debugging, AST for
 /// evaluation.
 ///
@@ -226,6 +237,94 @@ fn is_def_var_guards(ast: &AST) -> BTreeSet<String> {
         true
     });
     guarded
+}
+
+/// The names of every free-function call the expression makes — `foo(args)`,
+/// NOT method calls (`x.foo()`), property reads, or namespace-qualified paths,
+/// which are structurally distinct AST nodes.
+///
+/// This is the substrate for *lookup-registration validation*: a computed field
+/// that calls an entity-lookup function (`document`, `rule_sibling`, …) which
+/// is never registered on the eval engine errors at eval and lands as `()` — a
+/// silent per-field degrade. Collecting the called names lets the boot path
+/// prove every one is either a Rhai builtin or a registered lookup, before any
+/// row is ever rendered.
+pub fn referenced_functions(ast: &AST) -> BTreeSet<String> {
+    let mut called: BTreeSet<String> = BTreeSet::new();
+    ast.walk(&mut |path: &[ASTNode]| {
+        if let ASTNode::Expr(Expr::FnCall(call, _)) = path.last().unwrap() {
+            if call.namespace.is_empty() && is_identifier(&call.name) {
+                called.insert(call.name.to_string());
+            }
+        }
+        true
+    });
+    called
+}
+
+/// A named-function call, not an operator. Rhai lowers operators (`!=`, `&&`,
+/// `+`) into `FnCall` nodes whose names are the operator tokens; only calls
+/// whose name is a Rhai identifier are lookups/builtins a profile author wrote.
+fn is_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+#[cfg(test)]
+mod referenced_functions_tests {
+    use super::*;
+
+    // Registration validation must see EVERY lookup the SOURCE calls, so it
+    // compiles with optimization disabled: Rhai's Full optimizer folds an
+    // unreachable/standalone unregistered call out of the AST, but the source
+    // still references it — a landmine the moment a guard stops folding.
+    fn fns(src: &str) -> BTreeSet<String> {
+        referenced_functions(
+            &CompiledExpr::compile(&unoptimized_engine(), src)
+                .unwrap()
+                .ast,
+        )
+    }
+
+    fn set(items: &[&str]) -> BTreeSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn free_call_names_are_collected() {
+        assert_eq!(fns("document(document_id)"), set(&["document"]));
+    }
+
+    #[test]
+    fn method_calls_and_properties_are_not_functions() {
+        // `.contains(..)` / `.len` are method/property nodes, not free calls.
+        assert_eq!(fns("tags.contains(\"x\") && tags.len > 0"), set(&[]));
+    }
+
+    #[test]
+    fn builtin_and_lookup_calls_both_surface() {
+        // The caller decides which are builtins vs lookups; both must appear.
+        assert_eq!(
+            fns(
+                "if is_def_var(\"document_id\") && document_id != () { document(document_id) } else { () }"
+            ),
+            set(&["document", "is_def_var"])
+        );
+    }
+
+    #[test]
+    fn namespaced_call_target_is_not_collected() {
+        assert_eq!(fns("foo::bar(x)"), set(&[]));
+    }
+
+    #[test]
+    fn nested_calls_all_surface() {
+        assert_eq!(
+            fns("rule_sibling(parent_id) != () && query_source(id) == ()"),
+            set(&["query_source", "rule_sibling"])
+        );
+    }
 }
 
 #[cfg(test)]

@@ -736,6 +736,152 @@ fn register_entity_lookups(engine: &mut RhaiEngine, live_entities: &LiveEntities
     }
 }
 
+/// Rhai standard-library functions that may appear as a bare (non-method) call
+/// in a computed field and must NOT be mistaken for an entity lookup. Two
+/// sources feed this: functions a `StandardPackage` engine resolves free-form
+/// (`len(x)`, `keys(m)`, `type_of(x)`, `abs(n)`, …) and OPERATORS that Rhai
+/// lowers to identifier-named calls (`x in xs` → `contains`).
+///
+/// This tracks Rhai's `StandardPackage`; the eval engine
+/// (`rhai::Engine::new()`) carries exactly it plus the `LiveEntitySpec`
+/// lookups. Rhai gates its function enumeration (`gen_fn_signatures`) behind
+/// the `metadata` feature, which we do not enable (it embeds signature strings
+/// into every binary), so this list is the maintained mirror. It is generous on
+/// purpose: over-listing only risks missing an unregistered lookup whose name
+/// collides with a stdlib function — implausible for entity lookups
+/// (`document`, `rule_sibling`). If a future bundled field uses a stdlib
+/// function not listed here, the boot guard fails LOUD (never a silent brick)
+/// with a message that names the fix: add it here.
+const RHAI_STDLIB_FREE_FNS: &[&str] = &[
+    // Language / core
+    "is_def_var",
+    "is_def_fn",
+    "is_shared",
+    "type_of",
+    "print",
+    "debug",
+    "eval",
+    "call",
+    "curry",
+    "tag",
+    "set_tag",
+    "hash",
+    // Collections & strings, free form (method form is excluded by the AST walk)
+    "len",
+    "keys",
+    "values",
+    "contains",
+    "index_of",
+    "get",
+    "range",
+    "chars",
+    "split",
+    "chop",
+    "clear",
+    "pop",
+    "push",
+    "shift",
+    "unshift",
+    "insert",
+    "remove",
+    "reverse",
+    "truncate",
+    "extract",
+    "splice",
+    "pad",
+    "dedup",
+    "sort",
+    "filter",
+    "map",
+    "reduce",
+    "reduce_rev",
+    "some",
+    "all",
+    "find",
+    "find_map",
+    "for_each",
+    "retain",
+    "drain",
+    "sub_string",
+    "starts_with",
+    "ends_with",
+    "trim",
+    "replace",
+    "bytes",
+    "append",
+    "mixin",
+    "fill_with",
+    // Numbers & conversion
+    "abs",
+    "sign",
+    "sqrt",
+    "exp",
+    "ln",
+    "log",
+    "pow",
+    "floor",
+    "ceiling",
+    "round",
+    "int",
+    "fraction",
+    "min",
+    "max",
+    "parse_int",
+    "parse_float",
+    "to_int",
+    "to_float",
+    "to_decimal",
+    "to_string",
+    "to_debug",
+    "to_char",
+    "to_upper",
+    "to_lower",
+    "is_odd",
+    "is_even",
+    "is_zero",
+    "is_nan",
+    "is_finite",
+    "is_infinite",
+];
+
+/// Prove every entity-lookup function this profile's computed fields call is
+/// one the engine will resolve — either a registered `LiveEntitySpec` lookup
+/// (wired identically by both storage arms via [`register_entity_lookups`]) or
+/// a Rhai standard-library function ([`RHAI_STDLIB_FREE_FNS`]).
+///
+/// Rhai resolves functions at CALL time, so an unregistered lookup compiles
+/// cleanly, then errors at eval and lands as `()` in the scope — a silent
+/// per-field degrade at WARN that inverts every condition the field feeds. This
+/// makes that unrepresentable past boot: an unresolvable call is a loud error
+/// naming the offending field and function, raised while the bundled profiles
+/// load, before any row is ever rendered.
+pub fn validate_lookups_registered(profile: &ParsedProfile) -> Result<()> {
+    let registered: BTreeSet<String> = LiveEntitySpec::ALL
+        .iter()
+        .map(|spec| spec.entity_name().as_str().replace('-', "_"))
+        .collect();
+    let engine = holon_api::unoptimized_engine();
+    for (field, source) in &profile.computed {
+        let compiled = CompiledExpr::compile(&engine, source.as_str())
+            .map_err(|e| anyhow::anyhow!("computed field '{field}' failed to compile: {e}"))?;
+        for called in holon_api::referenced_functions(&compiled.ast) {
+            if RHAI_STDLIB_FREE_FNS.contains(&called.as_str()) || registered.contains(&called) {
+                continue;
+            }
+            anyhow::bail!(
+                "profile '{}' computed field '{field}' calls `{called}`, which the eval engine \
+                 will not resolve: it is neither a registered entity lookup (registered: \
+                 {registered:?}) nor a listed Rhai stdlib function. Rhai resolves calls at eval \
+                 time, so it compiles, then errors and silently degrades the field to () at WARN. \
+                 If `{called}` is an entity lookup, register it via LiveEntitySpec; if it is a \
+                 Rhai stdlib function used free-form, add it to RHAI_STDLIB_FREE_FNS.",
+                profile.entity_name,
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Convert a StorageEntity (HashMap<String, Value>) to a Rhai map.
 /// Flattens `properties` sub-object into top-level keys.
 fn storage_entity_to_rhai_map(entity: &StorageEntity) -> rhai::Dynamic {
@@ -1805,6 +1951,82 @@ variants:
 
     const BLOCK_PROFILE_YAML: &str =
         include_str!("../../../assets/default/types/block_profile.yaml");
+    const PERSON_PROFILE_YAML: &str =
+        include_str!("../../../assets/default/types/person_profile.yaml");
+    const COLLECTION_PROFILE_YAML: &str =
+        include_str!("../../../assets/default/types/collection_profile.yaml");
+
+    /// Every lookup function a SHIPPED computed field calls must be one the
+    /// engine registers — otherwise the field errors at eval and silently
+    /// degrades to () at WARN (the gap #44's verifier named). This is the same
+    /// check the boot path runs; a red here means a bundled profile references
+    /// an unregistered lookup.
+    #[test]
+    fn bundled_profiles_only_call_registered_lookups() {
+        for (name, yaml) in [
+            ("block", BLOCK_PROFILE_YAML),
+            ("person", PERSON_PROFILE_YAML),
+            ("collection", COLLECTION_PROFILE_YAML),
+        ] {
+            let profile = parse_profile_yaml(yaml).expect("bundled profile parses");
+            validate_lookups_registered(&profile).unwrap_or_else(|e| {
+                panic!("bundled profile '{name}' has an unregistered lookup: {e:#}")
+            });
+        }
+    }
+
+    /// The check FIRES: a computed field calling a function that is neither a
+    /// Rhai builtin nor a registered lookup fails loud, naming both the field
+    /// and the function — the boot guard, not a render-time WARN.
+    #[test]
+    fn validate_flags_an_unregistered_lookup() {
+        let profile: ParsedProfile = serde_yaml::from_str(
+            "entity_name: block\ncomputed:\n  bad: 'ghost_lookup(id) != ()'\n",
+        )
+        .unwrap();
+        let err = validate_lookups_registered(&profile)
+            .expect_err("an unregistered lookup must fail loud");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("ghost_lookup"), "names the function: {msg}");
+        assert!(msg.contains("bad"), "names the field: {msg}");
+    }
+
+    /// The registered lookups (`query_source`, `rule_sibling`) and the builtin
+    /// `is_def_var` all pass — the check is not over-eager.
+    #[test]
+    fn validate_accepts_registered_lookups_and_builtins() {
+        let profile: ParsedProfile = serde_yaml::from_str(
+            "entity_name: block\ncomputed:\n  ok: 'is_def_var(\"x\") && query_source(id) != () && rule_sibling(parent_id) == ()'\n",
+        )
+        .unwrap();
+        validate_lookups_registered(&profile).expect("registered lookups + builtins are accepted");
+    }
+
+    /// Regression pin (do not narrow `RHAI_STDLIB_FREE_FNS`): a computed field
+    /// using the two most natural Rhai stdlib forms — the `in` operator, which
+    /// lowers to a `contains` call, and free-form `len(tags)` — must NOT be
+    /// flagged as an unregistered lookup. A narrowing that re-bricked boot on
+    /// `x in tags` reds here.
+    #[test]
+    fn validate_does_not_flag_rhai_stdlib_free_functions() {
+        let profile: ParsedProfile = serde_yaml::from_str(
+            "entity_name: block\ncomputed:\n  ok: '(\"x\" in tags) && len(tags) > 0 && type_of(tags) == \"array\"'\n",
+        )
+        .unwrap();
+        // Prove the `in`→contains lowering + free `len`/`type_of` are actually
+        // present in the analysed AST (else the test would pass vacuously).
+        let compiled =
+            CompiledExpr::compile(&holon_api::unoptimized_engine(), &profile.computed["ok"])
+                .unwrap();
+        let called = holon_api::referenced_functions(&compiled.ast);
+        assert!(
+            called.contains("contains"),
+            "`in` lowers to contains: {called:?}"
+        );
+        assert!(called.contains("len"), "free len present: {called:?}");
+        validate_lookups_registered(&profile)
+            .expect("Rhai stdlib free functions must never be flagged as unregistered lookups");
+    }
 
     /// Rhai engine with the DB-backed lookups the block profile's computed
     /// fields call. `rule_sibling(parent_id)` returns a non-unit row iff
