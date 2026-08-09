@@ -7,6 +7,7 @@ members = [
     "crates/holon-turso",
     "crates/holon-engine",
     "crates/holon-expr",
+    "crates/holon-pattern",
     "crates/holon-org-format",
     "crates/holon-toon",
     "crates/holon-orgmode",
@@ -195,6 +196,7 @@ holon-oracles = { path = "crates/holon-oracles" }
 holon-core = { path = "crates/holon-core" }
 holon-engine = { path = "crates/holon-engine" }
 holon-expr = { path = "crates/holon-expr" }
+holon-pattern = { path = "crates/holon-pattern" }
 holon-petri = { path = "crates/holon-petri" }
 holon-profiles = { path = "crates/holon-profiles" }
 # default-features = false drops holon-loro's `iroh-sync` (iroh → QUIC/TLS/ring,
