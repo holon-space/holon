@@ -85,6 +85,26 @@ impl Fixtures {
     fn block(&self, id: &EntityUri) -> Block {
         self.0.lock().unwrap().by_id[id].clone()
     }
+
+    /// Add a SECOND live page under the same directory page, carrying `title`
+    /// and owning NO file — a fileless owner of that name chain. Its one child
+    /// block stands in for the user content only the store holds.
+    fn add_fileless_page(&self, id: &str, title: &str) -> (EntityUri, EntityUri) {
+        let dir_id = EntityUri::block(DIR_TITLE);
+        let page = page(id, dir_id.clone(), title);
+        let child = non_page(
+            &format!("{id}child"),
+            page.id.clone(),
+            "a line only the store holds",
+        );
+
+        let mut store = self.0.lock().unwrap();
+        store.by_id.insert(page.id.clone(), page.clone());
+        store.by_id.insert(child.id.clone(), child.clone());
+        store.children.entry(dir_id).or_default().push(page.clone());
+        store.children.insert(page.id.clone(), vec![child.clone()]);
+        (page.id, child.id)
+    }
 }
 
 #[async_trait]
@@ -169,10 +189,21 @@ impl DocumentManager for Fixtures {
     }
 }
 
-struct NoopOrdering;
+/// Records every `delete_in_tree` so a test can assert which blocks a cascade
+/// removed — the store-side twin of asserting which files survived on disk.
+#[derive(Default)]
+struct RecordingOrdering {
+    deleted: Mutex<Vec<String>>,
+}
+
+impl RecordingOrdering {
+    fn deleted(&self) -> Vec<String> {
+        self.deleted.lock().unwrap().clone()
+    }
+}
 
 #[async_trait]
-impl BlockOrdering for NoopOrdering {
+impl BlockOrdering for RecordingOrdering {
     async fn place(
         &self,
         _: &EntityUri,
@@ -199,7 +230,13 @@ impl BlockOrdering for NoopOrdering {
     async fn update_in_tree(&self, _: holon_api::StorageEntity) -> OrderingResult<()> {
         Ok(())
     }
-    async fn delete_in_tree(&self, _: holon_api::StorageEntity) -> OrderingResult<()> {
+    async fn delete_in_tree(&self, params: holon_api::StorageEntity) -> OrderingResult<()> {
+        let id = params
+            .get("id")
+            .and_then(|v| v.as_string())
+            .expect("delete_in_tree is always called with an `id`")
+            .to_string();
+        self.deleted.lock().unwrap().push(id);
         Ok(())
     }
 }
@@ -260,11 +297,20 @@ fn build_controller(
     root: &Path,
     registrar: Option<Arc<MapAliasRegistrar>>,
 ) -> holon_filesystem::FileSyncController {
+    build_controller_with_ordering(f, root, registrar, Arc::new(RecordingOrdering::default()))
+}
+
+fn build_controller_with_ordering(
+    f: &Fixtures,
+    root: &Path,
+    registrar: Option<Arc<MapAliasRegistrar>>,
+    ordering: Arc<RecordingOrdering>,
+) -> holon_filesystem::FileSyncController {
     let controller = new_org_sync_controller(
         Arc::new(f.clone()),
         Arc::new(f.clone()),
         root.to_path_buf(),
-        Arc::new(NoopOrdering),
+        ordering,
         Arc::new(RealFileSystem),
     );
     match registrar {
@@ -402,6 +448,96 @@ async fn a_rename_does_not_delete_a_second_pages_document_at_the_same_path() {
 #[tokio::test]
 async fn a_rename_does_not_delete_a_file_with_no_id_header() {
     a_rename_refuses_to_delete("* a plain org file a user dropped here\n").await;
+}
+
+// ---------------------------------------------------------------------------
+// Cascade safety. The retire above deletes a file, so the watcher delivers a
+// delete event for a path Holon itself vacated. Nothing about that event says
+// which document — if any — the vanished bytes belonged to, and resolving it by
+// the path's NAME finds whatever page answers to that name today.
+// ---------------------------------------------------------------------------
+
+/// The retired home's own delete event must not cascade-delete a DIFFERENT live
+/// page that merely answers to the vacated name.
+///
+/// After the retire, `forget_file_state` has dropped the path's
+/// `last_projection`, so `on_file_deleted` cannot read the vanished file's
+/// `#+ID:` and falls back to a name-chain lookup on the now-vacated chain. A
+/// FILELESS page carrying the old title (a page the store holds but no file
+/// backs — a rule-minted page, a `convert_block_to_page` result, a page whose
+/// materialize has not run) answers that lookup, and the id-based reunification
+/// scan cannot save it: it owns no tracked file for the scan to find.
+#[tokio::test]
+async fn retiring_a_stale_home_does_not_cascade_delete_a_fileless_namesake_page() {
+    let f = Fixtures::seeded(OLD_TITLE);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = vault_root(&tmp);
+    let ordering = Arc::new(RecordingOrdering::default());
+    let mut controller = build_controller_with_ordering(&f, &root, None, ordering.clone());
+
+    let original = f.block(&Fixtures::page_id());
+    write_back(&mut controller, &original)
+        .await
+        .expect("the page's first write-back must land");
+
+    let old_file = root.join(DIR_TITLE).join(format!("{OLD_TITLE}.org"));
+    assert!(old_file.exists(), "precondition: {old_file:?} must exist");
+
+    // The rename frees the old title, and an unrelated live page holds it.
+    f.retitle(NEW_TITLE);
+    let (namesake, namesake_child) = f.add_fileless_page("pgnamesake", OLD_TITLE);
+    let renamed = f.block(&Fixtures::page_id());
+    write_back(&mut controller, &renamed)
+        .await
+        .expect("renaming a page must not crash the sync loop");
+    assert!(
+        !old_file.exists(),
+        "precondition: the retire must have removed {old_file:?}"
+    );
+
+    // The watcher delivers the delete event for the file Holon itself removed.
+    controller
+        .on_file_changed(&old_file)
+        .await
+        .expect("the retire's own delete event must not fail the sync loop");
+
+    assert_eq!(
+        ordering.deleted(),
+        Vec::<String>::new(),
+        "the retire's own delete event cascade-deleted the FILELESS page {namesake} (child \
+         {namesake_child}) — a live document that never lived at {old_file:?}"
+    );
+}
+
+/// The discriminating control: a file the user genuinely removes still
+/// cascades. The proof gate has to refuse the NAME GUESS, not every deletion.
+#[tokio::test]
+async fn a_users_deletion_of_a_tracked_file_still_cascades() {
+    let f = Fixtures::seeded(OLD_TITLE);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = vault_root(&tmp);
+    let ordering = Arc::new(RecordingOrdering::default());
+    let mut controller = build_controller_with_ordering(&f, &root, None, ordering.clone());
+
+    let original = f.block(&Fixtures::page_id());
+    write_back(&mut controller, &original)
+        .await
+        .expect("the page's first write-back must land");
+
+    let old_file = root.join(DIR_TITLE).join(format!("{OLD_TITLE}.org"));
+    std::fs::remove_file(&old_file).expect("the user removes the page's file");
+    controller
+        .on_file_changed(&old_file)
+        .await
+        .expect("an external deletion must not fail the sync loop");
+
+    assert!(
+        ordering
+            .deleted()
+            .contains(&Fixtures::page_id().to_string()),
+        "the user's deletion of {old_file:?} did NOT cascade — deleted: {:?}",
+        ordering.deleted()
+    );
 }
 
 /// Cold boot of an UNCHANGED vault: `initialize` loads the hash the previous
