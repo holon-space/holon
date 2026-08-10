@@ -698,7 +698,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             sut.redo_burned
                 .extend(retired.iter().map(|(_, real)| real.clone()));
         }
-        sut.burned.extend(retired);
+        sut.burned.extend(retired.clone());
         // Born-equal doc pages: `WriteOrgFile` pins the oracle's `block:ref-doc-N`
         // into the file via `#+ID:`, so the SUT ingests the SAME id — synthetic in
         // scheme, but with no fresh real partner. Self-map those (identity), like
@@ -754,11 +754,13 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             .filter(|id| !ref_state.domain.block_state.blocks.contains_key(*id))
             .cloned()
             .collect();
+        let vanished: Vec<&EntityUri> = before.difference(&after).collect();
         assert_eq!(
             synthetic.len(),
             real_new.len(),
             "per-tick reconcile: one synthetic per minted real id (syn={synthetic:?}, \
-             real={real_new:?})"
+             real={real_new:?}); this tick RETIRED {retired:?} and the SUT LOST \
+             {vanished:?} from block_raw"
         );
         // Pairing safety for the R2 StaleExternalRewrite CHURN (multiple mints in
         // one tick, unlike the usual one-mint transitions this zip was written for):
