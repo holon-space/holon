@@ -67,6 +67,7 @@ impl StubProvider {
             trigger: None,
             bound_params: Default::default(),
             guard: holon_api::pattern::OpGuard::None,
+            arcs: holon_api::arcs::TransitionArcs::Undeclared,
         }
     }
 }

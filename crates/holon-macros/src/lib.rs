@@ -397,6 +397,22 @@ pub fn require(_: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+/// No-op proc macro for `#[reads("relation.field", …)]`, so Rust's parser
+/// accepts the attribute. `operations_trait` parses the place literals at
+/// expansion time into `TransitionArcs` (ADR 0031 Increment 2).
+#[proc_macro_attribute]
+pub fn reads(_: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
+/// No-op proc macro for `#[emits("relation.field", …)]` and
+/// `#[emits(excluded("relation.field", "why"))]`, so Rust's parser accepts the
+/// attribute. `operations_trait` does the real work.
+#[proc_macro_attribute]
+pub fn emits(_: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
 /// Auto-discover builder modules and generate registration function.
 ///
 /// Scans a directory for `.rs` files, emits `mod` declarations for each,

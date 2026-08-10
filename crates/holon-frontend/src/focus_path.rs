@@ -1374,6 +1374,7 @@ mod tests {
                     },
                 },
                 guard: holon_api::pattern::OpGuard::None,
+                arcs: holon_api::arcs::TransitionArcs::Undeclared,
             },
         });
 
@@ -1435,6 +1436,7 @@ mod tests {
                         surface: holon_api::NonMenuSurface::Test,
                     },
                     guard: holon_api::pattern::OpGuard::None,
+                    arcs: holon_api::arcs::TransitionArcs::Undeclared,
                 },
             },
             OperationWiring {
@@ -1462,6 +1464,7 @@ mod tests {
                         },
                     },
                     guard: holon_api::pattern::OpGuard::None,
+                    arcs: holon_api::arcs::TransitionArcs::Undeclared,
                 },
             },
         ];
@@ -1596,6 +1599,7 @@ mod tests {
                     surface: holon_api::NonMenuSurface::Test,
                 },
                 guard: holon_api::pattern::OpGuard::None,
+                arcs: holon_api::arcs::TransitionArcs::Undeclared,
             },
         });
 
@@ -1663,6 +1667,7 @@ mod tests {
                     surface: holon_api::NonMenuSurface::Test,
                 },
                 guard: holon_api::pattern::OpGuard::None,
+                arcs: holon_api::arcs::TransitionArcs::Undeclared,
             },
         });
 

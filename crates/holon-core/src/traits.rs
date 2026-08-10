@@ -580,7 +580,27 @@ where
     /// Set single field (returns changes and inverse operation for undo)
     /// Note: affected_fields is determined dynamically based on the field
     /// parameter
+    ///
+    /// The arcs are the STATIC over-approximation of that dynamic choice: the
+    /// closed intent vocabulary `BlockWriteField::parse` admits, plus the two
+    /// edge fields the edge-field writers route through here. `reads` mirrors
+    /// `emits` because the inverse this returns carries the place's prior
+    /// value, so every place it may write it first reads.
     #[holon_macros::boundary_behavior(private_only)]
+    #[holon_macros::reads("block.content", "block.content_type")]
+    #[holon_macros::reads("block.source_language", "block.source_name")]
+    #[holon_macros::reads("block.marks", "block.collapsed", "block.widget_only")]
+    #[holon_macros::reads("block.completed", "block.block_type", "block.properties")]
+    #[holon_macros::reads("block.tags", "block.task_state", "block.parent_id")]
+    #[holon_macros::reads("block.requires", "block.advice_suppressed")]
+    #[holon_macros::emits("block.content", "block.content_type")]
+    #[holon_macros::emits("block.source_language", "block.source_name")]
+    #[holon_macros::emits("block.marks", "block.collapsed", "block.widget_only")]
+    #[holon_macros::emits("block.completed", "block.block_type", "block.properties")]
+    #[holon_macros::emits("block.tags", "block.task_state", "block.parent_id")]
+    #[holon_macros::emits("block.requires", "block.advice_suppressed")]
+    #[holon_macros::emits(excluded("block.sort_key", "the ordering authority mints order keys"))]
+    #[holon_macros::emits(excluded("block.after_block_id", "a positional anchor, not a column"))]
     async fn set_field(&self, id: &str, field: &str, value: Value) -> Result<OperationResult>;
 
     /// Create new entity (returns new ID, changes, and inverse operation for
@@ -2842,6 +2862,7 @@ pub fn generate_sync_operation(provider_name: &str) -> OperationDescriptor {
         trigger: None,
         bound_params: std::collections::HashMap::new(),
         guard: holon_api::pattern::OpGuard::None,
+        arcs: holon_api::arcs::TransitionArcs::Undeclared,
     }
 }
 

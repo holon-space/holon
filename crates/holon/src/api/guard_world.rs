@@ -72,6 +72,11 @@ pub trait GuardWorld: Send + Sync {
 /// CurrentSchema`]: the block relation has no `name` column (a block's name is
 /// its `content`), and `clock` holds one row PER GRAIN, so `{today}` must read
 /// the day row or a guard would bind three differently-formatted labels.
+///
+/// The columns named here are also arc places: `BLOCK_FIELDS` / `CLOCK_FIELDS`
+/// in `holon-pattern/src/arcs.rs` is the closed vocabulary `#[reads]`/
+/// `#[emits]` parse against. A column added here that an op may name must be
+/// added there too, or the declaration will not compile.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ProjectionSchema;
 

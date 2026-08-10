@@ -1075,6 +1075,7 @@ impl OperationProvider for OperationDispatcher {
                 trigger: None,
                 bound_params: Default::default(),
                 guard: holon_api::pattern::OpGuard::None,
+                arcs: holon_api::arcs::TransitionArcs::Undeclared,
             });
 
             // Add wildcard full_sync operation (clear caches + sync)
@@ -1099,6 +1100,7 @@ impl OperationProvider for OperationDispatcher {
                 trigger: None,
                 bound_params: Default::default(),
                 guard: holon_api::pattern::OpGuard::None,
+                arcs: holon_api::arcs::TransitionArcs::Undeclared,
             });
         }
 
@@ -1336,6 +1338,7 @@ mod tests {
             trigger: None,
             bound_params: Default::default(),
             guard: holon_api::pattern::OpGuard::None,
+            arcs: holon_api::arcs::TransitionArcs::Undeclared,
         }
     }
 

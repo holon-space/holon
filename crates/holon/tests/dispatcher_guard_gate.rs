@@ -95,6 +95,7 @@ fn descriptor(op: &str, guard: OpGuard) -> OperationDescriptor {
         trigger: None,
         bound_params: Default::default(),
         guard,
+        arcs: holon_api::arcs::TransitionArcs::Undeclared,
     }
 }
 

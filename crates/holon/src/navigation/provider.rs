@@ -67,6 +67,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             trigger: None,
             bound_params: Default::default(),
             guard: holon_api::pattern::OpGuard::None,
+            arcs: holon_api::arcs::TransitionArcs::Undeclared,
         },
         OperationDescriptor {
             entity_name: ENTITY_NAME.into(),
@@ -94,6 +95,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             trigger: None,
             bound_params: Default::default(),
             guard: holon_api::pattern::OpGuard::None,
+            arcs: holon_api::arcs::TransitionArcs::Undeclared,
         },
         OperationDescriptor {
             entity_name: ENTITY_NAME.into(),
@@ -117,6 +119,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             trigger: None,
             bound_params: Default::default(),
             guard: holon_api::pattern::OpGuard::None,
+            arcs: holon_api::arcs::TransitionArcs::Undeclared,
         },
         OperationDescriptor {
             entity_name: ENTITY_NAME.into(),
@@ -136,6 +139,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             trigger: None,
             bound_params: Default::default(),
             guard: holon_api::pattern::OpGuard::None,
+            arcs: holon_api::arcs::TransitionArcs::Undeclared,
         },
         OperationDescriptor {
             entity_name: ENTITY_NAME.into(),
@@ -155,6 +159,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             trigger: None,
             bound_params: Default::default(),
             guard: holon_api::pattern::OpGuard::None,
+            arcs: holon_api::arcs::TransitionArcs::Undeclared,
         },
         OperationDescriptor {
             entity_name: ENTITY_NAME.into(),
@@ -174,6 +179,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             trigger: None,
             bound_params: Default::default(),
             guard: holon_api::pattern::OpGuard::None,
+            arcs: holon_api::arcs::TransitionArcs::Undeclared,
         },
         OperationDescriptor {
             entity_name: ENTITY_NAME.into(),
@@ -204,6 +210,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             trigger: None,
             bound_params: Default::default(),
             guard: holon_api::pattern::OpGuard::None,
+            arcs: holon_api::arcs::TransitionArcs::Undeclared,
         },
         OperationDescriptor {
             entity_name: ENTITY_NAME.into(),
@@ -234,6 +241,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             trigger: None,
             bound_params: Default::default(),
             guard: holon_api::pattern::OpGuard::None,
+            arcs: holon_api::arcs::TransitionArcs::Undeclared,
         },
     ];
     manual_ops

@@ -10,6 +10,7 @@
 //! `holon-api` re-exports both, so `holon_api::pattern::*` and
 //! `holon_api::Value` stay the canonical consumer paths.
 
+pub mod arcs;
 pub mod pattern;
 mod value;
 

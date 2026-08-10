@@ -1,3 +1,7 @@
+use holon_pattern::arcs::ArcEmit;
+use holon_pattern::arcs::ArcPlace;
+use holon_pattern::arcs::ArcRelation;
+use holon_pattern::arcs::TransitionArcs;
 use holon_pattern::pattern::BuiltinRef;
 use holon_pattern::pattern::Guard;
 use holon_pattern::pattern::OpGuard;
@@ -12,6 +16,7 @@ use syn::ItemTrait;
 use syn::Meta;
 use syn::Pat;
 use syn::Type;
+use syn::punctuated::Punctuated;
 
 pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
     // Parse provider_name from attribute: #[operations_trait(provider_name =
@@ -195,6 +200,20 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                 }
             };
 
+            // The declared transition arcs (ADR 0031 Increment 2): the
+            // `#[reads]`/`#[emits]` place literals are parsed HERE, at
+            // expansion time, so an unknown relation is a compile error.
+            let arcs_field = match extract_transition_arcs(&method.attrs) {
+                Ok(arcs) => {
+                    let expr = transition_arcs_tokens(&arcs);
+                    quote! { arcs: #expr, }
+                }
+                Err(err) => {
+                    let err = err.to_compile_error();
+                    quote! { arcs: { #err }, }
+                }
+            };
+
             // Extract affected fields from #[operation(affects = [...])] attribute
             let affected_fields = extract_affected_fields(&method.attrs);
             let affected_fields_expr = if affected_fields.is_empty() {
@@ -292,6 +311,7 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                         trigger: None,
                         bound_params: ::std::collections::HashMap::new(),
                         #guard_field
+                        #arcs_field
                     }
                 }
             }
@@ -1191,6 +1211,187 @@ fn op_guard_tokens(guard: &OpGuard) -> proc_macro2::TokenStream {
     }
 }
 
+/// Exclusion reasons are prose, so rustfmt's `format_strings` can rewrap them.
+/// Prose cannot silently change meaning the way a guard can, but a reason long
+/// enough to wrap is a reason that is explaining a design problem instead of
+/// naming an authority.
+const MAX_ARC_REASON_LEN: usize = 80;
+
+/// One item inside `#[emits(...)]`: a place literal, or `excluded(place,
+/// reason)`.
+enum ParsedEmit {
+    Writes(syn::LitStr),
+    Excluded(syn::LitStr, syn::LitStr),
+}
+
+impl syn::parse::Parse for ParsedEmit {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        if input.peek(syn::LitStr) {
+            return Ok(ParsedEmit::Writes(input.parse()?));
+        }
+        let keyword: syn::Ident = input.parse().map_err(|_| {
+            input.error(
+                "#[emits] takes place STRING literals, or excluded(\"relation.field\", \"why\")",
+            )
+        })?;
+        if keyword != "excluded" {
+            return Err(syn::Error::new_spanned(
+                &keyword,
+                format!("unknown #[emits] form {keyword}; the only form is excluded(…)"),
+            ));
+        }
+        let inner;
+        syn::parenthesized!(inner in input);
+        let place: syn::LitStr = inner.parse()?;
+        inner.parse::<syn::Token![,]>().map_err(|_| {
+            syn::Error::new_spanned(
+                &place,
+                "excluded(…) requires a REASON: silence about a written place is the red this \
+                 declaration exists to prevent",
+            )
+        })?;
+        let reason: syn::LitStr = inner.parse()?;
+        Ok(ParsedEmit::Excluded(place, reason))
+    }
+}
+
+/// Parse one `relation.field` literal into an [`ArcPlace`], reporting a parse
+/// failure at the literal's own span (the `#[require]` precedent).
+fn parse_arc_place(lit: &syn::LitStr) -> syn::Result<ArcPlace> {
+    ArcPlace::parse(&lit.value())
+        .map_err(|e| syn::Error::new_spanned(lit, format!("invalid arc place: {e}")))
+}
+
+/// Attribute-path match that accepts both the bare and the `holon_macros::`
+/// qualified spelling, as `#[require]` does.
+fn attr_is(attr: &syn::Attribute, name: &str) -> bool {
+    attr.path().is_ident(name)
+        || (attr.path().segments.len() == 2
+            && attr.path().segments[0].ident == "holon_macros"
+            && attr.path().segments[1].ident == name)
+}
+
+/// Parse every `#[reads(...)]` / `#[emits(...)]` on a method into the declared
+/// [`TransitionArcs`] (ADR 0031 Increment 2).
+///
+/// Places are parsed HERE, at expansion time, so an unknown relation is a
+/// compile error pointing at the literal. Absent both attributes the op is
+/// [`TransitionArcs::Undeclared`] — "not simulatable", never "writes nothing".
+fn extract_transition_arcs(attrs: &[syn::Attribute]) -> syn::Result<TransitionArcs> {
+    let mut reads: Vec<ArcPlace> = Vec::new();
+    let mut emits: Vec<ArcEmit> = Vec::new();
+    let mut saw_reads = false;
+    let mut saw_emits = false;
+
+    for attr in attrs {
+        let is_reads = attr_is(attr, "reads");
+        let is_emits = attr_is(attr, "emits");
+        if !is_reads && !is_emits {
+            continue;
+        }
+        let Meta::List(meta_list) = &attr.meta else {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "#[reads]/#[emits] take a parenthesized list of \"relation.field\" literals",
+            ));
+        };
+        if is_reads {
+            saw_reads = true;
+            let lits = meta_list
+                .parse_args_with(Punctuated::<syn::LitStr, syn::Token![,]>::parse_terminated)?;
+            for lit in &lits {
+                reads.push(parse_arc_place(lit)?);
+            }
+        } else {
+            saw_emits = true;
+            let items = meta_list
+                .parse_args_with(Punctuated::<ParsedEmit, syn::Token![,]>::parse_terminated)?;
+            for item in &items {
+                match item {
+                    ParsedEmit::Writes(lit) => emits.push(ArcEmit::Writes(parse_arc_place(lit)?)),
+                    ParsedEmit::Excluded(place, reason) => {
+                        let text = reason.value();
+                        if text.len() > MAX_ARC_REASON_LEN {
+                            return Err(syn::Error::new_spanned(
+                                reason,
+                                format!(
+                                    "exclusion reason is {} characters, over the \
+                                     {MAX_ARC_REASON_LEN}-character limit — name the authority \
+                                     that owns the place, do not explain the design here",
+                                    text.len()
+                                ),
+                            ));
+                        }
+                        emits.push(ArcEmit::Excluded {
+                            place: parse_arc_place(place)?,
+                            reason: text,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    if !saw_reads && !saw_emits {
+        return Ok(TransitionArcs::Undeclared);
+    }
+    if !saw_emits {
+        return Err(syn::Error::new_spanned(
+            attrs
+                .iter()
+                .find(|a| attr_is(a, "reads"))
+                .expect("saw_reads ⇒ a #[reads] attribute exists"),
+            "an op that declares #[reads] must also declare #[emits] — declaring inputs while \
+             staying silent about outputs is exactly what Undeclared already says. Write \
+             #[emits()] for a genuinely read-only op.",
+        ));
+    }
+    Ok(TransitionArcs::Declared { reads, emits })
+}
+
+/// Emit the parsed arcs as a literal constructor expression — plain
+/// serializable data, for the same dual-consumer reason as the guard.
+fn transition_arcs_tokens(arcs: &TransitionArcs) -> proc_macro2::TokenStream {
+    match arcs {
+        TransitionArcs::Undeclared => quote! { holon_api::arcs::TransitionArcs::Undeclared },
+        TransitionArcs::Declared { reads, emits } => {
+            let read_exprs = reads.iter().map(arc_place_tokens);
+            let emit_exprs = emits.iter().map(|e| match e {
+                ArcEmit::Writes(place) => {
+                    let place = arc_place_tokens(place);
+                    quote! { holon_api::arcs::ArcEmit::Writes(#place) }
+                }
+                ArcEmit::Excluded { place, reason } => {
+                    let place = arc_place_tokens(place);
+                    quote! {
+                        holon_api::arcs::ArcEmit::Excluded {
+                            place: #place,
+                            reason: #reason.to_string(),
+                        }
+                    }
+                }
+            });
+            quote! {
+                holon_api::arcs::TransitionArcs::Declared {
+                    reads: vec![#(#read_exprs),*],
+                    emits: vec![#(#emit_exprs),*],
+                }
+            }
+        }
+    }
+}
+
+fn arc_place_tokens(place: &ArcPlace) -> proc_macro2::TokenStream {
+    let relation = match place.relation {
+        ArcRelation::Block => quote! { holon_api::arcs::ArcRelation::Block },
+        ArcRelation::Clock => quote! { holon_api::arcs::ArcRelation::Clock },
+    };
+    let field = &place.field;
+    quote! {
+        holon_api::arcs::ArcPlace { relation: #relation, field: #field.to_string() }
+    }
+}
+
 fn pattern_tokens(pattern: &Pattern) -> proc_macro2::TokenStream {
     match pattern {
         Pattern::HasTag(tag) => quote! { holon_api::pattern::Pattern::HasTag(#tag.to_string()) },
@@ -1477,5 +1678,65 @@ fn menu_exposure_tokens(variant: Option<String>) -> proc_macro2::TokenStream {
                 surface: holon_api::NonMenuSurface::ProviderDefault,
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod arc_attribute_tests {
+    use super::*;
+
+    fn arcs_of(attrs: Vec<syn::Attribute>) -> syn::Result<TransitionArcs> {
+        extract_transition_arcs(&attrs)
+    }
+
+    /// A typo'd place is a COMPILE ERROR at the literal, not a declaration that
+    /// is silently true forever. This is the macro-side half of the closed
+    /// field list; `holon-pattern` owns the vocabulary itself.
+    #[test]
+    fn an_unknown_field_is_a_macro_error_naming_the_place() {
+        let err = arcs_of(vec![
+            syn::parse_quote!(#[emits("block.totally_bogus_field_xyz")]),
+        ])
+        .expect_err("an unknown place must not expand");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("totally_bogus_field_xyz") && msg.contains("has no place"),
+            "the error must name the offending place: {msg}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_relation_is_a_macro_error() {
+        let err = arcs_of(vec![syn::parse_quote!(#[reads("document.title")])])
+            .expect_err("an unknown relation must not expand");
+        assert!(err.to_string().contains("unknown arc relation"));
+    }
+
+    /// Declaring inputs while staying silent about outputs is what `Undeclared`
+    /// already says, so the half-declaration is refused.
+    #[test]
+    fn reads_without_emits_is_refused() {
+        let err = arcs_of(vec![syn::parse_quote!(#[reads("block.content")])])
+            .expect_err("reads alone must not expand");
+        assert!(err.to_string().contains("must also declare #[emits]"));
+    }
+
+    /// An exclusion without a reason is silence wearing a declaration's
+    /// clothes.
+    #[test]
+    fn excluded_without_a_reason_is_refused() {
+        let err = arcs_of(vec![
+            syn::parse_quote!(#[emits(excluded("block.sort_key"))]),
+        ])
+        .expect_err("a reasonless exclusion must not expand");
+        assert!(err.to_string().contains("requires a REASON"));
+    }
+
+    #[test]
+    fn absent_attributes_yield_undeclared() {
+        assert_eq!(
+            arcs_of(vec![syn::parse_quote!(#[doc = "unrelated"])]).expect("no arc attrs"),
+            TransitionArcs::Undeclared
+        );
     }
 }

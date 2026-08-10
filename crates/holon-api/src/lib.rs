@@ -149,6 +149,11 @@ pub fn is_seed_layout_doc(id: &EntityUri) -> bool {
 
 // Re-export block types
 // Re-export auth types
+pub use arcs::ArcEmit;
+pub use arcs::ArcParseError;
+pub use arcs::ArcPlace;
+pub use arcs::ArcRelation;
+pub use arcs::TransitionArcs;
 pub use auth::ProviderAuthStatus;
 pub use block::Block;
 pub use block::BlockContent;
@@ -189,9 +194,11 @@ pub use holon_expr::CompiledExpr;
 // is registered on the engine.
 pub use holon_expr::referenced_functions;
 pub use holon_expr::unoptimized_engine;
-// The guard AST and the dynamic `Value` live in the leaf crate `holon-pattern`
-// (reachable from `holon-macros`); these re-exports are their canonical paths.
+// The guard AST, the transition-arc vocabulary and the dynamic `Value` live in
+// the leaf crate `holon-pattern` (reachable from `holon-macros`, which parses
+// both declaration surfaces at expansion time); these are their canonical paths.
 pub use holon_pattern::Value;
+pub use holon_pattern::arcs;
 pub use holon_pattern::pattern;
 // Re-export inline-mark types (rich text)
 pub use inline_mark::{
