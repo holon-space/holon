@@ -13,6 +13,7 @@ pub mod di;
 pub mod key_chord_report;
 pub mod keybindings;
 pub mod resources;
+pub mod self_check;
 pub mod server;
 pub mod tools;
 pub mod types;

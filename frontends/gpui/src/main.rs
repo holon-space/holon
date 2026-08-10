@@ -217,6 +217,22 @@ fn main() -> Result<()> {
             }
         });
         *debug.live_debug.write().expect("live_debug cell poisoned") = cell;
+
+        // The invariant catalog the suite runs lives in the pbt-only test crate,
+        // so a release build carries no suite and `run_self_checks` reports that
+        // absence as an error rather than an empty report.
+        #[cfg(feature = "pbt")]
+        {
+            assert!(
+                debug
+                    .self_check_suite
+                    .set(std::sync::Arc::new(
+                        holon_integration_tests::pbt::live_self_check::LiveSelfCheck
+                    ))
+                    .is_ok(),
+                "self_check_suite registered twice"
+            );
+        }
     }
 
     #[cfg(feature = "desktop")]

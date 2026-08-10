@@ -243,6 +243,13 @@ pub struct DebugServices {
     /// answer against the retired engine; this cell fails that failure mode
     /// by being swappable alongside [`LiveMcpBackend`].
     pub live_debug: LiveDebugHandles,
+    /// The class-1 invariant suite `run_self_checks` dispatches to. Registered
+    /// once at boot by the frontend; only a `pbt`-featured build carries an
+    /// implementation, so `None` is a build fact the tool reports as an error
+    /// naming the fix, never as an empty pass. A boot-time `OnceLock` is
+    /// reset-safe here (unlike [`Self::live_debug`]) because the suite reads
+    /// the handles it is HANDED per call, holding none of its own.
+    pub self_check_suite: std::sync::OnceLock<Arc<dyn crate::self_check::LiveSelfCheckSuite>>,
     /// Serializes `send_key_chord` presses across every session's server.
     /// The tool attributes what a chord DID by reading the dispatch journal
     /// between a mark and the press returning; two presses in flight at once
@@ -327,6 +334,7 @@ impl Default for DebugServices {
             reset_tx: std::sync::OnceLock::new(),
             reset_builder: std::sync::OnceLock::new(),
             live_debug: Arc::new(std::sync::RwLock::new(DebugHandlesCell::default())),
+            self_check_suite: std::sync::OnceLock::new(),
             key_chord_press: tokio::sync::Mutex::new(()),
         }
     }
