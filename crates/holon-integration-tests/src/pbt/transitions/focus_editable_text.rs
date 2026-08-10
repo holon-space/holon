@@ -199,10 +199,9 @@ impl<
         // from any currently active editor; prod commits its user-authored
         // pending text on that authority move (focus-binding arm).
         commit_active_editor_if_dirty(state);
-        let saved = state
-            .block_content(&self.block_id)
-            .map(str::to_string)
-            .unwrap_or_default();
+        // The editor opens on the block's SOURCE PROJECTION, not its content
+        // column: a task shows `TODO milk`, and the caret lands after it.
+        let saved = state.editor_surface_text(&self.block_id);
         let cursor_byte = saved.len();
         // Open a fresh (clean) active editor on the target at end-of-content.
         state.open_active_editor(self.block_id.clone(), saved, cursor_byte);

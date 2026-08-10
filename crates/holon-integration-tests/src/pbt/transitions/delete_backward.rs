@@ -126,13 +126,18 @@ where
         // Join boundary = the merge target's pre-join content length —
         // prod returns it in the op response and the (now seed-aware)
         // headless mirror adopts it for the next keystroke.
+        // The join boundary is the merge target's pre-join CONTENT length, and
+        // the editor that consumes it opens on the SURFACE — so it crosses the
+        // keyword prefix on a tasked target, exactly as prod's seed does
+        // (task #93).
         let boundary = state.block_content(&target).map(str::len).unwrap_or(0);
+        let prefix = state
+            .editor_surface_text(&target)
+            .len()
+            .saturating_sub(state.block_content(&target).map_or(0, str::len));
         crate::pbt::transitions::join_block::join_block_apply_to_ref(&block_id, state);
-        let joined = state
-            .block_content(&target)
-            .map(str::to_owned)
-            .unwrap_or_default();
-        state.open_active_editor(target, joined, boundary);
+        let joined = state.editor_surface_text(&target);
+        state.open_active_editor(target, joined, boundary + prefix);
     }
     // Same Phase 2 contract as TypeChars: per-keystroke writes flow
     // through MutableText → Loro → SQL between transitions. The CDC

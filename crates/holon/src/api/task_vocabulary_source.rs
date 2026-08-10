@@ -88,33 +88,32 @@ impl SqlTaskVocabularySource {
         }
         anyhow::bail!("task vocabulary: parent chain of {block_id} exceeds {MAX_HOPS} hops")
     }
-}
 
-#[async_trait]
-impl TaskVocabularySource for SqlTaskVocabularySource {
-    async fn vocabulary_for_block(&self, block_id: &str) -> Result<TaskKeywordVocabulary> {
+    /// The raw `#+TODO:` declaration of the owning document, `None` when it
+    /// declares none. The typed form the editor's source projection needs; the
+    /// vocabulary below is the same fact with the parser's defaults applied.
+    pub async fn declared_keywords(
+        &self,
+        block_id: &str,
+    ) -> Result<Option<Vec<holon_api::TaskState>>> {
         let properties = match self.owning_page_properties(block_id).await? {
-            None | Some(Value::Null) => return Ok(TaskKeywordVocabulary::default()),
+            None | Some(Value::Null) => return Ok(None),
             Some(Value::String(s)) | Some(Value::Json(s)) if s.trim().is_empty() => {
-                return Ok(TaskKeywordVocabulary::default());
+                return Ok(None);
             }
             Some(other) => crate::api::operation_engine::properties_object(&other)?,
         };
         let mut doc = Block::new_text(EntityUri::no_parent(), EntityUri::no_parent(), "");
         doc.properties = properties;
-        let Some(states) = doc.todo_keywords() else {
-            return Ok(TaskKeywordVocabulary::default());
-        };
-        let active: Vec<String> = states
-            .iter()
-            .filter(|s| s.is_active())
-            .map(|s| s.keyword.clone())
-            .collect();
-        let done: Vec<String> = states
-            .iter()
-            .filter(|s| s.is_done())
-            .map(|s| s.keyword.clone())
-            .collect();
-        Ok(TaskKeywordVocabulary::for_document(&active, &done))
+        Ok(doc.todo_keywords())
+    }
+}
+
+#[async_trait]
+impl TaskVocabularySource for SqlTaskVocabularySource {
+    async fn vocabulary_for_block(&self, block_id: &str) -> Result<TaskKeywordVocabulary> {
+        Ok(TaskKeywordVocabulary::from_declared(
+            self.declared_keywords(block_id).await?,
+        ))
     }
 }

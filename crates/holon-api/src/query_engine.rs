@@ -109,6 +109,40 @@ pub trait QueryEngine: Send + Sync {
     /// that hasn't materialised.
     async fn block_task_state_by_id(&self, id: &EntityUri) -> Result<Option<String>>;
 
+    /// The two columns the editable surface is projected from, in ONE read:
+    /// `(content, task_state)`. Both `None` when the row has not materialised.
+    ///
+    /// One read rather than two because every editor mount needs both, and the
+    /// keystone budgets count reads per action — a second round trip per focus
+    /// would be a measurable regression for a fact the first row already
+    /// carried.
+    async fn block_editor_source_by_id(
+        &self,
+        id: &EntityUri,
+    ) -> Result<(Option<String>, Option<String>)> {
+        let _ = id;
+        anyhow::bail!("QueryEngine::block_editor_source_by_id not implemented by this impl")
+    }
+
+    /// The `#+TODO:` keywords declared by the document that owns `id` — its
+    /// nearest `Page`-tagged ancestor, the block itself included. `None` when
+    /// the document declares none, which is the caller's cue to apply the
+    /// parser's defaults (the same precedence the org parser applies).
+    ///
+    /// The editable surface needs it: what a block's stored `task_state`
+    /// PROJECTS to as vault syntax depends on whether this document declares
+    /// that keyword at all, and an editor seeded with a keyword the document
+    /// would read back as prose silently demotes the task on commit. Read once
+    /// per focus, never per keystroke.
+    ///
+    /// Default impl fails loud rather than answering "no keywords": a wiring
+    /// that cannot resolve the vocabulary must surface, because the quiet
+    /// answer is indistinguishable from a document that declares none.
+    async fn block_todo_keywords(&self, id: &EntityUri) -> Result<Option<Vec<crate::TaskState>>> {
+        let _ = id;
+        anyhow::bail!("QueryEngine::block_todo_keywords not implemented by this impl")
+    }
+
     /// ONE-SHOT, non-watching read: compile + execute `query` exactly once and
     /// return its current rows. Unlike [`Self::watch_query`], this sets up
     /// **no** materialized view and **no** CDC stream.

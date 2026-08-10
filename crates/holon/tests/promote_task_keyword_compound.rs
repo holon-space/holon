@@ -1,12 +1,14 @@
-//! `block.promote_task_keyword` — the engine-level compound that turns a
-//! just-authored leading task keyword into `task_state` + stripped `content`,
-//! driven by DIRECT engine calls (no editor involved).
+//! `set_field("source_text")` — the SOURCE CHANNEL the editable surface commits
+//! through, driven by DIRECT engine calls (no editor involved).
 //!
-//! What these tests retire: the undo risk. A promotion is TWO field writes but
-//! ONE user gesture, so a single Cmd-Z must restore both the text and the
-//! absent task state. They also pin the refusal contract — a guard that
-//! declines still commits the typed text verbatim, so a keystroke is never
-//! lost.
+//! The store's convergence is the parse: keyword-headed source spells the task
+//! it names, source without a keyword clears the task state, and both columns
+//! land as ONE reversible gesture. There is no promotion op and no refusal —
+//! the parse is total, which is what retired the whole proposal/refusal
+//! machinery and the DOUBLING shape it produced.
+//!
+//! Beside it, the #64 contract lock: `set_field("content")` writes one column
+//! and NEVER re-derives the task state, whoever writes it.
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -84,32 +86,6 @@ async fn create_block(engine: &BackendEngine, id: &str, content: &str) {
         .await
         .unwrap_or_else(|e| panic!("create {id}: {e:#}"));
 }
-
-async fn promote(
-    engine: &BackendEngine,
-    id: &str,
-    typed: &str,
-    keyword: &str,
-) -> HashMap<String, Value> {
-    let mut params: StorageEntity = HashMap::new();
-    params.insert("id".into(), Value::String(id.to_string()));
-    params.insert("typed".into(), Value::String(typed.to_string()));
-    params.insert("keyword".into(), Value::String(keyword.to_string()));
-    let outcome = engine
-        .execute_operation(
-            &EntityName::new("block"),
-            "promote_task_keyword",
-            params,
-            OpOrigin::User,
-        )
-        .await
-        .unwrap_or_else(|e| panic!("promote_task_keyword {id}: {e:#}"));
-    match outcome.response {
-        Some(Value::Object(map)) => map,
-        other => panic!("promote_task_keyword must return a disclosure payload, got {other:?}"),
-    }
-}
-
 async fn col(engine: &BackendEngine, id: &str, column: &str) -> Option<String> {
     let rows = engine
         .db_handle()
@@ -228,209 +204,81 @@ async fn undo_entry_values(engine: &BackendEngine, half: &str, field: &str) -> O
         })
 }
 
-fn payload_str(payload: &HashMap<String, Value>, key: &str) -> String {
-    payload
-        .get(key)
-        .and_then(|v| v.as_string())
-        .unwrap_or_else(|| panic!("payload is missing {key:?}: {payload:?}"))
-        .to_string()
-}
-
-// ---------------------------------------------------------------------------
-// Fire
-// ---------------------------------------------------------------------------
-
+/// The SPECIFIED empty-remainder case: source that is nothing but the keyword
+/// is the empty-titled task `** TODO` spells on disk, and the store holds
+/// exactly that.
 #[tokio::test(flavor = "multi_thread")]
-async fn promotion_strips_the_keyword_and_sets_the_task_state() {
+async fn an_empty_remainder_promotion_converges_to_an_empty_titled_task() {
     let engine = block_engine().await;
-    create_block(&engine, "block:p", "TODO").await;
-
-    let payload = promote(&engine, "block:p", "TODO buy milk", "TODO").await;
-    assert_eq!(payload_str(&payload, "outcome"), "promoted");
-    assert_eq!(payload_str(&payload, "keyword"), "TODO");
-
-    assert_eq!(
-        col(&engine, "block:p", "content").await.as_deref(),
-        Some("buy milk"),
-        "the keyword must be stripped out of the content"
-    );
-    assert_eq!(
-        prop(&engine, "block:p", "task_state").await.as_deref(),
-        Some("TODO")
-    );
-    assert!(
-        prop(&engine, "block:p", "task_state_category")
-            .await
-            .is_some(),
-        "the category sidecar must be paired with the keyword"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// One gesture = one undo press
-// ---------------------------------------------------------------------------
-
-#[tokio::test(flavor = "multi_thread")]
-async fn promotion_is_one_composite_undo_entry() {
-    let engine = block_engine().await;
-    create_block(&engine, "block:u", "TODO").await;
-    promote(&engine, "block:u", "TODO buy milk", "TODO").await;
-
-    assert!(engine.can_undo().await, "the promotion must be undoable");
-
-    // The composite's SHAPE, asserted before any behaviour: both constituents
-    // are in the one entry. Without this the test passes for a compound that
-    // never writes `task_state` at all — undo would have nothing to restore,
-    // and every behavioural assertion below would still hold.
-    let forward = undo_entry_fields(&engine, "ops").await;
-    assert_eq!(
-        forward.len(),
-        2,
-        "the promotion is exactly TWO constituents in ONE entry, got {forward:?}"
-    );
-    assert_eq!(
-        forward.iter().collect::<BTreeSet<_>>(),
-        ["content".to_string(), "task_state".to_string()]
-            .iter()
-            .collect::<BTreeSet<_>>(),
-        "the entry must carry BOTH the content and the task_state write, got {forward:?}"
-    );
-    let inverse = undo_entry_fields(&engine, "inverse_ops").await;
-    assert_eq!(
-        inverse,
-        vec!["task_state".to_string(), "content".to_string()],
-        "inverses run leaf-first (reverse of the forward order), got {inverse:?}"
-    );
-
-    assert_eq!(engine.undo().await.expect("undo"), UndoOutcome::Applied);
-
-    assert_eq!(
-        prop(&engine, "block:u", "task_state").await,
-        None,
-        "ONE undo press must clear the task_state the promotion added"
-    );
-    assert_eq!(
-        col(&engine, "block:u", "content").await.as_deref(),
-        Some("TODO buy milk"),
-        "the SAME undo press must restore the text the author TYPED"
-    );
-    assert!(
-        !engine.can_undo().await,
-        "the promotion must be a SINGLE entry — a second undo would mean two"
-    );
-}
-
-/// Per-keystroke authoring leaves the store holding the FUSED word: `TODO` and
-/// `milk` were committed one character at a time, and the promoting keystroke
-/// (the space) never became content. Undoing must hand back what the author
-/// typed, not that fused intermediate — and the redo guard fingerprints the
-/// post-undo state, so it has to agree or the redo is dropped as stale.
-#[tokio::test(flavor = "multi_thread")]
-async fn undo_restores_the_verbatim_typed_text_and_redo_still_applies() {
-    let engine = block_engine().await;
-    create_block(&engine, "block:v", "TODOmilk").await;
-    promote(&engine, "block:v", "TODO milk", "TODO").await;
-    assert_eq!(
-        col(&engine, "block:v", "content").await.as_deref(),
-        Some("milk"),
-        "the promotion strips the keyword from the content"
-    );
-
-    assert_eq!(engine.undo().await.expect("undo"), UndoOutcome::Applied);
-    assert_eq!(
-        col(&engine, "block:v", "content").await.as_deref(),
-        Some("TODO milk"),
-        "undo returns the typed text, never the fused `TODOmilk` the store held"
-    );
-    assert_eq!(
-        prop(&engine, "block:v", "task_state").await,
-        None,
-        "the same press takes the task state back off"
-    );
-
-    // `Applied` (not `StaleDropped`) is the proof that the redo precondition
-    // fingerprints the text the inverse actually wrote.
-    assert_eq!(engine.redo().await.expect("redo"), UndoOutcome::Applied);
-    assert_eq!(
-        col(&engine, "block:v", "content").await.as_deref(),
-        Some("milk")
-    );
-    assert_eq!(
-        prop(&engine, "block:v", "task_state").await.as_deref(),
-        Some("TODO")
-    );
-}
-
-/// The EMPTY-REMAINDER arm of the same rule: the whole typed text was the
-/// keyword, so the promotion strips everything and the block's content becomes
-/// empty. Undo must still hand back what the author typed — `TODO ` with the
-/// space that promoted it, not the bare `TODO` the keyword alone spells.
-///
-/// The two assertions are deliberately at DIFFERENT layers, so a failure names
-/// the layer that dropped the byte: the journal holds what the engine decided
-/// to restore, the column holds what the store was willing to keep.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "task #78 — F2/F5 representability ruling pending; asserts the intended post-ruling behaviour"]
-async fn undo_of_an_empty_remainder_promotion_restores_the_consumed_space() {
-    let engine = block_engine().await;
-    create_block(&engine, "block:er", "TODO").await;
-    promote(&engine, "block:er", "TODO ", "TODO").await;
+    create_block(&engine, "block:er", "").await;
+    set_field_as_user(&engine, "block:er", "source_text", "TODO ").await;
     assert_eq!(
         col(&engine, "block:er", "content").await.as_deref(),
         Some(""),
-        "precondition: the keyword was the whole text, so the promotion empties the content"
+        "the keyword was the whole text, so the promotion empties the content"
+    );
+    assert_eq!(
+        prop(&engine, "block:er", "task_state").await.as_deref(),
+        Some("TODO")
     );
 
-    assert_eq!(engine.undo().await.expect("undo"), UndoOutcome::Applied);
+    // A source write that only changes the TASK STATE is still one gesture:
+    // the content constituent is a no-op here, and a delta-only vacuity test
+    // would have made this press unundoable.
+    assert!(
+        engine.can_undo().await,
+        "an empty-titled promotion must be undoable"
+    );
+    assert_eq!(engine.undo().await.expect("undo"), UndoOutcome::NoChange);
     assert_eq!(
         undo_entry_values(&engine, "inverse_ops", "content")
             .await
             .as_deref(),
-        Some("TODO "),
-        "the engine's content inverse must carry the VERBATIM typed text, trailing space included"
+        Some(""),
+        "the source channel's inverse restores the CONVERGED value it replaced, \
+         not the raw text — which is what lets the undo chain walk back cleanly"
     );
     assert_eq!(
         col(&engine, "block:er", "content").await.as_deref(),
-        Some("TODO "),
-        "undo must leave the store holding the verbatim typed text, not the bare keyword"
+        Some(""),
+        "the block keeps the empty content it had before the write"
     );
     assert_eq!(
         prop(&engine, "block:er", "task_state").await,
         None,
-        "the same press takes the task state back off"
+        "undo restores the state the gesture replaced — the block was not a task, \
+         so it is not one again. Under the promotion compound this could not \
+         happen: its inverse restored the VERBATIM typed text, which the store \
+         re-converged straight back into the same task."
     );
 }
 
+/// A bare keyword written as ORDINARY CONTENT converges the same way — the
+/// empty-remainder case is a property of the bytes, not of the promotion op.
 #[tokio::test(flavor = "multi_thread")]
-async fn redo_re_promotes_identically() {
+async fn a_bare_keyword_written_as_content_converges_to_an_empty_titled_task() {
     let engine = block_engine().await;
-    create_block(&engine, "block:r", "TODO").await;
-    promote(&engine, "block:r", "TODO buy milk", "TODO").await;
-
-    assert_eq!(engine.undo().await.expect("undo"), UndoOutcome::Applied);
-    assert_eq!(engine.redo().await.expect("redo"), UndoOutcome::Applied);
+    create_block(&engine, "block:bare", "").await;
+    set_field(&engine, "block:bare", "content", "TODO").await;
 
     assert_eq!(
-        col(&engine, "block:r", "content").await.as_deref(),
-        Some("buy milk"),
-        "redo must re-apply the stripped content"
+        col(&engine, "block:bare", "content").await.as_deref(),
+        Some("")
     );
     assert_eq!(
-        prop(&engine, "block:r", "task_state").await.as_deref(),
+        prop(&engine, "block:bare", "task_state").await.as_deref(),
         Some("TODO"),
-        "redo must re-apply the task_state"
+        "`** TODO` on disk is an empty-titled task, so the store holds one"
     );
 }
 
-// ---------------------------------------------------------------------------
-// The marks-trap regression: a later content edit must NOT clear task_state
-// ---------------------------------------------------------------------------
-
+/// A later CONTENT edit is one column: it must not clear the task state the
+/// source write established, and it must not disturb the mark pipeline.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_next_content_edit_preserves_the_task_state() {
     let engine = block_engine().await;
-    create_block(&engine, "block:m", "TODO").await;
-    promote(&engine, "block:m", "TODO buy milk", "TODO").await;
+    create_block(&engine, "block:m", "").await;
+    set_field(&engine, "block:m", "source_text", "TODO buy milk").await;
 
     let mut params: StorageEntity = HashMap::new();
     params.insert("id".into(), Value::String("block:m".to_string()));
@@ -469,40 +317,16 @@ async fn the_next_content_edit_preserves_the_task_state() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Refuse — losslessly
-// ---------------------------------------------------------------------------
-
+/// The #64 boundary witness, deliberately unchanged: keyword-headed bytes
+/// arriving on the CONTENT channel are stored, not parsed — the block keeps the
+/// task state it had and the text lands verbatim.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_refused_proposal_commits_the_typed_text_verbatim() {
-    let engine = block_engine().await;
-    create_block(&engine, "block:x", "shop").await;
-
-    // `MAYBE` is not in the engine's vocabulary, so the guard declines.
-    let payload = promote(&engine, "block:x", "MAYBE buy milk", "MAYBE").await;
-    assert_eq!(payload_str(&payload, "outcome"), "refused");
-    assert_eq!(payload_str(&payload, "reason"), "not_keyword_headed");
-
-    assert_eq!(
-        col(&engine, "block:x", "content").await.as_deref(),
-        Some("MAYBE buy milk"),
-        "a refusal must never lose the keystroke — the typed text lands verbatim"
-    );
-    assert_eq!(
-        prop(&engine, "block:x", "task_state").await,
-        None,
-        "a refused promotion must leave the block plain"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn an_already_tasked_block_is_refused_and_still_commits() {
+async fn the_content_channel_never_re_derives_the_task_state() {
     let engine = block_engine().await;
     create_block(&engine, "block:a", "TODO").await;
-    promote(&engine, "block:a", "TODO buy milk", "TODO").await;
+    set_field(&engine, "block:a", "source_text", "TODO buy milk").await;
 
-    let payload = promote(&engine, "block:a", "DONE buy milk", "DONE").await;
-    assert_eq!(payload_str(&payload, "reason"), "already_tasked");
+    set_field(&engine, "block:a", "content", "DONE buy milk").await;
     assert_eq!(
         prop(&engine, "block:a", "task_state").await.as_deref(),
         Some("TODO"),
@@ -511,59 +335,222 @@ async fn an_already_tasked_block_is_refused_and_still_commits() {
     assert_eq!(
         col(&engine, "block:a", "content").await.as_deref(),
         Some("DONE buy milk"),
-        "the typed text still lands verbatim"
+        "the typed text still lands verbatim on the CONTENT channel"
     );
 }
 
-/// The re-ingest-suppression guard, engine-side: a block whose text is ALREADY
-/// keyword-headed carries no task state, so guard 1 cannot protect it — the
-/// delta condition must.
+/// The #64 contract lock, stated on the plain channel with no compound in the
+/// way: an agent writing keyword-shaped text into a task's content gets it
+/// stored, not parsed. If the `source_text` work ever leaks into `content`,
+/// this reds.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_block_already_keyword_headed_is_refused() {
+async fn an_agent_content_write_on_a_tasked_block_is_not_re_parsed() {
     let engine = block_engine().await;
-    create_block(&engine, "block:k", "TODO list ideas").await;
+    create_block(&engine, "block:agentc", "").await;
+    set_field(&engine, "block:agentc", "source_text", "TODO milk").await;
 
-    let payload = promote(&engine, "block:k", "TODO list ideasX", "TODO").await;
+    set_field(&engine, "block:agentc", "content", "DONE later").await;
+
     assert_eq!(
-        payload_str(&payload, "reason"),
-        "prior_content_already_keyword_headed"
+        col(&engine, "block:agentc", "content").await.as_deref(),
+        Some("DONE later"),
+        "the content channel stores what it is given"
     );
-    assert_eq!(prop(&engine, "block:k", "task_state").await, None);
     assert_eq!(
-        col(&engine, "block:k", "content").await.as_deref(),
-        Some("TODO list ideasX")
+        prop(&engine, "block:agentc", "task_state").await.as_deref(),
+        Some("TODO"),
+        "and never re-derives the task state from it"
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_disagreeing_proposal_is_refused_rather_than_silently_corrected() {
-    let engine = block_engine().await;
-    create_block(&engine, "block:d", "TODO").await;
+// ---------------------------------------------------------------------------
+// The SOURCE channel — the editable surface's commit
+// ---------------------------------------------------------------------------
 
-    // The guard resolves TODO from the text; the caller proposed DONE.
-    let payload = promote(&engine, "block:d", "TODO buy milk", "DONE").await;
-    assert_eq!(payload_str(&payload, "reason"), "proposal_disagrees");
-    assert_eq!(prop(&engine, "block:d", "task_state").await, None);
+/// THE DOUBLING SHAPE, and the contract that retires it. The editable surface
+/// seeds the source projection (`TODO milk`) and commits the buffer back
+/// unchanged. On the content channel that would store `TODO milk` INSIDE a
+/// block already carrying `TODO` — a keyword gained per focus cycle. On the
+/// source channel the buffer is parsed, so re-committing an untouched buffer is
+/// a no-op in meaning: the block is the same task it already was.
+#[tokio::test(flavor = "multi_thread")]
+async fn recommitting_the_source_projection_does_not_double_the_keyword() {
+    let engine = block_engine().await;
+    create_block(&engine, "block:src", "").await;
+    set_field(&engine, "block:src", "source_text", "TODO milk").await;
     assert_eq!(
-        col(&engine, "block:d", "content").await.as_deref(),
+        col(&engine, "block:src", "content").await.as_deref(),
+        Some("milk"),
+        "precondition: the block is a task whose content is the bare title"
+    );
+
+    // What the editor holds on focus, committed back untouched.
+    set_field(&engine, "block:src", "source_text", "TODO milk").await;
+
+    assert_eq!(
+        col(&engine, "block:src", "content").await.as_deref(),
+        Some("milk"),
+        "the keyword belongs to `task_state`; re-committing the source must not fold it into \
+         the content"
+    );
+    assert_eq!(
+        prop(&engine, "block:src", "task_state").await.as_deref(),
+        Some("TODO"),
+        "and the task survives its own source being rewritten"
+    );
+}
+
+/// EXPLICIT DEMOTION. The user deletes the keyword out of the editable surface
+/// and commits `milk`. There is no demote op and no gesture to recognise — the
+/// parse simply finds no keyword, so `task_state` is cleared. This is the half
+/// that `set_field("content")` structurally cannot do.
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_the_keyword_from_the_source_demotes_the_block() {
+    let engine = block_engine().await;
+    create_block(&engine, "block:demote", "").await;
+    set_field(&engine, "block:demote", "source_text", "TODO milk").await;
+    assert_eq!(
+        prop(&engine, "block:demote", "task_state").await.as_deref(),
+        Some("TODO"),
+        "precondition: it is a task"
+    );
+
+    set_field(&engine, "block:demote", "source_text", "milk").await;
+
+    assert_eq!(
+        prop(&engine, "block:demote", "task_state").await.as_deref(),
+        Some(""),
+        "the source carries no keyword, so the block is no longer a task — cleared with the \
+         empty keyword, the same way `cycle_task_state` clears it"
+    );
+    assert_eq!(
+        col(&engine, "block:demote", "content").await.as_deref(),
+        Some("milk")
+    );
+}
+
+/// The source channel PROMOTES as readily as it demotes — the parse is total
+/// and symmetric, with no one-shot guard anywhere in it.
+#[tokio::test(flavor = "multi_thread")]
+async fn writing_a_keyword_into_the_source_promotes_a_plain_block() {
+    let engine = block_engine().await;
+    create_block(&engine, "block:srcp", "milk").await;
+
+    set_field(&engine, "block:srcp", "source_text", "TODO milk").await;
+
+    assert_eq!(
+        col(&engine, "block:srcp", "content").await.as_deref(),
+        Some("milk")
+    );
+    assert_eq!(
+        prop(&engine, "block:srcp", "task_state").await.as_deref(),
+        Some("TODO")
+    );
+}
+
+/// The source channel reads the DOCUMENT's vocabulary, not the defaults — the
+/// same authority every other task-keyword seam consults. In a document
+/// declaring `NEXT WAITING | DONE`, `NEXT x` is a task and `TODO x` is prose.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_source_channel_parses_under_the_documents_vocabulary() {
+    let engine = block_engine().await;
+    page_with_declared_vocabulary(&engine, "block:errands", "block:sv1").await;
+    create_child(&engine, "block:sv2", "block:errands").await;
+
+    set_field(&engine, "block:sv1", "source_text", "NEXT call bank").await;
+    assert_eq!(
+        prop(&engine, "block:sv1", "task_state").await.as_deref(),
+        Some("NEXT")
+    );
+    assert_eq!(
+        col(&engine, "block:sv1", "content").await.as_deref(),
+        Some("call bank")
+    );
+
+    set_field(&engine, "block:sv2", "source_text", "TODO buy milk").await;
+    assert_eq!(
+        prop(&engine, "block:sv2", "task_state")
+            .await
+            .unwrap_or_default(),
+        "",
+        "TODO is prose in this document — parsing it as a keyword would write a state the \
+         parser erases on the next re-ingest"
+    );
+    assert_eq!(
+        col(&engine, "block:sv2", "content").await.as_deref(),
         Some("TODO buy milk")
     );
 }
 
-// ---------------------------------------------------------------------------
-// P1 = A — promotion is a TYPING gesture, not a property of the text
-// ---------------------------------------------------------------------------
-
-/// RULING P1=A. An agent, an MCP client or the org re-ingest writing the very
-/// same characters through `block.set_field` must NOT promote: the block keeps
-/// the keyword as literal content and stays plain. Only the editor's keystroke
-/// sink calls the detector.
-///
-/// This pins the asymmetry so that a future promotion bolted onto `set_field`
-/// (the tempting "make it work everywhere" change) reds here instead of
-/// silently rewriting every agent-authored line that starts with `TODO `.
+/// A source write is ONE undoable gesture across both fields — the #64 Inc 4b
+/// contract, now carried by the channel the editor actually uses.
 #[tokio::test(flavor = "multi_thread")]
-async fn set_field_never_promotes_however_the_text_looks() {
+async fn a_source_write_is_one_composite_undo_entry() {
+    let engine = block_engine().await;
+    // Created EMPTY so the content constituent carries a real delta: a wholly
+    // vacuous write is deliberately never journaled.
+    create_block(&engine, "block:srcu", "").await;
+    set_field_as_user(&engine, "block:srcu", "source_text", "TODO milk").await;
+    assert_eq!(
+        prop(&engine, "block:srcu", "task_state").await.as_deref(),
+        Some("TODO")
+    );
+
+    let forward = undo_entry_fields(&engine, "ops").await;
+    assert_eq!(
+        forward.iter().collect::<BTreeSet<_>>(),
+        ["content".to_string(), "task_state".to_string()]
+            .iter()
+            .collect::<BTreeSet<_>>(),
+        "one source write journals BOTH constituents, got {forward:?}"
+    );
+    let inverse = undo_entry_fields(&engine, "inverse_ops").await;
+    assert_eq!(
+        inverse,
+        vec!["task_state".to_string(), "content".to_string()],
+        "inverses run leaf-first, got {inverse:?}"
+    );
+
+    assert_eq!(engine.undo().await.expect("undo"), UndoOutcome::Applied);
+    assert_eq!(
+        prop(&engine, "block:srcu", "task_state")
+            .await
+            .unwrap_or_default(),
+        "",
+        "ONE press takes the task state back off"
+    );
+    assert_eq!(
+        col(&engine, "block:srcu", "content").await.as_deref(),
+        Some(""),
+        "and restores the text it was derived from — which is plain, so nothing re-converges"
+    );
+}
+
+/// The RETIRED guard's state, asserted unreachable. A block whose text is
+/// keyword-headed and whose `task_state` is absent used to be a legal state the
+/// compound had to refuse to re-promote; the ruling makes it illegal, so the
+/// `create` that used to produce it converges instead — and there is nothing
+/// left for a re-promotion guard to protect.
+#[tokio::test(flavor = "multi_thread")]
+async fn creating_a_block_with_keyword_headed_content_converges_it() {
+    let engine = block_engine().await;
+    create_block(&engine, "block:k", "TODO list ideas").await;
+
+    assert_eq!(
+        col(&engine, "block:k", "content").await.as_deref(),
+        Some("list ideas"),
+        "a create cannot mint the illegal state either"
+    );
+    assert_eq!(
+        prop(&engine, "block:k", "task_state").await.as_deref(),
+        Some("TODO")
+    );
+}
+
+/// Convergence is a property of the BYTES, not of the channel: an agent's plain
+/// content write of keyword-headed text on an UNTASKED block converges too.
+#[tokio::test(flavor = "multi_thread")]
+async fn set_field_converges_however_the_text_arrives() {
     let engine = block_engine().await;
     create_block(&engine, "block:agent", "").await;
 
@@ -583,13 +570,13 @@ async fn set_field_never_promotes_however_the_text_looks() {
 
     assert_eq!(
         col(&engine, "block:agent", "content").await.as_deref(),
-        Some("TODO x"),
-        "a non-editor write must store the text verbatim, keyword and all"
+        Some("x"),
+        "the keyword is not content — it is the task state, on every write path"
     );
     assert_eq!(
-        prop(&engine, "block:agent", "task_state").await,
-        None,
-        "P1=A: only typing promotes — set_field must leave the block plain"
+        prop(&engine, "block:agent", "task_state").await.as_deref(),
+        Some("TODO"),
+        "an agent write converges exactly as a keystroke does"
     );
 }
 
@@ -608,6 +595,23 @@ async fn set_field(engine: &BackendEngine, id: &str, field: &str, value: &str) {
             "set_field",
             params,
             OpOrigin::Sync,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("set_field {field} on {id}: {e:#}"));
+}
+
+/// A USER-origin field write — the only origin that journals an undo entry.
+async fn set_field_as_user(engine: &BackendEngine, id: &str, field: &str, value: &str) {
+    let mut params: StorageEntity = HashMap::new();
+    params.insert("id".into(), Value::String(id.to_string()));
+    params.insert("field".into(), Value::String(field.to_string()));
+    params.insert("value".into(), Value::String(value.to_string()));
+    engine
+        .execute_operation(
+            &EntityName::new("block"),
+            "set_field",
+            params,
+            OpOrigin::User,
         )
         .await
         .unwrap_or_else(|e| panic!("set_field {field} on {id}: {e:#}"));
@@ -655,72 +659,86 @@ async fn page_with_declared_vocabulary(engine: &BackendEngine, page: &str, child
     create_child(engine, child, page).await;
 }
 
-/// S2 — UNDER-PROMOTION. `NEXT` is a keyword in THIS document. Judged against
-/// the defaults the store disagrees with Emacs, LogSeq and Holon's own parser
-/// forever, and every task query misses the block.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_declared_keyword_promotes() {
-    let engine = block_engine().await;
-    page_with_declared_vocabulary(&engine, "block:errands", "block:s2").await;
-
-    let payload = promote(&engine, "block:s2", "NEXT call bank", "NEXT").await;
-    assert_eq!(
-        payload_str(&payload, "outcome"),
-        "promoted",
-        "the document declares NEXT, so the authority must promote it: {payload:?}"
-    );
-    assert_eq!(
-        col(&engine, "block:s2", "content").await.as_deref(),
-        Some("call bank")
-    );
-    assert_eq!(
-        prop(&engine, "block:s2", "task_state").await.as_deref(),
-        Some("NEXT")
-    );
-}
-
-/// S3 — SILENT DEMOTION, the data-loss direction. `TODO` is NOT a keyword in
-/// this document. Promoting it anyway writes a `task_state` the parser erases
-/// on the next re-ingest, putting the keyword back INSIDE the user's text — a
-/// mutation nobody authored, repeated on every restart.
-#[tokio::test(flavor = "multi_thread")]
-async fn an_undeclared_keyword_is_refused_and_committed_verbatim() {
-    let engine = block_engine().await;
-    page_with_declared_vocabulary(&engine, "block:errands", "block:s3").await;
-
-    let payload = promote(&engine, "block:s3", "TODO buy milk", "TODO").await;
-    assert_eq!(
-        payload_str(&payload, "outcome"),
-        "refused",
-        "the document's vocabulary has no TODO: {payload:?}"
-    );
-    assert_eq!(payload_str(&payload, "reason"), "not_keyword_headed");
-    assert_eq!(
-        col(&engine, "block:s3", "content").await.as_deref(),
-        Some("TODO buy milk"),
-        "a refusal commits the typed text verbatim — no keystroke is lost"
-    );
-    assert_eq!(
-        prop(&engine, "block:s3", "task_state").await,
-        None,
-        "no task_state may be written that the next re-ingest would erase"
-    );
-}
-
-/// The declared DONE list decides the category, so a vocabulary read that got
-/// only the keyword list right would still be wrong.
+/// The document's declared DONE list decides the category sidecar, not a
+/// hardcoded one.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_declared_done_list_decides_the_category() {
     let engine = block_engine().await;
     page_with_declared_vocabulary(&engine, "block:errands", "block:cat").await;
 
-    promote(&engine, "block:cat", "WAITING on reply", "WAITING").await;
+    set_field(&engine, "block:cat", "source_text", "WAITING on reply").await;
     assert_eq!(
         prop(&engine, "block:cat", "task_state_category")
             .await
             .as_deref(),
         Some("active"),
         "WAITING is declared active, not done"
+    );
+}
+
+/// The convergence rule is PER DOCUMENT and it runs on the generic write path,
+/// not only inside the promotion compound: in a document declaring
+/// `#+TODO: NEXT WAITING | DONE`, a plain `set_field` of `NEXT ...` converges
+/// and one of `TODO ...` does not. A future format provider that declares no
+/// keywords converges nothing by the same rule.
+#[tokio::test(flavor = "multi_thread")]
+async fn set_field_converges_by_the_documents_own_vocabulary() {
+    let engine = block_engine().await;
+    page_with_declared_vocabulary(&engine, "block:errands", "block:v1").await;
+    create_child(&engine, "block:v2", "block:errands").await;
+
+    set_field(&engine, "block:v1", "content", "NEXT call bank").await;
+    assert_eq!(
+        col(&engine, "block:v1", "content").await.as_deref(),
+        Some("call bank")
+    );
+    assert_eq!(
+        prop(&engine, "block:v1", "task_state").await.as_deref(),
+        Some("NEXT"),
+        "NEXT is declared by this document, so those bytes are a task"
+    );
+
+    set_field(&engine, "block:v2", "content", "TODO buy milk").await;
+    assert_eq!(
+        col(&engine, "block:v2", "content").await.as_deref(),
+        Some("TODO buy milk"),
+        "TODO is ordinary prose here — converging it would write a state the parser erases"
+    );
+    assert_eq!(prop(&engine, "block:v2", "task_state").await, None);
+}
+
+/// THE ADJACENT CELL of the vocabulary hole, locked at the store. A PLAIN block
+/// whose text merely has the SHAPE of a keyword the document does not declare
+/// must not gain a blank `task_state`: the parse names no keyword and there is
+/// nothing to clear, so the task-state constituent is skipped entirely rather
+/// than writing `""` onto a block that never was a task.
+///
+/// Without the skip, every source commit of `ASAP …` / `API …` / `PR …` in a
+/// `#+TODO:`-declaring document would leave a blank task state behind — a state
+/// no other write path produces, and one the org round trip has no way to
+/// spell.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_source_write_that_declares_nothing_leaves_a_plain_block_plain() {
+    let engine = block_engine().await;
+    page_with_declared_vocabulary(&engine, "block:errands", "block:plainkw").await;
+
+    set_field(&engine, "block:plainkw", "source_text", "ASAP call Bob").await;
+
+    assert_eq!(
+        col(&engine, "block:plainkw", "content").await.as_deref(),
+        Some("ASAP call Bob"),
+        "an undeclared token is ordinary prose here, so the text lands whole"
+    );
+    assert_eq!(
+        prop(&engine, "block:plainkw", "task_state").await,
+        None,
+        "the block was never a task and names no keyword, so NOTHING is written — \
+         not the empty keyword either"
+    );
+    assert_eq!(
+        prop(&engine, "block:plainkw", "task_state_category").await,
+        None,
+        "and no category sidecar is left behind"
     );
 }
 
@@ -733,8 +751,7 @@ async fn an_undeclaring_document_keeps_the_defaults() {
     tag_as_page(&engine, "block:inbox").await;
     create_child(&engine, "block:plain", "block:inbox").await;
 
-    let payload = promote(&engine, "block:plain", "TODO buy milk", "TODO").await;
-    assert_eq!(payload_str(&payload, "outcome"), "promoted");
+    set_field(&engine, "block:plain", "source_text", "TODO buy milk").await;
     assert_eq!(
         prop(&engine, "block:plain", "task_state").await.as_deref(),
         Some("TODO")

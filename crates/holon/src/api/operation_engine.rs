@@ -128,8 +128,9 @@ pub struct DispatchingOperationEngine {
     /// queryable block projection — the operation then fails loud, disclosed.
     template_source: Option<Arc<dyn crate::api::template_source::TemplateSource>>,
     /// Resolver for the owning document's `#+TODO:` vocabulary, consulted by
-    /// `promote_task_keyword`. `None` on a wiring without a queryable block
-    /// projection — the compound then falls back to the defaults and says so.
+    /// every path that parses or cycles a task keyword. `None` on a wiring
+    /// without a queryable block projection — those paths then fall back to the
+    /// defaults and say so.
     vocabulary_source: Option<Arc<dyn crate::core::task_keyword_promotion::TaskVocabularySource>>,
     /// Trust policy (VisionGapAnalysis C5): decides per (origin, entity, op)
     /// whether a dispatch executes against canonical state or is coerced into
@@ -220,13 +221,6 @@ const CONVERT_BLOCK_TO_PAGE_OP: &str = "convert_block_to_page";
 /// [`UndoEntry`].
 const MERGE_BLOCKS_OP: &str = "merge_blocks";
 
-/// The engine-level compound that promotes a just-authored leading task keyword
-/// (`TODO buy milk`) into `task_state = TODO` + `content = buy milk`. Composed
-/// from two ordinary `set_field`s so the whole promotion is ONE reversible
-/// [`UndoEntry`] — a single Cmd-Z restores both the text and the absent task
-/// state.
-pub const PROMOTE_TASK_KEYWORD_OP: &str = "promote_task_keyword";
-
 /// Advance a block one step around its owning document's task-state ring
 /// (Cmd+Enter). Intercepted at the engine because the ring is a function of the
 /// DOCUMENT's declared `#+TODO:` vocabulary, and only the engine holds the
@@ -234,6 +228,13 @@ pub const PROMOTE_TASK_KEYWORD_OP: &str = "promote_task_keyword";
 /// better than a hardcoded list, which is exactly the keyword the org parser
 /// then refuses to read back.
 pub const CYCLE_TASK_STATE_OP: &str = "cycle_task_state";
+
+/// Names the writes that enforce the keyword-convergence rule in failure
+/// messages and WARNs. Not a dispatchable op: convergence is a property of
+/// every block write, not something a caller asks for.
+const CONVERGE_TASK_KEYWORD_OP: &str = "converge_task_keyword";
+
+pub use holon_api::SOURCE_TEXT_FIELD;
 
 /// The id of the child that parks a merged-away block's body when BOTH sides
 /// carried content. Derived from the duplicate's id so a merge is idempotent
@@ -418,10 +419,10 @@ impl DispatchingOperationEngine {
         self
     }
 
-    /// Wire the owning-document `#+TODO:` vocabulary resolver. Without it
-    /// `promote_task_keyword` judges every block against the DEFAULT keywords,
-    /// which disagrees with the parser in any document that declares its own —
-    /// so an unwired source is announced at WARN, never degraded quietly.
+    /// Wire the owning-document `#+TODO:` vocabulary resolver. Without it every
+    /// keyword parse judges blocks against the DEFAULT keywords, which
+    /// disagrees with the parser in any document that declares its own — so an
+    /// unwired source is announced at WARN, never degraded quietly.
     pub fn with_task_vocabulary_source(
         mut self,
         source: Arc<dyn crate::core::task_keyword_promotion::TaskVocabularySource>,
@@ -587,18 +588,31 @@ impl DispatchingOperationEngine {
             ),
             None => None,
         };
-        let result = self
+        let params: StorageEntity = op
+            .params
+            .iter()
+            .map(|(k, v)| (Arc::from(k.as_str()), v.clone()))
+            .collect();
+        // A replay is a write like any other, so the convergence rule applies:
+        // undoing a promotion restores keyword-headed text, which IS the task
+        // again. The gesture is semantically void by construction — the escape
+        // is further undos through the typing ops that built the keyword.
+        let (params, converged) = self
+            .converge_block_write(&op.entity_name, &op.op_name, params)
+            .await?;
+        let mut result = self
             .dispatcher
-            .execute_operation(
-                &op.entity_name,
-                &op.op_name,
-                op.params
-                    .iter()
-                    .map(|(k, v)| (Arc::from(k.as_str()), v.clone()))
-                    .collect(),
-            )
+            .execute_operation(&op.entity_name, &op.op_name, params)
             .await
             .map_err(|e| anyhow::anyhow!("undo/redo replay of '{}' failed: {e}", op.op_name))?;
+        if let Some((id, promotion)) = &converged {
+            let (_, _, ch) = self.write_converged_task_state(id, promotion).await?;
+            result.changes.extend(ch);
+        }
+        let (_, _, post_ch) = self
+            .converge_after_write(&op.entity_name, &result.changes)
+            .await?;
+        result.changes.extend(post_ch);
         Ok(result.changes)
     }
 
@@ -1090,90 +1104,282 @@ impl DispatchingOperationEngine {
         Ok((content, keyword))
     }
 
-    /// Execute the live task-keyword promotion. See
-    /// [`PROMOTE_TASK_KEYWORD_OP`]. Params: `id`, `typed` (the FULL text
-    /// the author committed, keyword included), `keyword` (the caller's
-    /// proposal) and an optional `write_seq` forwarded to the content write
-    /// so the caller still recognises its own echo.
+    /// The owning document's task-keyword vocabulary. Read at use and never
+    /// cached: a `#+TODO:` line is ordinary editable content, so a vocabulary
+    /// resolved once goes stale the moment the user edits it.
+    async fn document_vocabulary(
+        &self,
+        op: &str,
+        id: &str,
+    ) -> Result<holon_org_format::TaskKeywordVocabulary> {
+        match &self.vocabulary_source {
+            Some(source) => source.vocabulary_for_block(id).await,
+            None => {
+                tracing::warn!(
+                    block = %id,
+                    op,
+                    "no task-vocabulary source wired; judging against the DEFAULT keywords, which \
+                     disagrees with the parser in any document declaring #+TODO:"
+                );
+                Ok(holon_org_format::TaskKeywordVocabulary::default())
+            }
+        }
+    }
+
+    /// The block's stored `task_state` keyword, or `None` when it carries none
+    /// — or when the row is not there yet (a `create` converges on its own
+    /// params). Unlike [`Self::read_task_keyword_prior_state`] this tolerates a
+    /// missing row, because it runs on writes that mint one.
+    async fn stored_task_keyword(&self, id: &str) -> Result<Option<String>> {
+        let Some(reader) = self.reader.as_ref() else {
+            return Ok(None);
+        };
+        let keyword = match reader.field_value(id, "properties").await? {
+            None | Some(Value::Null) => None,
+            Some(Value::Object(map)) => map
+                .get("task_state")
+                .and_then(|v| v.as_string())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            Some(Value::String(json)) | Some(Value::Json(json)) if !json.trim().is_empty() => {
+                let parsed: serde_json::Value = serde_json::from_str(&json).map_err(|e| {
+                    anyhow::anyhow!(
+                        "task-keyword convergence: corrupt properties JSON on {id}: {e}"
+                    )
+                })?;
+                parsed
+                    .get("task_state")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            }
+            Some(Value::String(_)) | Some(Value::Json(_)) => None,
+            Some(other) => bail!(
+                "task-keyword convergence: block {id} has a non-object `properties` value {other:?}"
+            ),
+        };
+        Ok(keyword)
+    }
+
+    /// The vault format's illegal-state rule: a block that carries no task
+    /// state and whose content is keyword-headed in its OWN document's
+    /// vocabulary is not representable — org reads exactly those bytes back as
+    /// a task, so the store would hold a reading the file disagrees with.
+    /// Returns the task the content already IS.
     ///
-    /// The `typed` text is what makes the refusal lossless: when the guard
-    /// declines, the compound still commits that text verbatim, so a keystroke
-    /// is never lost and the caller never sees an `Err` for a correct decision.
-    async fn run_promote_task_keyword(
+    /// The vocabulary-free shape gate runs first, so an ordinary content write
+    /// costs no document read at all; a format provider that declares no
+    /// keywords converges nothing.
+    async fn keyword_convergence(
+        &self,
+        id: &str,
+        content: &str,
+        write_sets_task_state: bool,
+    ) -> Result<Option<holon_org_format::Promotion>> {
+        if write_sets_task_state
+            || !holon_org_format::could_converge(content)
+            || self.stored_task_keyword(id).await?.is_some()
+        {
+            return Ok(None);
+        }
+        let vocabulary = self
+            .document_vocabulary(CONVERGE_TASK_KEYWORD_OP, id)
+            .await?;
+        if self.reader.is_none() && holon_org_format::keyword_headed(content, &vocabulary).is_some()
+        {
+            tracing::warn!(
+                block = %id,
+                "content is keyword-headed but this engine has no live-state reader, so the block \
+                 cannot be proven untasked; leaving the unconverged state"
+            );
+            return Ok(None);
+        }
+        Ok(holon_org_format::converge_keyword_headed(
+            content,
+            &vocabulary,
+        ))
+    }
+
+    /// The content value a block write would land, and whether that same write
+    /// supplies a task state. `None` for writes that set no content.
+    fn intended_content<'a>(op_name: &str, params: &'a StorageEntity) -> Option<(&'a str, bool)> {
+        match op_name {
+            "set_field" => (params.get("field").and_then(|v| v.as_string()) == Some("content"))
+                .then(|| {
+                    (
+                        params
+                            .get("value")
+                            .and_then(|v| v.as_string())
+                            .unwrap_or(""),
+                        false,
+                    )
+                }),
+            "create" | "update" => params
+                .get("content")
+                .and_then(|v| v.as_string())
+                .map(|c| (c, params.contains_key("task_state"))),
+            _ => None,
+        }
+    }
+
+    /// Rewrite a block write that would land the illegal state into the task it
+    /// already is, BEFORE it reaches the store. Pre-rewriting rather than
+    /// repairing afterwards is what keeps the unconverged content from ever
+    /// being observable — and keeps the editor's `write_seq` matched to exactly
+    /// one content write, so its echo discriminator still recognises its own
+    /// keystroke.
+    async fn converge_block_write(
+        &self,
+        entity_name: &EntityName,
+        op_name: &str,
+        mut params: StorageEntity,
+    ) -> Result<(StorageEntity, Option<(String, holon_org_format::Promotion)>)> {
+        if entity_name.as_str() != "block" {
+            return Ok((params, None));
+        }
+        let Some(id) = params
+            .get("id")
+            .and_then(|v| v.as_string())
+            .map(str::to_string)
+        else {
+            return Ok((params, None));
+        };
+        let Some((content, sets_task_state)) = Self::intended_content(op_name, &params) else {
+            return Ok((params, None));
+        };
+        let content = content.to_string();
+        let Some(promotion) = self
+            .keyword_convergence(&id, &content, sets_task_state)
+            .await?
+        else {
+            return Ok((params, None));
+        };
+        let field = if op_name == "set_field" {
+            "value"
+        } else {
+            "content"
+        };
+        params.insert(Arc::from(field), Value::String(promotion.stripped.clone()));
+        Ok((params, Some((id, promotion))))
+    }
+
+    /// Converge every block whose content a write LEFT keyword-headed. The
+    /// pre-rewrite above covers writes that name their content; this covers the
+    /// ones that compute it inside the provider (`split_block`, the merge
+    /// family), which surface only as field deltas.
+    async fn converge_after_write(
+        &self,
+        entity_name: &EntityName,
+        changes: &[FieldDelta],
+    ) -> Result<(Vec<Operation>, Vec<Operation>, Vec<FieldDelta>)> {
+        let mut forwards = Vec::new();
+        let mut inverses = Vec::new();
+        let mut extra_changes = Vec::new();
+        if entity_name.as_str() != "block" {
+            return Ok((forwards, inverses, extra_changes));
+        }
+        for delta in changes {
+            if delta.field != "content" {
+                continue;
+            }
+            let Some(content) = delta.new_value.as_string() else {
+                continue;
+            };
+            let Some(promotion) = self
+                .keyword_convergence(&delta.entity_id, content, false)
+                .await?
+            else {
+                continue;
+            };
+            for (field, value) in [
+                ("content", promotion.stripped.clone()),
+                ("task_state", promotion.keyword.keyword.clone()),
+            ] {
+                let mut p = StorageEntity::new();
+                p.insert("id".into(), Value::String(delta.entity_id.clone()));
+                p.insert("field".into(), Value::String(field.to_string()));
+                p.insert("value".into(), Value::String(value));
+                let (fwd, inv, ch) = self
+                    .dispatch_task_keyword_constituent(CONVERGE_TASK_KEYWORD_OP, p)
+                    .await?;
+                forwards.push(fwd);
+                // Leaf-first: undo drops the task state before restoring the
+                // text it was derived from.
+                inverses.insert(0, inv);
+                extra_changes.extend(ch);
+            }
+        }
+        Ok((forwards, inverses, extra_changes))
+    }
+
+    /// The `task_state` write that pairs a pre-rewritten content write.
+    async fn write_converged_task_state(
+        &self,
+        id: &str,
+        promotion: &holon_org_format::Promotion,
+    ) -> Result<(Operation, Operation, Vec<FieldDelta>)> {
+        let mut p = StorageEntity::new();
+        p.insert("id".into(), Value::String(id.to_string()));
+        p.insert("field".into(), Value::String("task_state".into()));
+        p.insert(
+            "value".into(),
+            Value::String(promotion.keyword.keyword.clone()),
+        );
+        self.dispatch_task_keyword_constituent(CONVERGE_TASK_KEYWORD_OP, p)
+            .await
+    }
+
+    /// Write a block's full vault source: parse [`SOURCE_TEXT_FIELD`] under the
+    /// owning document's vocabulary and land `content` + `task_state` as ONE
+    /// reversible gesture. Params: `id`, `value` (the raw source) and an
+    /// optional `write_seq` forwarded to the content write so the editor still
+    /// recognises its own echo.
+    ///
+    /// The parse is total — there is no refusal. Source that is keyword-headed
+    /// yields the task it spells; source that is not yields plain content AND
+    /// clears any `task_state` the block carried, which is how a user deletes
+    /// the keyword out of the editable surface and demotes the block.
+    async fn run_set_source_text(
         &self,
         params: &StorageEntity,
         origin: &OpOrigin,
     ) -> Result<Option<Value>> {
-        use holon_api::TaskState;
-        use holon_org_format::TaskKeywordVocabulary;
-        use holon_org_format::detect_keyword_promotion;
-        use holon_org_format::keyword_headed;
+        use holon_org_format::converge_keyword_headed;
 
-        use crate::core::task_keyword_promotion::PromotionRefusal;
-
-        let string_param = |key: &str| -> Result<String> {
-            params
-                .get(key)
-                .and_then(|v| v.as_string())
-                .map(str::to_string)
-                .ok_or_else(|| anyhow::anyhow!("promote_task_keyword: missing '{key}' param"))
-        };
-        let id = string_param("id")?;
-        let typed = string_param("typed")?;
-        let proposed = string_param("keyword")?;
+        let id = params
+            .get("id")
+            .and_then(|v| v.as_string())
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("set_field({SOURCE_TEXT_FIELD}): missing 'id' param"))?;
+        let source = params
+            .get("value")
+            .and_then(|v| v.as_string())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                anyhow::anyhow!("set_field({SOURCE_TEXT_FIELD}): missing 'value' param")
+            })?;
         let write_seq = params.get("write_seq").cloned();
 
-        // The block is read by the guard and rewritten by the constituents — a
-        // read-modify-write-journal over ONE entity, the step
-        // [`EntityWriteLocks`] makes atomic. Held for the whole compound; the
-        // constituents go straight to the dispatcher, so the hold never nests.
+        // Read-modify-write-journal over ONE entity, the same step the other
+        // task-keyword compounds take; the constituents go straight to the
+        // dispatcher so the hold never nests.
         let write_guard = self
             .entity_write_locks
             .lock_target("block", params, "id")
             .await;
 
-        // The AUTHORITY decides the vocabulary. The caller proposes a keyword
-        // on a vocabulary-free shape rule; only the owning document's
-        // `#+TODO:` line says whether that word is a keyword at all, so a
-        // caller-supplied vocabulary would let any caller promote any word.
-        let vocabulary = match &self.vocabulary_source {
-            Some(source) => source.vocabulary_for_block(&id).await?,
-            None => {
-                tracing::warn!(
-                    block = %id,
-                    "no task-vocabulary source wired; judging promotion against the DEFAULT \
-                     keywords, which disagrees with the parser in any document declaring #+TODO:"
-                );
-                TaskKeywordVocabulary::default()
-            }
-        };
-        let (prior_content, prior_keyword) = self
-            .read_task_keyword_prior_state(PROMOTE_TASK_KEYWORD_OP, &id)
-            .await?;
-        let prior_state = prior_keyword.as_deref().map(TaskState::from_keyword);
-
-        let promotion =
-            detect_keyword_promotion(&prior_content, prior_state.as_ref(), &typed, &vocabulary);
-        let refusal = match &promotion {
-            Some(p) if p.keyword.keyword == proposed => None,
-            Some(p) => Some(PromotionRefusal::ProposalDisagrees {
-                proposed: proposed.clone(),
-                resolved: p.keyword.keyword.clone(),
-            }),
-            None if prior_keyword.is_some() => Some(PromotionRefusal::AlreadyTasked {
-                current: prior_keyword.clone().unwrap_or_default(),
-            }),
-            None if keyword_headed(&typed, &vocabulary).is_none() => {
-                Some(PromotionRefusal::NotKeywordHeaded {
-                    vocabulary: vocabulary.all_keywords(),
-                })
-            }
-            None => Some(PromotionRefusal::PriorContentAlreadyKeywordHeaded {
-                prior: prior_content.clone(),
-            }),
+        let vocabulary = self.document_vocabulary(SOURCE_TEXT_FIELD, &id).await?;
+        let parsed = converge_keyword_headed(&source, &vocabulary);
+        let (content, keyword) = match &parsed {
+            Some(p) => (p.stripped.clone(), p.keyword.keyword.clone()),
+            // Empty string is how `set_field("task_state")` clears the property
+            // — the same value `cycle_task_state` writes for the blank ring
+            // slot, so demotion reuses the existing clearing path rather than
+            // inventing one.
+            None => (source.clone(), String::new()),
         };
 
-        let set_field_params = |field: &str, value: &str| {
+        let constituent = |field: &str, value: &str| {
             let mut p = StorageEntity::new();
             p.insert("id".into(), Value::String(id.clone()));
             p.insert("field".into(), Value::String(field.to_string()));
@@ -1186,106 +1392,58 @@ impl DispatchingOperationEngine {
             p
         };
 
-        let (forwards, inverses, all_changes, fp_changes, payload) = match refusal {
-            Some(reason) => {
-                // A guard that declines is a DECISION, disclosed as data and as
-                // a WARN — never an Err and never a dropped keystroke.
-                tracing::warn!(
-                    block = %id,
-                    proposed_keyword = %proposed,
-                    refusal = reason.as_str(),
-                    "promote_task_keyword refused ({reason}); committing the typed text verbatim \
-                     as a plain content edit"
-                );
-                let (fwd, inv, ch) = self
-                    .dispatch_task_keyword_constituent(
-                        PROMOTE_TASK_KEYWORD_OP,
-                        set_field_params("content", &typed),
-                    )
-                    .await?;
-                let mut payload = std::collections::HashMap::new();
-                payload.insert("outcome".to_string(), Value::String("refused".into()));
-                payload.insert(
-                    "reason".to_string(),
-                    Value::String(reason.as_str().to_string()),
-                );
-                payload.insert("detail".to_string(), Value::String(reason.to_string()));
-                payload.insert("content".to_string(), Value::String(typed.clone()));
-                let fp = ch.clone();
-                (vec![fwd], vec![inv], ch, fp, payload)
-            }
-            None => {
-                let promotion = promotion.expect("no refusal implies a promotion");
-                let (c_fwd, mut c_inv, mut ch) = self
-                    .dispatch_task_keyword_constituent(
-                        PROMOTE_TASK_KEYWORD_OP,
-                        set_field_params("content", &promotion.stripped),
-                    )
-                    .await?;
-                let (t_fwd, t_inv, t_ch) = self
-                    .dispatch_task_keyword_constituent(
-                        PROMOTE_TASK_KEYWORD_OP,
-                        set_field_params("task_state", &promotion.keyword.keyword),
-                    )
-                    .await?;
-                ch.extend(t_ch);
-                let mut payload = std::collections::HashMap::new();
-                payload.insert("outcome".to_string(), Value::String("promoted".into()));
-                payload.insert(
-                    "keyword".to_string(),
-                    Value::String(promotion.keyword.keyword.clone()),
-                );
-                payload.insert("content".to_string(), Value::String(promotion.stripped));
-                // Undo means "treat that keystroke as ordinary text instead",
-                // so the content inverse restores the VERBATIM typed text, not
-                // the fused value the store held mid-word. This is also what
-                // `restore_refused_promotion` commits, so a refused and an
-                // undone promotion leave identical content.
-                c_inv
-                    .params
-                    .insert("value".into(), Value::String(typed.clone()));
-                // The redo guard fingerprints the post-undo state, which is now
-                // `typed` on the content field — anything else is born stale.
-                let fp: Vec<FieldDelta> = ch
-                    .iter()
-                    .map(|d| {
-                        let mut d = d.clone();
-                        if d.entity_id == id && d.field == "content" {
-                            d.old_value = Value::String(typed.clone());
-                        }
-                        d
-                    })
-                    .collect();
-                // Inverses leaf-first: reverse the forward order, so undo drops
-                // the task state before restoring the text it was derived from.
-                (vec![c_fwd, t_fwd], vec![t_inv, c_inv], ch, fp, payload)
-            }
-        };
+        // Source that carries no keyword on a block that carries no task state
+        // has nothing to clear. Writing the empty keyword anyway would ADD a
+        // blank `task_state` property to every plain block whose text merely
+        // has the SHAPE of a keyword — a state no other write path produces.
+        let prior_keyword = self.stored_task_keyword(&id).await?;
+        let clears_nothing = parsed.is_none() && prior_keyword.is_none();
+        // A task-state change is a change even when the content constituent is a
+        // no-op (`TODO ` on an empty block re-writes the same empty content).
+        // The provider reports property writes without a field delta, so the
+        // delta-only vacuity test would judge that gesture unundoable.
+        let keyword_changed = prior_keyword.unwrap_or_default() != keyword;
 
-        if origin.is_user() {
+        let (c_fwd, c_inv, mut changes) = self
+            .dispatch_task_keyword_constituent(SOURCE_TEXT_FIELD, constituent("content", &content))
+            .await?;
+        let mut forwards = vec![c_fwd];
+        // Leaf-first: undo drops the task state before restoring the text it
+        // was derived from.
+        let mut inverses = vec![c_inv];
+        if !clears_nothing {
+            let (t_fwd, t_inv, t_changes) = self
+                .dispatch_task_keyword_constituent(
+                    SOURCE_TEXT_FIELD,
+                    constituent("task_state", &keyword),
+                )
+                .await?;
+            changes.extend(t_changes);
+            forwards.push(t_fwd);
+            inverses.insert(0, t_inv);
+        }
+
+        if origin.is_user() && (keyword_changed || !Self::changes_are_vacuous(&changes)) {
             let entry = UndoEntry {
                 ops: forwards,
                 inverse_ops: inverses,
                 origin: OpOrigin::User,
                 group_id: 0,
-                precondition: Precondition::forward(&all_changes),
-                redo_precondition: Precondition::inverse(&fp_changes),
+                precondition: Precondition::forward(&changes),
+                redo_precondition: Precondition::inverse(&changes),
             };
             self.journal_step(write_guard.as_ref(), entry).await?;
         }
         drop(write_guard);
 
         if let Some(history) = &self.history {
-            self.record_history(
-                history.as_ref(),
-                "block",
-                PROMOTE_TASK_KEYWORD_OP,
-                origin,
-                &all_changes,
-            )
-            .await?;
+            self.record_history(history.as_ref(), "block", "set_field", origin, &changes)
+                .await?;
         }
 
+        let mut payload = std::collections::HashMap::new();
+        payload.insert("content".to_string(), Value::String(content));
+        payload.insert("task_state".to_string(), Value::String(keyword));
         Ok(Some(Value::Object(payload)))
     }
 
@@ -1300,8 +1458,6 @@ impl DispatchingOperationEngine {
         params: &StorageEntity,
         origin: &OpOrigin,
     ) -> Result<Option<Value>> {
-        use holon_org_format::TaskKeywordVocabulary;
-
         use crate::core::task_keyword_cycle::cycle_ring;
 
         let id = params
@@ -1318,17 +1474,7 @@ impl DispatchingOperationEngine {
             .lock_target("block", params, "id")
             .await;
 
-        let vocabulary = match &self.vocabulary_source {
-            Some(source) => source.vocabulary_for_block(&id).await?,
-            None => {
-                tracing::warn!(
-                    block = %id,
-                    "no task-vocabulary source wired; cycling against the DEFAULT keywords, which \
-                     writes a state the parser erases in any document declaring #+TODO:"
-                );
-                TaskKeywordVocabulary::default()
-            }
-        };
+        let vocabulary = self.document_vocabulary(CYCLE_TASK_STATE_OP, &id).await?;
         let (_content, prior_keyword) = self
             .read_task_keyword_prior_state(CYCLE_TASK_STATE_OP, &id)
             .await?;
@@ -2228,13 +2374,16 @@ impl OperationEngine for DispatchingOperationEngine {
                 .map(OpOutcome::proven);
         }
 
-        // Engine-level compound: live task-keyword promotion. Guard-then-fire —
-        // the guard is re-evaluated here against live state, so the view-model's
-        // proposal is advisory and a refusal degrades to the ordinary content
-        // commit rather than losing the keystroke.
-        if op_name == PROMOTE_TASK_KEYWORD_OP && entity_name.as_str() == "block" {
+        // Engine-level compound: a write of the block's full vault SOURCE.
+        // Intercepted here because only the engine can resolve the owning
+        // document's vocabulary, which is what turns the source into
+        // (content, task_state). See [`SOURCE_TEXT_FIELD`].
+        if op_name == "set_field"
+            && entity_name.as_str() == "block"
+            && params.get("field").and_then(|v| v.as_string()) == Some(SOURCE_TEXT_FIELD)
+        {
             return self
-                .run_promote_task_keyword(&params, &origin)
+                .run_set_source_text(&params, &origin)
                 .await
                 .map(OpOutcome::proven);
         }
@@ -2280,6 +2429,14 @@ impl OperationEngine for DispatchingOperationEngine {
         // `block_raw.properties`, with no provider edits.
         let params = self.stamp_provenance(op_name, params, &origin);
 
+        // Keyword convergence (ruling 2026-08-10): a write that would leave the
+        // block as keyword-headed plain text is rewritten to the task it
+        // already is, here, before it reaches the store — so `forward_op` (the
+        // redo record) and the write itself carry the SAME converged content.
+        let (params, converged) = self
+            .converge_block_write(entity_name, op_name, params)
+            .await?;
+
         // Same reason, second consumer of the origin this method is the last to
         // hold: whether `content` may carry raw org markup the author just typed
         // (`[[Page]]`, `*bold*`) is a fact about PROVENANCE, so only here can it
@@ -2302,7 +2459,7 @@ impl OperationEngine for DispatchingOperationEngine {
                 .collect(),
         );
 
-        let result = self
+        let mut result = self
             .dispatcher
             .execute_operation_with_input(entity_name, op_name, params, input)
             .await
@@ -2317,6 +2474,28 @@ impl OperationEngine for DispatchingOperationEngine {
                 "operation '{op_name}' on '{entity_name}' returned an Undeclared undo \
                  classification — provider must return Undo(..) or DeclaredIrreversible(..)"
             );
+        }
+
+        // The two halves of convergence: the `task_state` that pairs a
+        // pre-rewritten content write, and the repair for writes that compute
+        // their content inside the provider (`split_block`, the merge family),
+        // which the pre-rewrite cannot see. Both run under this entity's write
+        // hold, so no reader observes the block between the two writes.
+        let mut converge_forwards = Vec::new();
+        let mut converge_inverses = Vec::new();
+        if let Some((id, promotion)) = &converged {
+            let (fwd, inv, ch) = self.write_converged_task_state(id, promotion).await?;
+            result.changes.extend(ch);
+            converge_forwards.push(fwd);
+            converge_inverses.push(inv);
+        }
+        let (post_fwd, post_inv, post_ch) = self
+            .converge_after_write(entity_name, &result.changes)
+            .await?;
+        result.changes.extend(post_ch);
+        converge_forwards.extend(post_fwd);
+        for inv in post_inv.into_iter().rev() {
+            converge_inverses.insert(0, inv);
         }
 
         // Ruling #1: only User-origin operations push undo entries. Rule/Sync/
@@ -2352,9 +2531,18 @@ impl OperationEngine for DispatchingOperationEngine {
             {
                 forward_op.params.insert("id".to_string(), minted.clone());
             }
+            // A converged write is ONE undoable gesture: the convergence
+            // writes are appended to the forwards and PREPENDED to the
+            // inverses, so undo drops the task state before restoring the text
+            // it was derived from. Undo lands the pre-write content, which is
+            // itself converged, so the block stays representable.
+            let mut ops = vec![forward_op];
+            ops.extend(converge_forwards);
+            let mut inverse_ops = converge_inverses;
+            inverse_ops.push(inverse_op.clone());
             let entry = UndoEntry {
-                ops: vec![forward_op],
-                inverse_ops: vec![inverse_op.clone()],
+                ops,
+                inverse_ops,
                 origin: OpOrigin::User,
                 group_id: 0,
                 precondition: Precondition::forward(&result.changes),

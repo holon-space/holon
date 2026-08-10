@@ -94,14 +94,9 @@ pub fn type_chars_weighted_generator<R: RefEditorMirror + RefFocus + RefLifecycl
 /// editor, then commit through to block content.
 ///
 /// ONE KEYSTROKE AT A TIME, deliberately. Prod delivers `text` as N separate
-/// keystrokes, each of which runs the whole sink (`apply_local_edit` → commit),
-/// and live task-keyword promotion is a function of the DELTA — so a model that
-/// applied `text` as one edit would compute a different promotion than the run
-/// it is judging. `TODO  milk` (two spaces) is the smallest witness: prod
-/// promotes on the FIRST space, when the block is still `TODO `, and the second
-/// space is then ordinary text; a one-shot model sees `TODO  milk` whole and
-/// trims both spaces away. Everything else here is per-keystroke for the same
-/// reason.
+/// keystrokes, each of which runs the whole sink (`apply_local_edit` → commit)
+/// and each of which the store canonicalizes, so a model that applied `text` as
+/// one edit would judge a state prod never held.
 pub fn type_chars_apply_to_ref<R>(text: &str, state: &mut R)
 where
     R: RefEditorMirrorMut + RefBlockTreeMut + RefFocus + RefLifecycle,
@@ -111,65 +106,18 @@ where
     }
 }
 
-/// One keystroke: insert it, then either promote or commit the buffer as
-/// ordinary content.
+/// One keystroke: insert it into the editable surface, then commit that
+/// surface. There is no promotion step — the surface holds vault syntax and the
+/// STORE's convergence is the parse, which is the whole shape of arm (d).
 fn type_one_char_to_ref<R>(ch: &str, state: &mut R)
 where
     R: RefEditorMirrorMut + RefBlockTreeMut + RefFocus + RefLifecycle,
 {
-    let prior_buffer = state.active_editor_text().unwrap_or_default().to_owned();
     state.type_chars(ch);
-    // Live task-keyword promotion (task #64): the keystroke that makes a block
-    // keyword-headed is an authoring gesture, not text — the keyword becomes
-    // `task_state` and leaves the content.
-    //
-    // ONE decision, on the guard inputs the ENGINE uses: the block's task
-    // state, the editor's prior text, and the vocabulary the DRAWN DOCUMENT
-    // declares. The vocabulary is derived here rather than copied from prod's
-    // constant — a model that hardcodes what prod hardcodes agrees with prod's
-    // wrong answer.
-    //
-    // Prod's trigger cannot see the document, so it proposes on a
-    // vocabulary-free shape rule and the engine adjudicates. A refusal is
-    // therefore reachable from typing, and the view model's un-strip is what
-    // keeps it lossless: both sides land on the typed text either way, which
-    // is why this ONE decision still predicts the SUT.
-    if let Some(block_id) = state.active_editor_block()
-        && let Some(typed) = state.active_editor_text().map(str::to_owned)
-        && let Some(caret) = state.active_editor_cursor()
-    {
-        let prior_state = state
-            .block_task_state(&block_id)
-            .map(|k| holon_api::TaskState::from_keyword(&k));
-        let promotion = holon_org_format::detect_keyword_promotion(
-            &prior_buffer,
-            prior_state.as_ref(),
-            &typed,
-            &state.block_task_vocabulary(&block_id),
-        );
-        if let Some(promotion) = promotion
-            && state.promote_block_task_keyword(
-                &block_id,
-                &promotion.keyword.keyword,
-                &promotion.stripped,
-            )
-        {
-            // The keyword left the visible text, so every caret offset moves
-            // back by exactly the prefix the promotion consumed.
-            state.reseed_active_editor(
-                &promotion.stripped,
-                caret.saturating_sub(promotion.consumed_prefix),
-            );
-            state.mark_active_editor_committed();
-            return;
-        }
-    }
-    // The GPUI editor now always commits typed text: when Loro is
-    // enabled the per-keystroke pipeline writes through the Cell into
-    // the Loro doc, and when no cell is attached (SqlOnly / no-Loro
-    // mode) the change handler falls back to `set_field("content")`.
-    // The ref must mirror this so the invariant sees the same content
-    // on both sides regardless of storage backend.
+    // The GPUI editor commits every typed keystroke: to `source_text` when the
+    // buffer is (or has just stopped being) keyword-headed, to `content`
+    // otherwise. `commit_active_editor_if_changed` runs that same routing, so
+    // the ref sees the same two columns the SUT does in either storage mode.
     commit_active_editor_if_changed(state);
 }
 
@@ -236,22 +184,32 @@ crate::cap_transition! {
         // the SqlOnly arm (measured 19 vs 18) — inside the untouched
         // tolerance, not a widening of it.
         //
-        // A keystroke the read gate admits costs the authority one more read
-        // per hop from the block to its nearest page ancestor, resolving the
-        // owning document's `#+TODO:` vocabulary. Charged ONLY for a
-        // candidate-headed text, so the budget still bites on ordinary prose.
+        // Every keystroke whose buffer is keyword-SHAPED commits through the
+        // source channel, and each of those costs the store one read per hop
+        // from the block to its nearest page ancestor to resolve the owning
+        // document's `#+TODO:` vocabulary. Counted per keystroke rather than
+        // per transition — the budget still bites on ordinary prose, which
+        // never opens the channel at all.
         let chars = me.text.chars().count();
-        let vocabulary_reads = if holon_org_format::candidate_keyword_headed(&me.text).is_some() {
-            VOCABULARY_RESOLVE_READS
-        } else {
-            0
-        };
+        let source_keystrokes = (1..=chars)
+            .filter(|n| {
+                let prefix: String = me.text.chars().take(*n).collect();
+                holon_org_format::could_converge(&prefix)
+            })
+            .count();
+        let vocabulary_reads = VOCABULARY_RESOLVE_READS * source_keystrokes;
         ExpectedSql {
             reads: REACTIVE_BASE + 2 * chars + vocabulary_reads,
+            // A source-channel keystroke lands TWO columns (content and
+            // task_state) where a content keystroke lands one. Charged for
+            // every keystroke the channel admits — an OVER-approximation,
+            // because the task_state write is skipped while the block carries
+            // no keyword to clear; over-charging only loosens a ceiling, and
+            // the shape (linear in the keyword-headed prefix) is the point.
             writes: if state.content_writes_reach_sql() {
-                2 * chars
+                2 * chars + source_keystrokes
             } else {
-                chars
+                chars + source_keystrokes
             },
             ddl: 0,
             tolerance: 5,

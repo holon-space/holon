@@ -28,9 +28,6 @@ use holon_api::Value;
 use crate::editor_caret;
 use crate::editor_view_model::EditorKey;
 use crate::editor_view_model::EditorViewModel;
-use crate::editor_view_model::PromotionOutcome;
-use crate::editor_view_model::PromotionResidue;
-use crate::editor_view_model::TaskKeywordAtKeystroke;
 use crate::editor_view_model::structural_block_action;
 use crate::operations::OperationIntent;
 use crate::reactive::BuilderServices;
@@ -168,104 +165,79 @@ impl HeadlessEditorMirror {
         engine: &Arc<ReactiveEngine>,
         block_uri: &holon_api::EntityUri,
     ) -> Result<()> {
-        let block_id = block_uri.to_string();
-        let services: &dyn BuilderServices = engine.as_ref();
-        let content = match services.editable_text(block_uri, "content") {
-            Ok(mt) => mt.current(),
-            Err(_) => self.sql_block_content(engine, &block_id).await?,
-        };
+        let seeded = self.seeded_editor(engine, block_uri).await?;
         self.editors
             .lock()
             .unwrap()
-            .insert(block_id.clone(), new_editor_vm(&block_id, &content));
+            .insert(block_uri.to_string(), seeded);
         Ok(())
     }
 
+    /// A fresh editor VM for `block_uri`, seeded with the block's SOURCE
+    /// PROJECTION and the vocabulary that produced it. The one place a focus
+    /// mount decides what the editable surface shows — the vocabulary read
+    /// happens here, once, and never on the keystroke path.
+    async fn seeded_editor(
+        &self,
+        engine: &Arc<ReactiveEngine>,
+        block_uri: &holon_api::EntityUri,
+    ) -> Result<EditorViewModel> {
+        let block_id = block_uri.to_string();
+        let services: &dyn BuilderServices = engine.as_ref();
+        let (sql_content, task_state) = self.sql_editor_source(engine, &block_id).await?;
+        let content = match services.editable_text(block_uri, "content") {
+            Ok(mt) => mt.current(),
+            Err(_) => sql_content,
+        };
+        // Resolved for EVERY seed, tasked or not. Skipping it for a plain block
+        // saved one document read and cost correctness: the surface would then
+        // be classified `Untasked` under a fabricated vocabulary, and the
+        // Untasked arm routes on the vocabulary-FREE shape rule — so typing a
+        // keyword the document does not declare would reach the source channel.
+        // The router must not be less vocabulary-aware than the parse it feeds.
+        let vocabulary = crate::editor_source::vocabulary_for_block(services, block_uri).await?;
+        let mut vm = new_editor_vm(&block_id, "");
+        // An unresolvable vocabulary leaves the editor UNCLASSIFIED rather than
+        // classified under a guess (`Surface::Pending`).
+        if let Some(vocabulary) = vocabulary {
+            vm.set_task_vocabulary(vocabulary);
+        }
+        // Seeding THROUGH the view model is what records the surface state the
+        // commit router reads — a seed applied around it would leave the router
+        // judging a refused buffer by the vocabulary-free shape rule.
+        let seed = vm.project_authority(&content, task_state.as_deref());
+        vm.set_buffer_from_authority(&seed, 0);
+        Ok(vm)
+    }
+
     /// Apply one user-typed buffer edit through the VM (the single keystroke
-    /// sink): mutate the owned buffer to `new_text`, stamp `write_seq`, and
-    /// dispatch the resulting `set_field("content")` intent through the real op
-    /// pipeline (`dispatch_intent_sync`). The lock is released BEFORE the await
-    /// so no VM guard is held across the dispatch.
-    /// Returns the bytes the VM stripped off the FRONT of `new_text` (a live
-    /// task-keyword promotion), which the caller subtracts from the caret it
-    /// was about to record — the headless analogue of a GPUI editor re-seeding
-    /// `InputState` from the VM buffer.
+    /// sink): mutate the owned buffer to `new_text` and dispatch the resulting
+    /// intent through the real op pipeline (`dispatch_intent_sync`). The lock
+    /// is released BEFORE the await so no VM guard is held across the
+    /// dispatch.
+    ///
+    /// Which intent that is — `set_field("content")` or
+    /// `set_field("source_text")` — is the VM's call and depends only on the
+    /// text, never on who typed it. See `EditorViewModel::apply_local_edit`.
     async fn vm_commit_edit(
         &self,
         engine: &Arc<ReactiveEngine>,
         block_id: &str,
         seed: &str,
         new_text: &str,
-    ) -> Result<usize> {
+    ) -> Result<()> {
         self.ensure_editor(block_id, seed);
-        // The block's task keyword is READ HERE, at the keystroke that would
-        // use it — never remembered across keystrokes, because a task-toggle
-        // click between two keystrokes would make a remembered copy stale
-        // exactly when the promotion guard consults it. `attempts_promotion`
-        // keeps the read off the hot path: it is true only for a keyword-headed
-        // keystroke, at most one per promotion.
-        let task_keyword = {
-            let attempts = {
-                let eds = self.editors.lock().unwrap();
-                eds.get(block_id)
-                    .expect("ensure_editor just guaranteed a VM for this block")
-                    .attempts_promotion(new_text)
-            };
-            if attempts {
-                TaskKeywordAtKeystroke::Read(self.sql_task_keyword(engine, block_id).await?)
-            } else {
-                TaskKeywordAtKeystroke::Unread
-            }
-        };
-        let edit = {
+        let intent = {
             let mut eds = self.editors.lock().unwrap();
             let vm = eds
                 .get_mut(block_id)
                 .expect("ensure_editor just guaranteed a VM for this block");
-            vm.apply_local_edit(new_text, task_keyword)?
+            vm.apply_local_edit(new_text)?
         };
-        let Some(intent) = edit.intent else {
-            return Ok(0);
-        };
-        let Some(rewrite) = edit.rewrite else {
-            // Ordinary content commit — nothing optimistic to take back.
-            engine.dispatch_intent_sync(intent).await?;
-            return Ok(0);
-        };
-        // A PROMOTING keystroke. The strip already happened in the buffer, so
-        // this dispatch is awaited for its payload: only the engine can say
-        // whether the promotion stood, and only its verbatim `content` can put
-        // the keyword back if it did not. No lock is held here — the VM mutex
-        // was released above, and the compound's own entity write-lock is taken
-        // and dropped INSIDE the engine, so awaiting it cannot self-deadlock.
-        let outcome = PromotionOutcome::parse(
-            engine
-                .dispatch_intent_awaiting_result(intent)
-                .await
-                .context("live task-keyword promotion")?,
-        )?;
-        let PromotionOutcome::Refused { content, reason } = outcome else {
-            return Ok(rewrite.stripped_prefix);
-        };
-        tracing::warn!(
-            target: "editor.task_keyword_promotion",
-            block = %block_id,
-            refusal = %reason,
-            "promotion refused after the editor had already stripped the keyword; \
-             restoring the typed text"
-        );
-        let restore = {
-            let mut eds = self.editors.lock().unwrap();
-            let vm = eds
-                .get_mut(block_id)
-                .expect("ensure_editor just guaranteed a VM for this block");
-            vm.restore_refused_promotion(&rewrite.text, &PromotionResidue::EngineStored(content))
-        };
-        if let Some(intent) = restore.and_then(|r| r.intent) {
+        if let Some(intent) = intent {
             engine.dispatch_intent_sync(intent).await?;
         }
-        // The keyword is back in the buffer, so the caret must not move back.
-        Ok(0)
+        Ok(())
     }
 
     /// Converge one editor's buffer against the settled SQL authority (Inc 4 —
@@ -281,12 +253,31 @@ impl HeadlessEditorMirror {
         engine: &Arc<ReactiveEngine>,
         block_id: &str,
     ) -> Result<()> {
-        let content = self.sql_block_content(engine, block_id).await?;
+        let (content, task_state) = self.sql_editor_source(engine, block_id).await?;
+        let mut converged_to = None;
         let mut eds = self.editors.lock().unwrap();
         if let Some(vm) = eds.get_mut(block_id) {
+            // The editable surface shows vault syntax, so the authority the echo
+            // discriminator compares against is the PROJECTION of the settled
+            // row, not its content column — otherwise every source-channel write
+            // reads back as an external change and converges the keyword away.
+            let authority = vm.project_authority(&content, task_state.as_deref());
             let seq = vm.last_local_seq();
-            if let Some(directive) = vm.converge_from_data_sync(&content, Some(seq)) {
+            if let Some(directive) = vm.converge_from_data_sync(&authority, Some(seq)) {
                 vm.set_buffer_from_authority(&directive.target, directive.seq);
+                converged_to = Some(directive.target);
+            }
+        }
+        drop(eds);
+        // A converge can SHORTEN the buffer (the store canonicalizes what it
+        // stored), so the caret is clamped onto it — the headless twin of
+        // GPUI's `preserved_caret` around the absolute `set_value`.
+        if let Some(target) = converged_to {
+            let mut cursors = self.cursors.lock().unwrap();
+            for (key, byte) in cursors.iter_mut() {
+                if key.0 == block_id {
+                    *byte = editor_caret::clamp_boundary(&target, *byte);
+                }
             }
         }
         Ok(())
@@ -318,8 +309,22 @@ impl HeadlessEditorMirror {
         if self.tracked_cursor_at(&block_id, occ).is_none() {
             return;
         }
-        self.set_cursor(&block_id, occ, offset);
+        self.set_cursor(&block_id, occ, self.seed_into_surface(&block_id, offset));
         engine.consume_caret_seed(block_uri);
+    }
+
+    /// Carry a structural op's caret seed from CONTENT coordinates into the
+    /// SURFACE the editor shows. `join_block` reports the merge boundary as an
+    /// offset into the target's content and `split_block` reports 0, but the
+    /// buffer that consumes either is the projection — so on a tasked target
+    /// the raw seed lands inside the keyword (task #93). No editor VM means
+    /// no projection to cross.
+    fn seed_into_surface(&self, block_id: &str, offset: usize) -> usize {
+        self.editors
+            .lock()
+            .unwrap()
+            .get(block_id)
+            .map_or(offset, |vm| vm.content_offset_to_surface(offset))
     }
 
     /// Mirror a user click on a block: seed the tracked caret for
@@ -338,12 +343,10 @@ impl HeadlessEditorMirror {
     ) -> Result<()> {
         let block_id = block_uri.to_string();
         let occ = engine.focused_occurrence();
-        let services: &dyn BuilderServices = engine.as_ref();
-        let current_text = match services.editable_text(block_uri, "content") {
-            Ok(mt) => mt.current(),
-            Err(_) => self.sql_block_content(engine, &block_id).await?,
-        };
-        self.set_cursor(&block_id, occ, current_text.len());
+        let seeded = self.seeded_editor(engine, block_uri).await?;
+        // End-of-text is end of the SOURCE PROJECTION: what the user clicks is
+        // the vault syntax, keyword included.
+        self.set_cursor(&block_id, occ, seeded.buffer().len());
         // A click re-mounts the editor: (re)seed its buffer VM from the current
         // authority content, discarding any stale buffer from an earlier editor
         // session on this block (mirrors GPUI re-seeding `InputState` on
@@ -351,47 +354,31 @@ impl HeadlessEditorMirror {
         self.editors
             .lock()
             .unwrap()
-            .insert(block_id.clone(), new_editor_vm(&block_id, &current_text));
+            .insert(block_id.clone(), seeded);
         Ok(())
     }
 
-    /// Read the block's `content` via the `QueryEngine` capability's
-    /// non-settling `block_raw` read. Returns `""` when the block isn't
-    /// present yet (e.g. the just-clicked block's create event hasn't
-    /// projected) — caller's subsequent keystrokes then no-op until the
-    /// row materialises, matching production GPUI's "editor mounts after
-    /// CDC settles" behaviour. Query errors propagate (fail loud).
-    async fn sql_block_content(
+    /// The two columns the editable surface is projected from, in ONE
+    /// non-settling read of the write table (`block_raw`) — the headless mirror
+    /// must see exactly what a production editor's read would see, WITHOUT
+    /// awaiting CDC quiescence (settling would mask the projection races the
+    /// PBTs hunt). `("", None)` when the row hasn't materialised yet, so a
+    /// just-clicked block's keystrokes no-op until it does; query errors
+    /// propagate (fail loud).
+    async fn sql_editor_source(
         &self,
         engine: &Arc<ReactiveEngine>,
         block_id: &str,
-    ) -> Result<String> {
+    ) -> Result<(String, Option<String>)> {
         let uri = holon_api::EntityUri::parse(block_id)
             .with_context(|| format!("headless mirror got a non-URI block id {block_id:?}"))?;
         let query_engine = engine.session().query_engine().with_context(|| {
-            format!("headless mirror content read for {block_id} needs the Turso query engine")
+            format!(
+                "headless mirror editor-source read for {block_id} needs the Turso query engine"
+            )
         })?;
-        Ok(query_engine
-            .block_content_by_id(&uri)
-            .await?
-            .unwrap_or_default())
-    }
-
-    /// The block's stored task keyword — the same fact a live frontend reads
-    /// off the row projection that renders the task affordance. `None` for a
-    /// plain block. Query errors propagate (fail loud): guessing `None` here
-    /// would re-arm the promotion trigger on a block that is already a task.
-    async fn sql_task_keyword(
-        &self,
-        engine: &Arc<ReactiveEngine>,
-        block_id: &str,
-    ) -> Result<Option<String>> {
-        let uri = holon_api::EntityUri::parse(block_id)
-            .with_context(|| format!("headless mirror got a non-URI block id {block_id:?}"))?;
-        let query_engine = engine.session().query_engine().with_context(|| {
-            format!("headless mirror task_state read for {block_id} needs the Turso query engine")
-        })?;
-        query_engine.block_task_state_by_id(&uri).await
+        let (content, task_state) = query_engine.block_editor_source_by_id(&uri).await?;
+        Ok((content.unwrap_or_default(), task_state))
     }
 
     /// Route a single keystroke through the same logical pipeline GPUI's
@@ -420,19 +407,6 @@ impl HeadlessEditorMirror {
         // still keys the write (`editable_text(block_uri)` below is unchanged).
         let occ = engine.focused_occurrence();
 
-        let services: &dyn BuilderServices = engine.as_ref();
-        // `editable_text` returns Err in SqlOnly mode (no Loro provider
-        // configured) and in Full mode if the block isn't in the Loro
-        // tree yet. Both states are legitimate during PBT runs — the
-        // mirror still tracks the cursor so structural ops can dispatch.
-        // Trace the error so a real Loro misconfiguration is visible.
-        let mt = match services.editable_text(&block_uri, "content") {
-            Ok(mt) => Some(mt),
-            Err(e) => {
-                tracing::trace!("[HeadlessEditorMirror] no MutableText for {block_id}: {e:#}");
-                None
-            }
-        };
         // Char keystrokes and mid-line backspace route through the block's
         // cell-free editor VM (Inc 4): the VM owns the buffer and dispatches a
         // `set_field("content")`+`write_seq` write through the real op pipeline.
@@ -451,13 +425,20 @@ impl HeadlessEditorMirror {
         // (commit aa636444).
         let current_text = if let Some(buffered) = self.live_text(&block_id) {
             // An editor VM already owns this block's buffer (a prior keystroke
-            // this focus session, or a focus-time `ensure_editor` seed) — it is
-            // the authority, not the possibly-mid-settle SQL/cell snapshot.
+            // this focus session, or a focus-time seed) — it is the authority,
+            // not the possibly-mid-settle SQL/cell snapshot.
             buffered
-        } else if let Some(ref m) = mt {
-            m.current()
         } else {
-            self.sql_block_content(engine, &block_id).await?
+            // No VM yet: mount one exactly as a focus would, on the block's
+            // SOURCE PROJECTION. A keystroke must never edit the content column
+            // directly — that is the surface the store re-derives.
+            let seeded = self.seeded_editor(engine, &block_uri).await?;
+            let text = seeded.buffer().to_string();
+            self.editors
+                .lock()
+                .unwrap()
+                .insert(block_id.clone(), seeded);
+            text
         };
         // First keystroke since focus: adopt the armed caret seed (split → 0,
         // join → boundary) exactly like a mounting GPUI editor does via
@@ -469,6 +450,7 @@ impl HeadlessEditorMirror {
             None => {
                 let init = engine
                     .peek_caret_seed(&block_uri)
+                    .map(|o| self.seed_into_surface(&block_id, o))
                     .filter(|&o| current_text.is_char_boundary(o.min(current_text.len())))
                     .map(|o| o.min(current_text.len()))
                     .unwrap_or(current_text.len());
@@ -515,10 +497,9 @@ impl HeadlessEditorMirror {
                 let new_cursor_byte = editor_caret::move_left(&current_text, cursor_byte);
                 let mut new_text = current_text.clone();
                 new_text.replace_range(new_cursor_byte..cursor_byte, "");
-                let stripped = self
-                    .vm_commit_edit(engine, &block_id, &current_text, &new_text)
+                self.vm_commit_edit(engine, &block_id, &current_text, &new_text)
                     .await?;
-                self.set_cursor(&block_id, occ, new_cursor_byte.saturating_sub(stripped));
+                self.set_cursor(&block_id, occ, new_cursor_byte);
             }
             "enter" if !has_ctrl_alt_cmd && !has_shift => {
                 // LogSeq parity: if the cursor sits after a `/cmd` that matches a
@@ -562,14 +543,9 @@ impl HeadlessEditorMirror {
                 let inserted = ch.to_string();
                 let mut new_text = current_text.clone();
                 new_text.insert_str(cursor_byte, &inserted);
-                let stripped = self
-                    .vm_commit_edit(engine, &block_id, &current_text, &new_text)
+                self.vm_commit_edit(engine, &block_id, &current_text, &new_text)
                     .await?;
-                self.set_cursor(
-                    &block_id,
-                    occ,
-                    (cursor_byte + inserted.len()).saturating_sub(stripped),
-                );
+                self.set_cursor(&block_id, occ, cursor_byte + inserted.len());
             }
             _ => {
                 tracing::trace!(

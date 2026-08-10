@@ -1,27 +1,15 @@
-//! Re-ingesting an on-disk projection nobody edited must NOT re-derive a task
-//! keyword into `task_state` (BugFunnel F4 — silent TODO promotion across
-//! restart).
+//! Re-ingest is a FIXED POINT of the task-keyword reading: whatever the store
+//! holds, `** TODO buy milk` on disk reads back as one task, and re-reading it
+//! again changes nothing.
 //!
-//! A block a user authored as plain text whose content merely STARTS with a
-//! task keyword ("TODO buy milk") renders to `* TODO buy milk`. On the next
-//! boot the org parser hoists "TODO" into `task_state`, silently promoting
-//! persisted plain text to a task — a mutation the user never authored.
-//!
-//! This drives the REAL `FileSyncController` twice:
-//!   1. ingest `* buy milk` → the store holds `milk-block` as plain text;
-//!   2. simulate the live-typed (but un-promoted) keyword by editing the stored
-//!      content to "TODO buy milk", then re-ingest the byte-identical disk
-//!      projection `* TODO buy milk`.
-//! The store block must still carry NO `task_state` after step 2.
-//!
-//! The twin below convicts the reconciler, not the fixture: a GENUINE on-disk
-//! keyword edit (the stored content did NOT already carry the keyword) still
-//! promotes — org interop preserved.
+//! This drives the REAL `FileSyncController`. The reading is per document: a
+//! file declaring `#+TODO: NEXT | DONE` reads `NEXT call bank` as a task and
+//! `TODO buy milk` as ordinary prose, and each of those is its own fixed point.
 //!
 //! @pbt kind harness
-//! @pbt covers reingest-task-promotion-idempotent — a persisted plain block
-//!   whose text starts with a task keyword is not silently promoted on
-//! re-ingest
+//! @pbt covers reingest-task-promotion-idempotent — the re-ingest reading of a
+//!   keyword-headed line is stable under repetition and follows the document's
+//!   own vocabulary
 
 #![cfg(feature = "di")]
 
@@ -371,7 +359,7 @@ fn write_seam_vocabulary(
 /// `task_state=NULL` + content `TODO buy milk` — on every restart.
 #[tokio::test]
 async fn typing_an_undeclared_keyword_is_a_reingest_fixed_point() {
-    use holon_org_format::detect_keyword_promotion;
+    use holon_org_format::converge_keyword_headed;
 
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
@@ -380,7 +368,7 @@ async fn typing_an_undeclared_keyword_is_a_reingest_fixed_point() {
     ingest(&store, &root, DECLARING).await;
     let vocabulary = write_seam_vocabulary(&store, "milk-doc");
 
-    let promotion = detect_keyword_promotion("buy milk", None, "TODO buy milk", &vocabulary);
+    let promotion = converge_keyword_headed("TODO buy milk", &vocabulary);
     assert_eq!(
         promotion, None,
         "TODO is not a keyword in this document — the write seam must not promote"
@@ -407,7 +395,7 @@ async fn typing_an_undeclared_keyword_is_a_reingest_fixed_point() {
 /// and every task query misses a block the file plainly marks as a task.
 #[tokio::test]
 async fn typing_a_declared_keyword_promotes_and_round_trips() {
-    use holon_org_format::detect_keyword_promotion;
+    use holon_org_format::converge_keyword_headed;
 
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
@@ -416,7 +404,7 @@ async fn typing_a_declared_keyword_promotes_and_round_trips() {
     ingest(&store, &root, DECLARING).await;
     let vocabulary = write_seam_vocabulary(&store, "milk-doc");
 
-    let promotion = detect_keyword_promotion("buy milk", None, "NEXT call bank", &vocabulary)
+    let promotion = converge_keyword_headed("NEXT call bank", &vocabulary)
         .expect("NEXT is declared by this document — the write seam must promote");
     assert_eq!(promotion.keyword.keyword, "NEXT");
     assert!(!promotion.keyword.is_done(), "NEXT is declared active");
@@ -438,10 +426,9 @@ async fn typing_a_declared_keyword_promotes_and_round_trips() {
 /// NULL, the keyword back inside the text.
 ///
 /// This is correct parser behaviour, and it is why the write seams must never
-/// produce that row: the demotion is unfixable downstream. Suppressing it in
-/// `reconcile_idempotent_reingest` would mean refusing every parsed
-/// `task_state=None` over a stored one, which is exactly what a genuine
-/// Emacs-side `C-c C-t` demotion looks like.
+/// produce that row: the demotion is unfixable downstream. Suppressing it would
+/// mean refusing every parsed `task_state=None` over a stored one, which is
+/// exactly what a genuine Emacs-side `C-c C-t` demotion looks like.
 #[tokio::test]
 async fn reingest_erases_a_task_state_the_document_vocabulary_does_not_admit() {
     let tmp = tempfile::tempdir().unwrap();
@@ -477,39 +464,44 @@ async fn reingest_erases_a_task_state_the_document_vocabulary_does_not_admit() {
     );
 }
 
+/// THE FIXED POINT. `** TODO buy milk` on disk is a task in every org reader,
+/// so the store reads it as one whatever it held before — and the only question
+/// left is whether that reading is STABLE.
+///
+/// Two re-ingests, because idempotence is the whole claim: the first converges,
+/// the second must change nothing.
 #[tokio::test]
-async fn persisted_plain_text_starting_with_todo_is_not_promoted_on_reingest() {
+async fn keyword_headed_bytes_ingest_as_a_task_idempotently() {
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
 
-    // 1. Author it plain: the store holds `milk-block` as plain text.
     let store = FakeStore::default();
     ingest(&store, &root, PLAIN).await;
     assert_eq!(store.task_state_of("milk-block"), None, "seeded plain");
 
-    // 2. The live authoring path put the keyword into the block's TEXT without
-    //    promoting it (task_state still absent), and write-back rendered the
-    //    byte-identical `* TODO buy milk` to disk.
+    // The state the deleted reconciler used to protect: keyword-headed text
+    // with no task state. Whatever put it there, the file says "task".
     store.set_content("milk-block", "TODO buy milk");
 
-    // 3. Re-ingest that projection nobody edited.
     ingest(&store, &root, PROJECTED_WITH_KEYWORD).await;
+    assert_eq!(
+        store.task_state_of("milk-block").as_deref(),
+        Some("TODO"),
+        "the bytes on disk are a task, so the store must read them as one"
+    );
+    assert_eq!(store.content_of("milk-block"), "buy milk");
 
+    ingest(&store, &root, PROJECTED_WITH_KEYWORD).await;
     assert_eq!(
-        store.task_state_of("milk-block"),
-        None,
-        "re-ingesting our own render must NOT silently promote plain text to a task"
+        store.task_state_of("milk-block").as_deref(),
+        Some("TODO"),
+        "the converged reading is a FIXED POINT — a second re-ingest changes nothing"
     );
-    assert_eq!(
-        store.content_of("milk-block"),
-        "TODO buy milk",
-        "the plain text must survive verbatim across the re-ingest"
-    );
+    assert_eq!(store.content_of("milk-block"), "buy milk");
 }
 
 /// Twin: a GENUINE on-disk keyword edit (stored content did NOT carry the
-/// keyword) still promotes — org interop is preserved, only the round-trip
-/// artifact is suppressed.
+/// keyword) promotes — org interop, from the other starting state.
 #[tokio::test]
 async fn a_genuine_on_disk_keyword_edit_still_promotes() {
     let tmp = tempfile::tempdir().unwrap();
@@ -537,7 +529,7 @@ async fn a_genuine_on_disk_keyword_edit_still_promotes() {
 #[tokio::test]
 async fn halfa_then_halfb_is_a_fixed_point() {
     use holon_org_format::TaskKeywordVocabulary;
-    use holon_org_format::detect_keyword_promotion;
+    use holon_org_format::converge_keyword_headed;
 
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
@@ -548,7 +540,7 @@ async fn halfa_then_halfb_is_a_fixed_point() {
     assert_eq!(store.task_state_of("milk-block"), None, "seeded plain");
 
     // HALF A: the author prepends the keyword; the detector fires once.
-    let promotion = detect_keyword_promotion("buy milk", None, "TODO buy milk", &vocabulary)
+    let promotion = converge_keyword_headed("TODO buy milk", &vocabulary)
         .expect("HALF A must promote the authoring gesture");
     store.apply_promotion("milk-block", &promotion);
     assert_eq!(store.content_of("milk-block"), "buy milk");
@@ -567,16 +559,11 @@ async fn halfa_then_halfb_is_a_fixed_point() {
         "the keyword must NOT be re-absorbed into the content"
     );
 
-    // And the detector itself is at rest: the block now carries a task_state,
-    // so no further keystroke can re-promote it.
+    // And the rule is at rest: the stored content no longer carries a keyword,
+    // so nothing converges a second time.
     assert_eq!(
-        detect_keyword_promotion(
-            "buy milk",
-            Some(&promotion.keyword),
-            "TODO buy milk",
-            &vocabulary
-        ),
+        converge_keyword_headed(&store.content_of("milk-block"), &vocabulary),
         None,
-        "a promoted block must never re-promote"
+        "a promoted block's stored content must not converge again"
     );
 }

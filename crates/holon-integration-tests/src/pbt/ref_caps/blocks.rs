@@ -254,28 +254,62 @@ impl RefBlockTreeMut for ReferenceState {
         defaults()
     }
 
-    fn promote_block_task_keyword(
-        &mut self,
-        id: &EntityUri,
-        keyword: &str,
-        stripped: &str,
-    ) -> bool {
-        self.set_block_content(id, stripped);
+    fn refresh_clean_editor_surface(&mut self, id: &EntityUri) {
+        let uri = parse_id_must(id);
+        self.refresh_clean_active_editor(&uri);
+    }
+
+    fn editor_surface_text(&self, id: &EntityUri) -> String {
+        let content = self.block_content(id).unwrap_or_default();
+        let keyword = self.block_task_state(id);
+        let state = keyword
+            .as_deref()
+            .filter(|k| !k.is_empty())
+            .map(holon_api::TaskState::from_keyword);
+        match holon_org_format::source_projection(
+            state.as_ref(),
+            content,
+            &self.block_task_vocabulary(id),
+        ) {
+            holon_org_format::SourceProjection::Text(text) => text,
+            // The SUT refuses the same projection and shows stored content, so
+            // the model does too — a divergence here would be the model's, not
+            // the SUT's.
+            holon_org_format::SourceProjection::Refused(_) => content.to_string(),
+        }
+    }
+
+    fn commit_editor_source(&mut self, id: &EntityUri, source: &str) {
+        let vocabulary = self.block_task_vocabulary(id);
+        let parsed = holon_org_format::converge_keyword_headed(source, &vocabulary);
+        let prior = self.block_task_state(id).filter(|k| !k.is_empty());
+        let (content, keyword) = match &parsed {
+            Some(p) => (p.stripped.clone(), p.keyword.keyword.clone()),
+            // The empty keyword is how the store clears a task state — the same
+            // value the blank ring slot writes, not a removal path of its own.
+            None => (source.to_string(), String::new()),
+        };
+        self.set_block_content(id, &content);
+        if parsed.is_none() && prior.is_none() {
+            // Nothing to clear: writing the empty keyword anyway would add a
+            // blank `task_state` to a plain block, a state no write path
+            // produces.
+            return;
+        }
         let uri = parse_id_must(id);
         let Some(block) = self.domain.block_state.blocks.get_mut(&uri) else {
-            return false;
+            return;
         };
         block.properties.insert(
             "task_state".to_string(),
-            holon_api::Value::String(keyword.to_string()),
+            holon_api::Value::String(keyword.clone()),
         );
         block.properties.insert(
             "task_state_category".to_string(),
             holon_api::Value::String(
-                holon_api::TaskState::category_str_for_keyword(keyword).to_string(),
+                holon_api::TaskState::category_str_for_keyword(&keyword).to_string(),
             ),
         );
-        true
     }
 
     fn split_block(&mut self, id: &EntityUri, position: usize) -> EntityUri {
@@ -444,11 +478,14 @@ impl RefApplyMutationMut for ReferenceState {
             && fields.contains_key("content")
         {
             self.reset_cursor_if_focused(id);
-            // Prod's data subscription refreshes an idle (clean) active editor
-            // from its live content cell — the exact source `editor_live_text`
-            // reads. Mirror that so `inv-editor-text/mirror` sees the refreshed
-            // content, not a stale pre-update buffer (dirty editors keep their
-            // pending user text; the split-with-pending-edit contract).
+        }
+        // Prod's data subscription refreshes an idle (clean) active editor from
+        // the authority AS THE SURFACE SHOWS IT. `task_state` is part of that
+        // surface — a state toggle under an open editor changes the vault syntax
+        // it displays — so both columns re-seed it.
+        if let Mutation::Update { id, fields, .. } = mutation
+            && (fields.contains_key("content") || fields.contains_key("task_state"))
+        {
             self.refresh_clean_active_editor(id);
         }
     }

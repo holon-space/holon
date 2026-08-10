@@ -5119,8 +5119,6 @@ mod tests {
     /// must not arm at all.
     #[test]
     fn a_keystroke_racing_the_undo_round_trip_disarms_the_reseed() {
-        use crate::editor_view_model::TaskKeywordAtKeystroke;
-
         let ui = UiState::new();
         let a = EntityUri::block("sql-row");
         ui.set_focus(Some(a.clone()));
@@ -5131,7 +5129,7 @@ mod tests {
         // The user types into the focused row while the replay is in flight.
         // The editor commits the keystroke and clears any armed re-seed.
         ui.consume_authority_reseed(&a);
-        vm.apply_local_edit("origx", TaskKeywordAtKeystroke::Unread)
+        vm.apply_local_edit("origx")
             .expect("SqlOnly keystroke commits through set_field");
 
         // Only now does the oneshot resolve `Applied`.
@@ -5244,8 +5242,6 @@ mod tests {
     /// where the clobber destroys committed CRDT text.
     #[test]
     fn a_cell_mode_keystroke_racing_the_undo_round_trip_disarms_the_reseed() {
-        use crate::editor_view_model::TaskKeywordAtKeystroke;
-
         let ui = UiState::new();
         let a = EntityUri::block("cell-row");
         ui.set_focus(Some(a.clone()));
@@ -5258,7 +5254,7 @@ mod tests {
         let gesture = ui.authority_reseed_handle().capture();
         // The user types into the focused row while the replay is in flight.
         ui.consume_authority_reseed(&a);
-        vm.apply_local_edit("origx", TaskKeywordAtKeystroke::Unread)
+        vm.apply_local_edit("origx")
             .expect("cell-mode keystroke commits through the CRDT");
         assert_eq!(vm.buffer(), "origx");
 

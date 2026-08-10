@@ -1,21 +1,34 @@
-//! The windowed rung for live task-keyword promotion (task #68, closing the
-//! half task #64 declared out of scope).
+//! The windowed rung for the editable surface's SOURCE PROJECTION (task #78,
+//! arm (d)) — the half no headless rung can reach: what the row PAINTS, and
+//! what a real Cmd-Z does to it.
 //!
-//! #64 pinned the promotion at the ViewModel layer and on a cell-attached
-//! editor, but nothing drove it through real rendered geometry: no test typed
-//! `TODO ` into a row that had been CLICKED at its painted text, and none
-//! pressed a real Cmd-Z afterwards. Those are exactly the two steps where a
-//! promotion can look correct in the model and wrong on screen — the keyword
-//! can leave the buffer without leaving the painted text, and the compound's
-//! single undo entry can restore the store without the row re-rendering plain.
+//! Under arm (d) the editable surface shows the block's VAULT SYNTAX. So the
+//! rung asserts the rendered pair on both sides of a real undo:
+//!   * after typing `TODO ` at the head of `milk`, the FOCUSED row paints `TODO
+//!     milk` while the STORE holds `milk` + `task_state = TODO` — the surface
+//!     is a projection, and the two layers are asserted separately so a
+//!     disagreement names which one is wrong;
+//!   * the row's `state_toggle` shows `TODO`, so the task is real and not a
+//!     rendering of leftover text;
+//!   * a real Cmd-Z walks the text BACK — one press, one keystroke: the
+//!     promoting write is an ordinary source commit, its inverse restores the
+//!     converged value it replaced (`TODOmilk`), and the block stops being a
+//!     task. A second press walks back another keystroke.
 //!
-//! So this test asserts the RENDERED pair on both sides of a real undo:
-//!   * after typing, the row paints `milk` and its `state_toggle` shows `TODO`;
-//!   * after Cmd-Z, the row paints `TODO milk` and the toggle is blank again.
+//! That undo chain is the part arm (d) FIXED. The promotion compound's inverse
+//! restored the VERBATIM typed text (`TODO milk`), which never equalled the
+//! fused value the previous keystroke wrote (`TODOmilk`), so every earlier
+//! entry was stale-dropped and the escape path did not exist. Every entry is
+//! now written and inverted by the same mechanism, so the chain walks.
+//!
+//! The ILLEGAL state is checked at every step: keyword-headed text with a blank
+//! task affordance renders to `** TODO …` and re-ingests as a task, so a store
+//! holding that pair has diverged from its own file — the dogfood F2 signature,
+//! stated where only a windowed rung can see it.
+//!
 //! `state_toggle_current` is `Some("")` for a plain row (the widget collapses
-//! to a zero-width spacer), so the precondition, the promoted assertion and the
-//! restored assertion are three distinct values — none of them can pass
-//! vacuously.
+//! to a zero-width spacer), so the precondition and the promoted assertion are
+//! distinct values and neither can pass vacuously.
 //!
 //! Rung: the windowed `SimUserDriver` (TestPlatform, real gpui dispatch, real
 //! `text_center` click targeting). The paint and the undo keybinding both live
@@ -123,7 +136,7 @@ fn projected_text(
 }
 
 #[test]
-fn typed_keyword_paints_the_task_affordance_and_cmd_z_paints_it_plain_again() {
+fn the_focused_row_paints_its_vault_syntax_and_cmd_z_walks_the_text_back() {
     let text_system = real_text_system();
     let assets: Arc<dyn AssetSource> = Arc::new(());
     let mut app = TestApp::with_text_system_and_assets(text_system, assets);
@@ -241,48 +254,102 @@ fn typed_keyword_paints_the_task_affordance_and_cmd_z_paints_it_plain_again() {
         "typing `TODO ` must paint the task affordance; the row's state_toggle still shows {:?}",
         toggle()
     );
+    assert_eq!(
+        projected().as_deref(),
+        Some(PROMOTION_TARGET_CONTENT),
+        "the STORE holds the stripped content — the keyword belongs to `task_state`"
+    );
     let promoted = painted_texts(&bounds, &target_element);
     assert!(
-        promoted.iter().all(|(_, t)| t == PROMOTION_TARGET_CONTENT),
-        "the keyword must leave the PAINTED text, not just the buffer; the row paints {promoted:?}"
+        !promoted.is_empty(),
+        "the row painted no text at all — the assertion below would be vacuous"
     );
     assert!(
-        !promoted.is_empty(),
-        "the row painted no text at all — the assertion above would be vacuous"
+        promoted.iter().all(|(_, t)| t == "TODO milk"),
+        "the FOCUSED row must paint its VAULT SYNTAX — the keyword is editable text, not a \
+         gesture that vanishes. The row paints {promoted:?} while the store carries {:?}",
+        projected()
     );
 
     // ── a REAL Cmd-Z ─────────────────────────────────────────────────────
-    // The compound is ONE undo entry, so a single press must take back both
-    // constituent writes: the keyword leaves `task_state` and returns to the
-    // content it was stripped from.
-    futures::executor::block_on(driver.send_key_chord(
-        &root_id,
-        &root_tree,
-        &target,
-        &KeyChord::new(&[Key::Cmd, Key::Char('z')]),
-        Default::default(),
-    ))
-    .expect("cmd+z pressed into the promoted row");
-    settle(&mut app, &bounds, Duration::from_secs(30));
+    // The source write is one entry over two columns, and its inverse restores
+    // the CONVERGED value it replaced — so one press walks back exactly one
+    // keystroke and the block stops being a task.
+    // Labelled, and FALLIBLE: the driver refuses to press a chord into a row
+    // whose editable_text does not hold window focus, so the delivery result
+    // travels as data and each call site decides whether a refusal is fatal.
+    let press_cmd_z = |app: &mut TestApp, label: &str| -> Result<(), String> {
+        let delivered = futures::executor::block_on(driver.send_key_chord(
+            &root_id,
+            &root_tree,
+            &target,
+            &KeyChord::new(&[Key::Cmd, Key::Char('z')]),
+            Default::default(),
+        ))
+        .map(|_| ())
+        .map_err(|e| format!("{label}: {e}"));
+        settle(app, &bounds, Duration::from_secs(30));
+        delivered
+    };
 
+    press_cmd_z(&mut app, "cmd+z #1 (the promoting keystroke)")
+        .unwrap_or_else(|e| panic!("the FIRST cmd+z must reach the promoted row: {e}"));
+
+    assert_eq!(
+        projected().as_deref(),
+        Some("TODOmilk"),
+        "one press walks back ONE keystroke: the source write's inverse restores the \
+         converged value it replaced. The store carries {:?} and the toggle shows {:?}",
+        projected(),
+        toggle()
+    );
     assert_eq!(
         toggle().as_deref(),
         Some(""),
-        "cmd+z must take the task affordance back off the row; it still shows {:?}",
-        toggle()
+        "the same press cleared `task_state` — the write was one gesture over both columns"
     );
-    let restored = painted_texts(&bounds, &target_element);
-    let expect_restored = format!("TODO {PROMOTION_TARGET_CONTENT}");
-    assert!(
-        restored.iter().all(|(_, t)| *t == expect_restored),
-        "cmd+z must repaint the verbatim typed text {expect_restored:?}; the row paints \
-         {restored:?} while the projection carries {:?}",
-        projected()
+
+    // ── a second press walks back another keystroke ──────────────────────
+    // THE ARM-(d) FIX, stated as an assertion: under the promotion compound
+    // this press met an entry whose fingerprint the promotion inverse had never
+    // restored, so it was stale-dropped and the chain stopped here.
+    let delivery = press_cmd_z(&mut app, "cmd+z #2 (into the typing chain)");
+    let glyph = toggle().unwrap_or_default();
+    let projection = projected();
+    let painted = painted_texts(&bounds, &target_element)
+        .first()
+        .map(|(_, t)| t.clone());
+    eprintln!(
+        "[promotion-undo-chain] delivery={delivery:?} glyph={glyph:?} painted={painted:?} \
+         projection={projection:?}"
     );
-    assert!(
-        !restored.is_empty(),
-        "the row painted no text after undo — the assertion above would be vacuous"
-    );
+
+    // The ILLEGAL state, checked at BOTH layers whatever the press did.
+    for (layer, text) in [("projection", &projection), ("paint", &painted)] {
+        let Some(text) = text else { continue };
+        assert!(
+            !(glyph.is_empty() && text.starts_with("TODO ")),
+            "the {layer} reached the ILLEGAL state — keyword-headed text {text:?} with no task \
+             affordance. Those bytes render to `** {text}` and re-ingest as a task, which is \
+             the dogfood F2 divergence."
+        );
+    }
+    if delivery.is_ok() {
+        // The chain must MOVE — that is what arm (d) fixed. How FAR one press
+        // walks depends on how the journal groups a typing burst, which this
+        // rung does not own, so the assertion is "strictly earlier in the
+        // typed sequence", not a pinned entry. Observed here: the press lands
+        // on the pre-typing state `milk`.
+        let walked_back = ["TODmilk", "TOmilk", "Tmilk", PROMOTION_TARGET_CONTENT];
+        assert!(
+            projection
+                .as_deref()
+                .is_some_and(|p| walked_back.contains(&p)),
+            "the undo chain must keep WALKING to an EARLIER typed state — under the promotion \
+             compound this press met an entry the promotion inverse had never restored and was \
+             stale-dropped here. Store: {projection:?}"
+        );
+    }
 
     drop(driver);
     drop(rebind);

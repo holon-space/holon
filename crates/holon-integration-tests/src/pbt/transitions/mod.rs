@@ -85,10 +85,9 @@ pub fn model_chord_click_focus<
     // external change and must NOT be committed (prod's editor would have
     // been refreshed by the data subscription).
     commit_active_editor_if_dirty(state);
-    let content = state
-        .block_content(block_id)
-        .unwrap_or_default()
-        .to_string();
+    // A click mounts the editor on the block's SOURCE PROJECTION — vault
+    // syntax, keyword included — so end-of-text is end of that surface.
+    let content = state.editor_surface_text(block_id);
     let caret = content.len();
     state.set_focus(CapRegion::Main, block_id.clone(), CapCursor::default());
     state.open_active_editor(block_id.clone(), content, caret);

@@ -119,22 +119,6 @@ pub trait FileFormatAdapter: Send + Sync {
     /// excluded — it is derived from document position, not a per-block field.
     fn content_differs(&self, a: &Block, b: &Block) -> bool;
 
-    /// Suppress a field the format would RE-DERIVE from a freshly-parsed block
-    /// purely as a round-trip artifact of this adapter's own render — so a
-    /// re-ingest of an on-disk projection nobody edited is idempotent.
-    ///
-    /// Called in the updates pass with `stored` (the block the store already
-    /// holds) and `parsed` (the same id re-parsed from disk). Return
-    /// `Some(adjusted)` to replace `parsed` with a version whose re-derivation
-    /// is reverted; return `None` (the default) to keep `parsed` as-is. Formats
-    /// with no re-derived-from-text fields need not override this.
-    ///
-    /// This is NOT the create pass: a first-sight block (org interop) never
-    /// reaches here, so genuine `* TODO x` files still yield tasks.
-    fn reconcile_idempotent_reingest(&self, _: &Block, _: &Block) -> Option<Block> {
-        None
-    }
-
     /// Reconcile format-specific document-header metadata from a freshly-parsed
     /// document block onto the persisted document entity — e.g. org's `#+TODO:`
     /// keyword config, which the parser reads from the file header but the
