@@ -204,13 +204,13 @@ mod tests {
             arcs_of("move_it"),
             TransitionArcs::Declared {
                 reads: vec![
-                    place(ArcRelation::Block, "parent_id"),
-                    place(ArcRelation::Block, "tags"),
+                    place(ArcRelation::block(), "parent_id"),
+                    place(ArcRelation::block(), "tags"),
                 ],
                 emits: vec![
-                    ArcEmit::Writes(place(ArcRelation::Block, "parent_id")),
+                    ArcEmit::Writes(place(ArcRelation::block(), "parent_id")),
                     ArcEmit::Excluded {
-                        place: place(ArcRelation::Block, "sort_key"),
+                        place: place(ArcRelation::block(), "sort_key"),
                         reason: "the ordering authority mints order keys".to_string(),
                     },
                 ],
@@ -218,7 +218,7 @@ mod tests {
         );
         assert_eq!(
             arcs_of("move_it").written_places(),
-            vec![&place(ArcRelation::Block, "parent_id")],
+            vec![&place(ArcRelation::block(), "parent_id")],
             "an EXCLUDED place is declared, not written"
         );
     }
@@ -233,7 +233,7 @@ mod tests {
             arcs_of("peek"),
             TransitionArcs::Declared {
                 reads: vec![ArcPlace {
-                    relation: ArcRelation::Clock,
+                    relation: ArcRelation::clock(),
                     field: "today".to_string(),
                 }],
                 emits: vec![],

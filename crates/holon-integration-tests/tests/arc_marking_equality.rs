@@ -21,7 +21,8 @@
 //! sound for a simulator — it must never be surprised by a write it was not
 //! told about. Dropping a real place therefore reds; adding a bogus one is
 //! caught earlier, at macro-expansion time, by the closed field vocabulary in
-//! `holon-pattern`'s `BLOCK_FIELDS` (containment alone could never see it).
+//! `holon-pattern`'s declared block schema (containment alone could never see
+//! it).
 
 use std::sync::Arc;
 

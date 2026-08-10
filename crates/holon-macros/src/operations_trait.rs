@@ -1,6 +1,5 @@
 use holon_pattern::arcs::ArcEmit;
 use holon_pattern::arcs::ArcPlace;
-use holon_pattern::arcs::ArcRelation;
 use holon_pattern::arcs::TransitionArcs;
 use holon_pattern::pattern::BuiltinRef;
 use holon_pattern::pattern::Guard;
@@ -1382,13 +1381,10 @@ fn transition_arcs_tokens(arcs: &TransitionArcs) -> proc_macro2::TokenStream {
 }
 
 fn arc_place_tokens(place: &ArcPlace) -> proc_macro2::TokenStream {
-    let relation = match place.relation {
-        ArcRelation::Block => quote! { holon_api::arcs::ArcRelation::Block },
-        ArcRelation::Clock => quote! { holon_api::arcs::ArcRelation::Clock },
-    };
+    let relation = place.relation.as_str();
     let field = &place.field;
     quote! {
-        holon_api::arcs::ArcPlace { relation: #relation, field: #field.to_string() }
+        holon_api::arcs::ArcPlace::new(#relation, #field)
     }
 }
 

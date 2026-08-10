@@ -295,6 +295,19 @@ pub struct TypeDefinition {
     pub profile_variants: Vec<ProfileVariant>,
 }
 
+/// A runtime entity type answers the same place question as an in-tree
+/// declaration, so an arc naming it can be checked at registration by the very
+/// same code path the macro uses at expansion.
+impl holon_pattern::schema::SchemaSource for TypeDefinition {
+    fn arc_places(&self, relation: &str) -> Option<Vec<String>> {
+        (self.name == relation).then(|| self.fields.iter().map(|f| f.name.clone()).collect())
+    }
+
+    fn relations(&self) -> Vec<String> {
+        vec![self.name.clone()]
+    }
+}
+
 fn default_primary_key() -> String {
     "id".to_string()
 }

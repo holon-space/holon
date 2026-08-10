@@ -201,6 +201,9 @@ pub fn register_loro_operation_engine(
     dispatcher
         .assert_boundary_seam_installed()
         .expect("[loro_block_query_source] boundary-seam assembly check failed");
+    dispatcher
+        .assert_declared_arcs_match_schema(&holon_api::schema::BuiltinSchemas)
+        .expect("[loro_block_query_source] arc-schema assembly check failed");
     // History relation (C2b): no Turso query substrate here, so wire the
     // DISCLOSED degraded store (warns at construction; reads fail loud) rather
     // than silently omitting history.

@@ -544,32 +544,11 @@ fn simulate_sql_round_trip(
     doc: &Block,
     params: holon_api::StorageEntity,
 ) -> holon_api::StorageEntity {
-    // Matches BLOCKS_KNOWN_COLUMNS in
-    // crates/holon/src/core/sql_operation_provider.rs. Kept in sync by
-    // convention; if the production list changes, this list must change too —
-    // the PBT is the canary.
-    const BLOCKS_KNOWN_COLUMNS: &[&str] = &[
-        "id",
-        "parent_id",
-        "sort_key",
-        "content",
-        "content_type",
-        "source_language",
-        "source_name",
-        "properties",
-        "marks",
-        "collapsed",
-        "widget_only",
-        "completed",
-        "block_type",
-        "created_at",
-        "updated_at",
-        "_change_origin",
-    ];
-    // Matches BlockSchemaModule::edge_fields (holon-turso/src/schema_modules.rs):
-    // tags, requires, advice_suppressed. The `block` matview hydrates all three
-    // as JSON arrays, and `Block::try_from` requires all three columns.
-    const EDGE_FIELDS: &[&str] = &["tags", "requires", "advice_suppressed"];
+    // Both partitions come from the ONE schema declaration, the same source
+    // `SqlOperationProvider::blocks_known_columns` and the junction registry
+    // derive from — so this mirror cannot drift from the provider it models.
+    let known_columns = holon_api::schema::BLOCK.columns();
+    let edge_fields = holon_api::schema::BLOCK.edge_sets();
 
     let mut row = holon_api::StorageEntity::new();
     let mut extras: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
@@ -592,7 +571,7 @@ fn simulate_sql_round_trip(
         {
             continue;
         }
-        if BLOCKS_KNOWN_COLUMNS.contains(&key.as_ref()) || EDGE_FIELDS.contains(&key.as_ref()) {
+        if known_columns.contains(&key.as_ref()) || edge_fields.contains(&key.as_ref()) {
             row.insert(key, value);
         } else {
             extras.insert(key.to_string(), value_to_serde_json(&value));

@@ -189,28 +189,16 @@ fn sql_literal_equals_value(sql_literal: &str, db_val: Option<&Value>) -> bool {
     false
 }
 
-/// Known columns in the blocks table that can be used directly in SQL.
-/// Any param key not in this set gets packed into the `properties` JSON column.
-/// Known columns in the blocks table (must match schema in schema_modules.rs).
-const BLOCKS_KNOWN_COLUMNS: &[&str] = &[
-    "id",
-    "parent_id",
-    "sort_key",
-    "content",
-    "content_type",
-    "source_language",
-    "source_name",
-    "properties",
-    "marks",
-    "collapsed",
-    "widget_only",
-    "completed",
-    "block_type",
-    "created_at",
-    "updated_at",
-    "_change_origin",
-    "write_seq",
-];
+/// The columns of `block_raw` that a param key may address directly. Any param
+/// key outside this set gets packed into the `properties` JSON column, so a
+/// column missing here has its writes silently misrouted into JSON.
+///
+/// Derived from the ONE schema declaration (`holon_api::schema::BLOCK`), which
+/// the `block_raw` DDL is locked to in both directions by
+/// `crates/holon-turso/tests/schema_source_ddl_lock.rs`.
+fn blocks_known_columns() -> Vec<&'static str> {
+    holon_api::schema::BLOCK.columns()
+}
 
 /// A prepared operation, split into two FK-ordered phases so a batch can apply
 /// ALL block_raw rows before ANY edge junction (rows-then-edges). This makes
@@ -277,7 +265,10 @@ impl SqlOperationProvider {
         entity_short_name: String,
         edge_fields: Vec<EdgeFieldDescriptor>,
     ) -> Self {
-        let known_columns = BLOCKS_KNOWN_COLUMNS.iter().map(|s| s.to_string()).collect();
+        let known_columns = blocks_known_columns()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let edge_fields = edge_fields
             .into_iter()
             .filter(|d| d.entity == entity_name)

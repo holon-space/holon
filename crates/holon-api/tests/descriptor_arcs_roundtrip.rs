@@ -52,13 +52,13 @@ fn place(relation: ArcRelation, field: &str) -> ArcPlace {
 fn declared() -> TransitionArcs {
     TransitionArcs::Declared {
         reads: vec![
-            place(ArcRelation::Block, "content"),
-            place(ArcRelation::Clock, "today"),
+            place(ArcRelation::block(), "content"),
+            place(ArcRelation::clock(), "today"),
         ],
         emits: vec![
-            ArcEmit::Writes(place(ArcRelation::Block, "content")),
+            ArcEmit::Writes(place(ArcRelation::block(), "content")),
             ArcEmit::Excluded {
-                place: place(ArcRelation::Block, "sort_key"),
+                place: place(ArcRelation::block(), "sort_key"),
                 reason: "the ordering authority mints order keys".to_string(),
             },
         ],
@@ -96,63 +96,49 @@ fn undeclared_arcs_are_serialized_as_a_stated_fact() {
     assert_eq!(back.arcs.emits(), None, "and it is not an empty write set");
 }
 
-/// The drift lock between the arc vocabulary (`holon-pattern`, a leaf) and the
-/// intent-write vocabulary (`BlockWriteField`, here). Both name what may be
-/// written to a block; they cannot be one list because the leaf crate cannot
-/// import this enum, so they are pinned to each other instead.
+/// The intent vocabulary (`BlockWriteField`) against the ONE declaration it is
+/// derived from. Not a hand-list on either side: the named variants are probed
+/// by round-tripping every `FieldIntent::Writable` field, and the reverse
+/// direction walks the declaration.
 ///
-/// A new `BlockWriteField` variant without its arc place would make an op
-/// unable to declare a write it can perform.
+/// A named variant whose field stopped being declared writable, or a writable
+/// field with no named variant, would silently land user writes in
+/// `block.properties` instead of the column they name.
 #[test]
 fn intent_writable_fields_are_all_arc_places() {
-    // Every raw name `BlockWriteField::parse` maps to a NAMED variant. An
-    // unknown name parses as `Property`, which lands in `block.properties`, so
-    // only the named ones need their own place.
-    let named = [
-        "content",
-        "content_type",
-        "source_language",
-        "source_name",
-        "marks",
-        "collapsed",
-        "widget_only",
-        "completed",
-        "block_type",
-        "properties",
-        "tags",
-        "task_state",
-        "parent_id",
-    ];
-    for raw in named {
+    let writable = holon_api::schema::BLOCK.intent_writable();
+    assert!(!writable.is_empty(), "the lock would be vacuous");
+
+    for raw in &writable {
+        let parsed = holon_api::BlockWriteField::parse(raw).unwrap_or_else(|e| {
+            panic!("declared-writable field {raw:?} is refused by intent: {e}")
+        });
         assert!(
-            !matches!(
-                holon_api::BlockWriteField::parse(raw),
-                Ok(holon_api::BlockWriteField::Property(_)) | Err(_)
-            ),
-            "{raw:?} is listed here as a named BlockWriteField but no longer parses as one"
+            !matches!(parsed, holon_api::BlockWriteField::Property(_)),
+            "{raw:?} is declared writable but falls through to a user property"
+        );
+        assert_eq!(
+            parsed.as_str(),
+            *raw,
+            "the variant must write the field it parsed"
         );
         ArcPlace::parse(&format!("block.{raw}"))
             .unwrap_or_else(|e| panic!("intent-writable field {raw:?} has no arc place: {e}"));
     }
 
-    // The other direction: an arc place for the block relation is either
-    // intent-writable, an edge set, or deliberately read-only/excludable.
-    let not_intent_writable = [
-        "id",
-        "sort_key",
-        "after_block_id",
-        "requires",
-        "advice_suppressed",
-    ];
-    for field in ArcRelation::Block.known_fields() {
-        if not_intent_writable.contains(field) {
+    // The other direction: a block arc place is either intent-writable or
+    // deliberately not — and "not" means the intent boundary refuses it or
+    // treats it as an ordinary property, never that it names a variant.
+    for field in holon_api::schema::BLOCK.arc_places() {
+        if writable.contains(&field) {
             continue;
         }
-        assert!(
-            named.contains(field),
-            "arc place block.{field} is neither an intent-writable BlockWriteField nor \
-             listed as read-only/edge-set — the two vocabularies have drifted"
-        );
+        match holon_api::BlockWriteField::parse(field) {
+            Err(_) | Ok(holon_api::BlockWriteField::Property(_)) => {}
+            Ok(named) => panic!(
+                "block.{field} is not declared intent-writable but parses to the named variant                  {named:?} — the declaration and the vocabulary have drifted"
+            ),
+        }
     }
 }
 

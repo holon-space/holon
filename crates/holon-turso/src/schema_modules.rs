@@ -397,25 +397,13 @@ impl SchemaModule for BlockSchemaModule {
 /// All columns of `block_raw`, projected verbatim into the `block` matview so
 /// downstream readers (block_with_path, block_requirement_edges, GQL/PRQL
 /// watch_view_*) see the same row shape they always did.
-const BLOCK_RAW_COLUMNS: &[&str] = &[
-    "id",
-    "parent_id",
-    "sort_key",
-    "content",
-    "content_type",
-    "source_language",
-    "source_name",
-    "properties",
-    "marks",
-    "collapsed",
-    "widget_only",
-    "completed",
-    "block_type",
-    "created_at",
-    "updated_at",
-    "_change_origin",
-    "write_seq",
-];
+///
+/// Derived from the ONE schema declaration (`holon_api::schema::BLOCK`); the
+/// DDL and that declaration are locked to each other by
+/// `crates/holon-turso/tests/schema_source_ddl_lock.rs`.
+fn block_raw_columns() -> Vec<&'static str> {
+    holon_api::schema::BLOCK.columns()
+}
 
 /// The `block` entity's edge-field descriptors — the single registry both the
 /// junction DDL (`BlockSchemaModule::edge_fields`) and the matview synthesis
@@ -476,7 +464,10 @@ fn block_matview_select_with_computed(
     descriptors: &[EdgeFieldDescriptor],
     computed: &[PlantedColumn],
 ) -> String {
-    let mut columns: Vec<String> = BLOCK_RAW_COLUMNS.iter().map(|c| format!("b.{c}")).collect();
+    let mut columns: Vec<String> = block_raw_columns()
+        .iter()
+        .map(|c| format!("b.{c}"))
+        .collect();
     let mut joins = Vec::new();
     for d in descriptors {
         let agg = edge_agg_view_name(d);
@@ -1098,7 +1089,7 @@ impl SchemaModule for JournalFeedSchemaModule {
 /// (`bullet_shape` needs `collapsed`; `is_rule_head`/`is_holon_source`/
 /// `is_legacy_rule` need `source_language`).
 pub fn backlinks_view_select() -> String {
-    let block_cols = BLOCK_RAW_COLUMNS
+    let block_cols = block_raw_columns()
         .iter()
         .map(|c| format!("b.{c} AS {c}"))
         .collect::<Vec<_>>()
@@ -1292,7 +1283,7 @@ mod tests {
     #[test]
     fn backlinks_view_projects_every_block_column() {
         let sql = backlinks_view_select();
-        for column in BLOCK_RAW_COLUMNS {
+        for column in block_raw_columns() {
             assert!(
                 sql.contains(&format!("b.{column} AS {column}")),
                 "backlinks matview drops block column '{column}': {sql}"

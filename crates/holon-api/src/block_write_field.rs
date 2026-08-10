@@ -23,7 +23,14 @@
 
 use std::fmt;
 
+use holon_pattern::schema::FieldIntent;
+
 /// A block field that a `set_field` **intent** is allowed to write.
+///
+/// The named variants are the `FieldIntent::Writable` fields of
+/// `holon_pattern::schema::BLOCK`; the lock that keeps the two from drifting is
+/// `intent_writable_fields_are_all_arc_places` in
+/// `holon-api/tests/descriptor_arcs_roundtrip.rs`.
 ///
 /// Deliberately excludes:
 /// - `sort_key` / `after_block_id` — order keys; minted by the ordering
@@ -116,11 +123,19 @@ impl BlockWriteField {
         if raw.starts_with("_expected_") {
             return Err(BlockWriteFieldError::StorageInternal(raw.to_string()));
         }
-        match raw {
-            "sort_key" | "after_block_id" => Err(BlockWriteFieldError::OrderKey(raw.to_string())),
-            "id" | "depth" | "created_at" | "updated_at" | "_change_origin" => {
-                Err(BlockWriteFieldError::StorageInternal(raw.to_string()))
+        // The refusals are read off the ONE schema declaration
+        // (`holon_pattern::schema::BLOCK`), so a field's intent classification
+        // lives beside its storage and cannot drift from it.
+        match holon_pattern::schema::BLOCK.field(raw).map(|f| f.intent) {
+            Some(FieldIntent::OrderKey) => {
+                return Err(BlockWriteFieldError::OrderKey(raw.to_string()));
             }
+            Some(FieldIntent::StorageInternal) => {
+                return Err(BlockWriteFieldError::StorageInternal(raw.to_string()));
+            }
+            _ => {}
+        }
+        match raw {
             "content" => Ok(Self::Content),
             "content_type" => Ok(Self::ContentType),
             "source_language" => Ok(Self::SourceLanguage),

@@ -200,6 +200,7 @@ pub use holon_expr::unoptimized_engine;
 pub use holon_pattern::Value;
 pub use holon_pattern::arcs;
 pub use holon_pattern::pattern;
+pub use holon_pattern::schema;
 // Re-export inline-mark types (rich text)
 pub use inline_mark::{
     DerivedLink, EntityRef, InlineMark, LinkKind, MarkClass, MarkSpan, SplitContentMarks,

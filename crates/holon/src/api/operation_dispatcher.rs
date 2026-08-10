@@ -18,6 +18,8 @@ use fluxdi::Shared;
 use holon_api::EntityName;
 use holon_api::Operation;
 use holon_api::OperationDescriptor;
+use holon_api::schema::BuiltinSchemas;
+use holon_api::schema::SchemaSource;
 use holon_core::BoundaryEnforcer;
 use holon_core::OperationObserver;
 use holon_core::OperationProvider;
@@ -355,6 +357,30 @@ impl OperationDispatcher {
                 .into(),
         )
     }
+    /// The registration-time half of the two-phase arc check (ADR 0031): every
+    /// place a registered descriptor declares must name a relation `schemas`
+    /// knows and a field that relation has.
+    ///
+    /// A descriptor written in-tree already passed the macro's compile-time
+    /// parse. One that arrives from outside — a created entity type, an MCP
+    /// sidecar — never did, and an arc naming a field its entity does not have
+    /// is a declaration that can never be violated and never red. Refuse the
+    /// registration instead of carrying the string.
+    pub fn assert_declared_arcs_match_schema(&self, schemas: &dyn SchemaSource) -> Result<()> {
+        for provider in &self.providers {
+            for op in provider.operations() {
+                op.arcs.validate_against(schemas).map_err(|e| {
+                    format!(
+                        "[OperationDispatcher] operation '{}' on entity '{}' declares an arc that \
+                         its entity's schema does not have: {e}",
+                        op.name, op.entity_name
+                    )
+                })?;
+            }
+        }
+        Ok(())
+    }
+
     /// Execute an operation by routing to the correct provider
     ///
     /// # Arguments
@@ -1275,6 +1301,15 @@ impl Module for OperationModule {
             dispatcher
                 .assert_boundary_seam_installed()
                 .expect("[OperationModule] boundary-seam startup check failed");
+            // Every in-tree descriptor's arcs already passed the macro's
+            // compile-time parse; this is the gate for the ones that did not —
+            // a descriptor deserialized from a sidecar or a created entity
+            // type. `BuiltinSchemas` is the source today because no runtime
+            // entity type registers operations yet; a composition site that
+            // adds one passes it here alongside the built-ins.
+            dispatcher
+                .assert_declared_arcs_match_schema(&BuiltinSchemas)
+                .expect("[OperationModule] arc-schema startup check failed");
 
             Shared::new(dispatcher)
         }));
