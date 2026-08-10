@@ -136,17 +136,70 @@ impl holon_pbt_core::capabilities::RefTaskStateToggle for ReferenceState {
         block_id: &EntityUri,
         new_state: holon_pbt_core::types::CycleTarget,
     ) {
+        // The transition turns (current, target) into a CLICK COUNT, so the ref
+        // must model what those clicks DO — walk the ring N times — rather than
+        // assert the target it asked for. Writing the target directly makes the
+        // oracle agree with any ring the SUT happens to implement, which is how
+        // a vocabulary-blind `cycle_task_state` stayed invisible to the
+        // keystone.
+        let current = RefTaskState::task_state_of(self, block_id).unwrap_or_default();
+        let clicks = crate::pbt::transitions::toggle_state::cycle_click_count(&current, new_state);
+        let ring = self.task_state_ring(block_id);
+        let mut resolved = current;
+        for _ in 0..clicks {
+            resolved = holon_api::render_eval::cycle_state(&resolved, &ring);
+        }
+
         self.push_undo_snapshot();
         self.apply_mutation(&holon_pbt_core::types::MutationEvent {
             source: holon_pbt_core::types::MutationSource::UI,
             mutation: holon_pbt_core::types::Mutation::Update {
                 id: block_id.clone(),
-                fields: [(
-                    "task_state".to_string(),
-                    holon_api::Value::String(new_state.keyword().to_string()),
-                )]
-                .into(),
+                fields: [("task_state".to_string(), holon_api::Value::String(resolved))].into(),
             },
         });
+    }
+}
+
+impl ReferenceState {
+    /// The task-state ring the block's owning document declares — the same
+    /// authority production's `cycle_task_state` reads, resolved over the ref's
+    /// own block tree so a divergence convicts the SUT's ring.
+    fn task_state_ring(&self, block_id: &EntityUri) -> Vec<String> {
+        use holon_org_format::OrgDocumentExt;
+
+        let vocabulary = self
+            .owning_page(block_id)
+            .and_then(|page| page.todo_keywords())
+            .map(|states| {
+                let active: Vec<String> = states
+                    .iter()
+                    .filter(|s| s.is_active())
+                    .map(|s| s.keyword.clone())
+                    .collect();
+                let done: Vec<String> = states
+                    .iter()
+                    .filter(|s| s.is_done())
+                    .map(|s| s.keyword.clone())
+                    .collect();
+                holon_org_format::TaskKeywordVocabulary::for_document(&active, &done)
+            })
+            .unwrap_or_default();
+        holon::core::task_keyword_cycle::cycle_ring(&vocabulary)
+    }
+
+    /// The nearest `Page` ancestor of `block_id`, the block itself included.
+    fn owning_page(&self, block_id: &EntityUri) -> Option<&holon_api::block::Block> {
+        let mut cursor = block_id.clone();
+        // The ref tree is finite and acyclic; the bound turns a fixture that
+        // broke that into a failed lookup instead of a hung test.
+        for _ in 0..1024 {
+            let block = self.domain.block_state.blocks.get(&cursor)?;
+            if block.is_page() {
+                return Some(block);
+            }
+            cursor = block.parent_id.clone();
+        }
+        None
     }
 }

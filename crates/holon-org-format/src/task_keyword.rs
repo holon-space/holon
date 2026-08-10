@@ -48,6 +48,10 @@ impl TaskKeywordVocabulary {
         Self::new(active.to_vec(), done.to_vec())
     }
 
+    pub fn active_keywords(&self) -> &[String] {
+        &self.active
+    }
+
     pub fn done_keywords(&self) -> &[String] {
         &self.done
     }
