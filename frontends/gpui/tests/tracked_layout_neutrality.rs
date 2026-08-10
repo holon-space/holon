@@ -99,6 +99,7 @@ fn click_wiring() -> OperationWiring {
                 surface: holon_api::NonMenuSurface::Test,
             },
             guard: holon_api::pattern::OpGuard::None,
+            arcs: holon_api::arcs::TransitionArcs::Undeclared,
         },
     }
 }

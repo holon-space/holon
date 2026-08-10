@@ -44,6 +44,7 @@ fn build_wiring(name: &str, args: &[Arg], row: &DataRow, trigger: Trigger) -> Op
                 surface: holon_api::NonMenuSurface::PointerGesture,
             },
             guard: holon_api::pattern::OpGuard::None,
+            arcs: holon_api::arcs::TransitionArcs::Undeclared,
         },
     }
 }

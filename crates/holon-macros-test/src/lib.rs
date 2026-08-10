@@ -47,15 +47,38 @@ where
     // ALLOW(unused_param): test fixture — the trait shape carries both params
     async fn set_priority(&self, _id: &str, _priority: i64) -> Result<UndoAction>;
 
-    /// Method without precondition.
+    /// Method without precondition. Also the `TransitionArcs::Undeclared`
+    /// fixture: no `#[reads]`/`#[emits]` at all.
     // ALLOW(unused_param): test fixture — id is part of the trait shape
     async fn no_precondition(&self, _id: &str) -> Result<UndoAction>;
+
+    /// Arc fixture: reads two places, writes one, and declares one place
+    /// EXCLUDED with its reason. `#[affects]` is declared alongside so the
+    /// `emits ⊇ affects` consistency lock (OQ-2=A) has something to bite on.
+    #[holon_macros::affects("parent_id")]
+    #[holon_macros::reads("block.parent_id", "block.tags")]
+    #[holon_macros::emits("block.parent_id")]
+    #[holon_macros::emits(excluded("block.sort_key", "the ordering authority mints order keys"))]
+    // ALLOW(unused_param): test fixture — the trait shape carries both params
+    async fn move_it(&self, _id: &str, _parent: &str) -> Result<UndoAction>;
+
+    /// Arc fixture: a genuinely read-only declaration. `#[emits()]` is empty on
+    /// purpose — "writes nothing", which is a different claim from
+    /// `Undeclared`.
+    #[holon_macros::reads("clock.today")]
+    #[holon_macros::emits()]
+    // ALLOW(unused_param): test fixture — id is part of the trait shape
+    async fn peek(&self, _id: &str) -> Result<UndoAction>;
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
+    use holon_api::arcs::ArcEmit;
+    use holon_api::arcs::ArcPlace;
+    use holon_api::arcs::ArcRelation;
+    use holon_api::arcs::TransitionArcs;
     use holon_api::pattern::Binding;
     use holon_api::pattern::BuiltinRef;
     use holon_api::pattern::CurrentSchema;
@@ -157,6 +180,95 @@ mod tests {
         assert_eq!(
             source_of("set_priority"),
             "has_tag(\"Page\") and parent(not has_tag(\"Page\"))"
+        );
+    }
+
+    fn arcs_of(name: &str) -> TransitionArcs {
+        ops()
+            .iter()
+            .find(|op| op.name == name)
+            .unwrap_or_else(|| panic!("op {name} exists"))
+            .arcs
+            .clone()
+    }
+
+    /// The macro emits the PARSED arcs — typed places, not the strings the
+    /// developer wrote.
+    #[test]
+    fn reads_and_emits_are_parsed_into_typed_places() {
+        let place = |relation, field: &str| ArcPlace {
+            relation,
+            field: field.to_string(),
+        };
+        assert_eq!(
+            arcs_of("move_it"),
+            TransitionArcs::Declared {
+                reads: vec![
+                    place(ArcRelation::Block, "parent_id"),
+                    place(ArcRelation::Block, "tags"),
+                ],
+                emits: vec![
+                    ArcEmit::Writes(place(ArcRelation::Block, "parent_id")),
+                    ArcEmit::Excluded {
+                        place: place(ArcRelation::Block, "sort_key"),
+                        reason: "the ordering authority mints order keys".to_string(),
+                    },
+                ],
+            }
+        );
+        assert_eq!(
+            arcs_of("move_it").written_places(),
+            vec![&place(ArcRelation::Block, "parent_id")],
+            "an EXCLUDED place is declared, not written"
+        );
+    }
+
+    /// No `#[reads]`/`#[emits]` yields the fail-closed `Undeclared`, which is
+    /// distinguishable from a declared empty write set.
+    #[test]
+    fn absent_arcs_are_undeclared_and_empty_arcs_are_not() {
+        assert_eq!(arcs_of("no_precondition"), TransitionArcs::Undeclared);
+        assert_eq!(arcs_of("no_precondition").emits(), None);
+        assert_eq!(
+            arcs_of("peek"),
+            TransitionArcs::Declared {
+                reads: vec![ArcPlace {
+                    relation: ArcRelation::Clock,
+                    field: "today".to_string(),
+                }],
+                emits: vec![],
+            }
+        );
+        assert_eq!(
+            arcs_of("peek").emits(),
+            Some(&[][..]),
+            "\"writes nothing\" is a statement; Undeclared is the refusal to make one"
+        );
+    }
+
+    /// OQ-2=(A): `#[emits]` must cover every `#[affects]` field. The lock lives
+    /// over the real catalog in `holon-app`; this is the mechanism check that
+    /// it can actually bite — `affects` names bare block fields, so the
+    /// mapping is `field ↦ block.field`.
+    #[test]
+    fn declared_emits_cover_the_declared_affects() {
+        let op = ops();
+        let op = op.iter().find(|op| op.name == "move_it").expect("move_it");
+        let written: Vec<String> = op
+            .arcs
+            .written_places()
+            .iter()
+            .map(|p| p.to_string())
+            .collect();
+        for field in &op.affected_fields {
+            assert!(
+                written.contains(&format!("block.{field}")),
+                "#[affects({field:?})] is not covered by #[emits]; declared writes: {written:?}"
+            );
+        }
+        assert!(
+            !op.affected_fields.is_empty(),
+            "the lock is not vacuous here"
         );
     }
 

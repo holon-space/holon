@@ -332,6 +332,7 @@ mod tests {
                 trigger: None,
                 bound_params: Default::default(),
                 guard: holon_api::pattern::OpGuard::None,
+                arcs: holon_api::arcs::TransitionArcs::Undeclared,
             },
             OperationDescriptor {
                 entity_name: "task".into(),
@@ -357,6 +358,7 @@ mod tests {
                 trigger: None,
                 bound_params: Default::default(),
                 guard: holon_api::pattern::OpGuard::None,
+                arcs: holon_api::arcs::TransitionArcs::Undeclared,
             },
         ]
     }

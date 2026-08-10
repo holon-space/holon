@@ -111,6 +111,7 @@ pub fn dismiss_advice_descriptor(
         trigger: None,
         bound_params: std::collections::HashMap::new(),
         guard: holon_api::pattern::OpGuard::None,
+        arcs: holon_api::arcs::TransitionArcs::Undeclared,
     }
 }
 
@@ -202,5 +203,6 @@ fn tag_descriptor(
         trigger: None,
         bound_params: std::collections::HashMap::new(),
         guard: holon_api::pattern::OpGuard::None,
+        arcs: holon_api::arcs::TransitionArcs::Undeclared,
     }
 }

@@ -5,6 +5,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::Value;
+use crate::arcs::TransitionArcs;
 use crate::pattern::OpGuard;
 use crate::predicate::Predicate;
 use crate::types::EntityName;
@@ -420,6 +421,16 @@ pub struct OperationDescriptor {
     /// a closure could never satisfy. The certificate is
     /// `crates/holon-api/tests/descriptor_guard_roundtrip.rs`.
     pub guard: OpGuard,
+
+    /// What this op READS and what it EMITS (ADR 0031 Increment 2).
+    /// Non-defaultable: an op that declares nothing carries
+    /// [`TransitionArcs::Undeclared`], whose runtime meaning is "not
+    /// simulatable — refuse", never "writes nothing".
+    ///
+    /// Ordinary serializable data for the same dual-consumer reason as
+    /// [`OperationDescriptor::guard`]. The certificate is
+    /// `crates/holon-api/tests/descriptor_arcs_roundtrip.rs`.
+    pub arcs: TransitionArcs,
 }
 
 // NOTE: `OperationDescriptor` intentionally has NO `Default`. `menu_exposure`

@@ -325,6 +325,7 @@ impl McpOperationProvider {
                 // relational). It stays a parse-time-validated declaration on
                 // the sidecar; nothing ever evaluated it from here.
                 guard: holon_api::pattern::OpGuard::None,
+                arcs: holon_api::arcs::TransitionArcs::Undeclared,
                 target_scope: holon_api::TargetScope::Block,
                 boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
                 menu_exposure: holon_api::MenuExposure::NotListed {

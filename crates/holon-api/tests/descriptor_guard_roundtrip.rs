@@ -35,6 +35,7 @@ fn descriptor_with(guard: OpGuard) -> OperationDescriptor {
         trigger: None,
         bound_params: HashMap::new(),
         guard,
+        arcs: holon_api::arcs::TransitionArcs::Undeclared,
     }
 }
 

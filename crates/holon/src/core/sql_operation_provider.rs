@@ -2509,6 +2509,17 @@ impl OperationProvider for SqlOperationProvider {
                 trigger: None,
                 bound_params: Default::default(),
                 guard: holon_api::pattern::OpGuard::None,
+                // Single-sourced from the `#[reads]`/`#[emits]` declaration on
+                // `CrudOperations::set_field`: this bespoke descriptor is what the
+                // block catalog actually advertises, so re-stating the arcs here
+                // would be the parallel catalog the declaration exists to prevent.
+                arcs: holon_core::__operations_crud_operations::SET_FIELD_OP(
+                    &self.entity_name,
+                    &self.entity_short_name,
+                    &self.table_name,
+                    "id",
+                )
+                .arcs,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -2528,6 +2539,7 @@ impl OperationProvider for SqlOperationProvider {
                 trigger: None,
                 bound_params: Default::default(),
                 guard: holon_api::pattern::OpGuard::None,
+                arcs: holon_api::arcs::TransitionArcs::Undeclared,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -2551,6 +2563,7 @@ impl OperationProvider for SqlOperationProvider {
                 trigger: None,
                 bound_params: Default::default(),
                 guard: holon_api::pattern::OpGuard::None,
+                arcs: holon_api::arcs::TransitionArcs::Undeclared,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -2577,6 +2590,7 @@ impl OperationProvider for SqlOperationProvider {
                 trigger: None,
                 bound_params: Default::default(),
                 guard: holon_api::pattern::OpGuard::None,
+                arcs: holon_api::arcs::TransitionArcs::Undeclared,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -2603,6 +2617,7 @@ impl OperationProvider for SqlOperationProvider {
                 trigger: None,
                 bound_params: Default::default(),
                 guard: holon_api::pattern::OpGuard::None,
+                arcs: holon_api::arcs::TransitionArcs::Undeclared,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -2626,6 +2641,7 @@ impl OperationProvider for SqlOperationProvider {
                 trigger: None,
                 bound_params: Default::default(),
                 guard: holon_api::pattern::OpGuard::None,
+                arcs: holon_api::arcs::TransitionArcs::Undeclared,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -2656,6 +2672,7 @@ impl OperationProvider for SqlOperationProvider {
                 trigger: None,
                 bound_params: Default::default(),
                 guard: holon_api::pattern::OpGuard::None,
+                arcs: holon_api::arcs::TransitionArcs::Undeclared,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -2681,6 +2698,7 @@ impl OperationProvider for SqlOperationProvider {
                 trigger: None,
                 bound_params: Default::default(),
                 guard: holon_api::pattern::OpGuard::None,
+                arcs: holon_api::arcs::TransitionArcs::Undeclared,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -2704,6 +2722,7 @@ impl OperationProvider for SqlOperationProvider {
                 trigger: None,
                 bound_params: Default::default(),
                 guard: holon_api::pattern::OpGuard::None,
+                arcs: holon_api::arcs::TransitionArcs::Undeclared,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -2734,6 +2753,7 @@ impl OperationProvider for SqlOperationProvider {
                 trigger: None,
                 bound_params: Default::default(),
                 guard: holon_api::pattern::OpGuard::None,
+                arcs: holon_api::arcs::TransitionArcs::Undeclared,
             },
         ];
 
