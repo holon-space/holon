@@ -292,6 +292,191 @@ const PROJECTED_WITH_KEYWORD: &str = "\
 :END:
 ";
 
+/// A document that declares its own vocabulary. `TODO` is NOT a keyword here;
+/// `NEXT` and `WAITING` are.
+const DECLARING: &str = "\
+#+ID: milk-doc
+#+TITLE: Milk
+#+TODO: NEXT WAITING | DONE
+* buy milk
+:PROPERTIES:
+:ID: milk-block
+:END:
+";
+
+/// The disk projection after the author typed `TODO buy milk` into the
+/// declaring document, whatever the write seam decided: the renderer emits
+/// keyword-then-content either way, so these bytes are the same.
+const DECLARING_WITH_TODO: &str = "\
+#+ID: milk-doc
+#+TITLE: Milk
+#+TODO: NEXT WAITING | DONE
+* TODO buy milk
+:PROPERTIES:
+:ID: milk-block
+:END:
+";
+
+const DECLARING_WITH_NEXT: &str = "\
+#+ID: milk-doc
+#+TITLE: Milk
+#+TODO: NEXT WAITING | DONE
+* NEXT call bank
+:PROPERTIES:
+:ID: milk-block
+:END:
+";
+
+/// The vocabulary the live WRITE seams judge a promotion against. Production
+/// resolves it from the block's owning document; before that it was the
+/// `::default()` constant at every seam, which is what makes the two cases
+/// below diverge from the parser.
+fn write_seam_vocabulary(
+    store: &FakeStore,
+    doc_bare: &str,
+) -> holon_org_format::TaskKeywordVocabulary {
+    use holon_org_format::OrgDocumentExt;
+    let doc = store
+        .docs
+        .lock()
+        .unwrap()
+        .values()
+        .find(|d| d.id.as_str().ends_with(doc_bare))
+        .cloned()
+        .unwrap_or_else(|| panic!("no ingested document ending in {doc_bare:?}"));
+    let Some(states) = doc.todo_keywords() else {
+        return holon_org_format::TaskKeywordVocabulary::default();
+    };
+    let active: Vec<String> = states
+        .iter()
+        .filter(|s| s.is_active())
+        .map(|s| s.keyword.clone())
+        .collect();
+    let done: Vec<String> = states
+        .iter()
+        .filter(|s| s.is_done())
+        .map(|s| s.keyword.clone())
+        .collect();
+    holon_org_format::TaskKeywordVocabulary::for_document(&active, &done)
+}
+
+/// S3 — the data-loss direction, end to end. Typing `TODO buy milk` into a
+/// document whose `#+TODO:` line has no `TODO` must leave a state the parser
+/// reproduces: the keyword stays in the text, no `task_state` is written, and
+/// the next re-ingest changes nothing.
+///
+/// Judging the promotion against the DEFAULT vocabulary instead writes
+/// `task_state=TODO` + content `buy milk`; re-ingest re-parses the rendered
+/// line under the document's vocabulary and OVERWRITES the row back to
+/// `task_state=NULL` + content `TODO buy milk` — on every restart.
+#[tokio::test]
+async fn typing_an_undeclared_keyword_is_a_reingest_fixed_point() {
+    use holon_org_format::detect_keyword_promotion;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+
+    let store = FakeStore::default();
+    ingest(&store, &root, DECLARING).await;
+    let vocabulary = write_seam_vocabulary(&store, "milk-doc");
+
+    let promotion = detect_keyword_promotion("buy milk", None, "TODO buy milk", &vocabulary);
+    assert_eq!(
+        promotion, None,
+        "TODO is not a keyword in this document — the write seam must not promote"
+    );
+    store.set_content("milk-block", "TODO buy milk");
+
+    ingest(&store, &root, DECLARING_WITH_TODO).await;
+
+    assert_eq!(
+        store.task_state_of("milk-block"),
+        None,
+        "the store must agree with the parser: no task here"
+    );
+    assert_eq!(
+        store.content_of("milk-block"),
+        "TODO buy milk",
+        "the user's text must survive the re-ingest verbatim"
+    );
+}
+
+/// S2 — the under-promotion direction. `NEXT` IS a keyword here, so typing it
+/// must promote and the round trip must be a fixed point. Judged against the
+/// defaults the seam refuses, the store keeps `NEXT call bank` as plain text,
+/// and every task query misses a block the file plainly marks as a task.
+#[tokio::test]
+async fn typing_a_declared_keyword_promotes_and_round_trips() {
+    use holon_org_format::detect_keyword_promotion;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+
+    let store = FakeStore::default();
+    ingest(&store, &root, DECLARING).await;
+    let vocabulary = write_seam_vocabulary(&store, "milk-doc");
+
+    let promotion = detect_keyword_promotion("buy milk", None, "NEXT call bank", &vocabulary)
+        .expect("NEXT is declared by this document — the write seam must promote");
+    assert_eq!(promotion.keyword.keyword, "NEXT");
+    assert!(!promotion.keyword.is_done(), "NEXT is declared active");
+    store.apply_promotion("milk-block", &promotion);
+
+    ingest(&store, &root, DECLARING_WITH_NEXT).await;
+
+    assert_eq!(
+        store.task_state_of("milk-block").as_deref(),
+        Some("NEXT"),
+        "the promoted task must survive the round trip"
+    );
+    assert_eq!(store.content_of("milk-block"), "call bank");
+}
+
+/// THE DEMOTION MECHANISM, asserted rather than reasoned about: a store row
+/// holding `task_state=TODO` + content `buy milk` under a document that never
+/// declares `TODO` is ERASED by the next re-ingest — `task_state` back to
+/// NULL, the keyword back inside the text.
+///
+/// This is correct parser behaviour, and it is why the write seams must never
+/// produce that row: the demotion is unfixable downstream. Suppressing it in
+/// `reconcile_idempotent_reingest` would mean refusing every parsed
+/// `task_state=None` over a stored one, which is exactly what a genuine
+/// Emacs-side `C-c C-t` demotion looks like.
+#[tokio::test]
+async fn reingest_erases_a_task_state_the_document_vocabulary_does_not_admit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+
+    let store = FakeStore::default();
+    ingest(&store, &root, DECLARING).await;
+    store.apply_promotion(
+        "milk-block",
+        &holon_org_format::Promotion {
+            keyword: holon_api::TaskState::active("TODO"),
+            stripped: "buy milk".to_string(),
+            consumed_prefix: 5,
+        },
+    );
+    assert_eq!(
+        store.task_state_of("milk-block").as_deref(),
+        Some("TODO"),
+        "precondition: the default-vocabulary promotion left this row behind"
+    );
+
+    ingest(&store, &root, DECLARING_WITH_TODO).await;
+
+    assert_eq!(
+        store.task_state_of("milk-block"),
+        None,
+        "the parser does not know TODO here, so the re-ingest erases the task"
+    );
+    assert_eq!(
+        store.content_of("milk-block"),
+        "TODO buy milk",
+        "and the keyword lands back inside the user's text"
+    );
+}
+
 #[tokio::test]
 async fn persisted_plain_text_starting_with_todo_is_not_promoted_on_reingest() {
     let tmp = tempfile::tempdir().unwrap();

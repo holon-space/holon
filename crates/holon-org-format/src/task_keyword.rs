@@ -106,6 +106,60 @@ pub fn keyword_headed<'a>(
     None
 }
 
+/// The leading token of `s` when it has the SHAPE of a task keyword: an
+/// ASCII-uppercase-initial word of 2..=32 chars over `A-Z 0-9 - _`, then at
+/// least one ASCII whitespace. Returns the token and the rest (whitespace
+/// still attached).
+///
+/// This is deliberately vocabulary-FREE, so a caller with no document handle
+/// can still tell that a keystroke MIGHT promote. It admits a strict superset
+/// of [`keyword_headed`] for every vocabulary whose keywords are
+/// ASCII-uppercase words — which the defaults are, and which the org
+/// convention for `#+TODO:` is.
+///
+/// Residual it does NOT cover: a document declaring a lowercase or non-ASCII
+/// keyword (`#+TODO: todo | erledigt`). Such a keystroke never reaches the
+/// authority, so it does not promote.
+pub fn candidate_keyword_headed(s: &str) -> Option<(&str, &str)> {
+    let end = s
+        .find(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-' || c == '_'))
+        .unwrap_or(s.len());
+    let (token, rest) = s.split_at(end);
+    if !(2..=32).contains(&token.len()) || !token.starts_with(|c: char| c.is_ascii_uppercase()) {
+        return None;
+    }
+    rest.starts_with(|c: char| c.is_ascii_whitespace())
+        .then_some((token, rest))
+}
+
+/// [`detect_keyword_promotion`] with the vocabulary membership test replaced by
+/// [`candidate_keyword_headed`]'s shape test — the proposal a caller that
+/// cannot see the owning document's `#+TODO:` line makes, for the authority to
+/// adjudicate against the real vocabulary.
+///
+/// `keyword` carries the ACTIVE category unconditionally: only the document's
+/// vocabulary says which keywords are done ones, so the category here is a
+/// placeholder the authority replaces.
+pub fn candidate_promotion(
+    prior_content: &str,
+    prior_task_state: Option<&TaskState>,
+    typed: &str,
+) -> Option<Promotion> {
+    if prior_task_state.is_some() {
+        return None;
+    }
+    let (token, rest) = candidate_keyword_headed(typed)?;
+    if candidate_keyword_headed(prior_content).is_some() {
+        return None;
+    }
+    let stripped = rest.trim_start();
+    Some(Promotion {
+        consumed_prefix: token.len() + (rest.len() - stripped.len()),
+        keyword: TaskState::active(token),
+        stripped: stripped.to_string(),
+    })
+}
+
 /// The one-shot promotion rule. Returns `Some` iff all three guards hold:
 /// the block carries no task state yet, the typed text is keyword-headed, and
 /// the prior content was *not* — the last is what makes promotion a transition
@@ -241,6 +295,52 @@ mod tests {
         assert_eq!(p.keyword, TaskState::active("NEXT"));
         let d = detect_keyword_promotion("", None, "SHIPPED x", &v).expect("SHIPPED must promote");
         assert!(d.keyword.is_done());
+    }
+
+    /// The vocabulary-free gate must never miss what a real vocabulary would
+    /// promote: it admits every default keyword AND a declared one it has
+    /// never heard of.
+    #[test]
+    fn candidate_shape_is_a_superset_of_every_uppercase_vocabulary() {
+        for kw in vocab().all_keywords() {
+            let typed = format!("{kw} x");
+            assert!(
+                candidate_promotion("", None, &typed).is_some(),
+                "the gate must admit the default keyword {kw}"
+            );
+        }
+        let declared = candidate_promotion("", None, "NEXT call bank")
+            .expect("an undeclared-to-the-gate keyword must still be admitted");
+        assert_eq!(declared.keyword.keyword, "NEXT");
+        assert_eq!(declared.stripped, "call bank");
+    }
+
+    /// The shape rule stays narrow enough that ordinary prose does not
+    /// propose: lowercase words, one-letter words, and mixed case are out.
+    #[test]
+    fn candidate_shape_refuses_ordinary_prose() {
+        for typed in ["buy milk", "I think", "Todo x", "A b", "TODOx y"] {
+            assert_eq!(
+                candidate_promotion("", None, typed),
+                None,
+                "{typed:?} must not propose a promotion"
+            );
+        }
+    }
+
+    /// The two guards that make it a TRANSITION carry over unchanged.
+    #[test]
+    fn candidate_shape_keeps_the_transition_guards() {
+        assert_eq!(
+            candidate_promotion("", Some(&TaskState::active("NEXT")), "NEXT x"),
+            None,
+            "an already-tasked block never re-proposes"
+        );
+        assert_eq!(
+            candidate_promotion("NEXT list", None, "NEXT listX"),
+            None,
+            "prior text that was already candidate-headed never proposes"
+        );
     }
 
     /// Tabs count as the separating whitespace, and multiple spaces collapse

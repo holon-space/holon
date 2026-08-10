@@ -127,6 +127,10 @@ pub struct DispatchingOperationEngine {
     /// (docs/Proposals/Templating-2026-07-12.md). `None` on a wiring without a
     /// queryable block projection — the operation then fails loud, disclosed.
     template_source: Option<Arc<dyn crate::api::template_source::TemplateSource>>,
+    /// Resolver for the owning document's `#+TODO:` vocabulary, consulted by
+    /// `promote_task_keyword`. `None` on a wiring without a queryable block
+    /// projection — the compound then falls back to the defaults and says so.
+    vocabulary_source: Option<Arc<dyn crate::core::task_keyword_promotion::TaskVocabularySource>>,
     /// Trust policy (VisionGapAnalysis C5): decides per (origin, entity, op)
     /// whether a dispatch executes against canonical state or is coerced into
     /// a proposal emission. Defaults to [`TrustPolicy::trust_all`] — the gate
@@ -332,7 +336,7 @@ fn origin_identity_key(origin: &OpOrigin) -> String {
 /// Normalize a block `properties` column value to its object form. The reader
 /// may hand back raw JSON TEXT (`String`/`Json`) or an already-structured
 /// `Object`; anything else is a loud error.
-fn properties_object(value: &Value) -> Result<std::collections::HashMap<String, Value>> {
+pub(crate) fn properties_object(value: &Value) -> Result<std::collections::HashMap<String, Value>> {
     match value {
         Value::Object(map) => Ok(map.clone()),
         Value::String(s) | Value::Json(s) => {
@@ -361,6 +365,7 @@ impl DispatchingOperationEngine {
             clock: Arc::new(SystemClock),
             history: None,
             template_source: None,
+            vocabulary_source: None,
             trust_policy: Arc::new(TrustPolicy::trust_all()),
             entity_write_locks: EntityWriteLocks::default(),
         }
@@ -405,6 +410,18 @@ impl DispatchingOperationEngine {
         self
     }
 
+    /// Wire the owning-document `#+TODO:` vocabulary resolver. Without it
+    /// `promote_task_keyword` judges every block against the DEFAULT keywords,
+    /// which disagrees with the parser in any document that declares its own —
+    /// so an unwired source is announced at WARN, never degraded quietly.
+    pub fn with_task_vocabulary_source(
+        mut self,
+        source: Arc<dyn crate::core::task_keyword_promotion::TaskVocabularySource>,
+    ) -> Self {
+        self.vocabulary_source = Some(source);
+        self
+    }
+
     /// Build a persistent engine. Loads any prior stack snapshot from `store`
     /// and re-verifies preconditions against live state via `reader` at replay.
     pub async fn new_persistent(
@@ -429,6 +446,7 @@ impl DispatchingOperationEngine {
             clock: Arc::new(SystemClock),
             history: None,
             template_source: None,
+            vocabulary_source: None,
             trust_policy: Arc::new(TrustPolicy::trust_all()),
             entity_write_locks: EntityWriteLocks::default(),
         })
@@ -1104,10 +1122,21 @@ impl DispatchingOperationEngine {
             .lock_target("block", params, "id")
             .await;
 
-        // Defaults only, deliberately: a document's own `#+TODO:` vocabulary is
-        // not plumbed here yet, and the refusal path below is what makes that
-        // upgrade lossless rather than a behaviour change.
-        let vocabulary = TaskKeywordVocabulary::default();
+        // The AUTHORITY decides the vocabulary. The caller proposes a keyword
+        // on a vocabulary-free shape rule; only the owning document's
+        // `#+TODO:` line says whether that word is a keyword at all, so a
+        // caller-supplied vocabulary would let any caller promote any word.
+        let vocabulary = match &self.vocabulary_source {
+            Some(source) => source.vocabulary_for_block(&id).await?,
+            None => {
+                tracing::warn!(
+                    block = %id,
+                    "no task-vocabulary source wired; judging promotion against the DEFAULT \
+                     keywords, which disagrees with the parser in any document declaring #+TODO:"
+                );
+                TaskKeywordVocabulary::default()
+            }
+        };
         let (prior_content, prior_keyword) = self.read_promotion_prior_state(&id).await?;
         let prior_state = prior_keyword.as_deref().map(TaskState::from_keyword);
 
@@ -1145,7 +1174,7 @@ impl DispatchingOperationEngine {
             p
         };
 
-        let (forwards, inverses, all_changes, payload) = match refusal {
+        let (forwards, inverses, all_changes, fp_changes, payload) = match refusal {
             Some(reason) => {
                 // A guard that declines is a DECISION, disclosed as data and as
                 // a WARN — never an Err and never a dropped keystroke.
@@ -1167,11 +1196,12 @@ impl DispatchingOperationEngine {
                 );
                 payload.insert("detail".to_string(), Value::String(reason.to_string()));
                 payload.insert("content".to_string(), Value::String(typed.clone()));
-                (vec![fwd], vec![inv], ch, payload)
+                let fp = ch.clone();
+                (vec![fwd], vec![inv], ch, fp, payload)
             }
             None => {
                 let promotion = promotion.expect("no refusal implies a promotion");
-                let (c_fwd, c_inv, mut ch) = self
+                let (c_fwd, mut c_inv, mut ch) = self
                     .dispatch_promotion_constituent(set_field_params(
                         "content",
                         &promotion.stripped,
@@ -1191,9 +1221,29 @@ impl DispatchingOperationEngine {
                     Value::String(promotion.keyword.keyword.clone()),
                 );
                 payload.insert("content".to_string(), Value::String(promotion.stripped));
+                // Undo means "treat that keystroke as ordinary text instead",
+                // so the content inverse restores the VERBATIM typed text, not
+                // the fused value the store held mid-word. This is also what
+                // `restore_refused_promotion` commits, so a refused and an
+                // undone promotion leave identical content.
+                c_inv
+                    .params
+                    .insert("value".into(), Value::String(typed.clone()));
+                // The redo guard fingerprints the post-undo state, which is now
+                // `typed` on the content field — anything else is born stale.
+                let fp: Vec<FieldDelta> = ch
+                    .iter()
+                    .map(|d| {
+                        let mut d = d.clone();
+                        if d.entity_id == id && d.field == "content" {
+                            d.old_value = Value::String(typed.clone());
+                        }
+                        d
+                    })
+                    .collect();
                 // Inverses leaf-first: reverse the forward order, so undo drops
                 // the task state before restoring the text it was derived from.
-                (vec![c_fwd, t_fwd], vec![t_inv, c_inv], ch, payload)
+                (vec![c_fwd, t_fwd], vec![t_inv, c_inv], ch, fp, payload)
             }
         };
 
@@ -1204,7 +1254,7 @@ impl DispatchingOperationEngine {
                 origin: OpOrigin::User,
                 group_id: 0,
                 precondition: Precondition::forward(&all_changes),
-                redo_precondition: Precondition::inverse(&all_changes),
+                redo_precondition: Precondition::inverse(&fp_changes),
             };
             self.journal_step(write_guard.as_ref(), entry).await?;
         }

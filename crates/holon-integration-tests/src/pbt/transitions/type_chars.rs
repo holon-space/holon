@@ -32,6 +32,10 @@ use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::REACTIVE_BASE;
 
+/// Hops the vocabulary resolver walks for a block sitting directly under its
+/// page: the block itself, then the page.
+const VOCABULARY_RESOLVE_READS: usize = 2;
+
 /// Type a short ASCII string into the active editor.
 /// Gated to `PBT_ATOMIC_EDITOR=1` runs.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -118,13 +122,17 @@ where
     // keyword-headed is an authoring gesture, not text — the keyword becomes
     // `task_state` and leaves the content.
     //
-    // ONE decision, on the guard inputs the ENGINE uses (the block's task state
-    // and the editor's prior text). Prod's trigger runs this same guard on the
-    // same inputs, which is what keeps the engine's refusal path unreachable
-    // from typing — and it must stay that way: the view model strips its buffer
-    // before the write is confirmed, so a refusal it did not predict would let
-    // the next keystroke commit the stripped text over the engine's verbatim
-    // commit, deleting what was typed.
+    // ONE decision, on the guard inputs the ENGINE uses: the block's task
+    // state, the editor's prior text, and the vocabulary the DRAWN DOCUMENT
+    // declares. The vocabulary is derived here rather than copied from prod's
+    // constant — a model that hardcodes what prod hardcodes agrees with prod's
+    // wrong answer.
+    //
+    // Prod's trigger cannot see the document, so it proposes on a
+    // vocabulary-free shape rule and the engine adjudicates. A refusal is
+    // therefore reachable from typing, and the view model's un-strip is what
+    // keeps it lossless: both sides land on the typed text either way, which
+    // is why this ONE decision still predicts the SUT.
     if let Some(block_id) = state.active_editor_block()
         && let Some(typed) = state.active_editor_text().map(str::to_owned)
         && let Some(caret) = state.active_editor_cursor()
@@ -136,7 +144,7 @@ where
             &prior_buffer,
             prior_state.as_ref(),
             &typed,
-            &holon_org_format::TaskKeywordVocabulary::default(),
+            &state.block_task_vocabulary(&block_id),
         );
         if let Some(promotion) = promotion
             && state.promote_block_task_keyword(
@@ -226,9 +234,19 @@ crate::cap_transition! {
         // both do (2·chars). The promoting keystroke adds one more write in
         // the SqlOnly arm (measured 19 vs 18) — inside the untouched
         // tolerance, not a widening of it.
+        //
+        // A keystroke the read gate admits costs the authority one more read
+        // per hop from the block to its nearest page ancestor, resolving the
+        // owning document's `#+TODO:` vocabulary. Charged ONLY for a
+        // candidate-headed text, so the budget still bites on ordinary prose.
         let chars = me.text.chars().count();
+        let vocabulary_reads = if holon_org_format::candidate_keyword_headed(&me.text).is_some() {
+            VOCABULARY_RESOLVE_READS
+        } else {
+            0
+        };
         ExpectedSql {
-            reads: REACTIVE_BASE + 2 * chars,
+            reads: REACTIVE_BASE + 2 * chars + vocabulary_reads,
             writes: if state.content_writes_reach_sql() {
                 2 * chars
             } else {

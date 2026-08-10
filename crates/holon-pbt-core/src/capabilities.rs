@@ -299,6 +299,16 @@ pub trait RefBlockTreeMut: RefBlockTree {
         None
     }
 
+    /// The task-keyword vocabulary that governs `id`: its owning document's
+    /// `#+TODO:` declaration, else the defaults.
+    ///
+    /// DERIVED from the drawn document, never a copy of the SUT's constant —
+    /// a model that hardcodes the same vocabulary prod hardcodes agrees with
+    /// prod's wrong answer and cannot convict it.
+    fn block_task_vocabulary(&self, _: &EntityUri) -> holon_org_format::TaskKeywordVocabulary {
+        holon_org_format::TaskKeywordVocabulary::default()
+    }
+
     /// Apply a live task-keyword promotion: `id`'s content becomes `stripped`
     /// and its task state becomes `keyword`, as ONE authoring step.
     ///

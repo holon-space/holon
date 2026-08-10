@@ -396,6 +396,34 @@ pub fn state_toggle_cycle_intent(
     walk(panel, entity_id)
 }
 
+/// The task keyword `entity_id`'s rendered `state_toggle` shows, or `None` when
+/// the row renders no toggle node at all.
+///
+/// An EMPTY string is the plain-row rendering, not an absent one: the widget
+/// collapses to a zero-width spacer and paints no glyph when `current` is empty
+/// (see `frontends/gpui/src/render/builders/state_toggle.rs`). So "the task
+/// affordance is on screen" is `Some(non-empty)`, and a test that only asked
+/// whether the node exists would pass on every plain block.
+pub fn state_toggle_current(
+    root: &crate::view_model::ViewModel,
+    entity_id: &EntityUri,
+    region: &str,
+) -> Option<String> {
+    use crate::view_model::ViewKind;
+
+    fn walk(node: &crate::view_model::ViewModel, entity_id: &EntityUri) -> Option<String> {
+        if let ViewKind::StateToggle { current, .. } = &node.kind {
+            if node.entity_id().as_ref() == Some(entity_id) {
+                return Some(current.clone());
+            }
+        }
+        node.children().iter().find_map(|c| walk(c, entity_id))
+    }
+
+    let panel = find_region_panel(root, region)?;
+    walk(panel, entity_id)
+}
+
 /// Name why [`state_toggle_cycle_intent`] resolved nothing for `entity_id`.
 ///
 /// That function returns a bare `None` for four structurally different states —
