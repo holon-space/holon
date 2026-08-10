@@ -23,7 +23,21 @@ mod capability_pair;
 mod capmap;
 mod entity;
 mod operations_trait;
+mod step_vocabulary;
 mod widget_builder;
+
+/// Derive the Gherkin step vocabulary of an annotated struct from one
+/// `#[step_template("…")]` phrasing. Placeholder names are checked against the
+/// real fields at compile time; a field the template does not name must carry
+/// `#[step_default]` / `#[step_default(expr)]`.
+#[proc_macro_derive(StepVocabulary, attributes(step_template, step_default))]
+pub fn derive_step_vocabulary(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match step_vocabulary::expand(input) {
+        Ok(tokens) => TokenStream::from(tokens),
+        Err(e) => TokenStream::from(e.to_compile_error()),
+    }
+}
 
 #[proc_macro_derive(
     Entity,

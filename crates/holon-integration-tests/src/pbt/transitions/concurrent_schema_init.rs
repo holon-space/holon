@@ -27,7 +27,8 @@ use validated::Validated;
 use crate::pbt::transition_budgets::ExpectedSql;
 
 /// Test that sequential schema operations don't cause database lock errors.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("the schema is initialised concurrently")]
 pub struct ConcurrentSchemaInit;
 
 impl<R: RefLifecycle + RefLayout + RefWatch> TransitionFactory<R> for ConcurrentSchemaInit {

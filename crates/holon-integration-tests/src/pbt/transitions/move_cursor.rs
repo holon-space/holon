@@ -31,7 +31,8 @@ use crate::pbt::transition_budgets::REACTIVE_BASE;
 
 /// Move the active editor caret to a given byte position.
 /// Gated to `PBT_ATOMIC_EDITOR=1` runs.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I move the cursor to byte {byte_position}")]
 pub struct MoveCursor {
     pub byte_position: usize,
 }

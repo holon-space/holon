@@ -41,7 +41,8 @@ use crate::pbt::transition_budgets::ExpectedSql;
 /// Convert `origin_id` (a non-page block with children, under a page ancestor)
 /// into a page: a NEW page P is minted under the origin's nearest page ancestor
 /// and the origin's children move under P.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I convert block {origin_id} to a page")]
 pub struct BlockToPage {
     pub origin_id: EntityUri,
 }

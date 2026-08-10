@@ -49,7 +49,8 @@ use crate::pbt::transition_budgets::OPEN_TAB_INSERT_CLICK_RESOLVE_READS;
 use crate::pbt::transition_budgets::REACTIVE_BASE;
 
 /// Open a sidebar page as an additional Main tab via cmd- or ctrl-click.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I modifier-click block {block_id} with ctrl {use_ctrl}")]
 pub struct OpenTabViaModifierClick {
     pub block_id: EntityUri,
     /// Which modifier carries the gesture. The sidebar declares BOTH

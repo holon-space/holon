@@ -42,7 +42,8 @@ use crate::pbt::transition_budgets::docs_tolerance;
 /// Mirrors what production's history `Back` button does. The reference
 /// model also clears per-region focus to match how the SUT lets engine
 /// focus drift to whatever last touched it.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I navigate back in region {region}")]
 pub struct NavigateBack {
     pub region: Region,
 }

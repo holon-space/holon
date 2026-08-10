@@ -25,7 +25,8 @@ use validated::Validated;
 use crate::pbt::transition_budgets::ExpectedSql;
 
 /// Create a directory (possibly nested) before app starts.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I create directory {path}")]
 pub struct CreateDirectory {
     pub path: String,
 }

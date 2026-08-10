@@ -24,7 +24,8 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 /// One-directional merge: peer's changes → primary.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I merge from peer {peer_idx}")]
 pub struct MergeFromPeer {
     pub peer_idx: usize,
 }

@@ -30,7 +30,8 @@ use crate::pbt::transition_budgets::MutationKind;
 use crate::pbt::transition_budgets::expected_sql_for_kind;
 
 /// Undo the last UI mutation via the engine's undo stack.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I undo")]
 pub struct UndoLastMutation;
 
 impl<R: RefLifecycle + RefBlockTreeMut> TransitionFactory<R> for UndoLastMutation {

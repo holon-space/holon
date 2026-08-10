@@ -38,7 +38,8 @@ use crate::pbt::transition_budgets::REACTIVE_BASE;
 use crate::pbt::transition_budgets::docs_tolerance;
 
 /// Navigate via arrow keys from the currently focused block in a region.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I arrow-navigate {direction} {steps} times in region {region}")]
 pub struct ArrowNavigate {
     pub region: Region,
     pub direction: NavDirection,

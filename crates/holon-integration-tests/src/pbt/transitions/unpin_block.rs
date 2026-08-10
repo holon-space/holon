@@ -44,7 +44,8 @@ use crate::pbt::transition_budgets::REACTIVE_BASE;
 use crate::pbt::transition_budgets::docs_tolerance;
 
 /// Unpin (close) one open `navigation_history` row by its id.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I unpin history entry {history_id}")]
 pub struct UnpinBlock {
     pub history_id: i64,
 }

@@ -35,7 +35,8 @@ use crate::pbt::transition_budgets::MutationKind;
 use crate::pbt::transition_budgets::expected_sql_for_kind;
 
 /// Move the focused block up: swap its sort_key with its previous sibling's.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I move block {block_id} up")]
 pub struct MoveUp {
     pub block_id: EntityUri,
 }

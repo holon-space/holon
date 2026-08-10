@@ -57,6 +57,7 @@ pub mod observables;
 pub mod panic_filter;
 pub mod retry;
 pub mod sibling_order;
+pub mod step_vocabulary;
 pub mod types;
 pub mod validation;
 pub mod wiring;

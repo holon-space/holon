@@ -71,25 +71,93 @@ Feature: Splitting a block routes prefix to original and suffix to new
 
 ## Step vocabulary
 
-Steps are matched in `src/pbt/fixtures/matchers.rs`. Unknown steps are a **hard
-error** — add a matcher (see *Extending*) rather than letting one slip.
+Action steps (`Given` / `When`) are read by the **generated step registry**:
+each transition declares ONE phrasing next to its own struct, and
+`declare_e2e_transitions!` generates the renderer, the parser, and the
+registration checks. `Then` steps still go through `match_assertion` in
+`src/pbt/fixtures/matchers.rs` (Increment 4 will move them too). Unknown steps
+are a **hard error** in both halves.
 
-### Actions (`Given` / `When`)
+### Actions (`Given` / `When`) — one template per transition
+
+Authoring a step is one attribute on the transition struct:
+
+```rust
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I click block {block_id} in region {region}")]
+pub struct ClickBlock {
+    pub block_id: EntityUri,
+    pub region: Region,
+}
+```
+
+The derive REFUSES AT COMPILE TIME, at the offending span: a placeholder that
+names no field (the error lists the real fields), a repeated placeholder, a
+malformed template, a missing `#[step_template]`, and — the coverage rule — any
+field the template does not name.
+
+**Every field must be covered.** A field the step cannot carry must say so
+explicitly with `#[step_default]` (`Default::default()`) or
+`#[step_default(expr)]` (a constant the step implies, e.g. `StartApp`'s
+`wait_for_ready: true`). A defaulted field is pinned: rendering a value that
+differs from the declared constant fails LOUD, because `render_step` re-parses
+its own output and compares serde values before returning it.
+
+**Quoting is decided by the field's TYPE, never by the phrasing.**
+`StepField::QUOTED` says whether a type renders inside `"…"` (with `\"` / `\\`
+escapes) or bare. Strings, `EntityUri`, `Region`, and the JSON-carried payload
+types are quoted; counters and booleans are bare. Parsing is anchored: literal
+segments must match exactly and a quoted field consumes one balanced quoted run,
+so a `content` field containing `" in region "` cannot confuse the parser.
+Adding a new field type means implementing `StepField` for it once (in
+`holon-pbt-core/src/step_vocabulary.rs`, or in the type's own crate when the
+orphan rule requires it) — including `step_field_examples()`, which is where the
+catalog-wide property test gets its values (`E2ETransition::step_catalog_examples()`
+is their union).
+
+**Docstrings.** A derived step takes NO docstring; attaching one is a refusal,
+not a silently dropped payload. The one transition whose payload IS a document,
+`WriteOrgFile`, hand-implements `StepVocabulary` and REQUIRES its docstring
+(`an org file "<name>":` + org text). Data-table-carried fields do not exist yet;
+until they do, a field is either in the template, defaulted, or a compile error.
+
+Registration-time checks run in `E2ETransition::check_step_vocabulary()` (asserted
+by `tests/step_vocabulary_laws.rs`): structurally ambiguous templates are refused,
+and each struct's serde key set must match its declared fields. The same test file
+holds the round-trip law `parse(render(t)) == t` over the whole catalog.
+
+The phrasings the shipped `.feature` files use:
 
 | Step | Transition |
 |---|---|
-| `the app is started` (optionally `… with loro`) | `StartApp` |
+| `the app is started` | `StartApp` |
 | `an org file "<name>":` + docstring | `WriteOrgFile` |
 | `I focus block "<id>" in region "<region>"` | `NavigateFocus` |
-| `I click block "<id>"` (optionally `in region "<region>"`) | `ClickBlock` |
+| `I click block "<id>" in region "<region>"` | `ClickBlock` |
 | `I focus the editor of block "<id>"` | `FocusEditableText` |
 | `I type "<text>"` | `TypeChars` |
 | `I split block "<id>" at position <n>` | `SplitBlock` |
 | `I indent block "<id>"` | `Indent` |
 | `I outdent block "<id>"` | `Outdent` |
-| `I press backspace` (optionally `<n> times`) | `DeleteBackward` |
+| `I press backspace <n> times` | `DeleteBackward` |
 
-`<region>` is `main` / `left` / `right`.
+Every other transition in the catalog has a template too — read it in the
+transition's own file, or dump the whole vocabulary with
+`E2ETransition::step_catalog()`.
+
+`<region>` renders as `main` / `left_sidebar` / `right_sidebar`; `left` and
+`right` are still accepted on parse.
+
+**Forms the registry REFUSES** (the regex matchers accepted them; a template has
+no optional segments):
+
+- `the app is started with loro` — the step cannot carry `enable_loro`, which is
+  therefore pinned to `false`. Recording a loro-enabled boot needs optional
+  template segments; that is specced with the recorder increments, not here.
+- `I click block "<id>"` without `in region "…"` — the region is a template
+  field, so it is always written.
+- `I press backspace` without a count, and the singular `1 time` — the count is a
+  template field and the literal is ` times`.
 
 ### Assertions (`Then`)
 
@@ -190,8 +258,10 @@ closure they pass it.
 
 ## Extending
 
-- **New action verb**: add a matcher to `match_action` in `matchers.rs`,
-  constructing the typed `E2ETransition` struct.
+- **New action verb**: add `holon_macros::StepVocabulary` + `#[step_template("…")]`
+  to the transition's struct (see *Step vocabulary*). Nothing central to edit —
+  the registry, the ambiguity check and the parser are generated from the one
+  variant list in `declare_e2e_transitions!`.
 - **New assertion**: add a variant to `Assertion` (`assert.rs`), handle it in
   `evaluate_assertion` (bounded on the capability traits it needs), and add a
   matcher to `match_assertion`.

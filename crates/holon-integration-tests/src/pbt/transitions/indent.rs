@@ -39,7 +39,8 @@ use crate::pbt::transition_budgets::expected_sql_for_kind;
 
 /// Indent the focused block: re-parent it under its previous sibling via the
 /// `Alt+Right` / Tab chord.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I indent block {block_id}")]
 pub struct Indent {
     pub block_id: EntityUri,
 }

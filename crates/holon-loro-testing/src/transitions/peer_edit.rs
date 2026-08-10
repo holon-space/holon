@@ -27,7 +27,8 @@ use proptest::strategy::Union;
 use validated::Validated;
 
 /// Edit a block on a peer's LoroDoc directly (no SQL, no BackendEngine).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("peer {peer_idx} applies edit {op}")]
 pub struct PeerEdit {
     pub peer_idx: usize,
     pub op: PeerEditOp,

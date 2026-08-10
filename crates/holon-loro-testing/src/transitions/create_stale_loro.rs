@@ -24,7 +24,8 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 /// Create a stale/corrupted .loro file BEFORE the system starts.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("a stale loro file for {org_filename} with corruption {corruption_type}")]
 pub struct CreateStaleLoro {
     /// The org filename this .loro file corresponds to (e.g., "test.org")
     pub org_filename: String,

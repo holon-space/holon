@@ -45,7 +45,8 @@ use crate::pbt::transition_budgets::READS_PER_WATCH;
 use crate::pbt::transition_budgets::cdc_tolerance;
 
 /// Move the org file `old_file_name` → `new_file_name` on disk.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I rename document {old_file_name} to {new_file_name}")]
 pub struct RenameDocument {
     pub old_file_name: String,
     pub new_file_name: String,

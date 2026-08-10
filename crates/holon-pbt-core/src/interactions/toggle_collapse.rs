@@ -1,6 +1,16 @@
 //! Variant: toggle an outline/tree row's expanded state.
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    holon_macros::StepVocabulary,
+)]
+#[step_template("I toggle collapse of {target_id}")]
 pub struct ToggleCollapse {
     /// The `target_id` of the `expand_toggle` widget — typically the
     /// row's `entity_uri` as rendered (`EntityUri::to_string()`). The

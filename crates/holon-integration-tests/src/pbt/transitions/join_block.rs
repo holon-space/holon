@@ -41,7 +41,8 @@ use crate::pbt::transition_budgets::expected_sql_for_kind;
 
 /// Join a block into its previous text sibling, or (when first child) into
 /// its non-layout text parent. Mirrors Backspace-at-position-0 semantics.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I join block {block_id} with its predecessor")]
 pub struct JoinBlock {
     pub block_id: EntityUri,
 }

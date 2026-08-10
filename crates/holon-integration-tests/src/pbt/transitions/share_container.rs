@@ -39,7 +39,8 @@ use crate::pbt::transition_budgets::ExpectedSql;
 /// (`holon_loro::container_registry::ROOT_CONTAINER_ID`).
 pub const ROOT_SELECTOR: &str = "holon_tree";
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I share container {selector} with principal {principal}")]
 pub struct ShareContainer {
     pub selector: String,
     pub principal: String,

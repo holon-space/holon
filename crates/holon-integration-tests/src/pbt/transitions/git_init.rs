@@ -24,7 +24,8 @@ use validated::Validated;
 use crate::pbt::transition_budgets::ExpectedSql;
 
 /// Initialize git repository (runs `git init`).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("the vault is git-initialised")]
 pub struct GitInit;
 
 impl<R: RefLifecycle + RefBootMut> TransitionFactory<R> for GitInit {

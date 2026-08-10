@@ -36,7 +36,8 @@ use crate::pbt::transition_budgets::expected_sql_for_kind;
 
 /// Outdent the focused block: move it up one level to its grandparent via the
 /// `Alt+Left` / Shift+Tab chord.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I outdent block {block_id}")]
 pub struct Outdent {
     pub block_id: EntityUri,
 }

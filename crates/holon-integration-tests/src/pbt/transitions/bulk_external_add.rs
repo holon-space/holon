@@ -38,7 +38,8 @@ use crate::pbt::transition_budgets::READS_PER_WATCH;
 use crate::pbt::transition_budgets::cdc_tolerance;
 
 /// Add multiple blocks to a document by writing an updated org file.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("an external bulk add of {blocks} to document {doc_uri}")]
 pub struct BulkExternalAdd {
     pub doc_uri: EntityUri,
     #[serde(with = "holon_api::block::block_wire_vec")]

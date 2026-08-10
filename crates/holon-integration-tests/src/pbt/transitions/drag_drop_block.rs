@@ -37,7 +37,8 @@ use crate::pbt::transition_budgets::expected_sql_for_kind;
 
 /// Drag the currently-focused block onto a target block, re-parenting the
 /// source as a child of the target at the beginning (after=None).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I drag block {source} onto block {target}")]
 pub struct DragDropBlock {
     pub source: EntityUri,
     pub target: EntityUri,

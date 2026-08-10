@@ -38,7 +38,8 @@ use crate::pbt::transition_budgets::ExpectedSql;
 /// The outer main-panel scroll region's bounds id (a real layout block).
 const OUTER_LIST_ELEMENT: &str = "block:default-main-panel";
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I scroll element {element_id} by {delta_y} over footer {over_footer}")]
 pub struct WheelScroll {
     /// Occlusion source: true = over the sticky footer, false = over the outer
     /// list. Inc D emits only the outer-list source.

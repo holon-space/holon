@@ -232,6 +232,16 @@ fn gql_childof_star_bounds(gql: &str) -> Option<(u32, u32)> {
     Some((min, max))
 }
 
+holon_pbt_core::step_field_via_json!(
+    TestQuery,
+    vec![TestQuery {
+        table: QueryTable::Blocks,
+        columns: vec!["id".to_string()],
+        predicates: Vec::new(),
+        source: QuerySource::AllBlocks,
+    }]
+);
+
 /// A language-neutral query that can compile to PRQL, SQL, or GQL and also
 /// evaluate against the reference model.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

@@ -309,6 +309,135 @@ macro_rules! declare_e2e_transitions {
                     >>::required_caps(), )*
                 }
             }
+
+            /// The step this transition writes as, plus a docstring when its
+            /// payload is a document.
+            ///
+            /// Rendering RE-PARSES its own output and compares serde values: a
+            /// value the template cannot express (a field pinned by
+            /// `#[step_default]` holding some other value) fails here, at record
+            /// time, instead of being silently narrowed on replay.
+            pub fn render_step(&self) -> ::holon_pbt_core::step_vocabulary::RenderedStep {
+                use ::holon_pbt_core::step_vocabulary::StepVocabulary;
+                let rendered = match self {
+                    $( Self::$variant(v) => <$ty as StepVocabulary>::render_step(v), )*
+                };
+                let mine = ::holon_pbt_core::step_vocabulary::comparable_step_value(
+                    match self {
+                        $( Self::$variant(v) => <$ty as StepVocabulary>::step_json(v), )*
+                    },
+                );
+                let round_tripped = Self::parse_step(&rendered.text, rendered.docstring.as_deref())
+                    .unwrap_or_else(|e| panic!(
+                        "{} rendered the step {:?}, which does not parse back: {e}",
+                        self.variant_name(), rendered.text,
+                    ));
+                let theirs = ::holon_pbt_core::step_vocabulary::comparable_step_value(
+                    match &round_tripped {
+                        $( Self::$variant(v) => <$ty as StepVocabulary>::step_json(v), )*
+                    },
+                );
+                assert_eq!(
+                    mine, theirs,
+                    "{} rendered the step {:?}, which parses back to a DIFFERENT value — \
+                     the template cannot express this value (a #[step_default] field holds a \
+                     non-default value?)",
+                    self.variant_name(), rendered.text,
+                );
+                rendered
+            }
+
+            /// Resolve one Gherkin step to exactly one transition. Zero matches
+            /// and several matches are both hard errors — never a guess.
+            ///
+            /// KNOWN SHARPNESS, for whoever adds a template here: a variant
+            /// whose template structurally matches the step but whose FIELDS
+            /// then fail to parse aborts the whole resolution (the `?` below),
+            /// even if another variant would have accepted the step. No pair in
+            /// today's catalog can reach that (the registration ambiguity check
+            /// keeps skeletons apart), but a new template that overlaps an
+            /// existing skeleton would turn a wrong-field error into a
+            /// "no transition" for a step that IS spelled correctly. Keep
+            /// skeletons distinct rather than relying on field parsing to
+            /// disambiguate.
+            pub fn parse_step(
+                text: &str,
+                docstring: ::core::option::Option<&str>,
+            ) -> ::core::result::Result<Self, ::std::string::String> {
+                use ::holon_pbt_core::step_vocabulary::StepVocabulary;
+                let mut matched: ::std::vec::Vec<(&'static str, Self)> = ::std::vec::Vec::new();
+                $(
+                    if let ::core::option::Option::Some(v) =
+                        <$ty as StepVocabulary>::parse_step(text, docstring)
+                            .map_err(|e| format!(
+                                "step {text:?} matches the {} template but its fields do not \
+                                 parse: {e}",
+                                stringify!($variant),
+                            ))?
+                    {
+                        matched.push((stringify!($variant), Self::$variant(v)));
+                    }
+                )*
+                match matched.len() {
+                    1 => ::core::result::Result::Ok(matched.pop().unwrap().1),
+                    0 => ::core::result::Result::Err(format!(
+                        "no step template describes {text:?}"
+                    )),
+                    _ => ::core::result::Result::Err(format!(
+                        "step {text:?} is AMBIGUOUS — it is described by {:?}",
+                        matched.iter().map(|(n, _)| *n).collect::<::std::vec::Vec<_>>(),
+                    )),
+                }
+            }
+
+            /// `(variant, template)` for every declared step — the input to the
+            /// registration-time ambiguity refusal.
+            pub fn step_catalog() -> ::std::vec::Vec<(&'static str, &'static str)> {
+                use ::holon_pbt_core::step_vocabulary::StepVocabulary;
+                ::std::vec![ $((
+                    stringify!($variant),
+                    <$ty as StepVocabulary>::TEMPLATE,
+                )),* ]
+            }
+
+            /// Every variant's example values — what the catalog-wide
+            /// round-trip property draws from.
+            pub fn step_catalog_examples() -> ::std::vec::Vec<Self> {
+                use ::holon_pbt_core::step_vocabulary::StepVocabulary;
+                let mut out = ::std::vec::Vec::new();
+                $(
+                    out.extend(
+                        <$ty as StepVocabulary>::step_examples()
+                            .into_iter()
+                            .map(Self::$variant),
+                    );
+                )*
+                out
+            }
+
+            /// Registration-time refusal: structurally ambiguous templates, and
+            /// any struct whose serde key set drifted from its declared fields.
+            pub fn check_step_vocabulary() -> ::core::result::Result<(), ::std::string::String> {
+                use ::holon_pbt_core::step_vocabulary::StepVocabulary;
+                ::holon_pbt_core::step_vocabulary::check_template_ambiguity(&Self::step_catalog())?;
+                $(
+                    {
+                        let examples = <$ty as StepVocabulary>::step_examples();
+                        let example = examples.first().ok_or_else(|| format!(
+                            "{}: step_examples() is empty — the round-trip property would be \
+                             vacuous for it",
+                            stringify!($variant),
+                        ))?;
+                        ::holon_pbt_core::step_vocabulary::check_field_coverage(
+                            stringify!($variant),
+                            <$ty as StepVocabulary>::TEMPLATE,
+                            <$ty as StepVocabulary>::field_names(),
+                            &<$ty as StepVocabulary>::step_json(example),
+                        )?;
+                    }
+                )*
+                ::core::result::Result::Ok(())
+            }
         }
 
         $vis fn aggregate_transitions(

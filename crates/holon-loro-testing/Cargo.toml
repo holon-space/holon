@@ -30,6 +30,7 @@ holon-api = { workspace = true }
 holon-loro = { workspace = true }
 loro = { workspace = true }
 holon-pbt-core = { path = "../holon-pbt-core" }
+holon-macros = { workspace = true }
 async-trait = { workspace = true }
 proptest = { workspace = true }
 validated = "1.0"
@@ -37,4 +38,5 @@ tokio = { workspace = true, features = ["sync", "time"] }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }

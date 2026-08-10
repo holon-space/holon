@@ -24,7 +24,8 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 /// Add a Loro-only peer instance that shares the primary's current state.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("a peer joins")]
 pub struct AddPeer;
 
 // ── Capability-bound free functions (Phase 6a) ────────────────────

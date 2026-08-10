@@ -24,7 +24,8 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 /// Bidirectional sync between primary's LoroDoc and a peer via DirectSync.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I sync with peer {peer_idx}")]
 pub struct SyncWithPeer {
     pub peer_idx: usize,
 }

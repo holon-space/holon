@@ -56,6 +56,16 @@ use crate::pbt::transition_budgets::REACTIVE_BASE;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::expected_sql_for_kind;
 
+holon_pbt_core::step_field_via_json!(
+    DenseEditKind,
+    vec![
+        DenseEditKind::AppendChild {
+            content: "appended".to_string(),
+        },
+        DenseEditKind::MoveFirstChildToEnd,
+    ]
+);
+
 /// One dense-text edit the agent applies between `dense_query` and
 /// `dense_patch`.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -74,7 +84,8 @@ pub enum DenseEditKind {
 
 /// Edit a dense projection of `parent`'s children through the dense_query →
 /// edit → dense_patch MCP round trip.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I apply dense edit {edit} under block {parent_id}")]
 pub struct DenseProjectionEdit {
     /// The projected parent — a page whose children the dense projection
     /// anchors under (`#+ID:` header = this id).

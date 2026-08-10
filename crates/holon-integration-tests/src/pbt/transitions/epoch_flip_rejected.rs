@@ -33,7 +33,8 @@ use crate::pbt::transition_budgets::ExpectedSql;
 
 /// Attempt to boot a second consolidator over the running app's durable state
 /// and assert the invariant-10 epoch guard rejects it.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("an epoch flip is rejected")]
 pub struct EpochFlipRejected;
 
 impl<R: RefLifecycle> TransitionFactory<R> for EpochFlipRejected {
