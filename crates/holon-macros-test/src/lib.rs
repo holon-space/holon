@@ -138,6 +138,28 @@ mod tests {
         );
     }
 
+    /// The emitted guard carries the developer's own literal, and the
+    /// conjunction case carries the JOINED text — a refusal quoting one of two
+    /// `#[require]`s would misdescribe what refused.
+    #[test]
+    fn require_emits_the_source_literal_joined() {
+        let source_of = |name: &str| {
+            ops()
+                .iter()
+                .find(|op| op.name == name)
+                .unwrap_or_else(|| panic!("op {name} exists"))
+                .guard
+                .source()
+                .unwrap_or_else(|| panic!("op {name} declares a guard"))
+                .to_string()
+        };
+        assert_eq!(source_of("set_flag"), "has_tag(\"flaggable\")");
+        assert_eq!(
+            source_of("set_priority"),
+            "has_tag(\"Page\") and parent(not has_tag(\"Page\"))"
+        );
+    }
+
     /// No `#[require]` is an explicit stated fact, not an absence.
     #[test]
     fn no_require_declares_op_guard_none() {

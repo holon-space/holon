@@ -38,7 +38,8 @@ catalog rather than being the catalog**.
 
 Concretely: the declaration surface is the existing `#[operations_trait]` attribute
 family (`#[affects]`, `#[triggered_by]`, `#[menu_exposure]`, `#[boundary_behavior]`,
-`#[target_scope]`, `#[require]`), extended with guard and arc declarations. The macro's
+`#[require]` — note `target_scope` is hardcoded to `TargetScope::Block` in the macro, not
+a parsed attribute), extended with guard and arc declarations. The macro's
 output is a plain, serializable value on `OperationDescriptor`. One declaration, every
 consumer derived.
 
@@ -212,23 +213,33 @@ repair-by-re-derivation for file mirrors stays blocked exactly as ADR 0030 state
 - The guard is ordinary serializable data: it round-trips through serde, participates in
   `PartialEq` and prints in `Debug`. A serde round-trip test on the descriptor with its
   guard intact is the certificate that the dual-consumer requirement stays reachable.
-- **A declared guard reads the CURRENT state; the chokepoints read the PROPOSED one.
-  Inc 3 must not confuse them.** A declared `parent(...)` guard evaluates the subject
-  block's EXISTING `parent_id` — it detects a block that IS already in a violating
-  topology. The three hand-wired chokepoints
-  (`holon_core::traits` ~:2263, `sql_operation_provider` ~:3810,
-  `loro_block_operations` ~:204) ask a different question: they evaluate the
-  PROSPECTIVE parent of a move that has not happened yet. So Inc 3's dispatcher gate
-  MUST evaluate guards against the **post-image of the proposed op** (or bind the
-  prospective parent explicitly as the guard's subject), and must NEVER naively swap
-  the declared guard into those call sites — under the current topology the guard is
-  trivially false for the very move the chokepoint exists to refuse. What IS already
-  proven is the equivalence of the two predicates over a given topology:
+- **The gate evaluates declared guards against the CURRENT world state** (ruling G1=A,
+  2026-08-10) and refuses before the op fires. There is no overlay world, no post-image
+  materialisation and no speculative provider call: the gate reads what is, and says no.
+  A guard is evaluated SUBJECT-BOUND — "does THIS block satisfy the body", the op's `id`
+  param — never `GuardResult::enabled()`, which means "some row satisfies this" and
+  would admit an op on an unrelated block's binding.
+- **Three call sites are declared EXCLUDED from the guard machinery**, because they judge
+  a PROPOSED state that a current-state guard cannot express:
+  - `crates/holon-core/src/traits.rs` (`BlockMovePrefetched::move_block_prefetched`) —
+    evaluates the PROSPECTIVE parent of a move that has not happened yet;
+  - `crates/holon/src/core/sql_operation_provider.rs` (the `add_tag` arm) and
+  - `crates/holon-loro/src/loro_block_operations.rs` (the same `add_tag` chokepoint) —
+    evaluate a PROSPECTIVE tag against the block's current parent.
+
+  All three call `block_op_catalog::page_under_non_page_prohibited` and stay bespoke.
+  Overlay-world evaluation is deferred until an oracle demands it. Each site carries a
+  comment naming this exclusion.
+- **The truth-table bridge is not an authorisation to swap.**
   `parent_guard_reproduces_the_chokepoint_truth_table`
   (`crates/holon-pattern/src/pattern.rs`) reproduces all six
   `(child_is_page, parent_is_page)` cases of `page_under_non_page_prohibited`,
-  including the parentless case. That is the semantic bridge; supplying the right
-  state to evaluate against is Inc 3's job.
+  including the parentless case. It proves the two predicates agree **over a given
+  topology** — it does NOT license replacing the chokepoints with the declared guard.
+  Under the current topology the guard is trivially false for the very move the
+  chokepoint exists to refuse, so the swap would delete the prohibition with no test
+  turning red at the call site. The standing keystone invariant `no_page_under_non_page`
+  is the net if the comments are ignored.
 - Guard evaluation is a single generated gate at the one routing point, not codegen
   inside each provider. Totality is delivered by the provider's write transaction and
   its rollback (ADR 0030's own position: "total or refused" is delivered by the
@@ -236,9 +247,13 @@ repair-by-re-derivation for file mirrors stays blocked exactly as ADR 0030 state
   the provider — which also gives mode honesty for free: one evaluation, both write
   authorities.
 - An advertised op with no catalog entry, and a catalog entry no provider advertises,
-  are **boot refusals**, not warnings. That is the `block_op_catalog_parity` test
-  promoted to a runtime invariant, and it is the regression guard for bug class I1
-  (descriptors drifting between the two write authorities).
+  should become **boot refusals**, not warnings — the regression guard for bug class I1
+  (descriptors drifting between the two write authorities). This is FUTURE WORK, not the
+  current state. `crates/holon/tests/block_op_catalog_parity.rs` asserts something
+  narrower: that *catalog-owned bespoke* descriptors are byte-identical across the two
+  providers. It does not assert "every advertised op has a catalog entry". Promoting it
+  is blocked until the exhaustiveness set is substantially complete — with one op in the
+  set, the refusal would reject essentially every op in the system.
 - What this deliberately does NOT do: it does not prove a provider body opens a
   transaction, nor that no write escapes it. That obligation stays with ADR 0030's
   fault-injection PBT. A typestate firing token would make a forgotten guard a *compile*

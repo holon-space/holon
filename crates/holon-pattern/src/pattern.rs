@@ -179,7 +179,12 @@ pub enum OpGuard {
     None,
     /// The declared relational precondition (P6=A: predicates over the state
     /// the op touches; parameter validity belongs in typed params).
-    Declared { guard: Guard },
+    ///
+    /// `source` is the developer's own `#[require]` text (several attributes
+    /// joined with ` and `). The dispatcher's refusal quotes it verbatim rather
+    /// than re-rendering the AST, so a refusal never shows a developer a guard
+    /// they did not write.
+    Declared { guard: Guard, source: String },
 }
 
 impl OpGuard {
@@ -188,6 +193,7 @@ impl OpGuard {
     pub fn parse(input: &str) -> Result<OpGuard, GuardParseError> {
         Ok(OpGuard::Declared {
             guard: Guard::parse(input)?,
+            source: input.to_string(),
         })
     }
 
@@ -195,7 +201,15 @@ impl OpGuard {
     pub fn guard(&self) -> Option<&Guard> {
         match self {
             OpGuard::None => Option::None,
-            OpGuard::Declared { guard } => Some(guard),
+            OpGuard::Declared { guard, .. } => Some(guard),
+        }
+    }
+
+    /// The declared guard's source text, for diagnostics.
+    pub fn source(&self) -> Option<&str> {
+        match self {
+            OpGuard::None => Option::None,
+            OpGuard::Declared { source, .. } => Some(source),
         }
     }
 }
@@ -552,6 +566,26 @@ impl Guard {
             }
         }
     }
+
+    /// The dispatcher gate's **subject-bound** query: does the row named by
+    /// `?1` appear among [`Guard::to_sql`]'s bindings? Wraps that query rather
+    /// than compiling a second one, so the agreement oracle proving `to_sql`
+    /// correct covers this shape too.
+    pub fn to_sql_bound(&self, schema: &dyn SchemaAbstraction) -> String {
+        format!(
+            "SELECT g.binding FROM (\n{}\n) g WHERE g.binding = ?1 LIMIT 1",
+            self.to_sql(schema)
+        )
+    }
+
+    /// The dispatcher gate's **unbound** query: does the guard bind ANY row?
+    /// The clock-subject form, where the single clock row is the only subject.
+    pub fn to_sql_any(&self, schema: &dyn SchemaAbstraction) -> String {
+        format!(
+            "SELECT g.binding FROM (\n{}\n) g LIMIT 1",
+            self.to_sql(schema)
+        )
+    }
 }
 
 impl Pattern {
@@ -690,7 +724,7 @@ fn sql_value(v: &Value) -> String {
     }
 }
 
-fn sql_string(s: &str) -> String {
+pub fn sql_string(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
@@ -698,7 +732,7 @@ fn sql_string(s: &str) -> String {
 /// cannot break out of the surrounding SQL string literal
 /// (parse-don't-validate: the key is an identifier position, validated not
 /// escaped).
-fn sql_ident(key: &str) -> String {
+pub fn sql_ident(key: &str) -> String {
     assert!(
         !key.contains('\'') && !key.contains('$'),
         "sql_ident: property key {key:?} contains a reserved character"

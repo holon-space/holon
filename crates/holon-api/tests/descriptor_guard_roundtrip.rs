@@ -56,6 +56,24 @@ fn descriptor_guard_survives_a_serde_round_trip() {
     assert_eq!(back, with_guard, "the whole descriptor round-trips");
 }
 
+/// The gate's refusal quotes the developer's own `#[require]` text, so the
+/// source literal is part of the declaration and must round-trip with it.
+#[test]
+fn declared_guard_carries_its_source_text_across_a_round_trip() {
+    let src = "has_tag(\"Page\") and parent(not has_tag(\"Page\"))";
+    let declared = OpGuard::parse(src).expect("the guard parses");
+    assert_eq!(declared.source(), Some(src), "the parser keeps the literal");
+
+    let json = serde_json::to_string(&descriptor_with(declared)).expect("serialize");
+    let back: OperationDescriptor = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(
+        back.guard.source(),
+        Some(src),
+        "the source literal must survive the round-trip; the refusal message \
+         quotes it. json was: {json}"
+    );
+}
+
 /// "Declares no precondition" is a stated fact that also round-trips — absent
 /// is not the same as unstated.
 #[test]

@@ -117,6 +117,35 @@ async fn sql_bindings(guard: &Guard, world: &InMemoryWorld) -> Vec<String> {
     out
 }
 
+/// The dispatcher gate's own query shape (ADR 0031 Inc 3): for a block
+/// subject, "does THIS id bind?"; for a clock subject, "does the clock row
+/// bind?". `subjects` are asked against ONE seeded DB, in the gate's order.
+async fn sql_gate_verdicts(guard: &Guard, world: &InMemoryWorld, subjects: &[String]) -> Vec<bool> {
+    let handle = setup_db(world).await;
+    let mut out = Vec::new();
+    match guard.subject {
+        Subject::Clock => {
+            let sql = guard.to_sql_any(&CurrentSchema);
+            let rows = handle
+                .query(&sql, HashMap::new())
+                .await
+                .unwrap_or_else(|e| panic!("gate clock query failed:\n{sql}\n\nerror: {e}"));
+            out.push(!rows.is_empty());
+        }
+        Subject::Block => {
+            let sql = guard.to_sql_bound(&CurrentSchema);
+            for s in subjects {
+                let rows = handle
+                    .query_positional(&sql, vec![turso::Value::Text(s.clone())])
+                    .await
+                    .unwrap_or_else(|e| panic!("gate bound query failed:\n{sql}\n\nerror: {e}"));
+                out.push(!rows.is_empty());
+            }
+        }
+    }
+    out
+}
+
 /// The in-memory evaluator's bindings for `guard` against `world`, sorted.
 fn inmem_bindings(guard: &Guard, world: &InMemoryWorld) -> Vec<String> {
     let mut out: Vec<String> = guard
@@ -422,6 +451,37 @@ proptest! {
             &inmem, &sql,
             "DISAGREEMENT\nguard = {:?}\nsql = {}\nworld today = {}\nblocks = {:?}",
             guard, guard.to_sql(&CurrentSchema), world.today, world.blocks
+        );
+    }
+
+    /// The SUBJECT-BOUND form the dispatcher gate actually issues (ADR 0031
+    /// Inc 3). The unbound property above proves the binding SET; this proves
+    /// the gate's per-subject verdict — including for an id absent from the
+    /// world, the fail-shut case a naive `enabled()` gate gets wrong.
+    #[test]
+    fn gate_bound_form_agrees_with_in_memory(
+        world in world_strategy(),
+        guard in guard_strategy(),
+    ) {
+        let inmem = inmem_bindings(&guard, &world);
+        let subjects: Vec<String> = match guard.subject {
+            Subject::Clock => vec![],
+            Subject::Block => world
+                .blocks
+                .iter()
+                .map(|b| b.id.clone())
+                .chain(std::iter::once("b:absent-from-world".to_string()))
+                .collect(),
+        };
+        let sql = rt().block_on(sql_gate_verdicts(&guard, &world, &subjects));
+        let expected: Vec<bool> = match guard.subject {
+            Subject::Clock => vec![!inmem.is_empty()],
+            Subject::Block => subjects.iter().map(|s| inmem.contains(s)).collect(),
+        };
+        prop_assert_eq!(
+            &expected, &sql,
+            "GATE DISAGREEMENT\nguard = {:?}\nsubjects = {:?}\nbindings = {:?}\nworld today = {}",
+            guard, subjects, inmem, world.today
         );
     }
 }
