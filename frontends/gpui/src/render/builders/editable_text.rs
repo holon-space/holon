@@ -171,8 +171,25 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
                     this.converge_input(source, &content, window, cx);
                 });
             }
+            // Disclose BOTH halves of an armed re-seed. "Applied" is the end of
+            // the chain the undo gesture started, and "still armed" is the
+            // state a live session could otherwise never distinguish from
+            // "never armed at all" — which is exactly the ambiguity that made
+            // dogfood finding F1 undiagnosable from its logs.
             if reseed_pending {
+                tracing::info!(
+                    target: "editor.undo_reseed",
+                    row = %reseed_row,
+                    "armed re-seed APPLIED: editor converged to the restored store text"
+                );
                 reseed_services.consume_authority_reseed(&reseed_row);
+            } else if reseed {
+                tracing::info!(
+                    target: "editor.undo_reseed",
+                    row = %reseed_row,
+                    "armed re-seed still PENDING: this render's content already equals the \
+                     editor buffer, so it stays armed for the next one"
+                );
             }
             // Snapshot the post-convergence value for the PBT staleness invariants.
             let displayed = input.read(cx).value().to_string();

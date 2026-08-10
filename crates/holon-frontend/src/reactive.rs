@@ -1684,12 +1684,87 @@ pub struct ReseedGesture {
 
 /// What [`ReseedGesture::arm`] did. Every refusal is a named variant so a
 /// silently skipped re-seed is unrepresentable.
+///
+/// `#[must_use]` because a DISCARDED outcome is exactly how the variants stop
+/// meaning anything: the enum's whole job is that a skipped re-seed leaves a
+/// trace, and a call site that drops it deletes that trace at the last step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "a discarded re-seed outcome is a silently skipped re-seed — log it \
+              (see ReseedArm::disclose)"]
 pub enum ReseedArm {
     Armed,
     NoTargetRow,
     LocalEditRaced,
     FocusMoved,
+}
+
+/// How loudly a [`ReseedArm`] outcome must be reported. A re-seed that did NOT
+/// happen leaves a live editor holding a buffer the store no longer agrees
+/// with, so the two outcomes that mean "nothing was re-seeded and nobody else
+/// is going to" are warnings, not debug noise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReseedSeverity {
+    /// The re-seed is owed to some other channel, or it was armed. Reported,
+    /// but not a problem.
+    Informational,
+    /// Nothing re-seeded the row and nothing else is expected to.
+    Warn,
+}
+
+impl std::fmt::Display for ReseedArm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Armed => f.write_str("ARMED: the row will re-seed on its next render"),
+            Self::NoTargetRow => f.write_str(
+                "REFUSED: no row held focus when the gesture was pressed, so there is no editor \
+                 to re-seed",
+            ),
+            Self::LocalEditRaced => f.write_str(
+                "REFUSED: a local write raced the replay; the row keeps its typed buffer",
+            ),
+            Self::FocusMoved => f.write_str(
+                "REFUSED: focus left the replayed row; the render backstop converges it",
+            ),
+        }
+    }
+}
+
+impl ReseedArm {
+    /// Total, wildcard-free: a new variant must state its severity here or the
+    /// crate stops compiling. That is what keeps "every outcome is disclosed"
+    /// true as the enum grows.
+    pub fn severity(self) -> ReseedSeverity {
+        match self {
+            // Armed: the re-seed is owed and will happen. FocusMoved: the
+            // render backstop takes the row, because it only skips a FOCUSED
+            // editor — focus having left is precisely what re-enables it.
+            Self::Armed | Self::FocusMoved => ReseedSeverity::Informational,
+            // Nothing converges the row: LocalEditRaced deliberately keeps the
+            // typed buffer (stale is recoverable, destroyed text is not), and
+            // NoTargetRow means the gesture never found an editor at all.
+            Self::LocalEditRaced | Self::NoTargetRow => ReseedSeverity::Warn,
+        }
+    }
+
+    /// Emit this outcome. `gesture` names the pressed action ("undo"/"redo")
+    /// and `row` the target when there was one — the caller cannot log without
+    /// choosing both, which is why disclosure lives here and not at the call
+    /// site.
+    pub fn disclose(self, gesture: &str, row: Option<&EntityUri>) {
+        let row = row
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        match self.severity() {
+            ReseedSeverity::Warn => tracing::warn!(
+                target: "editor.undo_reseed",
+                gesture, row, outcome = %self, "undo re-seed outcome"
+            ),
+            ReseedSeverity::Informational => tracing::info!(
+                target: "editor.undo_reseed",
+                gesture, row, outcome = %self, "undo re-seed outcome"
+            ),
+        }
+    }
 }
 
 impl ReseedGesture {
@@ -1705,29 +1780,33 @@ impl ReseedGesture {
     /// focus move (the captured row is no longer focused, so the ordinary
     /// render backstop converges it and nothing is owed). Refusing costs at
     /// most a stale buffer; arming wrongly destroys committed text.
-    pub fn arm(self) -> ReseedArm {
+    ///
+    /// `gesture` names the pressed action ("undo" / "redo") for the disclosure.
+    /// EVERY outcome — including the two that do nothing observable to the UI —
+    /// is disclosed here via [`ReseedArm::disclose`], because this is the only
+    /// scope that holds both the outcome and the target row.
+    pub fn arm(self, gesture: &str) -> ReseedArm {
+        let outcome = self.decide();
+        outcome.1.disclose(gesture, outcome.0.as_ref());
+        outcome.1
+    }
+
+    /// The decision, separated from its disclosure so the outcome and the row
+    /// it concerns are produced together — a disclosure that names the wrong
+    /// row (or no row) is then unrepresentable.
+    fn decide(self) -> (Option<EntityUri>, ReseedArm) {
         let Some((target, epoch)) = self.captured else {
-            return ReseedArm::NoTargetRow;
+            return (None, ReseedArm::NoTargetRow);
         };
         if crate::local_edit_epoch::current(&target) != epoch {
-            tracing::warn!(
-                row = %target,
-                "undo re-seed refused: a local write raced the replay; \
-                 the row keeps its typed buffer",
-            );
-            return ReseedArm::LocalEditRaced;
+            return (Some(target), ReseedArm::LocalEditRaced);
         }
         if self.handle.focus.get_cloned().as_ref() != Some(&target) {
-            tracing::debug!(
-                row = %target,
-                "undo re-seed refused: focus left the replayed row; \
-                 the render backstop converges it",
-            );
-            return ReseedArm::FocusMoved;
+            return (Some(target), ReseedArm::FocusMoved);
         }
         self.handle.pending.set(Some(target.clone()));
-        self.handle.focus.set(Some(target));
-        ReseedArm::Armed
+        self.handle.focus.set(Some(target.clone()));
+        (Some(target), ReseedArm::Armed)
     }
 }
 
@@ -5056,7 +5135,7 @@ mod tests {
             .expect("SqlOnly keystroke commits through set_field");
 
         // Only now does the oneshot resolve `Applied`.
-        assert_eq!(gesture.arm(), ReseedArm::LocalEditRaced);
+        assert_eq!(gesture.arm("undo"), ReseedArm::LocalEditRaced);
         assert!(
             !ui.authority_reseed_armed(&a),
             "a re-seed armed after a racing keystroke clobbers committed text",
@@ -5183,7 +5262,7 @@ mod tests {
             .expect("cell-mode keystroke commits through the CRDT");
         assert_eq!(vm.buffer(), "origx");
 
-        assert_eq!(gesture.arm(), ReseedArm::LocalEditRaced);
+        assert_eq!(gesture.arm("undo"), ReseedArm::LocalEditRaced);
         assert!(
             !ui.authority_reseed_armed(&a),
             "a re-seed armed after a racing keystroke clobbers committed text",
@@ -5198,7 +5277,7 @@ mod tests {
         let a = EntityUri::block("undisturbed-row");
         ui.set_focus(Some(a.clone()));
         let gesture = ui.authority_reseed_handle().capture();
-        assert_eq!(gesture.arm(), ReseedArm::Armed);
+        assert_eq!(gesture.arm("undo"), ReseedArm::Armed);
         assert!(ui.authority_reseed_armed(&a));
     }
 
@@ -5214,7 +5293,7 @@ mod tests {
         ui.set_focus(Some(a.clone()));
         let gesture = ui.authority_reseed_handle().capture();
         ui.set_focus(Some(b.clone()));
-        assert_eq!(gesture.arm(), ReseedArm::FocusMoved);
+        assert_eq!(gesture.arm("undo"), ReseedArm::FocusMoved);
         assert!(
             !ui.authority_reseed_armed(&b),
             "the token must never land on a row the replay did not rewrite",
@@ -5222,6 +5301,61 @@ mod tests {
         assert!(
             !ui.authority_reseed_armed(&a),
             "an unfocused row converges through the render backstop",
+        );
+    }
+
+    /// Dogfood finding F1's ENABLING defect: two of the four outcomes used to
+    /// emit nothing at all (`Armed` and `NoTargetRow`), so a live session could
+    /// not tell "the re-seed refused" from "the re-seed never ran". The enum
+    /// exists so a silently skipped re-seed is unrepresentable; disclosure is
+    /// what makes that true outside the type system.
+    ///
+    /// Asserts the PURE classification rather than captured tracing events:
+    /// this unit harness installs no subscriber, so an event assertion here
+    /// would pass vacuously against an empty capture. `severity` and `Display`
+    /// are total matches with no wildcard arm, so a new variant cannot be added
+    /// without answering both — that is the property under test, and the
+    /// call sites are covered by the windowed rung.
+    #[test]
+    fn every_reseed_outcome_discloses_itself() {
+        let all = [
+            ReseedArm::Armed,
+            ReseedArm::NoTargetRow,
+            ReseedArm::LocalEditRaced,
+            ReseedArm::FocusMoved,
+        ];
+
+        let mut texts: Vec<String> = all.iter().map(|o| o.to_string()).collect();
+        for (outcome, text) in all.iter().zip(texts.iter()) {
+            assert!(
+                text.len() > 20,
+                "{outcome:?} discloses {text:?} — too terse to explain the outcome to a reader \
+                 of a live log",
+            );
+        }
+        let distinct = {
+            texts.sort();
+            texts.dedup();
+            texts.len()
+        };
+        assert_eq!(
+            distinct,
+            all.len(),
+            "two outcomes share disclosure text, so a log line cannot identify which one fired",
+        );
+
+        // The severity split IS the finding: an outcome after which nothing
+        // converges the row must be a warning, because the editor is now
+        // holding a buffer the store disagrees with.
+        assert_eq!(ReseedArm::NoTargetRow.severity(), ReseedSeverity::Warn);
+        assert_eq!(ReseedArm::LocalEditRaced.severity(), ReseedSeverity::Warn);
+        // Armed re-seeds on the next render; FocusMoved re-enables the render
+        // backstop (it only skips a FOCUSED editor). Both are owed to a channel
+        // that will run, so neither is a warning.
+        assert_eq!(ReseedArm::Armed.severity(), ReseedSeverity::Informational);
+        assert_eq!(
+            ReseedArm::FocusMoved.severity(),
+            ReseedSeverity::Informational
         );
     }
 
