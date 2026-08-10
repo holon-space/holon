@@ -6,93 +6,70 @@
 //! that fail-closed statement, the analogue of
 //! `BoundaryBehavior::Unclassified`.
 //!
-//! Places are PARSED here, at macro-expansion time, from `"relation.field"`
-//! into [`ArcPlace`] — so an unknown relation is a compile error rather than a
-//! string that nobody ever checks. This crate is a leaf so `holon-macros` can
-//! reach it; `holon-api` re-exports these types as the canonical consumer path.
+//! Places are PARSED here, from `"relation.field"` into [`ArcPlace`], against a
+//! [`SchemaSource`] — the ONE declared field vocabulary (`crate::schema`). This
+//! crate is a leaf so `holon-macros` can reach it; `holon-api` re-exports these
+//! types as the canonical consumer path.
+//!
+//! Validation is two-phase, split by BINDING TIME:
+//! * [`ArcPlace::parse`] resolves against [`BuiltinSchemas`] and is called at
+//!   macro expansion, so a typo in a `#[reads]`/`#[emits]` literal on a
+//!   statically declared entity is a compile error.
+//! * A relation that exists only at runtime (a created entity type, an MCP
+//!   sidecar's) is REPRESENTABLE here — the relation is carried as a name — and
+//!   checked by [`TransitionArcs::validate_against`] when the descriptor is
+//!   registered.
 
 use std::fmt;
 
 use serde::Deserialize;
 use serde::Serialize;
 
-/// The relations an arc may name. Deliberately closed and deliberately the
-/// same vocabulary as [`crate::pattern::Subject`]: an arc names state a guard
-/// could also predicate over, so the two must not drift into two dialects.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ArcRelation {
-    Block,
-    Clock,
-}
+use crate::schema::BuiltinSchemas;
+use crate::schema::SchemaSource;
 
-/// Every place name the `block` relation admits. Closed, so a typo'd field is
-/// a compile error rather than a declaration that is silently true forever —
-/// containment can only catch a place that is MISSING, never one that does not
-/// exist.
+/// The relation an arc names — an entity type, by name. Open: a relation that
+/// exists only at runtime is as representable as `block`, and is checked
+/// against its own schema at registration time.
 ///
-/// Three groups, and the split carries the meaning:
-/// 1. Intent-writable columns — the vocabulary `BlockWriteField::parse`
-///    (`holon-api/src/block_write_field.rs`) admits. The two lists are locked
-///    together by `intent_writable_fields_are_all_arc_places` in
-///    `holon-api/tests/descriptor_arcs_roundtrip.rs`; this crate is a leaf and
-///    cannot import that enum, so the lock lives one crate up.
-/// 2. Junction-backed edge sets, written through the edge-field writers.
-/// 3. Places namable only to be READ or EXCLUDED. `id`, `parent_id`,
-///    `properties` and `content` are what `ProjectionSchema`
-///    (`holon/src/api/guard_world.rs`) compiles guards against; the order keys
-///    exist here so an op can declare them excluded and for no other reason.
-const BLOCK_FIELDS: &[&str] = &[
-    // 1. intent-writable columns
-    "content",
-    "content_type",
-    "source_language",
-    "source_name",
-    "marks",
-    "collapsed",
-    "widget_only",
-    "completed",
-    "block_type",
-    "properties",
-    "tags",
-    "task_state",
-    "parent_id",
-    // 2. junction-backed edge sets
-    "requires",
-    "advice_suppressed",
-    // 3. read-only / excludable
-    "id",
-    "sort_key",
-    "after_block_id",
-];
-
-/// The clock relation's places. `today` is the column `ProjectionSchema`'s
-/// `clock_relation` selects; `grain` is the column that selects the day row.
-const CLOCK_FIELDS: &[&str] = &["today", "grain"];
+/// Deliberately the same vocabulary as [`crate::pattern::Subject`]: an arc
+/// names state a guard could also predicate over, so the two must not drift
+/// into two dialects.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ArcRelation(String);
 
 impl ArcRelation {
-    /// The wire/source spelling — the same token accepted by
-    /// [`ArcPlace::parse`].
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ArcRelation::Block => "block",
-            ArcRelation::Clock => "clock",
-        }
+    pub fn new(name: impl Into<String>) -> Self {
+        ArcRelation(name.into())
     }
 
-    /// Every field this relation admits — the parser's vocabulary, and the
-    /// list the drift locks compare against their siblings.
-    pub fn known_fields(self) -> &'static [&'static str] {
-        match self {
-            ArcRelation::Block => BLOCK_FIELDS,
-            ArcRelation::Clock => CLOCK_FIELDS,
-        }
+    pub fn block() -> Self {
+        ArcRelation(crate::schema::block::RELATION.to_string())
+    }
+
+    pub fn clock() -> Self {
+        ArcRelation(crate::schema::clock::RELATION.to_string())
+    }
+
+    /// The wire/source spelling — the same token accepted by
+    /// [`ArcPlace::parse`].
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
 impl fmt::Display for ArcRelation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        f.write_str(&self.0)
+    }
+}
+
+/// Prints the relation NAME, so a refusal quotes what the developer wrote
+/// rather than a wrapper type.
+impl fmt::Debug for ArcRelation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, f)
     }
 }
 
@@ -104,31 +81,56 @@ pub struct ArcPlace {
 }
 
 impl ArcPlace {
-    /// Parse `"relation.field"`. The macro calls this at expansion time, so a
-    /// malformed place is a compile error pointing at the offending literal.
+    /// A place on a relation whose schema is not resolvable here — an entity
+    /// type that exists only at runtime. Unchecked by construction; the check
+    /// is [`TransitionArcs::validate_against`] at registration.
+    pub fn new(relation: impl Into<String>, field: impl Into<String>) -> ArcPlace {
+        ArcPlace {
+            relation: ArcRelation::new(relation),
+            field: field.into(),
+        }
+    }
+
+    /// Parse `"relation.field"` against the in-tree declarations. The macro
+    /// calls this at expansion time, so a malformed place is a compile error
+    /// pointing at the offending literal.
     pub fn parse(input: &str) -> Result<ArcPlace, ArcParseError> {
+        ArcPlace::parse_in(input, &BuiltinSchemas)
+    }
+
+    /// Parse against an arbitrary schema source — the same shape check, a
+    /// different population of entities.
+    pub fn parse_in(input: &str, source: &dyn SchemaSource) -> Result<ArcPlace, ArcParseError> {
         let Some((relation, field)) = input.split_once('.') else {
             return Err(ArcParseError::NotDotted(input.to_string()));
-        };
-        let relation = match relation {
-            "block" => ArcRelation::Block,
-            "clock" => ArcRelation::Clock,
-            other => return Err(ArcParseError::UnknownRelation(other.to_string())),
         };
         if field.is_empty() || field.contains('.') || field.contains(char::is_whitespace) {
             return Err(ArcParseError::BadField(field.to_string()));
         }
-        if !relation.known_fields().contains(&field) {
-            return Err(ArcParseError::UnknownField {
-                relation,
-                field: field.to_string(),
-            });
-        }
-        Ok(ArcPlace {
-            relation,
-            field: field.to_string(),
-        })
+        let place = ArcPlace::new(relation, field);
+        validate_place(&place, source)?;
+        Ok(place)
     }
+}
+
+/// Check one place against a schema source. Shared by the compile-time parse
+/// and the registration-time gate so the two cannot disagree about what a
+/// legal place is.
+pub fn validate_place(place: &ArcPlace, source: &dyn SchemaSource) -> Result<(), ArcParseError> {
+    let Some(known) = source.arc_places(place.relation.as_str()) else {
+        return Err(ArcParseError::UnknownRelation {
+            relation: place.relation.as_str().to_string(),
+            known: source.relations(),
+        });
+    };
+    if !known.contains(&place.field) {
+        return Err(ArcParseError::UnknownField {
+            relation: place.relation.clone(),
+            field: place.field.clone(),
+            known,
+        });
+    }
+    Ok(())
 }
 
 impl fmt::Display for ArcPlace {
@@ -141,7 +143,12 @@ impl fmt::Display for ArcPlace {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArcParseError {
     NotDotted(String),
-    UnknownRelation(String),
+    /// No schema source knows this relation. The known list travels with the
+    /// error so the refusal names what the writer could have meant.
+    UnknownRelation {
+        relation: String,
+        known: Vec<String>,
+    },
     BadField(String),
     /// The relation exists but has no such place. A typo'd field would
     /// otherwise be undetectable: containment reds on a MISSING place, never
@@ -149,6 +156,7 @@ pub enum ArcParseError {
     UnknownField {
         relation: ArcRelation,
         field: String,
+        known: Vec<String>,
     },
 }
 
@@ -158,17 +166,20 @@ impl fmt::Display for ArcParseError {
             ArcParseError::NotDotted(s) => {
                 write!(f, "arc place {s:?} is not \"relation.field\"")
             }
-            ArcParseError::UnknownRelation(r) => write!(
+            ArcParseError::UnknownRelation { relation, known } => write!(
                 f,
-                "unknown arc relation {r:?}; known relations are \"block\" and \"clock\""
+                "unknown arc relation {relation:?}; known relations are {known:?}"
             ),
             ArcParseError::BadField(s) => {
                 write!(f, "arc place field {s:?} must be one non-empty bare name")
             }
-            ArcParseError::UnknownField { relation, field } => write!(
+            ArcParseError::UnknownField {
+                relation,
+                field,
+                known,
+            } => write!(
                 f,
-                "relation {relation:?} has no place {field:?}; known places are {:?}",
-                relation.known_fields()
+                "relation {relation:?} has no place {field:?}; known places are {known:?}"
             ),
         }
     }
@@ -247,24 +258,63 @@ impl TransitionArcs {
                 .collect(),
         }
     }
+
+    /// Every place this declaration names, in and out.
+    pub fn places(&self) -> Vec<&ArcPlace> {
+        match self {
+            TransitionArcs::Undeclared => Vec::new(),
+            TransitionArcs::Declared { reads, emits } => reads
+                .iter()
+                .chain(emits.iter().map(ArcEmit::place))
+                .collect(),
+        }
+    }
+
+    /// The registration-time half of the two-phase check: every place must name
+    /// a relation the source knows and a field that relation has. A declaration
+    /// that arrives from outside the tree (a created entity type, an MCP
+    /// sidecar) never passed the macro's compile-time parse, so this is the
+    /// only place it is checked.
+    pub fn validate_against(&self, source: &dyn SchemaSource) -> Result<(), ArcParseError> {
+        for place in self.places() {
+            validate_place(place, source)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::BUILTIN_SCHEMAS;
+
+    /// A schema source standing in for an entity type that exists only at
+    /// runtime — the population the macro can never see.
+    struct RuntimeEntity;
+
+    impl SchemaSource for RuntimeEntity {
+        fn arc_places(&self, relation: &str) -> Option<Vec<String>> {
+            (relation == "claude_session")
+                .then(|| vec!["title".to_string(), "started_at".to_string()])
+        }
+
+        fn relations(&self) -> Vec<String> {
+            vec!["claude_session".to_string()]
+        }
+    }
 
     #[test]
     fn a_place_parses_into_a_typed_relation_and_field() {
         assert_eq!(
             ArcPlace::parse("block.parent_id").expect("parses"),
             ArcPlace {
-                relation: ArcRelation::Block,
+                relation: ArcRelation::block(),
                 field: "parent_id".to_string(),
             }
         );
         assert_eq!(
             ArcPlace::parse("clock.today").expect("parses").relation,
-            ArcRelation::Clock
+            ArcRelation::clock()
         );
     }
 
@@ -274,10 +324,10 @@ mod tests {
             ArcPlace::parse("parent_id"),
             Err(ArcParseError::NotDotted("parent_id".to_string()))
         );
-        assert_eq!(
+        assert!(matches!(
             ArcPlace::parse("document.title"),
-            Err(ArcParseError::UnknownRelation("document".to_string()))
-        );
+            Err(ArcParseError::UnknownRelation { relation, .. }) if relation == "document"
+        ));
         assert_eq!(
             ArcPlace::parse("block."),
             Err(ArcParseError::BadField(String::new()))
@@ -288,37 +338,45 @@ mod tests {
         );
     }
 
-    /// The teeth of the closed field list: a typo'd place is rejected. Without
-    /// this, `block.totally_bogus_field_xyz` would compile, satisfy every
-    /// containment check forever, and never red — containment can only see a
-    /// place that is missing, not one that does not exist.
+    /// The teeth of the declared field list: a typo'd place is rejected.
+    /// Without this, `block.totally_bogus_field_xyz` would compile, satisfy
+    /// every containment check forever, and never red — containment can only
+    /// see a place that is missing, not one that does not exist.
     #[test]
     fn a_field_the_relation_does_not_have_is_rejected() {
-        assert_eq!(
+        assert!(matches!(
             ArcPlace::parse("block.totally_bogus_field_xyz"),
-            Err(ArcParseError::UnknownField {
-                relation: ArcRelation::Block,
-                field: "totally_bogus_field_xyz".to_string(),
-            })
-        );
+            Err(ArcParseError::UnknownField { field, .. }) if field == "totally_bogus_field_xyz"
+        ));
         // A real block column is not automatically a clock place.
-        assert_eq!(
+        assert!(matches!(
             ArcPlace::parse("clock.content"),
-            Err(ArcParseError::UnknownField {
-                relation: ArcRelation::Clock,
-                field: "content".to_string(),
-            })
-        );
+            Err(ArcParseError::UnknownField { relation, field, .. })
+                if relation == ArcRelation::clock() && field == "content"
+        ));
         assert!(ArcPlace::parse("clock.today").is_ok());
     }
 
-    /// Every name the relation advertises must actually parse — a list entry
-    /// the parser rejects would be a vocabulary nobody can use.
+    /// Storage bookkeeping is not a place. A column exists in the DDL without
+    /// being declarable, so the schema's `arc_place` flag has to be the thing
+    /// the parser reads — not the column list.
+    #[test]
+    fn a_column_that_is_not_a_place_is_rejected() {
+        for column in ["created_at", "updated_at", "_change_origin", "write_seq"] {
+            assert!(
+                ArcPlace::parse(&format!("block.{column}")).is_err(),
+                "block.{column} is storage bookkeeping, not a declarable place"
+            );
+        }
+    }
+
+    /// Every name the schema advertises must actually parse — a declaration the
+    /// parser rejects would be a vocabulary nobody can use.
     #[test]
     fn every_advertised_field_parses() {
-        for relation in [ArcRelation::Block, ArcRelation::Clock] {
-            for field in relation.known_fields() {
-                let text = format!("{relation}.{field}");
+        for schema in BUILTIN_SCHEMAS {
+            for field in schema.arc_places() {
+                let text = format!("{}.{field}", schema.relation);
                 let place = ArcPlace::parse(&text)
                     .unwrap_or_else(|e| panic!("advertised place {text} must parse: {e}"));
                 assert_eq!(place.to_string(), text);
@@ -337,11 +395,57 @@ mod tests {
         );
         assert_eq!(
             msg("document.title"),
-            "unknown arc relation \"document\"; known relations are \"block\" and \"clock\""
+            "unknown arc relation \"document\"; known relations are [\"block\", \"clock\"]"
         );
         assert_eq!(
             msg("block."),
             "arc place field \"\" must be one non-empty bare name"
+        );
+        let unknown_field = msg("block.totally_bogus_field_xyz");
+        assert!(
+            unknown_field.contains("has no place \"totally_bogus_field_xyz\"")
+                && unknown_field.contains("\"content\""),
+            "the refusal must name the place and the vocabulary: {unknown_field}"
+        );
+    }
+
+    /// A relation the built-ins never heard of is REPRESENTABLE — that is what
+    /// makes an MCP-sourced entity's arcs expressible at all — and resolves
+    /// against its own source.
+    #[test]
+    fn a_runtime_relation_is_representable_and_checked_against_its_own_source() {
+        let place = ArcPlace::new("claude_session", "title");
+        assert!(
+            ArcPlace::parse("claude_session.title").is_err(),
+            "the built-in source must not admit a runtime relation"
+        );
+        validate_place(&place, &RuntimeEntity).expect("its own source knows it");
+        assert!(matches!(
+            validate_place(&ArcPlace::new("claude_session", "nope"), &RuntimeEntity),
+            Err(ArcParseError::UnknownField { field, .. }) if field == "nope"
+        ));
+    }
+
+    /// The registration-time gate walks BOTH directions of the transition: an
+    /// unknown place hiding in `reads` must refuse exactly as one in `emits`.
+    #[test]
+    fn validate_against_refuses_an_unknown_place_on_either_arc() {
+        let bad_read = TransitionArcs::Declared {
+            reads: vec![ArcPlace::new("claude_session", "nope")],
+            emits: vec![],
+        };
+        let bad_emit = TransitionArcs::Declared {
+            reads: vec![],
+            emits: vec![ArcEmit::Writes(ArcPlace::new("claude_session", "nope"))],
+        };
+        for arcs in [bad_read, bad_emit] {
+            assert!(arcs.validate_against(&RuntimeEntity).is_err());
+        }
+        assert!(
+            TransitionArcs::Undeclared
+                .validate_against(&RuntimeEntity)
+                .is_ok(),
+            "a refusal to declare names no places, so it cannot name a bad one"
         );
     }
 

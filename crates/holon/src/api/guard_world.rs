@@ -8,6 +8,8 @@ use async_trait::async_trait;
 use holon_api::pattern::Guard;
 use holon_api::pattern::SchemaAbstraction;
 use holon_api::pattern::Subject;
+use holon_api::schema::block;
+use holon_api::schema::clock;
 use holon_core::Result;
 use holon_turso::turso::DbHandle;
 
@@ -73,10 +75,9 @@ pub trait GuardWorld: Send + Sync {
 /// its `content`), and `clock` holds one row PER GRAIN, so `{today}` must read
 /// the day row or a guard would bind three differently-formatted labels.
 ///
-/// The columns named here are also arc places: `BLOCK_FIELDS` / `CLOCK_FIELDS`
-/// in `holon-pattern/src/arcs.rs` is the closed vocabulary `#[reads]`/
-/// `#[emits]` parse against. A column added here that an op may name must be
-/// added there too, or the declaration will not compile.
+/// The columns named here come from the ONE schema declaration
+/// (`holon_api::schema`), which is also the vocabulary `#[reads]`/`#[emits]`
+/// parse against — so a rename moves both together.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ProjectionSchema;
 
@@ -85,28 +86,33 @@ impl SchemaAbstraction for ProjectionSchema {
         crate::storage::BLOCK_READ_TABLE
     }
     fn id_column(&self, alias: &str) -> String {
-        format!("{alias}.id")
+        format!("{alias}.{}", block::ID)
     }
     fn name_column(&self, alias: &str) -> String {
-        format!("{alias}.content")
+        format!("{alias}.{}", block::CONTENT)
     }
     fn property_expr(&self, alias: &str, key: &str) -> String {
         format!(
-            "json_extract({alias}.properties, '$.{}')",
+            "json_extract({alias}.{}, '$.{}')",
+            block::PROPERTIES,
             holon_api::pattern::sql_ident(key)
         )
     }
     fn parent_id_column(&self, alias: &str) -> String {
-        format!("{alias}.parent_id")
+        format!("{alias}.{}", block::PARENT_ID)
     }
     fn has_tag_exists(&self, alias: &str, tag: &str) -> String {
         format!(
-            "EXISTS (SELECT 1 FROM block_tags bt WHERE bt.block_id = {alias}.id AND bt.tag = {})",
+            "EXISTS (SELECT 1 FROM block_tags bt WHERE bt.block_id = {alias}.{} AND bt.tag = {})",
+            block::ID,
             holon_api::pattern::sql_string(tag)
         )
     }
     fn clock_relation(&self) -> (&'static str, &'static str) {
-        ("(SELECT today FROM clock WHERE grain = 'day')", "today")
+        (
+            "(SELECT today FROM clock WHERE grain = 'day')",
+            clock::TODAY,
+        )
     }
 }
 

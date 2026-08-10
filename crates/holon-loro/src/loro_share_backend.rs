@@ -737,7 +737,7 @@ impl LoroShareBackend {
             Value::Array(vec![Value::String(holon_api::block::PAGE_TAG.to_string())]),
         );
         // Custom properties — `SqlOperationProvider::prepare_create` packs
-        // any key not in `BLOCKS_KNOWN_COLUMNS` into the `properties` JSON.
+        // any key not in the schema-derived block columns into the `properties` JSON.
         params.insert(
             SHARE_ROLE_PROPERTY.into(),
             Value::String(SHARE_ROLE_MOUNT.to_string()),

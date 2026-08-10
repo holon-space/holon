@@ -12,6 +12,7 @@
 
 pub mod arcs;
 pub mod pattern;
+pub mod schema;
 mod value;
 
 pub use value::Value;
