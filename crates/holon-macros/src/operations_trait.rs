@@ -1102,6 +1102,7 @@ const MAX_GUARD_LITERAL_LEN: usize = 80;
 /// for the length lint.
 fn extract_require_guard(attrs: &[syn::Attribute]) -> syn::Result<OpGuard> {
     let mut bodies = Vec::new();
+    let mut sources: Vec<String> = Vec::new();
 
     for attr in attrs {
         let is_require = attr.path().is_ident("require")
@@ -1139,6 +1140,7 @@ fn extract_require_guard(attrs: &[syn::Attribute]) -> syn::Result<OpGuard> {
         let body = holon_pattern::pattern::parse_guard_body(&text)
             .map_err(|e| syn::Error::new_spanned(&lit, format!("invalid guard: {e}")))?;
         bodies.push(body);
+        sources.push(text);
     }
 
     if bodies.is_empty() {
@@ -1159,7 +1161,12 @@ fn extract_require_guard(attrs: &[syn::Attribute]) -> syn::Result<OpGuard> {
             format!("invalid guard: {e}"),
         )
     })?;
-    Ok(OpGuard::Declared { guard })
+    // Several `#[require]`s conjoin, so the quoted source must be the joined
+    // text — quoting one literal would misdescribe what actually refused.
+    Ok(OpGuard::Declared {
+        guard,
+        source: sources.join(" and "),
+    })
 }
 
 /// Emit the parsed guard as a literal constructor expression. The macro's
@@ -1168,7 +1175,7 @@ fn extract_require_guard(attrs: &[syn::Attribute]) -> syn::Result<OpGuard> {
 fn op_guard_tokens(guard: &OpGuard) -> proc_macro2::TokenStream {
     match guard {
         OpGuard::None => quote! { holon_api::pattern::OpGuard::None },
-        OpGuard::Declared { guard } => {
+        OpGuard::Declared { guard, source } => {
             let subject = match guard.subject {
                 Subject::Clock => quote! { holon_api::pattern::Subject::Clock },
                 Subject::Block => quote! { holon_api::pattern::Subject::Block },
@@ -1177,6 +1184,7 @@ fn op_guard_tokens(guard: &OpGuard) -> proc_macro2::TokenStream {
             quote! {
                 holon_api::pattern::OpGuard::Declared {
                     guard: holon_api::pattern::Guard { subject: #subject, body: #body },
+                    source: #source.to_string(),
                 }
             }
         }

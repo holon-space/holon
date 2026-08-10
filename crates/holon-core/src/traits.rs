@@ -2328,6 +2328,12 @@ where
         // identically. This is the WRITE-side guard; `name_chain` (writeback) is the
         // downstream READ-side tripwire. Fail loud rather than let the prohibited
         // topology land and surface deep in writeback.
+        // ADR 0031 Enforcement: declared EXCLUDED from the catalog's guard
+        // machinery. This judges the PROSPECTIVE parent of a move that has not
+        // happened; a declared guard reads the CURRENT world, where it is
+        // trivially false for exactly this move. Do not swap one for the other
+        // — the truth-table bridge proves agreement over a topology, not this
+        // substitution.
         if crate::block_op_catalog::page_under_non_page_prohibited(
             moved_is_page,
             Some(parent_is_page),

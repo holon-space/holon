@@ -29,6 +29,8 @@ use holon_core::storage::types::StorageEntity;
 use tracing::error;
 use tracing::info;
 
+use crate::api::guard_world::GuardQuery;
+
 /// Composite dispatcher that aggregates multiple OperationProvider instances
 ///
 /// Routes operations to the correct provider based on entity_name.
@@ -45,6 +47,9 @@ pub struct OperationDispatcher {
     sync_token_store: Option<Arc<dyn SyncTokenStore>>,
     matview_manager: Option<Arc<crate::sync::MatviewManager>>,
     boundary_enforcer: Option<Arc<dyn BoundaryEnforcer>>,
+    /// ADR 0031 Increment 3 — the world declared `#[require]` guards are
+    /// evaluated against. Absent only in composition sites with no projection.
+    guard_world: Option<Arc<dyn crate::api::guard_world::GuardWorld>>,
     /// Classifies `[[…]]` targets in live-edit content. Built from the
     /// `TypeRegistry` at wiring time so a UI-authored `[[<entity>:<id>]]`
     /// resolves for exactly the entities that exist; the `Default` value knows
@@ -112,6 +117,14 @@ impl OperationDispatcher {
     /// as an `Err` and the provider never runs (D2 "reject loud").
     pub fn set_boundary_enforcer(&mut self, enforcer: Arc<dyn BoundaryEnforcer>) {
         self.boundary_enforcer = Some(enforcer);
+    }
+
+    /// Install the ADR 0031 guard seam. Consulted before every dispatched
+    /// operation whose descriptor declares a `#[require]` guard; a guard that
+    /// does not hold for the subject is returned as an `Err` and the provider
+    /// never runs.
+    pub fn set_guard_world(&mut self, world: Arc<dyn crate::api::guard_world::GuardWorld>) {
+        self.guard_world = Some(world);
     }
 
     /// Add an observer to this dispatcher
@@ -272,6 +285,56 @@ impl OperationDispatcher {
         Ok(())
     }
 
+    /// The ADR 0031 declared-guard decision for one dispatched operation.
+    ///
+    /// Ruling G1=A: the guard is evaluated against the **current** world and
+    /// refuses before the op fires. An `OpGuard::None` op pays one descriptor
+    /// lookup and touches no world.
+    ///
+    /// The predicate is subject-BOUND, not "is this guard enabled anywhere":
+    /// [`holon_api::pattern::GuardResult::enabled`] answers "some row satisfies
+    /// this", which would wave an op through on an unrelated block's binding
+    /// (R8). [`GuardQuery::bind`] pairs the guard with the op's `id` — the same
+    /// subject [`Self::enforce_boundary`] reads.
+    async fn enforce_guard(
+        &self,
+        available_ops: &[OperationDescriptor],
+        resolved_entity_name: &str,
+        op_name: &str,
+        params: &StorageEntity,
+    ) -> Result<()> {
+        let descriptor = available_ops
+            .iter()
+            .find(|op| op.entity_name == resolved_entity_name && op.name == op_name)
+            .ok_or_else(|| {
+                format!(
+                    "guard seam: no descriptor for {resolved_entity_name}.{op_name} after \
+                     provider resolution"
+                )
+            })?;
+        let (Some(guard), Some(source)) = (descriptor.guard.guard(), descriptor.guard.source())
+        else {
+            return Ok(());
+        };
+        let world = self.guard_world.as_ref().ok_or_else(|| {
+            format!(
+                "ADR 0031 guard gate: {resolved_entity_name}.{op_name} declares the guard \
+                 `{source}` but no GuardWorld is installed at this composition site, so the \
+                 declaration could only be ignored. Call `set_guard_world`."
+            )
+        })?;
+        let query = GuardQuery::bind(guard, params.get("id").and_then(|v| v.as_string()))?;
+        if world.guard_holds(&query).await? {
+            return Ok(());
+        }
+        Err(format!(
+            "ADR 0031 guard refusal: {resolved_entity_name}.{op_name} requires `{source}`, \
+             which does not hold for {:?} in the current state",
+            query.subject()
+        )
+        .into())
+    }
+
     /// Fail-loud guard that a composed backend actually installed the ADR 0028
     /// boundary seam.
     ///
@@ -334,7 +397,16 @@ impl OperationDispatcher {
                 entity_name, op_name, params
             );
 
-            // Check if this is a wildcard operation
+            // ADR 0031 Increment 3 — guard evaluation does NOT cover this arm,
+            // and the gap is vacuous rather than tolerated. The complete set of
+            // ops advertised under entity `*` is synthesized in
+            // `OperationProvider::operations` below: `sync` and `full_sync`.
+            // Both carry `required_params: []`, an empty `id_column`,
+            // `TargetScope::Global` and `OpGuard::None` — they name no subject
+            // block, so a relational guard has nothing to bind.
+            //
+            // A wildcard op that DOES take a subject param would break that
+            // reasoning; adding one means giving this arm its own gate first.
             if entity_name == "*" {
                 info!(
                     "[OperationDispatcher] Wildcard operation detected: op={}",
@@ -730,6 +802,11 @@ impl OperationDispatcher {
                 // ADR 0028 C3 — THE boundary/authz seam, before the provider runs
                 // and before any I/O.
                 self.enforce_boundary(&available_ops, resolved_entity_name, op_name, &params)?;
+
+                // ADR 0031 Increment 3 — THE declared-guard seam, current-state
+                // (ruling G1=A), likewise before the provider runs.
+                self.enforce_guard(&available_ops, resolved_entity_name, op_name, &params)
+                    .await?;
 
                 info!(
                     "[OperationDispatcher] Routing operation to provider: entity={}, op={}",
@@ -1171,6 +1248,9 @@ impl Module for OperationModule {
                 dispatcher.set_sync_token_store(store);
             }
             dispatcher.set_matview_manager(matview_mgr);
+            dispatcher.set_guard_world(Arc::new(crate::api::guard_world::SqlGuardWorld::new(
+                db_handle_provider.handle(),
+            )));
             dispatcher.set_link_classifier(
                 r.resolve_async::<holon_profiles::TypeRegistry>()
                     .await

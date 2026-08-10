@@ -3807,6 +3807,9 @@ impl OriginTaggedWrites for SqlOperationProvider {
                         Some(pid) => Some(self.block_is_page(pid).await?),
                         None => None,
                     };
+                    // ADR 0031 Enforcement: declared EXCLUDED from the guard
+                    // machinery. This judges a PROPOSED tag against the current
+                    // parent; a current-state guard cannot express it.
                     if holon_core::block_op_catalog::page_under_non_page_prohibited(
                         true,
                         parent_is_page,
