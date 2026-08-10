@@ -187,6 +187,47 @@ async fn undo_entry_fields(engine: &BackendEngine, half: &str) -> Vec<String> {
         .collect()
 }
 
+/// The `value` param of the op writing `field` in one half of the newest
+/// journaled `UndoEntry`. Where [`undo_entry_fields`] proves WHICH constituents
+/// the compound recorded, this proves what each one would WRITE — the only way
+/// to separate an engine that decided to restore the wrong text from a store
+/// that declined to keep the right text.
+async fn undo_entry_values(engine: &BackendEngine, half: &str, field: &str) -> Option<String> {
+    let rows = engine
+        .db_handle()
+        .query(
+            "SELECT state_json FROM undo_log WHERE id = 0",
+            HashMap::new(),
+        )
+        .await
+        .expect("undo_log query");
+    let json = rows
+        .first()
+        .and_then(|r| r.get("state_json"))
+        .and_then(|v| v.as_string())
+        .expect("the undo snapshot must be persisted")
+        .to_string();
+    let stack: serde_json::Value = serde_json::from_str(&json).expect("undo snapshot is JSON");
+    // After an undo the entry has moved to the redo stack, so look in both.
+    let entry = ["undo", "redo"]
+        .iter()
+        .filter_map(|s| stack[s].as_array())
+        .flatten()
+        .next_back()
+        .unwrap_or_else(|| panic!("a journaled entry must exist; snapshot={json}"));
+    entry[half]
+        .as_array()
+        .unwrap_or_else(|| panic!("{half} must be an array; entry={entry}"))
+        .iter()
+        .find(|op| op["params"]["field"].as_str() == Some(field))
+        .map(|op| {
+            op["params"]["value"]
+                .as_str()
+                .unwrap_or_else(|| panic!("the {field} constituent must carry a value; op={op}"))
+                .to_string()
+        })
+}
+
 fn payload_str(payload: &HashMap<String, Value>, key: &str) -> String {
     payload
         .get(key)
@@ -317,6 +358,46 @@ async fn undo_restores_the_verbatim_typed_text_and_redo_still_applies() {
     assert_eq!(
         prop(&engine, "block:v", "task_state").await.as_deref(),
         Some("TODO")
+    );
+}
+
+/// The EMPTY-REMAINDER arm of the same rule: the whole typed text was the
+/// keyword, so the promotion strips everything and the block's content becomes
+/// empty. Undo must still hand back what the author typed — `TODO ` with the
+/// space that promoted it, not the bare `TODO` the keyword alone spells.
+///
+/// The two assertions are deliberately at DIFFERENT layers, so a failure names
+/// the layer that dropped the byte: the journal holds what the engine decided
+/// to restore, the column holds what the store was willing to keep.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "task #78 — F2/F5 representability ruling pending; asserts the intended post-ruling behaviour"]
+async fn undo_of_an_empty_remainder_promotion_restores_the_consumed_space() {
+    let engine = block_engine().await;
+    create_block(&engine, "block:er", "TODO").await;
+    promote(&engine, "block:er", "TODO ", "TODO").await;
+    assert_eq!(
+        col(&engine, "block:er", "content").await.as_deref(),
+        Some(""),
+        "precondition: the keyword was the whole text, so the promotion empties the content"
+    );
+
+    assert_eq!(engine.undo().await.expect("undo"), UndoOutcome::Applied);
+    assert_eq!(
+        undo_entry_values(&engine, "inverse_ops", "content")
+            .await
+            .as_deref(),
+        Some("TODO "),
+        "the engine's content inverse must carry the VERBATIM typed text, trailing space included"
+    );
+    assert_eq!(
+        col(&engine, "block:er", "content").await.as_deref(),
+        Some("TODO "),
+        "undo must leave the store holding the verbatim typed text, not the bare keyword"
+    );
+    assert_eq!(
+        prop(&engine, "block:er", "task_state").await,
+        None,
+        "the same press takes the task state back off"
     );
 }
 

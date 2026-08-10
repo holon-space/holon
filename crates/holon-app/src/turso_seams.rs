@@ -455,6 +455,12 @@ impl BlockReader for CacheBlockReader {
 pub struct LiveDocumentManager {
     live: Arc<holon::sync::LiveData<Block>>,
     command_bus: Arc<dyn OriginTaggedWrites>,
+    /// The authoritative block-write seam — Loro-first under `Consolidator::
+    /// Upstream`, direct SQL under `Store`. Doc-level metadata (`#+TODO:`,
+    /// `#+TITLE:`, the root body) is block state like any other, so it must
+    /// travel this way; a direct SQL write is reverted by the very next
+    /// Loro→SQL projection, which nulls every property Loro does not have.
+    ordering: Arc<dyn holon_core::block_ordering::BlockOrdering>,
     /// Serializes find-then-create against itself so two concurrent
     /// `get_or_create_by_name_chain` calls for the same `(parent_id, title)`
     /// can't both miss the LiveData lookup and INSERT distinct UUIDs. The
@@ -468,6 +474,7 @@ impl LiveDocumentManager {
     /// blocks.
     pub async fn new(
         command_bus: Arc<dyn OriginTaggedWrites>,
+        ordering: Arc<dyn holon_core::block_ordering::BlockOrdering>,
         db_handle: holon::storage::DbHandle,
     ) -> anyhow::Result<Self> {
         let matview_mgr =
@@ -500,6 +507,7 @@ impl LiveDocumentManager {
         Ok(Self {
             live,
             command_bus,
+            ordering,
             create_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
@@ -637,22 +645,19 @@ impl DocumentManager for LiveDocumentManager {
                 }
             }
         }
-        // Tag as `EventOrigin::Org` mirroring sibling `create` above.
-        // Without this, the `LoroSyncController` inbound gate
-        // drops the event as a generic SQL-direct write — and on doc rows
-        // whose `properties` contain `todo_keywords` from a `#+TODO:`
-        // directive, the keyword list is silently lost. Surfaced as the
-        // `inv-org-render-fixed-point` PBT flake (May 2026, see
-        // `devlog/2026-05-19-phase-c-validation-diagnosis.md`).
-        self.command_bus
-            .execute_operation_with_origin(
-                &EntityName::new("block"),
-                "update",
-                params,
-                EventOrigin::Org,
-            )
+        // A doc-root's parent and position are owned by the page hierarchy, not
+        // by its header metadata — leave them out so the update seam cannot
+        // read a re-parent intent out of a `#+TODO:` change.
+        params.remove("parent_id");
+        // Route through the authoritative block-write seam, NOT the SQL
+        // command bus: under Loro authority the projector diffs Loro against
+        // the SQL row and emits a `Value::Null` removal for every property
+        // Loro does not carry, so an SQL-direct write of `todo_keywords` is
+        // reverted within the same ingest.
+        self.ordering
+            .update_in_tree(params)
             .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+            .map_err(|e| anyhow::anyhow!("update_metadata({}): {e:#}", doc.id))?;
         // Update in-memory cache
         self.live
             .insert(doc.id.as_str().to_string(), Arc::new(doc.clone()));
@@ -736,7 +741,10 @@ impl Module for OrgModeModule {
                 BlockSchemaModule.edge_fields(),
             ));
             let command_bus: Arc<dyn OriginTaggedWrites> = sql_ops as Arc<dyn OriginTaggedWrites>;
-            let mgr = LiveDocumentManager::new(command_bus, db_handle)
+            let ordering = r
+                .resolve_async::<dyn holon_core::block_ordering::BlockOrdering>()
+                .await;
+            let mgr = LiveDocumentManager::new(command_bus, ordering, db_handle)
                 .await
                 .expect("Failed to create LiveDocumentManager");
             Arc::new(mgr) as Arc<dyn DocumentManager>

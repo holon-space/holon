@@ -227,6 +227,14 @@ const MERGE_BLOCKS_OP: &str = "merge_blocks";
 /// state.
 pub const PROMOTE_TASK_KEYWORD_OP: &str = "promote_task_keyword";
 
+/// Advance a block one step around its owning document's task-state ring
+/// (Cmd+Enter). Intercepted at the engine because the ring is a function of the
+/// DOCUMENT's declared `#+TODO:` vocabulary, and only the engine holds the
+/// handle that resolves it — a storage provider sees one row and can do no
+/// better than a hardcoded list, which is exactly the keyword the org parser
+/// then refuses to read back.
+pub const CYCLE_TASK_STATE_OP: &str = "cycle_task_state";
+
 /// The id of the child that parks a merged-away block's body when BOTH sides
 /// carried content. Derived from the duplicate's id so a merge is idempotent
 /// in the id it mints and the block is greppable back to its origin.
@@ -1002,11 +1010,13 @@ impl DispatchingOperationEngine {
         Ok(Some(Value::String(plan.page_id)))
     }
 
-    /// One constituent of the promotion compound, dispatched straight to the
-    /// dispatcher (so the compound's stripe is never re-entered) and returning
-    /// its forward op, its inverse and its field deltas.
-    async fn dispatch_promotion_constituent(
+    /// One `set_field` constituent of a task-keyword compound, dispatched
+    /// straight to the dispatcher (so the compound's stripe is never
+    /// re-entered) and returning its forward op, its inverse and its field
+    /// deltas. `op` names the compound in the failure messages.
+    async fn dispatch_task_keyword_constituent(
         &self,
+        op: &str,
         params: StorageEntity,
     ) -> Result<(Operation, Operation, Vec<FieldDelta>)> {
         let block = EntityName::new("block");
@@ -1023,35 +1033,36 @@ impl DispatchingOperationEngine {
             .dispatcher
             .execute_operation(&block, "set_field", params)
             .await
-            .map_err(|e| {
-                anyhow::anyhow!("promote_task_keyword: constituent set_field failed: {e}")
-            })?;
+            .map_err(|e| anyhow::anyhow!("{op}: constituent set_field failed: {e}"))?;
         let inverse = match result.undo {
             UndoAction::Undo(inv) => inv,
             UndoAction::DeclaredIrreversible(reason) => bail!(
-                "promote_task_keyword: constituent set_field is irreversible ({reason}) — \
-                 refusing to ship a partial-undo promotion"
+                "{op}: constituent set_field is irreversible ({reason}) — refusing to ship a \
+                 partial-undo gesture"
             ),
-            UndoAction::Undeclared => bail!(
-                "promote_task_keyword: constituent set_field returned an Undeclared undo \
-                 classification"
-            ),
+            UndoAction::Undeclared => {
+                bail!("{op}: constituent set_field returned an Undeclared undo classification")
+            }
         };
         Ok((forward, inverse, result.changes))
     }
 
     /// The guard's view of live state: the block's persisted content and the
     /// keyword of its `task_state`, if any. Fails loud on a missing block —
-    /// promoting a row that is not there would write a ghost.
-    async fn read_promotion_prior_state(&self, id: &str) -> Result<(String, Option<String>)> {
+    /// writing a task keyword onto a row that is not there would write a ghost.
+    async fn read_task_keyword_prior_state(
+        &self,
+        op: &str,
+        id: &str,
+    ) -> Result<(String, Option<String>)> {
         let reader = self.reader.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
-                "promote_task_keyword needs a live-state reader to evaluate its guard; this \
+                "{op} needs a live-state reader to resolve the block's current task state; this \
                  engine was built without one"
             )
         })?;
         if reader.field_value(id, "id").await?.is_none() {
-            bail!("promote_task_keyword: block {id} does not exist");
+            bail!("{op}: block {id} does not exist");
         }
         let content = reader
             .field_value(id, "content")
@@ -1064,18 +1075,17 @@ impl DispatchingOperationEngine {
                 .get("task_state")
                 .and_then(|v| v.as_string().map(str::to_string)),
             Some(Value::String(json)) | Some(Value::Json(json)) if !json.trim().is_empty() => {
-                let parsed: serde_json::Value = serde_json::from_str(&json).map_err(|e| {
-                    anyhow::anyhow!("promote_task_keyword: corrupt properties JSON on {id}: {e}")
-                })?;
+                let parsed: serde_json::Value = serde_json::from_str(&json)
+                    .map_err(|e| anyhow::anyhow!("{op}: corrupt properties JSON on {id}: {e}"))?;
                 parsed
                     .get("task_state")
                     .and_then(|v| v.as_str())
                     .map(str::to_string)
             }
             Some(Value::String(_)) | Some(Value::Json(_)) => None,
-            Some(other) => bail!(
-                "promote_task_keyword: block {id} has a non-object `properties` value {other:?}"
-            ),
+            Some(other) => {
+                bail!("{op}: block {id} has a non-object `properties` value {other:?}")
+            }
         };
         Ok((content, keyword))
     }
@@ -1137,7 +1147,9 @@ impl DispatchingOperationEngine {
                 TaskKeywordVocabulary::default()
             }
         };
-        let (prior_content, prior_keyword) = self.read_promotion_prior_state(&id).await?;
+        let (prior_content, prior_keyword) = self
+            .read_task_keyword_prior_state(PROMOTE_TASK_KEYWORD_OP, &id)
+            .await?;
         let prior_state = prior_keyword.as_deref().map(TaskState::from_keyword);
 
         let promotion =
@@ -1186,7 +1198,10 @@ impl DispatchingOperationEngine {
                      as a plain content edit"
                 );
                 let (fwd, inv, ch) = self
-                    .dispatch_promotion_constituent(set_field_params("content", &typed))
+                    .dispatch_task_keyword_constituent(
+                        PROMOTE_TASK_KEYWORD_OP,
+                        set_field_params("content", &typed),
+                    )
                     .await?;
                 let mut payload = std::collections::HashMap::new();
                 payload.insert("outcome".to_string(), Value::String("refused".into()));
@@ -1202,16 +1217,16 @@ impl DispatchingOperationEngine {
             None => {
                 let promotion = promotion.expect("no refusal implies a promotion");
                 let (c_fwd, mut c_inv, mut ch) = self
-                    .dispatch_promotion_constituent(set_field_params(
-                        "content",
-                        &promotion.stripped,
-                    ))
+                    .dispatch_task_keyword_constituent(
+                        PROMOTE_TASK_KEYWORD_OP,
+                        set_field_params("content", &promotion.stripped),
+                    )
                     .await?;
                 let (t_fwd, t_inv, t_ch) = self
-                    .dispatch_promotion_constituent(set_field_params(
-                        "task_state",
-                        &promotion.keyword.keyword,
-                    ))
+                    .dispatch_task_keyword_constituent(
+                        PROMOTE_TASK_KEYWORD_OP,
+                        set_field_params("task_state", &promotion.keyword.keyword),
+                    )
                     .await?;
                 ch.extend(t_ch);
                 let mut payload = std::collections::HashMap::new();
@@ -1272,6 +1287,92 @@ impl DispatchingOperationEngine {
         }
 
         Ok(Some(Value::Object(payload)))
+    }
+
+    /// Advance a block one step around its document's task-state ring. See
+    /// [`CYCLE_TASK_STATE_OP`]. Params: `id`. Returns the keyword written.
+    ///
+    /// The vocabulary is read at use and never cached: a document's `#+TODO:`
+    /// line is ordinary editable content, so a ring resolved once would go
+    /// stale the moment the user edits it.
+    async fn run_cycle_task_state(
+        &self,
+        params: &StorageEntity,
+        origin: &OpOrigin,
+    ) -> Result<Option<Value>> {
+        use holon_org_format::TaskKeywordVocabulary;
+
+        use crate::core::task_keyword_cycle::cycle_ring;
+
+        let id = params
+            .get("id")
+            .and_then(|v| v.as_string())
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("cycle_task_state: missing 'id' param"))?;
+
+        // Read-modify-write-journal over ONE entity, the same step the
+        // promotion compound takes; the constituent goes straight to the
+        // dispatcher so the hold never nests.
+        let write_guard = self
+            .entity_write_locks
+            .lock_target("block", params, "id")
+            .await;
+
+        let vocabulary = match &self.vocabulary_source {
+            Some(source) => source.vocabulary_for_block(&id).await?,
+            None => {
+                tracing::warn!(
+                    block = %id,
+                    "no task-vocabulary source wired; cycling against the DEFAULT keywords, which \
+                     writes a state the parser erases in any document declaring #+TODO:"
+                );
+                TaskKeywordVocabulary::default()
+            }
+        };
+        let (_content, prior_keyword) = self
+            .read_task_keyword_prior_state(CYCLE_TASK_STATE_OP, &id)
+            .await?;
+        let ring = cycle_ring(&vocabulary);
+        let next = holon_api::render_eval::cycle_state(
+            prior_keyword.as_deref().unwrap_or_default(),
+            &ring,
+        );
+
+        let mut set_field_params = StorageEntity::new();
+        set_field_params.insert("id".into(), Value::String(id.clone()));
+        set_field_params.insert("field".into(), Value::String("task_state".into()));
+        set_field_params.insert("value".into(), Value::String(next.clone()));
+        // `set_field("task_state")` pairs the `task_state_category` sidecar in
+        // the same write, so the pair invariant holds without a second op.
+        let (forward, inverse, changes) = self
+            .dispatch_task_keyword_constituent(CYCLE_TASK_STATE_OP, set_field_params)
+            .await?;
+
+        if origin.is_user() {
+            let entry = UndoEntry {
+                ops: vec![forward],
+                inverse_ops: vec![inverse],
+                origin: OpOrigin::User,
+                group_id: 0,
+                precondition: Precondition::forward(&changes),
+                redo_precondition: Precondition::inverse(&changes),
+            };
+            self.journal_step(write_guard.as_ref(), entry).await?;
+        }
+        drop(write_guard);
+
+        if let Some(history) = &self.history {
+            self.record_history(
+                history.as_ref(),
+                "block",
+                CYCLE_TASK_STATE_OP,
+                origin,
+                &changes,
+            )
+            .await?;
+        }
+
+        Ok(Some(Value::String(next)))
     }
 
     /// Execute the duplicate-identity merge. See [`MERGE_BLOCKS_OP`]. Params:
@@ -2131,6 +2232,17 @@ impl OperationEngine for DispatchingOperationEngine {
         if op_name == PROMOTE_TASK_KEYWORD_OP && entity_name.as_str() == "block" {
             return self
                 .run_promote_task_keyword(&params, &origin)
+                .await
+                .map(OpOutcome::proven);
+        }
+
+        // Engine-level op: the task-state ring. Intercepted rather than left to
+        // the providers because the ring is the owning DOCUMENT's `#+TODO:`
+        // vocabulary and only the engine can resolve it — the providers' own
+        // hardcoded rings are unreachable for this op by construction.
+        if op_name == CYCLE_TASK_STATE_OP && entity_name.as_str() == "block" {
+            return self
+                .run_cycle_task_state(&params, &origin)
                 .await
                 .map(OpOutcome::proven);
         }
