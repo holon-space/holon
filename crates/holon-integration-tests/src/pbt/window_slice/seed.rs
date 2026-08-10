@@ -299,3 +299,31 @@ pub async fn graft_promotion_target_row(env: &TestEnvironment) -> Result<()> {
         .context("graft the promotion target row under Main focus root")?;
     Ok(())
 }
+
+/// Content of the row [`graft_undo_blur_pair`] edits. Two words, so an appended
+/// suffix is a plain content edit with no keyword, no trigger and no structural
+/// meaning.
+pub const UNDO_EDIT_CONTENT: &str = "alpha two";
+/// Content of the blur target. Distinct from [`UNDO_EDIT_CONTENT`] so a
+/// mis-aimed click lands on visibly different text.
+pub const UNDO_BLUR_SIBLING_CONTENT: &str = "beta three";
+
+/// Graft the two sibling rows the undo/blur rung needs: one to edit and undo,
+/// one to click afterwards so focus genuinely leaves the first. Returns
+/// `(edit_id, blur_sibling_id)`.
+///
+/// `suffix` keys the ids per storage-mode arm. The re-seed gesture's staleness
+/// signal (`local_edit_epoch`) is a PROCESS-GLOBAL map keyed by row id, so two
+/// arms sharing a row id would sample each other's edits.
+pub async fn graft_undo_blur_pair(env: &TestEnvironment, suffix: &str) -> Result<(String, String)> {
+    let root = main_focus_root(env).await?;
+    let edit_id = format!("undo-edit-target-{suffix}");
+    let blur_id = format!("undo-blur-sibling-{suffix}");
+    env.create_block(&edit_id, &root, UNDO_EDIT_CONTENT)
+        .await
+        .context("graft the undo edit target under Main focus root")?;
+    env.create_block(&blur_id, &root, UNDO_BLUR_SIBLING_CONTENT)
+        .await
+        .context("graft the blur sibling under Main focus root")?;
+    Ok((edit_id, blur_id))
+}
