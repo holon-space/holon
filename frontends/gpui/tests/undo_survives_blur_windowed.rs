@@ -134,6 +134,21 @@ fn painted_texts(bounds: &BoundsRegistry, entity: &str) -> Vec<String> {
     out
 }
 
+/// Serializes the arms against each other.
+///
+/// This binary is the first windowed rung to carry MORE THAN ONE `#[test]`
+/// (`live_promotion_windowed.rs`, the template, has exactly one), and two
+/// windowed apps must not be alive in one process at the same time: each arm
+/// builds its own `TestApp` plus its own tokio runtime, and the engine still
+/// reaches `tokio::spawn` from paths that assume the entering thread's reactor
+/// (the task #74 exposure). Under libtest's default parallelism the three arms
+/// start together and the process SIGABRTs before libtest prints anything.
+///
+/// A poisoned lock is deliberately taken anyway: the panic that poisoned it is
+/// already a reported failure, and swallowing the remaining arms would hide
+/// their real results behind an unrelated arm's red.
+static ONE_WINDOWED_APP_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// One arm of the rung. `loro` picks the storage mode; `suffix` keys the row
 /// ids so the two arms never share a `local_edit_epoch` entry.
 fn drive_undo_then_blur(
@@ -142,6 +157,10 @@ fn drive_undo_then_blur(
     window_title: &'static str,
     rebuild_rowset_first: bool,
 ) {
+    let _serialized = ONE_WINDOWED_APP_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
     let text_system = real_text_system();
     let assets: Arc<dyn AssetSource> = Arc::new(());
     let mut app = TestApp::with_text_system_and_assets(text_system, assets);

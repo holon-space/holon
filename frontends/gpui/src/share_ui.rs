@@ -907,17 +907,22 @@ fn dispatch_undo_redo(
     async_cx
         .spawn(async move |cx| {
             let outcome = rx.await;
+            let label = if is_redo { "redo" } else { "undo" };
             // The replay rewrote the store under the row that held focus at the
             // press. Its open editor is skipped by every convergence channel
             // while focused, so without this its stale buffer survives — and the
             // next keystroke commits it over the restored content.
-            if matches!(outcome, Ok(Ok(holon_api::UndoOutcome::Applied))) {
-                reseed_gesture.arm();
-            }
-            let label = if is_redo { "redo" } else { "undo" };
+            //
+            // The outcome is BOUND, not dropped: `ReseedArm` is `#[must_use]`
+            // precisely because discarding it is how a skipped re-seed becomes
+            // invisible. `arm` discloses it (it holds the target row); this
+            // scope adds it to the press's own line so one log entry answers
+            // "did the gesture run, and did the row re-seed".
+            let reseed = matches!(outcome, Ok(Ok(holon_api::UndoOutcome::Applied)))
+                .then(|| reseed_gesture.arm(label));
             let disclosure = undo_disclosure(label, &outcome);
             match &disclosure {
-                None => tracing::debug!("[{label}] ran with nothing to disclose"),
+                None => tracing::debug!("[{label}] ran; re-seed {reseed:?}"),
                 Some(d) if d.warn_only => tracing::warn!("[{label}] {}", d.detail),
                 Some(d) => tracing::error!("[{label}] {}", d.detail),
             }
