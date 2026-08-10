@@ -270,12 +270,53 @@ async fn promotion_is_one_composite_undo_entry() {
     );
     assert_eq!(
         col(&engine, "block:u", "content").await.as_deref(),
-        Some("TODO"),
-        "the SAME undo press must restore the pre-promotion text"
+        Some("TODO buy milk"),
+        "the SAME undo press must restore the text the author TYPED"
     );
     assert!(
         !engine.can_undo().await,
         "the promotion must be a SINGLE entry — a second undo would mean two"
+    );
+}
+
+/// Per-keystroke authoring leaves the store holding the FUSED word: `TODO` and
+/// `milk` were committed one character at a time, and the promoting keystroke
+/// (the space) never became content. Undoing must hand back what the author
+/// typed, not that fused intermediate — and the redo guard fingerprints the
+/// post-undo state, so it has to agree or the redo is dropped as stale.
+#[tokio::test(flavor = "multi_thread")]
+async fn undo_restores_the_verbatim_typed_text_and_redo_still_applies() {
+    let engine = block_engine().await;
+    create_block(&engine, "block:v", "TODOmilk").await;
+    promote(&engine, "block:v", "TODO milk", "TODO").await;
+    assert_eq!(
+        col(&engine, "block:v", "content").await.as_deref(),
+        Some("milk"),
+        "the promotion strips the keyword from the content"
+    );
+
+    assert_eq!(engine.undo().await.expect("undo"), UndoOutcome::Applied);
+    assert_eq!(
+        col(&engine, "block:v", "content").await.as_deref(),
+        Some("TODO milk"),
+        "undo returns the typed text, never the fused `TODOmilk` the store held"
+    );
+    assert_eq!(
+        prop(&engine, "block:v", "task_state").await,
+        None,
+        "the same press takes the task state back off"
+    );
+
+    // `Applied` (not `StaleDropped`) is the proof that the redo precondition
+    // fingerprints the text the inverse actually wrote.
+    assert_eq!(engine.redo().await.expect("redo"), UndoOutcome::Applied);
+    assert_eq!(
+        col(&engine, "block:v", "content").await.as_deref(),
+        Some("milk")
+    );
+    assert_eq!(
+        prop(&engine, "block:v", "task_state").await.as_deref(),
+        Some("TODO")
     );
 }
 
@@ -468,5 +509,153 @@ async fn set_field_never_promotes_however_the_text_looks() {
         prop(&engine, "block:agent", "task_state").await,
         None,
         "P1=A: only typing promotes — set_field must leave the block plain"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The owning document's `#+TODO:` vocabulary is the authority
+// ---------------------------------------------------------------------------
+
+async fn set_field(engine: &BackendEngine, id: &str, field: &str, value: &str) {
+    let mut params: StorageEntity = HashMap::new();
+    params.insert("id".into(), Value::String(id.to_string()));
+    params.insert("field".into(), Value::String(field.to_string()));
+    params.insert("value".into(), Value::String(value.to_string()));
+    engine
+        .execute_operation(
+            &EntityName::new("block"),
+            "set_field",
+            params,
+            OpOrigin::Sync,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("set_field {field} on {id}: {e:#}"));
+}
+
+async fn tag_as_page(engine: &BackendEngine, id: &str) {
+    let mut params: StorageEntity = HashMap::new();
+    params.insert("id".into(), Value::String(id.to_string()));
+    params.insert("tag".into(), Value::String("Page".to_string()));
+    engine
+        .execute_operation(&EntityName::new("block"), "add_tag", params, OpOrigin::Sync)
+        .await
+        .unwrap_or_else(|e| panic!("tag {id} as Page: {e:#}"));
+}
+
+async fn create_child(engine: &BackendEngine, id: &str, parent: &str) {
+    let mut params: StorageEntity = HashMap::new();
+    params.insert("id".into(), Value::String(id.to_string()));
+    params.insert("content".into(), Value::String(String::new()));
+    params.insert("parent_id".into(), Value::String(parent.to_string()));
+    engine
+        .execute_operation(&EntityName::new("block"), "create", params, OpOrigin::Sync)
+        .await
+        .unwrap_or_else(|e| panic!("create {id}: {e:#}"));
+}
+
+/// The persisted form of `#+TODO: NEXT WAITING | DONE` on a `Page`-tagged
+/// document row, plus one child under it.
+/// Serialized here rather than hand-written so the fixture cannot drift from
+/// what `OrgDocumentExt::set_todo_keywords` actually persists.
+fn declared_vocabulary() -> String {
+    use holon_api::TaskState;
+    serde_json::to_string(&[
+        TaskState::active("NEXT"),
+        TaskState::active("WAITING"),
+        TaskState::done("DONE"),
+    ])
+    .expect("TaskState serializes")
+}
+
+async fn page_with_declared_vocabulary(engine: &BackendEngine, page: &str, child: &str) {
+    create_block(engine, page, "Errands").await;
+    set_field(engine, page, "todo_keywords", &declared_vocabulary()).await;
+    tag_as_page(engine, page).await;
+    create_child(engine, child, page).await;
+}
+
+/// S2 — UNDER-PROMOTION. `NEXT` is a keyword in THIS document. Judged against
+/// the defaults the store disagrees with Emacs, LogSeq and Holon's own parser
+/// forever, and every task query misses the block.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_declared_keyword_promotes() {
+    let engine = block_engine().await;
+    page_with_declared_vocabulary(&engine, "block:errands", "block:s2").await;
+
+    let payload = promote(&engine, "block:s2", "NEXT call bank", "NEXT").await;
+    assert_eq!(
+        payload_str(&payload, "outcome"),
+        "promoted",
+        "the document declares NEXT, so the authority must promote it: {payload:?}"
+    );
+    assert_eq!(
+        col(&engine, "block:s2", "content").await.as_deref(),
+        Some("call bank")
+    );
+    assert_eq!(
+        prop(&engine, "block:s2", "task_state").await.as_deref(),
+        Some("NEXT")
+    );
+}
+
+/// S3 — SILENT DEMOTION, the data-loss direction. `TODO` is NOT a keyword in
+/// this document. Promoting it anyway writes a `task_state` the parser erases
+/// on the next re-ingest, putting the keyword back INSIDE the user's text — a
+/// mutation nobody authored, repeated on every restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_undeclared_keyword_is_refused_and_committed_verbatim() {
+    let engine = block_engine().await;
+    page_with_declared_vocabulary(&engine, "block:errands", "block:s3").await;
+
+    let payload = promote(&engine, "block:s3", "TODO buy milk", "TODO").await;
+    assert_eq!(
+        payload_str(&payload, "outcome"),
+        "refused",
+        "the document's vocabulary has no TODO: {payload:?}"
+    );
+    assert_eq!(payload_str(&payload, "reason"), "not_keyword_headed");
+    assert_eq!(
+        col(&engine, "block:s3", "content").await.as_deref(),
+        Some("TODO buy milk"),
+        "a refusal commits the typed text verbatim — no keystroke is lost"
+    );
+    assert_eq!(
+        prop(&engine, "block:s3", "task_state").await,
+        None,
+        "no task_state may be written that the next re-ingest would erase"
+    );
+}
+
+/// The declared DONE list decides the category, so a vocabulary read that got
+/// only the keyword list right would still be wrong.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_declared_done_list_decides_the_category() {
+    let engine = block_engine().await;
+    page_with_declared_vocabulary(&engine, "block:errands", "block:cat").await;
+
+    promote(&engine, "block:cat", "WAITING on reply", "WAITING").await;
+    assert_eq!(
+        prop(&engine, "block:cat", "task_state_category")
+            .await
+            .as_deref(),
+        Some("active"),
+        "WAITING is declared active, not done"
+    );
+}
+
+/// A document that declares NOTHING keeps the defaults — the precedence rule,
+/// pinned so the vocabulary read cannot regress into an empty vocabulary.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_undeclaring_document_keeps_the_defaults() {
+    let engine = block_engine().await;
+    create_block(&engine, "block:inbox", "Inbox").await;
+    tag_as_page(&engine, "block:inbox").await;
+    create_child(&engine, "block:plain", "block:inbox").await;
+
+    let payload = promote(&engine, "block:plain", "TODO buy milk", "TODO").await;
+    assert_eq!(payload_str(&payload, "outcome"), "promoted");
+    assert_eq!(
+        prop(&engine, "block:plain", "task_state").await.as_deref(),
+        Some("TODO")
     );
 }

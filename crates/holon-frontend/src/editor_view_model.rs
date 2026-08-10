@@ -364,23 +364,24 @@ impl EditorViewModel {
 
     /// Would this keystroke ATTEMPT a live task-keyword promotion? Pure, cheap
     /// and authority-free: it runs only the two guards that need no read (the
-    /// typed text is keyword-headed, the prior buffer was not).
+    /// typed text is candidate-keyword-headed, the prior buffer was not).
     ///
     /// This is the caller's read gate. `true` obliges it to read the block's
     /// CURRENT task keyword and pass it to [`Self::apply_local_edit`]; `false`
     /// means [`TaskKeywordAtKeystroke::Unread`] is correct and no read is owed.
-    /// A keyword-headed keystroke is rare — one per promotion, none while
-    /// typing ordinary prose — so the authority read stays off the hot path.
+    ///
+    /// The gate is deliberately vocabulary-FREE and therefore
+    /// OVER-APPROXIMATING: which words are keywords is the owning document's
+    /// `#+TODO:` line to say, and consulting it here would put a read on every
+    /// keystroke. It admits every ASCII-uppercase leading token (see
+    /// [`holon_org_format::candidate_keyword_headed`]) — a superset of every
+    /// such vocabulary, so it never withholds a promotion the document would
+    /// make. The extra admissions cost one authority read and one refusal that
+    /// commits the typed text verbatim.
     pub fn attempts_promotion(&self, new_text: &str) -> bool {
         new_text != self.buffer
             && self.handler.context_id().is_some()
-            && holon_org_format::detect_keyword_promotion(
-                &self.buffer,
-                None,
-                new_text,
-                &holon_org_format::TaskKeywordVocabulary::default(),
-            )
-            .is_some()
+            && holon_org_format::candidate_promotion(&self.buffer, None, new_text).is_some()
     }
 
     /// Wire the reaper's registry so the first non-empty keystroke can retire
@@ -408,6 +409,22 @@ impl EditorViewModel {
         if let Ok(uri) = holon_api::EntityUri::parse(id) {
             newborns.retire(&uri);
         }
+    }
+
+    /// Announce that a local edit reached this buffer, so an async gesture
+    /// holding a pre-round-trip snapshot of this row (the undo/redo re-seed)
+    /// refuses to overwrite it.
+    ///
+    /// Called from the keystroke sink UPSTREAM of the cell/no-cell fork: the
+    /// buffer became the authority in either mode, and a signal taken from one
+    /// mode's write path would be silent in the other.
+    fn note_local_edit(&self) {
+        let Some(id) = self.handler.context_id() else {
+            return;
+        };
+        // ALLOW(entity_uri_from_raw): boundary — the context id is the render
+        // spec's row id string; the gesture side keys on the same parse.
+        crate::local_edit_epoch::note(&holon_api::EntityUri::from_raw(id));
     }
 
     /// Attach a [`Cell<String>`] handle for the editable field. Call once,
@@ -538,6 +555,7 @@ impl EditorViewModel {
             return Ok(LocalEdit::default());
         }
         self.retire_from_the_reaper(new_text);
+        self.note_local_edit();
         if let Some(promotion) = self.promote_task_keyword(new_text, task_keyword) {
             return Ok(promotion);
         }
@@ -614,6 +632,7 @@ impl EditorViewModel {
         let suffix = self.buffer.strip_prefix(stripped)?.to_string();
         let text = format!("{}{suffix}", residue.text());
         self.buffer = text.clone();
+        self.note_local_edit();
         let intent = residue
             .needs_commit(suffix.is_empty())
             .then(|| {
@@ -635,20 +654,17 @@ impl EditorViewModel {
         Some(PromotionRestore { text, intent })
     }
 
-    /// PROPOSE WHAT THE ENGINE WILL PROBABLY ACCEPT, AND BE ABLE TO TAKE IT
-    /// BACK. The trigger runs the same guard the engine runs, on the block's
-    /// task keyword AS THE CALLER JUST READ IT plus the prior content and the
-    /// typed text, so a refusal is rare. It is not impossible: the read and the
-    /// engine's guard are not one transaction, and any concurrent writer of
-    /// `task_state` — a peer, an agent, a rule — can land between them.
+    /// PROPOSE A CANDIDATE, AND BE ABLE TO TAKE IT BACK. The trigger runs the
+    /// engine's guards on the block's task keyword AS THE CALLER JUST READ IT
+    /// plus the prior content and the typed text — but on the vocabulary-free
+    /// SHAPE rule, because only the owning document's `#+TODO:` line decides
+    /// membership and this view model has no document handle. The engine
+    /// re-runs the same guards against the real vocabulary and may refuse.
     ///
     /// That is why the caller must AWAIT this intent and hand a refusal to
-    /// [`Self::restore_refused_promotion`]. Freshness makes the refusal rare;
-    /// only the un-strip makes it harmless, and the difference is whether the
+    /// [`Self::restore_refused_promotion`]: the un-strip is what makes an
+    /// over-approximated proposal harmless, and the difference is whether the
     /// user's keyword survives.
-    ///
-    /// The refusal path is also the authority's backstop for a document
-    /// `#+TODO:` the trigger does not know yet (Inc 5).
     fn promote_task_keyword(
         &mut self,
         new_text: &str,
@@ -670,12 +686,8 @@ impl EditorViewModel {
             }
         };
         let prior_state = keyword.as_deref().map(holon_api::TaskState::from_keyword);
-        let promotion = holon_org_format::detect_keyword_promotion(
-            &self.buffer,
-            prior_state.as_ref(),
-            new_text,
-            &holon_org_format::TaskKeywordVocabulary::default(),
-        )?;
+        let promotion =
+            holon_org_format::candidate_promotion(&self.buffer, prior_state.as_ref(), new_text)?;
         let stripped_prefix = promotion.consumed_prefix;
         let seq = holon_api::write_seq::next();
         self.last_local_seq = seq.get();

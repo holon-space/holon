@@ -59,3 +59,17 @@ impl fmt::Display for PromotionRefusal {
         }
     }
 }
+
+/// Resolve the task-keyword vocabulary that governs a block: its owning
+/// document's `#+TODO:` / `#+SEQ_TODO:` declaration, else the defaults.
+///
+/// Deliberately NOT a widening of `UndoStateReader`: that trait is undo's
+/// single-row precondition reader, and a page-ancestor walk is a different
+/// capability with a different failure mode.
+#[async_trait::async_trait]
+pub trait TaskVocabularySource: Send + Sync {
+    async fn vocabulary_for_block(
+        &self,
+        block_id: &str,
+    ) -> anyhow::Result<holon_org_format::TaskKeywordVocabulary>;
+}

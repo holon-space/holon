@@ -282,3 +282,20 @@ pub async fn graft_chord_target_row(env: &TestEnvironment) -> Result<()> {
         .context("graft the chord target row under Main focus root")?;
     Ok(())
 }
+
+/// Block id [`graft_promotion_target_row`] grafts.
+pub const PROMOTION_TARGET_ID: &str = "promotion-target";
+/// Content of the grafted promotion target row. Non-empty so the row paints a
+/// text element the driver can aim a real click at, and NOT keyword-headed so
+/// prepending one is a genuine promotion rather than a re-commit.
+pub const PROMOTION_TARGET_CONTENT: &str = "milk";
+
+/// Graft a single plain, task-less row under the Main focus root: the target
+/// for typing a task keyword at the head of a real editor.
+pub async fn graft_promotion_target_row(env: &TestEnvironment) -> Result<()> {
+    let root = main_focus_root(env).await?;
+    env.create_block(PROMOTION_TARGET_ID, &root, PROMOTION_TARGET_CONTENT)
+        .await
+        .context("graft the promotion target row under Main focus root")?;
+    Ok(())
+}

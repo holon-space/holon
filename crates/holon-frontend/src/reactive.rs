@@ -482,6 +482,18 @@ pub trait BuilderServices: Send + Sync {
     /// different block. Headless/stub services have no seed to consume.
     fn consume_caret_seed(&self, _: &EntityUri) {}
 
+    /// Whether an undo/redo armed a one-shot authority re-seed for `block`.
+    /// A FOCUSED editor is skipped by the render backstop, so this is its only
+    /// way to learn that the store changed under it. Headless/stub services
+    /// never arm one.
+    fn authority_reseed_armed(&self, _: &EntityUri) -> bool {
+        false
+    }
+
+    /// Clear the armed authority re-seed for `block` — after the render
+    /// applied it, or when a local keystroke makes the editor the authority.
+    fn consume_authority_reseed(&self, _: &EntityUri) {}
+
     /// Get a [`Cell<String>`] handle for collaborative editing of a block
     /// field. Resolves through the `BlockCellRegistry` (Loro-backed when
     /// LoroModule is loaded). Returns `Err` for headless/stub services
@@ -1636,6 +1648,89 @@ pub struct ViewportInfo {
     pub scale_factor: f32,
 }
 
+/// Owned handles for arming an authority re-seed from a task that cannot
+/// borrow [`UiState`] (the undo/redo dispatch runs spawned). `Mutable` clones
+/// share state.
+#[derive(Clone)]
+pub struct AuthorityReseedHandle {
+    pending: Mutable<Option<EntityUri>>,
+    focus: Mutable<Option<EntityUri>>,
+}
+
+impl AuthorityReseedHandle {
+    /// Take the gesture's re-seed intent AT PRESS TIME: the row the replay is
+    /// about to rewrite, plus the local-edit epoch it was undisturbed at.
+    /// Both are unknowable once the round trip has resolved.
+    pub fn capture(&self) -> ReseedGesture {
+        let captured = self.focus.get_cloned().map(|target| {
+            let epoch = crate::local_edit_epoch::current(&target);
+            (target, epoch)
+        });
+        ReseedGesture {
+            handle: self.clone(),
+            captured,
+        }
+    }
+}
+
+/// One undo/redo gesture's re-seed intent, taken at press time and armed only
+/// if the round trip that follows left its target undisturbed. A target row
+/// and the epoch it was undisturbed at are captured together, so an epoch
+/// belonging to no row is unrepresentable.
+pub struct ReseedGesture {
+    handle: AuthorityReseedHandle,
+    captured: Option<(EntityUri, crate::local_edit_epoch::LocalEditEpoch)>,
+}
+
+/// What [`ReseedGesture::arm`] did. Every refusal is a named variant so a
+/// silently skipped re-seed is unrepresentable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReseedArm {
+    Armed,
+    NoTargetRow,
+    LocalEditRaced,
+    FocusMoved,
+}
+
+impl ReseedGesture {
+    /// Arm the captured row and re-notify focus, so the row re-renders and its
+    /// open editor converges to the restored store text. The re-notification is
+    /// what guarantees a render even when the store write has already been
+    /// projected.
+    ///
+    /// A re-seed is a hard `set_value` plus a view-model re-baseline, so it is
+    /// only sound while the buffer is NOT a pending user edit. Two disturbances
+    /// break that, and both refuse: a local edit into the captured row during
+    /// the round trip (its buffer now holds text the replay never saw), and a
+    /// focus move (the captured row is no longer focused, so the ordinary
+    /// render backstop converges it and nothing is owed). Refusing costs at
+    /// most a stale buffer; arming wrongly destroys committed text.
+    pub fn arm(self) -> ReseedArm {
+        let Some((target, epoch)) = self.captured else {
+            return ReseedArm::NoTargetRow;
+        };
+        if crate::local_edit_epoch::current(&target) != epoch {
+            tracing::warn!(
+                row = %target,
+                "undo re-seed refused: a local write raced the replay; \
+                 the row keeps its typed buffer",
+            );
+            return ReseedArm::LocalEditRaced;
+        }
+        if self.handle.focus.get_cloned().as_ref() != Some(&target) {
+            tracing::debug!(
+                row = %target,
+                "undo re-seed refused: focus left the replayed row; \
+                 the render backstop converges it",
+            );
+            return ReseedArm::FocusMoved;
+        }
+        self.handle.pending.set(Some(target.clone()));
+        self.handle.focus.set(Some(target));
+        ReseedArm::Armed
+    }
+}
+
 pub struct UiState {
     /// Currently focused block (receives `is_focused = true` in predicate
     /// context).
@@ -1659,6 +1754,18 @@ pub struct UiState {
     /// is how the initial caret reaches a backend-driven mount in-process,
     /// replacing the old `editor_cursor` round-trip.
     pending_caret_seed: Mutable<Option<(EntityUri, usize)>>,
+    /// One-shot "re-seed this row's open editor from the store" request.
+    ///
+    /// A FOCUSED SqlOnly editor has no other convergence channel: its per-row
+    /// data subscription is orphaned by any row-set rebuild, and the render
+    /// backstop deliberately skips a focused editor so in-flight typing is
+    /// never yanked. An undo therefore restores the store while the visible
+    /// buffer keeps the pre-undo text — and the next keystroke commits that
+    /// stale buffer over the restored content. Armed by the undo/redo
+    /// dispatch, applied and cleared by the next render of that row, and
+    /// cleared by a local keystroke (which makes the editor the authority
+    /// again).
+    pending_authority_reseed: Mutable<Option<EntityUri>>,
     /// SPIKE (Phase 1b — display-placement de-risk): which *occurrence* of
     /// `focused_block` holds focus. `None` = the block's canonical occurrence
     /// (every existing `set_focus` path leaves this `None`, so behaviour is
@@ -1716,6 +1823,7 @@ impl UiState {
             viewport_generation: Mutable::new(0),
             viewport: Mutable::new(None),
             pending_caret_seed: Mutable::new(None),
+            pending_authority_reseed: Mutable::new(None),
             focused_occurrence: Mutable::new(None),
             main_nav_generation: Mutable::new(0),
             expanded_view: Mutex::new(HashMap::new()),
@@ -1909,6 +2017,29 @@ impl UiState {
             if seed_block == block {
                 self.pending_caret_seed.set(None);
             }
+        }
+    }
+
+    /// Whether an authority re-seed is armed for `block`.
+    pub fn authority_reseed_armed(&self, block: &EntityUri) -> bool {
+        self.pending_authority_reseed.get_cloned().as_ref() == Some(block)
+    }
+
+    /// Clear the armed authority re-seed if it targets `block`. Called both by
+    /// the render that applied it and by the row's next local keystroke — a
+    /// keystroke makes the editor the authority again, so a still-armed
+    /// re-seed must never reach it.
+    pub fn consume_authority_reseed(&self, block: &EntityUri) {
+        if self.authority_reseed_armed(block) {
+            self.pending_authority_reseed.set(None);
+        }
+    }
+
+    /// Cloned handles for arming an authority re-seed from a spawned task.
+    pub fn authority_reseed_handle(&self) -> AuthorityReseedHandle {
+        AuthorityReseedHandle {
+            pending: self.pending_authority_reseed.clone(),
+            focus: self.focused_block.clone(),
         }
     }
 
@@ -3778,6 +3909,14 @@ impl BuilderServices for ReactiveEngine {
         self.ui_state.consume_caret_seed(block);
     }
 
+    fn authority_reseed_armed(&self, block: &EntityUri) -> bool {
+        self.ui_state.authority_reseed_armed(block)
+    }
+
+    fn consume_authority_reseed(&self, block: &EntityUri) {
+        self.ui_state.consume_authority_reseed(block);
+    }
+
     fn provider_cache(&self) -> Option<Arc<crate::provider_cache::ProviderCache>> {
         Some(self.provider_cache.clone())
     }
@@ -4889,6 +5028,201 @@ mod tests {
         // Consuming the owner clears it.
         ui.consume_caret_seed(&a);
         assert_eq!(ui.peek_caret_seed(&a), None);
+    }
+
+    /// `session.undo()` is a DB round trip: the press and the arming are tens
+    /// of milliseconds apart, and a keystroke can land in between. That
+    /// keystroke is already committed, and the buffer holding it is the
+    /// authority — arming a re-seed for it makes the next render `set_value`
+    /// the pre-keystroke text over it and re-baseline the view model, so the
+    /// following keystroke commits the reverted buffer. Losing committed user
+    /// text is strictly worse than leaving a stale buffer, so a raced gesture
+    /// must not arm at all.
+    #[test]
+    fn a_keystroke_racing_the_undo_round_trip_disarms_the_reseed() {
+        use crate::editor_view_model::TaskKeywordAtKeystroke;
+
+        let ui = UiState::new();
+        let a = EntityUri::block("sql-row");
+        ui.set_focus(Some(a.clone()));
+        let mut vm = sql_mode_editor("sql-row", "orig");
+        assert!(!vm.has_cell(), "fixture must exercise the SqlOnly arm");
+
+        let gesture = ui.authority_reseed_handle().capture();
+        // The user types into the focused row while the replay is in flight.
+        // The editor commits the keystroke and clears any armed re-seed.
+        ui.consume_authority_reseed(&a);
+        vm.apply_local_edit("origx", TaskKeywordAtKeystroke::Unread)
+            .expect("SqlOnly keystroke commits through set_field");
+
+        // Only now does the oneshot resolve `Applied`.
+        assert_eq!(gesture.arm(), ReseedArm::LocalEditRaced);
+        assert!(
+            !ui.authority_reseed_armed(&a),
+            "a re-seed armed after a racing keystroke clobbers committed text",
+        );
+    }
+
+    /// An in-memory text-rich cell, the Loro arm's stand-in: `apply_text_op`
+    /// mutates a shared `String`, so a cell-mode keystroke commits through the
+    /// CRDT writer exactly as it does with Loro attached.
+    fn in_memory_text_cell(seed: &str) -> holon_core::cell::Cell<String> {
+        use std::sync::Arc;
+        use std::sync::Mutex;
+
+        use holon_core::cell::CellBacking;
+        use holon_core::cell::CursorAnchor;
+        use holon_core::cell::CursorBias;
+        use holon_core::cell::TextCellBacking;
+        use holon_core::cell::TextDelta;
+        use holon_core::cell::TextOp;
+
+        struct InMemoryText(Mutex<String>);
+
+        impl CellBacking<String> for InMemoryText {
+            fn current(&self) -> String {
+                self.0.lock().unwrap().clone()
+            }
+            fn signal(&self) -> futures::stream::BoxStream<'static, String> {
+                Box::pin(futures::stream::empty())
+            }
+            fn apply_replace(
+                &self,
+                v: String,
+            ) -> futures::future::BoxFuture<'static, anyhow::Result<()>> {
+                *self.0.lock().unwrap() = v;
+                Box::pin(async { Ok(()) })
+            }
+            fn as_text_backing(&self) -> Option<&dyn TextCellBacking> {
+                Some(self)
+            }
+        }
+
+        impl TextCellBacking for InMemoryText {
+            fn apply_text_op(&self, op: TextOp) -> anyhow::Result<()> {
+                let mut text = self.0.lock().unwrap();
+                let mut chars: Vec<char> = text.chars().collect();
+                match op {
+                    TextOp::Insert {
+                        pos_codepoint,
+                        text: inserted,
+                    } => {
+                        let tail = chars.split_off(pos_codepoint);
+                        chars.extend(inserted.chars());
+                        chars.extend(tail);
+                    }
+                    TextOp::Delete {
+                        pos_codepoint,
+                        len_codepoint,
+                    } => {
+                        chars.drain(pos_codepoint..pos_codepoint + len_codepoint);
+                    }
+                }
+                *text = chars.into_iter().collect();
+                Ok(())
+            }
+            fn anchor_cursor(&self, char_offset: usize, bias: CursorBias) -> CursorAnchor {
+                CursorAnchor::new(Box::new(char_offset), bias)
+            }
+            fn resolve_cursor(&self, anchor: &CursorAnchor) -> usize {
+                *anchor.inner.downcast_ref::<usize>().expect("offset anchor")
+            }
+            fn remote_deltas(&self) -> futures::stream::BoxStream<'static, TextDelta> {
+                Box::pin(futures::stream::empty())
+            }
+        }
+
+        holon_core::cell::Cell::from_backing(
+            Arc::new(InMemoryText(Mutex::new(seed.to_string()))) as Arc<dyn CellBacking<String>>
+        )
+    }
+
+    /// A view model editing `row`, in the no-cell (SqlOnly) arm.
+    fn sql_mode_editor(row: &str, seed: &str) -> crate::editor_view_model::EditorViewModel {
+        let id = EntityUri::block(row);
+        let context = HashMap::from([("id".into(), Value::String(id.as_str().into()))]);
+        crate::editor_view_model::EditorViewModel::new(
+            Vec::new(),
+            Vec::new(),
+            context,
+            "content".into(),
+            seed.into(),
+        )
+    }
+
+    /// The same view model in the CELL arm — the mode the shipped Loro wiring
+    /// puts every editor in.
+    fn cell_mode_editor(row: &str, seed: &str) -> crate::editor_view_model::EditorViewModel {
+        let mut vm = sql_mode_editor(row, seed);
+        vm.attach_cell(in_memory_text_cell(seed));
+        vm
+    }
+
+    /// The same race, driven through the REAL keystroke sink of a CELL-mode
+    /// editor. The guard must hold in the arm the shipped Loro wiring selects,
+    /// where the keystroke commits through the CRDT and never touches the SQL
+    /// write path — a guard that reads a SQL-only side effect is inert exactly
+    /// where the clobber destroys committed CRDT text.
+    #[test]
+    fn a_cell_mode_keystroke_racing_the_undo_round_trip_disarms_the_reseed() {
+        use crate::editor_view_model::TaskKeywordAtKeystroke;
+
+        let ui = UiState::new();
+        let a = EntityUri::block("cell-row");
+        ui.set_focus(Some(a.clone()));
+        let mut vm = cell_mode_editor("cell-row", "orig");
+        assert!(
+            vm.has_cell(),
+            "fixture must exercise the cell arm, not degrade to SqlOnly",
+        );
+
+        let gesture = ui.authority_reseed_handle().capture();
+        // The user types into the focused row while the replay is in flight.
+        ui.consume_authority_reseed(&a);
+        vm.apply_local_edit("origx", TaskKeywordAtKeystroke::Unread)
+            .expect("cell-mode keystroke commits through the CRDT");
+        assert_eq!(vm.buffer(), "origx");
+
+        assert_eq!(gesture.arm(), ReseedArm::LocalEditRaced);
+        assert!(
+            !ui.authority_reseed_armed(&a),
+            "a re-seed armed after a racing keystroke clobbers committed text",
+        );
+    }
+
+    /// The undisturbed gesture must still arm — the refusals above are not
+    /// allowed to disable the fix they guard.
+    #[test]
+    fn an_undisturbed_undo_gesture_reseeds_the_row_it_captured() {
+        let ui = UiState::new();
+        let a = EntityUri::block("undisturbed-row");
+        ui.set_focus(Some(a.clone()));
+        let gesture = ui.authority_reseed_handle().capture();
+        assert_eq!(gesture.arm(), ReseedArm::Armed);
+        assert!(ui.authority_reseed_armed(&a));
+    }
+
+    /// Focus read at RESOLUTION time names whatever row focus happens to sit
+    /// on, not the row the replay rewrote. A gesture whose focus moved during
+    /// the round trip must not arm the new row: that row was never undone, and
+    /// a re-seed on it is the same clobber under a different name.
+    #[test]
+    fn focus_moving_during_the_undo_round_trip_disarms_the_reseed() {
+        let ui = UiState::new();
+        let a = EntityUri::block("moved-from-row");
+        let b = EntityUri::block("moved-to-row");
+        ui.set_focus(Some(a.clone()));
+        let gesture = ui.authority_reseed_handle().capture();
+        ui.set_focus(Some(b.clone()));
+        assert_eq!(gesture.arm(), ReseedArm::FocusMoved);
+        assert!(
+            !ui.authority_reseed_armed(&b),
+            "the token must never land on a row the replay did not rewrite",
+        );
+        assert!(
+            !ui.authority_reseed_armed(&a),
+            "an unfocused row converges through the render backstop",
+        );
     }
 
     #[test]

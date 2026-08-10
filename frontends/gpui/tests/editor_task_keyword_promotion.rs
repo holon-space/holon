@@ -469,3 +469,7 @@ fn a_refused_promotion_puts_the_keyword_back_with_a_cell(cx: &mut TestAppContext
 
     assert_eq!(visible(vcx, &entity), "TODO milk");
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

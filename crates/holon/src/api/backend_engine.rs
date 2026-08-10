@@ -809,6 +809,12 @@ impl BackendEngine {
         .with_history_store(history)
         .with_template_source(Arc::new(
             crate::api::template_source::TursoTemplateSource::new(self.db_handle.clone()),
+        ))
+        .with_task_vocabulary_source(Arc::new(
+            crate::api::task_vocabulary_source::SqlTaskVocabularySource::new(
+                self.db_handle.clone(),
+                crate::storage::BLOCK_WRITE_TABLE,
+            ),
         ));
         Ok(())
     }

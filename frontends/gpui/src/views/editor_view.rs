@@ -221,6 +221,9 @@ impl EditorView {
             // `task_state` has no second source — an editor that cannot see it
             // proposes promotions on blocks that are already tasks.
             let task_row = data.clone();
+            // ALLOW(entity_uri_from_raw): render-spec row_id, schemed to match
+            // the key an undo/redo arms its authority re-seed under.
+            let row_uri_for_reseed = holon_api::EntityUri::from_raw(&row_id);
             cx.subscribe_in(
                 &input,
                 window,
@@ -322,6 +325,11 @@ impl EditorView {
                         } else {
                             TaskKeywordAtKeystroke::Unread
                         };
+                        // A genuine keystroke makes this editor the authority
+                        // again, so an armed undo re-seed must never reach it.
+                        if ctrl.lock().unwrap().buffer() != text {
+                            services_clone.consume_authority_reseed(&row_uri_for_reseed);
+                        }
                         let local_edit = ctrl.lock().unwrap().apply_local_edit(&text, task_keyword);
                         match local_edit {
                             Ok(edit) => match (edit.intent, edit.rewrite) {

@@ -61,5 +61,7 @@ pub use parser::parse_org_file;
 pub use parser::parse_org_file_with;
 pub use task_keyword::Promotion;
 pub use task_keyword::TaskKeywordVocabulary;
+pub use task_keyword::candidate_keyword_headed;
+pub use task_keyword::candidate_promotion;
 pub use task_keyword::detect_keyword_promotion;
 pub use task_keyword::keyword_headed;

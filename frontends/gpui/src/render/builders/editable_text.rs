@@ -31,6 +31,10 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
     let operations = node.operations.clone();
     let triggers = node.triggers.clone();
     let services = ctx.services.clone();
+    let reseed_services = ctx.services.clone();
+    // ALLOW(entity_uri_from_raw): render-spec row_id, schemed to match the
+    // key the undo/redo dispatch arms its re-seed under.
+    let reseed_row = holon_api::EntityUri::from_raw(&row_id);
     let nav = ctx.nav.clone();
     let data_handle = Some(node.data.clone());
     let el_id_for_create = el_id.clone();
@@ -148,8 +152,17 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
             // this does NOT reintroduce the retired SQL `content` backstop. It is
             // idempotent — a no-op when the cell already delivered.
             let cell_attached = entity.read(cx).has_cell();
-            if converge_on_render(cell_attached, is_focused, just_focused) {
-                let source = if cell_attached {
+            // An undo/redo restored the store under a FOCUSED editor, which
+            // every other convergence channel skips. Applied here and cleared
+            // only once the restored text has actually arrived in `content`,
+            // so a render that beats the projection leaves it armed for the
+            // next one.
+            let reseed = reseed_services.authority_reseed_armed(&reseed_row);
+            let reseed_pending = reseed && input.read(cx).value() != content;
+            if converge_on_render(cell_attached, is_focused, just_focused) || reseed_pending {
+                let source = if reseed_pending {
+                    "undo_reseed"
+                } else if cell_attached {
                     "focus_reload"
                 } else {
                     "render_backstop"
@@ -157,6 +170,9 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
                 entity.update(cx, |this, cx| {
                     this.converge_input(source, &content, window, cx);
                 });
+            }
+            if reseed_pending {
+                reseed_services.consume_authority_reseed(&reseed_row);
             }
             // Snapshot the post-convergence value for the PBT staleness invariants.
             let displayed = input.read(cx).value().to_string();

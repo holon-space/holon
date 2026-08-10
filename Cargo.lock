@@ -5634,6 +5634,7 @@ dependencies = [
  "futures",
  "holon-api",
  "holon-macros",
+ "holon-org-format",
  "nonempty-collections",
  "proptest 1.11.0",
  "proptest-state-machine",

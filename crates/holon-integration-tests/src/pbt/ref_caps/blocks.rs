@@ -221,6 +221,39 @@ impl RefBlockTreeMut for ReferenceState {
             .and_then(|v| v.as_string().map(str::to_owned))
     }
 
+    /// Walk to the nearest page ancestor (`id` itself included) and read the
+    /// `todo_keywords` the drawn document declares. Derived, never a copy of
+    /// the SUT's constant.
+    fn block_task_vocabulary(&self, id: &EntityUri) -> holon_org_format::TaskKeywordVocabulary {
+        use holon_org_format::OrgDocumentExt;
+        let defaults = holon_org_format::TaskKeywordVocabulary::default;
+        let mut cursor = parse_id(id);
+        for _ in 0..1024 {
+            let Some(uri) = cursor else { return defaults() };
+            let Some(block) = self.domain.block_state.blocks.get(&uri) else {
+                return defaults();
+            };
+            if block.is_page() {
+                let Some(states) = block.todo_keywords() else {
+                    return defaults();
+                };
+                let active: Vec<String> = states
+                    .iter()
+                    .filter(|s| s.is_active())
+                    .map(|s| s.keyword.clone())
+                    .collect();
+                let done: Vec<String> = states
+                    .iter()
+                    .filter(|s| s.is_done())
+                    .map(|s| s.keyword.clone())
+                    .collect();
+                return holon_org_format::TaskKeywordVocabulary::for_document(&active, &done);
+            }
+            cursor = Some(block.parent_id.clone());
+        }
+        defaults()
+    }
+
     fn promote_block_task_keyword(
         &mut self,
         id: &EntityUri,

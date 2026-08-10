@@ -1265,6 +1265,12 @@ impl Render for HolonApp {
             // Window-registry chords bypass `dispatch_intent`; they journal
             // themselves so a reply can tell "ran" from "nothing ran".
             let journal = self.app_model.read(cx).engine.ui_state().dispatch_journal();
+            let reseed = self
+                .app_model
+                .read(cx)
+                .engine
+                .ui_state()
+                .authority_reseed_handle();
             let window_handle = window.window_handle();
             div()
                 .size_full()
@@ -1287,6 +1293,7 @@ impl Render for HolonApp {
                     let rt_handle = rt_handle.clone();
                     let share_ui = self.share_ui.clone();
                     let journal = journal.clone();
+                    let reseed = reseed.clone();
                     move |_: &gpui_component::input::Undo, _window, cx: &mut App| {
                         let async_cx = cx.to_async();
                         share_ui::dispatch_undo(
@@ -1295,6 +1302,7 @@ impl Render for HolonApp {
                             share_ui.clone(),
                             window_handle,
                             journal.clone(),
+                            reseed.clone(),
                             &async_cx,
                         );
                         cx.stop_propagation();
@@ -1305,6 +1313,7 @@ impl Render for HolonApp {
                     let rt_handle = rt_handle.clone();
                     let share_ui = self.share_ui.clone();
                     let journal = journal.clone();
+                    let reseed = reseed.clone();
                     move |_: &gpui_component::input::Redo, _window, cx: &mut App| {
                         let async_cx = cx.to_async();
                         share_ui::dispatch_redo(
@@ -1313,6 +1322,7 @@ impl Render for HolonApp {
                             share_ui.clone(),
                             window_handle,
                             journal.clone(),
+                            reseed.clone(),
                             &async_cx,
                         );
                         cx.stop_propagation();
@@ -1323,6 +1333,7 @@ impl Render for HolonApp {
                     let rt_handle = rt_handle.clone();
                     let share_ui = self.share_ui.clone();
                     let journal = journal.clone();
+                    let reseed = reseed.clone();
                     move |_: &TriggerUndo, _window, cx: &mut App| {
                         let async_cx = cx.to_async();
                         share_ui::dispatch_undo(
@@ -1331,6 +1342,7 @@ impl Render for HolonApp {
                             share_ui.clone(),
                             window_handle,
                             journal.clone(),
+                            reseed.clone(),
                             &async_cx,
                         );
                         cx.stop_propagation();
@@ -1341,6 +1353,7 @@ impl Render for HolonApp {
                     let rt_handle = rt_handle.clone();
                     let share_ui = self.share_ui.clone();
                     let journal = journal.clone();
+                    let reseed = reseed.clone();
                     move |_: &TriggerRedo, _window, cx: &mut App| {
                         let async_cx = cx.to_async();
                         share_ui::dispatch_redo(
@@ -1349,6 +1362,7 @@ impl Render for HolonApp {
                             share_ui.clone(),
                             window_handle,
                             journal.clone(),
+                            reseed.clone(),
                             &async_cx,
                         );
                         cx.stop_propagation();
@@ -2350,6 +2364,11 @@ fn launch_holon_window_impl(
         let rt_for_undo = rt_handle.clone();
         let share_ui_for_undo = app_model.read(cx).share_ui.clone();
         let journal_for_undo = journal.clone();
+        let reseed_for_undo = app_model
+            .read(cx)
+            .engine
+            .ui_state()
+            .authority_reseed_handle();
         cx.on_action(move |_: &TriggerUndo, cx: &mut App| {
             let async_cx = cx.to_async();
             share_ui::dispatch_undo(
@@ -2358,6 +2377,7 @@ fn launch_holon_window_impl(
                 share_ui_for_undo.clone(),
                 wh,
                 journal_for_undo.clone(),
+                reseed_for_undo.clone(),
                 &async_cx,
             );
             cx.stop_propagation();
@@ -2366,6 +2386,11 @@ fn launch_holon_window_impl(
         let rt_for_redo = rt_handle.clone();
         let share_ui_for_redo = app_model.read(cx).share_ui.clone();
         let journal_for_redo = journal.clone();
+        let reseed_for_redo = app_model
+            .read(cx)
+            .engine
+            .ui_state()
+            .authority_reseed_handle();
         cx.on_action(move |_: &TriggerRedo, cx: &mut App| {
             let async_cx = cx.to_async();
             share_ui::dispatch_redo(
@@ -2374,6 +2399,7 @@ fn launch_holon_window_impl(
                 share_ui_for_redo.clone(),
                 wh,
                 journal_for_redo.clone(),
+                reseed_for_redo.clone(),
                 &async_cx,
             );
             cx.stop_propagation();

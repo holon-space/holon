@@ -883,12 +883,17 @@ fn dispatch_undo_redo(
     share_state: Entity<ShareUiState>,
     window_handle: AnyWindowHandle,
     journal: Arc<DispatchJournal>,
+    reseed: holon_frontend::reactive::AuthorityReseedHandle,
     async_cx: &AsyncApp,
 ) {
     // Undo/redo run `FrontendSession::undo` directly — they never reach
     // `dispatch_intent`, so without this the dispatch journal (and every
     // reply reading it) would report a working cmd+z as "nothing ran".
     let journal_seq = journal.record_window_action(if is_redo { "redo" } else { "undo" });
+    // Taken HERE, on the press, because the round trip below is a real DB call:
+    // the row that holds focus and the buffer state at resolution time are not
+    // the ones the replay acted on.
+    let reseed_gesture = reseed.capture();
     let (tx, rx) = futures::channel::oneshot::channel::<Result<holon_api::UndoOutcome, String>>();
     rt_handle.spawn(async move {
         let result = if is_redo {
@@ -902,6 +907,13 @@ fn dispatch_undo_redo(
     async_cx
         .spawn(async move |cx| {
             let outcome = rx.await;
+            // The replay rewrote the store under the row that held focus at the
+            // press. Its open editor is skipped by every convergence channel
+            // while focused, so without this its stale buffer survives — and the
+            // next keystroke commits it over the restored content.
+            if matches!(outcome, Ok(Ok(holon_api::UndoOutcome::Applied))) {
+                reseed_gesture.arm();
+            }
             let label = if is_redo { "redo" } else { "undo" };
             let disclosure = undo_disclosure(label, &outcome);
             match &disclosure {
@@ -943,6 +955,7 @@ pub fn dispatch_undo(
     share_state: Entity<ShareUiState>,
     window_handle: AnyWindowHandle,
     journal: Arc<DispatchJournal>,
+    reseed: holon_frontend::reactive::AuthorityReseedHandle,
     async_cx: &AsyncApp,
 ) {
     dispatch_undo_redo(
@@ -952,6 +965,7 @@ pub fn dispatch_undo(
         share_state,
         window_handle,
         journal,
+        reseed,
         async_cx,
     );
 }
@@ -962,6 +976,7 @@ pub fn dispatch_redo(
     share_state: Entity<ShareUiState>,
     window_handle: AnyWindowHandle,
     journal: Arc<DispatchJournal>,
+    reseed: holon_frontend::reactive::AuthorityReseedHandle,
     async_cx: &AsyncApp,
 ) {
     dispatch_undo_redo(
@@ -971,6 +986,7 @@ pub fn dispatch_redo(
         share_state,
         window_handle,
         journal,
+        reseed,
         async_cx,
     );
 }
