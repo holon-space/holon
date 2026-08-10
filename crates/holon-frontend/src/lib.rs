@@ -191,6 +191,7 @@ pub mod command_provider;
 pub mod config;
 pub mod creation_slot;
 pub mod echo;
+pub mod editor_source;
 pub mod editor_view_model;
 pub mod focus_path;
 pub mod geometry;

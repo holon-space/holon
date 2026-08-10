@@ -201,19 +201,20 @@ pub struct TestServices {
     /// click test assert WHICH operation a click chose (or that it chose none)
     /// — the stub's own `dispatch_intent` only logs.
     dispatched_intents: std::sync::Mutex<Vec<OperationIntent>>,
+    /// The query capability handed to every editor built from this fixture.
+    /// `None` installs an ungated [`DeclaresNothingQueryEngine`], so the
+    /// vocabulary resolves on the first poll.
+    query_engine: Option<Arc<dyn holon_api::QueryEngine>>,
     /// When set, `editable_text` hands this cell to every editor, so the
     /// fixture builds a CELL-ATTACHED (Loro/Full-arm) `EditorView` instead of
     /// the no-cell SqlOnly one. `None` keeps the historical behaviour.
     editable_cell: Option<holon_core::cell::Cell<String>>,
-    /// Makes `block.promote_task_keyword` answer `refused`, echoing the typed
-    /// text back exactly as the real compound's lossless-refusal path does.
-    /// Lets a fixture drive the refusal-recovery branch without a live engine.
-    pub refuse_promotions: std::sync::atomic::AtomicBool,
 }
 
 impl TestServices {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
+            query_engine: None,
             inner: holon_frontend::reactive::StubBuilderServices::new(),
             popup_results: std::sync::Mutex::new(Vec::new()),
             registry: Arc::new(BlockTreeRegistry::new()),
@@ -224,7 +225,6 @@ impl TestServices {
             focused: std::sync::Mutex::new(None),
             dispatched_intents: std::sync::Mutex::new(Vec::new()),
             editable_cell: None,
-            refuse_promotions: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -232,8 +232,19 @@ impl TestServices {
     /// CRDT owns content and the per-row DataRow content subscription is
     /// dropped. Editor code that differs between the arms (anything gated on
     /// `has_cell()`) is only reachable through this constructor.
+    /// Build a fixture whose editors resolve their vocabulary through `engine`
+    /// — the seam a test uses to hold the resolution window open.
+    pub fn with_query_engine(engine: Arc<dyn holon_api::QueryEngine>) -> Arc<Self> {
+        let mut this = Self::new();
+        Arc::get_mut(&mut this)
+            .expect("freshly built, uniquely owned")
+            .query_engine = Some(engine);
+        this
+    }
+
     pub fn with_editable_cell(cell: holon_core::cell::Cell<String>) -> Arc<Self> {
         Arc::new(Self {
+            query_engine: None,
             inner: holon_frontend::reactive::StubBuilderServices::new(),
             popup_results: std::sync::Mutex::new(Vec::new()),
             registry: Arc::new(BlockTreeRegistry::new()),
@@ -244,7 +255,6 @@ impl TestServices {
             focused: std::sync::Mutex::new(None),
             dispatched_intents: std::sync::Mutex::new(Vec::new()),
             editable_cell: Some(cell),
-            refuse_promotions: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -261,6 +271,7 @@ impl TestServices {
     /// `test_quiescent_runtime_handle`).
     pub fn with_registry_quiescent(registry: Arc<BlockTreeRegistry>) -> Arc<Self> {
         Arc::new(Self {
+            query_engine: None,
             inner: holon_frontend::reactive::StubBuilderServices::new(),
             popup_results: std::sync::Mutex::new(Vec::new()),
             registry,
@@ -271,7 +282,6 @@ impl TestServices {
             focused: std::sync::Mutex::new(None),
             dispatched_intents: std::sync::Mutex::new(Vec::new()),
             editable_cell: None,
-            refuse_promotions: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -280,6 +290,7 @@ impl TestServices {
     /// to produce deterministic items without touching a real SQL backend.
     pub fn with_popup_results(rows: Vec<holon_api::LinkCandidate>) -> Arc<Self> {
         Arc::new(Self {
+            query_engine: None,
             inner: holon_frontend::reactive::StubBuilderServices::new(),
             popup_results: std::sync::Mutex::new(rows),
             registry: Arc::new(BlockTreeRegistry::new()),
@@ -290,7 +301,6 @@ impl TestServices {
             focused: std::sync::Mutex::new(None),
             dispatched_intents: std::sync::Mutex::new(Vec::new()),
             editable_cell: None,
-            refuse_promotions: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -321,54 +331,25 @@ impl BuilderServices for TestServices {
     fn interpret(&self, expr: &RenderExpr, ctx: &FrontendRenderContext) -> ReactiveViewModel {
         self.inner.interpret(expr, ctx)
     }
-    /// Stands in for the `block.promote_task_keyword` compound: records the
-    /// intent, then answers with the SAME disclosure payload the real engine
-    /// builds — `promoted`, or `refused` echoing the typed text verbatim when
-    /// [`TestServices::refuse_promotions`] is set. Any other op is recorded and
-    /// answered with no payload.
+
+    fn query_engine(&self) -> Option<Arc<dyn holon_api::QueryEngine>> {
+        Some(
+            self.query_engine
+                .clone()
+                .unwrap_or_else(|| Arc::new(DeclaresNothingQueryEngine::open())),
+        )
+    }
+    /// Records the intent and answers with no payload — every op the editable
+    /// surface dispatches is a plain `set_field`, whose result the adapter does
+    /// not read.
     fn dispatch_intent_awaiting_result(
         &self,
         intent: OperationIntent,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Option<holon_api::Value>>> + Send + 'static>,
     > {
-        self.dispatched_intents.lock().unwrap().push(intent.clone());
-        if intent.op_name != "promote_task_keyword" {
-            return Box::pin(std::future::ready(Ok(None)));
-        }
-        let typed = intent
-            .params
-            .get("typed")
-            .and_then(|v| v.as_string())
-            .unwrap_or_default()
-            .to_string();
-        let refused = self
-            .refuse_promotions
-            .load(std::sync::atomic::Ordering::SeqCst);
-        let mut payload = std::collections::HashMap::new();
-        if refused {
-            payload.insert(
-                "outcome".to_string(),
-                holon_api::Value::String("refused".into()),
-            );
-            payload.insert(
-                "reason".to_string(),
-                holon_api::Value::String("already_tasked".into()),
-            );
-            payload.insert("content".to_string(), holon_api::Value::String(typed));
-        } else {
-            payload.insert(
-                "outcome".to_string(),
-                holon_api::Value::String("promoted".into()),
-            );
-            payload.insert(
-                "keyword".to_string(),
-                holon_api::Value::String("TODO".into()),
-            );
-        }
-        Box::pin(std::future::ready(Ok(Some(holon_api::Value::Object(
-            payload,
-        )))))
+        self.dispatched_intents.lock().unwrap().push(intent);
+        Box::pin(std::future::ready(Ok(None)))
     }
 
     /// Hands out the fixture's cell when one was configured
@@ -1217,3 +1198,81 @@ impl Render for ScrollableListView {
 // See the doc block at the top of `tests/layout_scroll.rs` for the
 // current hypothesis about the columns bug and the recommended fix
 // site (`builders/columns.rs` around line 118).
+
+/// A `QueryEngine` that answers only the two reads the editable surface's
+/// SOURCE PROJECTION needs, and answers them honestly: this fixture's document
+/// declares no `#+TODO:` line, so `block_todo_keywords` returns `None` and the
+/// parser's defaults ARE its vocabulary.
+///
+/// Without a query capability at all, an editor cannot RESOLVE a vocabulary and
+/// therefore does not classify its surface (`Surface::Pending`) — correct in
+/// production, but it would make every projection rung here vacuous.
+pub struct DeclaresNothingQueryEngine {
+    /// When present, `block_todo_keywords` AWAITS this before answering — the
+    /// vocabulary-resolution window, held open under the test's control instead
+    /// of raced. `None` answers immediately.
+    gate: std::sync::Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
+}
+
+impl DeclaresNothingQueryEngine {
+    /// Answers immediately: the window is closed before anything can observe
+    /// it.
+    pub fn open() -> Self {
+        Self {
+            gate: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Holds the vocabulary read open until the returned sender fires, so a
+    /// test can assert what the editor does WHILE the window is open and
+    /// then again after it closes.
+    pub fn gated() -> (Self, futures::channel::oneshot::Sender<()>) {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        (
+            Self {
+                gate: std::sync::Mutex::new(Some(rx)),
+            },
+            tx,
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl holon_api::QueryEngine for DeclaresNothingQueryEngine {
+    async fn lookup_block_path(&self, _: &holon_api::EntityUri) -> Result<String> {
+        Ok(String::new())
+    }
+
+    async fn watch_query(
+        &self,
+        _query: &str,
+        _language: holon_api::QueryLanguage,
+        _params: std::collections::HashMap<String, holon_api::Value>,
+        _context: Option<holon_api::QueryContext>,
+    ) -> Result<holon_api::EnrichedChangeStream> {
+        anyhow::bail!("DeclaresNothingQueryEngine does not watch queries")
+    }
+
+    async fn search_link_candidates(&self, _: &str) -> Result<Vec<holon_api::LinkCandidate>> {
+        Ok(Vec::new())
+    }
+
+    async fn block_content_by_id(&self, _: &holon_api::EntityUri) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    async fn block_task_state_by_id(&self, _: &holon_api::EntityUri) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    async fn block_todo_keywords(
+        &self,
+        _: &holon_api::EntityUri,
+    ) -> Result<Option<Vec<holon_api::TaskState>>> {
+        let gate = self.gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            let _ = gate.await;
+        }
+        Ok(None)
+    }
+}

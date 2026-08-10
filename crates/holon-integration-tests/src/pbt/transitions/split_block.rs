@@ -269,10 +269,12 @@ pub fn split_block_apply_to_ref<
     // position-0 split that block is `block_id` itself — the id follows the
     // text. Mirror that so subsequent transitions and post-step invariants see
     // the right focused block.
-    let new_content = state
-        .block_content(&focus_target)
-        .unwrap_or_default()
-        .to_string();
+    let new_content = state.editor_surface_text(&focus_target);
+    // Offset 0 is the start of the CONTENT, which on a tasked block sits after
+    // the keyword the surface shows (task #93).
+    let caret = new_content
+        .len()
+        .saturating_sub(state.block_content(&focus_target).map_or(0, str::len));
     state.set_focus(CapRegion::Main, focus_target.clone(), CapCursor::default());
     // That focus move also makes the new block the ACTIVE editor at
     // caret 0 — not just the navigation focus. A subsequent `PressKey(Enter)`
@@ -281,7 +283,7 @@ pub fn split_block_apply_to_ref<
     // stale, so PressKey(Enter) re-splits the old target and its content
     // diverges from prod (which left that block untouched) — the
     // settled-consistent `inv-blocks-match-ref` content divergence.
-    state.open_active_editor(focus_target, new_content, 0);
+    state.open_active_editor(focus_target, new_content, caret);
 }
 
 // ── E2E trait impls (delegate to _cap fns) ────────────────────────

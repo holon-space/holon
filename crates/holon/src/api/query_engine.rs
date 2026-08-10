@@ -245,6 +245,36 @@ impl QueryEngine for BackendEngine {
                 .map(str::to_string)
         }))
     }
+
+    async fn block_editor_source_by_id(
+        &self,
+        id: &EntityUri,
+    ) -> Result<(Option<String>, Option<String>)> {
+        use crate::storage::BLOCK_WRITE_TABLE;
+        let escaped = id.to_string().replace('\'', "''");
+        let sql = format!(
+            "SELECT content, json_extract(properties, '$.task_state') AS task_state FROM \
+             {BLOCK_WRITE_TABLE} WHERE id = '{escaped}'"
+        );
+        let rows = BackendEngine::execute_query(self, sql, HashMap::new(), None).await?;
+        let Some(row) = rows.into_iter().next() else {
+            return Ok((None, None));
+        };
+        let field = |key: &str| row.get(key).and_then(|v| v.as_string()).map(str::to_string);
+        Ok((field("content"), field("task_state")))
+    }
+
+    async fn block_todo_keywords(
+        &self,
+        id: &EntityUri,
+    ) -> Result<Option<Vec<holon_api::TaskState>>> {
+        crate::api::task_vocabulary_source::SqlTaskVocabularySource::new(
+            self.db_handle().clone(),
+            crate::storage::BLOCK_WRITE_TABLE,
+        )
+        .declared_keywords(id.as_str())
+        .await
+    }
 }
 
 /// Parse `(id, label)` search rows into typed [`LinkCandidate`]s, failing loud

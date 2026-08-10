@@ -111,6 +111,17 @@ pub use template::TEMPLATE_MARKER_PROPERTY;
 pub use template::TEMPLATE_VARS_PROPERTY;
 pub use ui_watcher::UiWatcher;
 
+/// The `set_field` FIELD whose value is a block's full vault source rather than
+/// one column: the engine parses it and writes `content` and `task_state`
+/// together, clearing the task state when the source carries no keyword.
+///
+/// It lives here, not in the engine, because it is a CONTRACT between the
+/// editable surface (which shows a source projection, `TODO milk`) and the
+/// store (which re-derives both columns from it). `set_field("content")`
+/// deliberately means something else: one column, and never a task-state
+/// change.
+pub const SOURCE_TEXT_FIELD: &str = "source_text";
+
 /// Fixed root layout block ID — must match `:ID:` property on the root heading
 /// in index.org. Stored with the `block:` EntityUri scheme prefix.
 pub const ROOT_LAYOUT_BLOCK_ID: &str = "block:root-layout";

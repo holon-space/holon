@@ -778,19 +778,31 @@ impl ReferenceState {
         };
         let block_id = editor.block_id.clone();
         let in_memory = editor.in_memory_content.clone();
-        let Some(block) = self.domain.block_state.blocks.get_mut(&block_id) else {
+        if !self.domain.block_state.blocks.contains_key(&block_id) {
             return false;
+        }
+        // The buffer is the block's SOURCE PROJECTION, so the commit routes
+        // exactly as prod's editor routes it: the source channel re-derives
+        // content AND task state, the content channel writes one column.
+        let id = super::ref_caps::cap_id(&block_id);
+        let surface = {
+            use holon_pbt_core::capabilities::RefBlockTreeMut;
+            self.editor_surface_text(&id)
         };
-        let (normalized, marks) =
-            super::types::normalize_content_for_org_roundtrip(&in_memory, block.content_type);
-        if block.content == normalized && block.marks == marks {
+        if surface == in_memory {
             if let Some(e) = self.ui.tab.active_editor.as_mut() {
                 e.dirty = false;
             }
             return false;
         }
-        block.content = normalized;
-        block.marks = marks;
+        {
+            use holon_pbt_core::capabilities::RefBlockTreeMut;
+            if holon_org_format::source_channel_commit(&surface, &in_memory) {
+                self.commit_editor_source(&id, &in_memory);
+            } else {
+                self.set_block_content(&id, &in_memory);
+            }
+        }
         if let Some(e) = self.ui.tab.active_editor.as_mut() {
             e.dirty = false;
         }
@@ -843,8 +855,14 @@ impl ReferenceState {
         let Some(block) = self.domain.block_state.blocks.get(block_id) else {
             return;
         };
-        let new_content = block.content.clone();
         let content_type = block.content_type;
+        // A clean editor re-seeds from the AUTHORITY AS THE SURFACE SHOWS IT —
+        // vault syntax — because that is what prod's convergence targets.
+        let new_content = {
+            use holon_pbt_core::capabilities::RefBlockTreeMut;
+            let id = super::ref_caps::cap_id(block_id);
+            self.editor_surface_text(&id)
+        };
         if let Some(editor) = self.ui.tab.active_editor.as_mut()
             && &editor.block_id == block_id
             && !editor.dirty
@@ -869,6 +887,11 @@ impl ReferenceState {
             let is_own_trailing_ws_echo =
                 canonical == new_content && editor.in_memory_content != new_content;
             if !is_own_trailing_ws_echo {
+                // A converge can SHORTEN the surface (the store canonicalizes
+                // `TODO  milk` into the task `milk`), so the caret is clamped
+                // onto it exactly as prod's `preserved_caret` clamps.
+                editor.cursor_byte =
+                    holon_frontend::editor_caret::clamp_boundary(&new_content, editor.cursor_byte);
                 editor.in_memory_content = new_content;
             }
         }

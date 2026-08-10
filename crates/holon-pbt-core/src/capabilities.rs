@@ -309,14 +309,34 @@ pub trait RefBlockTreeMut: RefBlockTree {
         holon_org_format::TaskKeywordVocabulary::default()
     }
 
-    /// Apply a live task-keyword promotion: `id`'s content becomes `stripped`
-    /// and its task state becomes `keyword`, as ONE authoring step.
+    /// What an editor OPENED on `id` shows: the block's vault syntax
+    /// (`TODO milk`) for the task-keyword facet, its stored content otherwise.
     ///
-    /// Returns `false` for a reference that does not model task state, so the
-    /// caller leaves the text alone rather than stripping a keyword into
-    /// nowhere — the degradation is a return value, not a silent no-op.
-    fn promote_block_task_keyword(&mut self, _: &EntityUri, _: &str, _: &str) -> bool {
-        false
+    /// The editable surface is a projection, not the content column, so every
+    /// modelled editor seed reads it here. A reference that does not model task
+    /// state answers with the content, which is exactly right for it.
+    fn editor_surface_text(&self, id: &EntityUri) -> String {
+        self.block_content(id).unwrap_or_default().to_string()
+    }
+
+    /// Commit an editor buffer through the SOURCE channel: parse `source` under
+    /// the block's own vocabulary and land `content` AND `task_state` from it,
+    /// clearing the task state when the source carries no keyword.
+    ///
+    /// This is the STORE's rule, not the editor's — the model has no separate
+    /// promotion step, which is the whole point of the source projection.
+    /// Defaults to a plain content write for a reference that does not model
+    /// task state.
+    fn commit_editor_source(&mut self, id: &EntityUri, source: &str) {
+        self.set_block_content(id, source);
+    }
+
+    /// Re-seed an idle editor open on `id` from the authority as the surface
+    /// shows it, keeping the one divergence prod's echo discriminator
+    /// recognises as its own write (trailing whitespace). No-op for a reference
+    /// that models no editor.
+    fn refresh_clean_editor_surface(&mut self, id: &EntityUri) {
+        let _ = id;
     }
 }
 
@@ -2792,13 +2812,25 @@ where
         (Some(id), Some(t)) => (id, t),
         _ => return false,
     };
-    let current = state.block_content(&block_id).map(|s| s.to_owned());
-    if current.as_deref() == Some(&text) {
+    // The editor buffer is the block's SOURCE PROJECTION, so "unchanged" is
+    // measured against that surface, not against the content column it is
+    // derived from.
+    let surface = state.editor_surface_text(&block_id);
+    if surface == text {
         state.mark_active_editor_committed();
         return false;
     }
-    state.set_block_content(&block_id, &text);
+    if holon_org_format::source_channel_commit(&surface, &text) {
+        state.commit_editor_source(&block_id, &text);
+    } else {
+        state.set_block_content(&block_id, &text);
+    }
     state.mark_active_editor_committed();
+    // The store canonicalizes what it stored (`TODO  milk` is the task `milk`),
+    // and the editor converges onto that canonical surface — except for the one
+    // shape its echo discriminator recognises as its own (trailing whitespace).
+    // The reference applies the SAME discriminator.
+    state.refresh_clean_editor_surface(&block_id);
     true
 }
 

@@ -42,130 +42,6 @@ use crate::reactive::BuilderServices;
 use crate::view_event_handler::HandleResult;
 use crate::view_event_handler::ViewEventHandler;
 
-/// The VM kept a buffer OTHER than the text the caller handed it: a live
-/// task-keyword promotion stripped `stripped_prefix` bytes off the front, so
-/// the visible field and its caret must follow the VM, not the keystroke.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BufferRewrite {
-    /// The VM's new authoritative buffer — what the field must display.
-    pub text: String,
-    /// Bytes removed from the FRONT. The caller moves its caret back by this
-    /// much (saturating at 0); every offset in the field shifts by it.
-    pub stripped_prefix: usize,
-    /// What the keystroke actually produced, keyword and all. Kept so a caller
-    /// that never learns the engine's verdict (a failed dispatch) can still put
-    /// the user's text back.
-    pub typed: String,
-}
-
-/// What one local (user-typed) edit produced: the intent to dispatch, and —
-/// when the VM did not adopt the typed text verbatim — the rewrite the caller
-/// must apply to the visible field.
-///
-/// A present `rewrite` marks a PROMOTING keystroke, and those are the ones the
-/// caller must dispatch with
-/// [`crate::reactive::BuilderServices::dispatch_intent_awaiting_result`]:
-/// the strip is optimistic, so its refusal has to come back. Ordinary content
-/// commits stay fire-and-forget.
-#[derive(Debug, Clone, Default)]
-pub struct LocalEdit {
-    pub intent: Option<OperationIntent>,
-    pub rewrite: Option<BufferRewrite>,
-}
-
-impl LocalEdit {
-    fn intent(intent: OperationIntent) -> Self {
-        Self {
-            intent: Some(intent),
-            rewrite: None,
-        }
-    }
-}
-
-/// What the `block.promote_task_keyword` compound decided, parsed from its
-/// disclosure payload at the boundary.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PromotionOutcome {
-    Promoted,
-    /// The engine's guard declined. `content` is the text it committed
-    /// VERBATIM, and putting that back on screen is the whole point of
-    /// awaiting the payload.
-    Refused {
-        content: String,
-        reason: String,
-    },
-}
-
-impl PromotionOutcome {
-    /// Parse the compound's payload. Fails loud on a shape it does not
-    /// recognise: a caller that read "not refused" out of a payload it could
-    /// not understand would keep an optimistically stripped buffer forever.
-    pub fn parse(payload: Option<Value>) -> Result<Self> {
-        let Some(Value::Object(map)) = payload else {
-            return Err(anyhow!(
-                "promote_task_keyword returned no disclosure payload; the editor \
-                 cannot tell an accepted promotion from a refused one"
-            ));
-        };
-        let field = |key: &str| map.get(key).and_then(|v| v.as_string()).map(str::to_string);
-        match field("outcome").as_deref() {
-            Some("promoted") => Ok(Self::Promoted),
-            Some("refused") => Ok(Self::Refused {
-                content: field("content").ok_or_else(|| {
-                    anyhow!("promote_task_keyword refusal carries no `content` to restore")
-                })?,
-                reason: field("reason").unwrap_or_else(|| "unknown".to_string()),
-            }),
-            other => Err(anyhow!(
-                "promote_task_keyword returned an unknown outcome {other:?}"
-            )),
-        }
-    }
-}
-
-/// What the store holds when a promotion did not stand — the difference
-/// decides whether the restore also has to write.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PromotionResidue {
-    /// The engine REFUSED and committed this text verbatim. Only a keystroke
-    /// that raced the refusal makes a further commit necessary.
-    EngineStored(String),
-    /// The dispatch produced no verdict (it failed), so nothing was written:
-    /// the restored text must be committed by us or the keystroke is lost.
-    /// An `Err` arriving AFTER the engine stored a successful promotion also
-    /// lands here and re-commits the keyword onto the already-tasked block —
-    /// duplication over loss, deliberately.
-    NothingStored(String),
-}
-
-impl PromotionResidue {
-    fn text(&self) -> &str {
-        match self {
-            Self::EngineStored(t) | Self::NothingStored(t) => t,
-        }
-    }
-
-    fn needs_commit(&self, suffix_empty: bool) -> bool {
-        match self {
-            Self::EngineStored(_) => !suffix_empty,
-            Self::NothingStored(_) => true,
-        }
-    }
-}
-
-/// How to put the visible field back after a refused promotion.
-#[derive(Debug, Clone)]
-pub struct PromotionRestore {
-    /// The text the field must show again — the engine's verbatim commit, plus
-    /// anything typed after the optimistic strip.
-    pub text: String,
-    /// A content commit the caller must dispatch, present ONLY when keystrokes
-    /// raced the refusal and made the restored text differ from what the engine
-    /// stored. `None` on the common path: the engine's own verbatim commit
-    /// already IS the restored text.
-    pub intent: Option<OperationIntent>,
-}
-
 /// Actions the frontend should execute after calling EditorViewModel methods.
 ///
 /// The controller decides *what* to do; the frontend decides *how* to do it
@@ -321,24 +197,26 @@ pub struct EditorViewModel {
     /// frontend that births blocks from creation affordances. `None` for
     /// headless/unit editors, which have no reaper to race.
     ephemeral_newborns: Option<Arc<crate::creation_slot::EphemeralNewborns>>,
-}
-
-/// The block's task keyword as of THIS keystroke, supplied by the caller.
-///
-/// The view model deliberately does not remember it. Any non-editor write —
-/// the task-toggle widget, a peer, an agent — changes `task_state` under an
-/// open editor, and a remembered copy would be stale exactly when the guard
-/// consults it. Making the value an argument makes the stale case
-/// unrepresentable.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TaskKeywordAtKeystroke {
-    /// The caller read the authority: the block carries this keyword (or none).
-    Read(Option<String>),
-    /// The caller read nothing, which [`EditorViewModel::attempts_promotion`]
-    /// told it was fine. Reaching the promotion guard with this is a caller
-    /// bug; the keystroke then commits as ordinary content — never lost, and
-    /// reported at WARN.
-    Unread,
+    /// The owning document's `#+TODO:` vocabulary, read once per focus. It
+    /// governs what the editable surface SHOWS (the source projection and its
+    /// refusals) and, through [`Self::surface`], which channel its commits
+    /// take.
+    ///
+    /// `None` until the read returns — deliberately NOT the parser's defaults.
+    /// See [`crate::editor_source::Surface::Pending`]: the defaults declare
+    /// `TODO`, so a fabricated vocabulary here silently loses task state.
+    vocabulary: Option<holon_org_format::TaskKeywordVocabulary>,
+    /// What this editor's buffer MEANS, decided at the seed under the
+    /// vocabulary above. The commit router reads it rather than re-deriving:
+    /// the cheap shape rule it would otherwise use is vocabulary-free, and a
+    /// refused buffer whose content merely starts with an uppercase token would
+    /// be admitted to the source channel and lose its task state there.
+    surface: crate::editor_source::Surface,
+    /// Bytes the surface prepends to the content column — the task keyword and
+    /// its separating space, `0` whenever the two coincide. Recorded at the
+    /// seed so an offset arriving in CONTENT coordinates (a structural op's
+    /// `cursor_offset`) can be carried into the buffer that consumes it.
+    surface_prefix: usize,
 }
 
 impl EditorViewModel {
@@ -359,29 +237,10 @@ impl EditorViewModel {
             last_local_seq: holon_api::write_seq::WriteSeq::ZERO.get(),
             pending_directive: None,
             ephemeral_newborns: None,
+            vocabulary: None,
+            surface: crate::editor_source::Surface::Pending,
+            surface_prefix: 0,
         }
-    }
-
-    /// Would this keystroke ATTEMPT a live task-keyword promotion? Pure, cheap
-    /// and authority-free: it runs only the two guards that need no read (the
-    /// typed text is candidate-keyword-headed, the prior buffer was not).
-    ///
-    /// This is the caller's read gate. `true` obliges it to read the block's
-    /// CURRENT task keyword and pass it to [`Self::apply_local_edit`]; `false`
-    /// means [`TaskKeywordAtKeystroke::Unread`] is correct and no read is owed.
-    ///
-    /// The gate is deliberately vocabulary-FREE and therefore
-    /// OVER-APPROXIMATING: which words are keywords is the owning document's
-    /// `#+TODO:` line to say, and consulting it here would put a read on every
-    /// keystroke. It admits every ASCII-uppercase leading token (see
-    /// [`holon_org_format::candidate_keyword_headed`]) — a superset of every
-    /// such vocabulary, so it never withholds a promotion the document would
-    /// make. The extra admissions cost one authority read and one refusal that
-    /// commits the typed text verbatim.
-    pub fn attempts_promotion(&self, new_text: &str) -> bool {
-        new_text != self.buffer
-            && self.handler.context_id().is_some()
-            && holon_org_format::candidate_promotion(&self.buffer, None, new_text).is_some()
     }
 
     /// Wire the reaper's registry so the first non-empty keystroke can retire
@@ -515,26 +374,72 @@ impl EditorViewModel {
         self.handler.set_baseline(text.to_string());
     }
 
+    /// The vault syntax this block's stored state shows in the editable
+    /// surface, or its stored content with the refusal disclosed. See
+    /// [`crate::editor_source::project_or_disclose`]; the vocabulary is the one
+    /// this editor was seeded with on focus.
+    pub fn project_authority(&mut self, content: &str, task_state: Option<&str>) -> String {
+        let Some(vocabulary) = self.vocabulary.as_ref() else {
+            // UNRESOLVED, not "declares nothing". The surface stays the content
+            // column and the router stays on the safe channel until the real
+            // vocabulary arrives and this runs again.
+            self.surface = crate::editor_source::Surface::Pending;
+            self.surface_prefix = 0;
+            return content.to_string();
+        };
+        let seed = crate::editor_source::project_or_disclose(
+            self.handler.context_id().unwrap_or("<unmounted>"),
+            content,
+            task_state,
+            vocabulary,
+        );
+        self.surface = seed.surface;
+        self.surface_prefix = seed.text.len().saturating_sub(content.len());
+        seed.text
+    }
+
+    /// Carry an offset expressed in CONTENT coordinates into the SURFACE the
+    /// editor shows. Structural ops report their caret that way (`join_block`
+    /// returns the merge boundary into the target's content, `split_block`
+    /// returns 0), and the buffer that consumes the seed is the projection — so
+    /// without this the caret lands inside the keyword on any tasked target and
+    /// the next keystroke corrupts it (task #93).
+    pub fn content_offset_to_surface(&self, offset: usize) -> usize {
+        offset + self.surface_prefix
+    }
+
+    /// What this editor's buffer means — see [`crate::editor_source::Surface`].
+    pub fn surface(&self) -> crate::editor_source::Surface {
+        self.surface
+    }
+
+    /// Adopt the owning document's `#+TODO:` vocabulary for this editing
+    /// session. Called once per focus, before the first authority seed — it
+    /// decides only what the surface may SHOW; the commit re-resolves the
+    /// vocabulary at the store, so a stale copy here can never write a wrong
+    /// task state.
+    pub fn set_task_vocabulary(&mut self, vocabulary: holon_org_format::TaskKeywordVocabulary) {
+        self.vocabulary = Some(vocabulary);
+    }
+
     /// Apply a local (user-typed) edit to the authoritative buffer — the single
     /// keystroke sink. Mutates `buffer` to `new_text` and returns the
     /// persistence intent the frontend must dispatch (its sole commit funnel):
     ///
-    /// - **Cell mode** (Loro attached): computes the delta from the previous
-    ///   buffer and applies it through the CRDT (`apply_local`); returns
-    ///   `Ok(None)` — the Loro projection is the content writer.
+    /// - **Source-channel commit** (either mode): the buffer is — or has just
+    ///   stopped being — vault syntax for a task, so the whole raw text goes to
+    ///   `set_field("source_text")` and the STORE re-derives `content` and
+    ///   `task_state` from it. In cell mode the CRDT delta is suppressed for
+    ///   exactly these writes: the cell holds the content column, which is not
+    ///   what the buffer says. See [`holon_org_format::source_channel_commit`].
+    /// - **Cell mode** (Loro attached), ordinary text: computes the delta from
+    ///   the previous buffer and applies it through the CRDT (`apply_local`);
+    ///   returns `Ok(None)` — the Loro projection is the content writer.
     /// - **No-cell mode** (SqlOnly), real block: stamps a monotonic
     ///   `write_seq`, records it as `last_local_seq`, and returns
     ///   `Ok(Some(set_field intent))` so the typed text lands in the backend
     ///   before the next transition.
-    /// - **Promoting keystroke** (either mode): see
-    ///   [`Self::promote_task_keyword`] — the VM suppresses its own commit and
-    ///   returns the `promote_task_keyword` intent plus the [`BufferRewrite`]
-    ///   the caller applies to the visible field.
-    /// - **Unchanged text**: returns an empty [`LocalEdit`].
-    ///
-    /// `task_keyword` is the block's task state AS OF THIS KEYSTROKE. Ask
-    /// [`Self::attempts_promotion`] first: it is the only case that reads the
-    /// value, and the only case that obliges the caller to fetch it.
+    /// - **Unchanged text**: returns `Ok(None)`.
     ///
     /// This is also where an empty-born block stops being reapable: the first
     /// non-empty text retires it from
@@ -546,20 +451,46 @@ impl EditorViewModel {
     /// RAW-seam hook: the `set_field` intent path is the single point where the
     /// dispatcher re-extracts inline marks on commit; keep it the sole commit
     /// funnel so raw→stripped extraction has exactly one home.
-    pub fn apply_local_edit(
-        &mut self,
-        new_text: &str,
-        task_keyword: TaskKeywordAtKeystroke,
-    ) -> Result<LocalEdit> {
+    /// Which channel this buffer's commit takes. The judgment is the SEED's,
+    /// not the keystroke's, because only the seed saw the document's
+    /// vocabulary:
+    ///
+    /// * `Refused` — the surface could not show the block's keyword, so it must
+    ///   not be able to REMOVE it. Pinned to the content channel for the whole
+    ///   session; the store never re-derives a task state from that channel.
+    /// * `Projected` — the buffer IS vault syntax, so every commit re-derives
+    ///   both columns, deletion of the keyword included.
+    /// * `Untasked` — nothing to lose, so the cheap vocabulary-free shape rule
+    ///   is enough: it decides only whether the STORE is asked to parse, and
+    ///   the store's parse is itself vocabulary-aware and writes no task state
+    ///   for text that names none. Reachable only AFTER a real vocabulary
+    ///   classified the seed, so the router is never less vocabulary-aware than
+    ///   the parse it feeds.
+    /// * `Pending` — the vocabulary is not known, so nothing has been judged at
+    ///   all. Same safe channel as `Refused`.
+    fn commits_as_source(&self, new_text: &str) -> bool {
+        match self.surface {
+            // Unclassified and refused both mean "this surface may not change a
+            // task state", for different reasons that both make the source
+            // channel wrong.
+            crate::editor_source::Surface::Pending | crate::editor_source::Surface::Refused => {
+                false
+            }
+            crate::editor_source::Surface::Projected => true,
+            crate::editor_source::Surface::Untasked => {
+                holon_org_format::source_channel_commit(&self.buffer, new_text)
+            }
+        }
+    }
+
+    pub fn apply_local_edit(&mut self, new_text: &str) -> Result<Option<OperationIntent>> {
         if new_text == self.buffer {
-            return Ok(LocalEdit::default());
+            return Ok(None);
         }
         self.retire_from_the_reaper(new_text);
         self.note_local_edit();
-        if let Some(promotion) = self.promote_task_keyword(new_text, task_keyword) {
-            return Ok(promotion);
-        }
-        if self.cell.is_some() {
+        let source_channel = self.commits_as_source(new_text);
+        if self.cell.is_some() && !source_channel {
             // Cell mode: apply the delta through the CRDT unless the cell
             // already holds this text (our own echo).
             if self.current_text().as_deref() != Some(new_text) {
@@ -568,150 +499,33 @@ impl EditorViewModel {
                 }
             }
             self.buffer = new_text.to_string();
-            return Ok(LocalEdit::default());
+            return Ok(None);
         }
-        // No cell (SqlOnly / no-Loro mode).
         let id = self.handler.context_id().map(str::to_string);
         self.buffer = new_text.to_string();
         let Some(id) = id else {
-            return Ok(LocalEdit::default());
+            return Ok(None);
         };
-        // Stamp a monotonic ordering token on this content write and record it
-        // as our last local sequence BEFORE the caller dispatches, so a fast
-        // CDC echo cannot race a not-yet-recorded seq.
+        // Stamp a monotonic ordering token on this write and record it as our
+        // last local sequence BEFORE the caller dispatches, so a fast CDC echo
+        // cannot race a not-yet-recorded seq.
         let seq = holon_api::write_seq::next();
         self.last_local_seq = seq.get();
+        let field = if source_channel {
+            holon_api::SOURCE_TEXT_FIELD
+        } else {
+            "content"
+        };
         let mut params = HashMap::new();
         params.insert("id".into(), Value::String(id));
-        params.insert("field".into(), Value::String("content".to_string()));
+        params.insert("field".into(), Value::String(field.to_string()));
         params.insert("value".into(), Value::String(new_text.to_string()));
         params.insert("write_seq".into(), Value::Integer(seq.get()));
-        Ok(LocalEdit::intent(OperationIntent::new(
+        Ok(Some(OperationIntent::new(
             "block".into(),
             "set_field".into(),
             params,
         )))
-    }
-
-    /// Live task-keyword promotion (task #64 HALF A): typing a leading `TODO `
-    /// into a block that was not keyword-headed is an authoring gesture, not
-    /// text — the block becomes a task and the keyword leaves the content.
-    ///
-    /// Runs BEFORE the cell/no-cell fork and, on a hit, is the whole keystroke:
-    /// the VM suppresses its own commit (no CRDT delta in Full mode, no
-    /// `set_field` in SqlOnly) so the `promote_task_keyword` compound is the
-    /// SOLE writer of both fields, through whichever provider is the CRUD
-    /// authority in that mode. The `write_seq` stamp is the ordinary content
-    /// stamp — the compound forwards it to the content constituent, so the
-    /// echo of a promoting keystroke is recognised like any other.
-    ///
-    /// Put the keyword back after the engine REFUSED the promotion and
-    /// committed `committed` (the typed text) verbatim.
-    ///
-    /// This is what makes the optimistic strip recoverable rather than
-    /// load-bearing. The trigger's guard read and the engine's guard are not
-    /// one transaction — nothing holds the block between them — so a
-    /// concurrent writer can always turn an accepted proposal into a refusal,
-    /// no matter how fresh the read was. Awaiting the refusal and undoing the
-    /// strip retires that whole class instead of narrowing it.
-    ///
-    /// `stripped` is what the strip left behind. Anything typed since sits
-    /// AFTER it, so re-inserting the prefix keeps those keystrokes too: the
-    /// user loses neither the keyword nor the characters that raced the
-    /// refusal. Returns `None` only when the buffer no longer starts with
-    /// `stripped` — an external converge landed here, and its text is the
-    /// authority, not ours.
-    ///
-    /// [`PromotionResidue`] says whether the store already holds the text; the
-    /// returned `intent` is present exactly when it does not.
-    pub fn restore_refused_promotion(
-        &mut self,
-        stripped: &str,
-        residue: &PromotionResidue,
-    ) -> Option<PromotionRestore> {
-        let suffix = self.buffer.strip_prefix(stripped)?.to_string();
-        let text = format!("{}{suffix}", residue.text());
-        self.buffer = text.clone();
-        self.note_local_edit();
-        let intent = residue
-            .needs_commit(suffix.is_empty())
-            .then(|| {
-                let id = self.handler.context_id()?.to_string();
-                let seq = holon_api::write_seq::next();
-                self.last_local_seq = seq.get();
-                let mut params = HashMap::new();
-                params.insert("id".into(), Value::String(id));
-                params.insert("field".into(), Value::String("content".to_string()));
-                params.insert("value".into(), Value::String(text.clone()));
-                params.insert("write_seq".into(), Value::Integer(seq.get()));
-                Some(OperationIntent::new(
-                    "block".into(),
-                    "set_field".into(),
-                    params,
-                ))
-            })
-            .flatten();
-        Some(PromotionRestore { text, intent })
-    }
-
-    /// PROPOSE A CANDIDATE, AND BE ABLE TO TAKE IT BACK. The trigger runs the
-    /// engine's guards on the block's task keyword AS THE CALLER JUST READ IT
-    /// plus the prior content and the typed text — but on the vocabulary-free
-    /// SHAPE rule, because only the owning document's `#+TODO:` line decides
-    /// membership and this view model has no document handle. The engine
-    /// re-runs the same guards against the real vocabulary and may refuse.
-    ///
-    /// That is why the caller must AWAIT this intent and hand a refusal to
-    /// [`Self::restore_refused_promotion`]: the un-strip is what makes an
-    /// over-approximated proposal harmless, and the difference is whether the
-    /// user's keyword survives.
-    fn promote_task_keyword(
-        &mut self,
-        new_text: &str,
-        task_keyword: TaskKeywordAtKeystroke,
-    ) -> Option<LocalEdit> {
-        let id = self.handler.context_id()?.to_string();
-        let keyword = match task_keyword {
-            TaskKeywordAtKeystroke::Read(keyword) => keyword,
-            TaskKeywordAtKeystroke::Unread => {
-                if self.attempts_promotion(new_text) {
-                    tracing::warn!(
-                        target: "editor.task_keyword_promotion",
-                        block = %id,
-                        "keystroke would promote but its caller read no task keyword; \
-                         committing as ordinary content (attempts_promotion was not consulted)"
-                    );
-                }
-                return None;
-            }
-        };
-        let prior_state = keyword.as_deref().map(holon_api::TaskState::from_keyword);
-        let promotion =
-            holon_org_format::candidate_promotion(&self.buffer, prior_state.as_ref(), new_text)?;
-        let stripped_prefix = promotion.consumed_prefix;
-        let seq = holon_api::write_seq::next();
-        self.last_local_seq = seq.get();
-        self.buffer = promotion.stripped.clone();
-        let mut params = HashMap::new();
-        params.insert("id".into(), Value::String(id));
-        params.insert("typed".into(), Value::String(new_text.to_string()));
-        params.insert(
-            "keyword".into(),
-            Value::String(promotion.keyword.keyword.clone()),
-        );
-        params.insert("write_seq".into(), Value::Integer(seq.get()));
-        Some(LocalEdit {
-            intent: Some(OperationIntent::new(
-                "block".into(),
-                "promote_task_keyword".into(),
-                params,
-            )),
-            rewrite: Some(BufferRewrite {
-                text: promotion.stripped,
-                stripped_prefix,
-                typed: new_text.to_string(),
-            }),
-        })
     }
 
     /// Decide how to react to a SqlOnly data-sync echo (`new_value` carrying
@@ -1651,8 +1465,7 @@ mod tests {
 
         let mut vm = block_vm("block:newborn-1");
         vm.set_ephemeral_newborns(newborns.clone());
-        vm.apply_local_edit("h", TaskKeywordAtKeystroke::Unread)
-            .expect("keystroke");
+        vm.apply_local_edit("h").expect("keystroke");
 
         assert!(
             !newborns.is_ephemeral(&id),
@@ -1670,10 +1483,8 @@ mod tests {
 
         let mut vm = block_vm("block:newborn-1");
         vm.set_ephemeral_newborns(newborns.clone());
-        vm.apply_local_edit("h", TaskKeywordAtKeystroke::Unread)
-            .expect("typed");
-        vm.apply_local_edit("", TaskKeywordAtKeystroke::Unread)
-            .expect("cleared");
+        vm.apply_local_edit("h").expect("typed");
+        vm.apply_local_edit("").expect("cleared");
 
         assert!(!newborns.is_ephemeral(&id));
     }
@@ -1764,8 +1575,7 @@ mod tests {
     fn data_sync_own_canonicalized_echo_adopts_baseline_without_directive() {
         let mut vm = test_controller();
         // Type a trailing space through the buffer sink; records a fresh seq.
-        vm.apply_local_edit("foo ", TaskKeywordAtKeystroke::Unread)
-            .unwrap();
+        vm.apply_local_edit("foo ").unwrap();
         let seq = vm.last_local_seq();
         assert!(
             vm.converge_from_data_sync("foo", Some(seq)).is_none(),
@@ -1774,210 +1584,372 @@ mod tests {
         assert_eq!(vm.buffer(), "foo ", "typed buffer kept as-is");
     }
 
-    /// Task #64: the keystroke that makes the buffer keyword-headed emits the
-    /// `promote_task_keyword` intent carrying the FULL typed text, strips the
-    /// keyword out of the VM's own buffer, and reports the prefix the caller
-    /// must subtract from its caret.
+    /// Arm (d): the editable surface IS the source projection, so the keystroke
+    /// that makes the buffer keyword-headed keeps the keyword ON SCREEN and
+    /// commits the whole raw text through the SOURCE channel. The store's parse
+    /// — not the editor — decides what that text means.
     #[test]
-    fn the_committing_space_promotes_and_strips() {
+    fn the_committing_space_commits_the_raw_source() {
         let mut vm = test_controller();
-        vm.set_buffer_from_authority("TODO", 0);
-        let edit = vm
-            .apply_local_edit("TODO milk", TaskKeywordAtKeystroke::Read(None))
-            .expect("keystroke");
-        let intent = edit.intent.expect("a promotion must dispatch the compound");
-        assert_eq!(intent.entity_name, "block");
-        assert_eq!(intent.op_name, "promote_task_keyword");
-        assert_eq!(intent.params["typed"], Value::String("TODO milk".into()));
-        assert_eq!(intent.params["keyword"], Value::String("TODO".into()));
-        assert_eq!(
-            intent.params["write_seq"],
-            Value::Integer(vm.last_local_seq()),
-            "the compound must carry the stamp the echo guard compares against"
-        );
-        let rewrite = edit.rewrite.expect("the buffer was rewritten");
-        assert_eq!(rewrite.text, "milk");
-        assert_eq!(rewrite.stripped_prefix, 5);
-        assert_eq!(vm.buffer(), "milk");
-    }
-
-    /// The promotion is one-shot: with the keyword already out of the buffer,
-    /// the next keystroke is an ordinary content commit.
-    #[test]
-    fn the_keystroke_after_a_promotion_is_an_ordinary_commit() {
-        let mut vm = test_controller();
-        vm.set_buffer_from_authority("TODO", 0);
-        vm.apply_local_edit("TODO milk", TaskKeywordAtKeystroke::Read(None))
-            .expect("promotes");
-        let edit = vm
-            .apply_local_edit("milkx", TaskKeywordAtKeystroke::Unread)
-            .expect("keystroke");
-        assert!(edit.rewrite.is_none(), "nothing left to strip");
-        let intent = edit.intent.expect("ordinary content commit");
+        // This document declares no `#+TODO:` line, so the parser's defaults ARE
+        // its vocabulary — stated explicitly, because an editor that has not
+        // resolved one classifies nothing (`Surface::Pending`).
+        vm.set_task_vocabulary(holon_org_format::TaskKeywordVocabulary::default());
+        let seed = vm.project_authority("TODO", Some("TODO"));
+        vm.set_buffer_from_authority(&seed, 0);
+        let intent = vm
+            .apply_local_edit("TODO ")
+            .expect("keystroke")
+            .expect("a source commit");
         assert_eq!(intent.op_name, "set_field");
-        assert_eq!(intent.params["value"], Value::String("milkx".into()));
-    }
-
-    /// The read gate: only a keyword-headed keystroke obliges the caller to
-    /// read the authority, so ordinary typing never pays for one.
-    #[test]
-    fn only_a_keyword_headed_keystroke_owes_an_authority_read() {
-        let mut vm = test_controller();
-        vm.set_buffer_from_authority("TODO", 0);
-
-        assert!(vm.attempts_promotion("TODO milk"));
-        assert!(!vm.attempts_promotion("TODOx"), "not keyword-headed");
-        assert!(!vm.attempts_promotion("TODO"), "unchanged text");
-
-        vm.set_buffer_from_authority("TODO list ideas", 0);
-        assert!(
-            !vm.attempts_promotion("TODO list ideasX"),
-            "prior buffer is already keyword-headed — the delta condition"
-        );
-    }
-
-    /// The staleness case the cached keyword got wrong: something else made
-    /// this block a task while the editor was open. The keyword is read at the
-    /// keystroke, so the guard sees it and the text is committed as-is.
-    #[test]
-    fn a_block_that_became_a_task_under_the_editor_is_not_promoted() {
-        let mut vm = test_controller();
-        vm.set_buffer_from_authority("TODO", 0);
-
-        let edit = vm
-            .apply_local_edit(
-                "TODO milk",
-                TaskKeywordAtKeystroke::Read(Some("TODO".to_string())),
-            )
-            .expect("keystroke");
-
-        assert!(
-            edit.rewrite.is_none(),
-            "nothing may be stripped: the block is already a task"
-        );
-        assert_eq!(edit.intent.expect("ordinary commit").op_name, "set_field");
-        assert_eq!(vm.buffer(), "TODO milk");
-    }
-
-    /// A refused promotion puts the keyword back. On the common path the
-    /// engine already stored exactly that text, so no further commit is owed.
-    #[test]
-    fn a_refused_promotion_restores_the_typed_text() {
-        let mut vm = test_controller();
-        vm.set_buffer_from_authority("TODO", 0);
-        let edit = vm
-            .apply_local_edit("TODO milk", TaskKeywordAtKeystroke::Read(None))
-            .expect("keystroke");
-        let rewrite = edit.rewrite.expect("promoting keystroke");
-        assert_eq!(vm.buffer(), "milk", "precondition: the strip happened");
-
-        let restore = vm
-            .restore_refused_promotion(
-                &rewrite.text,
-                &PromotionResidue::EngineStored("TODO milk".to_string()),
-            )
-            .expect("the buffer still starts with the stripped text");
-
-        assert_eq!(restore.text, "TODO milk");
-        assert_eq!(vm.buffer(), "TODO milk");
-        assert!(
-            restore.intent.is_none(),
-            "the engine's verbatim commit already IS the restored text"
-        );
-    }
-
-    /// Typing does not stop while the verdict is in flight. A keystroke that
-    /// landed after the strip sits AFTER the stripped text, so the restore
-    /// re-inserts the keyword and KEEPS it — and owes a commit, because the
-    /// engine's verbatim text is no longer what the user has.
-    #[test]
-    fn a_keystroke_racing_the_refusal_survives_it() {
-        let mut vm = test_controller();
-        vm.set_buffer_from_authority("TODO", 0);
-        let edit = vm
-            .apply_local_edit("TODO ", TaskKeywordAtKeystroke::Read(None))
-            .expect("keystroke");
-        let rewrite = edit.rewrite.expect("promoting keystroke");
-        // The verdict is still in flight; the user types on.
-        vm.apply_local_edit("z", TaskKeywordAtKeystroke::Unread)
-            .expect("racing keystroke");
-
-        let restore = vm
-            .restore_refused_promotion(
-                &rewrite.text,
-                &PromotionResidue::EngineStored("TODO ".to_string()),
-            )
-            .expect("restores");
-
         assert_eq!(
-            restore.text, "TODO z",
-            "the keyword AND the raced keystroke"
+            intent.params["field"],
+            Value::String(holon_api::SOURCE_TEXT_FIELD.into())
         );
-        let intent = restore
-            .intent
-            .expect("the engine stored `TODO `, not `TODO z`, so a commit is owed");
-        assert_eq!(intent.params["value"], Value::String("TODO z".into()));
-    }
-
-    /// A dispatch that never produced a verdict wrote nothing, so the restore
-    /// must commit the text itself — a keystroke is not lost to a failed op.
-    #[test]
-    fn a_promotion_that_never_answered_still_commits_the_typed_text() {
-        let mut vm = test_controller();
-        vm.set_buffer_from_authority("TODO", 0);
-        let edit = vm
-            .apply_local_edit("TODO milk", TaskKeywordAtKeystroke::Read(None))
-            .expect("keystroke");
-        let rewrite = edit.rewrite.expect("promoting keystroke");
-
-        let restore = vm
-            .restore_refused_promotion(
-                &rewrite.text,
-                &PromotionResidue::NothingStored(rewrite.typed.clone()),
-            )
-            .expect("restores");
-
-        assert_eq!(restore.text, "TODO milk");
+        assert_eq!(intent.params["value"], Value::String("TODO ".into()));
         assert_eq!(
-            restore
-                .intent
-                .expect("nothing was stored, so the restore must write")
-                .params["value"],
-            Value::String("TODO milk".into())
+            vm.buffer(),
+            "TODO ",
+            "the keyword stays in the editable surface — it is vault syntax, not a gesture"
         );
     }
 
-    /// A caller that skipped the read cannot promote by accident. Fail-safe,
-    /// not silent: the keystroke commits as ordinary content and the mistake
-    /// is logged.
+    /// DELETING the keyword is the demotion gesture, and it must reach the only
+    /// channel that can clear a task state. A buffer that merely STOPPED being
+    /// keyword-headed still commits as source.
     #[test]
-    fn an_unread_keyword_never_promotes() {
+    fn deleting_the_keyword_still_takes_the_source_channel() {
         let mut vm = test_controller();
-        vm.set_buffer_from_authority("TODO", 0);
-
-        let edit = vm
-            .apply_local_edit("TODO milk", TaskKeywordAtKeystroke::Unread)
-            .expect("keystroke");
-
-        assert!(edit.rewrite.is_none());
-        assert_eq!(edit.intent.expect("ordinary commit").op_name, "set_field");
-        assert_eq!(vm.buffer(), "TODO milk", "the keystroke is never lost");
+        vm.set_task_vocabulary(holon_org_format::TaskKeywordVocabulary::default());
+        let seed = vm.project_authority("milk", Some("TODO"));
+        assert_eq!(seed, "TODO milk");
+        vm.set_buffer_from_authority(&seed, 0);
+        let intent = vm
+            .apply_local_edit("milk")
+            .expect("keystroke")
+            .expect("a source commit");
+        assert_eq!(
+            intent.params["field"],
+            Value::String(holon_api::SOURCE_TEXT_FIELD.into()),
+            "a content write would leave the block a task with the keyword gone from view"
+        );
+        assert_eq!(intent.params["value"], Value::String("milk".into()));
     }
 
-    /// A block whose text merely starts with a keyword-shaped word keeps being
-    /// edited as text — the delta condition, not the content, decides.
+    /// Ordinary prose never pays for the source channel: it commits `content`,
+    /// which by contract never re-derives the task state (the #64 lock).
     #[test]
-    fn typing_on_an_already_keyword_headed_buffer_does_not_promote() {
+    fn ordinary_prose_commits_the_content_channel() {
         let mut vm = test_controller();
-        vm.set_buffer_from_authority("TODO list ideas", 0);
-        let edit = vm
-            .apply_local_edit("TODO list ideasX", TaskKeywordAtKeystroke::Read(None))
-            .expect("keystroke");
-        assert!(edit.rewrite.is_none());
+        vm.set_task_vocabulary(holon_org_format::TaskKeywordVocabulary::default());
+        let seed = vm.project_authority("buy", None);
+        vm.set_buffer_from_authority(&seed, 0);
+        let intent = vm
+            .apply_local_edit("buy milk")
+            .expect("keystroke")
+            .expect("a content commit");
+        assert_eq!(intent.params["field"], Value::String("content".into()));
+    }
+
+    /// The seed is the source projection, and a keyword the document does not
+    /// declare is REFUSED rather than shown: projecting it would read back as
+    /// prose and demote the task on the next commit.
+    #[test]
+    fn an_undeclared_keyword_is_not_projected_into_the_surface() {
+        let mut vm = test_controller();
+        vm.set_task_vocabulary(holon_org_format::TaskKeywordVocabulary::for_document(
+            &["NEXT".to_string()],
+            &["DONE".to_string()],
+        ));
         assert_eq!(
-            edit.intent.expect("ordinary commit").op_name,
-            "set_field",
-            "guard 3 keeps this a plain content edit"
+            vm.project_authority("milk", Some("TODO")),
+            "milk",
+            "an undeclared keyword must not reach the surface"
+        );
+        assert_eq!(
+            vm.project_authority("milk", Some("NEXT")),
+            "NEXT milk",
+            "a declared keyword projects to vault syntax"
+        );
+        assert_eq!(vm.project_authority("milk", None), "milk");
+    }
+
+    /// THE VOCABULARY WINDOW, encoded — and made DETERMINISTIC by construction
+    /// rather than by racing a DB round trip: "the vocabulary has not arrived"
+    /// is simply "nobody called `set_task_vocabulary` yet", which is exactly
+    /// the state a freshly mounted GPUI editor is in until its
+    /// page-ancestor read returns.
+    ///
+    /// Classifying under the parser's DEFAULT vocabulary in that window is a
+    /// fake-data bug: the defaults declare `TODO`, so a block the REAL
+    /// vocabulary would refuse gets projected and pinned to the source channel,
+    /// and the still-unclassified arm falls to the vocabulary-free shape rule.
+    /// Both demote silently on the next keystroke.
+    #[test]
+    fn an_unresolved_vocabulary_never_classifies_the_surface() {
+        // Arm A — a block the real vocabulary would REFUSE. Under the defaults
+        // it projects to `TODO ASAP call Bob` and routes source.
+        let mut vm = test_controller();
+        let seed = vm.project_authority("ASAP call Bob", Some("TODO"));
+        assert_eq!(
+            seed, "ASAP call Bob",
+            "an unresolved vocabulary must not FABRICATE vault syntax — the content \
+             column is the only thing known to be true here"
+        );
+        vm.set_buffer_from_authority(&seed, 0);
+        let intent = vm
+            .apply_local_edit("ASAP call Bob!")
+            .expect("keystroke")
+            .expect("a commit");
+        assert_eq!(
+            intent.params["field"],
+            Value::String("content".into()),
+            "arm A: a keystroke inside the vocabulary window must take the channel that \
+             cannot touch a task state"
+        );
+
+        // Arm B — an UNTASKED block whose text merely has keyword SHAPE. The
+        // shape rule is vocabulary-free, so it may not be consulted before the
+        // vocabulary that would adjudicate it has arrived.
+        let mut untasked = test_controller();
+        let seed = untasked.project_authority("call Bob", None);
+        untasked.set_buffer_from_authority(&seed, 0);
+        let intent = untasked
+            .apply_local_edit("TODO call Bob")
+            .expect("keystroke")
+            .expect("a commit");
+        assert_eq!(
+            intent.params["field"],
+            Value::String("content".into()),
+            "arm B: the router must not be less vocabulary-aware than the parse it feeds"
+        );
+    }
+
+    /// The window CLOSES: once the real vocabulary arrives and the surface is
+    /// re-projected, both arms classify and route as they should. Without this
+    /// the fix above could pass by pinning every editor to the content channel
+    /// forever, which would silently disable the whole feature.
+    #[test]
+    fn the_resolved_vocabulary_classifies_and_reopens_the_source_channel() {
+        let declared = holon_org_format::TaskKeywordVocabulary::for_document(
+            &["NEXT".to_string()],
+            &["DONE".to_string()],
+        );
+
+        // Refused stays on content — for the right reason now, not by accident.
+        let mut refused = test_controller();
+        refused.set_task_vocabulary(declared.clone());
+        let seed = refused.project_authority("ASAP call Bob", Some("TODO"));
+        refused.set_buffer_from_authority(&seed, 0);
+        assert_eq!(
+            refused
+                .apply_local_edit("ASAP call Bob!")
+                .unwrap()
+                .unwrap()
+                .params["field"],
+            Value::String("content".into())
+        );
+
+        // A DECLARED keyword projects and routes source.
+        let mut projected = test_controller();
+        projected.set_task_vocabulary(declared.clone());
+        let seed = projected.project_authority("call bank", Some("NEXT"));
+        assert_eq!(seed, "NEXT call bank");
+        projected.set_buffer_from_authority(&seed, 0);
+        assert_eq!(
+            projected
+                .apply_local_edit("NEXT call banks")
+                .unwrap()
+                .unwrap()
+                .params["field"],
+            Value::String(holon_api::SOURCE_TEXT_FIELD.into())
+        );
+
+        // And an untasked block can still be PROMOTED by typing, which is the
+        // feature this must not disable.
+        let mut untasked = test_controller();
+        untasked.set_task_vocabulary(declared);
+        let seed = untasked.project_authority("call bank", None);
+        untasked.set_buffer_from_authority(&seed, 0);
+        assert_eq!(
+            untasked
+                .apply_local_edit("NEXT call bank")
+                .unwrap()
+                .unwrap()
+                .params["field"],
+            Value::String(holon_api::SOURCE_TEXT_FIELD.into())
+        );
+    }
+
+    /// TASK #93. A structural op reports its caret in CONTENT coordinates
+    /// (`join_block` returns the merge boundary, `split_block` returns 0), but
+    /// the buffer that consumes the seed is the SURFACE. On a merge target that
+    /// is a task the seed therefore lands `keyword.len() + 1` bytes short —
+    /// INSIDE the keyword — and the next keystroke corrupts it (`TODOX
+    /// milkbread`), which the store then reads as naming no keyword at all: the
+    /// same silent-demotion class as the vocabulary hole.
+    #[test]
+    fn a_caret_seed_in_content_coordinates_crosses_the_keyword_prefix() {
+        let mut vm = test_controller();
+        vm.set_task_vocabulary(holon_org_format::TaskKeywordVocabulary::default());
+        let seed = vm.project_authority("milk", Some("TODO"));
+        assert_eq!(seed, "TODO milk");
+        vm.set_buffer_from_authority(&seed, 0);
+
+        // `join_block` reports the merge boundary as an offset into `milk`.
+        assert_eq!(
+            vm.content_offset_to_surface(4),
+            9,
+            "end-of-content is end-of-surface, not four bytes into the keyword"
+        );
+        assert_eq!(
+            vm.content_offset_to_surface(0),
+            5,
+            "offset 0 is the START OF THE CONTENT, which sits after the keyword"
+        );
+    }
+
+    /// The mapping is a no-op wherever the surface is not a projection — a
+    /// plain block, and a REFUSED one (whose surface IS the content column).
+    #[test]
+    fn a_caret_seed_is_untouched_when_the_surface_shows_the_content_column() {
+        let mut vm = test_controller();
+        vm.set_task_vocabulary(holon_org_format::TaskKeywordVocabulary::default());
+        let seed = vm.project_authority("milk", None);
+        vm.set_buffer_from_authority(&seed, 0);
+        assert_eq!(vm.content_offset_to_surface(2), 2);
+
+        let mut refused = test_controller();
+        refused.set_task_vocabulary(holon_org_format::TaskKeywordVocabulary::for_document(
+            &["NEXT".to_string()],
+            &["DONE".to_string()],
+        ));
+        let seed = refused.project_authority("API rewrite", Some("TODO"));
+        refused.set_buffer_from_authority(&seed, 0);
+        assert_eq!(
+            refused.content_offset_to_surface(3),
+            3,
+            "a refused surface shows the content column, so the two coordinate \
+             spaces are the same one"
+        );
+    }
+
+    /// THE REFUTED CLAIM, encoded. The seed refusal is judged under the
+    /// DOCUMENT's vocabulary; the commit router was judged by the
+    /// vocabulary-FREE shape rule. A refused block whose stored CONTENT happens
+    /// to start with an uppercase token was therefore admitted to the source
+    /// channel, where the store found no declared keyword and cleared
+    /// `task_state` — silently, because the only WARN fires at the seed.
+    ///
+    /// Reachable by adding a `#+TODO:` line to a page whose blocks were already
+    /// marked TODO under the defaults: every one of them is refused, and any
+    /// whose text starts with `API`/`PR`/`ASAP`/… loses its task on the next
+    /// keystroke.
+    #[test]
+    fn a_refused_surface_never_commits_through_the_source_channel() {
+        let mut vm = test_controller();
+        vm.set_task_vocabulary(holon_org_format::TaskKeywordVocabulary::for_document(
+            &["NEXT".to_string(), "WAITING".to_string()],
+            &["DONE".to_string()],
+        ));
+        // The block carries TODO, which THIS document does not declare, so the
+        // projection is refused and the surface shows stored content.
+        let seed = vm.project_authority("ASAP call Bob", Some("TODO"));
+        assert_eq!(seed, "ASAP call Bob", "precondition: the seed was refused");
+        vm.set_buffer_from_authority(&seed, 0);
+
+        let intent = vm
+            .apply_local_edit("ASAP call Bob!")
+            .expect("keystroke")
+            .expect("a commit");
+        assert_eq!(
+            intent.params["field"],
+            Value::String("content".into()),
+            "a surface that could not show the keyword must not be allowed to REMOVE it — \
+             the source channel would re-derive `task_state` from text that never carried it"
+        );
+    }
+
+    /// The refusal is pinned for the whole session, not just the first
+    /// keystroke: the block is still refused after any number of edits, so
+    /// every one of them stays on the content channel.
+    #[test]
+    fn the_refusal_pins_the_channel_for_the_whole_session() {
+        let mut vm = test_controller();
+        vm.set_task_vocabulary(holon_org_format::TaskKeywordVocabulary::for_document(
+            &["NEXT".to_string()],
+            &["DONE".to_string()],
+        ));
+        let seed = vm.project_authority("API rewrite", Some("TODO"));
+        vm.set_buffer_from_authority(&seed, 0);
+        for typed in ["API rewrite ", "API rewrite n", "NEXT rewrite"] {
+            let intent = vm
+                .apply_local_edit(typed)
+                .expect("keystroke")
+                .expect("a commit");
+            assert_eq!(
+                intent.params["field"],
+                Value::String("content".into()),
+                "keystroke {typed:?} escaped the pinned content channel"
+            );
+        }
+    }
+
+    /// The pin is NOT a blanket disable, and the guard cannot pass by refusing
+    /// everything: a block whose keyword the document DOES declare projects,
+    /// and its surface commits as SOURCE — including the demoting edit that
+    /// deletes the keyword out of it.
+    #[test]
+    fn a_projected_surface_still_commits_as_source() {
+        let mut vm = test_controller();
+        vm.set_task_vocabulary(holon_org_format::TaskKeywordVocabulary::for_document(
+            &["NEXT".to_string()],
+            &["DONE".to_string()],
+        ));
+        let seed = vm.project_authority("call bank", Some("NEXT"));
+        assert_eq!(seed, "NEXT call bank", "precondition: the seed projected");
+        vm.set_buffer_from_authority(&seed, 0);
+
+        for typed in ["NEXT call banks", "call banks"] {
+            let intent = vm
+                .apply_local_edit(typed)
+                .expect("keystroke")
+                .expect("a commit");
+            assert_eq!(
+                intent.params["field"],
+                Value::String(holon_api::SOURCE_TEXT_FIELD.into()),
+                "keystroke {typed:?} must re-derive both columns — the second one is the \
+                 demotion gesture, which only this channel can perform"
+            );
+        }
+    }
+
+    /// An UNTASKED block whose text merely has the SHAPE of a keyword the
+    /// document does not declare must not gain a blank `task_state`. The store
+    /// is what guarantees this (it skips the task-state constituent when there
+    /// is nothing to clear); the routing here is what puts it in front of that
+    /// guarantee, so both halves are pinned — see
+    /// `a_source_write_that_declares_nothing_leaves_a_plain_block_plain` in
+    /// `crates/holon/tests/promote_task_keyword_compound.rs`.
+    #[test]
+    fn an_untasked_block_with_an_undeclared_uppercase_token_still_commits() {
+        let mut vm = test_controller();
+        vm.set_task_vocabulary(holon_org_format::TaskKeywordVocabulary::for_document(
+            &["NEXT".to_string()],
+            &["DONE".to_string()],
+        ));
+        let seed = vm.project_authority("ASAP call Bob", None);
+        assert_eq!(seed, "ASAP call Bob");
+        vm.set_buffer_from_authority(&seed, 0);
+
+        let intent = vm
+            .apply_local_edit("ASAP call Bob!")
+            .expect("keystroke")
+            .expect("a commit");
+        assert_eq!(
+            intent.params["value"],
+            Value::String("ASAP call Bob!".into()),
+            "the keystroke is never lost, whichever channel carries it"
         );
     }
 

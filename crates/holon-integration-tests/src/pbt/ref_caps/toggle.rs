@@ -158,6 +158,10 @@ impl holon_pbt_core::capabilities::RefTaskStateToggle for ReferenceState {
                 fields: [("task_state".to_string(), holon_api::Value::String(resolved))].into(),
             },
         });
+        // The editable surface shows the block's VAULT SYNTAX, so a state
+        // toggle under an idle editor changes the text it displays — prod's
+        // convergence re-seeds it, and the model must too.
+        self.refresh_clean_active_editor(block_id);
     }
 }
 

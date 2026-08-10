@@ -1,10 +1,23 @@
-//! Live task-keyword promotion — the one-shot dual of
-//! `OrgFileFormat::reconcile_idempotent_reingest`.
+//! The task-keyword convergence rule.
 //!
-//! Promotion is a function of the **delta** (prior state → typed text), never
-//! of the new content alone. Re-deriving it from content is the bug the
-//! re-ingest reconciler exists to suppress, so this module states the rule as a
-//! transition: a block that was *not* keyword-headed becomes keyword-headed.
+//! A block that carries no task state and whose content begins with a keyword
+//! of its own document's vocabulary is an ILLEGAL STATE: the org file those
+//! bytes render to reads back as a task, so the store would be holding a
+//! reading the file disagrees with. The rule is therefore a property of the
+//! CONTENT plus the document's vocabulary — not of a delta — and every write
+//! path converges it at the store boundary.
+//!
+//! The vocabulary is the plug-in point: a format provider that declares no
+//! keywords converges nothing, so `- TODO ...` stays cleartext there.
+//!
+//! The editable surface is the INVERSE of that rule: [`source_projection`]
+//! renders the vault syntax a block's stored state spells, and an editor
+//! commits that raw text back through the source channel
+//! ([`source_channel_commit`]), where the same convergence re-derives both
+//! fields. Editor and store therefore share ONE rule and there is no
+//! delta-shaped proposal to refuse.
+
+use std::fmt;
 
 use holon_api::TaskState;
 
@@ -56,6 +69,27 @@ impl TaskKeywordVocabulary {
         &self.done
     }
 
+    /// The vocabulary a document's `#+TODO:` declaration spells, with the
+    /// parser's defaults applied when it declares none (`None`). The ONE place
+    /// a declaration becomes a closed vocabulary, so the store's parse and the
+    /// editor's projection cannot drift apart.
+    pub fn from_declared(declared: Option<Vec<TaskState>>) -> Self {
+        let Some(states) = declared else {
+            return Self::default();
+        };
+        let active: Vec<String> = states
+            .iter()
+            .filter(|s| s.is_active())
+            .map(|s| s.keyword.clone())
+            .collect();
+        let done: Vec<String> = states
+            .iter()
+            .filter(|s| s.is_done())
+            .map(|s| s.keyword.clone())
+            .collect();
+        Self::for_document(&active, &done)
+    }
+
     /// Every keyword this vocabulary admits, active then done — the closed set
     /// a refusal must be able to name.
     pub fn all_keywords(&self) -> Vec<String> {
@@ -92,8 +126,12 @@ pub struct Promotion {
     pub consumed_prefix: usize,
 }
 
-/// `s` is `KEYWORD`, then at least one ASCII whitespace, then the rest.
-/// Anchored at offset 0. The returned rest still carries that whitespace.
+/// `s` is `KEYWORD`, then either the end of the string or at least one ASCII
+/// whitespace and the rest. Anchored at offset 0. The returned rest still
+/// carries that whitespace.
+///
+/// The end-of-string arm is not an edge case: `TODO` alone renders to the
+/// headline `** TODO`, which org reads as a task with an empty title.
 pub fn keyword_headed<'a>(
     s: &'a str,
     vocabulary: &TaskKeywordVocabulary,
@@ -102,7 +140,7 @@ pub fn keyword_headed<'a>(
         let Some(rest) = s.strip_prefix(keyword.as_str()) else {
             continue;
         };
-        if !rest.starts_with(|c: char| c.is_ascii_whitespace()) {
+        if !(rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_whitespace())) {
             continue;
         }
         return Some((vocabulary.task_state(keyword), rest));
@@ -110,78 +148,147 @@ pub fn keyword_headed<'a>(
     None
 }
 
-/// The leading token of `s` when it has the SHAPE of a task keyword: an
-/// ASCII-uppercase-initial word of 2..=32 chars over `A-Z 0-9 - _`, then at
-/// least one ASCII whitespace. Returns the token and the rest (whitespace
-/// still attached).
+/// The vocabulary-free superset of [`keyword_headed`] — end-of-string included.
 ///
-/// This is deliberately vocabulary-FREE, so a caller with no document handle
-/// can still tell that a keystroke MIGHT promote. It admits a strict superset
-/// of [`keyword_headed`] for every vocabulary whose keywords are
-/// ASCII-uppercase words — which the defaults are, and which the org
-/// convention for `#+TODO:` is.
-///
-/// Residual it does NOT cover: a document declaring a lowercase or non-ASCII
-/// keyword (`#+TODO: todo | erledigt`). Such a keystroke never reaches the
-/// authority, so it does not promote.
-pub fn candidate_keyword_headed(s: &str) -> Option<(&str, &str)> {
+/// This is the STORE's cheap pre-filter: a content write whose shape cannot
+/// converge under ANY ASCII-uppercase vocabulary is answered without reading
+/// the owning document at all, which is what keeps ordinary prose off the
+/// vocabulary lookup. [`source_channel_commit`] reuses it for the editor's
+/// commit routing, so both sides admit exactly the same shapes.
+pub fn could_converge(s: &str) -> bool {
     let end = s
         .find(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-' || c == '_'))
         .unwrap_or(s.len());
     let (token, rest) = s.split_at(end);
-    if !(2..=32).contains(&token.len()) || !token.starts_with(|c: char| c.is_ascii_uppercase()) {
-        return None;
-    }
-    rest.starts_with(|c: char| c.is_ascii_whitespace())
-        .then_some((token, rest))
+    (2..=32).contains(&token.len())
+        && token.starts_with(|c: char| c.is_ascii_uppercase())
+        && (rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_whitespace()))
 }
 
-/// [`detect_keyword_promotion`] with the vocabulary membership test replaced by
-/// [`candidate_keyword_headed`]'s shape test — the proposal a caller that
-/// cannot see the owning document's `#+TODO:` line makes, for the authority to
-/// adjudicate against the real vocabulary.
+/// Which channel an EDITOR buffer commit takes: the source channel (the store
+/// re-derives `content` + `task_state` from the raw text) or the ordinary
+/// content channel (the store writes the bytes and never touches the task
+/// state).
 ///
-/// `keyword` carries the ACTIVE category unconditionally: only the document's
-/// vocabulary says which keywords are done ones, so the category here is a
-/// placeholder the authority replaces.
-pub fn candidate_promotion(
-    prior_content: &str,
-    prior_task_state: Option<&TaskState>,
-    typed: &str,
-) -> Option<Promotion> {
-    if prior_task_state.is_some() {
-        return None;
+/// Both arms are needed and each is a distinct gesture. `new_text` catches
+/// authoring a keyword; `prior_buffer` catches DELETING one — a buffer that was
+/// keyword-headed and no longer is must demote the block, which only the source
+/// channel can do. Everything else stays on the content channel, so ordinary
+/// prose costs no document read, exactly as [`could_converge`] keeps it off the
+/// store's lookup.
+pub fn source_channel_commit(prior_buffer: &str, new_text: &str) -> bool {
+    could_converge(new_text) || could_converge(prior_buffer)
+}
+
+/// What the editable surface shows for a block's task-keyword facet, or why it
+/// cannot show it. A refusal travels as DATA, so seeding the stripped content
+/// instead — which looks identical and means something else — cannot happen
+/// without the caller reading the reason and disclosing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceProjection {
+    /// The vault syntax for this block: what the editor seeds, and what a
+    /// commit of an unedited buffer parses straight back into.
+    Text(String),
+    /// Projecting would produce text that does NOT parse back to this state, so
+    /// the caller must seed the stored content instead and say so. Both arms
+    /// are reachable from imported or legacy rows, never from a converged
+    /// write.
+    Refused(ProjectionRefusal),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectionRefusal {
+    /// The block carries a keyword this document's vocabulary does not declare.
+    /// Projecting `TODO x` into a `#+TODO: NEXT | DONE` document would parse
+    /// back as prose — the commit would SILENTLY DEMOTE the task.
+    KeywordNotDeclared {
+        keyword: String,
+        vocabulary: Vec<String>,
+    },
+    /// The content starts with whitespace, which the parser eats: `TODO  milk`
+    /// parses back to `milk`, losing the leading space on the first commit.
+    ContentStartsWithWhitespace { content: String },
+}
+
+impl ProjectionRefusal {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::KeywordNotDeclared { .. } => "keyword_not_declared",
+            Self::ContentStartsWithWhitespace { .. } => "content_starts_with_whitespace",
+        }
     }
-    let (token, rest) = candidate_keyword_headed(typed)?;
-    if candidate_keyword_headed(prior_content).is_some() {
-        return None;
+}
+
+impl fmt::Display for ProjectionRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::KeywordNotDeclared {
+                keyword,
+                vocabulary,
+            } => write!(
+                f,
+                "task keyword {keyword:?} is not declared by this document {vocabulary:?}, so \
+                 projecting it would read back as ordinary text and demote the task"
+            ),
+            Self::ContentStartsWithWhitespace { content } => write!(
+                f,
+                "content {content:?} starts with whitespace, which the keyword parser eats — the \
+                 projection would not round-trip"
+            ),
+        }
     }
-    let stripped = rest.trim_start();
-    Some(Promotion {
-        consumed_prefix: token.len() + (rest.len() - stripped.len()),
-        keyword: TaskState::active(token),
-        stripped: stripped.to_string(),
+}
+
+/// The editable surface's view of a block: vault syntax for the task-keyword
+/// facet, stored content otherwise. The INVERSE of [`converge_keyword_headed`],
+/// and the pair is a fixed point — which is what lets the editor commit its
+/// buffer as ordinary content and let the store's convergence be the parse.
+///
+/// Empty content projects to the bare keyword with NO trailing space, because
+/// the store canonicalizer trims one and the projection has to survive that.
+pub fn source_projection(
+    task_state: Option<&TaskState>,
+    content: &str,
+    vocabulary: &TaskKeywordVocabulary,
+) -> SourceProjection {
+    let Some(task_state) = task_state else {
+        return SourceProjection::Text(content.to_string());
+    };
+    if !vocabulary
+        .all_keywords()
+        .iter()
+        .any(|k| *k == task_state.keyword)
+    {
+        return SourceProjection::Refused(ProjectionRefusal::KeywordNotDeclared {
+            keyword: task_state.keyword.clone(),
+            vocabulary: vocabulary.all_keywords(),
+        });
+    }
+    if content.starts_with(|c: char| c.is_ascii_whitespace()) {
+        return SourceProjection::Refused(ProjectionRefusal::ContentStartsWithWhitespace {
+            content: content.to_string(),
+        });
+    }
+    SourceProjection::Text(if content.is_empty() {
+        task_state.keyword.clone()
+    } else {
+        format!("{} {}", task_state.keyword, content)
     })
 }
 
-/// The one-shot promotion rule. Returns `Some` iff all three guards hold:
-/// the block carries no task state yet, the typed text is keyword-headed, and
-/// the prior content was *not* — the last is what makes promotion a transition
-/// rather than a property of the text, so re-committing an unchanged
-/// keyword-headed line never re-promotes.
-pub fn detect_keyword_promotion(
-    prior_content: &str,
-    prior_task_state: Option<&TaskState>,
-    typed: &str,
+/// The convergence rule. `Some` iff `content` is keyword-headed in
+/// `vocabulary` — in which case the block IS the returned task, whatever the
+/// write that produced the content thought it was doing.
+///
+/// State-based, not delta-based: the same bytes must converge whether they
+/// arrive by typing, by an agent's `set_field`, by an undo replay or by a
+/// split. A caller applies it only to a block that carries no task state yet;
+/// a block that already has one is representable as it stands.
+pub fn converge_keyword_headed(
+    content: &str,
     vocabulary: &TaskKeywordVocabulary,
 ) -> Option<Promotion> {
-    if prior_task_state.is_some() {
-        return None;
-    }
-    let (keyword, rest) = keyword_headed(typed, vocabulary)?;
-    if keyword_headed(prior_content, vocabulary).is_some() {
-        return None;
-    }
+    let (keyword, rest) = keyword_headed(content, vocabulary)?;
     let stripped = rest.trim_start();
     Some(Promotion {
         consumed_prefix: keyword.keyword.len() + (rest.len() - stripped.len()),
@@ -198,160 +305,105 @@ mod tests {
         TaskKeywordVocabulary::default()
     }
 
-    fn promote(prior: &str, ts: Option<TaskState>, typed: &str) -> Option<Promotion> {
-        detect_keyword_promotion(prior, ts.as_ref(), typed, &vocab())
+    fn converge(content: &str) -> Option<Promotion> {
+        converge_keyword_headed(content, &vocab())
     }
 
-    /// G1 — the primary path: `T`→`TO`→`TOD`→`TODO` commits with prior
-    /// `"TODO"`, which is EQUAL to the keyword; only a transition-shaped guard
-    /// admits the space keystroke that follows.
+    /// G1 — the primary authoring path: the keyword plus a space IS a task.
     #[test]
-    fn char_by_char_promotes_on_the_space() {
-        let p = promote("TODO", None, "TODO ").expect("the space must promote");
+    fn keyword_and_space_converges() {
+        let p = converge("TODO ").expect("the space must converge");
         assert_eq!(p.keyword, TaskState::active("TODO"));
         assert_eq!(p.stripped, "");
     }
 
-    /// G2 — guard 1: an already-promoted block never re-promotes.
+    /// G3 — pasted keyword-headed text converges to keyword + remainder.
     #[test]
-    fn keystroke_after_promotion_does_not_refire() {
-        assert_eq!(promote("", Some(TaskState::active("TODO")), "b"), None);
-    }
-
-    /// G3 — paste into an empty block: guard 3 holds trivially.
-    #[test]
-    fn paste_into_empty_promotes() {
-        let p = promote("", None, "TODO buy milk").expect("paste must promote");
+    fn keyword_headed_text_converges() {
+        let p = converge("TODO buy milk").expect("keyword-headed text must converge");
         assert_eq!(p.keyword, TaskState::active("TODO"));
         assert_eq!(p.stripped, "buy milk");
     }
 
-    /// G4 — prepending the keyword to existing text is the same authoring
-    /// gesture and promotes.
+    /// G6/G8 — the SPECIFIED empty-remainder case (ruling 2026-08-10): a bare
+    /// keyword renders to the headline `** TODO`, which org reads back as a
+    /// task with an empty title, so the store holds exactly that. It replaces
+    /// the retired "a bare keyword defers to the space" rule, which left the
+    /// store holding a reading the file disagreed with.
     #[test]
-    fn prepend_to_existing_promotes() {
-        let p = promote("buy milk", None, "TODO buy milk").expect("prepend must promote");
+    fn bare_keyword_converges_to_an_empty_titled_task() {
+        let p = converge("TODO").expect("a bare keyword must converge");
         assert_eq!(p.keyword, TaskState::active("TODO"));
-        assert_eq!(p.stripped, "buy milk");
-    }
-
-    /// G5 — re-committing unchanged keyword-headed text does not re-fire; the
-    /// guard holds independently of any caller-side unchanged-text shortcut,
-    /// because it is also reachable from replay.
-    #[test]
-    fn recommit_of_unchanged_text_does_not_refire() {
-        assert_eq!(promote("TODO buy milk", None, "TODO buy milk"), None);
-    }
-
-    /// G6 — the re-ingest-suppression block: a plain block that merely STARTS
-    /// with a keyword has no task state, so guard 1 does not protect it. Guard
-    /// 3 does. Losing this re-opens the double-promotion bug.
-    #[test]
-    fn plain_block_that_merely_starts_with_a_keyword_never_promotes() {
-        assert_eq!(promote("TODO list ideas", None, "TODO list ideasX"), None);
+        assert_eq!(p.stripped, "");
+        assert_eq!(p.consumed_prefix, 4);
     }
 
     /// G7 — the keyword must be a whole token.
     #[test]
-    fn keyword_without_whitespace_does_not_promote() {
-        assert_eq!(promote("", None, "TODOx"), None);
-    }
-
-    /// G8 — a bare keyword defers to the space, so promotion happens at one
-    /// predictable keystroke (G1) instead of twice.
-    #[test]
-    fn bare_keyword_defers_to_the_space() {
-        assert_eq!(promote("", None, "TODO"), None);
+    fn keyword_without_a_boundary_does_not_converge() {
+        assert_eq!(converge("TODOx"), None);
+        assert_eq!(converge("TODOx y"), None);
     }
 
     /// G9 — the done category comes from the vocabulary's done list.
     #[test]
-    fn done_keyword_promotes_with_done_category() {
-        let p = promote("DONE", None, "DONE ").expect("DONE must promote");
+    fn done_keyword_converges_with_done_category() {
+        let p = converge("DONE ").expect("DONE must converge");
         assert_eq!(p.keyword, TaskState::done("DONE"));
         assert!(p.keyword.is_done());
-        assert_eq!(p.stripped, "");
     }
 
     /// G10 — the vocabulary is closed.
     #[test]
-    fn unknown_keyword_does_not_promote() {
-        assert_eq!(promote("", None, "MAYBE x"), None);
-    }
-
-    /// G11 — select-all-replace reaches the commit with an unrelated prior, so
-    /// guard 3 holds and it promotes. Documented, accepted behaviour.
-    #[test]
-    fn select_all_replace_promotes() {
-        let p = promote("x", None, "TODO ").expect("replace must promote");
-        assert_eq!(p.keyword, TaskState::active("TODO"));
-        assert_eq!(p.stripped, "");
+    fn unknown_keyword_does_not_converge() {
+        assert_eq!(converge("MAYBE x"), None);
     }
 
     /// A document's own `#+TODO:` vocabulary decides both membership and
-    /// category — `TODO` is not a keyword in a document that never declares it.
+    /// category, and it is the whole plug-in surface: `TODO` is ordinary text
+    /// in a document that never declares it, and a provider that declares no
+    /// keywords at all converges nothing.
     #[test]
     fn document_vocabulary_is_authoritative() {
         let v =
             TaskKeywordVocabulary::for_document(&["NEXT".to_string()], &["SHIPPED".to_string()]);
-        assert_eq!(detect_keyword_promotion("", None, "TODO x", &v), None);
-        let p = detect_keyword_promotion("", None, "NEXT x", &v).expect("NEXT must promote");
+        assert_eq!(converge_keyword_headed("TODO x", &v), None);
+        let p = converge_keyword_headed("NEXT call bank", &v).expect("NEXT must converge");
         assert_eq!(p.keyword, TaskState::active("NEXT"));
-        let d = detect_keyword_promotion("", None, "SHIPPED x", &v).expect("SHIPPED must promote");
+        assert_eq!(p.stripped, "call bank");
+        let d = converge_keyword_headed("SHIPPED it", &v).expect("SHIPPED must converge");
         assert!(d.keyword.is_done());
+
+        let empty = TaskKeywordVocabulary::new(Vec::new(), Vec::new());
+        assert_eq!(converge_keyword_headed("TODO x", &empty), None);
+        assert_eq!(converge_keyword_headed("NEXT x", &empty), None);
     }
 
-    /// The vocabulary-free gate must never miss what a real vocabulary would
-    /// promote: it admits every default keyword AND a declared one it has
-    /// never heard of.
+    /// The editor's commit routing, both directions of the one gesture:
+    /// authoring a keyword AND deleting one take the source channel, because
+    /// only that channel can set — or clear — the task state. Prose never does.
     #[test]
-    fn candidate_shape_is_a_superset_of_every_uppercase_vocabulary() {
-        for kw in vocab().all_keywords() {
-            let typed = format!("{kw} x");
-            assert!(
-                candidate_promotion("", None, &typed).is_some(),
-                "the gate must admit the default keyword {kw}"
-            );
-        }
-        let declared = candidate_promotion("", None, "NEXT call bank")
-            .expect("an undeclared-to-the-gate keyword must still be admitted");
-        assert_eq!(declared.keyword.keyword, "NEXT");
-        assert_eq!(declared.stripped, "call bank");
-    }
-
-    /// The shape rule stays narrow enough that ordinary prose does not
-    /// propose: lowercase words, one-letter words, and mixed case are out.
-    #[test]
-    fn candidate_shape_refuses_ordinary_prose() {
-        for typed in ["buy milk", "I think", "Todo x", "A b", "TODOx y"] {
-            assert_eq!(
-                candidate_promotion("", None, typed),
-                None,
-                "{typed:?} must not propose a promotion"
-            );
-        }
-    }
-
-    /// The two guards that make it a TRANSITION carry over unchanged.
-    #[test]
-    fn candidate_shape_keeps_the_transition_guards() {
-        assert_eq!(
-            candidate_promotion("", Some(&TaskState::active("NEXT")), "NEXT x"),
-            None,
-            "an already-tasked block never re-proposes"
+    fn source_channel_routes_both_directions_of_the_keyword_gesture() {
+        assert!(
+            source_channel_commit("TOD", "TODO"),
+            "bare keyword authored"
         );
-        assert_eq!(
-            candidate_promotion("NEXT list", None, "NEXT listX"),
-            None,
-            "prior text that was already candidate-headed never proposes"
+        assert!(source_channel_commit("TODO", "TODO milk"), "keyword headed");
+        assert!(
+            source_channel_commit("TODO milk", "milk"),
+            "deleting the keyword must reach the channel that can demote"
         );
+        assert!(source_channel_commit("TODO milk", ""), "buffer cleared");
+        assert!(!source_channel_commit("buy", "buy milk"), "ordinary prose");
+        assert!(!source_channel_commit("", "x"));
     }
 
     /// Tabs count as the separating whitespace, and multiple spaces collapse
     /// out of the stripped remainder.
     #[test]
     fn any_ascii_whitespace_separates_and_is_stripped() {
-        let p = promote("", None, "TODO\t  buy milk").expect("tab must separate");
+        let p = converge("TODO\t  buy milk").expect("tab must separate");
         assert_eq!(p.stripped, "buy milk");
+        assert_eq!(p.consumed_prefix, 7);
     }
 }

@@ -1,17 +1,17 @@
-//! Windowed rung for live task-keyword promotion (task #64 Inc 4).
+//! Windowed rung for the editable surface's SOURCE PROJECTION (task #78,
+//! arm (d)).
 //!
 //! The headless keystone pins the STORAGE effect of typing `TODO ` (the block
 //! gains `task_state` and loses the keyword from its content). It cannot pin
-//! the half the user actually sees: a real GPUI `InputState` keeps showing the
-//! text the platform inserted unless the adapter re-seeds it from the view
-//! model. That re-seed (`EditorView::apply_buffer_rewrite`) is production code
-//! no headless rung reaches, and without it the visible field reads
-//! `TODO buy milk` while the row renders a TODO chip in front of `buy milk` —
-//! the keyword doubled on screen.
+//! the half the user actually sees: what a real GPUI `InputState` DISPLAYS, and
+//! where the caret lands in it. Under arm (d) the surface shows the block's
+//! vault syntax — the keyword stays visible and editable — and the commit
+//! routes to `set_field("source_text")`, where the STORE's parse is the only
+//! thing that reads a keyword.
 //!
 //! These tests type through `replace_text_in_range`, the same platform entry
-//! point the OS calls for a real keystroke, into a real no-cell (SqlOnly)
-//! `EditorView` in a real window.
+//! point the OS calls for a real keystroke, into a real `EditorView` in a real
+//! window, in BOTH the no-cell (SqlOnly) and the cell-attached (Loro) arm.
 //!
 //! Run: cargo test -p holon-gpui --test editor_task_keyword_promotion
 
@@ -59,8 +59,19 @@ fn mount_editor<'a>(
     &'a mut VisualTestContext,
     Arc<TestServices>,
 ) {
+    mount_editor_with(cx, data, TestServices::new())
+}
+
+fn mount_editor_with<'a>(
+    cx: &'a mut TestAppContext,
+    data: &Mutable<Arc<DataRow>>,
+    services_concrete: Arc<TestServices>,
+) -> (
+    gpui::Entity<EditorView>,
+    &'a mut VisualTestContext,
+    Arc<TestServices>,
+) {
     cx.update(|cx| gpui_component::init(cx));
-    let services_concrete = TestServices::new();
     let services: Arc<dyn BuilderServices> = services_concrete.clone();
     let data_handle = data.read_only();
 
@@ -121,176 +132,197 @@ fn caret(vcx: &mut VisualTestContext, entity: &gpui::Entity<EditorView>) -> usiz
     entity.read_with(vcx, |ev, cx| ev.input_entity().read(cx).cursor())
 }
 
-/// PRIMARY RUNG. Typing the space that commits a leading `TODO` dispatches the
-/// promotion compound AND takes the keyword out of the visible field, caret
-/// following the surviving text.
+// ── The editable surface ─────────────────────────────────────────────────
+
+/// PRIMARY RUNG. Typing a leading keyword commits the WHOLE raw text through
+/// the source channel and leaves it on screen. The old behaviour — strip the
+/// keyword out of the visible field — is what produced the doubling shape: the
+/// chip rendered `TODO` in front of a field the next focus re-seeded with
+/// `TODO milk` again.
 #[gpui::test]
-fn typing_the_keyword_promotes_and_clears_it_from_the_visible_field(cx: &mut TestAppContext) {
+fn typing_a_keyword_commits_the_source_and_keeps_it_visible(cx: &mut TestAppContext) {
     let data = Mutable::new(row(""));
     let (entity, vcx, services) = mount_editor(cx, &data);
-
-    type_text(vcx, &entity, "TODO ");
-
-    let promotions: Vec<_> = services
-        .recorded_intents()
-        .into_iter()
-        .filter(|i| i.op_name == "promote_task_keyword")
-        .collect();
-    assert_eq!(
-        promotions.len(),
-        1,
-        "the committing space must dispatch exactly one promotion; recorded: {:?}",
-        services.recorded_intents()
-    );
-    let intent = &promotions[0];
-    assert_eq!(intent.entity_name, "block");
-    assert_eq!(intent.params["id"], Value::String(ROW_ID.to_string()));
-    assert_eq!(intent.params["typed"], Value::String("TODO ".to_string()));
-    assert_eq!(intent.params["keyword"], Value::String("TODO".to_string()));
-    assert!(
-        matches!(intent.params.get("write_seq"), Some(Value::Integer(_))),
-        "the compound must carry the editor's write_seq so its echo is recognised"
-    );
-
-    assert_eq!(
-        visible(vcx, &entity),
-        "",
-        "REGRESSION: the keyword is now the block's task state, so the visible \
-         field must not still show it — the row would render the keyword twice"
-    );
-    assert_eq!(caret(vcx, &entity), 0);
-}
-
-/// The caret keeps its place within the text that survives the strip: after
-/// `TODO milk` the user is still typing at the end of `milk`, not 5 bytes past
-/// it (which is not even a legal offset in the new text).
-#[gpui::test]
-fn the_caret_follows_the_stripped_text(cx: &mut TestAppContext) {
-    let data = Mutable::new(row(""));
-    let (entity, vcx, _services) = mount_editor(cx, &data);
 
     type_text(vcx, &entity, "TODO milk");
 
-    assert_eq!(visible(vcx, &entity), "milk");
-    assert_eq!(caret(vcx, &entity), 4);
-}
-
-/// Negative control: a bare keyword with no space is ordinary text. Nothing is
-/// stripped and no promotion is dispatched — the visible field must be left
-/// exactly as typed, or every `TODO`-shaped word would lose characters.
-#[gpui::test]
-fn a_bare_keyword_is_left_alone(cx: &mut TestAppContext) {
-    let data = Mutable::new(row(""));
-    let (entity, vcx, services) = mount_editor(cx, &data);
-
-    type_text(vcx, &entity, "TODO");
-
-    assert_eq!(visible(vcx, &entity), "TODO");
-    assert_eq!(caret(vcx, &entity), 4);
-    assert!(
-        services
-            .recorded_intents()
-            .iter()
-            .all(|i| i.op_name == "set_field"),
-        "no promotion until the space commits it; recorded: {:?}",
-        services.recorded_intents()
-    );
-}
-
-/// THE TEXT-LOSS RUNG (BugFunnel 2026-08-10). Typing a keyword a SECOND time
-/// into a block that is already a task must leave the text alone. The strip is
-/// applied before the write is confirmed, so a promotion the engine would
-/// refuse leaves the buffer short and the next keystroke commits the short text
-/// over the engine's verbatim commit — the keyword silently deleted.
-#[gpui::test]
-fn a_second_keyword_after_a_promotion_is_ordinary_text(cx: &mut TestAppContext) {
-    let data = Mutable::new(row(""));
-    let (entity, vcx, services) = mount_editor(cx, &data);
-
-    type_text(vcx, &entity, "TODO ");
     assert_eq!(
         visible(vcx, &entity),
-        "",
-        "precondition: the block promoted"
+        "TODO milk",
+        "the surface shows vault syntax; the keyword is text the user can edit"
     );
-
-    // There is no engine behind `TestServices` — it records intents — so the
-    // row the compound would update is pushed by hand, through the same per-row
-    // `Mutable` production feeds. DISCLOSED: prod updates that row
-    // asynchronously, so a second keyword typed INSIDE that window still reads
-    // a row that has not caught up (the lane report's "in-flight window").
-    data.set(tasked_row("", "TODO"));
-    vcx.run_until_parked();
-
-    type_text(vcx, &entity, "TODO x");
-
     assert_eq!(
-        visible(vcx, &entity),
-        "TODO x",
-        "REGRESSION: the block is already a task, so this keyword is text — \
-         stripping it here deletes what the user typed"
+        caret(vcx, &entity),
+        9,
+        "the caret is where the user typed it"
     );
-    let promotions = services
+    let last = services
         .recorded_intents()
         .into_iter()
-        .filter(|i| i.op_name == "promote_task_keyword")
-        .count();
-    assert_eq!(promotions, 1, "promotion is one-shot per block");
-}
-
-/// The mount seed. An editor opening on a block that is ALREADY a task must
-/// learn that from its row, or the very first keyword it sees becomes the same
-/// text-loss bug — this is the cross-session half, which no amount of
-/// in-session bookkeeping can cover.
-#[gpui::test]
-fn an_editor_mounted_on_an_existing_task_does_not_promote(cx: &mut TestAppContext) {
-    let data = Mutable::new(tasked_row("milk", "TODO"));
-    let (entity, vcx, services) = mount_editor(cx, &data);
-
-    type_text(vcx, &entity, "TODO ");
-
+        .last()
+        .expect("the keystroke commits");
+    assert_eq!(last.op_name, "set_field");
     assert_eq!(
-        visible(vcx, &entity),
-        "TODO ",
-        "the block already carries TODO, so this text is not an authoring gesture"
+        last.params["field"],
+        Value::String(holon_api::SOURCE_TEXT_FIELD.into()),
+        "keyword-headed text commits on the SOURCE channel, where the store parses it"
     );
-    assert!(
-        services
-            .recorded_intents()
-            .iter()
-            .all(|i| i.op_name == "set_field"),
-        "no promotion may be proposed for an already-tasked block; recorded: {:?}",
-        services.recorded_intents()
-    );
-}
-
-/// The staleness case in a window: the row gains `task_state` under an OPEN
-/// editor (a task-toggle click, a peer, an agent). The keyword is read at the
-/// keystroke, so the guard sees the new state — a value remembered from mount
-/// would be stale exactly here.
-#[gpui::test]
-fn a_task_state_that_arrives_under_an_open_editor_is_seen(cx: &mut TestAppContext) {
-    let data = Mutable::new(row(""));
-    let (entity, vcx, services) = mount_editor(cx, &data);
-
-    data.set(tasked_row("", "TODO"));
-    vcx.run_until_parked();
-
-    type_text(vcx, &entity, "TODO ");
-
-    assert_eq!(
-        visible(vcx, &entity),
-        "TODO ",
-        "REGRESSION: the block became a task under this editor, so the keyword \
-         is text — stripping it deletes what the user typed"
-    );
+    assert_eq!(last.params["value"], Value::String("TODO milk".into()));
     assert!(
         services
             .recorded_intents()
             .iter()
             .all(|i| i.op_name != "promote_task_keyword"),
-        "recorded: {:?}",
+        "the promotion compound is gone; recorded: {:?}",
         services.recorded_intents()
+    );
+}
+
+/// Ordinary prose never touches the source channel — it commits `content`,
+/// which by contract never re-derives the task state (the #64 lock).
+#[gpui::test]
+fn ordinary_prose_commits_the_content_channel(cx: &mut TestAppContext) {
+    let data = Mutable::new(row(""));
+    let (entity, vcx, services) = mount_editor(cx, &data);
+
+    type_text(vcx, &entity, "milk");
+
+    let last = services
+        .recorded_intents()
+        .into_iter()
+        .last()
+        .expect("the keystroke commits");
+    assert_eq!(last.params["field"], Value::String("content".into()));
+    assert_eq!(visible(vcx, &entity), "milk");
+}
+
+/// FOCUS SEED + CARET MAPPING (Inc 2). An editor mounted on a block that is
+/// already a task shows its vault syntax, and a caret placed against the
+/// DISPLAYED content crosses the keyword prefix with it — without the mapping a
+/// mid-word click lands `keyword.len() + 1` bytes to the left.
+#[gpui::test]
+fn focus_seeds_the_keyword_and_maps_the_caret(cx: &mut TestAppContext) {
+    let data = Mutable::new(row("milk"));
+    let (entity, vcx, _services) = mount_editor(cx, &data);
+
+    // Click mid-word in the displayed `milk`, between `mi` and `lk`.
+    let input = entity.read_with(vcx, |ev, _| ev.input_entity().clone());
+    input.update_in(vcx, |state, window, cx| {
+        use gpui_component::input::RopeExt;
+        state.set_value("milk", window, cx);
+        let pos = state.text().offset_to_position(2);
+        state.set_cursor_position(pos, window, cx);
+    });
+    vcx.run_until_parked();
+
+    // The block becomes a task under the open editor and the surface re-seeds.
+    data.set(tasked_row("milk", "TODO"));
+    vcx.run_until_parked();
+
+    assert_eq!(
+        visible(vcx, &entity),
+        "TODO milk",
+        "the surface must show the block's vault syntax once it is a task"
+    );
+    assert_eq!(
+        caret(vcx, &entity),
+        7,
+        "the caret still sits between `mi` and `lk` — it crossed the keyword prefix"
+    );
+}
+
+/// DELETING the keyword is the demotion gesture and must reach the only channel
+/// that can clear a task state. A content write here would leave the block a
+/// task whose keyword the user can no longer see.
+#[gpui::test]
+fn deleting_the_keyword_commits_the_source_channel(cx: &mut TestAppContext) {
+    let data = Mutable::new(tasked_row("milk", "TODO"));
+    let (entity, vcx, services) = mount_editor(cx, &data);
+    vcx.run_until_parked();
+
+    let input = entity.read_with(vcx, |ev, _| ev.input_entity().clone());
+    input.update_in(vcx, |state, window, cx| {
+        state.replace_text_in_range(Some(0..5), "", window, cx);
+    });
+    vcx.run_until_parked();
+
+    assert_eq!(visible(vcx, &entity), "milk");
+    let last = services
+        .recorded_intents()
+        .into_iter()
+        .last()
+        .expect("the deletion commits");
+    assert_eq!(
+        last.params["field"],
+        Value::String(holon_api::SOURCE_TEXT_FIELD.into()),
+        "a buffer that STOPPED being keyword-headed must reach the demoting channel"
+    );
+    assert_eq!(last.params["value"], Value::String("milk".into()));
+}
+
+/// The staleness case in a window: the row gains `task_state` under an OPEN
+/// editor (a task-toggle click, a peer, an agent). The surface is a projection
+/// of the LIVE row, so the keyword appears — a value remembered from mount
+/// would leave the user editing a surface that no longer describes the block.
+#[gpui::test]
+fn a_task_state_that_arrives_under_an_open_editor_is_shown(cx: &mut TestAppContext) {
+    let data = Mutable::new(row("milk"));
+    let (entity, vcx, _services) = mount_editor(cx, &data);
+
+    data.set(tasked_row("milk", "TODO"));
+    vcx.run_until_parked();
+
+    assert_eq!(visible(vcx, &entity), "TODO milk");
+}
+
+/// THE PROD RE-PROJECTION EDGE, pinned. `EditorView` resolves the owning
+/// document's vocabulary asynchronously and, when it lands, re-projects the
+/// surface and converges — `converge_to("vocabulary_resolved", …)`. That edge
+/// is the ONLY thing that closes the window in production: the `task_state`
+/// signal is `dedupe_cloned`, so for an idle editor it fires once at mount
+/// (while the vocabulary is still unresolved) and never again.
+///
+/// The window is held open BY THE TEST rather than raced: the fixture's query
+/// engine awaits a gate before answering, so "unresolved" is a state this rung
+/// can observe and assert against, then close on demand.
+#[gpui::test]
+fn the_surface_reclassifies_when_the_vocabulary_resolves(cx: &mut TestAppContext) {
+    let (engine, release) = support::DeclaresNothingQueryEngine::gated();
+    let data = Mutable::new(tasked_row("milk", "TODO"));
+    let (entity, vcx, services) =
+        mount_editor_with(cx, &data, TestServices::with_query_engine(Arc::new(engine)));
+
+    // Window OPEN: every other signal has fired and settled, and the surface is
+    // still unclassified — so it shows the content column, not vault syntax.
+    assert_eq!(
+        visible(vcx, &entity),
+        "milk",
+        "an unresolved vocabulary must not classify the surface"
+    );
+
+    // Close it.
+    release
+        .send(())
+        .expect("the vocabulary read is still waiting");
+    vcx.run_until_parked();
+
+    assert_eq!(
+        visible(vcx, &entity),
+        "TODO milk",
+        "REGRESSION: the vocabulary resolved but nothing re-projected the surface — the \
+         feature silently disappears for the whole editing session"
+    );
+    // And the reclassification reaches the ROUTER, not just the pixels.
+    type_text(vcx, &entity, "s");
+    let last = services
+        .recorded_intents()
+        .into_iter()
+        .last()
+        .expect("the keystroke commits");
+    assert_eq!(
+        last.params["field"],
+        Value::String(holon_api::SOURCE_TEXT_FIELD.into()),
+        "a surface classified after the window closed must route as source"
     );
 }
 
@@ -320,13 +352,14 @@ fn in_memory_cell(seed: &str) -> holon_core::cell::Cell<String> {
 fn mount_cell_editor<'a>(
     cx: &'a mut TestAppContext,
     data: &Mutable<Arc<DataRow>>,
+    cell_seed: &str,
 ) -> (
     gpui::Entity<EditorView>,
     &'a mut VisualTestContext,
     Arc<TestServices>,
 ) {
     cx.update(|cx| gpui_component::init(cx));
-    let services_concrete = TestServices::with_editable_cell(in_memory_cell(""));
+    let services_concrete = TestServices::with_editable_cell(in_memory_cell(cell_seed));
     let services: Arc<dyn BuilderServices> = services_concrete.clone();
     let data_handle = data.read_only();
 
@@ -365,109 +398,43 @@ fn mount_cell_editor<'a>(
 }
 
 /// THE CELL-ARM RUNG. A cell-attached editor drops its per-row CONTENT
-/// subscription (the CRDT owns content), so anything that reads the row must
-/// not travel through that handle. `task_state` has no second source: an
-/// editor that cannot see it proposes a promotion on every already-tasked
-/// block, from the first keystroke, and the engine's refused-but-verbatim
-/// commit is then overwritten by the stripped buffer.
+/// subscription (the CRDT owns content), so `task_state` — which has no second
+/// source — must still reach it, or the surface silently stops being the
+/// block's vault syntax in the shipped Loro configuration.
 #[gpui::test]
-fn a_cell_attached_editor_sees_the_blocks_task_state(cx: &mut TestAppContext) {
+fn a_cell_attached_editor_shows_the_blocks_vault_syntax(cx: &mut TestAppContext) {
     let data = Mutable::new(tasked_row("milk", "TODO"));
-    let (entity, vcx, services) = mount_cell_editor(cx, &data);
-
-    type_text(vcx, &entity, "TODO ");
-
-    assert_eq!(
-        visible(vcx, &entity),
-        "TODO ",
-        "REGRESSION: the block already carries TODO, so this is text — a \
-         cell-attached editor must read task_state just like a no-cell one"
-    );
-    assert!(
-        services
-            .recorded_intents()
-            .iter()
-            .all(|i| i.op_name != "promote_task_keyword"),
-        "no promotion may be proposed for an already-tasked block; recorded: {:?}",
-        services.recorded_intents()
-    );
-}
-
-/// The cell arm still PROMOTES when it should — the guard reads the row, it
-/// does not simply disable itself when a cell is attached.
-#[gpui::test]
-fn a_cell_attached_editor_still_promotes_a_plain_block(cx: &mut TestAppContext) {
-    let data = Mutable::new(row(""));
-    let (entity, vcx, services) = mount_cell_editor(cx, &data);
-
-    type_text(vcx, &entity, "TODO ");
-
-    let promotions = services
-        .recorded_intents()
-        .into_iter()
-        .filter(|i| i.op_name == "promote_task_keyword")
-        .count();
-    assert_eq!(promotions, 1, "the cell arm promotes too");
-    assert_eq!(visible(vcx, &entity), "");
-}
-
-// ── Refusal recovery ─────────────────────────────────────────────────────
-
-/// THE RECOVERY RUNG. The strip is applied before the write is confirmed, and
-/// the trigger's read is NOT transactional with the dispatch — nothing holds
-/// the block between them, so a peer, an agent or a rule writing `task_state`
-/// in that interval turns an accepted proposal into a refusal no matter how
-/// fresh the read was. That race is not deterministically reproducible; the
-/// behaviour it needs is, and this is it: on a refusal the keyword comes BACK.
-///
-/// Without this the same shape as the original bug returns — engine commits
-/// `TODO milk` verbatim, editor shows `milk`, next keystroke overwrites the
-/// engine's text with the stripped one.
-#[gpui::test]
-fn a_refused_promotion_puts_the_keyword_back(cx: &mut TestAppContext) {
-    let data = Mutable::new(row(""));
-    let (entity, vcx, services) = mount_editor(cx, &data);
-    services
-        .refuse_promotions
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-
-    type_text(vcx, &entity, "TODO milk");
+    let (entity, vcx, _services) = mount_cell_editor(cx, &data, "milk");
+    vcx.run_until_parked();
 
     assert_eq!(
         visible(vcx, &entity),
         "TODO milk",
-        "REGRESSION: the engine refused and stored the typed text verbatim, so \
-         the editor must show it again — a stripped buffer here is the data-loss bug"
-    );
-    assert_eq!(
-        caret(vcx, &entity),
-        9,
-        "the caret follows the restored text, not the stripped one"
-    );
-    assert_eq!(
-        services
-            .recorded_intents()
-            .iter()
-            .filter(|i| i.op_name == "promote_task_keyword")
-            .count(),
-        1,
-        "one proposal, one verdict — the refusal is not retried"
+        "REGRESSION: the cell arm lost sight of task_state, so the surface shows \
+         the content column instead of the source projection"
     );
 }
 
-/// The refusal restores through the CELL arm too: the recovery lives in the
-/// adapter, not in the SqlOnly-only code path.
+/// The cell arm routes a keyword-headed buffer through the SOURCE channel
+/// rather than splicing it into the CRDT: the cell holds the CONTENT column,
+/// which is not what the buffer says.
 #[gpui::test]
-fn a_refused_promotion_puts_the_keyword_back_with_a_cell(cx: &mut TestAppContext) {
+fn a_cell_attached_editor_commits_keyword_headed_text_as_source(cx: &mut TestAppContext) {
     let data = Mutable::new(row(""));
-    let (entity, vcx, services) = mount_cell_editor(cx, &data);
-    services
-        .refuse_promotions
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (entity, vcx, services) = mount_cell_editor(cx, &data, "");
 
     type_text(vcx, &entity, "TODO milk");
 
     assert_eq!(visible(vcx, &entity), "TODO milk");
+    let last = services
+        .recorded_intents()
+        .into_iter()
+        .last()
+        .expect("the cell arm must dispatch a source commit, not only a CRDT delta");
+    assert_eq!(
+        last.params["field"],
+        Value::String(holon_api::SOURCE_TEXT_FIELD.into())
+    );
 }
 
 // Installs the windowed capturing tracing subscriber before this binary's

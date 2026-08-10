@@ -24,7 +24,6 @@ use holon_frontend::editor_view_model::ConvergeDirective;
 use holon_frontend::editor_view_model::EditorAction;
 use holon_frontend::editor_view_model::EditorKey;
 use holon_frontend::editor_view_model::EditorViewModel;
-use holon_frontend::editor_view_model::TaskKeywordAtKeystroke;
 use holon_frontend::editor_view_model::structural_block_action;
 use holon_frontend::input::InputAction;
 use holon_frontend::input::WidgetInput;
@@ -77,6 +76,11 @@ pub struct EditorView {
     /// and splices remote edits into InputState via
     /// `replace_text_in_range_silent`.
     _remote_delta_subscription: Option<Task<()>>,
+    /// Cancelled on drop. The `task_state` edge: the editable surface is a
+    /// projection of BOTH columns, and the content subscription above is
+    /// dropped for cell-attached editors, so this one carries the other half in
+    /// either arm.
+    _task_state_subscription: Option<Task<()>>,
     /// Bounds registry threaded from `GpuiRenderContext` so the popup
     /// overlay can register each item as a tracked widget. Lets the PBT
     /// driver observe the popup state via `wait_for_widget_kind` instead
@@ -105,6 +109,11 @@ pub struct EditorView {
     /// per-row `Mutable` cell). Cell-attached editors bypass this gate
     /// (Increment G).
     prev_focused: std::cell::Cell<bool>,
+    /// Shared per-row cell, kept for the `task_state` column alone. The content
+    /// subscription's handle is dropped for cell-attached editors (the CRDT
+    /// owns content) while `task_state` has no second source — and without
+    /// it the editable surface cannot render the block's vault syntax.
+    task_row: Option<ReadOnlyMutable<Arc<DataRow>>>,
     #[cfg(feature = "mobile")]
     /// The soft-keyboard focus generation this editor claimed on its last
     /// focus-gain (see `crate::mobile::editor_focus_gained`). Passed back on
@@ -209,18 +218,93 @@ impl EditorView {
                 })
         });
 
+        // Kept for the `task_state` column: the editable surface shows a block's
+        // vault syntax, and that column is what turns stored content into it.
+        let task_row = data.clone();
+        let field_for_task_state = field_for_subscription.clone();
+
+        // Resolve the owning document's `#+TODO:` vocabulary ONCE for this
+        // editing session and converge the surface when it lands. Until it does,
+        // the surface shows stored content — safe by construction, because a
+        // buffer that is not keyword-headed commits on the content channel and
+        // can never change a task state.
+        {
+            let services_for_vocab = services.clone();
+            // ALLOW(entity_uri_from_raw): render-spec row id (a `String`),
+            // schemed once here before the vocabulary read.
+            let block_for_vocab = holon_api::EntityUri::from_raw(&row_id);
+            let ctrl_for_vocab = controller.clone();
+            let field_for_vocab = field_for_subscription.clone();
+            cx.spawn(async move |this, cx| {
+                let vocabulary = holon_frontend::editor_source::vocabulary_for_block(
+                    services_for_vocab.as_ref(),
+                    &block_for_vocab,
+                )
+                .await;
+                let vocabulary = match vocabulary {
+                    Ok(Some(v)) => v,
+                    // No query capability: nothing to read, so the surface stays
+                    // UNCLASSIFIED (`Surface::Pending`) and its commits stay on
+                    // the channel that cannot change a task state. Classifying
+                    // under the parser's defaults instead would fabricate the
+                    // one fact this whole seam exists to get right.
+                    Ok(None) => {
+                        tracing::debug!(
+                            target: "editor.source_projection",
+                            block = %block_for_vocab,
+                            "no query capability; the editable surface stays the content column"
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            target: "editor.source_projection",
+                            block = %block_for_vocab,
+                            "cannot resolve this document's task-keyword vocabulary ({e:#}); the \
+                             editable surface shows stored content and the keyword is not editable"
+                        );
+                        return;
+                    }
+                };
+                ctrl_for_vocab
+                    .lock()
+                    .unwrap()
+                    .set_task_vocabulary(vocabulary);
+                let _ = cx.update(|cx| {
+                    let Some(view) = this.upgrade() else {
+                        return;
+                    };
+                    for window_handle in cx.windows() {
+                        let _ = window_handle.update(cx, |_, window, cx| {
+                            view.update(cx, |this, cx| {
+                                // The RAW authority column, never the visible
+                                // buffer: that one is already a projection, and
+                                // projecting it again would restate the keyword.
+                                let raw = match this.controller.lock().unwrap().current_text() {
+                                    Some(cell) => Some(cell),
+                                    None => this.task_row.as_ref().and_then(|row| {
+                                        row.get_cloned()
+                                            .get(field_for_vocab.as_str())
+                                            .and_then(|v| v.as_string())
+                                            .map(str::to_string)
+                                    }),
+                                };
+                                let Some(raw) = raw else { return };
+                                let target = this.project_authority(&raw);
+                                this.converge_to("vocabulary_resolved", &target, window, cx);
+                            });
+                        });
+                    }
+                });
+            })
+            .detach();
+        }
+
         // Subscribe to blur and change events.
         {
             let ctrl = controller.clone();
             let services_clone = services.clone();
             let row_id_for_blur = row_id.clone();
-            // The keyword-promotion trigger reads the block's task state from
-            // the row AT THE KEYSTROKE that would use it. Cloned here rather
-            // than taken from the content subscription's handle: that one is
-            // dropped for cell-attached editors (the CRDT owns content), while
-            // `task_state` has no second source — an editor that cannot see it
-            // proposes promotions on blocks that are already tasks.
-            let task_row = data.clone();
             // ALLOW(entity_uri_from_raw): render-spec row_id, schemed to match
             // the key an undo/redo arms its authority re-seed under.
             let row_uri_for_reseed = holon_api::EntityUri::from_raw(&row_id);
@@ -309,66 +393,20 @@ impl EditorView {
                         // The write_seq stamp happens INSIDE `apply_local_edit`
                         // before this dispatch, so a fast CDC echo cannot race a
                         // not-yet-recorded seq.
-                        // Read the block's task keyword from the row only when
-                        // this keystroke would actually consult it (a
-                        // keyword-headed one, at most one per promotion), and
-                        // read it NOW rather than remembering it — a task
-                        // toggle between two keystrokes would make a remembered
-                        // copy stale exactly when the guard runs.
-                        let task_keyword = if ctrl.lock().unwrap().attempts_promotion(&text) {
-                            TaskKeywordAtKeystroke::Read(task_row.as_ref().and_then(|row| {
-                                row.get_cloned()
-                                    .get("task_state")
-                                    .and_then(|v| v.as_string())
-                                    .map(str::to_string)
-                            }))
-                        } else {
-                            TaskKeywordAtKeystroke::Unread
-                        };
                         // A genuine keystroke makes this editor the authority
                         // again, so an armed undo re-seed must never reach it.
                         if ctrl.lock().unwrap().buffer() != text {
                             services_clone.consume_authority_reseed(&row_uri_for_reseed);
                         }
-                        let local_edit = ctrl.lock().unwrap().apply_local_edit(&text, task_keyword);
-                        match local_edit {
-                            Ok(edit) => match (edit.intent, edit.rewrite) {
-                                // A live task-keyword promotion. The keyword
-                                // already left the visible text — the re-entrant
-                                // Change that triggers sees `new_text == buffer`
-                                // and is a no-op — but the strip is OPTIMISTIC:
-                                // the read that authorised it and the engine's
-                                // guard are not one transaction, so this
-                                // dispatch is AWAITED and a refusal puts the
-                                // keyword back.
-                                (Some(intent), Some(rewrite)) => {
-                                    this.apply_buffer_rewrite(&rewrite, window, cx);
-                                    let pending =
-                                        services_clone.dispatch_intent_awaiting_result(intent);
-                                    cx.spawn(async move |this, cx| {
-                                        let outcome = pending.await.and_then(|payload| {
-                                            holon_frontend::editor_view_model::PromotionOutcome::parse(payload)
-                                        });
-                                        let _ = cx.update(|cx| {
-                                            let Some(view) = this.upgrade() else {
-                                                return;
-                                            };
-                                            for window_handle in cx.windows() {
-                                                let _ = window_handle.update(cx, |_, window, cx| {
-                                                    view.update(cx, |this, cx| {
-                                                        this.settle_promotion(
-                                                            &outcome, &rewrite, window, cx,
-                                                        );
-                                                    });
-                                                });
-                                            }
-                                        });
-                                    })
-                                    .detach();
-                                }
-                                (Some(intent), None) => services_clone.dispatch_intent(intent),
-                                (None, _) => {}
-                            },
+                        // The buffer is VAULT SYNTAX, so the VM routes the write
+                        // to `source_text` when the text is (or has stopped
+                        // being) keyword-headed and to `content` otherwise. The
+                        // adapter does not need to know which — both are plain
+                        // fire-and-forget `set_field`s, and the store's parse is
+                        // the only thing that reads a keyword.
+                        match ctrl.lock().unwrap().apply_local_edit(&text) {
+                            Ok(Some(intent)) => services_clone.dispatch_intent(intent),
+                            Ok(None) => {}
                             Err(e) => {
                                 tracing::error!("apply_local_edit failed: {e}");
                             }
@@ -437,7 +475,15 @@ impl EditorView {
                     // missing/mistyped — a plumbing regression the loop reports
                     // loudly and treats as "drop", never a silent converge.
                     let echo_seq = row.get("write_seq").and_then(|v| v.as_i64());
-                    (content, echo_seq)
+                    // `task_state` rides along ONLY so the dedupe below cannot
+                    // swallow a task-toggle that leaves the content column
+                    // alone: the surface is projected from both columns.
+                    let task_state = row
+                        .get("task_state")
+                        .and_then(|v| v.as_string())
+                        .unwrap_or("")
+                        .to_string();
+                    (content, echo_seq, task_state)
                 })
                 .dedupe_cloned();
             cx.spawn(async move |this, cx| {
@@ -456,7 +502,7 @@ impl EditorView {
                 // carries a greater-or-equal seq, so it still converges while
                 // the editor owns focus — the property the old heuristic
                 // existed to preserve.
-                while let Some((new_value, echo_seq)) = stream.next().await {
+                while let Some((new_value, echo_seq, _task_state)) = stream.next().await {
                     if this.upgrade().is_none() {
                         // EditorView dropped (e.g. row removed by
                         // collection driver). Stop the loop — the `Task`
@@ -485,14 +531,70 @@ impl EditorView {
                                     // InputState must converge. The adapter
                                     // applies it now, or defers it past an IME
                                     // composition (Amendment 3).
+                                    // The buffer holds vault syntax, so the
+                                    // authority the echo discriminator compares
+                                    // against is the PROJECTION of the settled
+                                    // row — otherwise every source-channel write
+                                    // reads back as an external change and
+                                    // converges the keyword out of view.
+                                    let surface = this.project_authority(&new_value);
                                     let directive = this
                                         .controller
                                         .lock()
                                         .unwrap()
-                                        .converge_from_data_sync(&new_value, echo_seq);
+                                        .converge_from_data_sync(&surface, echo_seq);
                                     if let Some(directive) = directive {
                                         this.converge_or_defer("data_sync", directive, window, cx);
                                     }
+                                });
+                            });
+                        }
+                    });
+                }
+            })
+        });
+
+        // The editable surface is projected from `content` AND `task_state`, and a
+        // cell-attached editor drops the content subscription above (the CRDT
+        // owns content) — so `task_state` gets its own edge, in both arms. It
+        // carries no `write_seq` (no editor writes it), so it never feeds the
+        // echo discriminator: it re-projects the live authority and converges.
+        let _task_state_subscription: Option<Task<()>> = task_row.clone().map(|row| {
+            let signal = row
+                .signal_cloned()
+                .map(|row| {
+                    row.get("task_state")
+                        .and_then(|v| v.as_string())
+                        .unwrap_or("")
+                        .to_string()
+                })
+                .dedupe_cloned();
+            cx.spawn(async move |this, cx| {
+                use futures::StreamExt;
+                let mut stream = signal.to_stream();
+                while stream.next().await.is_some() {
+                    if this.upgrade().is_none() {
+                        break;
+                    }
+                    cx.update(|cx| {
+                        let Some(view) = this.upgrade() else {
+                            return;
+                        };
+                        for window_handle in cx.windows() {
+                            let _ = window_handle.update(cx, |_, window, cx| {
+                                view.update(cx, |this, cx| {
+                                    let raw = match this.controller.lock().unwrap().current_text() {
+                                        Some(cell) => Some(cell),
+                                        None => this.task_row.as_ref().and_then(|row| {
+                                            row.get_cloned()
+                                                .get(field_for_task_state.as_str())
+                                                .and_then(|v| v.as_string())
+                                                .map(str::to_string)
+                                        }),
+                                    };
+                                    let Some(raw) = raw else { return };
+                                    let target = this.project_authority(&raw);
+                                    this.converge_to("task_state", &target, window, cx);
                                 });
                             });
                         }
@@ -510,7 +612,8 @@ impl EditorView {
         // ALLOW(entity_uri_from_raw): render-spec row_id parsed once to match the focus
         // signal
         let row_uri_for_focus = holon_api::EntityUri::from_raw(&row_id);
-        let _focus_subscription = spawn_focus_binding(cx, services.clone(), row_uri_for_focus);
+        let _focus_subscription =
+            spawn_focus_binding(cx, services.clone(), controller.clone(), row_uri_for_focus);
 
         // ── CRDT-backed remote delta subscription ──────
         //
@@ -576,8 +679,15 @@ impl EditorView {
                                     // behind the adapter-side IME guard
                                     // (Amendment 3). The structural payload of
                                     // the delta stays discarded above.
-                                    let directive =
-                                        this.controller.lock().unwrap().remote_converge_directive();
+                                    let directive = this
+                                        .controller
+                                        .lock()
+                                        .unwrap()
+                                        .remote_converge_directive()
+                                        .map(|d| ConvergeDirective {
+                                            target: this.project_authority(&d.target),
+                                            ..d
+                                        });
                                     if let Some(directive) = directive {
                                         this.converge_or_defer(
                                             "remote_delta",
@@ -614,7 +724,15 @@ impl EditorView {
         // mount
         let row_uri = holon_api::EntityUri::from_raw(&row_id);
         if services.focused_block().as_ref() == Some(&row_uri) {
-            grab_focus_and_seed_caret(&input, window, cx, services.as_ref(), &row_uri, true);
+            grab_focus_and_seed_caret(
+                &input,
+                window,
+                cx,
+                services.as_ref(),
+                &controller,
+                &row_uri,
+                true,
+            );
         }
 
         Self {
@@ -629,7 +747,9 @@ impl EditorView {
             _data_subscription,
             _focus_subscription,
             _remote_delta_subscription,
+            _task_state_subscription,
             prev_focused: std::cell::Cell::new(false),
+            task_row,
             #[cfg(feature = "mobile")]
             focus_gen: std::cell::Cell::new(0),
         }
@@ -692,7 +812,7 @@ impl EditorView {
                 .set_pending_directive(directive);
             return;
         }
-        self.converge_input(source, &directive.target, window, cx);
+        self.converge_to(source, &directive.target, window, cx);
     }
 
     /// Replay a directive deferred during an IME composition, once composition
@@ -708,7 +828,7 @@ impl EditorView {
         let Some(directive) = self.controller.lock().unwrap().take_pending_directive() else {
             return;
         };
-        self.converge_input("ime_replay", &directive.target, window, cx);
+        self.converge_to("ime_replay", &directive.target, window, cx);
     }
 
     /// The single convergence entry point: set this editor's `InputState`
@@ -743,10 +863,44 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let target = {
+        let raw = {
             let vm = self.controller.lock().unwrap();
             vm.current_text().unwrap_or_else(|| sql_default.to_string())
         };
+        let target = self.project_authority(&raw);
+        self.converge_to(source, &target, window, cx);
+    }
+
+    /// The block's stored state as the editable surface shows it: vault syntax
+    /// for the task-keyword facet, stored content otherwise. `raw` is the
+    /// authority's CONTENT column; the `task_state` comes from the shared row
+    /// cell, read now rather than remembered — a task toggle under an open
+    /// editor must change what the surface shows.
+    fn project_authority(&self, raw: &str) -> String {
+        let task_state = self.task_row.as_ref().and_then(|row| {
+            row.get_cloned()
+                .get("task_state")
+                .and_then(|v| v.as_string())
+                .map(str::to_string)
+        });
+        self.controller
+            .lock()
+            .unwrap()
+            .project_authority(raw, task_state.as_deref())
+    }
+
+    /// Set `InputState` to an editor-surface `target` that a caller has already
+    /// projected. Split out of [`Self::converge_input`] so a directive built
+    /// against the surface (the echo discriminator compares surface text) is
+    /// never projected twice.
+    pub(crate) fn converge_to(
+        &mut self,
+        source: &'static str,
+        target: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = target.to_string();
         // Re-baseline the blur-commit change tracking to the authority we are
         // converging onto. `converge_input` is the single convergence entry
         // point and only fires at safe (non-mid-typing) points, so the buffer
@@ -802,10 +956,22 @@ impl EditorView {
         let restored = anchor
             .as_ref()
             .and_then(|anchor| self.controller.lock().unwrap().resolve_cursor(anchor));
+        // The Loro anchor resolves against the CELL text — the content column —
+        // while the buffer holds the source projection, so an anchored offset
+        // has to cross the same keyword prefix every other offset crosses.
+        let anchor_prefix_chars = self
+            .controller
+            .lock()
+            .unwrap()
+            .current_text()
+            .map(|cell| prepended_chars(&cell, &target))
+            .unwrap_or(0);
         input.update(cx, |state, cx| {
             let byte_offset = match restored {
-                Some(new_codepoint) => state.text().char_index_to_offset(new_codepoint),
-                None => preserved_caret(prior_cursor, &target),
+                Some(new_codepoint) => state
+                    .text()
+                    .char_index_to_offset(new_codepoint + anchor_prefix_chars),
+                None => caret_after_converge(prior_cursor, &current, &target),
             };
             let pos = state.text().offset_to_position(byte_offset);
             state.set_cursor_position(pos, window, cx);
@@ -814,91 +980,6 @@ impl EditorView {
         // re-entrant Change sees `new_text == buffer` → `apply_local_edit`
         // returns an empty edit → no spurious write-back.
     }
-
-    /// Land the engine's verdict on a promotion whose keyword this editor has
-    /// already stripped from the visible field.
-    ///
-    /// On a refusal — or on an error, which is likewise no promotion — the
-    /// keyword goes back: the engine committed the typed text verbatim, and
-    /// anything typed while the answer was in flight is kept after it. Silence
-    /// here would be the original data-loss bug with extra steps, so the
-    /// failure arm restores too rather than logging and walking away.
-    pub(crate) fn settle_promotion(
-        &mut self,
-        outcome: &anyhow::Result<holon_frontend::editor_view_model::PromotionOutcome>,
-        rewrite: &holon_frontend::editor_view_model::BufferRewrite,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        use holon_frontend::editor_view_model::PromotionOutcome;
-        use holon_frontend::editor_view_model::PromotionResidue;
-        let residue = match outcome {
-            Ok(PromotionOutcome::Promoted) => return,
-            Ok(PromotionOutcome::Refused { content, reason }) => {
-                tracing::warn!(
-                    target: "editor.task_keyword_promotion",
-                    row_id = %self.row_id,
-                    refusal = %reason,
-                    "promotion refused after the keyword was stripped; restoring the typed text"
-                );
-                PromotionResidue::EngineStored(content.clone())
-            }
-            Err(e) => {
-                tracing::error!(
-                    target: "editor.task_keyword_promotion",
-                    row_id = %self.row_id,
-                    "promotion dispatch failed ({e:#}); restoring the typed text"
-                );
-                // The op may have written nothing at all, so the typed text
-                // goes back on screen AND is committed — a keystroke is never
-                // lost to a failed dispatch.
-                PromotionResidue::NothingStored(rewrite.typed.clone())
-            }
-        };
-        let restore = self
-            .controller
-            .lock()
-            .unwrap()
-            .restore_refused_promotion(&rewrite.text, &residue);
-        let Some(restore) = restore else {
-            return; // an external converge landed here; its text is authority
-        };
-        let input = self.input.clone();
-        let caret = input.read(cx).cursor() + rewrite.stripped_prefix;
-        input.update(cx, |state, cx| {
-            state.set_value(&restore.text, window, cx);
-            let pos = state
-                .text()
-                .offset_to_position(preserved_caret(caret, &restore.text));
-            state.set_cursor_position(pos, window, cx);
-        });
-        if let Some(intent) = restore.intent {
-            self.services.dispatch_intent(intent);
-        }
-    }
-
-    /// Re-seed the visible `InputState` from a VM buffer the VM rewrote itself
-    /// (live task-keyword promotion). The caret moves back by exactly the
-    /// stripped prefix so it keeps its position within the surviving text.
-    pub(crate) fn apply_buffer_rewrite(
-        &mut self,
-        rewrite: &holon_frontend::editor_view_model::BufferRewrite,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let input = self.input.clone();
-        let caret = input
-            .read(cx)
-            .cursor()
-            .saturating_sub(rewrite.stripped_prefix);
-        input.update(cx, |state, cx| {
-            state.set_value(&rewrite.text, window, cx);
-            let pos = state
-                .text()
-                .offset_to_position(preserved_caret(caret, &rewrite.text));
-            state.set_cursor_position(pos, window, cx);
-        });
-    }
 }
 
 /// Clamp a caret byte offset captured before an absolute `set_value` onto the
@@ -906,6 +987,28 @@ impl EditorView {
 /// so the restored caret is always a valid offset. The click position survives
 /// convergence in SqlOnly mode (no Loro anchor); when the new text is shorter
 /// the caret pins to the end.
+/// Carry a caret across a converge that only PREPENDED bytes — which is what
+/// seeding the source projection does: `milk` becomes `TODO milk`, every offset
+/// in the text the user can see shifts right by the keyword prefix.
+///
+/// Any other shape (a genuine external rewrite) keeps the plain clamp: guessing
+/// an edit script would move the caret on evidence the text does not carry.
+fn caret_after_converge(prior: usize, old: &str, new: &str) -> usize {
+    if new.len() > old.len() && new.ends_with(old) {
+        return preserved_caret(prior + (new.len() - old.len()), new);
+    }
+    preserved_caret(prior, new)
+}
+
+/// How many CHARACTERS `new` prepends to `old`, `0` when it does not simply
+/// prepend. Codepoints, not bytes: the Loro anchor speaks codepoint indices.
+fn prepended_chars(old: &str, new: &str) -> usize {
+    if new.len() > old.len() && new.ends_with(old) {
+        return new.chars().count() - old.chars().count();
+    }
+    0
+}
+
 fn preserved_caret(old_offset: usize, new_text: &str) -> usize {
     let mut offset = old_offset.min(new_text.len());
     while !new_text.is_char_boundary(offset) {
@@ -924,6 +1027,7 @@ fn preserved_caret(old_offset: usize, new_text: &str) -> usize {
 fn spawn_focus_binding(
     cx: &mut Context<EditorView>,
     services: Arc<dyn BuilderServices>,
+    controller: Arc<Mutex<EditorViewModel>>,
     row: holon_api::EntityUri,
 ) -> Option<Task<()>> {
     use futures_signals::signal::SignalExt;
@@ -977,6 +1081,7 @@ fn spawn_focus_binding(
                                 window,
                                 cx,
                                 services.as_ref(),
+                                &controller,
                                 &row,
                                 false,
                             );
@@ -1073,13 +1178,19 @@ fn grab_focus_and_seed_caret(
     window: &mut Window,
     cx: &mut App,
     services: &dyn BuilderServices,
+    controller: &Arc<Mutex<EditorViewModel>>,
     row: &holon_api::EntityUri,
     default_caret_to_end: bool,
 ) {
     if !input.read(cx).focus_handle(cx).is_focused(window) {
         window.focus(&input.read(cx).focus_handle(cx), cx);
     }
-    let seed = services.peek_caret_seed(row);
+    // The seed arrives in CONTENT coordinates (`join_block` reports the merge
+    // boundary, `split_block` reports 0) while this buffer holds the SURFACE, so
+    // it crosses the keyword prefix on any tasked target (task #93).
+    let seed = services
+        .peek_caret_seed(row)
+        .map(|offset| controller.lock().unwrap().content_offset_to_surface(offset));
     input.update(cx, |state, cx| {
         if caret_probe() {
             eprintln!(
@@ -2101,5 +2212,61 @@ mod caret_preservation {
     fn multibyte_valid_boundary_is_kept() {
         // An offset already on a char boundary of a multibyte string is kept.
         assert_eq!(preserved_caret(3, "café"), 3);
+    }
+}
+
+#[cfg(test)]
+mod source_projection_caret {
+    //! Inc 2 — focus seeds the SOURCE PROJECTION, which grows the buffer at the
+    //! FRONT by the task keyword. Every offset the user placed against the
+    //! displayed text has to cross that prefix, or a mid-word click lands
+    //! `keyword.len() + 1` bytes to the left of the character it was aimed at.
+    use super::caret_after_converge;
+    use super::prepended_chars;
+
+    #[test]
+    fn a_mid_word_caret_follows_the_keyword_prefix() {
+        // Clicked between `mi` and `lk` of the displayed `milk`, then focus
+        // seeds `TODO milk`: the caret must still sit between `mi` and `lk`.
+        assert_eq!(caret_after_converge(2, "milk", "TODO milk"), 7);
+    }
+
+    #[test]
+    fn a_caret_at_the_start_of_the_content_stays_at_its_start() {
+        assert_eq!(caret_after_converge(0, "milk", "TODO milk"), 5);
+        assert_eq!(caret_after_converge(4, "milk", "TODO milk"), 9);
+    }
+
+    #[test]
+    fn a_genuine_external_rewrite_keeps_the_plain_clamp() {
+        // Not a prepend — the text was replaced, and there is no evidence for
+        // where the caret "should" go, so it clamps as before.
+        assert_eq!(caret_after_converge(3, "milk", "bread"), 3);
+        assert_eq!(caret_after_converge(9, "milk", "oat"), 3);
+    }
+
+    #[test]
+    fn an_unprojected_converge_does_not_move_the_caret() {
+        assert_eq!(caret_after_converge(2, "milk", "milk"), 2);
+    }
+
+    #[test]
+    fn the_prefix_is_counted_in_codepoints_for_the_loro_anchor() {
+        // The anchor speaks codepoint indices, so a multibyte keyword must not
+        // shift it by its BYTE length.
+        assert_eq!(prepended_chars("milk", "TODO milk"), 5);
+        assert_eq!(prepended_chars("milk", "TÄT milk"), 4);
+        assert_eq!(prepended_chars("milk", "bread"), 0);
+        assert_eq!(prepended_chars("milk", "milk"), 0);
+    }
+
+    #[test]
+    fn a_selection_endpoint_crosses_the_prefix_the_same_way() {
+        // Anchor and head are two offsets in the same coordinate space, so the
+        // one rule carries both — a selection over the whole displayed text
+        // still selects exactly that text, not the keyword with it.
+        let (anchor, head) = (0usize, 4usize);
+        assert_eq!(caret_after_converge(anchor, "milk", "TODO milk"), 5);
+        assert_eq!(caret_after_converge(head, "milk", "TODO milk"), 9);
     }
 }
