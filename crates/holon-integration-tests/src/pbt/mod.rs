@@ -18,6 +18,7 @@ pub mod generators;
 pub mod invariant_mode_override;
 pub mod invariants;
 pub mod layout_bridge;
+pub mod live_self_check;
 pub mod loro_slice;
 pub mod loro_sync;
 pub mod mcp_server_actor_state;

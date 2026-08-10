@@ -246,6 +246,8 @@ deepening it.
      parent_id, sort_key FROM block ORDER BY parent_id, sort_key` gives the whole forest.
      Disk: read `$SANDBOX/vault/*.org` directly (the `read_org_file` MCP tool takes `doc_id`,
      not a path).
+   - Run `run_self_checks {}` after every mutating sequence — any `fail` is a finding, and the
+     `skipped` count tells you which invariants never engaged.
    - **Divergence between the two is itself a bug** — e.g. sidebar rendering 3 rows where its
      backing SQL returns 2 (found live: phantom `__virtual:` row).
 6. **After EVERY step, grep the log:** `grep -E "PANIC|ERROR" $SANDBOX/logs/app.log` — the UI
@@ -372,5 +374,9 @@ Introspect: `execute_query{query,language,…}` · `execute_raw_sql{sql}` (error
 "Failed to execute raw SQL" with no cause; iterate on the SQL) · `diff_loro_sql` ·
 `inspect_loro_blocks{doc_id}` · `list_loro_documents` · `read_org_file{doc_id}` ·
 `render_org` · `list_keybindings` (read a shortcut before sending it — do not assume one) ·
-`watch_query`/`poll_changes`.
+`watch_query`/`poll_changes` ·
+`run_self_checks{}` (runs the class-1 self-consistency invariants against live state; returns
+per-invariant pass/fail/skipped with counts).
 NOT present on all branches: `reset_vault` (check `--list` first).
+`run_self_checks` needs a pbt-featured launch — `just live-verify` now supplies it. Under a plain
+`cargo run -p holon-gpui` no suite is registered and the tool returns an error, not an empty report.

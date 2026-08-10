@@ -2317,6 +2317,82 @@ impl HolonMcpServer {
             result.to_string(),
         )]))
     }
+
+    /// Run the class-1 (self-consistency) invariants against the live app.
+    ///
+    /// The snapshot is captured HERE, on the server's runtime, and handed to
+    /// the suite as owned data: the invariant futures are `!Send`, and a single
+    /// snapshot also guarantees every check sees the same instant.
+    #[tool(
+        description = "TEST-ONLY: run the class-1 self-consistency invariants (marks within \
+                       content, no orphan blocks, no parent cycles, …) against the LIVE app \
+                       state and return a per-invariant pass/fail/skipped report. Skipped \
+                       always carries its reason. Requires a pbt-featured build."
+    )]
+    async fn run_self_checks(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        let suite = self.debug.self_check_suite.get().cloned().ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                "run_self_checks: no self-check suite is registered. The invariant catalog is \
+                 compiled in only by the `pbt` feature — relaunch with \
+                 `cargo run -p holon-gpui --features pbt` (`just live-verify` does this). \
+                 Reporting no checks would read like a pass, so this is an error.",
+                None,
+            )
+        })?;
+
+        let block_query_source = {
+            let cell = self
+                .debug
+                .live_debug
+                .read()
+                .expect("live_debug cell poisoned");
+            cell.block_query_source.clone()
+        };
+        let block_query_source = block_query_source.ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                "run_self_checks requires a wired block_query_source (the live CDC mirror); \
+                 there is no silent SQL substitute",
+                None,
+            )
+        })?;
+
+        let snapshot = block_query_source.snapshot().await.map_err(|e| {
+            rmcp::ErrorData::internal_error(
+                format!("run_self_checks: live block snapshot failed: {e}"),
+                None,
+            )
+        })?;
+        let live = crate::self_check::LiveSnapshot {
+            live_blocks: snapshot.iter_blocks().cloned().collect(),
+            focus_roots: holon_core::storage::BlockQuery::focus_roots(&snapshot)
+                .into_iter()
+                .map(|fr| (fr.region, fr.root_id))
+                .collect(),
+        };
+
+        // The suite's futures are `!Send`; it drives them on its own
+        // current-thread runtime, so it must not run on a worker thread that is
+        // already inside one.
+        let report = tokio::task::spawn_blocking(move || suite.run(live))
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("run_self_checks: the suite task panicked: {e}"),
+                    None,
+                )
+            })?
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("run_self_checks failed: {e}"), None)
+            })?;
+
+        let json = serde_json::to_string(&report).map_err(|e| {
+            rmcp::ErrorData::internal_error(
+                format!("run_self_checks: report serialization failed: {e}"),
+                None,
+            )
+        })?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
 }
 
 /// Fail-loud decision for `type_text` (dogfood #5 row 147): given `total`
@@ -4785,6 +4861,43 @@ mod tests {
         assert_eq!(
             entity.get("_source_header_args").unwrap(),
             &Value::String(":results raw".into())
+        );
+    }
+}
+
+#[cfg(test)]
+mod self_check_wiring_tests {
+    use std::sync::Arc;
+
+    use crate::server::DebugServices;
+    use crate::server::HolonMcpServer;
+
+    /// An unregistered suite must be a LOUD error naming the fix: an empty
+    /// report would read like a pass.
+    #[tokio::test]
+    async fn run_self_checks_without_a_registered_suite_errors_naming_the_fix() {
+        let server = HolonMcpServer::with_type_registry(
+            None,
+            None,
+            Arc::new(DebugServices::default()),
+            None,
+        );
+
+        let result = server.run_self_checks().await;
+
+        let err = match result {
+            Err(e) => e,
+            Ok(ok) => panic!("an unwired suite must be an error, not a report: {ok:?}"),
+        };
+        assert!(
+            err.message.contains("--features pbt"),
+            "the error must name the actual fix: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("just live-verify"),
+            "the error must name the one-command form: {}",
+            err.message
         );
     }
 }

@@ -267,14 +267,15 @@ keystone-mcp port='8710' cases='8' weights='':
 # Launch the app for live MCP-driven verification: throwaway config+vault, own
 # MCP port (registry: 8710/8720/8730/... — pick one per verifier). Leaves the
 # app running in the background; caller drives it over http://127.0.0.1:PORT/mcp
-# and kills the printed pid when done.
+# and kills the printed pid when done. Built with `--features pbt` — that
+# feature is what wires the self-check suite behind the `run_self_checks` tool.
 live-verify port='8710' dir='/tmp/holon-live-verify':
     #!/usr/bin/env bash
     set -euo pipefail
     rm -rf "{{dir}}"
     mkdir -p "{{dir}}/config" "{{dir}}/vault"
     HOLON_CONFIG_DIR="{{dir}}/config" HOLON_VAULT_ROOT="{{dir}}/vault" \
-        MCP_SERVER_PORT={{port}} cargo run -p holon-gpui \
+        MCP_SERVER_PORT={{port}} cargo run -p holon-gpui --features pbt \
         > "{{dir}}/app.log" 2>&1 &
     app_pid=$!
     echo "launched holon-gpui pid=${app_pid}, waiting for /health ..."
