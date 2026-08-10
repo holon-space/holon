@@ -28,7 +28,8 @@ use crate::pbt::transition_budgets::MutationKind;
 use crate::pbt::transition_budgets::expected_sql_for_kind;
 
 /// Redo the last undone mutation via the engine's redo stack.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I redo")]
 pub struct Redo;
 
 impl<R: RefLifecycle + RefBlockTreeMut> TransitionFactory<R> for Redo {

@@ -47,7 +47,8 @@ use crate::pbt::transition_budgets::REACTIVE_BASE;
 use crate::pbt::transition_budgets::docs_tolerance;
 
 /// Navigate to focus on a specific block within a region.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I focus block {block_id} in region {region}")]
 pub struct NavigateFocus {
     pub region: Region,
     pub block_id: EntityUri,

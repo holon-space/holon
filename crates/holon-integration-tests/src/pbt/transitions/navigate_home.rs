@@ -38,7 +38,8 @@ use crate::pbt::transition_budgets::docs_tolerance;
 
 /// Return to root (home) in a region's navigation history.
 /// Clears all navigation state for the region and sets focus to None globally.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I navigate home in region {region}")]
 pub struct NavigateHome {
     pub region: Region,
 }

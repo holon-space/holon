@@ -31,7 +31,8 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 /// Edit a block's LoroText container on a peer at the character level.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("peer {peer_idx} edits block {block_id} with {op}")]
 pub struct PeerCharEdit {
     pub peer_idx: usize,
     pub block_id: String,

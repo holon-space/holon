@@ -36,7 +36,8 @@ use validated::Validated;
 use crate::pbt::transition_budgets::ExpectedSql;
 
 /// Retitle the page `page_id` to `new_title`.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I rename page {page_id} to {new_title}")]
 pub struct RenamePage {
     pub page_id: EntityUri,
     pub new_title: String,

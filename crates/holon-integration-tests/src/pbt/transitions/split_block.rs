@@ -157,7 +157,8 @@ use crate::pbt::transition_budgets::expected_sql_for_kind;
 
 /// Split an editable text block at a byte position.
 /// Only the currently focused (editable) block is a candidate.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I split block {block_id} at position {position}")]
 pub struct SplitBlock {
     pub block_id: EntityUri,
     pub position: usize,

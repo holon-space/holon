@@ -35,7 +35,8 @@ use crate::pbt::transition_budgets::docs_tolerance;
 /// Turso handle, rehydrate the Loro container, or restart the engine — the true
 /// persistence-across-restart class (a real `RebootStorage`) is a separate,
 /// unbuilt transition (F9 fork). Do not read this as a storage reboot.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("the app is restarted")]
 pub struct SimulateRestart;
 
 impl<R: RefLifecycle + RefLayout> TransitionFactory<R> for SimulateRestart {

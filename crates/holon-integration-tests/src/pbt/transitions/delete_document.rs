@@ -43,7 +43,8 @@ use crate::pbt::transition_budgets::cdc_tolerance;
 /// are excluded so the deletion universe is exactly the create-inverse. This
 /// narrowing is liftable once file-deletion convergence is proven on the
 /// synthetic docs.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I delete document {file_name}")]
 pub struct DeleteDocument {
     pub file_name: String,
 }

@@ -22,7 +22,8 @@ use crate::pbt::transition_budgets::ExpectedSql;
 /// No-op transition: does nothing to either the reference model or SUT.
 /// Enables the PBT to explore the search space without making progress,
 /// useful for validating invariants in a stable state.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("nothing happens")]
 pub struct Nothing;
 
 impl<R> TransitionFactory<R> for Nothing {

@@ -80,7 +80,8 @@ pub async fn apply_click_block_to_sut<S: SutLayout + SutDriver>(
 
 /// Click on a rendered block to focus it. When clicking in LeftSidebar,
 /// also pushes a navigation-history entry for Region::Main.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I click block {block_id} in region {region}")]
 pub struct ClickBlock {
     pub region: Region,
     pub block_id: EntityUri,

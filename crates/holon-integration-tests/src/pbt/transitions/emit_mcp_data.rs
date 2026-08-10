@@ -30,7 +30,8 @@ use crate::pbt::transition_budgets::docs_tolerance;
 
 /// Trigger IVM re-evaluation to detect CDC re-emission bugs.
 /// Generated with low weight — useful after navigation transitions.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("the MCP emits its data")]
 pub struct EmitMcpData;
 
 impl<R: RefLifecycle> TransitionFactory<R> for EmitMcpData {

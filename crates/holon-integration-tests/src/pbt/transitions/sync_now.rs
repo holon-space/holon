@@ -24,7 +24,8 @@ use validated::Validated::Good;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I sync now owner-to-receiver {owner_to_receiver}")]
 pub struct SyncNow {
     /// `true` = the owner publishes and the receiver admits; `false` = the
     /// reverse. Both directions run the SAME orchestrator over the SAME relay.

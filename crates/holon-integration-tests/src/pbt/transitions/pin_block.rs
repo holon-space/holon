@@ -60,7 +60,8 @@ use crate::pbt::transition_budgets::PIN_BLOCK_CLICK_RESOLVE_READS;
 use crate::pbt::transition_budgets::REACTIVE_BASE;
 
 /// Pin a block to the right sidebar via shift+click semantics.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I pin block {block_id} in region {region}")]
 pub struct PinBlock {
     pub region: Region,
     pub block_id: EntityUri,

@@ -41,7 +41,8 @@ use crate::pbt::transition_budgets::expected_sql_for_kind;
 
 /// Press a structural key chord (Enter, Backspace, Escape) in the active
 /// editor. Gated to `PBT_ATOMIC_EDITOR=1` runs.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I press the key chord {chord}")]
 pub struct PressKey {
     pub chord: KeyChord,
 }

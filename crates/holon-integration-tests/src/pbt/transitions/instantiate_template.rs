@@ -35,7 +35,10 @@ use crate::template_fixture::TPL_CHILD;
 use crate::template_fixture::TPL_ROOT;
 
 /// Instantiate the canned template under an existing non-page block.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template(
+    "I instantiate a template under block {parent_id} for date {date} with mood {mood}"
+)]
 pub struct InstantiateTemplate {
     pub parent_id: EntityUri,
     pub date: String,

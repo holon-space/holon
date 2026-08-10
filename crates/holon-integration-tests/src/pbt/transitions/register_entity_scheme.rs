@@ -46,7 +46,8 @@ pub const ENTITY_NAMES: [&str; 2] = ["t_widget", "cc_session"];
 pub const LINKED_SCHEME: &str = "t-widget";
 
 /// Register one entity type through the `create_entity_type` MCP tool.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I register the entity scheme {entity_name}")]
 pub struct RegisterEntityScheme {
     /// SQL table spelling, drawn from [`ENTITY_NAMES`].
     pub entity_name: String,

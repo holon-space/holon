@@ -62,13 +62,17 @@ pub(crate) fn seeded_sidebar_watch_spec() -> WatchSpec {
 use crate::pbt::transition_budgets::ExpectedSql;
 
 /// Start the application (triggers sync, may race with DDL).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("the app is started")]
 pub struct StartApp {
+    #[step_default(true)]
     pub wait_for_ready: bool,
     /// Enable the fake external MCP provider (adds concurrent DDL during
     /// startup)
+    #[step_default(true)]
     pub enable_fake_mcp: bool,
     /// Enable Loro CRDT layer (false = SQL-only, matching Flutter default)
+    #[step_default(false)]
     pub enable_loro: bool,
 }
 

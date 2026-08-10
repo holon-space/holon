@@ -33,7 +33,8 @@ use crate::pbt::transition_budgets::REACTIVE_BASE;
 use crate::pbt::transition_budgets::docs_tolerance;
 
 /// Set up a new query watch.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I watch {query} as {query_id} in language {language}")]
 pub struct SetupWatch {
     pub query_id: String,
     pub query: TestQuery,

@@ -95,7 +95,8 @@ use crate::pbt::transition_budgets::MutationKind;
 use crate::pbt::transition_budgets::expected_sql_for_kind;
 
 /// Toggle the task state of a block via the StateToggle widget.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I cycle block {block_id} to state {new_state}")]
 pub struct ToggleState {
     pub block_id: EntityUri,
     pub new_state: CycleTarget,

@@ -49,7 +49,8 @@ use crate::pbt::transition_budgets::REACTIVE_BASE;
 
 /// Advance the ambient calendar day by `days` (`0` = same-day re-tick, the
 /// idempotence probe; `1` = day rollover). The generator weights toward `1`.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I advance the clock by {days} days")]
 pub struct AdvanceDay {
     pub days: i64,
 }

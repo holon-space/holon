@@ -51,7 +51,8 @@ use crate::pbt::transition_budgets::MutationKind;
 use crate::pbt::transition_budgets::expected_sql_for_kind;
 
 /// Set one edge field (`tags` or `requires`) on an existing block.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I set edge field {update} on block {block_id}")]
 pub struct SetEdgeField {
     pub block_id: EntityUri,
     pub update: EdgeFieldUpdate,

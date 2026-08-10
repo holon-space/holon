@@ -32,7 +32,8 @@ use crate::pbt::transition_budgets::REACTIVE_BASE;
 use crate::pbt::transition_budgets::docs_tolerance;
 
 /// Remove an active query watch.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I remove the watch {query_id}")]
 pub struct RemoveWatch {
     pub query_id: String,
 }

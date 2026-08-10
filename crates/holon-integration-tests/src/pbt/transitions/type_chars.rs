@@ -38,7 +38,8 @@ const VOCABULARY_RESOLVE_READS: usize = 2;
 
 /// Type a short ASCII string into the active editor.
 /// Gated to `PBT_ATOMIC_EDITOR=1` runs.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I type {text}")]
 pub struct TypeChars {
     pub text: String,
 }

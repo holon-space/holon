@@ -43,7 +43,8 @@ use crate::pbt::transition_budgets::ExpectedSql;
 
 /// Create the page chain named by the `/`-joined `path` (a path some earlier
 /// `RenamePage` vacated).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I create a page at path {path}")]
 pub struct CreatePageAtFreedPath {
     pub path: String,
 }

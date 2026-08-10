@@ -24,7 +24,8 @@ use validated::Validated;
 use crate::pbt::transition_budgets::ExpectedSql;
 
 /// Initialize jj repository (runs `jj git init`).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("the vault is jj-git-initialised")]
 pub struct JjGitInit;
 
 impl<R: RefLifecycle + RefBootMut> TransitionFactory<R> for JjGitInit {

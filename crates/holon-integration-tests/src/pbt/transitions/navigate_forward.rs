@@ -37,7 +37,8 @@ use crate::pbt::transition_budgets::docs_tolerance;
 
 /// Pop one entry forward in the active navigation history for `region`.
 /// Mirrors the forward-button in production's per-region history stack.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I navigate forward in region {region}")]
 pub struct NavigateForward {
     pub region: Region,
 }

@@ -34,7 +34,8 @@ use crate::pbt::transition_budgets::READS_PER_WATCH;
 use crate::pbt::transition_budgets::cdc_tolerance;
 
 /// Create a new empty document (post-startup).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I create document {file_name}")]
 pub struct CreateDocument {
     pub file_name: String,
 }

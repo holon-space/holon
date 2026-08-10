@@ -80,7 +80,8 @@ use crate::pbt::transition_budgets::cdc_tolerance;
 
 /// Rewrite the currently-focused block's content through the external
 /// (org-file re-ingest) channel, colliding with the open editor.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("an external edit sets the focused block {block_id} to {new_content}")]
 pub struct ExternalWriteSameBlockFocused {
     pub block_id: EntityUri,
     pub new_content: String,

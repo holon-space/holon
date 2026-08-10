@@ -60,7 +60,8 @@ use crate::pbt::transition_budgets::REACTIVE_BASE;
 use crate::pbt::transition_budgets::expected_sql_for_kind;
 
 /// Create a text block under the currently focused page via its creation slot.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I create a block {content} under the focused page with id {id}")]
 pub struct CreateBlockUnderFocus {
     pub content: String,
     /// When `Some(uri)`, create the block with that exact born-equal id (the

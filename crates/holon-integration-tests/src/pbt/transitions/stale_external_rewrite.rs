@@ -48,7 +48,8 @@ use crate::pbt::transition_budgets::ExpectedSql;
 use crate::pbt::transition_budgets::REACTIVE_BASE;
 
 /// Replay a doc's current content over its file WITHOUT block ids.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("an external stale rewrite of document {doc_uri}")]
 pub struct StaleExternalRewrite {
     pub doc_uri: EntityUri,
 }

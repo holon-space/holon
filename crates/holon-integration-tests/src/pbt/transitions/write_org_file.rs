@@ -91,6 +91,84 @@ impl WriteOrgFile {
     }
 }
 
+/// The one hand-written vocabulary in the catalog: this transition's payload is
+/// an ORG DOCUMENT, carried by the step's docstring, so the derive (which maps
+/// fields to template placeholders) cannot express it. `blocks` and
+/// `keyword_set` are read out of, and written back into, that docstring.
+impl holon_pbt_core::step_vocabulary::StepVocabulary for WriteOrgFile {
+    const TEMPLATE: &'static str = "an org file {filename}:";
+
+    fn field_names() -> &'static [&'static str] {
+        &["filename", "blocks", "keyword_set"]
+    }
+
+    fn template_fields() -> &'static [holon_pbt_core::step_vocabulary::TemplateField] {
+        &[(
+            "filename",
+            <String as holon_pbt_core::step_vocabulary::StepField>::QUOTED,
+        )]
+    }
+
+    fn render_step(&self) -> holon_pbt_core::step_vocabulary::RenderedStep {
+        let text = holon_pbt_core::step_vocabulary::render_template(
+            Self::TEMPLATE,
+            &[("filename", true, self.filename.clone())],
+        );
+        let rendered = OrgRenderer::render_entitys(
+            &self.blocks,
+            std::path::Path::new(self.filename.as_str()),
+            &EntityUri::block(GEN_PLACEHOLDER),
+        );
+        let docstring = match &self.keyword_set {
+            Some(ks) => format!("{}\n{}", ks.to_org_header(), rendered),
+            None => rendered,
+        };
+        holon_pbt_core::step_vocabulary::RenderedStep {
+            text,
+            docstring: Some(docstring),
+        }
+    }
+
+    fn parse_step(text: &str, docstring: Option<&str>) -> Result<Option<Self>, String> {
+        let Some(caps) = holon_pbt_core::step_vocabulary::capture_template(
+            Self::TEMPLATE,
+            Self::template_fields(),
+            text,
+        ) else {
+            return Ok(None);
+        };
+        let filename = holon_pbt_core::step_vocabulary::captured(&caps, "filename").to_string();
+        let content = docstring.ok_or_else(|| {
+            format!("org-file step {text:?} needs a docstring holding the org content")
+        })?;
+        Self::from_org_text(filename, content)
+            .map(Some)
+            .map_err(|e| format!("failed to parse org-file step content: {e}"))
+    }
+
+    fn step_examples() -> Vec<Self> {
+        // Keyword-set-carrying examples are deliberately absent: the parse side
+        // reads the org text with the production parser, which resolves the
+        // `#+TODO:` header into task states rather than handing the set back.
+        vec![
+            Self {
+                filename: "example.org".to_string(),
+                blocks: Vec::new(),
+                keyword_set: None,
+            },
+            Self::from_org_text(
+                "example.org".to_string(),
+                "* HelloWorld\n:PROPERTIES:\n:ID: blk-a\n:END:\n",
+            )
+            .expect("the example org text must parse"),
+        ]
+    }
+
+    fn step_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("WriteOrgFile is serializable")
+    }
+}
+
 impl<R: RefDocumentsMut + Clone + 'static> TransitionFactory<R> for WriteOrgFile {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
         Self::declared_caps()

@@ -60,7 +60,8 @@ use crate::pbt::transition_budgets::ExpectedSql;
 use crate::pbt::transition_budgets::expected_mutation_sql;
 
 /// Apply a single mutation (UI or external).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("the mutation {event} is applied")]
 pub struct ApplyMutation {
     pub event: MutationEvent,
 }

@@ -105,7 +105,8 @@ pub async fn apply_trigger_slash_command_to_sut<S: SutLayout + SutDriver>(sut: &
 }
 
 /// Trigger the "/" slash-command menu on the focused block and select "delete".
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I trigger the slash command on block {block_id}")]
 pub struct TriggerSlashCommand {
     pub block_id: EntityUri,
 }

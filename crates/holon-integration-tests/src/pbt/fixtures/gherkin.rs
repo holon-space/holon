@@ -18,8 +18,8 @@ use gherkin::StepType;
 use super::FixtureSource;
 use super::FixtureStep;
 use super::NamedFixture;
-use super::matchers::match_action;
 use super::matchers::match_assertion;
+use crate::pbt::transitions::E2ETransition;
 
 /// One scenario (or one Outline row) flattened into an ordered step sequence.
 pub struct FeatureCase {
@@ -85,8 +85,11 @@ fn build_case(
         let fixture_step = match substituted.ty {
             // `And`/`But` are already resolved to the prior concrete type.
             StepType::Given | StepType::When => FixtureStep::Action(
-                match_action(&substituted)
-                    .map_err(|e| format!("{}: scenario {name:?}: {e}", path.display()))?,
+                E2ETransition::parse_step(
+                    substituted.value.trim(),
+                    substituted.docstring.as_deref(),
+                )
+                .map_err(|e| format!("{}: scenario {name:?}: {e}", path.display()))?,
             ),
             StepType::Then => FixtureStep::Assert(
                 match_assertion(&substituted)

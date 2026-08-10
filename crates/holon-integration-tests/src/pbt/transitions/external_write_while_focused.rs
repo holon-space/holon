@@ -53,7 +53,8 @@ use crate::pbt::transition_budgets::READS_PER_WATCH;
 use crate::pbt::transition_budgets::cdc_tolerance;
 
 /// Land an external sibling-block write while an editor is dirty-focused.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("an external write of {blocks} lands on document {doc_uri} while focused")]
 pub struct ExternalWriteWhileFocused {
     pub doc_uri: EntityUri,
     #[serde(with = "holon_api::block::block_wire_vec")]

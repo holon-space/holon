@@ -32,7 +32,8 @@ use crate::pbt::transition_budgets::REACTIVE_BASE;
 use crate::pbt::transition_budgets::docs_tolerance;
 
 /// Switch the current view (e.g. "all", "sidebar", "main").
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I switch to view {view_name}")]
 pub struct SwitchView {
     pub view_name: String,
 }
