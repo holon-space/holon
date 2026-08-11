@@ -171,15 +171,25 @@ impl Default for EntityWriteLocks {
 }
 
 impl EntityWriteLocks {
-    async fn lock(&self, entity_name: &str, id: &str) -> tokio::sync::MutexGuard<'_, ()> {
+    /// The stripe an entity hashes to. The stripe index — not the
+    /// `(entity_name, id)` key — is the lock's identity, so any code that takes
+    /// more than one guard must order and dedupe on THIS value.
+    fn stripe_of(&self, entity_name: &str, id: &str) -> usize {
         use std::hash::Hash;
         use std::hash::Hasher;
 
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         entity_name.hash(&mut hasher);
         id.hash(&mut hasher);
-        let stripe = (hasher.finish() % self.stripes.len() as u64) as usize;
+        (hasher.finish() % self.stripes.len() as u64) as usize
+    }
+
+    async fn lock_stripe(&self, stripe: usize) -> tokio::sync::MutexGuard<'_, ()> {
         self.stripes[stripe].lock().await
+    }
+
+    async fn lock(&self, entity_name: &str, id: &str) -> tokio::sync::MutexGuard<'_, ()> {
+        self.lock_stripe(self.stripe_of(entity_name, id)).await
     }
 
     /// Lock the entity an op targets, named by the `id_key` param it uses
@@ -187,9 +197,10 @@ impl EntityWriteLocks {
     /// `canonical` for the merge). An op that names none — a `create` that
     /// mints its own id — has no prior state to race for.
     ///
-    /// Never call this while already holding a stripe: every hold in this
-    /// engine is a single, non-nested hold, which is what makes the
-    /// striping deadlock-free without a lock order.
+    /// This takes exactly one guard and must not nest inside another. The only
+    /// sanctioned multi-guard hold is [`Self::lock_all`], which is safe because
+    /// it acquires in ascending stripe order; a `lock_target` nested inside one
+    /// of those holds would acquire out of order and could deadlock.
     async fn lock_target(
         &self,
         entity_name: &str,
@@ -198,6 +209,30 @@ impl EntityWriteLocks {
     ) -> Option<tokio::sync::MutexGuard<'_, ()>> {
         let id = params.get(id_key).and_then(Value::as_string)?;
         Some(self.lock(entity_name, id).await)
+    }
+
+    /// Take every stripe the given `(entity_name, id)` pairs hash to, as ONE
+    /// hold. Deadlock-freedom rests on two properties, both of which are about
+    /// the stripe index rather than the key: acquiring in ascending stripe
+    /// order gives all callers a single total order over the actual mutexes,
+    /// and deduping stripes stops a hash collision between two distinct ids
+    /// from re-locking a stripe this task already holds (a `tokio` mutex is not
+    /// reentrant, so that would hang forever).
+    async fn lock_all<'a>(
+        &self,
+        targets: impl Iterator<Item = (&'a str, &'a str)>,
+    ) -> Vec<tokio::sync::MutexGuard<'_, ()>> {
+        let mut stripes: Vec<usize> = targets
+            .map(|(entity_name, id)| self.stripe_of(entity_name, id))
+            .collect();
+        stripes.sort_unstable();
+        stripes.dedup();
+
+        let mut guards = Vec::with_capacity(stripes.len());
+        for stripe in stripes {
+            guards.push(self.lock_stripe(stripe).await);
+        }
+        guards
     }
 }
 
@@ -567,6 +602,25 @@ impl DispatchingOperationEngine {
         self.persist().await
     }
 
+    /// Take every stripe one undo/redo gesture will write, for the whole
+    /// gesture. One entry replays N ops; holding their stripes across the
+    /// staleness check AND every replay is what stops an external write landing
+    /// between the check and the replay, or between two inverses of one
+    /// composite entry (task #47).
+    ///
+    /// Ops that name no `id` contribute no stripe — a `create` that mints its
+    /// own id has no prior state to race for, exactly as in [`Self::replay`].
+    async fn lock_entry(&self, ops: &[Operation]) -> Vec<tokio::sync::MutexGuard<'_, ()>> {
+        self.entity_write_locks
+            .lock_all(ops.iter().filter_map(|op| {
+                op.params
+                    .get("id")
+                    .and_then(Value::as_string)
+                    .map(|id| (op.entity_name.as_str(), id))
+            }))
+            .await
+    }
+
     /// Dispatch a stored op verbatim (used for inverse/forward replay). Never
     /// pushes an undo entry — replays bypass the push path by construction.
     /// Replay one undo/redo op through the dispatcher, returning the field
@@ -575,19 +629,15 @@ impl DispatchingOperationEngine {
     /// [`Self::changes_are_vacuous`]): a provably-vacuous replay
     /// (identical-content set_field) must be reported
     /// as [`UndoOutcome::NoChange`], never as `Applied`.
-    async fn replay(&self, op: &Operation) -> Result<Vec<FieldDelta>> {
-        // A replay writes the entity like any other write, so it queues behind
-        // the in-flight writes to that entity ([`EntityWriteLocks`]) instead of
-        // interleaving with one.
-        let id = op.params.get("id").and_then(Value::as_string);
-        let _write_guard = match id {
-            Some(id) => Some(
-                self.entity_write_locks
-                    .lock(op.entity_name.as_str(), id)
-                    .await,
-            ),
-            None => None,
-        };
+    async fn replay(
+        &self,
+        op: &Operation,
+        // ALLOW(unused_param): the held guards ARE the compile-time evidence
+        // the gesture's stripes are held across this replay; naming them for
+        // use would let a caller replay outside the hold without a compile
+        // error, reopening the check-to-replay window (task #47).
+        _held: &[tokio::sync::MutexGuard<'_, ()>],
+    ) -> Result<Vec<FieldDelta>> {
         let params: StorageEntity = op
             .params
             .iter()
@@ -2292,10 +2342,12 @@ impl DispatchingOperationEngine {
         Ok(response)
     }
 
-    /// Verify a precondition against live state. With no reader wired (an
-    /// in-memory, single-writer session that has no external-mutation surface)
-    /// verification is skipped — disclosed, not a silent fake. When a reader is
-    /// present a divergence is reported so the caller drops the entry loudly.
+    /// Verify a precondition against live state. An EMPTY precondition asserts
+    /// nothing and needs no reader. A non-empty one cannot be verified without
+    /// a reader: every reversible op journals one, so refusing outright would
+    /// take undo away entirely on a reader-less wiring. The replay proceeds
+    /// UNVERIFIED and says so at WARN — degraded, disclosed, never silent
+    /// (task #47).
     async fn check_stale(&self, precondition: &Precondition) -> Result<Option<String>> {
         if precondition.is_empty() {
             return Ok(None);
@@ -2303,8 +2355,12 @@ impl DispatchingOperationEngine {
         match &self.reader {
             Some(reader) => verify_precondition(reader.as_ref(), precondition).await,
             None => {
-                tracing::debug!(
-                    "undo: no state reader wired — skipping precondition check (in-memory session)"
+                tracing::warn!(
+                    "undo/redo entry carries a {}-field precondition but this engine has no \
+                     live-state reader wired, so staleness cannot be verified; replaying \
+                     UNVERIFIED — an external write to these fields will be overwritten. \
+                     Build the engine with `new_persistent` or `with_state_reader`.",
+                    precondition.fields.len()
                 );
                 Ok(None)
             }
@@ -2615,6 +2671,11 @@ impl OperationEngine for DispatchingOperationEngine {
             None => return Ok(UndoOutcome::Empty),
         };
 
+        // One gesture, one hold: the stripes are taken BEFORE the staleness
+        // check and released only after the entry is committed, so no external
+        // write can land between the check and the replay (task #47).
+        let held = self.lock_entry(&entry.inverse_ops).await;
+
         // Ruling #4: verify BEFORE replaying; a stale entry is dropped loudly,
         // never silently skipped to the next entry.
         if let Some(reason) = self.check_stale(&entry.precondition).await? {
@@ -2633,7 +2694,7 @@ impl OperationEngine for DispatchingOperationEngine {
         // truth about the partial state.)
         let inverse_count = entry.inverse_ops.len();
         for (idx, op) in entry.inverse_ops.iter().enumerate() {
-            let replayed = self.replay(op).await.map_err(|e| {
+            let replayed = self.replay(op, &held).await.map_err(|e| {
                 anyhow::anyhow!(
                     "undo: composite inverse op {idx} of {inverse_count} ('{}' on '{}') failed — \
                      stopping (partial undo, earlier inverses already applied): {e}",
@@ -2649,6 +2710,7 @@ impl OperationEngine for DispatchingOperationEngine {
         // claims "undone" for a no-op press (BugFunnel 2026-07-13 undo row).
         self.undo_stack.write().await.commit_undo();
         self.persist().await?;
+        drop(held);
         if Self::changes_are_vacuous(&changes) {
             tracing::warn!("undo: inverse replay produced no observable change (no-op entry)");
             return Ok(UndoOutcome::NoChange);
@@ -2662,6 +2724,10 @@ impl OperationEngine for DispatchingOperationEngine {
             None => return Ok(UndoOutcome::Empty),
         };
 
+        // Symmetric one-gesture-one-hold (task #47); a redo replays the FORWARD
+        // ops, so those name the stripes.
+        let held = self.lock_entry(&entry.ops).await;
+
         if let Some(reason) = self.check_stale(&entry.redo_precondition).await? {
             self.undo_stack.write().await.drop_redo();
             self.persist().await?;
@@ -2674,7 +2740,7 @@ impl OperationEngine for DispatchingOperationEngine {
         // N forwards in order; the first failure stops and names its index.
         let forward_count = entry.ops.len();
         for (idx, op) in entry.ops.iter().enumerate() {
-            let replayed = self.replay(op).await.map_err(|e| {
+            let replayed = self.replay(op, &held).await.map_err(|e| {
                 anyhow::anyhow!(
                     "redo: composite forward op {idx} of {forward_count} ('{}' on '{}') failed — \
                      stopping (partial redo, earlier ops already applied): {e}",
@@ -2686,6 +2752,7 @@ impl OperationEngine for DispatchingOperationEngine {
         }
         self.undo_stack.write().await.commit_redo();
         self.persist().await?;
+        drop(held);
         if Self::changes_are_vacuous(&changes) {
             tracing::warn!("redo: forward replay produced no observable change (no-op entry)");
             return Ok(UndoOutcome::NoChange);
