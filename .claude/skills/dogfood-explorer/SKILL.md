@@ -336,6 +336,105 @@ Reusable checks (not session-specific):
 13. **Page-hierarchy rule.** Pages must not appear under non-page parents (fix landed 079014ef);
     try to provoke a page nested under a non-page.
 
+## 3b. Recording your session as Gherkin
+
+Every flow you drive live must leave a `.feature` behind. A dogfood session that
+finds nothing still pays for itself if the flows it exercised become replayable
+regressions. The rule: **drive it, then write it, then replay it — in that
+order**. Writing first turns the session into test authoring; replaying last is
+what proves the scenario is real and not a wish.
+
+### The loop, per flow
+
+1. **Drive** the flow over MCP and verify it per §2 (rendered vs SQL vs disk).
+2. **Write** the scenario using ONLY the derived step vocabulary. Do not invent
+   phrasings — the parser has no optional segments and no synonyms.
+3. **Replay** it headless before you move on. A scenario that has never been
+   replayed is a draft, not a fixture.
+4. **Record the friction.** A step you needed but could not phrase is a
+   VOCABULARY GAP and goes in the report, with the parser's verbatim refusal
+   text. Gaps are the primary product of this section — they steer the recorder
+   work, and a gap you hit five times outranks one you hit once.
+
+### Where the vocabulary actually lives
+
+`docs/Testing/CucumberSetup.md` §Step vocabulary is the narrative; the ground
+truth is the code, and it is one grep:
+
+```bash
+grep -rn 'step_template(' crates frontends --include '*.rs' | grep -v macros/src
+```
+
+Every transition declares exactly one phrasing next to its own struct. If a verb
+is not in that list, the flow is not recordable today — say so, do not
+approximate it with a different verb.
+
+Two rules that catch most authoring mistakes:
+
+- **Quoting follows the field's TYPE, never the phrasing.** Strings,
+  `EntityUri`, `Region` and every JSON-carried payload render inside `"…"`;
+  counters and booleans render bare. `I press backspace 2 times`, not
+  `"2" times`.
+- **Every field is always written.** There are no optional segments, so
+  `I click block "block:c1"` without `in region "main"` is a refusal, not a
+  shorthand.
+
+### Which SUT to write against
+
+Author **born-booted onto the wide seed** (`block:structural-page` →
+`block:parent` / `block:c1` / `block:c2`) — no `Given an org file` /
+`the app is started` ceremony. That is the convention the composed fixtures use,
+it replays over `ComposedSut<WideE2E>` with the full per-tick invariant catalog,
+and it is the only form the windowed replay accepts, so the same file can be
+promoted to `frontends/gpui/tests/features/` unchanged if the flow turns out to
+be windowed-only.
+
+Use the `Given an org file "<name>":` + docstring + `the app is started` form
+only when the flow genuinely depends on ingesting a specific org document.
+
+### Running your recorded features
+
+Drop the files in `crates/holon-integration-tests/tests/fixtures/dogfood-recorded/`
+and replay them with `dogfood_recorded_replay.rs` (registry-parse gate first, so
+an unknown phrasing fails in milliseconds instead of after a composed boot):
+
+```bash
+cargo test -p holon-integration-tests --features pbt \
+  --test dogfood_recorded_replay 2>&1 | tee /tmp/dogfood-<date>-logs/replay.log
+```
+
+If a flow is only expressible through the real window (focus/keystroke routing),
+put the feature under `frontends/gpui/tests/features/` and run it with
+`GHERKIN_FEATURE=<abs path> cargo test -p holon-gpui --features pbt --test
+gpui_gherkin_replay`. **Note that instead of forcing it headless** — a scenario
+bent to fit the headless SUT records the wrong thing.
+
+### What a recorded scenario can and cannot assert
+
+The `Then` half is still the old regex matcher set, and it is small:
+`the widget contains/shows/shows exactly "…"`, `block "<id>" contains/shows
+"…"`, `focus is on block "<id>"`, each optionally prefixed
+`within <N> seconds `. There is **no negation, no structural assertion, no
+property/task-state assertion, and no disk assertion.**
+
+This is less limiting than it looks, and you must say why in the feature's own
+comment block: the composed catalog runs **after every step**, so the reference
+model and the SUT are compared on every tick. A scenario whose `Then` is weak is
+still a real regression as long as the flow reaches a state the invariants
+cover. Write the comment; a future reader who sees only a thin `Then` will
+otherwise delete the scenario as worthless.
+
+When you genuinely cannot express the assertion that would have caught the bug
+you just found, that is the finding — record it as a vocabulary gap AND, if the
+underlying invariant does not exist either, as an ORACLE row in BugFunnel.
+
+### Deliverable
+
+The report gains two sections: **every authored scenario with its replay
+result** (green, red, or refused-at-parse with the refusal text), and the
+**vocabulary-gap list ranked by hit count**. An unreplayed scenario is reported
+as unreplayed — never as passing.
+
 ## 4. Bug handling — triage every finding
 
 Run `bug-gap-triage` per finding; produce rows ready for `docs/Testing/BugFunnel.md`:
