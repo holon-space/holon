@@ -40,6 +40,7 @@ use super::composed::catalog::composed_invariant_catalog;
 const CLASS_THREE_EXCLUDED: &[&str] = &[
     "inv-sql-budget",
     "inv-settle-budget",
+    "inv-complexity-class-trend",
     "inv-matview-consistent-with-recompute",
     "inv-no-steady-reseed-leak",
 ];

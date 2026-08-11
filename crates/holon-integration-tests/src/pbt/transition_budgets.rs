@@ -88,6 +88,114 @@ pub fn expected_sql(
     transition.expected_sql(ref_state)
 }
 
+// ── Complexity class (derived from the formula above) ─────────────
+
+/// A synthetic reference state used only to probe a budget formula's
+/// state-sensitivity.
+///
+/// # Every QUANTITY moves together; only the booleans are enumerated
+/// One `scale` field answers every `usize` accessor, and that is the whole
+/// safety property: it is structurally impossible to leave one quantity pinned
+/// at a constant while the others grow.
+///
+/// This is not cosmetic. A formula whose state-dependent term is GATED by a
+/// quantity — `joins * (join.reads - REACTIVE_BASE)` in `DeleteBackward` — has
+/// that entire term multiplied away when the gate is pinned at 0, and reports
+/// `(5, 0, 0)` at every state size. Pinning a `usize` does not "select a
+/// branch", it ERASES the arm that would have revealed the dependency, and the
+/// transition is then misclassified `Constant` and admitted into the trend
+/// check's teeth.
+///
+/// INVARIANT FOR THE NEXT EDITOR: if `RefSqlCardinality` gains a `usize`
+/// accessor, answer it from `scale`. Never return a literal — a literal here is
+/// the defect above, reintroduced. Booleans are the only members that may hold
+/// a fixed value, and only because [`declared_complexity_class`] enumerates
+/// every combination of them rather than trusting one.
+struct CardinalityProbe {
+    scale: usize,
+    first_visit: bool,
+    open_tab_activated: bool,
+    content_writes_sql: bool,
+}
+
+impl holon_pbt_core::capabilities::RefSqlCardinality for CardinalityProbe {
+    fn block_count(&self) -> usize {
+        self.scale
+    }
+    fn document_count(&self) -> usize {
+        self.scale
+    }
+    fn active_watch_count(&self) -> usize {
+        self.scale
+    }
+    /// A `usize` EVENT COUNT, and therefore scaled like every other quantity —
+    /// see the type's invariant. It gates `DeleteBackward`'s O(state) merge
+    /// arm.
+    fn last_backspace_joins(&self) -> usize {
+        self.scale
+    }
+    fn last_navigate_first_visit(&self) -> bool {
+        self.first_visit
+    }
+    fn last_open_tab_activated(&self) -> bool {
+        self.open_tab_activated
+    }
+    fn content_writes_reach_sql(&self) -> bool {
+        self.content_writes_sql
+    }
+}
+
+/// The complexity class a transition's OWN budget formula claims, derived by
+/// evaluating it at a small and a large state.
+///
+/// The formulas in `transitions/*` are the single declaration surface: one that
+/// ignores every cardinality accessor already asserts "this transition's cost
+/// does not depend on how much is in the store". A second, hand-maintained
+/// class table could only drift away from it.
+///
+/// `tolerance` is deliberately NOT compared — it is async-race slack that
+/// legitimately widens with the corpus, not claimed cost.
+///
+/// # Constant is the claim that must be EARNED
+/// The verdict is `Constant` only if the formula is state-blind under EVERY
+/// boolean combination. A transition that forks on a boolean gets each arm
+/// evaluated, so an arm that reads cardinality is caught instead of being
+/// hidden behind whichever arm the probe happened to pick. Any single
+/// combination that varies with `scale` decides `StateDependent` — the
+/// conservative direction, since a wrongly-`StateDependent` kind merely sits
+/// out of the trend check while a wrongly-`Constant` one reds the gate on arm
+/// mix.
+pub fn declared_complexity_class(
+    transition: &crate::pbt::transitions::E2ETransition,
+) -> crate::pbt::complexity_trend::ComplexityClass {
+    use crate::pbt::complexity_trend::ComplexityClass;
+    // Small must stay > 0: several formulas divide or subtract on a cardinality,
+    // and a 0-sized "state" is not a state any run ever reaches.
+    const SMALL: usize = 1;
+    const LARGE: usize = 64;
+    for first_visit in [false, true] {
+        for open_tab_activated in [false, true] {
+            for content_writes_sql in [false, true] {
+                let at = |scale| {
+                    transition.expected_sql(&CardinalityProbe {
+                        scale,
+                        first_visit,
+                        open_tab_activated,
+                        content_writes_sql,
+                    })
+                };
+                let small = at(SMALL);
+                let large = at(LARGE);
+                if (small.reads, small.writes, small.ddl) != (large.reads, large.writes, large.ddl)
+                {
+                    return ComplexityClass::StateDependent;
+                }
+            }
+        }
+    }
+    ComplexityClass::Constant
+}
+
 /// Expected SQL for a mutation via its `Mutation` value.
 pub(crate) fn expected_mutation_sql(
     mutation: &Mutation,
@@ -853,5 +961,88 @@ mod tests {
         let json = serde_json::to_string_pretty(&map).unwrap();
         let parsed = parse_baseline(&json);
         assert_eq!(parsed, map);
+    }
+}
+
+#[cfg(test)]
+mod complexity_class_tests {
+    use holon_api::EntityUri;
+
+    use super::declared_complexity_class;
+    use crate::pbt::complexity_trend::ComplexityClass;
+    use crate::pbt::transitions::ClickBlock;
+    use crate::pbt::transitions::DeleteBackward;
+    use crate::pbt::transitions::E2ETransition;
+    use crate::pbt::transitions::InstantiateTemplate;
+    use crate::pbt::transitions::Nothing;
+    use crate::pbt::transitions::PinBlock;
+
+    fn uri(s: &str) -> EntityUri {
+        EntityUri::parse(s).expect("probe uri")
+    }
+
+    /// The probe must DISCRIMINATE in BOTH directions. A derivation that
+    /// answered `StateDependent` for everything would leave
+    /// `inv-complexity-class-trend` with no teeth in production and no test
+    /// would notice; one that answers `Constant` too eagerly admits an O(state)
+    /// transition into the teeth, which is the defect this test now pins.
+    #[test]
+    fn the_probe_separates_state_blind_from_state_reading_formulas() {
+        // ── must be Constant: reads are a sum of constants under every boolean
+        // combination. (Their TOLERANCE may read `docs` — that is race slack,
+        // deliberately excluded from the comparison.)
+        for (name, t) in [
+            (
+                "ClickBlock",
+                E2ETransition::ClickBlock(ClickBlock {
+                    region: holon_api::Region::Main,
+                    block_id: uri("block:x"),
+                }),
+            ),
+            (
+                "PinBlock",
+                E2ETransition::PinBlock(PinBlock {
+                    region: holon_api::Region::RightSidebar,
+                    block_id: uri("block:x"),
+                }),
+            ),
+        ] {
+            assert_eq!(
+                declared_complexity_class(&t),
+                ComplexityClass::Constant,
+                "{name} is state-blind and must stay inside the trend check's teeth",
+            );
+        }
+
+        // ── must be StateDependent: the formula reads a cardinality.
+        //
+        // `DeleteBackward` is the REGRESSION PIN for the probe-fixed-multiplier
+        // defect. Its merge arm is `joins * (join.reads - REACTIVE_BASE)`, so a
+        // probe that pinned `last_backspace_joins` at 0 multiplied the whole
+        // O(state) term away and reported `Constant` — admitting a transition
+        // whose two arms differ >4x (join arm reads=28 vs REACTIVE_BASE=5) into
+        // a check whose slack is x1.5+2. It would then have RED on arm mix
+        // rather than on a trend.
+        for (name, t) in [
+            (
+                "DeleteBackward",
+                E2ETransition::DeleteBackward(DeleteBackward { count: 1 }),
+            ),
+            (
+                "InstantiateTemplate",
+                E2ETransition::InstantiateTemplate(InstantiateTemplate {
+                    parent_id: uri("block:parent"),
+                    date: "2026-08-12".to_string(),
+                    mood: "focused".to_string(),
+                }),
+            ),
+            ("Nothing", E2ETransition::Nothing(Nothing)),
+        ] {
+            assert_eq!(
+                declared_complexity_class(&t),
+                ComplexityClass::StateDependent,
+                "{name} reads a cardinality and must be OUT of the trend check's teeth",
+            );
+        }
     }
 }

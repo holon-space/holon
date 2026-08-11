@@ -45,19 +45,21 @@ use holon_pbt_core::null_ref::null_ref_caps;
 /// this against a running app with no reference model".
 ///
 /// Cross-check: the hand census in the dogfood-recorder plan §1.2 counted 29,
-/// and this machine-derived set is 29 — independently, over a 75-entry catalog
+/// and this machine-derived set is 30 — one above the census, which predates
+/// `inv-complexity-class-trend` — over a 76-entry catalog
 /// (the census counted body modules; the catalog also holds the
 /// correspondence-derived per-store families).
 ///
 /// Class 1 is NOT the same as "safe to run against a live app with no history":
-/// four of these are the plan's class-3 temporal/budget checks
-/// (`inv-sql-budget`, `inv-settle-budget`,
+/// five of these are the plan's class-3 temporal/budget checks
+/// (`inv-sql-budget`, `inv-settle-budget`, `inv-complexity-class-trend`,
 /// `inv-matview-consistent-with-recompute`, `inv-no-steady-reseed-leak`) — they
-/// consult no reference model but do need per-tick accounting, so a live
-/// self-check suite must exclude them explicitly rather than inherit them from
-/// this list.
+/// consult no reference model but do need per-tick accounting (the trend check
+/// needs a whole SEQUENCE of it), so a live self-check suite must exclude them
+/// explicitly rather than inherit them from this list.
 const CLASS_ONE: &[&str] = &[
     "inv-birth-contract-satisfied",
+    "inv-complexity-class-trend",
     "inv-display-placement-canonical-inert",
     "inv-frontend-engine",
     "inv-frontend-no-error-widgets",

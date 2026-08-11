@@ -469,6 +469,48 @@ pub fn budget_map(b: FixtureBudget) -> CapMap {
     Config::new().with(b).build()
 }
 
+/// A hand-crafted [`ComposedTrend`] SUT over a PLANTED counter series, so the
+/// `inv-complexity-class-trend` teeth can inject an accumulating transition
+/// without driving a whole growing sequence through a real backend.
+///
+/// The series is fed through the production [`TrendAccumulator`] — the fit
+/// under test is the real one, only its input is synthetic.
+///
+/// [`ComposedTrend`]: crate::pbt::composed::complexity_trend::ComposedTrend
+/// [`TrendAccumulator`]: crate::pbt::complexity_trend::TrendAccumulator
+pub struct FixtureTrend {
+    pub kind: String,
+    pub class: crate::pbt::complexity_trend::ComplexityClass,
+    pub reads: Vec<usize>,
+    /// Arms the gate for this fixture — the teeth's stand-in for
+    /// `HOLON_TREND_BUDGET`, with no process environment to race a sibling
+    /// test.
+    pub enforce: bool,
+}
+
+impl crate::pbt::composed::complexity_trend::ComposedTrend for FixtureTrend {
+    fn trend_report(&self) -> crate::pbt::complexity_trend::TrendReport {
+        let mut acc = crate::pbt::complexity_trend::TrendAccumulator::new();
+        for (i, reads) in self.reads.iter().enumerate() {
+            acc.record(self.kind.clone(), self.class, *reads, 2, i + 1);
+        }
+        let mut report = acc.report();
+        report.enforce = self.enforce;
+        report
+    }
+}
+
+impl CapProvider for FixtureTrend {
+    fn register(self: Arc<Self>, caps: &mut CapMap) {
+        caps.insert(self as Arc<dyn crate::pbt::composed::complexity_trend::ComposedTrend>);
+    }
+}
+
+/// Build a SUT `CapMap` exposing only `ComposedTrend` over a planted series.
+pub fn trend_map(t: FixtureTrend) -> CapMap {
+    Config::new().with(t).build()
+}
+
 /// A hand-crafted [`SettleLatency`] SUT — a canned per-transition settle
 /// duration, so the `inv-settle-budget` teeth can inject the vault-scale
 /// latency regime without booting a 25k-block vault.

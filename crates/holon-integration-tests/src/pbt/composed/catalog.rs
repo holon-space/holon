@@ -236,6 +236,14 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // registers `ComposedSpanMetrics`; storage/pure slices deselect it.
         #[cfg(feature = "otel-testing")]
         invariants::sql_budget::wire(),
+        // Within-run complexity-class TREND: a transition whose budget formula
+        // is a state-blind constant claims O(1), so its counters must not grow
+        // with sequence position. Catches "this operation gets more expensive
+        // the longer the program runs", which a per-transition budget wide
+        // enough to hold at scale structurally cannot see. Observe-only until
+        // `HOLON_TREND_BUDGET=1`.
+        #[cfg(feature = "otel-testing")]
+        invariants::complexity_trend::wire(),
         // Per-transition interaction→projection-visible latency vs the p95
         // 200ms SLO (BugFunnel 2026-07-28: a single navigation write wedged
         // the IVM actor for 23 minutes at vault scale and the suite would

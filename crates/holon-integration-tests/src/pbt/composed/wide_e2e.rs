@@ -990,11 +990,15 @@ pub async fn boot_and_seed_wide_with_peer_id(
     // reset-on-apply / freeze-on-check). One `Arc`, registered as both caps.
     #[cfg(feature = "otel-testing")]
     {
+        use crate::pbt::composed::complexity_trend::ComposedTrend;
         use crate::pbt::composed::span_metrics::ComposedBudget;
         use crate::pbt::composed::span_metrics::ComposedSpanMetrics;
         use crate::pbt::composed::span_metrics::SutMetricsLifecycle;
         let m = std::sync::Arc::new(ComposedSpanMetrics::new());
         caps.insert(m.clone() as std::sync::Arc<dyn ComposedBudget>);
+        // Same host, third cap: `inv-complexity-class-trend` fits the counter
+        // series the budget's own freeze point already produces.
+        caps.insert(m.clone() as std::sync::Arc<dyn ComposedTrend>);
         caps.insert(m as std::sync::Arc<dyn SutMetricsLifecycle>);
 
         use crate::pbt::composed::observed_errors::ComposedObservedErrors;
