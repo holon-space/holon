@@ -17,6 +17,15 @@
 //! Under Loro this decorator is not installed — the tree owns order there and
 //! `apply_create` derives the index from `position_after_block_id`.
 //!
+//! A create this decorator cannot place — no usable `sort_key` AND no
+//! `parent_id` to append under — is REFUSED here (#63) rather than allowed to
+//! land on the `sort_key` column default. This is the only such guard: it needs
+//! no consolidator check because the decorator is SqlOnly by construction (see
+//! the previous paragraph), and `SqlBlockOperations::create` is not an
+//! alternative home for it — that type advertises only the structural ops, so
+//! no dispatched `block.create` ever reaches it, and its `create_at` override
+//! goes straight to `create_row`.
+//!
 //! `delete` needs nothing: removing a row leaves its siblings' keys distinct
 //! and correctly ordered.
 
@@ -80,6 +89,36 @@ impl OrderedBlockCrud {
         // locally — this decorator holds no keyspace of its own.
         self.order_owner.new_child_anchor(parent, last).await
     }
+
+    /// Whether a create already carries a real position. Absent, empty, and
+    /// non-string `sort_key` values are all "no position": `""` collides in the
+    /// keyspace exactly like the `A0` column default, and a `Value::Null`
+    /// otherwise survives to the `NOT NULL` constraint one layer down.
+    fn carries_a_position(params: &StorageEntity) -> bool {
+        params
+            .get("sort_key")
+            .and_then(|v| v.as_string())
+            .is_some_and(|key| !key.is_empty())
+    }
+
+    /// The refusal for a create that would otherwise reach `block_raw` unplaced
+    /// (#63). Names the block and the key so the caller can act on it.
+    fn no_position(
+        params: &StorageEntity,
+        reason: &str,
+    ) -> Box<dyn std::error::Error + Send + Sync> {
+        let id = params
+            .get("id")
+            .and_then(|v| v.as_string())
+            .unwrap_or("<no id supplied>");
+        format!(
+            "OrderedBlockCrud: refusing to create block {id} without a position — {reason}. \
+             SqlOnly owns sibling order, so the row would land on the `sort_key` column default \
+             and collide with every other unpositioned block. Supply a non-empty sort_key, or a \
+             parent_id to append under."
+        )
+        .into()
+    }
 }
 
 #[async_trait::async_trait]
@@ -121,22 +160,38 @@ impl OperationProvider for OrderedBlockCrud {
             // A create that names its parent and does not already carry an
             // explicit position is appended as that parent's last child — the
             // creation slot's contract ("type here" adds to the end).
-            "create" if !params.contains_key("sort_key") => {
-                let position = if let Some(parent) = params
+            "create" if !Self::carries_a_position(&params) => {
+                // A `sort_key` that is PRESENT but unusable is a caller bug, not
+                // the append contract. Minting over it would hide the bug, so it
+                // gets the same named refusal as any other unplaced create.
+                if params.contains_key("sort_key") {
+                    return Err(Self::no_position(
+                        &params,
+                        "its sort_key is present but is not a usable position (empty or null)",
+                    ));
+                }
+                let Some(parent) = params
                     .get("parent_id")
                     .and_then(|v| v.as_string())
                     .map(str::to_string)
-                {
-                    // ALLOW(entity_uri_from_raw): op-dispatch parent id string → EntityUri
-                    let parent = EntityUri::from_raw(&parent);
-                    // Key AND any sibling re-key it is expressed against, carried
-                    // TYPED into the create's transaction (ADR 0030 D1) — never
-                    // an `_order_rekeys` params key (Ruling B).
-                    Some(self.append_key(&parent, None).await?)
-                } else {
-                    None
+                else {
+                    // #63: no key AND no parent to anchor against means this
+                    // create has no position at all. Refuse rather than let the
+                    // row land on the column's literal `DEFAULT 'A0'`, where it
+                    // reads back as positioned and ties with every other keyless
+                    // block until some later op happens to re-key the set.
+                    return Err(Self::no_position(
+                        &params,
+                        "it supplies no sort_key and no parent_id to mint one against",
+                    ));
                 };
-                self.sql.create_row(params, position).await
+                // ALLOW(entity_uri_from_raw): op-dispatch parent id string → EntityUri
+                let parent = EntityUri::from_raw(&parent);
+                // Key AND any sibling re-key it is expressed against, carried
+                // TYPED into the create's transaction (ADR 0030 D1) — never
+                // an `_order_rekeys` params key (Ruling B).
+                let position = self.append_key(&parent, None).await?;
+                self.sql.create_row(params, Some(position)).await
             }
             // A re-parent moves the block into a sequence its old key has no
             // meaning in, so it is appended to the new parent. The position is
