@@ -521,7 +521,7 @@ impl LiveDocumentManager {
         // Route document creation events to the document's own ID.
         // _routing_doc_uri is only event routing metadata (not stored in DB) —
         // it tells FileSyncController which file to re-render.
-        let params = build_block_params(&doc, &doc.parent_id, &doc.id);
+        let params = build_block_params(&doc, &doc.parent_id, &doc.id, None);
         // INSERT OR IGNORE: only triggers on PK collision now that the
         // partial unique index on `(parent_id, name)` is gone. The
         // `create_lock` held by the caller is what prevents same-title
@@ -631,7 +631,7 @@ impl DocumentManager for LiveDocumentManager {
 
     async fn update_metadata(&self, doc: &Block) -> anyhow::Result<()> {
         use holon_orgmode::build_block_params;
-        let mut params = build_block_params(doc, &doc.parent_id, &doc.id);
+        let mut params = build_block_params(doc, &doc.parent_id, &doc.id, None);
         // `doc.properties` is authoritative for doc-level metadata, but
         // `build_block_params` only emits keys that are PRESENT — and the
         // SQL provider's property merge can't clear what isn't mentioned.

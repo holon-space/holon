@@ -1,3 +1,6 @@
+use std::collections::HashSet;
+use std::sync::LazyLock;
+
 use holon_api::EntityUri;
 use holon_api::Value;
 use holon_api::block::Block;
@@ -16,10 +19,18 @@ use crate::models::OrgBlockExt;
 /// (`FileSyncController`) reads the typed field, so it can route the
 /// operation to the correct document regardless of where `parent_id`
 /// points.
+///
+/// `previous` is the block as the file previously declared it. It makes the
+/// file authoritative for the block's drawer: a key `previous` carried and
+/// `block` no longer does is emitted as `Value::Null` — the writer's removal
+/// sentinel — so a renamed or deleted drawer key is cleared from the store
+/// instead of surviving an insert-only merge forever. `None` for a create, and
+/// for any caller not reconciling a file against its own prior state.
 pub fn build_block_params(
     block: &Block,
     parent_id: &EntityUri,
     document_uri: &EntityUri,
+    previous: Option<&Block>,
 ) -> holon_api::StorageEntity {
     let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
     params.insert("id".into(), Value::String(block.id.to_string()));
@@ -158,26 +169,78 @@ pub fn build_block_params(
     params.insert("ID".into(), Value::String(id));
 
     for (k, v) in block.drawer_properties() {
-        // `drawer_properties()` emits `REQUIRES` for org *rendering* (the
-        // org-edna dependency drawer). Here it must be skipped: `requires` is
-        // an edge field already emitted as the typed `Value::Array` param above
-        // (routed to the `block_requires` junction). Re-inserting it as a flat
-        // string property would pollute `block.properties` with a stray
-        // uppercase `REQUIRES` key that the reference model never has.
-        if k.eq_ignore_ascii_case("requires") {
+        if is_edge_drawer_key(&k) {
             continue;
         }
-        // Same shape for `:ADVICE_SUPPRESSED:` (ADR 0021): typed edge field
-        // already emitted as a `Value::Array` param above (routed to the
-        // `advice_suppressed` junction); the drawer string must not leak into
-        // `block.properties`.
-        if k.eq_ignore_ascii_case("advice_suppressed") {
+        if is_storage_column_key(&k) {
+            warn_unrepresentable_drawer_key(&k, block);
             continue;
         }
         params.insert(k.into(), Value::String(v));
     }
 
+    // The file is authoritative for its own drawer: a key it USED to declare
+    // and no longer does must be cleared from the store, not merged forward.
+    // `drawer_properties()` never yields `_`-prefixed keys, so store-managed
+    // system keys — which no file can express — are structurally out of reach
+    // here and survive untouched.
+    if let Some(previous) = previous {
+        for k in previous.drawer_properties().into_keys() {
+            // A storage-column name is refused SILENTLY here. The emit loop
+            // above already disclosed it for any key the file still declares,
+            // and a removal is not a loss of authored data — it is a refusal to
+            // write `SET <column> = NULL` over row state this builder does not
+            // own (`sort_key` is the consolidator's order key).
+            if is_edge_drawer_key(&k) || is_storage_column_key(&k) || params.contains_key(&*k) {
+                continue;
+            }
+            params.insert(k.into(), Value::Null);
+        }
+    }
+
     params
+}
+
+/// True for the drawer keys `drawer_properties()` emits for org RENDERING that
+/// are really typed edge fields, already carried as `Value::Array` params
+/// (`block_requires` / `advice_suppressed` junctions; ADR 0021). Re-inserting
+/// one as a flat string would pollute `block.properties` with a stray uppercase
+/// key the reference model never has.
+fn is_edge_drawer_key(key: &str) -> bool {
+    key.eq_ignore_ascii_case("requires") || key.eq_ignore_ascii_case("advice_suppressed")
+}
+
+/// The `block_raw` storage columns, as one set built once.
+static BLOCK_STORAGE_COLUMNS: LazyLock<HashSet<&'static str>> =
+    LazyLock::new(|| holon_api::schema::BLOCK.columns().into_iter().collect());
+
+/// True for a drawer key that spells a `block_raw` STORAGE COLUMN.
+///
+/// Such a key is not a property at all:
+/// `SqlOperationProvider::partition_params` routes any param whose key names a
+/// column straight to that column, so emitting one overwrites real row state
+/// (`:id:` rewrites the primary key, `:content:` the block's text,
+/// `:properties:` merges the drawer's own value into the property map) and
+/// nulling one on removal emits `SET sort_key = NULL`, destroying the order key
+/// the consolidator owns.
+///
+/// Matched case-sensitively against the schema, exactly as `partition_params`
+/// matches, so `:Sort_Key:` stays an ordinary property instead of being
+/// over-refused.
+fn is_storage_column_key(key: &str) -> bool {
+    BLOCK_STORAGE_COLUMNS.contains(key)
+}
+
+/// Disclose a refused drawer key. The value IS being dropped, so this must be
+/// audible — a silent drop is the one outcome the repo's error ladder forbids
+/// outright.
+fn warn_unrepresentable_drawer_key(key: &str, block: &Block) {
+    tracing::warn!(
+        block = %block.id,
+        key = %key,
+        "org drawer key names a `block_raw` storage column and cannot be stored as a property \
+         — dropping it from this block's ingest params. Rename the drawer key."
+    );
 }
 
 #[cfg(test)]
@@ -218,7 +281,7 @@ mod tests {
         );
 
         for block in headlines {
-            let params = build_block_params(block, &parsed.document.id, &parsed.document.id);
+            let params = build_block_params(block, &parsed.document.id, &parsed.document.id, None);
             let task_state = params
                 .get("task_state")
                 .and_then(|v| v.as_string())
@@ -282,7 +345,7 @@ mod tests {
         );
 
         // Store-write side (org-ingest → SQL create/update params).
-        let params = build_block_params(block, &parsed.document.id, &parsed.document.id);
+        let params = build_block_params(block, &parsed.document.id, &parsed.document.id, None);
         let marks_param = params.get("marks").unwrap_or_else(|| {
             panic!(
                 "build_block_params dropped `marks` — org-ingested link syntax is lost on store \
@@ -353,7 +416,7 @@ mod tests {
     fn source_block_params_carry_language_and_name() {
         let block = base_source_block();
         let parent = EntityUri::block("parent-1");
-        let params = build_block_params(&block, &parent, &parent);
+        let params = build_block_params(&block, &parent, &parent, None);
         assert_eq!(
             params.get("source_language").and_then(|v| v.as_string()),
             Some("python"),
@@ -374,7 +437,7 @@ mod tests {
     fn source_block_without_header_args_omits_the_column() {
         let block = base_source_block();
         let parent = EntityUri::block("parent-1");
-        let params = build_block_params(&block, &parent, &parent);
+        let params = build_block_params(&block, &parent, &parent, None);
         assert!(
             !params.contains_key("source_header_args"),
             "empty header args must not emit source_header_args, got {:?}",
@@ -393,7 +456,7 @@ mod tests {
 
         let mut with_ts = base_source_block();
         with_ts.created_at = 12345;
-        let params = build_block_params(&with_ts, &parent, &parent);
+        let params = build_block_params(&with_ts, &parent, &parent, None);
         assert_eq!(
             params.get("created_at").and_then(|v| v.as_i64()),
             Some(12345),
@@ -402,7 +465,7 @@ mod tests {
 
         let mut without_ts = base_source_block();
         without_ts.created_at = 0;
-        let params = build_block_params(&without_ts, &parent, &parent);
+        let params = build_block_params(&without_ts, &parent, &parent, None);
         let created = params
             .get("created_at")
             .and_then(|v| v.as_i64())
@@ -411,5 +474,210 @@ mod tests {
             created > 0,
             "absent created_at must be defaulted to a positive `now`, got {created}"
         );
+    }
+
+    /// A drawer key the file dropped is emitted as the `Value::Null` removal
+    /// sentinel; a key it still declares is emitted as its value; and the typed
+    /// edge drawers (`REQUIRES`/`ADVICE_SUPPRESSED`) never take part — they
+    /// travel as `Value::Array` params, so nulling them would clear a junction
+    /// the file still populates.
+    #[test]
+    fn a_dropped_drawer_key_is_emitted_as_the_removal_sentinel() {
+        let parent = EntityUri::no_parent();
+        let previous = parse_one(
+            "* Problem\n:PROPERTIES:\n:ID: p0\n:compass: problem\n:leads-to: m1\n:REQUIRES: \
+             b1\n:END:\n",
+        );
+        let current = parse_one(
+            "* Problem\n:PROPERTIES:\n:ID: p0\n:compass: problem\n:contributes-to: m1\n:END:\n",
+        );
+
+        let params = build_block_params(&current, &parent, &parent, Some(&previous));
+
+        assert_eq!(
+            params.get("leads-to"),
+            Some(&Value::Null),
+            "a dropped drawer key must carry the removal sentinel: {params:?}"
+        );
+        assert_eq!(
+            params.get("contributes-to").and_then(|v| v.as_string()),
+            Some("m1"),
+            "the key the file now declares must carry its value: {params:?}"
+        );
+        assert_eq!(
+            params.get("compass").and_then(|v| v.as_string()),
+            Some("problem"),
+            "an unchanged key must carry its value: {params:?}"
+        );
+        assert!(
+            matches!(params.get("requires"), Some(Value::Array(_))),
+            "the edge drawer must stay a typed array param, never a sentinel: {params:?}"
+        );
+    }
+
+    /// A drawer key that spells a `block_raw` STORAGE COLUMN is refused in BOTH
+    /// directions — never emitted, never nulled.
+    ///
+    /// Emitting one lets `partition_params` route the drawer's own value into
+    /// the column (`:id:` rewrites the primary key, `:properties:` merges into
+    /// the property map). Nulling one on removal is worse: the update nulls the
+    /// `sort_key` column outright, destroying the order key the consolidator
+    /// owns — the exact competing-writer class the `sort_key` comment at this
+    /// function's call site warns about.
+    #[test]
+    fn a_drawer_key_naming_a_storage_column_never_reaches_the_params() {
+        let parent = EntityUri::no_parent();
+        // Every one of these is in `holon_api::schema::BLOCK.columns()` and in
+        // NEITHER `drawer_properties`'s INTERNAL_KEYS nor the `_` namespace, so
+        // without the guard each reaches the params.
+        let columns = [
+            "sort_key",
+            "completed",
+            "block_type",
+            "write_seq",
+            "source_name",
+            "properties",
+            "id",
+            "content",
+        ];
+        let drawer: String = columns.iter().map(|c| format!(":{c}: x\n")).collect();
+        let previous = parse_one(&format!(
+            "* P\n:PROPERTIES:\n:ID: p0\n{drawer}:keep: v\n:END:\n"
+        ));
+
+        // EMIT direction: the authored value must not reach the column.
+        let params = build_block_params(&previous, &parent, &parent, None);
+        for c in columns {
+            assert_ne!(
+                params.get(c).and_then(|v| v.as_string()),
+                Some("x"),
+                "drawer key `{c}` names a storage column — its authored value must never \
+                 reach the params: {params:?}"
+            );
+        }
+
+        // REMOVAL direction: the file drops every one of them. None may be
+        // nulled — `SET sort_key = NULL` is the destructive outcome.
+        let current = parse_one("* P\n:PROPERTIES:\n:ID: p0\n:keep: v\n:END:\n");
+        let params = build_block_params(&current, &parent, &parent, Some(&previous));
+        for c in columns {
+            assert_ne!(
+                params.get(c),
+                Some(&Value::Null),
+                "drawer key `{c}` names a storage column — removing it must never emit a \
+                 NULL column write: {params:?}"
+            );
+        }
+        // Non-vacuity: an ordinary key IS still removable in the same call.
+        let current = parse_one("* P\n:PROPERTIES:\n:ID: p0\n:END:\n");
+        let params = build_block_params(&current, &parent, &parent, Some(&previous));
+        assert_eq!(
+            params.get("keep"),
+            Some(&Value::Null),
+            "the guard must not have disabled removal generally: {params:?}"
+        );
+    }
+
+    /// The refusal's claim to "falls back visibly" rather than "silently
+    /// degrades" rests entirely on the WARN, so the WARN is pinned, not just
+    /// the params shape — deleting it would turn this into a silent drop.
+    ///
+    /// Captured through a LOCAL subscriber (`with_default`) rather than the
+    /// `SpanCollector::global()` discipline: that collector lives in
+    /// `holon-integration-tests`, which this crate cannot depend on. A local
+    /// subscriber needs no touch-before-SUT ordering and leaks no global state.
+    #[test]
+    fn the_refusal_is_disclosed_exactly_once_per_key() {
+        let parent = EntityUri::no_parent();
+        let block = parse_one("* P\n:PROPERTIES:\n:ID: p0\n:sort_key: zzz\n:keep: v\n:END:\n");
+
+        let captured = CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(captured.clone())
+            .with_max_level(tracing::Level::WARN)
+            .without_time()
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            build_block_params(&block, &parent, &parent, Some(&block));
+        });
+
+        let logged = captured.contents();
+        assert!(
+            logged.contains("sort_key"),
+            "the refused key must be named in the WARN, or the drop is silent: {logged:?}"
+        );
+        assert!(
+            logged.contains("p0"),
+            "the WARN must name the block so the user can find it: {logged:?}"
+        );
+        assert_eq!(
+            logged.matches("sort_key").count(),
+            1,
+            "exactly one WARN per refused key — the removal loop must not re-log what the \
+             emit loop already disclosed: {logged:?}"
+        );
+    }
+
+    /// Collects a local subscriber's output so a test can assert on it.
+    #[derive(Clone, Default)]
+    struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CaptureWriter {
+        fn contents(&self) -> String {
+            String::from_utf8(self.0.lock().expect("capture buffer").clone())
+                .expect("tracing output is UTF-8")
+        }
+    }
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("capture buffer")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+        type Writer = CaptureWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Without a `previous` there is no authority over peer keys, so nothing is
+    /// nulled — the create path and every non-reconciling caller keep the
+    /// insert-only merge.
+    #[test]
+    fn without_a_previous_block_no_key_is_nulled() {
+        let parent = EntityUri::no_parent();
+        let current = parse_one(
+            "* Problem\n:PROPERTIES:\n:ID: p0\n:compass: problem\n:contributes-to: m1\n:END:\n",
+        );
+        let params = build_block_params(&current, &parent, &parent, None);
+        assert!(
+            !params.values().any(|v| matches!(v, Value::Null)),
+            "a create emits no removal sentinel: {params:?}"
+        );
+    }
+
+    /// The single headline of a one-block org source.
+    fn parse_one(source: &str) -> Block {
+        let parsed = parse_org_file(
+            std::path::Path::new("/vault/doc.org"),
+            source,
+            &EntityUri::no_parent(),
+            std::path::Path::new("/vault"),
+        )
+        .expect("parse org source");
+        parsed
+            .blocks
+            .into_iter()
+            .find(|b| b.id.id() == "p0")
+            .expect("the parse carries the `p0` headline")
     }
 }

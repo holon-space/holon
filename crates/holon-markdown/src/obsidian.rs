@@ -364,8 +364,9 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
         block: &Block,
         parent_id: &EntityUri,
         document_uri: &EntityUri,
+        previous: Option<&Block>,
     ) -> StorageEntity {
-        build_block_params(block, parent_id, document_uri)
+        build_block_params(block, parent_id, document_uri, previous)
     }
 
     fn content_differs(&self, a: &Block, b: &Block) -> bool {

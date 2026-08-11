@@ -134,7 +134,8 @@ pub async fn seed_default_layout(
                 .is_empty();
             if !exists {
                 let doc_uri = &routing_docs[&block.id];
-                let params = holon_orgmode::build_block_params(block, &block.parent_id, doc_uri);
+                let params =
+                    holon_orgmode::build_block_params(block, &block.parent_id, doc_uri, None);
                 // First-boot seeding is system-authored boundary ingest —
                 // never user-undoable.
                 engine
