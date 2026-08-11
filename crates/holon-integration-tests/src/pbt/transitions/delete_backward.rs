@@ -32,6 +32,8 @@ use validated::Validated;
 use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::REACTIVE_BASE;
+#[cfg(feature = "otel-testing")]
+use crate::pbt::transitions::join_block::join_expected_sql;
 
 /// Delete `count` characters backward in the active editor.
 /// Gated to `PBT_ATOMIC_EDITOR=1` runs.
@@ -96,6 +98,10 @@ where
     // deletes one char. Modeling the whole `count` as a flat char delete
     // missed the join — the SUT merged blocks while the ref only trimmed
     // text (the Full-slice SplitBlock→DeleteBackward divergence).
+    // Counted for `inv-sql-budget`: each join is a structural mutation the
+    // budget charges a `JoinBlock`, and the post-apply state it inspects can no
+    // longer tell a merge from a mid-line delete.
+    let mut joins = 0usize;
     for _ in 0..count {
         let cursor = state.active_editor_cursor().unwrap_or(0);
         if cursor > 0 {
@@ -136,9 +142,11 @@ where
             .len()
             .saturating_sub(state.block_content(&target).map_or(0, str::len));
         crate::pbt::transitions::join_block::join_block_apply_to_ref(&block_id, state);
+        joins += 1;
         let joined = state.editor_surface_text(&target);
         state.open_active_editor(target, joined, boundary + prefix);
     }
+    state.note_backspace_joins(joins);
     // Same Phase 2 contract as TypeChars: per-keystroke writes flow
     // through MutableText → Loro → SQL between transitions. The CDC
     // quiescence barrier in the PBT runner means block.content has
@@ -201,12 +209,23 @@ crate::cap_transition! {
     |me, _state, sut| {
         sut.apply_delete_backward(me.count).await;
     }
-    sql_budget: |_me, _state| {
+    sql_budget: |_me, state| {
+        // A backspace at caret 0 is a JOIN, not a keystroke: it merges the
+        // block into its predecessor, which legitimately writes. Each merge the
+        // run performed costs one `JoinBlock` budget on top of the single
+        // reactive base every transition pays; `joins = 0` reduces this to the
+        // pure in-buffer keystroke (5 reads, 0 writes) it always was.
+        let joins = state.last_backspace_joins();
+        let join = join_expected_sql(
+            state.active_watch_count(),
+            state.block_count(),
+            state.document_count(),
+        );
         ExpectedSql {
-            reads: REACTIVE_BASE,
-            writes: 0,
+            reads: REACTIVE_BASE + joins * (join.reads - REACTIVE_BASE),
+            writes: joins * join.writes,
             ddl: 0,
-            tolerance: 5,
+            tolerance: 5 + joins * join.tolerance,
         }
     }
 }

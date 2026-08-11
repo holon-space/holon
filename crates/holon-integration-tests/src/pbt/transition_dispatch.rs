@@ -581,6 +581,9 @@ mod cap_transition_generic_arm_selftest {
             fn content_writes_reach_sql(&self) -> bool {
                 false
             }
+            fn last_backspace_joins(&self) -> usize {
+                0
+            }
         }
 
         let sql = DummyGenericTransition.expected_sql(&DummyRef);

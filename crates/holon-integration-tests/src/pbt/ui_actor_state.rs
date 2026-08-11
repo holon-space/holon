@@ -93,6 +93,14 @@ pub struct UITabState {
     /// where the row is open under either branch. `inv-sql-budget` reads it to
     /// pick which of the two `OPEN_TAB_*_READS` ceilings applies.
     pub last_open_tab_activated: bool,
+
+    /// How many block MERGES the most recent `DeleteBackward` performed — a
+    /// backspace at caret 0 joins into the predecessor rather than deleting a
+    /// character. Recorded by `DeleteBackward::apply_to_ref` because
+    /// `expected_sql` only sees the post-apply state, where the merged block is
+    /// already gone and a merge is indistinguishable from a mid-line delete.
+    /// `inv-sql-budget` charges each merge one `JoinBlock` budget.
+    pub last_backspace_joins: usize,
 }
 
 impl UITabState {
@@ -109,6 +117,7 @@ impl UITabState {
             seen_focus_targets: HashSet::new(),
             last_navigate_first_visit: false,
             last_open_tab_activated: false,
+            last_backspace_joins: 0,
         }
     }
 }
