@@ -1351,6 +1351,24 @@ pub trait SutBackend {
     async fn live_focus_root_rows(&self) -> Vec<(String, String)>;
 }
 
+/// The ordering encoding the observer's block projection carries alongside each
+/// block — the `sort_key` column of the `block` matview.
+///
+/// A SEPARATE cap from [`SutBackend`] because the domain `holon_api::Block`
+/// deliberately does NOT carry `sort_key` (ADR 0005): the fractional index is
+/// the storage adapter's internal encoding, so a typed `Block` snapshot cannot
+/// answer "is this block positioned?". A slice that projects no order column
+/// simply does not register this, and `inv-birth-contract-satisfied` honestly
+/// DESELECTS there instead of passing vacuously.
+#[holon_macros::capmap_adapter]
+pub trait SutOrderKeys {
+    /// `(id, sort_key)` for every block the projection exposes, read after CDC
+    /// quiescence. The value is the raw column string — the caller classifies
+    /// it with `holon_core::fractional_index::is_minted_key`; an unkeyed
+    /// sentinel (`"A0"`) is a legal column value but not a position.
+    async fn live_block_order_keys(&self) -> Vec<(EntityUri, String)>;
+}
+
 /// Loro-side task_state projection. Phase 7 addition for
 /// `inv-task-state-storage-coherence`. Separate from `SutLoroLog` to
 /// keep the Loro-tree surface (children snapshot) isolated from the
