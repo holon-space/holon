@@ -76,9 +76,12 @@ fn assert_content_survives(content: &str) {
 // Family 1 — content that collides with org inline markup
 // ===========================================================================
 
-/// Task #67, CONFIRMED in prod: `block:__default__`'s content `__default__`
-/// comes back as `default`. `_x_` is org UNDERLINE, so `__default__` parses as
-/// underline-inside-underline and both delimiter pairs are consumed into marks.
+/// Task #67 feared this shape: `_x_` is org UNDERLINE, so `__default__` could
+/// parse as underline-inside-underline with both delimiter pairs consumed into
+/// marks, and `block:__default__`'s content would come back as `default`. It
+/// does not — the round trip is byte-stable, here and in the sibling
+/// fixed-point and in-sentence cases, and the 2026-08-11 Compass probe retired
+/// the same claim independently.
 #[test]
 fn dunder_content_survives_roundtrip() {
     assert_content_survives("__default__");

@@ -5093,6 +5093,7 @@ dependencies = [
  "holon-frontend",
  "holon-loro",
  "holon-mcp-client",
+ "holon-org-format",
  "holon-orgmode",
  "holon-profiles",
  "holon-turso",
