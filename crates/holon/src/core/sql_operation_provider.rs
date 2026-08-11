@@ -693,10 +693,12 @@ impl SqlOperationProvider {
         // that must be RECOGNIZED against its current holder before it can
         // `INSERT ... ON CONFLICT(id) DO UPDATE`-land, so a rename (id
         // preserved, title changed) is never silently clobbered. The
-        // former inline pre-SELECT collision guard is SUBSUMED into
-        // `mint`, which uses the single-source `recognize_derived_id`
-        // predicate (D1b interim fail-loud). Content-gated exactly as
-        // before: with no title there is nothing to recognize.
+        // recognition itself lives in `recognize_create`, which runs the
+        // same single-source `recognize_derived_id` predicate over the same
+        // store read the minter's `Carried` arm does — one step richer,
+        // because a create must ACT differently on a free id and on a
+        // recognized re-create, a distinction a blessed `MintedId` cannot
+        // carry.
         let minter =
             self.identity_minter()
                 .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
@@ -705,26 +707,12 @@ impl SqlOperationProvider {
                 })?;
         let create_id: holon_api::identity_minting::CreateId =
             match params.get("id").and_then(|v| v.as_string()) {
-                Some(existing) => {
-                    let carried = holon_api::identity_minting::CarriedId::from_stored(
+                Some(existing) => holon_api::identity_minting::CreateId::Carried(
+                    holon_api::identity_minting::CarriedId::from_stored(
                         // ALLOW(entity_uri_from_raw): id is a validated create param
                         EntityUri::from_raw(existing),
-                    );
-                    if let Some(content) = params.get("content").and_then(|v| v.as_string()) {
-                        // Recognize the carried id against its store
-                        // holder; Err(IdentityCollision) on a rename
-                        // clobber. The blessed MintedId is discarded — the
-                        // CarriedId witness is the create id.
-                        let content = content.to_string();
-                        let carried_id = carried.as_entity_uri().clone();
-                        minter
-                            .mint(holon_api::identity_minting::IdentityInput::carried(
-                                carried_id, content,
-                            ))
-                            .await?;
-                    }
-                    holon_api::identity_minting::CreateId::Carried(carried)
-                }
+                    ),
+                ),
                 None => holon_api::identity_minting::CreateId::Minted(
                     minter
                         .mint(holon_api::identity_minting::IdentityInput::UniqueRandom)
@@ -733,14 +721,29 @@ impl SqlOperationProvider {
             };
         let id = create_id.as_str().to_string();
         params.insert("id".into(), Value::String(id.clone()));
+        // Recognition BEFORE anything is minted or placed, so a refused
+        // create leaves the keyspace untouched.
+        let held = self.recognize_create(&params).await?;
         // The minted position (its `sort_key` + the sibling re-keys the
         // key is expressed against) arrives TYPED — never a params map
         // key. Inject the key and collect the re-key UPDATEs BEFORE
         // prepare_create, so the new row carries the real key and the
         // re-keys ride the create's OWN transaction (ADR 0030 D1: a
         // refused create leaves the keyspace untouched).
+        let caller_sort_key = params.get("sort_key").cloned();
         let rekey_statements = self.apply_position(&mut params, position).await?;
-        let prepared = self.prepare_create(&params);
+        if held.is_some() {
+            // A recognized re-create PLACES nothing: the row already sits
+            // somewhere, so it keeps its current key and the freshly minted
+            // one is dropped. The sibling re-keys still ride the
+            // transaction — they normalize the EXISTING set, order-preserving,
+            // and later ops in the same batch are keyed against them.
+            match caller_sort_key {
+                Some(k) => params.insert("sort_key".into(), k),
+                None => params.remove("sort_key"),
+            };
+        }
+        let prepared = self.prepare_create(&params, held.as_ref());
         // block_links junction (links increment 2): derived from the
         // marks param, written in the SAME transaction as the row +
         // edge junctions. A Page-tagged create also re-resolves
@@ -814,74 +817,21 @@ impl SqlOperationProvider {
             }
             return Err(format!("Failed to execute SQL: {}", msg).into());
         }
-        // Read the row back and return its id, so the caller knows which id
-        // won.
-        //
-        // NOT an INSERT-OR-IGNORE probe, despite how this reads: `prepare_create`
-        // emits `INSERT … ON CONFLICT(id) DO UPDATE SET <every non-id column> =
-        // excluded.<col>`, an unguarded upsert on the primary key, so the row is
-        // always present here and the "was it ignored?" question this select was
-        // written to answer no longer has a negative answer. What actually keeps
-        // one page from upserting over another's identity is the ADR 0029 D1b
-        // gate above (`identity_minter().mint(CarriedId::from_stored(..))`), and
-        // that gate is content-gated — with no title there is nothing to
-        // recognize (task #8).
-        let select_sql = format!(
-            "SELECT id FROM {} WHERE id = '{}'",
-            self.table_name,
-            id.replace('\'', "''")
-        );
-        let inserted = match self.db_handle.query(&select_sql, HashMap::new()).await {
-            Ok(rows) => rows.into_iter().next().is_some(),
-            Err(e) => {
-                tracing::error!(
-                    "[SqlOp] SELECT after INSERT failed for '{}': {} — treating as not \
-                             inserted",
-                    id,
-                    e,
-                );
-                false
-            }
-        };
-
-        let response = if !inserted {
-            // Our id doesn't exist → INSERT was ignored. With the unique
-            // (parent_id, name) index gone, this branch only triggers on
-            // primary-key collision; resolve by id alone.
-            let block_id = params.get("id").and_then(|v| v.as_string());
-            match block_id {
-                Some(bid) => {
-                    let find_sql = format!(
-                        "SELECT id FROM {} WHERE id = '{}'",
-                        self.table_name,
-                        bid.replace('\'', "''"),
-                    );
-                    let existing_id = self
-                        .db_handle
-                        .query(&find_sql, HashMap::new())
-                        .await
-                        .ok() // ALLOW(ok): id-collision lookup tolerance // ALLOW(fallback):
-                        // comment-only mention, not a real degraded path
-                        .and_then(|rows| rows.into_iter().next())
-                        .and_then(|row| row.get("id").cloned());
-                    existing_id.map(|v| match v {
-                        Value::String(s) => Value::String(s),
-                        other => Value::String(format!("{:?}", other)),
-                    })
-                }
-                _ => None,
-            }
-        } else {
-            None
-        };
+        // Whether THIS call created the row is already known: `held` is
+        // `Some` exactly when the id was standing before, so no read-back
+        // probe is needed (and the transaction above fails loud if the write
+        // did not land).
+        let created = held.is_none();
+        // A re-create tells the caller which id won — the one it re-observed.
+        let response = held.as_ref().map(|_| Value::String(id.clone()));
 
         // Inverse of a genuine create = delete the minted/supplied id
-        // (identity-preserving, ADR 0024). An IGNORED insert created
+        // (identity-preserving, ADR 0024). A recognized re-create created
         // nothing, so undoing it must NOT delete the pre-existing row —
         // that path is declared irreversible. Forward fingerprint: the
         // `id` column is present post-create (absent → `Value::Null`
         // pre-create), so undo drops loudly if the row vanished under it.
-        let mut result = if inserted {
+        let mut result = if created {
             let inverse = Operation::from_params(
                 EntityName::new(&self.entity_name),
                 "delete",
@@ -900,7 +850,8 @@ impl SqlOperationProvider {
         } else {
             OperationResult::declared_irreversible(
                 Vec::new(),
-                "create: insert ignored (row already existed)",
+                "create: the id was already held by the SAME entity — an idempotent re-create \
+                 creates nothing to undo",
             )
         };
         result.response = response;
@@ -1120,19 +1071,110 @@ impl SqlOperationProvider {
         Ok(())
     }
 
+    /// Recognize a create's carried `id` against the row that currently holds
+    /// it — the ADR 0029 D1b step, extended by the collision ruling of
+    /// 2026-08-12 (task #8).
+    ///
+    /// `Ok(None)` = the id is free; the create is an ordinary one.
+    /// `Ok(Some(row))` = the id is held by the SAME name-addressable
+    /// entity, so this is an idempotent RE-create: it asserts that the
+    /// block exists, not what every column of it should be, and
+    /// [`prepare_create`](Self::prepare_create) narrows it to the fields it
+    /// actually supplies AND that actually differ.
+    ///
+    /// Two loud refusals. A create carrying NO title cannot be recognized
+    /// against a holder at all, so it must not land over one — that is the
+    /// hole the former content-gated guard left open. A create whose title
+    /// DIFFERS is the rename clobber, refused with the typed
+    /// [`IdentityCollision`](holon_api::storage_error::IdentityCollision).
+    async fn recognize_create(&self, params: &StorageEntity) -> Result<Option<StorageEntity>> {
+        let Some(id) = params.get("id").and_then(|v| v.as_string()) else {
+            return Ok(None);
+        };
+        let sql = format!(
+            "SELECT * FROM {} WHERE id = '{}'",
+            self.table_name,
+            id.replace('\'', "''")
+        );
+        let Some(held) = self
+            .db_handle
+            .query(&sql, HashMap::new())
+            .await
+            .map_err(|e| format!("create recognition: reading the holder of {id}: {e}"))?
+            .into_iter()
+            .next()
+        else {
+            return Ok(None);
+        };
+        let held_title = held
+            .get("content")
+            .and_then(|v| v.as_string())
+            .map(str::to_string);
+        let Some(requested) = params.get("content").and_then(|v| v.as_string()) else {
+            return Err(format!(
+                "create for {id}: that id is ALREADY HELD (holder title {held_title:?}) and this \
+                 create carries no title, so there is nothing to recognize the holder by. \
+                 Refusing rather than upserting over it — name the entity this create means, or \
+                 address the existing row with an `update`."
+            )
+            .into());
+        };
+        // ALLOW(entity_uri_from_raw): create param id at the write boundary.
+        let uri = EntityUri::from_raw(id);
+        match holon_api::identity_recognition::recognize_derived_id(
+            &uri,
+            held_title.as_deref(),
+            requested,
+        ) {
+            holon_api::identity_recognition::Recognition::AlreadySatisfied => Ok(Some(held)),
+            // `Free` reaches here only when the id's row EXISTS but its title
+            // is SQL NULL (or the table has no `content` column at all): the
+            // predicate sees no name, exactly as for a blank one. Same
+            // adoption, so it takes the same DISCLOSED arm — a nameless
+            // holder must never be adopted silently just because its
+            // namelessness is spelled NULL rather than "".
+            holon_api::identity_recognition::Recognition::UnnamedPlaceholder
+            | holon_api::identity_recognition::Recognition::Free => {
+                // Disclosed adoption, not a silent substitution: the holder
+                // carries no title, so this create names a placeholder that
+                // was standing in for this very id.
+                tracing::warn!(
+                    id = %id,
+                    requested_title = %requested,
+                    held_title = ?held_title,
+                    "adopting an UNNAMED placeholder row at a held id — the create completes it \
+                     with the requested title; no named holder is clobbered"
+                );
+                Ok(Some(held))
+            }
+            holon_api::identity_recognition::Recognition::Collision(c) => Err(Box::new(c)),
+        }
+    }
+
     /// Build SQL for a create operation without executing.
-    fn prepare_create(&self, params: &StorageEntity) -> PreparedOp {
+    ///
+    /// `held` is the row already standing at this id (from
+    /// [`recognize_create`](Self::recognize_create)) — `Some` turns the create
+    /// into a recognized RE-create, which re-asserts only what it supplies and
+    /// only where that differs from what is stored.
+    fn prepare_create(&self, params: &StorageEntity, held: Option<&StorageEntity>) -> PreparedOp {
         // Ensure timestamps are present so the event payload is a complete Block.
         // Without this, CacheEventSubscriber fails to deserialize: "missing field
         // created_at".
+        //
+        // A re-create defaults NEITHER: a row that already exists was created
+        // once, and re-stamping `created_at`/`updated_at` on a create that
+        // changed nothing is exactly the clobber this arm exists to stop.
         let mut params = params.clone();
-        let now_ms = self.clock.now_millis();
-        params
-            .entry("created_at".into())
-            .or_insert_with(|| Value::Integer(now_ms));
-        params
-            .entry("updated_at".into())
-            .or_insert_with(|| Value::Integer(now_ms));
+        if held.is_none() {
+            let now_ms = self.clock.now_millis();
+            params
+                .entry("created_at".into())
+                .or_insert_with(|| Value::Integer(now_ms));
+            params
+                .entry("updated_at".into())
+                .or_insert_with(|| Value::Integer(now_ms));
+        }
 
         let (mut sql_fields, extra_props, edge_field_params) = self.partition_params(&params);
 
@@ -1152,6 +1194,16 @@ impl SqlOperationProvider {
             ));
         }
 
+        if let Some(old_row) = held {
+            // Recognized re-create: drop every field whose stored value the
+            // create already agrees with, so an idempotent re-observation
+            // writes NOTHING — no row touched, no CDC, no timestamp churn.
+            // What survives is what the authority genuinely re-asserts.
+            sql_fields.retain(|(k, new_sql_literal)| {
+                k == "id" || !sql_literal_equals_value(new_sql_literal, old_row.get(k.as_str()))
+            });
+        }
+
         let columns: Vec<_> = sql_fields
             .iter()
             .map(|(k, _)| Self::quote_identifier(k))
@@ -1166,7 +1218,9 @@ impl SqlOperationProvider {
         // value and breaking sibling ordering after `mov_after`. UPSERT lets
         // the projector be the single authoritative writer for `sort_key`
         // and other Loro-derived columns. The `id` column is the conflict
-        // target so it's excluded from the SET clause.
+        // target so it's excluded from the SET clause. Which columns reach
+        // that SET is decided above: an unrecognized create carries all of
+        // them, a recognized re-create only the ones it changes.
         let upsert_set: Vec<String> = sql_fields
             .iter()
             .filter(|(k, _)| k != "id")
@@ -1175,13 +1229,20 @@ impl SqlOperationProvider {
                 format!("{q} = excluded.{q}")
             })
             .collect();
-        let row_statements = vec![format!(
-            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT(id) DO UPDATE SET {}",
-            self.table_name,
-            columns.join(", "),
-            values.join(", "),
-            upsert_set.join(", "),
-        )];
+        // Nothing but the id left ⇒ the re-create agrees with the stored row
+        // in every field it supplied. Emitting `DO UPDATE SET` with an empty
+        // clause is not even valid SQL; the honest statement is none at all.
+        let row_statements = if held.is_some() && upsert_set.is_empty() {
+            Vec::new()
+        } else {
+            vec![format!(
+                "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT(id) DO UPDATE SET {}",
+                self.table_name,
+                columns.join(", "),
+                values.join(", "),
+                upsert_set.join(", "),
+            )]
+        };
 
         let aggregate_id = params
             .get("id")
@@ -4021,9 +4082,29 @@ impl OriginTaggedWrites for SqlOperationProvider {
             // NEVER arrive as a `params` map key — a peer property cannot become
             // one (Ruling B). Collected before the prepare so a no-op `update`
             // cannot drop them.
+            //
+            // A batched create is recognized FIRST (task #8): bulk org ingest
+            // and the Loro→SQL projection both re-derive create-vs-update from
+            // a cache/snapshot that a cold boot leaves empty, so an existing
+            // row routinely arrives here as a "create". Recognizing it keeps
+            // that re-observation from re-stamping the row, and drops the
+            // minted key it never earned (its sibling re-keys stay — the
+            // per-parent cursor of later ops is expressed against them).
+            let held = if op_name == "create" {
+                self.recognize_create(&params).await?
+            } else {
+                None
+            };
+            let caller_sort_key = params.get("sort_key").cloned();
             row_sql.extend(self.apply_position(&mut params, position).await?);
+            if held.is_some() {
+                match caller_sort_key {
+                    Some(k) => params.insert("sort_key".into(), k),
+                    None => params.remove("sort_key"),
+                };
+            }
             let prepared = match op_name.as_str() {
-                "create" => self.prepare_create(&params),
+                "create" => self.prepare_create(&params, held.as_ref()),
                 "update" => match self.prepare_update(&params).await? {
                     Some(p) => p,
                     None => continue,
@@ -4145,7 +4226,7 @@ mod clock_tests {
 
         let mut params = StorageEntity::new();
         params.insert("id".into(), Value::String("b1".to_string()));
-        let prepared = provider.prepare_create(&params);
+        let prepared = provider.prepare_create(&params, None);
 
         db_handle
             .execute(&prepared.row_statements[0], vec![])
