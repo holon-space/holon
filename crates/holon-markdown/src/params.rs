@@ -13,11 +13,16 @@ use holon_api::block::Block;
 use holon_api::marks_to_json;
 use holon_org_format::OrgBlockExt;
 
+/// `previous` is accepted to satisfy the adapter contract but has nothing to
+/// act on here: these params carry no user-authored property namespace (the
+/// field set below is closed), so no key can go stale in the store.
 pub fn build_block_params(
     block: &Block,
     parent_id: &EntityUri,
     document_uri: &EntityUri,
+    previous: Option<&Block>,
 ) -> StorageEntity {
+    let _ = previous;
     let mut params = StorageEntity::new();
     params.insert("id".into(), Value::String(block.id.to_string()));
     params.insert("parent_id".into(), Value::String(parent_id.to_string()));

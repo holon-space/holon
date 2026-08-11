@@ -112,6 +112,7 @@ web-time = "1"
 holon-block-roundtrip-testing.workspace = true
 holon-filesystem.workspace = true
 holon-loro.workspace = true
+holon-orgmode = { workspace = true, features = ["di"] }
 proptest.workspace = true
 proptest-state-machine.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

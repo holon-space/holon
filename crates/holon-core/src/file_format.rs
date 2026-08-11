@@ -105,11 +105,21 @@ pub trait FileFormatAdapter: Send + Sync {
     /// can route the op to the owning document regardless of where `parent_id`
     /// points. Format-specific because the param shape encodes the format's
     /// structured fields (org drawer properties, task state, scheduling, …).
+    ///
+    /// `previous` is the block as the file PREVIOUSLY declared it, and is what
+    /// makes the file authoritative for the block's user-visible property set:
+    /// a property key `previous` declared and `block` no longer does is emitted
+    /// as `Value::Null`, the writer's removal sentinel, so the store-side merge
+    /// clears it instead of keeping it alive forever. `None` for a create, and
+    /// for any caller that is NOT reconciling a file against its own prior
+    /// state — such a write names no authority over peer keys and must keep the
+    /// insert-only merge.
     fn build_block_params(
         &self,
         block: &Block,
         parent_id: &EntityUri,
         document_uri: &EntityUri,
+        previous: Option<&Block>,
     ) -> StorageEntity;
 
     /// Decide whether two blocks differ in a way that warrants re-emitting an

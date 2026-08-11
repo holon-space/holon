@@ -521,7 +521,8 @@ impl DocumentManager for MockDocumentManager {
         // build_block_params silently drops on the way to SQL. The new flow
         // round-trips through (params → SQL-shaped row → Block::try_from)
         // so a dropped param surfaces as a missing field on read-back.
-        let params = holon_orgmode::block_params::build_block_params(doc, &doc.parent_id, &doc.id);
+        let params =
+            holon_orgmode::block_params::build_block_params(doc, &doc.parent_id, &doc.id, None);
         let row = simulate_sql_round_trip(doc, params);
         let reconstructed = Block::try_from(row)
             .map_err(|e| anyhow::anyhow!("simulated SQL round-trip failed: {e}"))?;

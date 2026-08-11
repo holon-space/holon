@@ -3215,9 +3215,12 @@ impl FileSyncController {
                 } else {
                     &block.parent_id
                 };
-                let mut params = self
-                    .format
-                    .build_block_params(block, parent_id, &document_uri);
+                // No prior file state for this block (it is absent from the
+                // diff base), so nothing can have gone stale — the write names
+                // no authority over peer property keys.
+                let mut params =
+                    self.format
+                        .build_block_params(block, parent_id, &document_uri, None);
                 if let Some(Some(prev)) = predecessors.get(&block.id) {
                     params.insert(
                         POSITION_AFTER_BLOCK_ID_PARAM.into(),
@@ -3339,9 +3342,12 @@ impl FileSyncController {
                     } else {
                         &effective.parent_id
                     };
-                    let mut params =
-                        self.format
-                            .build_block_params(effective, parent_id, &document_uri);
+                    let mut params = self.format.build_block_params(
+                        effective,
+                        parent_id,
+                        &document_uri,
+                        Some(old_block),
+                    );
                     if let Some(Some(prev)) = predecessors.get(id) {
                         params.insert(
                             POSITION_AFTER_BLOCK_ID_PARAM.into(),
