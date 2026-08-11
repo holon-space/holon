@@ -267,9 +267,15 @@ async fn session_chat_view_materialises_its_message_query() {
     let query = find(&content, "live_query")
         .prop_str("query")
         .expect("the live_query node must publish its query for the platform layer to subscribe");
+    // The 2026-08-04 turso-fdw-ivm-handoff ruling: read the CACHE table
+    // (`cc_message`), never the `_fdw` foreign table (snapshot, not stream).
     assert!(
-        query.contains("cc_message_fdw"),
-        "the chat view must query the message table; got `{query}`"
+        query.contains("FROM cc_message ") || query.ends_with("FROM cc_message"),
+        "the chat view must query the cc_message cache table (never cc_message_fdw); got `{query}`"
+    );
+    assert!(
+        !query.contains("cc_message_fdw"),
+        "the chat view must not read the _fdw snapshot table; got `{query}`"
     );
 }
 
