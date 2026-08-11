@@ -98,6 +98,8 @@ pub use proposal::PROPOSED_BY_PROPERTY;
 pub use proposal::ProposalRecord;
 pub use proposal::ProposalStatus;
 pub use proposal::REJECT_PROPOSAL_OP;
+pub use proposal::is_proposal_block;
+pub use proposal::is_proposals_place;
 pub use provenance::PROVENANCE_PROPERTY;
 pub use provenance::ProvenanceStamp;
 pub use query_engine::QueryEngine;
