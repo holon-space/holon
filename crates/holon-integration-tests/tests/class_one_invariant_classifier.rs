@@ -57,6 +57,7 @@ use holon_pbt_core::null_ref::null_ref_caps;
 /// self-check suite must exclude them explicitly rather than inherit them from
 /// this list.
 const CLASS_ONE: &[&str] = &[
+    "inv-birth-contract-satisfied",
     "inv-display-placement-canonical-inert",
     "inv-frontend-engine",
     "inv-frontend-no-error-widgets",

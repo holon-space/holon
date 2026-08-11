@@ -63,6 +63,7 @@ use holon_pbt_core::capabilities::SutMcpEmit;
 use holon_pbt_core::capabilities::SutMutate;
 use holon_pbt_core::capabilities::SutNavHistoryDrive;
 use holon_pbt_core::capabilities::SutNavHistoryWrite;
+use holon_pbt_core::capabilities::SutOrderKeys;
 use holon_pbt_core::capabilities::SutOrgRead;
 use holon_pbt_core::capabilities::SutOrgRender;
 use holon_pbt_core::capabilities::SutQueryResults;
@@ -1827,6 +1828,35 @@ impl SutBackend for HeadlessFrontendComponent {
     /// produce a real `Fail` (not `Skipped`) on divergence (V4).
     async fn live_focus_root_rows(&self) -> Vec<(String, String)> {
         self.focus_roots_rows().await
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl SutOrderKeys for HeadlessFrontendComponent {
+    /// The `sort_key` column of the SAME `block` matview
+    /// [`SutBackend::live_block_snapshot`] reads, so the birth contract judges
+    /// the position of exactly the rows an observer sees.
+    async fn live_block_order_keys(&self) -> Vec<(EntityUri, String)> {
+        let rows = self
+            .engine
+            .db_handle()
+            .query(
+                "SELECT id, sort_key FROM block",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("block matview order-key query");
+        rows.iter()
+            .map(|row| {
+                let id = Self::cell(row, "id").expect("block matview row without an id");
+                let sort_key =
+                    Self::cell(row, "sort_key").expect("block matview row without a sort_key");
+                (
+                    EntityUri::parse(&id).expect("block id from SQL must be a valid EntityUri"),
+                    sort_key,
+                )
+            })
+            .collect()
     }
 }
 
@@ -3924,6 +3954,7 @@ impl HeadlessFrontendComponent {
         caps.insert(self.clone() as Arc<dyn SutRenderer>);
         caps.insert(self.clone() as Arc<dyn SutViewSelection>);
         caps.insert(self.clone() as Arc<dyn SutBackend>);
+        caps.insert(self.clone() as Arc<dyn SutOrderKeys>);
         caps.insert(self.clone() as Arc<dyn SutWatch>);
         caps.insert(self.clone() as Arc<dyn SutOrgRead>);
         // `SutAdviceMatview` — the SQL-level advice twin's SUT read. Selecting

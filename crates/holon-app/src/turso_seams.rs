@@ -21,15 +21,12 @@ use holon::core::sql_block_operations::SqlBlockOperations;
 use holon::storage::BLOCK_READ_TABLE;
 use holon::storage::BLOCK_WRITE_TABLE;
 use holon::storage::schema_module::SchemaModule;
-use holon_api::EntityName;
 use holon_api::EntityUri;
 use holon_api::block::Block;
 use holon_api::block::blocks_by_document;
 use holon_core::CrudAuthority;
-use holon_core::EventOrigin;
 use holon_core::OperationProvider;
 use holon_core::OperationWrapper;
-use holon_core::OriginTaggedWrites;
 use holon_core::SyncTokenStore;
 use holon_core::SyncableProvider;
 use holon_filesystem::BlockReader;
@@ -454,7 +451,6 @@ impl BlockReader for CacheBlockReader {
 /// CDC automatically propagates them into the LiveData.
 pub struct LiveDocumentManager {
     live: Arc<holon::sync::LiveData<Block>>,
-    command_bus: Arc<dyn OriginTaggedWrites>,
     /// The authoritative block-write seam — Loro-first under `Consolidator::
     /// Upstream`, direct SQL under `Store`. Doc-level metadata (`#+TODO:`,
     /// `#+TITLE:`, the root body) is block state like any other, so it must
@@ -473,7 +469,6 @@ impl LiveDocumentManager {
     /// Create a LiveDocumentManager backed by a materialized view over document
     /// blocks.
     pub async fn new(
-        command_bus: Arc<dyn OriginTaggedWrites>,
         ordering: Arc<dyn holon_core::block_ordering::BlockOrdering>,
         db_handle: holon::storage::DbHandle,
     ) -> anyhow::Result<Self> {
@@ -506,66 +501,73 @@ impl LiveDocumentManager {
 
         Ok(Self {
             live,
-            command_bus,
             ordering,
             create_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
-    /// Insert a page row via the SQL create op and mirror it into LiveData.
-    /// Caller holds `create_lock` and has already decided (by title or by id)
-    /// that this page should be created — this method performs only the write.
+    /// Insert a page row through the ordering authority and mirror it into
+    /// LiveData. Caller holds `create_lock` and has already decided (by title
+    /// or by id) that this page should be created — this method performs only
+    /// the write.
     async fn insert_page(&self, doc: Block) -> anyhow::Result<Block> {
         use holon_orgmode::build_block_params;
 
         // Route document creation events to the document's own ID.
         // _routing_doc_uri is only event routing metadata (not stored in DB) —
         // it tells FileSyncController which file to re-render.
+        // Rebased onto main's `previous: Option<&Block>` signature: `None`
+        // here because a page create has no prior state to reconcile against.
         let params = build_block_params(&doc, &doc.parent_id, &doc.id, None);
-        // INSERT OR IGNORE: only triggers on PK collision now that the
-        // partial unique index on `(parent_id, name)` is gone. The
-        // `create_lock` held by the caller is what prevents same-title
-        // duplicates on the `create` path.
-        // Tag the create event with `EventOrigin::Org` so the
-        // `LoroSyncController` inbound gate routes it to `Apply` instead of
-        // dropping it as a generic SQL-direct write. This page-creation flow
-        // is triggered by `FileSyncController::on_file_changed`; semantically
-        // it's an Org-driven event.
-        let result = self
-            .command_bus
-            .execute_operation_with_origin(
-                &EntityName::new("block"),
-                "create",
-                params,
-                EventOrigin::Org,
+
+        // Authority-only birth (ADR 0030): a page is a block, so it is born
+        // through the ordering authority carrying a minted position, exactly
+        // like every other block create. Routing this create straight at the
+        // command bus left the row on the SQL column default `sort_key` "A0",
+        // which is NOT a position (`is_minted_key` rejects it) — the doc root
+        // then sorted arbitrarily against its sibling roots and nothing ever
+        // re-minted it.
+        //
+        // Two arms, mirroring the ingest path's `flush_pending_creates`. The
+        // `BlockOrdering` wired in BOTH modes is `SqlBlockOperations`; which arm
+        // answers depends on whether its cell registry claims the create:
+        //
+        // - Loro: the Loro cell registry persists the block (it owns the fractional
+        //   index) and reports `true`.
+        // - SqlOnly: no cell-routed create exists, the registry reports `false`, and
+        //   `update_in_tree` writes the row — minting the key via `new_child_anchor`
+        //   and landing it through `create_row`, so key and row share one transaction
+        //   and the row is never observable unkeyed.
+        //
+        // `create_row` is also what runs the ADR 0029 D1b identity gate
+        // (`identity_minter().mint(CarriedId::from_stored(..))`), which refuses
+        // to upsert one page's row over another's identity. Reaching the write
+        // by any route that skips it — e.g. the batch seam — would turn a
+        // guarded upsert into an unguarded one.
+        let persisted = self
+            .ordering
+            .create_in_tree(
+                &doc.parent_id,
+                None,
+                &doc.id,
+                doc.to_block_content(),
+                &doc.properties,
+                &doc.tags,
+                &doc.requires,
+                &doc.advice_suppressed,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-        // If the response carries an existing id, the INSERT was ignored —
-        // a page with the same PRIMARY KEY already exists in the DB.
-        // Return that existing page instead of the one we tried to insert.
-        if let Some(holon_api::Value::String(existing_id)) = result.response {
-            tracing::debug!(
-                "[LiveDocumentManager] Page {:?} already exists as {} (attempted id={})",
-                doc.title(),
-                existing_id,
-                doc.id,
-            );
-            // ALLOW(entity_uri_from_raw): existing_id from a command_bus SQL response
-            let existing_uri = EntityUri::from_raw(&existing_id);
-            if let Some(existing) = self.get_by_id(&existing_uri).await? {
-                return Ok(existing);
-            }
-            // The document exists in SQL but not in LiveData.
-            // Insert it so subsequent find_by_parent_and_name / get_by_id lookups succeed.
-            let mut existing_doc = doc.clone();
-            existing_doc.id = existing_uri;
-            self.live.insert(
-                existing_doc.id.as_str().to_string(),
-                Arc::new(existing_doc.clone()),
-            );
-            return Ok(existing_doc);
+            .map_err(|e| anyhow::anyhow!("insert_page create_in_tree({}): {e:#}", doc.id))?;
+        if !persisted {
+            // `update_in_tree` tags its writes `EventOrigin::Org`, the origin
+            // this flow needs: page creation is triggered by
+            // `FileSyncController::on_file_changed`, and the
+            // `LoroSyncController` inbound gate routes `Org` to `Apply` rather
+            // than dropping it as a generic SQL-direct write.
+            self.ordering
+                .update_in_tree(params)
+                .await
+                .map_err(|e| anyhow::anyhow!("insert_page({}): {e:#}", doc.id))?;
         }
 
         self.live
@@ -733,18 +735,10 @@ impl Module for OrgModeModule {
         }));
         injector.provide::<dyn DocumentManager>(Provider::root_async(|r| async move {
             let db_handle = r.resolve::<dyn holon::di::DbHandleProvider>().handle();
-            let sql_ops = Arc::new(holon::core::SqlOperationProvider::with_edge_fields(
-                db_handle.clone(),
-                BLOCK_WRITE_TABLE.to_string(),
-                "block".to_string(),
-                "block".to_string(),
-                BlockSchemaModule.edge_fields(),
-            ));
-            let command_bus: Arc<dyn OriginTaggedWrites> = sql_ops as Arc<dyn OriginTaggedWrites>;
             let ordering = r
                 .resolve_async::<dyn holon_core::block_ordering::BlockOrdering>()
                 .await;
-            let mgr = LiveDocumentManager::new(command_bus, ordering, db_handle)
+            let mgr = LiveDocumentManager::new(ordering, db_handle)
                 .await
                 .expect("Failed to create LiveDocumentManager");
             Arc::new(mgr) as Arc<dyn DocumentManager>

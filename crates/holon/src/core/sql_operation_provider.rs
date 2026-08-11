@@ -814,9 +814,18 @@ impl SqlOperationProvider {
             }
             return Err(format!("Failed to execute SQL: {}", msg).into());
         }
-        // After INSERT OR IGNORE, read back the actual row to detect
-        // whether the insert was ignored (duplicate name+parent_id).
-        // Return the actual DB id so the caller knows which UUID won.
+        // Read the row back and return its id, so the caller knows which id
+        // won.
+        //
+        // NOT an INSERT-OR-IGNORE probe, despite how this reads: `prepare_create`
+        // emits `INSERT … ON CONFLICT(id) DO UPDATE SET <every non-id column> =
+        // excluded.<col>`, an unguarded upsert on the primary key, so the row is
+        // always present here and the "was it ignored?" question this select was
+        // written to answer no longer has a negative answer. What actually keeps
+        // one page from upserting over another's identity is the ADR 0029 D1b
+        // gate above (`identity_minter().mint(CarriedId::from_stored(..))`), and
+        // that gate is content-gated — with no title there is nothing to
+        // recognize (task #8).
         let select_sql = format!(
             "SELECT id FROM {} WHERE id = '{}'",
             self.table_name,

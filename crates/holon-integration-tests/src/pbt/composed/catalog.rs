@@ -45,6 +45,12 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // frontend slice supplies it (production CacheBlockReader + OrgRenderer).
         invariants::org_render_fixed_point::wire(),
         invariants::no_orphan::wire(),
+        // Birth contract (#34a): every block the projection exposes carries an
+        // id, a resolvable parent, and a MINTED fractional position. Needs
+        // `SutOrderKeys` on top of `SutBackend` — the position facet is not on
+        // the domain `Block` — so it deselects on slices that project no order
+        // column.
+        invariants::birth_contract::wire(),
         // Daily-journal rule cardinality (ADR 0024 §6): the production
         // `journals_auto_create` rule yields exactly one journal date-page per
         // calendar day and one for every clock-visited day. Needs

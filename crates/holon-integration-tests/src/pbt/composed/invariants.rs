@@ -25,6 +25,7 @@
 
 pub mod advice_rows_woven;
 pub mod audience_never_over_approximates;
+pub mod birth_contract;
 pub mod boundary_respected;
 pub mod companion_has_no_child_page_headings;
 pub mod display_placement_canonical_inert;

@@ -28,6 +28,7 @@ use holon_pbt_core::capabilities::SutEditorMirrorRead;
 use holon_pbt_core::capabilities::SutErrorLog;
 use holon_pbt_core::capabilities::SutLoroLog;
 use holon_pbt_core::capabilities::SutLoroTaskState;
+use holon_pbt_core::capabilities::SutOrderKeys;
 use holon_pbt_core::capabilities::SutSqlProjection;
 use holon_pbt_core::capabilities::SutViewSelection;
 pub use holon_pbt_core::composition::CapMap;
@@ -74,6 +75,38 @@ impl CapProvider for FixtureBackend {
 
 pub fn fixture_slice(blocks: Vec<Block>) -> CapMap {
     Config::new().with(FixtureBackend { blocks }).build()
+}
+
+/// The order column a real projection carries beside its blocks. A SEPARATE
+/// component from [`FixtureBackend`] so `fixture_slice` keeps projecting no
+/// order keys at all — `inv-birth-contract-satisfied` then deselects there
+/// (the honest answer for a double with no order column) instead of failing
+/// every existing catch test on a facet that fixture never modelled.
+pub struct FixtureOrderKeys {
+    pub keys: Vec<(EntityUri, String)>,
+}
+
+#[async_trait::async_trait(?Send)]
+impl SutOrderKeys for FixtureOrderKeys {
+    async fn live_block_order_keys(&self) -> Vec<(EntityUri, String)> {
+        self.keys.clone()
+    }
+}
+
+impl CapProvider for FixtureOrderKeys {
+    fn register(self: Arc<Self>, caps: &mut CapMap) {
+        caps.insert(self as Arc<dyn SutOrderKeys>);
+    }
+}
+
+pub fn fixture_slice_with_order_keys(
+    blocks: Vec<Block>,
+    order_keys: Vec<(EntityUri, String)>,
+) -> CapMap {
+    Config::new()
+        .with(FixtureBackend { blocks })
+        .with(FixtureOrderKeys { keys: order_keys })
+        .build()
 }
 
 // ─── Editor (second SUT component) doubles ───────────────────────────────
