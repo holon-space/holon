@@ -122,6 +122,18 @@ impl MetricsSut {
         });
     }
 
+    /// The frozen window's (deduplicated reads, writes) — a PEEK, unlike
+    /// [`Self::sql_budget_report`], which consumes the snapshot. The trend
+    /// accumulator reads through this so both consumers score the identical
+    /// window instead of sampling the collector twice.
+    #[cfg(feature = "otel-testing")]
+    pub(super) fn frozen_counters(&self) -> Option<(usize, usize)> {
+        self.frozen_at_check
+            .borrow()
+            .as_ref()
+            .map(|f| (f.metrics.dedup_read_count(), f.metrics.sql_write_count))
+    }
+
     /// Snapshot the previous transition's `query` ancestor chains into the
     /// case-level accumulator (when `PBT_MATVIEW_METRICS=1`), then reset the
     /// span collector and re-sample wall-clock/RSS for the transition that is

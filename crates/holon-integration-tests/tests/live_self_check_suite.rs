@@ -119,6 +119,7 @@ fn unavailable_checks_are_present_and_reasoned() {
     for id in [
         "inv-sql-budget",
         "inv-settle-budget",
+        "inv-complexity-class-trend",
         "inv-matview-consistent-with-recompute",
         "inv-no-steady-reseed-leak",
     ] {

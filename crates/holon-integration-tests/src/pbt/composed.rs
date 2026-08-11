@@ -43,6 +43,11 @@ pub mod invariants;
 pub mod settle_latency;
 pub mod span_metrics;
 
+/// The composed-slice read cap + decision for `inv-complexity-class-trend`.
+/// Shares [`span_metrics::ComposedSpanMetrics`]'s collection pipeline; see that
+/// module for why the trend is a second consumer rather than a second pipeline.
+pub mod complexity_trend;
+
 /// Process-global ERROR-event + panic capture surface for
 /// `inv-no-observed-errors`.
 pub mod observed_errors;

@@ -8,6 +8,7 @@ pub mod advice_expectation;
 pub mod bisect_driver;
 pub mod block_state;
 pub mod clock_state;
+pub mod complexity_trend;
 pub mod composed;
 pub mod convergence;
 pub mod driver_input;

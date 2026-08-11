@@ -20,15 +20,21 @@
 
 use std::cell::RefCell;
 
+use holon_pbt_core::capabilities::RefSqlCardinality;
 use holon_pbt_core::composition::CapMap;
 use holon_pbt_core::invariant::Invariant;
 use holon_pbt_core::invariant::InvariantId;
 use holon_pbt_core::invariant::InvariantResult;
 
+use crate::pbt::complexity_trend::TrendAccumulator;
+use crate::pbt::complexity_trend::TrendReport;
+use crate::pbt::composed::complexity_trend::ComposedTrend;
 use crate::pbt::invariants::bodies::sql_budget::InvSqlBudget;
 use crate::pbt::invariants::bodies::sql_budget::SqlBudgetReport;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::sut_metrics::MetricsSut;
+use crate::pbt::transition_budgets::declared_complexity_class;
+use crate::pbt::transition_budgets::transition_key;
 use crate::pbt::transitions::E2ETransition;
 
 /// Read cap: the per-transition budget decision. Ref-less — the host already
@@ -64,6 +70,10 @@ pub struct ComposedSpanMetrics {
     metrics: RefCell<MetricsSut>,
     last_transition: RefCell<Option<E2ETransition>>,
     frozen_ref: RefCell<Option<ReferenceState>>,
+    /// Cross-transition counter series for `inv-complexity-class-trend`, fed
+    /// from the SAME freeze point the budget reads — one collection pipeline,
+    /// two consumers.
+    trend: RefCell<TrendAccumulator>,
 }
 
 impl ComposedSpanMetrics {
@@ -72,6 +82,7 @@ impl ComposedSpanMetrics {
             metrics: RefCell::new(MetricsSut::new()),
             last_transition: RefCell::new(None),
             frozen_ref: RefCell::new(None),
+            trend: RefCell::new(TrendAccumulator::new()),
         }
     }
 }
@@ -91,6 +102,31 @@ impl SutMetricsLifecycle for ComposedSpanMetrics {
     fn freeze_for_check(&self, ref_state: &ReferenceState) {
         self.metrics.borrow().freeze_at_check_start();
         *self.frozen_ref.borrow_mut() = Some(ref_state.clone());
+        // Accumulate BEFORE any invariant body runs: `budget_report` CONSUMES
+        // the frozen snapshot, and catalog order does not promise this
+        // invariant runs first.
+        if let Some(transition) = self.last_transition.borrow().as_ref() {
+            let (reads, writes) = self
+                .metrics
+                .borrow()
+                .frozen_counters()
+                .expect("freeze_at_check_start just ran");
+            self.trend.borrow_mut().record(
+                transition_key(transition),
+                declared_complexity_class(transition),
+                reads,
+                writes,
+                ref_state.block_count(),
+            );
+        }
+    }
+}
+
+impl ComposedTrend for ComposedSpanMetrics {
+    fn trend_report(&self) -> TrendReport {
+        let mut report = self.trend.borrow().report();
+        report.enforce = crate::pbt::composed::complexity_trend::trend_budget_enforced();
+        report
     }
 }
 
