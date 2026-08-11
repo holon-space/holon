@@ -391,6 +391,16 @@ pub trait RefEditorMirrorMut: RefEditorMirror {
     /// Clear the dirty flag after a commit. Default no-op for models
     /// without dirty tracking.
     fn mark_active_editor_committed(&mut self) {}
+
+    /// Record how many block MERGES the backspace run just performed — a
+    /// backspace at caret 0 joins into the predecessor instead of deleting a
+    /// character, and `inv-sql-budget` charges each merge the `JoinBlock`
+    /// budget. Recorded at apply time because the budget only ever sees the
+    /// POST-apply reference, where a merge and a mid-line delete are
+    /// indistinguishable. Default no-op for models that carry no SQL budget.
+    fn note_backspace_joins(&mut self, joins: usize) {
+        let _ = joins;
+    }
 }
 
 // ─── Reference-side: Focus ───────────────────────────────────────────
@@ -2776,6 +2786,13 @@ pub trait RefSqlCardinality {
     /// Loro arm the content lands in the CRDT and only the undo journal is a
     /// SQL write, in the SqlOnly arm both are.
     fn content_writes_reach_sql(&self) -> bool;
+
+    /// How many block merges the most recent `DeleteBackward` performed.
+    /// A backspace at caret 0 is a JOIN, not a keystroke, so its budget is
+    /// `JoinBlock`'s — see
+    /// [`RefEditorMirrorMut::note_backspace_joins`] for why it is recorded
+    /// rather than derived.
+    fn last_backspace_joins(&self) -> usize;
 }
 
 /// Reference-side typed block surface for `inv-backend-blocks-match-ref`.

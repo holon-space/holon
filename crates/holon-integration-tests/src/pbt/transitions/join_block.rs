@@ -182,6 +182,23 @@ impl<R: RefBlockTree + RefBlockTreeMut + RefFocus + RefFocusMut + RefLifecycle> 
     }
 }
 
+/// One block merge's SQL cost: the surviving block's content Update plus the
+/// merged block's Delete, over the one reactive base a single transition pays.
+///
+/// Shared with `DeleteBackward`, whose caret-at-0 arm performs this very join
+/// through the keystroke path — two budgets for one operation would drift.
+#[cfg(feature = "otel-testing")]
+pub(crate) fn join_expected_sql(watches: usize, blocks: usize, docs: usize) -> ExpectedSql {
+    let update = expected_sql_for_kind(MutationKind::Update, watches, blocks, docs);
+    let delete = expected_sql_for_kind(MutationKind::Delete, watches, blocks, docs);
+    ExpectedSql {
+        reads: update.reads + delete.reads - REACTIVE_BASE,
+        writes: update.writes + delete.writes,
+        ddl: 0,
+        tolerance: update.tolerance + delete.tolerance,
+    }
+}
+
 crate::cap_transition! {
     JoinBlock: SutBlockTreeWrite,
     where R: [ RefBlockTree + RefFocus + RefLifecycle ],
@@ -189,16 +206,10 @@ crate::cap_transition! {
         sut.apply_join_block(&me.block_id).await;
     }
     sql_budget: |_me, state| {
-        let watches = state.active_watch_count();
-        let blocks = state.block_count();
-        let docs = state.document_count();
-        let update = expected_sql_for_kind(MutationKind::Update, watches, blocks, docs);
-        let delete = expected_sql_for_kind(MutationKind::Delete, watches, blocks, docs);
-        ExpectedSql {
-            reads: update.reads + delete.reads - REACTIVE_BASE,
-            writes: update.writes + delete.writes,
-            ddl: 0,
-            tolerance: update.tolerance + delete.tolerance,
-        }
+        join_expected_sql(
+            state.active_watch_count(),
+            state.block_count(),
+            state.document_count(),
+        )
     }
 }
