@@ -34,6 +34,7 @@ use std::time::Duration;
 use holon_pbt_core::capabilities::CapRegion;
 use holon_pbt_core::capabilities::EntityUri;
 use holon_pbt_core::capabilities::RefFocus;
+use holon_pbt_core::capabilities::SutBackend;
 use holon_pbt_core::capabilities::SutFocus;
 use holon_pbt_core::capabilities::SutRenderer;
 use holon_pbt_core::capabilities::WidgetSnapshot;
@@ -57,6 +58,13 @@ pub enum Assertion {
         block_id: String,
         within_secs: Option<u64>,
     },
+    /// `child_id`'s parent in the SUT store is `parent_id`. Both are
+    /// reference-model ids (remapped through the harness `IdResolver`).
+    ParentIs {
+        child_id: String,
+        parent_id: String,
+        within_secs: Option<u64>,
+    },
 }
 
 impl Assertion {
@@ -64,6 +72,7 @@ impl Assertion {
         match self {
             Assertion::WidgetContains { within_secs, .. } => *within_secs,
             Assertion::FocusOn { within_secs, .. } => *within_secs,
+            Assertion::ParentIs { within_secs, .. } => *within_secs,
         }
     }
 }
@@ -136,6 +145,11 @@ where
             Assertion::FocusOn { block_id, .. } => {
                 focus_on_caps(ref_, caps, resolver, block_id).await
             }
+            Assertion::ParentIs {
+                child_id,
+                parent_id,
+                ..
+            } => parent_is_caps(caps, resolver, child_id, parent_id).await,
         };
         match result {
             Ok(()) => return Ok(()),
@@ -188,6 +202,57 @@ async fn widget_contains_caps(
     Err(format!(
         "[widget-contains] expected {scope} to contain {qualifier}{text:?}, but rendered text \
          was:\n{haystack}"
+    ))
+}
+
+/// Parentage oracle. Reads the SAME write-side store snapshot the composed
+/// catalog's parentage invariants read (`SutBackend::block_raw_snapshot`, the
+/// source `inv-no-parent-cycles` and `inv-undo-redo-reference-heal` compare
+/// `parent_id` from), so a fixture assertion and an invariant can never
+/// disagree about what the store says.
+async fn parent_is_caps(
+    caps: &CapMap,
+    resolver: &IdResolver,
+    child_id: &str,
+    parent_id: &str,
+) -> Result<(), String> {
+    let child_uri = EntityUri::parse(child_id)
+        .map_err(|e| format!("[parent-is] block id {child_id:?} is not a valid EntityUri: {e}"))?;
+    let parent_uri = EntityUri::parse(parent_id)
+        .map_err(|e| format!("[parent-is] block id {parent_id:?} is not a valid EntityUri: {e}"))?;
+    let child = resolve_via(resolver, &child_uri);
+    let parent = resolve_via(resolver, &parent_uri);
+
+    let blocks = caps.block_raw_snapshot().await;
+    let known = || {
+        let mut ids: Vec<&str> = blocks.iter().map(|b| b.id.as_str()).collect();
+        ids.sort_unstable();
+        ids.join(", ")
+    };
+    let Some(block) = blocks.iter().find(|b| b.id == child) else {
+        return Err(format!(
+            "[parent-is] block {child_id:?} (resolved {child:?}) does not exist in the SUT store \
+             — known block ids: [{}]",
+            known()
+        ));
+    };
+    // An unknown PARENT id must fail by name too: without this it would only
+    // show up as an inequality, hiding a typo behind a plausible-looking diff.
+    if !blocks.iter().any(|b| b.id == parent) {
+        return Err(format!(
+            "[parent-is] parent {parent_id:?} (resolved {parent:?}) does not exist in the SUT \
+             store — block {child_id:?} has parent {:?}; known block ids: [{}]",
+            block.parent_id,
+            known()
+        ));
+    }
+    if block.parent_id == parent {
+        return Ok(());
+    }
+    Err(format!(
+        "[parent-is] expected block {child_id:?} (resolved {child:?}) to be a child of \
+         {parent_id:?} (resolved {parent:?}), but its store parent is {:?}",
+        block.parent_id
     ))
 }
 

@@ -8,9 +8,12 @@
 //! a step we don't understand must not silently pass.
 
 use gherkin::Step;
+use holon_pbt_core::step_vocabulary::StepVocabulary;
 use regex::Regex;
 
 use super::assert::Assertion;
+use super::assert_steps::BlockIsChildOf;
+use super::assert_steps::BlockIsTopLevelOf;
 
 /// Translate a single Gherkin `Then` step into an assertion. An optional
 /// `within <N> seconds ` prefix sets a retry budget on the assertion.
@@ -28,6 +31,29 @@ pub fn match_assertion(step: &Step) -> Result<Assertion, String> {
         }
         None => (None, raw),
     };
+
+    // Derive-authored templates first (`assert_steps`). A template that
+    // structurally matches but whose fields do not parse is a HARD error, never
+    // a fall-through to the regexes.
+    let docstring = step.docstring.as_deref();
+    if let Some(v) = BlockIsChildOf::parse_step(text, docstring)
+        .map_err(|e| format!("step {text:?} matches `is a child of` but its fields do not: {e}"))?
+    {
+        return Ok(Assertion::ParentIs {
+            child_id: v.child_id.to_string(),
+            parent_id: v.parent_id.to_string(),
+            within_secs,
+        });
+    }
+    if let Some(v) = BlockIsTopLevelOf::parse_step(text, docstring).map_err(|e| {
+        format!("step {text:?} matches `is a top-level block of` but its fields do not: {e}")
+    })? {
+        return Ok(Assertion::ParentIs {
+            child_id: v.block_id.to_string(),
+            parent_id: v.page_id.to_string(),
+            within_secs,
+        });
+    }
 
     // `the widget shows exactly "<text>"`
     let re_root_exact = Regex::new(r#"(?i)^the widget shows exactly\s+"(?P<text>.*)"$"#).unwrap();

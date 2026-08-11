@@ -17,6 +17,7 @@
 //! they differ only in which SUT/driver is plugged in.
 
 pub mod assert;
+pub mod assert_steps;
 pub mod gherkin;
 pub mod json;
 pub mod matchers;

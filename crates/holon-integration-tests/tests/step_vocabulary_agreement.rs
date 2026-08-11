@@ -27,6 +27,7 @@ fn feature_files() -> Vec<PathBuf> {
         crate_root.join("tests/fixtures/split_block_content_pbt/split_outline_positions.feature"),
         crate_root.join("tests/fixtures/_gherkin_assert/widget_and_focus.feature"),
         crate_root.join("tests/fixtures/_gherkin_assert/split_then_address_new_block.feature"),
+        crate_root.join("tests/fixtures/_gherkin_assert/parentage.feature"),
         crate_root.join("tests/fixtures/composed_split_gherkin/split_routes_prefix_suffix.feature"),
         crate_root.join("tests/fixtures/_gherkin_negative/then_before_startup.feature"),
         crate_root.join("tests/fixtures/_gherkin_negative/split_corrupt_id.feature"),
