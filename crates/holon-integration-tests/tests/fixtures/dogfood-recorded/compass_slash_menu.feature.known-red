@@ -1,0 +1,41 @@
+Feature: The slash-command menu, the door the Compass template picker sits behind
+
+  Recorded live against the GPUI app (sandbox port 8720, SqlOnly / loro=false)
+  seeded with a copy of the Compass vault plus the Compass template document
+  (`assets/default/Compass.org` copied INTO the vault — the app enumerates
+  templates from the block snapshot, so a template file that stays in
+  `assets/` is never offered).
+
+  The seven Compass templates DO reach the picker's enumeration: each template
+  root carries an uppercase org `:TEMPLATE:` marker, which
+  `templates_from_blocks` matches case-insensitively, and all seven are in the
+  block snapshot after ingest.
+
+  WHAT THIS SCENARIO PINS. The slash menu opening at all. Live over the MCP
+  driver it does NOT: `type_text {"text":"/"}` writes "/" into the block's
+  content, no popup appears in `describe_ui` or in a fresh screenshot, and the
+  next typed character REPLACES the "/" instead of filtering a menu — content
+  went "/" then "goal", never "/goal". So the Compass template picker is
+  unreachable through the MCP driver, and every template instantiation in this
+  dogfood session had to go through `execute_operation instantiate_template`.
+  This scenario replays the same intent headless; the headless transition and
+  the live MCP driver disagreeing about whether a menu exists is exactly the
+  environment gap worth holding a fixture over.
+
+  WHY THE `Then` IS THIN. There is no step that names a menu entry, so the
+  scenario can only assert the menu's EFFECT. The bundled transition selects
+  "delete", so a menu that opened and dispatched leaves the block gone from the
+  widget; a menu that never opened leaves the text sitting there. The composed
+  catalog runs after every step, so a menu that opens and dispatches the wrong
+  operation diverges on the next sweep.
+
+  NOT RECORDABLE — picking a named entry. `I trigger the slash command on
+  block {block_id}` carries no entry argument; its transition hard-codes
+  "delete". Choosing `compass-goal` (or any template) from the menu, and
+  supplying its bindings, has no phrasing at all. Reported as a vocabulary gap.
+
+  Scenario: The slash menu opens on a block and dispatches its selection
+    When I focus block "block:structural-page" in region "main"
+    And I focus the editor of block "block:c2"
+    And I trigger the slash command on block "block:c2"
+    Then within 10 seconds block "block:c1" is a child of block "block:structural-page"

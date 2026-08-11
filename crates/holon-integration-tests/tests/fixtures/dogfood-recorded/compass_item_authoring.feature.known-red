@@ -1,0 +1,62 @@
+Feature: Authoring a Compass item and its supporting children
+
+  Recorded live against the GPUI app (sandbox port 8720, SqlOnly / loro=false)
+  seeded with a copy of the Compass vault — an index page plus one page per
+  Compass kind (mission, problems, goals, strategies, challenges, the
+  current/ideal dimension pairs). Every Compass item is an org heading whose
+  drawer carries `compass:`, `contributes-to:`, `last-reviewed:`,
+  `review-cadence:` and `provenance:`.
+
+  The flow below is the one a Compass user runs constantly: open a Compass
+  page, put the caret on the last supporting child of an item, press Enter,
+  and type the new supporting line. Live that added a "Measure:" line under a
+  goal; here it adds a sibling under the wide seed's page, because the
+  vocabulary cannot name a Compass drawer (see NOT RECORDABLE).
+
+  WHY THE `Then` IS THIN. The `Then` half can only match rendered substrings —
+  plus the parentage phrasings, which read `SutBackend::block_raw_snapshot()`,
+  the same write-side store the composed parentage invariants read. What gives
+  these scenarios teeth is the composed catalog running after EVERY step: a
+  split that lands the new block under the wrong parent, or that loses the
+  original's content, diverges on the next invariant sweep even though no
+  `Then` names it. The parentage assertions pin the one thing that mattered
+  live: the new supporting line must become a SIBLING of the existing
+  children, never a child of one of them.
+
+  NOT RECORDABLE — the whole Compass-specific half of the feature.
+  1. TEMPLATE INSTANTIATION. The picker flow (type "/", choose
+     `compass-goal`, bind `title`/`metric`/`target`/`mission`/`reviewed`) has
+     NO step. `I trigger the slash command on block {block_id}` exists but its
+     transition hard-codes selecting "delete", and there is no step that picks
+     a named menu entry or supplies template bindings. Driven live through
+     `execute_operation instantiate_template` instead — an operation no step
+     can express.
+  2. DRAWER PROPERTIES. There is no step to set or assert a block property, so
+     `contributes-to`, `last-reviewed`, `review-cadence`, `provenance` and
+     `compass` are all invisible to a recorded scenario. `I set edge field
+     {update} on block {block_id}` covers REQUIRES only.
+  3. DISK. The round-trip that matters for Compass — drawer key SET and ORDER
+     surviving an edit — needs a disk assertion, and there is none.
+  Each of these is reported as a vocabulary gap.
+
+  Scenario: Enter at the end of a supporting line adds a sibling, not a child
+    When I focus block "block:structural-page" in region "main"
+    And I focus the editor of block "block:c1"
+    And I split block "block:c1" at position 2
+    And I type "Measure: alpha users use it successfully"
+    Then within 10 seconds block "block:c1" is a child of block "block:structural-page"
+    And within 10 seconds the widget contains "Measure: alpha users use it successfully"
+
+  Scenario: Indenting a supporting line nests it under the line above
+    When I focus block "block:structural-page" in region "main"
+    And I focus the editor of block "block:c2"
+    And I indent block "block:c2"
+    Then within 10 seconds block "block:c2" is a child of block "block:c1"
+
+  Scenario: A Compass item keeps its own text when a sibling is added after it
+    When I focus block "block:structural-page" in region "main"
+    And I focus the editor of block "block:c1"
+    And I split block "block:c1" at position 2
+    And I type "Current: unknown"
+    Then within 10 seconds block "block:c1" contains "c1"
+    And within 10 seconds the widget contains "Current: unknown"
