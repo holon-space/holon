@@ -608,13 +608,12 @@ async fn a_create_that_supplies_marks_is_not_reparsed() {
 /// The inverse of a delete must restore the deleted BYTES, even when those
 /// bytes are markup the create boundary would otherwise adopt.
 ///
-/// The trap this locks shut: `capture_row` filters `Value::Null` columns
-/// (`sql_operation_provider.rs`), so the delete-inverse of a marks-NULL row
-/// carries NO `marks` key at all — the shape that also arrives from raw
-/// pre-adoption blocks and from ingest. "No marks param" is therefore NOT
-/// evidence of "unparsed live typing", and adoption keyed on its absence
-/// rewrites the user's block during UNDO: `"see [[Journals]] now"` comes back
-/// as `"see Journals now"` with minted marks and a junction row, breaking the
+/// The trap this locks shut: the delete-inverse of a marks-NULL row carries
+/// `marks` as an explicit `Value::Null` (`capture_row` in
+/// `sql_operation_provider.rs`), which is a RESTORE INSTRUCTION, not the
+/// "unparsed live typing" shape. Adoption keyed on the params' shape rewrites
+/// the user's block during UNDO: `"see [[Journals]] now"` comes back as
+/// `"see Journals now"` with minted marks and a junction row, breaking the
 /// identity-preserving inverse contract (ADR 0024). Adoption is gated on the
 /// authoring ORIGIN instead, and `OperationEngine::replay` dispatches without
 /// one — so this replay path cannot reach it by construction.
@@ -655,10 +654,11 @@ async fn undo_of_a_delete_restores_bytes_verbatim_even_when_adoption_would_apply
         other => panic!("leaf delete must be reversible, got {other:?}"),
     };
     assert_eq!(inverse.op_name, "create");
-    assert!(
-        !inverse.params.contains_key("marks"),
-        "capture_row drops NULL columns, so the inverse carries no marks param — this is the \
-         shape that must NOT be read as 'unparsed user typing'"
+    assert_eq!(
+        inverse.params.get("marks"),
+        Some(&Value::Null),
+        "the inverse must state the absent marks EXPLICITLY, so replay restores \
+         the mark-free row instead of inheriting whatever marks are there"
     );
 
     // Replay it exactly as `OperationEngine::replay` does: straight through the
@@ -693,20 +693,12 @@ async fn undo_of_a_delete_restores_bytes_verbatim_even_when_adoption_would_apply
 /// a pre-adoption block that previous content is raw markup. Undo must put
 /// those bytes back, not adopt them.
 ///
-/// IGNORED, and the reason is a real fork rather than a missing line. The edit
-/// arm cannot simply be origin-gated like the create arm: `capture_row` filters
-/// NULL columns, so a content inverse cannot say "restore marks to NULL", and
-/// what actually clears stale marks on undo today is the adoption follow-up
-/// firing during replay (`undo_link_add_restores_prior_pair` in
-/// `undo_marks_consistency_repro.rs` fails the moment the arm is gated —
-/// measured, not predicted). Undo is therefore correct for adopted blocks and
-/// wrong for raw ones, and picking either behaviour is picking which population
-/// to break. The fix both tests would pass is inverses that carry their marks
-/// explicitly, i.e. `capture_row` emitting explicit NULLs — a change to every
-/// inverse in the system. Escalated in `lane-report-12.md`; un-ignore this test
-/// in the lane that makes that change.
-#[ignore = "blocked on inverses that carry marks explicitly (capture_row NULL filtering); see \
-            lane-report-12.md"]
+/// The edit arm could not simply be origin-gated like the create arm: while a
+/// content inverse could not say "restore marks to NULL", what cleared stale
+/// marks on undo was the adoption follow-up firing during replay, so gating the
+/// arm broke adopted blocks instead of raw ones. What lets both populations
+/// pass is inverses that carry their marks explicitly — a rich Object content
+/// inverse over a `capture_row` that emits explicit NULLs (#22).
 #[tokio::test(flavor = "multi_thread")]
 async fn undo_of_a_content_edit_restores_raw_previous_bytes() {
     let (_backend, handle) = TursoBackend::new_in_memory()

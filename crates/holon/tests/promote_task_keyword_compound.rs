@@ -197,7 +197,12 @@ async fn undo_entry_values(engine: &BackendEngine, half: &str, field: &str) -> O
         .iter()
         .find(|op| op["params"]["field"].as_str() == Some(field))
         .map(|op| {
-            op["params"]["value"]
+            // A `content` inverse restores text and marks as ONE `{text, marks}`
+            // Object, so undo puts the pair back atomically; every other field
+            // restores a bare string.
+            let v = &op["params"]["value"];
+            v.get("text")
+                .unwrap_or(v)
                 .as_str()
                 .unwrap_or_else(|| panic!("the {field} constituent must carry a value; op={op}"))
                 .to_string()

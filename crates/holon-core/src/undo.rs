@@ -218,8 +218,18 @@ impl UndoEntry {
         let entity_id = fwd.params.get("id").and_then(Value::as_string_owned)?;
         let field = fwd.params.get("field").and_then(Value::as_string_owned)?;
         let new_text = fwd.params.get("value").and_then(Value::as_string_owned)?;
-        let old_text = inv.params.get("value").and_then(Value::as_string_owned)?;
+        let old_text = inv.params.get("value").and_then(restored_text)?;
         Some((entity_id, field, old_text, new_text))
+    }
+}
+
+/// The text an inverse `set_field` restores. A content inverse carries the
+/// prior text and marks as ONE `{text, marks}` Object so undo restores the
+/// pair atomically; word-boundary coalescing compares only the text.
+fn restored_text(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(obj) => obj.get("text").and_then(Value::as_string_owned),
+        other => other.as_string_owned(),
     }
 }
 
