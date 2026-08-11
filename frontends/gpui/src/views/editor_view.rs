@@ -1141,7 +1141,7 @@ fn dispatch_structural_as_commit_point(
     live_text: &str,
     structural: holon_frontend::operations::OperationIntent,
 ) {
-    let commit = ctrl.lock().unwrap().pending_commit_intent(live_text);
+    let commit = ctrl.lock().unwrap().chord_commit_intent(live_text);
     let intents: Vec<_> = commit
         .into_iter()
         .chain(std::iter::once(structural))
@@ -1629,7 +1629,7 @@ impl Render for EditorView {
                         // visible CommandFailed toast, not just a `tracing::error!`.
                         // Commit any pending text edit FIRST (structural commit
                         // point), then dispatch outdent and await its result.
-                        let commit = ctrl.lock().unwrap().pending_commit_intent(&live_text);
+                        let commit = ctrl.lock().unwrap().chord_commit_intent(&live_text);
                         let services_for = services.clone();
                         let rt = services.runtime_handle();
                         cx.spawn(async move |cx| {

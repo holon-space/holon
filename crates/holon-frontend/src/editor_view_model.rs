@@ -758,14 +758,42 @@ impl EditorViewModel {
         self.handle_result_to_action(result)
     }
 
-    /// Pending-text commit for a structural op ("structural ops are commit
-    /// points", docs/Architecture/UI.md). Same decision as `on_blur`'s
-    /// TextSync path — `Some(intent)` iff the live text diverged from the
-    /// authority's view AND this editor is the content writer (SqlOnly);
-    /// `None` when unchanged or when Loro's per-keystroke pipeline already
-    /// writes through. Like a blur, this re-baselines the change tracking:
-    /// the returned intent MUST be dispatched, ordered BEFORE the structural
-    /// op (`dispatch_intent_chain`), or the pending text is lost.
+    /// Pending-text commit for a STRUCTURAL CHORD ("structural ops are commit
+    /// points", docs/Architecture/UI.md): `Some(intent)` iff `live_text` is
+    /// text this editor has NOT already put through its keystroke sink. The
+    /// returned intent MUST be dispatched ordered BEFORE the structural op, or
+    /// that text is lost.
+    ///
+    /// Narrower than the focus-leave funnel ([`Self::pending_commit_intent`])
+    /// because the editor STAYS focused across a chord — and a focused editor
+    /// receives no data-sync echo, so after a non-editor origin moves its row
+    /// (a `split_block` from MCP or a peer) the buffer is silently STALE.
+    /// Re-committing a buffer the keystroke sink already persisted then lands
+    /// as a REVERT that resurrects the pre-split text beside the split's
+    /// surviving tail, duplicating it (task #94). Text the sink never saw — an
+    /// IME composition, a programmatic `set_value` — is genuinely pending and
+    /// still flushes.
+    pub fn chord_commit_intent(&mut self, live_text: &str) -> Option<OperationIntent> {
+        if live_text == self.buffer {
+            return None;
+        }
+        tracing::debug!(
+            target: "editor.pending_commit",
+            row_id = ?self.handler.context_id(),
+            live = %live_text,
+            buffer = %self.buffer,
+            "chord flushes text the keystroke sink never saw"
+        );
+        self.pending_commit_intent(live_text)
+    }
+
+    /// Pending-text commit for the FOCUS-LEAVE boundary. Same decision as
+    /// `on_blur`'s TextSync path — `Some(intent)` iff the live text diverged
+    /// from the authority's view AND this editor is the content writer
+    /// (SqlOnly); `None` when unchanged or when Loro's per-keystroke pipeline
+    /// already writes through. Like a blur, this re-baselines the change
+    /// tracking: the returned intent MUST be dispatched, ordered BEFORE any
+    /// structural op, or the pending text is lost.
     pub fn pending_commit_intent(&mut self, live_text: &str) -> Option<OperationIntent> {
         let result = self.handler.handle(ViewEvent::TextSync {
             value: live_text.to_string(),
@@ -2000,6 +2028,113 @@ mod tests {
             intent.params["field"],
             Value::String("content".into()),
             "the blur escaped the pinned content channel"
+        );
+    }
+
+    /// Task #94: the structural-chord funnel must not re-commit text the
+    /// keystroke sink already dispatched. A focused editor receives no
+    /// data-sync echo, so after a non-editor origin splits its row the buffer
+    /// is stale — and this re-commit would land as a revert that resurrects the
+    /// pre-split text beside the split's surviving tail.
+    #[test]
+    fn a_chord_does_not_re_commit_what_the_keystroke_sink_already_wrote() {
+        let mut vm = test_controller();
+        vm.set_buffer_from_authority("alpha two", 0);
+        vm.apply_local_edit("alpha twoZZZZ")
+            .expect("the keystroke sink accepts the edit")
+            .expect("SqlOnly dispatches the typed text itself");
+
+        assert!(
+            vm.chord_commit_intent("alpha twoZZZZ").is_none(),
+            "the chord flushed a buffer the keystroke sink had already committed"
+        );
+    }
+
+    /// The same guard on a PROJECTED (tasked) surface, so the #99 fold cannot
+    /// re-enter through this third funnel: nothing is re-committed at all, and
+    /// when the funnel legitimately fires (see the blur tests above) it routes
+    /// through `commits_as_source`.
+    #[test]
+    fn a_chord_on_a_tasked_row_re_commits_nothing_after_typing() {
+        let mut vm = test_controller();
+        vm.set_task_vocabulary(holon_org_format::TaskKeywordVocabulary::for_document(
+            &["NEXT".to_string()],
+            &["DONE".to_string()],
+        ));
+        let seed = vm.project_authority("call bank", Some("NEXT"));
+        vm.set_buffer_from_authority(&seed, 0);
+        let typed = format!("{seed}s");
+        vm.apply_local_edit(&typed)
+            .expect("the keystroke sink accepts the edit")
+            .expect("a projected surface commits through the source channel");
+
+        assert!(
+            vm.chord_commit_intent(&typed).is_none(),
+            "the chord re-committed an already-dispatched tasked surface"
+        );
+    }
+
+    /// The chord funnel takes the SAME channel decision as the blur funnel it
+    /// delegates to. Without this the #99 fold re-enters through the third
+    /// commit funnel: a chord flush of a PROJECTED surface would commit vault
+    /// syntax into the content column.
+    #[test]
+    fn a_chord_flush_of_a_projected_surface_takes_the_source_channel() {
+        let mut vm = test_controller();
+        vm.set_task_vocabulary(holon_org_format::TaskKeywordVocabulary::for_document(
+            &["NEXT".to_string()],
+            &["DONE".to_string()],
+        ));
+        let seed = vm.project_authority("call bank", Some("NEXT"));
+        vm.set_buffer_from_authority(&seed, 0);
+
+        let intent = vm
+            .chord_commit_intent("NEXT call banks")
+            .expect("text the sink never saw must flush");
+        assert_eq!(
+            intent.params["field"],
+            Value::String(holon_api::SOURCE_TEXT_FIELD.into()),
+            "the chord flush carries the surface, so the store must re-derive both columns"
+        );
+    }
+
+    /// And the ruled `Refused` session-pin survives the chord funnel too: a
+    /// surface that could not SHOW the keyword must not be able to remove it.
+    #[test]
+    fn a_chord_flush_of_a_refused_surface_stays_on_the_content_channel() {
+        let mut vm = test_controller();
+        vm.set_task_vocabulary(holon_org_format::TaskKeywordVocabulary::for_document(
+            &["NEXT".to_string()],
+            &["DONE".to_string()],
+        ));
+        let seed = vm.project_authority("API rewrite", Some("TODO"));
+        vm.set_buffer_from_authority(&seed, 0);
+
+        let intent = vm
+            .chord_commit_intent("NEXT rewrite")
+            .expect("text the sink never saw must flush");
+        assert_eq!(
+            intent.params["field"],
+            Value::String("content".into()),
+            "the chord flush escaped the pinned content channel"
+        );
+    }
+
+    /// The funnel still exists for text the sink never saw — an IME
+    /// composition or a programmatic `set_value` moves the visible field
+    /// without reaching `apply_local_edit`, and that text must not be lost to
+    /// the structural op.
+    #[test]
+    fn a_chord_still_flushes_text_the_keystroke_sink_never_saw() {
+        let mut vm = test_controller();
+        vm.set_buffer_from_authority("alpha two", 0);
+
+        let intent = vm
+            .chord_commit_intent("alpha two composed")
+            .expect("text the sink never saw is genuinely pending and must be flushed");
+        assert_eq!(
+            intent.params["value"],
+            Value::String("alpha two composed".into())
         );
     }
 
