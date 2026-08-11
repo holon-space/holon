@@ -17,6 +17,8 @@ use holon::core::sql_operation_provider::SqlOperationProvider;
 use holon::di::test_helpers::create_test_engine_with_providers;
 use holon::storage::BLOCK_WRITE_TABLE;
 use holon_api::EntityName;
+use holon_api::InlineMark;
+use holon_api::MarkSpan;
 use holon_api::OpOrigin;
 use holon_api::UndoOutcome;
 use holon_api::Value;
@@ -120,6 +122,27 @@ async fn col(engine: &BackendEngine, id: &str, column: &str) -> Option<String> {
         .and_then(|r| r.get(column))
         .and_then(|v| v.as_string())
         .map(str::to_string)
+}
+
+/// Read the `marks` column. `None` ONLY for SQL NULL — `marks` is a jsonb
+/// column that comes back as `Value::Json`, never `Value::String`, so reading
+/// it through `col` would collapse every state to `None` and pass vacuously.
+async fn marks(engine: &BackendEngine, id: &str) -> Option<String> {
+    let rows = engine
+        .db_handle()
+        .query(
+            &format!(
+                "SELECT marks FROM {BLOCK_WRITE_TABLE} WHERE id = '{}'",
+                id.replace('\'', "''")
+            ),
+            HashMap::new(),
+        )
+        .await
+        .expect("marks query");
+    match rows.first().and_then(|r| r.get("marks")) {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_string().expect("marks is a JSON string").to_string()),
+    }
 }
 
 /// Read a `properties` JSON entry; `None` when absent.
@@ -370,6 +393,88 @@ async fn delete_leaf_undo_resurrects_identical_row() {
     assert!(
         !row_exists(&engine, "block:leaf").await,
         "redo re-deletes the leaf"
+    );
+}
+
+/// #22's goal, behaviourally: undo restores `marks` to a genuine SQL NULL, and
+/// it does so on a row a concurrent writer has touched since the edit.
+///
+/// The delete arm cannot show this — its inverse fingerprints `id`, so any
+/// resurrection makes undo drop as stale. The CONTENT arm can: a `set_field`
+/// precondition covers only the field it wrote (`sql_operation_provider.rs`,
+/// the `known_columns` guard on `changes`), and the derived `marks` follow-up's
+/// result is discarded by the dispatcher, so `marks` is never fingerprinted at
+/// all. A writer that moves ONLY `marks` therefore slips past `check_stale`,
+/// and the rich Object inverse writes BOTH columns in one UPDATE — landing the
+/// NULL restore over the interposed spans.
+///
+/// The concurrent writer LOSING here is current behaviour, not a ruling: the
+/// stale-guard refuses on the delete arm and the inverse wins on this one. C2
+/// inherits that decision (refusal vs inverse-wins); if C2 rules refusal, this
+/// is the rung that flips.
+#[tokio::test(flavor = "multi_thread")]
+async fn undo_of_a_content_edit_restores_marks_to_null_past_a_concurrent_marks_write() {
+    let engine = block_engine().await;
+    create_block(
+        &engine,
+        "block:parent",
+        "sentinel:no_parent",
+        "Parent",
+        OpOrigin::Sync,
+    )
+    .await;
+    create_block(
+        &engine,
+        "block:leaf",
+        "block:parent",
+        "prior bytes",
+        OpOrigin::Sync,
+    )
+    .await;
+    assert_eq!(
+        marks(&engine, "block:leaf").await,
+        None,
+        "the fixture must start mark-free, else the NULL restore is vacuous"
+    );
+
+    set_field(&engine, "block:leaf", "content", "replaced", OpOrigin::User).await;
+
+    // A writer that moves ONLY `marks` — never `content`, so nothing the undo
+    // entry fingerprinted has changed.
+    let spans = holon_api::marks_to_json(&[MarkSpan::new(0, 5, InlineMark::Bold)]);
+    engine
+        .db_handle()
+        .execute(
+            &format!(
+                "UPDATE {BLOCK_WRITE_TABLE} SET marks = '{}' WHERE id = 'block:leaf'",
+                spans.replace('\'', "''")
+            ),
+            vec![],
+        )
+        .await
+        .expect("interposed marks-only write");
+    assert_eq!(
+        marks(&engine, "block:leaf").await.as_deref(),
+        Some(spans.as_str()),
+        "the interposed write must land marks, else the test is vacuous"
+    );
+
+    assert_eq!(
+        engine.undo().await.expect("undo"),
+        UndoOutcome::Applied,
+        "a marks-only write must not make the content undo stale — the \
+         precondition covers `content` alone"
+    );
+    assert_eq!(
+        col(&engine, "block:leaf", "content").await.as_deref(),
+        Some("prior bytes"),
+        "undo restores the prior bytes"
+    );
+    assert_eq!(
+        marks(&engine, "block:leaf").await,
+        None,
+        "undo must restore `marks` to NULL — the explicit 'this block had no \
+         marks' #22 exists to express"
     );
 }
 

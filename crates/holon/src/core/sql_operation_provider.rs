@@ -357,10 +357,18 @@ impl SqlOperationProvider {
 
         for (key, value) in params.iter() {
             if &**key == "properties" {
-                // Capture existing properties JSON to merge with extras later
-                if let Some(s) = value.as_string() {
-                    existing_properties_json = Some(s.to_string());
-                }
+                // Captured here to merge with the extras bucket below. Live
+                // callers pass the column as a JSON string, but `capture_row`
+                // hands it back DECODED, as an Object — reading only the string
+                // shape dropped every property from a delete-inverse, so undo
+                // resurrected the row stripped of them.
+                existing_properties_json = match value {
+                    Value::Object(_) => {
+                        let json: serde_json::Value = value.clone().into();
+                        Some(serde_json::to_string(&json).expect("Value→JSON cannot fail"))
+                    }
+                    _ => value.as_string().map(str::to_string),
+                };
             } else if holon_core::block_ordering::is_operation_control_param(key) {
                 // Operation-control metadata (positional intent, routing hints,
                 // diff guards) — never persist. The positional intent is lifted
@@ -2166,6 +2174,10 @@ impl SqlOperationProvider {
     /// off a derived `marks` follow-up for a *String* content value (it reads
     /// `value.as_string()`), so an Object value NEVER triggers the re-derive
     /// that would otherwise clobber the restored marks.
+    ///
+    /// A mark-free predecessor yields `"[]"`, which the writer stores as SQL
+    /// NULL — the explicit "this block had no marks" the String inverse could
+    /// not express.
     fn rich_content_value(text: &str, marks: &Value) -> Value {
         let marks_json = match marks {
             Value::String(s) | Value::Json(s) => s.clone(),
@@ -2178,8 +2190,9 @@ impl SqlOperationProvider {
     }
 
     /// True when a `marks` column value carries at least one span (a non-empty,
-    /// non-`[]` JSON array). Drives the choice between a rich Object inverse
-    /// (restore both content AND marks) and a plain String content inverse.
+    /// non-`[]` JSON array). Test-only: production inverses no longer branch on
+    /// it, they state the prior marks explicitly whether present or not.
+    #[cfg(test)]
     fn marks_non_empty(marks: &Value) -> bool {
         match marks {
             Value::String(s) | Value::Json(s) => !s.is_empty() && s != "[]" && s != "null",
@@ -2264,37 +2277,31 @@ impl SqlOperationProvider {
                 .map_err(|e| format!("set_field(content rich) block_links update failed: {e}"))?;
         }
 
-        // Inverse restores the prior pair: rich Object when the predecessor
-        // carried marks (so undo↔redo across this write is symmetric), else a
-        // plain String content restore.
+        // Inverse restores the prior pair as one rich Object, so undo↔redo
+        // across this write is symmetric whether or not the predecessor
+        // carried marks.
         let prior_text = match &prior_content {
             Value::String(s) => s.clone(),
             _ => String::new(),
         };
-        let inverse = if Self::marks_non_empty(&prior_marks) {
-            self.set_field_inverse(
-                id,
-                "content",
-                Self::rich_content_value(&prior_text, &prior_marks),
-            )
-        } else {
-            self.set_field_inverse(id, "content", Value::String(prior_text))
-        };
+        let inverse = self.set_field_inverse(
+            id,
+            "content",
+            Self::rich_content_value(&prior_text, &prior_marks),
+        );
 
-        // `content` is a projected column, so arm the stale-guard when the text
-        // actually changed; a marks-only restore (text unchanged) leaves the
-        // column untouched and reports no delta (single-writer safe).
+        // Report the `content` delta ALWAYS, exactly as the String path does —
+        // the UPDATE above writes the column either way. An identical-value
+        // delta is how `OperationEngine::changes_are_vacuous` PROVES a replay
+        // was a no-op; reporting nothing instead reads as "changed" and turns a
+        // vacuous undo into `Applied`.
         let new_content = Value::String(trimmed);
-        let changes = if prior_content != new_content {
-            vec![FieldDelta::new(
-                id.to_string(),
-                "content",
-                prior_content,
-                new_content,
-            )]
-        } else {
-            Vec::new()
-        };
+        let changes = vec![FieldDelta::new(
+            id.to_string(),
+            "content",
+            prior_content,
+            new_content,
+        )];
         Ok(OperationResult::new(changes, inverse))
     }
 
@@ -2302,6 +2309,10 @@ impl SqlOperationProvider {
     /// verbatim, minus the CDC-provenance sentinel `_change_origin`, which the
     /// writer stamps fresh). Returns `None` when the row is absent. Used to
     /// build the identity-preserving inverse of a leaf `delete`.
+    ///
+    /// NULL columns are carried as explicit [`Value::Null`] entries, not
+    /// dropped: an inverse that omits a column cannot restore it to NULL, so
+    /// the resurrected row would keep whatever a concurrent writer left there.
     async fn capture_row(&self, id: &str) -> Result<Option<StorageEntity>> {
         let sql = format!(
             "SELECT * FROM {table} WHERE id = '{id}'",
@@ -2318,7 +2329,7 @@ impl SqlOperationProvider {
         };
         let params: StorageEntity = row
             .into_iter()
-            .filter(|(k, v)| k.as_ref() != "_change_origin" && !matches!(v, Value::Null))
+            .filter(|(k, _)| k.as_ref() != "_change_origin")
             .collect();
         Ok(Some(params))
     }
@@ -3110,31 +3121,25 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 } else {
                     Vec::new()
                 };
-                // A String content write over a block that ALREADY carried
-                // marks must restore BOTH on undo: the dispatcher folds the
-                // derived `marks` write into this same undoable step (no undo
-                // entry of its own), so a content-only inverse would drop the
-                // predecessor's marks (leaving nonsense-offset or absent spans).
-                // Capture the prior marks (the column still holds them here —
-                // the `marks` follow-up runs after this returns) and upgrade to
-                // a rich Object inverse that restores the exact pair. A plain
-                // predecessor (no marks) keeps the String inverse so the undo
-                // stack's word-boundary coalescer still recognises typing.
+                // A content write must restore BOTH columns on undo: the
+                // dispatcher folds the derived `marks` write into this same
+                // undoable step (no undo entry of its own), so a content-only
+                // inverse would leave the successor's marks over the restored
+                // text. Capture the prior marks (the column still holds them
+                // here — the `marks` follow-up runs after this returns) and
+                // always build the rich Object inverse, which states the prior
+                // marks EXPLICITLY, including their absence.
                 let inverse = if field == "content" {
                     let prior_marks = match prior_marks {
                         Some(marks) => marks,
                         None => self.read_field_old_value(id, "marks").await?,
                     };
-                    if Self::marks_non_empty(&prior_marks) {
-                        let prior_text = old_value.as_string().unwrap_or_default().to_string();
-                        self.set_field_inverse(
-                            id,
-                            "content",
-                            Self::rich_content_value(&prior_text, &prior_marks),
-                        )
-                    } else {
-                        self.set_field_inverse(id, field, old_value)
-                    }
+                    let prior_text = old_value.as_string().unwrap_or_default().to_string();
+                    self.set_field_inverse(
+                        id,
+                        "content",
+                        Self::rich_content_value(&prior_text, &prior_marks),
+                    )
                 } else {
                     self.set_field_inverse(id, field, old_value)
                 };
@@ -4314,6 +4319,81 @@ mod delete_inverse_classification_tests {
             }
             other => panic!("leaf delete must be reversible, got {other:?}"),
         }
+    }
+
+    /// A delete-inverse must resurrect the row's PROPERTIES, not just its
+    /// columns. `capture_row` hands `properties` back DECODED (a
+    /// `Value::Object`, not the JSON string a live caller passes), and
+    /// `partition_params` used to read only the string shape — so every
+    /// property fell out of the inverse and undo brought the block back
+    /// stripped.
+    #[tokio::test]
+    async fn a_delete_inverse_resurrects_the_rows_properties() {
+        let (db, provider) = provider_with_rows().await;
+        let mut seed = StorageEntity::new();
+        seed.insert("id".into(), Value::String("block:leaf".to_string()));
+        seed.insert("parent_id".into(), Value::String("block:root".to_string()));
+        seed.insert("keeper".into(), Value::String("survives".to_string()));
+        provider
+            .execute_operation_with_origin(
+                &EntityName::new("block"),
+                "create",
+                seed,
+                EventOrigin::Other("test".to_string()),
+            )
+            .await
+            .expect("seed create with a property");
+        let seeded = property_of(&db, "block:leaf", "keeper").await;
+        assert_eq!(
+            seeded.as_deref(),
+            Some("survives"),
+            "the fixture must actually carry a property, else the test is vacuous"
+        );
+
+        let inverse_params = match delete_result(&provider, "block:leaf").await.undo {
+            UndoAction::Undo(op) => op.params,
+            other => panic!("leaf delete must be reversible, got {other:?}"),
+        };
+        provider
+            .execute_operation_with_origin(
+                &EntityName::new("block"),
+                "create",
+                inverse_params
+                    .into_iter()
+                    .map(|(k, v)| (std::sync::Arc::from(k.as_str()), v))
+                    .collect::<StorageEntity>(),
+                EventOrigin::Other("test".to_string()),
+            )
+            .await
+            .expect("replay inverse create");
+
+        assert_eq!(
+            property_of(&db, "block:leaf", "keeper").await,
+            seeded,
+            "undo must bring the property back with the row"
+        );
+    }
+
+    /// One `properties` JSON entry of `id`, `None` when absent.
+    async fn property_of(
+        db: &crate::storage::turso::DbHandle,
+        id: &str,
+        key: &str,
+    ) -> Option<String> {
+        let rows = db
+            .query(
+                &format!(
+                    "SELECT json_extract(properties, '$.{key}') AS v FROM block_raw WHERE id = \
+                     '{id}'"
+                ),
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("property query");
+        rows.first()
+            .and_then(|r| r.get("v"))
+            .and_then(|v| v.as_string())
+            .map(str::to_string)
     }
 
     /// A delete that CASCADES to descendants is DECLARED irreversible (subtree

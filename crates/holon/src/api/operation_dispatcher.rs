@@ -63,12 +63,14 @@ pub struct OperationDispatcher {
 /// JUST AUTHORED. Only that case adopts raw org markup in `content` into a
 /// stripped label plus a mark set.
 ///
-/// This is PROVENANCE, and it cannot be recovered from the params' shape. The
-/// absence of a `marks` key proves nothing: `capture_row` filters NULL columns,
-/// so the delete-inverse of any mark-free block arrives looking exactly like
-/// freshly typed text. Reading that shape as "unparsed input" makes UNDO
-/// rewrite the very bytes it exists to restore (ADR 0024's identity-preserving
-/// inverse). The engine holds the origin and is the only place that can say.
+/// This is PROVENANCE, and it cannot be recovered from the params' shape.
+/// Inverses now state every column explicitly — `capture_row` carries NULL
+/// columns as `Value::Null`, and a content inverse carries its prior marks as
+/// a rich Object — but a mark-free block still resurrects with `marks` NULL,
+/// the same shape freshly typed text has. Reading that shape as "unparsed
+/// input" makes UNDO rewrite the very bytes it exists to restore (ADR 0024's
+/// identity-preserving inverse). The engine holds the origin and is the only
+/// place that can say.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AuthoredInput {
     /// A live authoring intent (`OpOrigin::User` / `OpOrigin::Agent`):
@@ -719,19 +721,15 @@ impl OperationDispatcher {
                 // `content_marks_followup`). That comparison — not this extraction — is
                 // what keeps the follow-up from firing spuriously.
                 //
-                // This EDIT arm is deliberately NOT gated on `input`, unlike the `create`
-                // arm below, and the asymmetry is load-bearing: undo of a content edit
-                // currently DEPENDS on this arm running during replay. `capture_row`
-                // cannot express "restore this column to NULL" (it filters NULL columns),
-                // so a content inverse never carries the prior `marks`; what clears them
-                // is this follow-up firing on the replayed edit. Gate the arm and stale
-                // marks outlive the undo, pointing past the restored text — exactly what
-                // `undo_link_add_restores_prior_pair` catches. The cost of leaving it
-                // ungated is that replaying an inverse whose prior bytes are RAW markup
-                // re-parses them (the ignored
-                // `undo_of_a_content_edit_restores_raw_previous_bytes`); removing that
-                // cost needs inverses that carry marks explicitly — a `capture_row`
-                // change touching every inverse, escalated rather than guessed at here.
+                // This EDIT arm is NOT gated on `input`, unlike the `create` arm
+                // below, and undo replay is safe from it by SHAPE rather than by
+                // origin: a content inverse carries the prior text and marks as one
+                // `{text, marks}` Object (#22), and the `as_string()` match below
+                // takes String values only, so a replayed inverse never enters this
+                // arm and its restored bytes are never re-parsed. The rich write
+                // restores both columns itself; nothing here has to clear marks for
+                // it (`undo_link_add_restores_prior_pair`,
+                // `undo_of_a_content_edit_restores_raw_previous_bytes`).
                 let content_edit: Option<(String, String, Vec<holon_api::MarkSpan>)> =
                     if resolved_entity_name == "block"
                         && op_name == "set_field"
