@@ -11,8 +11,10 @@ use holon_api::Value;
 use holon_api::block::Block;
 
 use crate::models::OrgBlockExt;
+use crate::models::OrgDocumentExt;
 use crate::models::ToOrg;
 use crate::models::render_document_header;
+use crate::task_keyword::TaskKeywordVocabulary;
 
 /// The `:PROPERTIES:` drawer keys in the order the author wrote them, as
 /// recorded by the parser. Empty for blocks that never came from a file.
@@ -45,7 +47,7 @@ impl OrgRenderer {
     pub fn render_document(
         doc_block: &Block,
         blocks: &[Block],
-        file_path: &Path,
+        _: &Path,
         file_id: &EntityUri,
     ) -> String {
         let mut result = render_document_header(doc_block);
@@ -71,7 +73,17 @@ impl OrgRenderer {
             result.push_str(preamble);
             result.push('\n');
         }
-        result.push_str(&Self::render_entitys(blocks, file_path, file_id));
+        // The document's OWN `#+TODO:` declaration governs what its headlines
+        // may spell — the same chain (`from_declared`) the editor's surface
+        // projection resolves. Rendering a keyword this document does not
+        // declare emits bytes the next parse reads as ordinary title text.
+        let vocabulary = TaskKeywordVocabulary::from_declared(doc_block.todo_keywords());
+        result.push_str(&Self::render_walk(
+            blocks,
+            file_id,
+            Some(&vocabulary),
+            &|b: &Block| b.to_org(),
+        ));
         // Every org file ends with exactly one '\n'. Strip any trailing
         // whitespace/newlines and re-add one — keeps disk content stable across
         // render → parse → render so PBT round-trips converge to a fixed point.
@@ -94,8 +106,14 @@ impl OrgRenderer {
     ///
     /// # Returns
     /// Org-mode formatted string
+    /// No document accompanies these blocks, so no vocabulary is KNOWN — which
+    /// is not the same as "declares nothing", and must not be substituted with
+    /// the defaults (the representability rule the editor's `Surface::Pending`
+    /// encodes). Task states therefore render as stored here; the refusal in
+    /// [`Self::refuse_undeclared_task_state`] applies only where the owning
+    /// document is in hand, i.e. [`Self::render_document`].
     pub fn render_entitys(blocks: &[Block], _: &Path, file_id: &EntityUri) -> String {
-        Self::render_walk(blocks, file_id, &|b: &Block| b.to_org())
+        Self::render_walk(blocks, file_id, None, &|b: &Block| b.to_org())
     }
 
     /// Dense projection variant of [`Self::render_entitys`]: identical tree
@@ -109,7 +127,7 @@ impl OrgRenderer {
         alias_table: &crate::dense::AliasTable,
         gap_ids: &std::collections::HashSet<String>,
     ) -> String {
-        Self::render_walk(blocks, file_id, &|b: &Block| {
+        Self::render_walk(blocks, file_id, None, &|b: &Block| {
             crate::dense::to_org_dense(b, alias_table, gap_ids)
         })
     }
@@ -117,6 +135,7 @@ impl OrgRenderer {
     fn render_walk<F: Fn(&Block) -> String>(
         blocks: &[Block],
         file_id: &EntityUri,
+        vocabulary: Option<&TaskKeywordVocabulary>,
         render_block: &F,
     ) -> String {
         let mut result = String::new();
@@ -183,6 +202,7 @@ impl OrgRenderer {
                     &mut result,
                     0,
                     &mut visited,
+                    vocabulary,
                     render_block,
                 );
             }
@@ -226,6 +246,7 @@ impl OrgRenderer {
         result: &mut String,
         depth: usize,
         visited: &mut std::collections::HashSet<&'b str>,
+        vocabulary: Option<&TaskKeywordVocabulary>,
         render_block: &F,
     ) {
         // Record reachability for the WP-F cycle/disconnected-component assertion
@@ -235,7 +256,7 @@ impl OrgRenderer {
         // Prepare block for org rendering - transfer Loro properties to org_props
         // format
         let mut prepared_block = block.clone();
-        Self::prepare_block_for_org(&mut prepared_block, depth);
+        Self::prepare_block_for_org(&mut prepared_block, depth, vocabulary);
 
         // Render via the caller-supplied per-block renderer (canonical
         // `Block::to_org` or the dense token form). Both guarantee a trailing
@@ -250,6 +271,7 @@ impl OrgRenderer {
                     result,
                     depth + 1,
                     visited,
+                    vocabulary,
                     render_block,
                 );
             }
@@ -262,7 +284,49 @@ impl OrgRenderer {
     /// Public so a caller that owns its own tree walk (the integration-test
     /// serializer) can reach `Block::to_org` through the SAME preparation
     /// write-back uses instead of re-deriving the drawer.
-    pub fn prepare_block_for_org(block: &mut Block, depth: usize) {
+    /// Drop a `task_state` this document's vocabulary does not declare from the
+    /// render (the block is a CLONE; the store keeps its column).
+    ///
+    /// The same refusal the editable surface makes
+    /// (`SourceProjection::Refused` / `Surface::Refused`): a surface that
+    /// cannot SHOW the keyword must not write it. Rendering `* TODO x` into a
+    /// `#+TODO: NEXT | DONE` document emits bytes the very next parse reads as
+    /// ordinary title text, so the keyword lands in `content` and the file
+    /// grows one more of them on every cold boot.
+    ///
+    /// The state is therefore not durable on disk for as long as it stays
+    /// undeclared — a loss, but a DISCLOSED one, and strictly smaller than the
+    /// alternative, which also loses the state and corrupts the user's text
+    /// with it. Declaring the keyword in the document's `#+TODO:` line makes
+    /// the state renderable and the loss disappears.
+    fn refuse_undeclared_task_state(block: &mut Block, vocabulary: Option<&TaskKeywordVocabulary>) {
+        let (Some(vocabulary), Some(state)) = (vocabulary, block.task_state()) else {
+            return;
+        };
+        if vocabulary.all_keywords().contains(&state.keyword) {
+            return;
+        }
+        tracing::warn!(
+            target: "org.render",
+            block = %block.id,
+            keyword = %state.keyword,
+            declared = ?vocabulary.all_keywords(),
+            "task_state is not declared by this document's `#+TODO:` vocabulary — the headline \
+             keyword is NOT written. Rendering it would re-ingest as ordinary title text and add \
+             one keyword per cold boot. Declare the keyword in the document to make the state \
+             durable on disk."
+        );
+        block.set_task_state(None);
+    }
+
+    /// `vocabulary` is the owning document's declaration (the parser's defaults
+    /// when it declares none); a `task_state` it does not admit is dropped from
+    /// the RENDER — see [`Self::refuse_undeclared_task_state`].
+    pub fn prepare_block_for_org(
+        block: &mut Block,
+        depth: usize,
+        vocabulary: Option<&TaskKeywordVocabulary>,
+    ) {
         let properties = block.properties_map();
 
         // Set level from depth (level = depth + 1)
@@ -274,6 +338,7 @@ impl OrgRenderer {
                 block.set_task_state(Some(holon_api::TaskState::from_keyword(todo)));
             }
         }
+        Self::refuse_undeclared_task_state(block, vocabulary);
 
         // Transfer PRIORITY to priority if not already set
         if block.priority().is_none() {

@@ -719,13 +719,42 @@ impl EditorViewModel {
         self.handle_result_to_action(result)
     }
 
+    /// Route a text-sync commit through the SAME channel decision the keystroke
+    /// sink makes. [`ViewEventHandler::handle_text_sync`] builds its
+    /// `set_field` from the editable node's own field, which is `content` —
+    /// and for a surface that IS vault syntax those bytes are the
+    /// projection, not the content column, so committing them there folds
+    /// the keyword into the title. `Refused`/`Pending` surfaces keep the
+    /// content channel, because `commits_as_source` is the same match the
+    /// keystroke sink uses.
+    fn route_commit_channel(&self, params: &mut HashMap<String, Value>) {
+        let value = params
+            .get("value")
+            .and_then(|v| v.as_string())
+            .expect("a text-sync commit always carries its value")
+            .to_string();
+        let field = params
+            .get("field")
+            .and_then(|v| v.as_string())
+            .expect("a text-sync commit always carries its field");
+        if field == "content" && self.commits_as_source(&value) {
+            params.insert(
+                "field".into(),
+                Value::String(holon_api::SOURCE_TEXT_FIELD.to_string()),
+            );
+        }
+    }
+
     /// Called when the editor loses focus (blur).
     ///
     /// If the text changed, returns `Execute` with a set_field operation.
     pub fn on_blur(&mut self, current_value: &str) -> EditorAction {
-        let result = self.handler.handle(ViewEvent::TextSync {
+        let mut result = self.handler.handle(ViewEvent::TextSync {
             value: current_value.to_string(),
         });
+        if let HandleResult::PopupResult(PopupResult::Execute { params, .. }) = &mut result {
+            self.route_commit_channel(params);
+        }
         self.handle_result_to_action(result)
     }
 
@@ -745,9 +774,12 @@ impl EditorViewModel {
             HandleResult::PopupResult(PopupResult::Execute {
                 entity_name,
                 op_name,
-                params,
+                mut params,
                 ..
-            }) => Some(OperationIntent::new(entity_name, op_name, params)),
+            }) => {
+                self.route_commit_channel(&mut params);
+                Some(OperationIntent::new(entity_name, op_name, params))
+            }
             _ => None,
         }
     }
@@ -1922,6 +1954,53 @@ mod tests {
                  demotion gesture, which only this channel can perform"
             );
         }
+    }
+
+    /// The BLUR funnel takes the same channel as the keystroke funnel. It
+    /// builds its `set_field` from the editable node's own field (`content`),
+    /// so without the routing it commits the SURFACE — vault syntax — into the
+    /// content column and folds the keyword into the title (task #99).
+    #[test]
+    fn a_blur_commits_a_projected_surface_as_source() {
+        let mut vm = test_controller();
+        vm.set_task_vocabulary(holon_org_format::TaskKeywordVocabulary::for_document(
+            &["NEXT".to_string()],
+            &["DONE".to_string()],
+        ));
+        let seed = vm.project_authority("call bank", Some("NEXT"));
+        vm.set_buffer_from_authority(&seed, 0);
+
+        let intent = vm
+            .pending_commit_intent("NEXT call banks")
+            .expect("a changed buffer must commit on blur");
+        assert_eq!(
+            intent.params["field"],
+            Value::String(holon_api::SOURCE_TEXT_FIELD.into()),
+            "the blur commit carries the surface, so the store must re-derive both columns"
+        );
+    }
+
+    /// And the ruled `Refused` session-pin survives the routing, because it is
+    /// the same `commits_as_source` match: a surface that could not SHOW the
+    /// keyword must not be able to remove it on the way out either.
+    #[test]
+    fn a_blur_keeps_a_refused_surface_on_the_content_channel() {
+        let mut vm = test_controller();
+        vm.set_task_vocabulary(holon_org_format::TaskKeywordVocabulary::for_document(
+            &["NEXT".to_string()],
+            &["DONE".to_string()],
+        ));
+        let seed = vm.project_authority("API rewrite", Some("TODO"));
+        vm.set_buffer_from_authority(&seed, 0);
+
+        let intent = vm
+            .pending_commit_intent("NEXT rewrite")
+            .expect("a changed buffer must commit on blur");
+        assert_eq!(
+            intent.params["field"],
+            Value::String("content".into()),
+            "the blur escaped the pinned content channel"
+        );
     }
 
     /// An UNTASKED block whose text merely has the SHAPE of a keyword the
