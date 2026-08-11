@@ -567,3 +567,154 @@ async fn halfa_then_halfb_is_a_fixed_point() {
         "a promoted block's stored content must not converge again"
     );
 }
+
+/// A task state the declaring document's `#+TODO:` line does NOT admit. The
+/// live editor refuses to PROJECT it (`Surface::Refused`) and says so; the
+/// question this rung asks is what the FILE does with the same state.
+const UNDECLARED_KEYWORD: &str = "TODO";
+/// Plain text with no keyword of its own, so any keyword appearing in the
+/// re-ingested content came from the render.
+const UNDECLARED_CONTENT: &str = "ordinary line!";
+
+impl FakeStore {
+    fn set_task_state(&self, bare: &str, keyword: &str) {
+        let mut guard = self.blocks.lock().unwrap();
+        let key = guard
+            .values()
+            .find(|r| row_field(r, "id").ends_with(bare))
+            .map(|r| row_field(r, "id").to_string())
+            .unwrap_or_else(|| panic!("no store row for block ending in {bare:?}"));
+        let row = guard.get_mut(&key).unwrap();
+        row.insert(
+            "task_state".into(),
+            holon_api::Value::String(keyword.into()),
+        );
+        row.insert(
+            "task_state_category".into(),
+            holon_api::Value::String("active".into()),
+        );
+    }
+
+    /// The ingested document block, which carries the `#+TODO:` declaration
+    /// write-back must render under.
+    fn doc(&self, bare: &str) -> Block {
+        self.docs
+            .lock()
+            .unwrap()
+            .values()
+            .find(|d| d.id.as_str().ends_with(bare))
+            .cloned()
+            .unwrap_or_else(|| panic!("no ingested document ending in {bare:?}"))
+    }
+
+    /// The block as write-back sees it: stored content plus the stored
+    /// `task_state`, with the `:ID:` drawer that keeps identity across the
+    /// round trip.
+    fn render_input(&self, bare: &str) -> Block {
+        use holon_org_format::OrgBlockExt;
+        let row = self.row_of(bare);
+        let mut block = row_to_block(&row);
+        block.set_org_properties(Some(format!("{{\"ID\":\"{bare}\"}}")));
+        if let Some(keyword) = self.task_state_of(bare) {
+            block.set_task_state(Some(holon_api::TaskState::from_keyword(&keyword)));
+        }
+        block
+    }
+}
+
+/// One cold boot: render the store to disk through the SAME renderer
+/// write-back uses, then ingest those bytes back. Returns the rendered file.
+async fn cold_boot(store: &FakeStore, root: &std::path::Path) -> String {
+    use holon_org_format::OrgRenderer;
+
+    let doc = store.doc("milk-doc");
+    let path = root.join("Milk.org");
+    let rendered = OrgRenderer::render_document(
+        &doc,
+        std::slice::from_ref(&store.render_input("milk-block")),
+        &path,
+        &doc.id,
+    );
+    ingest(store, root, &rendered).await;
+    rendered
+}
+
+/// #100 — an undeclared `task_state` must not GROW a keyword per cold boot.
+///
+/// The document declares `NEXT WAITING | DONE`, and the store holds
+/// `task_state = TODO` on a block whose content carries no keyword — the state
+/// the live editor reaches (it refuses to project the keyword, WARNs, and keeps
+/// the column). Write-back then renders the keyword UNCONDITIONALLY, the
+/// re-ingest re-reads that headline under the document's own vocabulary — where
+/// `TODO` is ordinary prose — and folds it into the title. The stored
+/// `task_state` survives untouched, so the next boot renders it again in front
+/// of text that already absorbed it: one keyword per restart, without bound
+/// (dogfood F2: `* TODO ordinary line!` → `* TODO TODO ordinary line!` →
+/// `* TODO TODO TODO ordinary line!`).
+///
+/// The property asserted is the F2 one: the file is a FIXED POINT of
+/// render → ingest → render. File bytes and stored content are asserted
+/// separately, so a divergence names which side moved.
+#[tokio::test]
+async fn an_undeclared_task_state_is_a_cold_boot_fixed_point() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+
+    let store = FakeStore::default();
+    ingest(&store, &root, DECLARING).await;
+    assert_eq!(
+        write_seam_vocabulary(&store, "milk-doc").all_keywords(),
+        vec!["NEXT", "WAITING", "DONE"],
+        "precondition: the document declares its own vocabulary and TODO is not in it"
+    );
+
+    store.set_content("milk-block", UNDECLARED_CONTENT);
+    store.set_task_state("milk-block", UNDECLARED_KEYWORD);
+
+    // The state itself must SURVIVE each cycle. Refusing to render it is a
+    // refusal to write bytes the parse would misread — not a licence for the
+    // re-ingest to clear the column the store still holds.
+    let mut states = Vec::new();
+    let boot1 = cold_boot(&store, &root).await;
+    let content1 = store.content_of("milk-block");
+    states.push(store.task_state_of("milk-block"));
+    let boot2 = cold_boot(&store, &root).await;
+    let content2 = store.content_of("milk-block");
+    states.push(store.task_state_of("milk-block"));
+    let boot3 = cold_boot(&store, &root).await;
+    let content3 = store.content_of("milk-block");
+    states.push(store.task_state_of("milk-block"));
+    assert_eq!(
+        states,
+        vec![
+            Some(UNDECLARED_KEYWORD.to_string()),
+            Some(UNDECLARED_KEYWORD.to_string()),
+            Some(UNDECLARED_KEYWORD.to_string())
+        ],
+        "the stored task_state must survive every render → ingest cycle"
+    );
+
+    assert_eq!(
+        boot1, boot2,
+        "#100: the file must be a fixed point of render → ingest → render. Boot 1 wrote:\n\
+         {boot1}\nBoot 2 wrote:\n{boot2}"
+    );
+    assert_eq!(boot2, boot3, "and stay one across a third boot:\n{boot3}");
+    assert_eq!(
+        (content1.as_str(), content2.as_str(), content3.as_str()),
+        (UNDECLARED_CONTENT, UNDECLARED_CONTENT, UNDECLARED_CONTENT),
+        "#100: the stored content must not absorb a keyword the render put in front of it"
+    );
+    assert!(
+        !boot3.contains("TODO TODO"),
+        "the compounding signature reached disk:\n{boot3}"
+    );
+    // The DISCLOSED cost of the fixed point: a keyword this document cannot
+    // spell is not written at all (the render WARNs), rather than written in a
+    // form the next parse reads as prose.
+    assert!(
+        boot3.contains("* ordinary line!"),
+        "the headline must carry the text alone, with no keyword the document does not \
+         declare:\n{boot3}"
+    );
+}
