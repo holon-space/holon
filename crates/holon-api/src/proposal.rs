@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 
 use crate::EntityName;
+use crate::EntityUri;
 use crate::Value;
 
 /// The block property key carrying the wrapped operation. Leading underscore
@@ -49,6 +50,27 @@ const KEY_ENTITY: &str = "entity";
 const KEY_OP: &str = "op";
 const KEY_PARAMS: &str = "params";
 const KEY_RESOLVED_BY: &str = "resolved_by";
+
+/// Whether a block's properties carry a proposal record.
+///
+/// The one predicate for "this block is a proposal, not vault content". The
+/// property's presence is the whole test: a malformed record still means the
+/// block was minted by the trust gate, and treating it as ordinary content
+/// would put a sub-threshold write into the vault.
+pub fn is_proposal_block(properties: &HashMap<String, Value>) -> bool {
+    properties.contains_key(PROPOSAL_PROPERTY)
+}
+
+/// Whether a block IS the proposal place root or sits directly in it.
+///
+/// The parent is an argument rather than a storage read, so this stays a pure
+/// predicate usable on a feed item. Proposals are minted as direct children of
+/// the root (`coerce_to_proposal`), so the immediate parent is the entire
+/// chain — a deeper proposal subtree would need a real ancestor walk.
+pub fn is_proposals_place(id: &EntityUri, parent_id: &EntityUri) -> bool {
+    let root = EntityUri::block(PROPOSALS_ROOT_ID);
+    *id == root || *parent_id == root
+}
 
 /// Lifecycle of a proposal. `Pending` is the only state the confirmation ops
 /// accept; `Accepted`/`Rejected` are terminal and keep the record queryable

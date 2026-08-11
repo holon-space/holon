@@ -210,7 +210,11 @@ pub fn writeback_drops(
         let content_match = surviving
             .contents
             .contains(&normalize_content(&block.content));
-        let sanctioned = sanctioned_removals.contains(block.id.as_str());
+        // A proposal already on disk from an earlier run is a SANCTIONED
+        // removal: proposals are no longer rendered into the vault, so its
+        // absence from the projection is the fix working, not data loss.
+        let sanctioned = sanctioned_removals.contains(block.id.as_str())
+            || holon_api::is_proposal_block(&block.properties);
         if !id_match && !content_match && !sanctioned {
             dropped.push(excerpt(block));
         }

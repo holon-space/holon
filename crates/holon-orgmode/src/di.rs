@@ -614,14 +614,16 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                             std::collections::HashSet::new();
 
                         while let Some(item) = supervised.recv().await {
-                            let msg = match item {
+                            // `None` routes nothing at all — see
+                            // [`route_homed_block`].
+                            let msg: Option<OrgRerender> = match item {
                                 Supervised::Reset => {
                                     snapshot_pending = feed.read().keys().cloned().collect();
                                     // Drop the dead incarnation's derived state,
                                     // then cover the incoming seed with one bulk
                                     // render off the authority.
                                     let _ = tx.send(OrgRerender::Reset);
-                                    OrgRerender::All
+                                    Some(OrgRerender::All)
                                 }
                                 Supervised::Diff(HomedDiff::Upsert {
                                     doc,
@@ -643,32 +645,7 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                                             &disclosed,
                                         );
                                     }
-                                    match (doc, parse_prev(prev.as_deref())) {
-                                        (DocHome::Resolved(doc), Ok(prev)) => {
-                                            let delta = Box::new(BlockDelta::Upsert {
-                                                block: (*value).clone(),
-                                                prev,
-                                            });
-                                            if seeding {
-                                                OrgRerender::Seed { doc, delta }
-                                            } else {
-                                                OrgRerender::Block { doc, delta }
-                                            }
-                                        }
-                                        // No `Page` ancestor, or the authority
-                                        // faulted: the block belongs to no
-                                        // document we can write, so recover
-                                        // through the authoritative bulk pass.
-                                        (DocHome::Unresolved, _) => OrgRerender::All,
-                                        (DocHome::Resolved(doc), Err(e)) => {
-                                            tracing::error!(
-                                                "[OrgMode] home_by homed block {key} to {doc} with \
-                                                 an unparseable previous sibling: {e} — falling \
-                                                 back to full re-render"
-                                            );
-                                            OrgRerender::All
-                                        }
-                                    }
+                                    route_upsert(&doc, &value, prev.as_deref(), seeding)
                                 }
                                 Supervised::Diff(HomedDiff::Remove { doc, key }) => {
                                     // The DEPARTURE. A retraction always lands
@@ -680,24 +657,32 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                                     // presence-check that would short-circuit a
                                     // move.
                                     snapshot_pending.remove(&key);
+                                    // A departure carries no block value, so the
+                                    // proposal predicates have nothing to read:
+                                    // retracting a proposal still arms the bulk
+                                    // pass. Unchanged here deliberately.
                                     match (doc, EntityUri::parse(&key)) {
-                                        (DocHome::Resolved(doc), Ok(id)) => OrgRerender::Block {
-                                            doc,
-                                            delta: Box::new(BlockDelta::Remove(id)),
-                                        },
-                                        (DocHome::Unresolved, _) => OrgRerender::All,
+                                        (DocHome::Resolved(doc), Ok(id)) => {
+                                            Some(OrgRerender::Block {
+                                                doc,
+                                                delta: Box::new(BlockDelta::Remove(id)),
+                                            })
+                                        }
+                                        (DocHome::Unresolved, _) => Some(OrgRerender::All),
                                         (DocHome::Resolved(_), Err(e)) => {
                                             tracing::error!(
                                                 "[OrgMode] block feed Remove key {key:?} is not a \
                                                  valid EntityUri: {e} — falling back to full \
                                                  re-render"
                                             );
-                                            OrgRerender::All
+                                            Some(OrgRerender::All)
                                         }
                                     }
                                 }
                             };
-                            let _ = tx.send(msg);
+                            if let Some(msg) = msg {
+                                let _ = tx.send(msg);
+                            }
                         }
                     });
                 }
@@ -767,6 +752,82 @@ fn parse_prev(prev: Option<&str>) -> anyhow::Result<Option<EntityUri>> {
     match prev {
         None => Ok(None),
         Some(p) => Ok(Some(EntityUri::parse(p)?)),
+    }
+}
+
+/// Where one block the feed homed is routed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockRoute {
+    /// Render into this document.
+    Document(EntityUri),
+    /// Route nothing at all: the block is not vault content.
+    Drop,
+    /// No document owns the block — converge via the authoritative bulk pass.
+    Recover,
+}
+
+/// The routing decision for one homed block, as a pure function of its home
+/// and its own fields.
+///
+/// `Recover` is the designed recovery for vault content whose document cannot
+/// be resolved, and it costs a re-render of EVERY tracked file. Proposal blocks
+/// would take it on every write: the trust gate mints them under a parentless,
+/// non-page place, so they home `Unresolved` by construction rather than by
+/// fault. They are not vault content and route nowhere; every other block keeps
+/// the recovery behaviour unchanged.
+pub fn route_homed_block(
+    home: &DocHome,
+    id: &EntityUri,
+    parent_id: &EntityUri,
+    properties: &std::collections::HashMap<String, holon_api::Value>,
+) -> BlockRoute {
+    if holon_api::is_proposal_block(properties) || holon_api::is_proposals_place(id, parent_id) {
+        return BlockRoute::Drop;
+    }
+    match home {
+        DocHome::Resolved(doc) => BlockRoute::Document(doc.clone()),
+        DocHome::Unresolved => BlockRoute::Recover,
+    }
+}
+
+/// The re-render request one homed `Upsert` becomes, or `None` when it routes
+/// nowhere.
+///
+/// This is the production call site of [`route_homed_block`]: the feed loop
+/// does no routing of its own, so a test driving this drives the real decision
+/// AND the message the loop acts on, rather than a transcription of either.
+pub fn route_upsert(
+    home: &DocHome,
+    block: &Block,
+    prev: Option<&str>,
+    seeding: bool,
+) -> Option<OrgRerender> {
+    let route = route_homed_block(home, &block.id, &block.parent_id, &block.properties);
+    match (route, parse_prev(prev)) {
+        (BlockRoute::Document(doc), Ok(prev)) => {
+            let delta = Box::new(BlockDelta::Upsert {
+                block: block.clone(),
+                prev,
+            });
+            Some(if seeding {
+                OrgRerender::Seed { doc, delta }
+            } else {
+                OrgRerender::Block { doc, delta }
+            })
+        }
+        // Not vault content: no document renders and no recovery pass arms.
+        (BlockRoute::Drop, _) => None,
+        // No `Page` ancestor, or the authority faulted: the block belongs to no
+        // document we can write, so recover through the authoritative bulk pass.
+        (BlockRoute::Recover, _) => Some(OrgRerender::All),
+        (BlockRoute::Document(doc), Err(e)) => {
+            tracing::error!(
+                "[OrgMode] home_by homed block {} to {doc} with an unparseable \
+                 previous sibling: {e} — falling back to full re-render",
+                block.id
+            );
+            Some(OrgRerender::All)
+        }
     }
 }
 
