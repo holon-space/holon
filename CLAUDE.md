@@ -74,9 +74,13 @@ plans); the vault holds the altitude view and points back to those docs.
 When you defer a decision or surface a cross-session open topic, record it in
 the vault as a topic-doc headline with a slug `:ID:` (see
 `Display Placement & Resurfacing.org` for the pattern) — not only in-repo.
-Note: the vault's org round-trip currently mangles underscored identifiers
-(a known lossy-render bug), so keep exact type/file names in the repo docs and
-phrase the vault entries around them.
+Note (measured 2026-08-11, ratified by Martin): underscored identifiers
+round-trip byte-stable — the old "mangles underscored identifiers" claim is
+refuted. The REAL round-trip hazards: `_`-prefixed property KEYS are silently
+erased from disk on write-back (crates/holon-org-format/src/models.rs:886,908),
+an empty property value drops its key entirely, and authored drawer order is
+lost through the store (author drawers alphabetically). See
+docs/Reference/CompassConventions.md.
 
 # Development
 See [DEVELOPMENT.md](DEVELOPMENT.md) — testing (nextest, coverage) and log analysis scripts.

@@ -1,0 +1,145 @@
+* {{title}}
+:PROPERTIES:
+:ID: compass-mission-tpl-0
+:TEMPLATE: compass-mission
+:TEMPLATE_VARS: title, reviewed, provenance=explicit
+:compass: mission
+:contributes-to: none
+:last-reviewed: {{reviewed}}
+:provenance: {{provenance}}
+:review-cadence: P180D
+:END:
+** Why this stays true when the goals underneath it change
+:PROPERTIES:
+:ID: compass-mission-tpl-1
+:END:
+** What it looks like from the outside when this mission is alive
+:PROPERTIES:
+:ID: compass-mission-tpl-2
+:END:
+* {{title}}
+:PROPERTIES:
+:ID: compass-problem-tpl-0
+:TEMPLATE: compass-problem
+:TEMPLATE_VARS: title, mission, reviewed, provenance=explicit
+:compass: problem
+:contributes-to: [[{{mission}}]]
+:last-reviewed: {{reviewed}}
+:provenance: {{provenance}}
+:review-cadence: P180D
+:END:
+** Who carries this problem today, and how it shows up for them
+:PROPERTIES:
+:ID: compass-problem-tpl-1
+:END:
+** What I do about it today
+:PROPERTIES:
+:ID: compass-problem-tpl-2
+:END:
+* {{title}}
+:PROPERTIES:
+:ID: compass-goal-tpl-0
+:TEMPLATE: compass-goal
+:TEMPLATE_VARS: title, metric, target, current=unknown, mission, reviewed, provenance=explicit
+:compass: goal
+:contributes-to: [[{{mission}}]]
+:last-reviewed: {{reviewed}}
+:provenance: {{provenance}}
+:review-cadence: P30D
+:END:
+** Measure *{{metric}}*
+:PROPERTIES:
+:ID: compass-goal-tpl-1
+:END:
+*** Target: {{target}}
+:PROPERTIES:
+:ID: compass-goal-tpl-2
+:END:
+*** Current: {{current}}
+:PROPERTIES:
+:ID: compass-goal-tpl-3
+:END:
+** TODO Record the current value of *{{metric}}* at every review
+:PROPERTIES:
+:ID: compass-goal-tpl-4
+:END:
+** TODO Name the strategies that advance this goal
+:PROPERTIES:
+:ID: compass-goal-tpl-5
+:END:
+* {{title}}
+:PROPERTIES:
+:ID: compass-strategy-tpl-0
+:TEMPLATE: compass-strategy
+:TEMPLATE_VARS: title, goal, reviewed, provenance=explicit
+:compass: strategy
+:contributes-to: [[{{goal}}]]
+:last-reviewed: {{reviewed}}
+:provenance: {{provenance}}
+:review-cadence: P30D
+:END:
+** What makes this repeatable instead of a one-off task
+:PROPERTIES:
+:ID: compass-strategy-tpl-1
+:END:
+** TODO Remove the blockers that stop me from running this strategy
+:PROPERTIES:
+:ID: compass-strategy-tpl-2
+:END:
+* {{title}}
+:PROPERTIES:
+:ID: compass-challenge-tpl-0
+:TEMPLATE: compass-challenge
+:TEMPLATE_VARS: title, strategy, reviewed, provenance=explicit
+:compass: challenge
+:contributes-to: [[{{strategy}}]]
+:last-reviewed: {{reviewed}}
+:provenance: {{provenance}}
+:review-cadence: P90D
+:END:
+** When this pattern is most likely active
+:PROPERTIES:
+:ID: compass-challenge-tpl-1
+:END:
+** What has worked against it before
+:PROPERTIES:
+:ID: compass-challenge-tpl-2
+:END:
+* Current state — {{dimension}}
+:PROPERTIES:
+:ID: compass-dimension-current-tpl-0
+:TEMPLATE: compass-dimension-current
+:TEMPLATE_VARS: dimension, ideal, reviewed, provenance=explicit
+:compass: dimension-current
+:contributes-to: [[{{ideal}}]]
+:last-reviewed: {{reviewed}}
+:provenance: {{provenance}}
+:review-cadence: P90D
+:END:
+** What is in place today
+:PROPERTIES:
+:ID: compass-dimension-current-tpl-1
+:END:
+** What is missing today
+:PROPERTIES:
+:ID: compass-dimension-current-tpl-2
+:END:
+* Ideal state — {{dimension}}
+:PROPERTIES:
+:ID: compass-dimension-ideal-tpl-0
+:TEMPLATE: compass-dimension-ideal
+:TEMPLATE_VARS: dimension, mission, reviewed, provenance=explicit
+:compass: dimension-ideal
+:contributes-to: [[{{mission}}]]
+:last-reviewed: {{reviewed}}
+:provenance: {{provenance}}
+:review-cadence: P90D
+:END:
+** Targets that make the gap against the current state computable
+:PROPERTIES:
+:ID: compass-dimension-ideal-tpl-1
+:END:
+** How I will know the gap has closed
+:PROPERTIES:
+:ID: compass-dimension-ideal-tpl-2
+:END:
