@@ -32,11 +32,15 @@ ideal state, and an ideal state at its mission.
    from the parse at all; the key vanishes. Use an explicit sentinel (`none`)
    instead.
 4. **Author the drawer in ASCII-alphabetical order, after `:ID:`.** Authored
-   drawer order is replayed from `_drawer_order`, which is itself `_`-prefixed
-   and therefore never reaches the store. After a store round trip the renderer
-   has no authored order and falls back to an alphabetical tiebreak, so an
-   alphabetical template is the only order stable on both the file→file and the
-   file→store→file path. The sort is byte-wise, so uppercase keys sort first:
+   drawer order is replayed from `_drawer_order`, which the `_`-prefix filter
+   removes from the DRAWER only — the carrier persists in the stored properties
+   bag and comes back on the store-origin render path (measured 2026-08-11 by
+   `crates/holon-app/tests/org_store_org_round_trip.rs`; strip the carrier by
+   hand and the same renderer alphabetizes). Alphabetical authoring is
+   therefore a determinism convention, not a loss mitigation: it makes the
+   template identical to the renderer's carrier-less fallback, so documents
+   stay byte-stable even where a carrier is absent (hand-authored files that
+   never carried one). The sort is byte-wise, so uppercase keys sort first:
    `ID`, `TEMPLATE`, `TEMPLATE_VARS`, `compass`, `contributes-to`,
    `last-reviewed`, `provenance`, `review-cadence`.
 5. **Values are opaque text.** Multiword values, ISO datetimes, org links, and
@@ -63,8 +67,12 @@ Two premises that probe RETIRED: general underscores in identifiers do NOT get
 mangled (only the `_` PREFIX loses data), and `INTERNAL_KEYS` are dropped at
 render, not at ingest.
 
-One gap it disclosed: no end-to-end org → store → org round-trip test exists,
-so rule 4 is a mitigation for a real, currently-untested churn path.
+The gap it disclosed — no end-to-end org → store → org round-trip test — is
+discharged: `crates/holon-app/tests/org_store_org_round_trip.rs` drives a real
+pair on both legs (parse → SqlOperationProvider → Turso → CacheBlockReader →
+OrgRenderer) and pins that authored drawer order survives the store. The
+probe's original carrier-loss premise is RETIRED with it: the probe had
+hand-built carrier-less blocks, a shape the store never produces.
 
 ## Relation to Vision §3.1
 
