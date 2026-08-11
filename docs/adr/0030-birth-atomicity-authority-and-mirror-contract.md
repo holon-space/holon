@@ -246,17 +246,38 @@ proof-gated paths may land.
 - Facet-level authority declarations (D5) exist today as code behavior, not as a
   readable registry; whether to reify them into the ADR 0031 catalog is open — carried
   there as ruling P4, deferred.
-- Validations owed (from the second review): V1 whether Loro mode performs a full
-  boot-time Loro→SQL re-projection (would make SQL divergence self-healing — cite it,
-  or the D3 ordering hole widens); V2 measure the actual per-op ordering of
-  `save_doc` vs subscription-driven projection and org write-back (is the
-  mirror-outruns-authority window real on the scheduler?); V3 — DONE, see the
-  validation log below; V4 whether trust-gate proposal blocks leak into org
-  write-back (D7 Open Decision 5 — if yes, a birth-adjacent mirror leak D3 must
-  name); V5 atomicity audit of `SharedSnapshotStore` and roster sidecar writes —
-  DONE, all four artifacts already write tmp → `fsync` → rename.
+- Validations owed (from the second review): V1, V2 and V4 — DONE, see the
+  validation log below; V3 — DONE, see the validation log below; V5 atomicity
+  audit of `SharedSnapshotStore` and roster sidecar writes — DONE, all four
+  artifacts already write tmp → `fsync` → rename.
 
 ## Validation log
+
+**V1 — is there a full boot-time Loro→SQL re-projection? Answer: NO.**
+
+Evidence (`crates/holon-loro/src/loro_sync_controller.rs:361-436`). `start_gated`
+registers `doc.subscribe_root` (line 391 — the callback extracts each commit's
+dirty facts and appends them to the projection's pending queue), fires ONE
+synthetic wake for startup drift, then spawns a task that waits on the boot gate
+and enters `run_loop()` (line 425). No branch walks the whole tree to rebuild SQL
+from the authority; the loop's only input is the incremental pending queue.
+
+Consequence: SQL divergence is not self-healing at boot. Anything the mirror
+missed or mis-applied stays missing, so the D3 ordering hole is wider than the
+review assumed — it is not bounded by "the next boot repairs it".
+
+**V2 — is the mirror-outruns-authority window real? Answer: only for org files;
+the Loro authority is durable first.**
+
+Evidence (`crates/holon-loro/src/loro_block_operations.rs:112-116`). `save_doc`
+awaits `LoroDocumentStore::save_all` synchronously, and every block op ends with
+`self.save_doc(...).await?` (call sites at lines 159, 241, 305, 718, 1036, 1147,
+1390, 1445, 1478, 1532). The `subscribe_root` callback only queues facts and
+notifies; SQL projection runs on the separately spawned `run_loop` task.
+
+Consequence: for the SQL mirror the window is closed by construction — the
+authority is durable before the projection is applied. Org write-back ordering is
+NOT covered by this measurement and stays unmeasured.
 
 **V3 — crash-injection over the order re-key mid-loop. Answer: MIS-ORDERING, not a
 benign later re-key — but only for some keyspaces, which is worse than either horn
@@ -282,6 +303,26 @@ the generator's output — not on anything the writer controls or can test for. 
 is the argument for folding the re-key into the firing transaction rather than
 merely making the loop restartable, and it retires "partial application degrades
 benignly" as a defence for any future keyspace rewrite.
+
+**V4 — do trust-gate proposal blocks leak into org write-back? Answer: YES, they
+did — fixed in increment A0 (commit `d4657d26`).**
+
+Evidence. Proposals are ordinary blocks recorded under `block:proposals`
+(`crates/holon/src/api/operation_engine.rs:2050-2056` — `coerce_to_proposal`;
+`:2143-2146` — `ensure_proposals_root`). A proposal block is parentless, so it
+homed `DocHome::Unresolved` and routed the authoritative bulk re-render: one
+proposal write re-rendered the whole vault.
+
+Fix: `route_homed_block` (`crates/holon-orgmode/src/di.rs:778-791`) drops
+proposal blocks — `is_proposal_block` on the properties, `is_proposals_place` on
+the id/parent pair — BEFORE the `DocHome` match can pick `Recover` and arm the
+bulk pass. Rung `proposal_writes_do_not_amplify`, red at base (one proposal write
+wrote 6 vault files), green after.
+
+Latent residual: `HomedDiff::Remove` is key-only, so a proposal DELETION would
+still arm the bulk pass. No current op deletes a proposal (rejection arrives as an
+`Upsert` still carrying the proposal marker and is dropped), so this is latent,
+not live.
 
 ## Alternatives rejected
 
