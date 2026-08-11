@@ -76,9 +76,8 @@ block_raw, block_tags   (base tables)
   shape (block-matview JOIN a junction table). Reusable: a calendar view, a
   "jump to today", and journal backlinks can all read this relation.
 - **`journal_feed`** (matview, chained on `journal_day_pages`): the feed
-  projection. Adds `1 AS expand_default`. This stage is deliberately thin in
-  increment 1; it is the seam where feed **windowing / LIMIT** (pagination) will
-  live so the read never scans all history.
+  projection. Adds `1 AS expand_default`. This stage is deliberately thin, and
+  it stays thin: it is **not** a windowing seam — see the SUPERSEDED note below.
 
 Ordering stays in the *read* query (`ORDER BY content DESC`), matching the
 `automations_journal` convention (matviews are sets; the read orders).
@@ -87,7 +86,7 @@ Ordering stays in the *read* query (`ORDER BY content DESC`), matching the
 
 The ruling + the "base → detection → feed" framing call for a chain, and the two
 stages have distinct responsibilities (detection is reusable; feed-projection is
-feed-specific and will grow windowing). It also *exercises* matview-on-matview
+feed-specific). It also *exercises* matview-on-matview
 for journal data, which is the reliability guarantee being asked for. See Open
 Questions Q1 — a single matview is the alternative if Martin prefers minimalism.
 
@@ -97,8 +96,33 @@ Questions Q1 — a single matview is the alternative if Martin prefers minimalis
   boot-owned via `SchemaModule` + DI providers; `Journals.org` reads
   `FROM journal_feed`. View-level tests (ordering, delta on new day) + seed-shape
   test + `keystone-smoke`.
-- **Increment 2 (deferred):** feed windowing/pagination (LIMIT in `journal_feed`
-  or a windowed read), "load older" affordance.
+- **Increment 2 — SUPERSEDED 2026-08-11, DO NOT BUILD.** It read: "feed
+  windowing/pagination (LIMIT in `journal_feed` or a windowed read), 'load
+  older' affordance."
+
+  **A `LIMIT` in the feed — in the matview or in the read — is refused.**
+  `crates/holon-turso/src/util.rs:43-48` states the contract in the source:
+  "`LIMIT` / `OFFSET` are excluded: the matview holds the unbounded relation and
+  its CDC stream delivers changes beyond any window, so re-applying a window to
+  the snapshot alone would disagree with the stream." `strip_order_by`
+  (`util.rs:36-41`) enforces it — a `LIMIT` written into the journals
+  `holon_sql` is silently discarded (test `strip_order_by_also_strips_limit`,
+  `util.rs:420-425`). That contract was written *after* this plan; where the two
+  disagree, `util.rs` wins.
+
+  **Ruling (Martin, 2026-08-11): windowing happens at the VIEW layer**, applied
+  downstream of the unbounded CDC stream — the same discipline that already puts
+  ordering in the render spec (`sortkey: "-content"`) rather than in SQL.
+  `journal_feed` stays unbounded. The lazy term is not the row count (~365 thin
+  rows/year, and `gpui::list()` already virtualizes painting) but the per-day
+  content: `expand_default = 1` materialises a `live_query(from descendants)` —
+  a `ReactiveShell`, a watched matview and a CDC subscription — for *every* day
+  page. That is what viewport-driven expansion bounds.
+
+  Adding cursor pagination (a window parameter through `QueryContext` /
+  `execute_query` / `query_and_watch`, plus snapshot-vs-stream reconciliation
+  for a windowed relation) is a new delivery protocol affecting every reactive
+  surface, and needs its own ruling. See `plan-journals-view.md` §2.3 and §8.1.
 - **Increment 3 (deferred):** per-day child-count / summary column on the feed
   (grouped aggregate on the detection layer, like `automations_journal`).
 

@@ -3988,6 +3988,163 @@ entities:
         );
     }
 
+    /// A synthetic journals document with `days` day-pages, each owning
+    /// `CHILDREN_PER_DAY` child notes. Ids are deterministic
+    /// (`day-NNN` / `day-NNN-cJ`) so a render snapshot can be asked
+    /// "how many day-CHILDREN did you materialise?" by id membership.
+    ///
+    /// Dates count DOWN from 2026-12-31 so day 0 is always the newest,
+    /// independent of `days`.
+    fn synthetic_journals_org(days: usize) -> String {
+        let mut org = String::from("#+ID: journals\n");
+        for i in 0..days {
+            let day = 31 - i;
+            org.push_str(&format!(
+                "* 2026-12-{day:02} :Page:\n:PROPERTIES:\n:ID: day-{i:03}\n:END:\nLog {i}.\n"
+            ));
+            for c in 0..CHILDREN_PER_DAY {
+                org.push_str(&format!(
+                    "** note {i}-{c}\n:PROPERTIES:\n:ID: day-{i:03}-c{c}\n:END:\n"
+                ));
+            }
+        }
+        org
+    }
+
+    const CHILDREN_PER_DAY: usize = 3;
+
+    /// Render the journals feed over a synthetic `days`-day history and return
+    /// `(day_pages_listed, day_children_materialised)`.
+    async fn measure_journals_feed(days: usize) -> (usize, usize) {
+        use holon_pbt_core::capabilities::SutRenderer;
+
+        let comp = Arc::new(
+            HeadlessFrontendComponent::new(
+                &[("Journals.org", synthetic_journals_org(days).as_str())],
+                Duration::from_millis(600),
+            )
+            .await,
+        );
+        tokio::time::sleep(SETTLE).await;
+
+        let journals = EntityUri::parse("block:journals").expect("journals id");
+        let mut feed = comp
+            .widget_tree_for(&journals)
+            .await
+            .expect("journals page renders its own feed");
+        for _ in 0..60 {
+            if feed.collect_by_kind("expand_toggle").len() >= days {
+                break;
+            }
+            tokio::time::sleep(SETTLE).await;
+            feed = comp
+                .widget_tree_for(&journals)
+                .await
+                .expect("journals page renders its own feed");
+        }
+
+        let ids = feed.collect_entity_ids();
+        // Only OUR synthetic day pages — the auto-create rule may add a "today"
+        // entry, which must not be counted as history.
+        let listed = (0..days)
+            .filter(|i| ids.contains(&format!("block:day-{i:03}")))
+            .count();
+        let materialised = (0..days)
+            .flat_map(|i| (0..CHILDREN_PER_DAY).map(move |c| format!("block:day-{i:03}-c{c}")))
+            .filter(|id| ids.contains(id))
+            .count();
+        (listed, materialised)
+    }
+
+    /// **Increment 0 — MEASUREMENT: journals feed render cost must not scale
+    /// with history size.**
+    ///
+    /// Martin's requirement is that the journals view be LAZY: "render cost
+    /// does not scale linearly with history size". The cost that actually
+    /// scales is not the day-page ROW count (thin rows, and `gpui::list()`
+    /// virtualizes painting) but the per-day CONTENT: `journal_feed` projects
+    /// `1 AS expand_default` (`journal_feed_matview.sql:32`), which selects the
+    /// `embedded_page_expanded` profile variant with `default_expanded: true`
+    /// (`block_profile.yaml:89`), which materialises a
+    /// `live_query(from descendants)` — a shell, a watched matview and a CDC
+    /// subscription — for EVERY day page, on screen or not.
+    ///
+    /// This rung measures that term directly: how many day-CHILDREN are
+    /// reachable in the rendered feed. The claim under test is the one the
+    /// feature needs, and it is a RATIO claim rather than a magic constant —
+    /// materialised content must be bounded by the viewport, hence the SAME at
+    /// a small and a large history.
+    ///
+    /// Expected RED at base: materialisation proportional to `days`.
+    ///
+    /// **MEASURED 2026-08-11 — the premise does not hold HEADLESSLY. This rung
+    /// cannot go red for the intended reason, and that is increment 0's
+    /// result.** Both arms materialise ZERO day children (3 days: 3 listed / 0
+    /// materialised; 12 days: 12 listed / 0 materialised), so it trips the
+    /// vacuity guard instead of the cost claim. Cause, verbatim from the
+    /// rendered tree under every day's `expand_toggle`:
+    /// `ERROR: Query error: HeadlessBuilderServices does not support live
+    /// queries`. Term (c) — the per-day `live_query(from descendants)` — is
+    /// structurally unobservable in this slice: the headless component never
+    /// runs a nested live query, so it materialises nothing to count, at any
+    /// history size. The cost claim therefore has no headless home and must be
+    /// carried by a WINDOWED rung (plan §3 increment 2,
+    /// `journals_scroll_window_expands_and_releases`).
+    ///
+    /// Kept, not deleted: the fixture and the measurement are exactly right and
+    /// this rung turns real the moment the headless component grows live-query
+    /// support. `#[ignore]` per `holon-feature` §1 — a red that is not
+    /// red-for-the-right-reason is never presented as one.
+    ///
+    /// Deliberately NOT asserted here: wall-clock latency. Headless timings do
+    /// not model the GPUI paint path (arm-d measured 236→243ms headless for a
+    /// change that was 16x faster live), so the p95 SLO is the WINDOWED rung's
+    /// job. This rung owns the structural, machine-independent claim.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "increment-0 measurement result: HeadlessBuilderServices does not \
+                support live queries, so per-day content is unobservable here at \
+                any history size — the cost claim belongs to a windowed rung"]
+    async fn journals_feed_cost_is_sublinear_in_history() {
+        const SMALL: usize = 3;
+        const LARGE: usize = 12;
+
+        let (small_listed, small_materialised) = measure_journals_feed(SMALL).await;
+        let (large_listed, large_materialised) = measure_journals_feed(LARGE).await;
+
+        eprintln!(
+            "[journals_feed_cost_is_sublinear_in_history] days={SMALL}: listed={small_listed} \
+             materialised_children={small_materialised} | days={LARGE}: listed={large_listed} \
+             materialised_children={large_materialised}"
+        );
+
+        // VACUITY GUARD: the measurement is meaningless unless both arms
+        // actually listed their full history. A feed that silently dropped days
+        // would "pass" the cost claim by rendering nothing.
+        assert_eq!(
+            (small_listed, large_listed),
+            (SMALL, LARGE),
+            "both arms must list their whole history before cost can be judged \
+             (small={small_listed}/{SMALL}, large={large_listed}/{LARGE})"
+        );
+        // VACUITY GUARD: the small arm must materialise SOMETHING, else
+        // "equal materialisation" is trivially 0 == 0.
+        assert!(
+            small_materialised > 0,
+            "the small arm must materialise day children, else the cost claim is vacuous"
+        );
+
+        // THE CLAIM: content materialisation is bounded by the viewport, not by
+        // history. A view that is lazy in the required sense materialises the
+        // same amount of content whether the vault holds 3 days or 12.
+        assert_eq!(
+            large_materialised, small_materialised,
+            "journals feed materialises day-children proportional to HISTORY \
+             ({large_materialised} children at {LARGE} days vs {small_materialised} at {SMALL}) \
+             — render cost scales linearly with history, which is exactly the \
+             defect increment 2 must fix"
+        );
+    }
+
     /// **dogfood #6 row 34 — RED-first repro pinning the OPEN architecture
     /// bug.**
     ///
@@ -4018,9 +4175,31 @@ entities:
     /// `render_source`) — see docs/Testing/BugFunnel.md row 34. Compare the two
     /// dumps below: DIRECT (`widget_tree_for`) shows the real feed; MAIN-PANEL
     /// (the app path) does not. Remove `#[ignore]` once the delegation lands.
+    /// **Re-measured 2026-08-11 (increment 1). Still RED, still for the reason
+    /// above — and the repair is OUT of this lane's timebox.** Un-ignored run
+    /// (`lane-logs/inc1-RED-r1.log`): the app path lists `block:day-0714`
+    /// BEFORE `block:day-0715` (sort_key order, not `content DESC`), every
+    /// `expand_toggle` reports `expanded=false`, and the tree holds 2 dividers
+    /// against 3 toggles — all three documented symptoms at once, while the
+    /// DIRECT render of the same vault shows `dividers=3 expand_toggles=3`.
+    ///
+    /// Escalated rather than fixed. The feed's ordering, `divider()` and
+    /// `expand_default` all come from `block:journals`' OWN query source
+    /// (`SELECT * FROM journal_feed`) and render source, but the panel compiles
+    /// exactly one query — its static focus-descendants SQL, parameterised
+    /// through `focus_roots` — and returns one change stream for it
+    /// (`block_domain.rs:143-152`). Showing the feed means re-pointing the
+    /// panel's QUERY and its CDC stream at the focus root's own sources per
+    /// navigation. No such delegation exists anywhere today, and it would
+    /// re-point every focused page that owns a `render_source`, not just
+    /// journals — the delivery/navigation architecture change the plan's §8.4
+    /// stop-criterion reserves for its own task.
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "RED on main: journal feed render_source unreachable via focus \
-                navigation — open architecture bug (BugFunnel row 34)"]
+    #[ignore = "RED on main AND re-measured red 2026-08-11: journal feed render_source \
+                unreachable via focus navigation. Fix = focus-root panel delegation \
+                (panel query + CDC stream re-pointed per navigation), which is a \
+                delivery/navigation architecture change — ESCALATED, out of the \
+                journals lane's timebox (plan §8.4). BugFunnel row 34"]
     async fn journal_feed_via_main_panel_focus_shows_feed() {
         use holon_pbt_core::capabilities::CapRegion;
         use holon_pbt_core::capabilities::SutFocusWrite;
