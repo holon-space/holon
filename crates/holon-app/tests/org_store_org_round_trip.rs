@@ -306,3 +306,47 @@ async fn non_alphabetical_drawer_order_survives_the_ingest_leg() {
          byte-identical"
     );
 }
+
+/// `:contributes-to:` and `:REQUIRES:` are the two arc directions of the same
+/// Compass relation (docs/Reference/CompassConventions.md), so they must reach
+/// the store the same way: as typed edges in their junction tables, not as
+/// drawer strings riding along in the properties blob.
+///
+/// A byte-stable round trip does NOT establish this — a property that survives
+/// verbatim renders identically to an edge that was projected. The assertion
+/// therefore reads the typed field, and reads the properties blob to confirm
+/// the key was consumed at the parse boundary rather than duplicated.
+#[tokio::test(flavor = "multi_thread")]
+async fn compass_edges_survive_the_store_as_typed_edges() {
+    const SOURCE: &str = "#+ID: compass-page\n* Reach steady-state ingest\n:PROPERTIES:\n:ID: \
+                          compass-anchor\n:REQUIRES: compass-blocker\n:contributes-to: \
+                          compass-north\n:END:\n";
+
+    let path = Path::new(FILE);
+    let parsed = parse_org_file(path, SOURCE, &EntityUri::no_parent(), Path::new(ROOT))
+        .expect("the fixture must parse");
+    let restored = through_the_store(&parsed.document, &parsed.blocks, WriteLeg::Loro).await;
+
+    let anchor = restored
+        .iter()
+        .find(|b| b.id == EntityUri::block("compass-anchor"))
+        .expect("the anchor block must come back from the store");
+
+    assert_eq!(
+        anchor.requires,
+        vec![EntityUri::block("compass-blocker")],
+        "control: the `requires` edge already projects through the junction"
+    );
+    assert_eq!(
+        anchor.contributes_to,
+        vec![EntityUri::block("compass-north")],
+        "an authored `:contributes-to:` must reach the store as a typed edge, projected to the \
+         block_contributes_to junction — parity with `requires`"
+    );
+    assert!(
+        !anchor.properties.contains_key("contributes-to"),
+        "`contributes-to` must be consumed at the parse boundary, not also kept as a drawer \
+         string: {:?}",
+        anchor.properties
+    );
+}

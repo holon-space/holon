@@ -136,6 +136,7 @@ pub mod block {
     pub const TAGS: &str = "tags";
     pub const REQUIRES: &str = "requires";
     pub const ADVICE_SUPPRESSED: &str = "advice_suppressed";
+    pub const CONTRIBUTES_TO: &str = "contributes_to";
     pub const DEPTH: &str = "depth";
 }
 
@@ -199,6 +200,12 @@ pub const BLOCK: EntitySchema = EntitySchema {
         },
         SchemaField {
             name: block::ADVICE_SUPPRESSED,
+            storage: FieldStorage::EdgeSet,
+            intent: FieldIntent::Unnamed,
+            arc_place: true,
+        },
+        SchemaField {
+            name: block::CONTRIBUTES_TO,
             storage: FieldStorage::EdgeSet,
             intent: FieldIntent::Unnamed,
             arc_place: true,

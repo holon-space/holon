@@ -24,7 +24,6 @@ use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use futures::stream::StreamExt;
 use holon_api::EntityUri;
-use holon_api::Tags;
 use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::live_data::LiveData;
@@ -800,9 +799,7 @@ impl EntityCellRegistry for BlockCellRegistry {
         new_id: &EntityUri,
         content: holon_api::BlockContent,
         properties: &std::collections::HashMap<String, holon_api::Value>,
-        tags: &Tags,
-        requires: &[EntityUri],
-        advice_suppressed: &[EntityUri],
+        edges: &holon_api::BlockEdges,
     ) -> Result<bool> {
         let backend = match &self.backing_source {
             BackingSource::Loro { backend, .. } => backend.clone(),
@@ -887,27 +884,42 @@ impl EntityCellRegistry for BlockCellRegistry {
                     .await
                     .map_err(|e| anyhow!("update_block_position({new_id}) placeholder: {e:#}"))?;
             }
-            if !tags.is_empty() && current.tags != *tags {
+            if !edges.tags.is_empty() && current.tags != edges.tags {
                 backend
-                    .set_block_tags(new_id.id(), &tags.to_vec())
+                    .set_block_tags(new_id.id(), &edges.tags.to_vec())
                     .await
                     .map_err(|e| anyhow!("set_block_tags({new_id}): {e:#}"))?;
             }
-            // Skipped when empty to avoid clobbering deps set elsewhere with an
-            // empty list; otherwise written only when the request differs.
-            if !requires.is_empty() && current.requires.as_slice() != requires {
+            // A non-tag edge set is skipped when empty, so a reconcile cannot
+            // clobber targets set elsewhere; otherwise written only when it
+            // differs. Iterating `EdgeField::ALL` is what keeps a newly added
+            // edge field from being dropped on this path.
+            let mut desired = current.clone();
+            edges.apply_to(&mut desired);
+            for field in holon_api::EdgeField::ALL {
+                if field == holon_api::EdgeField::Tags
+                    || field.is_empty(&desired)
+                    || !field.differs(&current, &desired)
+                {
+                    continue;
+                }
+                let holon_api::Value::Array(targets) = field.param_value(&desired) else {
+                    unreachable!("EdgeField::param_value is always an Array");
+                };
+                let plain: Vec<String> = targets
+                    .iter()
+                    .map(|v| {
+                        v.as_string()
+                            .expect("EdgeField::param_value yields string entries")
+                            .to_string()
+                    })
+                    .collect();
                 backend
-                    .set_block_requires(new_id.id(), requires)
+                    .set_block_edge_field(new_id.id(), field.column(), &plain)
                     .await
-                    .map_err(|e| anyhow!("set_block_requires({new_id}): {e:#}"))?;
-            }
-            if !advice_suppressed.is_empty()
-                && current.advice_suppressed.as_slice() != advice_suppressed
-            {
-                backend
-                    .set_block_advice_suppressed(new_id.id(), advice_suppressed)
-                    .await
-                    .map_err(|e| anyhow!("set_block_advice_suppressed({new_id}): {e:#}"))?;
+                    .map_err(|e| {
+                        anyhow!("set_block_edge_field({new_id}, {}): {e:#}", field.column())
+                    })?;
             }
             return Ok(true);
         }
@@ -918,9 +930,7 @@ impl EntityCellRegistry for BlockCellRegistry {
                 content,
                 Some(new_id.clone()),
                 properties,
-                tags,
-                requires,
-                advice_suppressed,
+                edges,
             )
             .await
             .map_err(|e| anyhow!("create_block({new_id}): {e:#}"))?;
@@ -1010,9 +1020,7 @@ impl BlockCellRegistry {
                         &request.id,
                         request.content.clone(),
                         &request.properties,
-                        &request.tags,
-                        &request.requires,
-                        &request.advice_suppressed,
+                        &request.edges,
                     )
                     .await?;
                 continue;
@@ -1029,9 +1037,7 @@ impl BlockCellRegistry {
                     id: request.id.clone(),
                     content: request.content.clone(),
                     properties: request.properties.clone(),
-                    tags: request.tags.clone(),
-                    requires: request.requires.clone(),
-                    advice_suppressed: request.advice_suppressed.clone(),
+                    edges: request.edges.clone(),
                 },
             ));
         }
@@ -1132,6 +1138,7 @@ impl BlockCellRegistry {
 
 #[cfg(test)]
 mod tests {
+    use holon_api::Tags;
     use holon_core::cell::Cell;
     use holon_core::cell_registry::EntityCellRegistryExt;
 
@@ -1290,9 +1297,7 @@ mod tests {
             &minted,
             holon_api::BlockContent::text(""),
             &std::collections::HashMap::new(),
-            &Tags::default(),
-            &[],
-            &[],
+            &holon_api::BlockEdges::default(),
         ))?;
         assert!(wrote, "a root create must take the Loro route");
 
@@ -1342,9 +1347,7 @@ mod tests {
             &EntityUri::block("new-block"),
             holon_api::BlockContent::text("x"),
             &std::collections::HashMap::new(),
-            &Tags::default(),
-            &[],
-            &[],
+            &holon_api::BlockEdges::default(),
         ))?;
         assert!(
             !wrote,
@@ -1397,9 +1400,10 @@ mod tests {
                 &child,
                 holon_api::BlockContent::text("Journals"),
                 &HashMap::new(),
-                &page_tags,
-                &[],
-                &[],
+                &holon_api::BlockEdges {
+                    tags: page_tags.clone(),
+                    ..Default::default()
+                },
             )
             .await?;
         assert!(wrote, "loro-mode create must persist");
@@ -1413,9 +1417,10 @@ mod tests {
                 &child,
                 holon_api::BlockContent::text("Journals"),
                 &HashMap::new(),
-                &page_tags,
-                &[],
-                &[],
+                &holon_api::BlockEdges {
+                    tags: page_tags.clone(),
+                    ..Default::default()
+                },
             )
             .await?;
         assert!(wrote2, "existing-node reconcile still returns true");
@@ -1435,9 +1440,10 @@ mod tests {
                 &child,
                 holon_api::BlockContent::text("Journals"),
                 &HashMap::new(),
-                &changed_tags,
-                &[],
-                &[],
+                &holon_api::BlockEdges {
+                    tags: changed_tags.clone(),
+                    ..Default::default()
+                },
             )
             .await?;
         assert!(wrote3);
@@ -1474,9 +1480,7 @@ mod tests {
             id: id.clone(),
             content: holon_api::BlockContent::text(id.id()),
             properties: HashMap::new(),
-            tags: Tags::default(),
-            requires: Vec::new(),
-            advice_suppressed: Vec::new(),
+            edges: holon_api::BlockEdges::default(),
         };
 
         let flags = registry
@@ -1547,9 +1551,7 @@ mod tests {
                 &child,
                 holon_api::BlockContent::text("OLD layout"),
                 &HashMap::new(),
-                &Tags::default(),
-                &[],
-                &[],
+                &holon_api::BlockEdges::default(),
             )
             .await?;
         assert!(wrote, "loro-mode create must persist");

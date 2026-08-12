@@ -75,30 +75,12 @@ pub fn build_block_params(
     params.insert("updated_at".into(), Value::Integer(now));
 
     // Edge-typed fields — `SqlOperationProvider`'s edge partition routes these
-    // to the `block_tags`/`block_requires`/`advice_suppressed` junctions (see
-    // schema_modules.rs::edge_fields). Always emit (even when empty) so an
-    // empty Vec correctly clears stale junction rows on update, and so strict
-    // row parsing downstream always sees all three columns.
-    let arr: Vec<Value> = block
-        .tags
-        .iter()
-        .map(|t| Value::String(t.clone()))
-        .collect();
-    params.insert("tags".into(), Value::Array(arr));
-
-    let arr: Vec<Value> = block
-        .requires
-        .iter()
-        .map(|r| Value::String(r.to_string()))
-        .collect();
-    params.insert("requires".into(), Value::Array(arr));
-
-    let arr: Vec<Value> = block
-        .advice_suppressed
-        .iter()
-        .map(|r| Value::String(r.to_string()))
-        .collect();
-    params.insert("advice_suppressed".into(), Value::Array(arr));
+    // to their junction tables (see schema_modules.rs::edge_fields). Emit EVERY
+    // field, even when empty, so an empty Vec clears stale junction rows on
+    // update and strict row parsing downstream always sees the full column set.
+    for field in holon_api::EdgeField::ALL {
+        params.insert(field.column().into(), field.param_value(block));
+    }
 
     if block.content_type == ContentType::Source {
         if let Some(ref lang) = block.source_language {
@@ -209,12 +191,17 @@ pub fn build_block_params(
 }
 
 /// True for the drawer keys `drawer_properties()` emits for org RENDERING that
-/// are really typed edge fields, already carried as `Value::Array` params
-/// (`block_requires` / `advice_suppressed` junctions; ADR 0021). Re-inserting
-/// one as a flat string would pollute `block.properties` with a stray uppercase
-/// key the reference model never has.
+/// are really typed edge fields, already carried as `Value::Array` params.
+/// Re-inserting one as a flat string would pollute `block.properties` with a
+/// stray key the reference model never has.
+///
+/// The drawer spelling and the column name differ (`:contributes-to:` vs
+/// `contributes_to`), so this compares against both.
 fn is_edge_drawer_key(key: &str) -> bool {
-    key.eq_ignore_ascii_case("requires") || key.eq_ignore_ascii_case("advice_suppressed")
+    holon_api::EdgeField::ALL.iter().any(|f| {
+        let column = f.column();
+        key.eq_ignore_ascii_case(column) || key.eq_ignore_ascii_case(&column.replace('_', "-"))
+    })
 }
 
 /// The `block_raw` storage columns, as one set built once.
@@ -507,9 +494,9 @@ mod tests {
             "a dropped drawer key must carry the removal sentinel: {params:?}"
         );
         assert_eq!(
-            params.get("contributes-to").and_then(|v| v.as_string()),
-            Some("m1"),
-            "the key the file now declares must carry its value: {params:?}"
+            params.get("contributes_to"),
+            Some(&Value::Array(vec![Value::String("block:m1".to_string())])),
+            "the edge the file now declares must carry its targets: {params:?}"
         );
         assert_eq!(
             params.get("compass").and_then(|v| v.as_string()),
@@ -654,6 +641,39 @@ mod tests {
         fn make_writer(&'a self) -> Self::Writer {
             self.clone()
         }
+    }
+
+    /// The org-ingest params builder is where the Compass contribution edge
+    /// either reaches its junction or silently degrades into a drawer string in
+    /// the properties blob — invisible to every edge-driven query. Pinned
+    /// against `requires`, the other arc direction of the same relation
+    /// (docs/Reference/CompassConventions.md), so the two cannot drift apart.
+    #[test]
+    fn contributes_to_is_emitted_as_a_typed_edge_not_a_drawer_string() {
+        let parent = EntityUri::no_parent();
+        let current = parse_one(
+            "* Goal\n:PROPERTIES:\n:ID: p0\n:REQUIRES: blk-b\n:contributes-to: m1\n:END:\n",
+        );
+
+        let params = build_block_params(&current, &parent, &parent, None);
+
+        assert_eq!(
+            params.get("requires"),
+            Some(&Value::Array(vec![Value::String(
+                "block:blk-b".to_string()
+            )])),
+            "control: `requires` already routes to its junction: {params:?}"
+        );
+        assert_eq!(
+            params.get("contributes_to"),
+            Some(&Value::Array(vec![Value::String("block:m1".to_string())])),
+            "`contributes-to` must route to the block_contributes_to junction as a typed array: \
+             {params:?}"
+        );
+        assert!(
+            !params.contains_key("contributes-to"),
+            "the drawer spelling must not ALSO land in the properties blob: {params:?}"
+        );
     }
 
     /// Without a `previous` there is no authority over peer keys, so nothing is

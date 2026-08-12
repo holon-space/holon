@@ -63,6 +63,22 @@ pub struct CacheBlockReader {
     block_feed: Option<Arc<holon::sync::LiveData<Block>>>,
 }
 
+/// The `block_raw` projection every [`CacheBlockReader`] read selects: native
+/// columns aliased `b.*`, plus one `json_group_array` subquery per edge field.
+/// `Block::try_from` REQUIRES every edge column, so a read that omits one fails
+/// the whole row rather than yielding a block with a silently empty edge set.
+const HYDRATED_BLOCK_COLUMNS: &str = "b.id, b.parent_id, b.sort_key, b.content, b.content_type, \
+     b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.widget_only, \
+     b.completed, b.block_type, b.created_at, b.updated_at, \
+     COALESCE((SELECT json_group_array(tag) FROM block_tags WHERE block_id = b.id), '[]') AS \
+     tags, \
+     COALESCE((SELECT json_group_array(required_id) FROM block_requires WHERE block_id = b.id), \
+     '[]') AS requires, \
+     COALESCE((SELECT json_group_array(lesson_id) FROM advice_suppressed WHERE anchor_id = \
+     b.id), '[]') AS advice_suppressed, \
+     COALESCE((SELECT json_group_array(target_id) FROM block_contributes_to WHERE block_id = \
+     b.id), '[]') AS contributes_to";
+
 impl CacheBlockReader {
     pub fn new(cache: Arc<QueryableCache<Block>>) -> Self {
         Self {
@@ -141,14 +157,7 @@ impl CacheBlockReader {
     /// `block_raw`); see devlog/2026-05-05-110315.md.
     async fn load_all_blocks_with_hydration(&self) -> anyhow::Result<Vec<Block>> {
         let sql = format!(
-            "SELECT b.id, b.parent_id, b.sort_key, b.content, b.content_type, \
-             b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.widget_only, \
-             b.completed, \
-             b.block_type, b.created_at, b.updated_at, COALESCE((SELECT json_group_array(tag) \
-             FROM block_tags WHERE block_id = b.id), '[]') AS tags, COALESCE((SELECT \
-             json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS \
-             requires, COALESCE((SELECT json_group_array(lesson_id) FROM advice_suppressed WHERE \
-             anchor_id = b.id), '[]') AS advice_suppressed FROM {BLOCK_WRITE_TABLE} b ORDER BY \
+            "SELECT {HYDRATED_BLOCK_COLUMNS} FROM {BLOCK_WRITE_TABLE} b ORDER BY \
              b.sort_key, b.id"
         );
 
@@ -193,14 +202,7 @@ impl BlockReader for CacheBlockReader {
              $doc_id AND bt.block_id IS NULL UNION ALL SELECT b.id, d.depth_acc + 1 FROM {table} \
              b JOIN descendants d ON b.parent_id = d.id LEFT JOIN block_tags bt ON bt.block_id = \
              b.id AND bt.tag = 'Page' WHERE bt.block_id IS NULL AND d.depth_acc < 100 ) SELECT \
-             b.id, b.parent_id, b.sort_key, b.content, b.content_type, \
-             b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.widget_only, \
-             b.completed, \
-             b.block_type, b.created_at, b.updated_at, COALESCE((SELECT json_group_array(tag) \
-             FROM block_tags WHERE block_id = b.id), '[]') AS tags, COALESCE((SELECT \
-             json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS \
-             requires, COALESCE((SELECT json_group_array(lesson_id) FROM advice_suppressed WHERE \
-             anchor_id = b.id), '[]') AS advice_suppressed FROM {table} b JOIN descendants d ON \
+             {HYDRATED_BLOCK_COLUMNS} FROM {table} b JOIN descendants d ON \
              d.id = b.id ORDER BY b.sort_key, b.id",
             table = BLOCK_WRITE_TABLE,
         );
@@ -299,14 +301,7 @@ impl BlockReader for CacheBlockReader {
         // per-edit refresh for the org-writeback incremental cache; it shares
         // `block_raw` authority with the cache's `get_blocks` seed.
         let sql = format!(
-            "SELECT b.id, b.parent_id, b.sort_key, b.content, b.content_type, \
-             b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.widget_only, \
-             b.completed, \
-             b.block_type, b.created_at, b.updated_at, COALESCE((SELECT json_group_array(tag) \
-             FROM block_tags WHERE block_id = b.id), '[]') AS tags, COALESCE((SELECT \
-             json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS \
-             requires, COALESCE((SELECT json_group_array(lesson_id) FROM advice_suppressed WHERE \
-             anchor_id = b.id), '[]') AS advice_suppressed FROM {table} b WHERE b.id = $id",
+            "SELECT {HYDRATED_BLOCK_COLUMNS} FROM {table} b WHERE b.id = $id",
             table = BLOCK_WRITE_TABLE,
         );
 
@@ -552,9 +547,7 @@ impl LiveDocumentManager {
                 &doc.id,
                 doc.to_block_content(),
                 &doc.properties,
-                &doc.tags,
-                &doc.requires,
-                &doc.advice_suppressed,
+                &holon_api::BlockEdges::of(&doc),
             )
             .await
             .map_err(|e| anyhow::anyhow!("insert_page create_in_tree({}): {e:#}", doc.id))?;

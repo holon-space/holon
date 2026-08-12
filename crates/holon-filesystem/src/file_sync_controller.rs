@@ -272,9 +272,7 @@ fn block_create_request(
         id: block.id.clone(),
         content: block.to_block_content(),
         properties: block.properties.clone(),
-        tags: block.tags.clone(),
-        requires: block.requires.clone(),
-        advice_suppressed: block.advice_suppressed.clone(),
+        edges: holon_api::BlockEdges::of(block),
     }
 }
 
@@ -2536,9 +2534,7 @@ impl FileSyncController {
                 &document_uri,
                 holon_api::BlockContent::text(document.content.clone()),
                 &document.properties,
-                &document.tags,
-                &document.requires,
-                &document.advice_suppressed,
+                &holon_api::BlockEdges::of(&document),
             )
             .await
             .map_err(|e| anyhow::anyhow!("create_in_tree(document {document_uri}): {e:#}"))?;

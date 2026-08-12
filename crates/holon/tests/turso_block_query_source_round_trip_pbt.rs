@@ -31,7 +31,6 @@ use holon_api::ContentType;
 use holon_api::EntityName;
 use holon_api::EntityUri;
 use holon_api::SourceBlock;
-use holon_api::Tags;
 use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::repository::Lifecycle;
@@ -178,9 +177,7 @@ async fn seed_loro_backend(
             BlockContent::text("doc"),
             Some(doc_id.clone()),
             &HashMap::new(),
-            &Tags::default(),
-            &[],
-            &[],
+            &holon_api::BlockEdges::default(),
         )
         .await
         .map_err(|e| TestCaseError::fail(format!("loro seed doc root: {e}")))?;
@@ -203,9 +200,7 @@ async fn seed_loro_backend(
                 content,
                 Some(b.id.clone()),
                 &b.properties_map(),
-                &b.tags,
-                &b.requires,
-                &b.advice_suppressed,
+                &holon_api::BlockEdges::of(b),
             )
             .await
             .map_err(|e| TestCaseError::fail(format!("loro seed {}: {e}", b.id)))?;

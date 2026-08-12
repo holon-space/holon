@@ -23,15 +23,16 @@ use holon_api::entity_uri::EntityUri;
 use holon_orgmode::OrgBlockExt;
 
 /// Snapshot SQL for the `block` MATVIEW — the canonical projection that carries
-/// the junction edge fields (`tags`/`requires`/`advice_suppressed`) as
-/// `json_group_array` columns.
+/// the junction edge fields as `json_group_array` columns — one per
+/// [`holon_api::EdgeField`].
 /// Backs the `inv-blocks-match-ref/matview` reader
 /// (`SutBackend::live_block_snapshot`). Centralised here, next to
 /// [`parse_block_row`], so the column list and its parser stay in lockstep and
 /// the SQL isn't duplicated across SUT impls.
 pub(super) const BLOCK_MATVIEW_SNAPSHOT_SQL: &str = "SELECT id, parent_id, content, content_type, \
                                                      source_language, properties, marks, tags, \
-                                                     requires, advice_suppressed FROM block";
+                                                     requires, advice_suppressed, contributes_to \
+                                                     FROM block";
 
 /// Snapshot SQL for the write-side `block_raw` BASE TABLE. Native columns only
 /// — `block_raw` has no junction `tags`/`requires`, so [`parse_block_row`]
@@ -98,54 +99,13 @@ pub(super) fn parse_block_row(row: &holon_core::storage::types::StorageEntity) -
         .unwrap_or_default()
         .into();
 
-    // `requires` (org-edna dependency edge field) is hydrated from the
-    // `block_requires` junction by the matview's json_group_array, exactly like
-    // `tags`. Parse it so the backend mirror carries the edge field for
-    // `inv-backend-blocks-match-ref` comparison.
-    block.requires = row
-        .get("requires")
-        .map(|v| {
-            let raw: Vec<String> = match v {
-                Value::Array(arr) => arr
-                    .iter()
-                    .filter_map(|x| x.as_string().map(|s| s.to_string()))
-                    .collect(),
-                Value::Json(s) | Value::String(s) => {
-                    serde_json::from_str::<Vec<String>>(s).unwrap_or_default()
-                }
-                _ => Vec::new(),
-            };
-            raw.into_iter()
-                .map(|s| EntityUri::parse_owned(s).expect("stored requires must be a valid URI"))
-                .collect::<Vec<EntityUri>>()
-        })
-        .unwrap_or_default();
-
-    // `advice_suppressed` (ADR 0021 dismissal exclusion set) is hydrated from the
-    // `advice_suppressed` junction by the matview's json_group_array, exactly like
-    // `requires`. Parse it so the backend mirror carries the edge field for
-    // `inv-blocks-match-ref/matview` comparison — omitting it silently pinned the
-    // SUT side to `[]` and diverged from any oracle dismissal.
-    block.advice_suppressed = row
-        .get("advice_suppressed")
-        .map(|v| {
-            let raw: Vec<String> = match v {
-                Value::Array(arr) => arr
-                    .iter()
-                    .filter_map(|x| x.as_string().map(|s| s.to_string()))
-                    .collect(),
-                Value::Json(s) | Value::String(s) => {
-                    serde_json::from_str::<Vec<String>>(s).unwrap_or_default()
-                }
-                _ => Vec::new(),
-            };
-            raw.into_iter()
-                .map(|s| {
-                    EntityUri::parse_owned(s).expect("stored advice_suppressed must be a valid URI")
-                })
-                .collect::<Vec<EntityUri>>()
-        })
-        .unwrap_or_default();
+    // The block-referencing edge fields are hydrated from their junctions by the
+    // matview's json_group_array, exactly like `tags`. Omitting one silently
+    // pins the SUT side to `[]`, so `inv-blocks-match-ref/matview` can never
+    // see that edge fail to project.
+    block.requires = edge_targets(row, "requires");
+    block.advice_suppressed = edge_targets(row, "advice_suppressed");
+    block.contributes_to = edge_targets(row, "contributes_to");
 
     // `marks` — inline rich-text marks JSON (dogfood 2026-07-10 link-destruction
     // class): parse it into `block.marks` or the SUT-side observable is
@@ -231,4 +191,28 @@ pub(super) fn parse_block_row(row: &holon_core::storage::types::StorageEntity) -
     }
 
     Some(block)
+}
+
+/// One hydrated edge-field column as typed target URIs. The matview delivers a
+/// `json_group_array`, which reaches here either already decoded
+/// (`Value::Array`) or as its JSON text, depending on the driver path.
+fn edge_targets(row: &holon_core::storage::types::StorageEntity, column: &str) -> Vec<EntityUri> {
+    let Some(v) = row.get(column) else {
+        return Vec::new();
+    };
+    let raw: Vec<String> = match v {
+        Value::Array(arr) => arr
+            .iter()
+            .filter_map(|x| x.as_string().map(|s| s.to_string()))
+            .collect(),
+        Value::Json(s) | Value::String(s) => serde_json::from_str::<Vec<String>>(s)
+            .unwrap_or_else(|e| panic!("block row {column:?} holds invalid JSON {s:?}: {e}")),
+        other => panic!("block row {column:?} must be a JSON array, got {other:?}"),
+    };
+    raw.into_iter()
+        .map(|s| {
+            EntityUri::parse_owned(s)
+                .unwrap_or_else(|e| panic!("stored {column} entry is not a valid URI: {e}"))
+        })
+        .collect()
 }

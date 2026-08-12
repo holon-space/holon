@@ -129,13 +129,8 @@ fn compass_property_key_survival_matrix() {
             "[[id:compass-north][North]]",
         ),
         (
-            "value: org link",
-            "contributes-to",
-            "[[id:compass-north][North]]",
-        ),
-        (
             "value: page link",
-            "contributes-to",
+            "provenance-note",
             "[[Become fundamentally happy and egoless]]",
         ),
         ("value: sentinel", "contributes-to", "none"),
@@ -242,7 +237,7 @@ fn recommended_compass_key_set_is_byte_stable() {
                      compass-north\n:last-reviewed: 2026-08-11\n:leads-to: \
                      compass-north\n:provenance: inferred\n:review-cadence: P30D\n:END:\n** \
                      Support the anchor\n:PROPERTIES:\n:ID: compass-child\n:contributes-to: \
-                     [[Become fundamentally happy and egoless]]\n:last-reviewed: \
+                     compass-anchor\n:last-reviewed: \
                      2026-08-11T09:30:00Z\n:provenance: explicit\n:review-cadence: P7D\n:END:\n";
     let pass1 = write_back(canonical);
     let pass2 = write_back(&pass1);

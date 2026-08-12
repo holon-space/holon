@@ -52,19 +52,17 @@ pub fn build_block_params(
     params.insert("created_at".into(), Value::Integer(created));
     params.insert("updated_at".into(), Value::Integer(now));
 
-    // Edge-typed fields — always emit (empty Vec clears stale junction rows).
-    params.insert(
-        "tags".into(),
-        Value::Array(
-            block
-                .tags
-                .iter()
-                .map(|t| Value::String(t.clone()))
-                .collect(),
-        ),
-    );
-    params.insert("requires".into(), Value::Array(vec![]));
-    params.insert("advice_suppressed".into(), Value::Array(vec![]));
+    // Edge-typed fields, over the closed set so a new one cannot be omitted.
+    // Markdown expresses tags and nothing else, so every block-referencing edge
+    // is emitted EMPTY: the file is authoritative, and an absent syntax means
+    // the edge is gone, not merely unmentioned.
+    for field in holon_api::EdgeField::ALL {
+        let value = match field {
+            holon_api::EdgeField::Tags => field.param_value(block),
+            _ => Value::Array(Vec::new()),
+        };
+        params.insert(field.column().into(), value);
+    }
 
     if let Some(task_state) = block.task_state() {
         params.insert("task_state".into(), Value::String(task_state.to_string()));

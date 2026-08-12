@@ -17,7 +17,7 @@
 //!
 //! - **fields** — [`normalize_block`] + sort-by-id + `==`. `normalize_block`
 //!   zeroes timestamps and strips internal/null/empty properties, so this
-//!   compares content, content_type, parent, properties, tags, requires,
+//!   compares content, content_type, parent, properties, tags, edge fields,
 //!   task_state, source_language — everything *except* sibling order.
 //! - **order** — per-parent sibling order under the renderer's canonical sort
 //!   (source/image before text, then `sequence`, then id).
@@ -281,6 +281,7 @@ fn field_deltas(a: &Block, e: &Block) -> String {
     delta!(tags);
     delta!(requires);
     delta!(advice_suppressed);
+    delta!(contributes_to);
     delta!(content);
     delta!(content_type);
     delta!(source_language);

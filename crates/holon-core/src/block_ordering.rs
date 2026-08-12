@@ -14,7 +14,6 @@
 use async_trait::async_trait;
 use holon_api::BlockContent;
 use holon_api::EntityUri;
-use holon_api::Tags;
 use holon_api::capability::Consolidator;
 
 use crate::traits::Result;
@@ -29,9 +28,7 @@ pub struct BlockCreateRequest {
     pub id: EntityUri,
     pub content: BlockContent,
     pub properties: std::collections::HashMap<String, holon_api::Value>,
-    pub tags: Tags,
-    pub requires: Vec<EntityUri>,
-    pub advice_suppressed: Vec<EntityUri>,
+    pub edges: holon_api::BlockEdges,
 }
 
 /// Provider of positional-intent writes for block aggregates.
@@ -131,9 +128,7 @@ pub trait BlockOrdering: Send + Sync {
         _: &EntityUri,
         _: BlockContent,
         _: &std::collections::HashMap<String, holon_api::Value>,
-        _: &Tags,
-        _: &[EntityUri],
-        _: &[EntityUri],
+        _: &holon_api::BlockEdges,
     ) -> Result<bool> {
         Ok(false)
     }
@@ -157,9 +152,7 @@ pub trait BlockOrdering: Send + Sync {
                     &r.id,
                     r.content.clone(),
                     &r.properties,
-                    &r.tags,
-                    &r.requires,
-                    &r.advice_suppressed,
+                    &r.edges,
                 )
                 .await?,
             );
@@ -483,9 +476,7 @@ mod default_contract_tests {
                     &EntityUri::block("A"),
                     BlockContent::text("x"),
                     &std::collections::HashMap::new(),
-                    &Tags::default(),
-                    &[],
-                    &[],
+                    &holon_api::BlockEdges::default(),
                 )
                 .await
                 .unwrap(),

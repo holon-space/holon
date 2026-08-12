@@ -252,6 +252,30 @@ async fn seed_system_key(engine: &BackendEngine, id: &str, key: &str, value: &st
         .expect("seed system key");
 }
 
+/// The block's projected contribution edges, as stored target ids.
+async fn contributes_to_targets(engine: &BackendEngine, id: &str) -> Vec<String> {
+    engine
+        .db_handle()
+        .query(
+            &format!(
+                "SELECT target_id FROM block_contributes_to WHERE block_id = '{}' ORDER BY \
+                 target_id",
+                id.replace('\'', "''")
+            ),
+            std::collections::HashMap::new(),
+        )
+        .await
+        .expect("read block_contributes_to")
+        .into_iter()
+        .map(|row| {
+            row.get("target_id")
+                .and_then(|v| v.as_string())
+                .expect("target_id is a string")
+                .to_string()
+        })
+        .collect()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn reingest_drops_a_drawer_key_the_file_no_longer_declares() {
     let (engine, sink) = ingest_sink().await;
@@ -275,10 +299,15 @@ async fn reingest_drops_a_drawer_key_the_file_no_longer_declares() {
         !props.contains_key("leads-to"),
         "the file no longer declares `leads-to`, so it must not survive in the store; got {props:?}"
     );
+    assert!(
+        !props.contains_key("contributes-to"),
+        "`contributes-to` is a typed edge, so it must not land in the properties blob; got \
+         {props:?}"
+    );
     assert_eq!(
-        props.get("contributes-to").and_then(|v| v.as_str()),
-        Some("m1"),
-        "the renamed key must be stored; got {props:?}"
+        contributes_to_targets(&engine, &id).await,
+        vec!["block:m1".to_string()],
+        "the renamed key must be stored — as an edge, under its junction"
     );
     assert_eq!(
         props.get("compass").and_then(|v| v.as_str()),

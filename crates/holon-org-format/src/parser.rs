@@ -457,7 +457,7 @@ pub fn parse_org_file_with(
         file_id.id(),
         &mut sequence_counter,
         &mut blocks,
-    );
+    )?;
 
     process_headlines(
         doc.headlines(),
@@ -604,7 +604,7 @@ fn emit_section_children(
     parent_bare: &str,
     sequence_counter: &mut i64,
     output: &mut Vec<Block>,
-) {
+) -> anyhow::Result<()> {
     let now = holon_api::clock::now_millis();
     // Create child Block entities for each source block
     for (src_index, mut source_block) in source_blocks.into_iter().enumerate() {
@@ -689,6 +689,10 @@ fn emit_section_children(
                             }
                         }
                     }
+                } else if k.eq_ignore_ascii_case("contributes-to") {
+                    if let Some(s) = v.as_string() {
+                        src_block.contributes_to = parse_contributes_to(s, src_block.id.as_str())?;
+                    }
                 } else if k.eq_ignore_ascii_case("ADVICE_SUPPRESSED") {
                     if let Some(s) = v.as_string() {
                         src_block.advice_suppressed = s
@@ -740,6 +744,7 @@ fn emit_section_children(
         img_block.updated_at = now;
         output.push(img_block);
     }
+    Ok(())
 }
 
 /// Recursively process headlines and their children
@@ -917,6 +922,13 @@ fn process_headlines(
                         block.requires.push(uri);
                     }
                 }
+            } else if key.eq_ignore_ascii_case("contributes-to") {
+                // `:contributes-to:` is the Compass CONTRIBUTION edge — same
+                // bare-ID grammar as `:REQUIRES:`, routed to the
+                // `block_contributes_to` junction. `none` is the authored
+                // sentinel for "advances nothing"; it names no block, so it
+                // parses to the empty set and the renderer omits the key.
+                block.contributes_to = parse_contributes_to(value, id.as_str())?;
             } else if key.eq_ignore_ascii_case("ADVICE_SUPPRESSED") {
                 // `:ADVICE_SUPPRESSED:` is the authored advice-suppression
                 // exclusion set (ADR 0021): identical bare-ID grammar to
@@ -1003,7 +1015,7 @@ fn process_headlines(
             &id,
             sequence_counter,
             output,
-        );
+        )?;
 
         // Recursively process children
         process_headlines(
@@ -1343,6 +1355,33 @@ fn extract_name_from_block_text(text: &str) -> Option<String> {
     None
 }
 
+/// Parse a `contributes-to` value into edge targets. Bare block IDs, separated
+/// by whitespace or commas; the legacy `none` sentinel means the empty set.
+///
+/// The `[[…]]` link form names no block id and so cannot become an edge — it is
+/// refused by name rather than handed to `EntityUri`, which would panic on it
+/// (docs/Reference/CompassConventions.md). `owner` labels the offending block
+/// in the error.
+fn parse_contributes_to(value: &str, owner: &str) -> anyhow::Result<Vec<EntityUri>> {
+    let mut targets = Vec::new();
+    for slug in value
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("none"))
+    {
+        if slug.contains(['[', ']']) {
+            anyhow::bail!(
+                "block {owner}: :contributes-to: takes bare block IDs, got {slug:?} — the \
+                 `[[…]]` link form names no block id and cannot become an edge \
+                 (docs/Reference/CompassConventions.md)"
+            );
+        }
+        // ALLOW(entity_uri_from_raw): contributes-to bare slug at the org parse
+        // boundary
+        targets.push(EntityUri::from_raw(slug));
+    }
+    Ok(targets)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -1433,6 +1472,32 @@ mod tests {
         assert_eq!(h.task_state(), Some(TaskState::active("TODO")));
         assert_eq!(h.priority(), Some(holon_api::Priority::High));
         assert_eq!(h.tags(), holon_api::Tags::from_csv("work,urgent"));
+    }
+
+    /// Both authoring surfaces for the contribution edge — the headline drawer
+    /// and the source-block header arg — refuse the `[[…]]` link form by name.
+    /// The header-arg branch reached `EntityUri` directly and PANICKED on it,
+    /// which a `Result`-returning parser must never do.
+    #[test]
+    fn contributes_to_refuses_the_link_form_on_both_authoring_surfaces() {
+        let headline = "* Goal\n:PROPERTIES:\n:ID: p0\n:contributes-to: [[Some Page]]\n:END:\n";
+        let src = "#+begin_src prql :id probe-src :contributes-to [[Some Page]]\nfrom                    x\n#+end_src\n";
+
+        for source in [headline, src] {
+            let Err(err) = parse_org_file(
+                std::path::Path::new("/vault/doc.org"),
+                source,
+                &EntityUri::no_parent(),
+                std::path::Path::new("/vault"),
+            ) else {
+                panic!("the link form must be refused, not parsed: {source:?}");
+            };
+            let err = err.to_string();
+            assert!(
+                err.contains("takes bare block IDs") && err.contains("[[Some"),
+                "the refusal must name the offending value: {err}"
+            );
+        }
     }
 
     #[test]

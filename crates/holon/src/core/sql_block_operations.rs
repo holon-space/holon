@@ -27,7 +27,6 @@ use async_trait::async_trait;
 use holon_api::EntityName;
 use holon_api::EntityUri;
 use holon_api::OperationDescriptor;
-use holon_api::Tags;
 use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::capability::Consolidator;
@@ -597,21 +596,10 @@ impl BlockOrdering for SqlBlockOperations {
         new_id: &EntityUri,
         content: holon_api::BlockContent,
         properties: &HashMap<String, Value>,
-        tags: &Tags,
-        requires: &[EntityUri],
-        advice_suppressed: &[EntityUri],
+        edges: &holon_api::BlockEdges,
     ) -> Result<bool> {
         self.cell_registry
-            .create_entity(
-                parent_id,
-                after_id,
-                new_id,
-                content,
-                properties,
-                tags,
-                requires,
-                advice_suppressed,
-            )
+            .create_entity(parent_id, after_id, new_id, content, properties, edges)
             .await
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })
     }

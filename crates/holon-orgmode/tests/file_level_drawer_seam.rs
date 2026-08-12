@@ -88,9 +88,7 @@ impl BlockOrdering for RecordingOrdering {
         id: &EntityUri,
         content: holon_api::BlockContent,
         properties: &HashMap<String, holon_api::Value>,
-        tags: &holon_api::types::Tags,
-        _: &[EntityUri],
-        _: &[EntityUri],
+        edges: &holon_api::BlockEdges,
     ) -> OrderingResult<bool> {
         let mut block = Block::new_text(
             id.clone(),
@@ -98,7 +96,7 @@ impl BlockOrdering for RecordingOrdering {
             content.as_text().unwrap_or(""),
         );
         block.properties = properties.clone();
-        block.tags = tags.clone();
+        edges.apply_to(&mut block);
         self.store.lock().unwrap().insert(id.clone(), block);
         // `false` = "no separate consolidator persisted this" — the same answer
         // the default impl gives. Returning `true` without also wiring a

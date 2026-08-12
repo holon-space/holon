@@ -27,14 +27,19 @@ pub enum EdgeField {
     /// this anchor block has dismissed. Projected to the `advice_suppressed`
     /// junction; serialized as the `:ADVICE_SUPPRESSED:` drawer (ADR 0021).
     AdviceSuppressed,
+    /// Compass contribution edges: the blocks this block advances. Projected to
+    /// the `block_contributes_to` junction; serialized as the
+    /// `:contributes-to:` drawer (docs/Reference/CompassConventions.md).
+    ContributesTo,
 }
 
 impl EdgeField {
     /// Every edge field. Iterate this — never hand-list `tags`/`requires`.
-    pub const ALL: [EdgeField; 3] = [
+    pub const ALL: [EdgeField; 4] = [
         EdgeField::Tags,
         EdgeField::Requires,
         EdgeField::AdviceSuppressed,
+        EdgeField::ContributesTo,
     ];
 
     /// The SQL/params column name (and the key used in flattened params).
@@ -43,6 +48,7 @@ impl EdgeField {
             EdgeField::Tags => "tags",
             EdgeField::Requires => "requires",
             EdgeField::AdviceSuppressed => "advice_suppressed",
+            EdgeField::ContributesTo => "contributes_to",
         }
     }
 
@@ -59,6 +65,7 @@ impl EdgeField {
             EdgeField::Tags => block.tags.is_empty(),
             EdgeField::Requires => block.requires.is_empty(),
             EdgeField::AdviceSuppressed => block.advice_suppressed.is_empty(),
+            EdgeField::ContributesTo => block.contributes_to.is_empty(),
         }
     }
 
@@ -68,6 +75,19 @@ impl EdgeField {
             EdgeField::Tags => a.tags != b.tags,
             EdgeField::Requires => a.requires != b.requires,
             EdgeField::AdviceSuppressed => a.advice_suppressed != b.advice_suppressed,
+            EdgeField::ContributesTo => a.contributes_to != b.contributes_to,
+        }
+    }
+
+    /// This edge field's target ids on `block`, mutably. `None` for
+    /// [`EdgeField::Tags`], whose members are tag strings, not block references
+    /// — so a caller rewriting block ids gets exactly the fields it may touch.
+    pub fn targets_mut(self, block: &mut Block) -> Option<&mut Vec<EntityUri>> {
+        match self {
+            EdgeField::Tags => None,
+            EdgeField::Requires => Some(&mut block.requires),
+            EdgeField::AdviceSuppressed => Some(&mut block.advice_suppressed),
+            EdgeField::ContributesTo => Some(&mut block.contributes_to),
         }
     }
 
@@ -97,7 +117,54 @@ impl EdgeField {
                     .map(|r| Value::String(r.to_string()))
                     .collect(),
             ),
+            EdgeField::ContributesTo => Value::Array(
+                block
+                    .contributes_to
+                    .iter()
+                    .map(|r| Value::String(r.to_string()))
+                    .collect(),
+            ),
         }
+    }
+}
+
+/// A block's edge fields as ONE value. Every create path carries this instead
+/// of one positional argument per field, so adding an edge field is a change
+/// here and at [`EdgeField::ALL`] — never a new parameter threaded through
+/// call sites that would silently default it away.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BlockEdges {
+    pub tags: Tags,
+    pub requires: Vec<EntityUri>,
+    pub advice_suppressed: Vec<EntityUri>,
+    pub contributes_to: Vec<EntityUri>,
+}
+
+impl BlockEdges {
+    /// The edge fields carried by `block`.
+    pub fn of(block: &Block) -> Self {
+        Self {
+            tags: block.tags.clone(),
+            requires: block.requires.clone(),
+            advice_suppressed: block.advice_suppressed.clone(),
+            contributes_to: block.contributes_to.clone(),
+        }
+    }
+
+    /// Overwrite `block`'s edge fields with these.
+    pub fn apply_to(&self, block: &mut Block) {
+        block.tags = self.tags.clone();
+        block.requires = self.requires.clone();
+        block.advice_suppressed = self.advice_suppressed.clone();
+        block.contributes_to = self.contributes_to.clone();
+    }
+
+    /// Whether every edge set is empty.
+    pub fn is_empty(&self) -> bool {
+        self.tags.is_empty()
+            && self.requires.is_empty()
+            && self.advice_suppressed.is_empty()
+            && self.contributes_to.is_empty()
     }
 }
 
@@ -115,6 +182,9 @@ pub enum EdgeFieldUpdate {
     /// `advice_suppressed` junction): the `(anchor, lesson)` pairs this anchor
     /// block has dismissed (ADR 0021).
     AdviceSuppressed(Vec<EntityUri>),
+    /// Replace the block's `contributes_to` contribution edges (the
+    /// `block_contributes_to` junction): the blocks this block advances.
+    ContributesTo(Vec<EntityUri>),
 }
 
 impl EdgeFieldUpdate {
@@ -124,6 +194,7 @@ impl EdgeFieldUpdate {
             EdgeFieldUpdate::Tags(_) => EdgeField::Tags,
             EdgeFieldUpdate::Requires(_) => EdgeField::Requires,
             EdgeFieldUpdate::AdviceSuppressed(_) => EdgeField::AdviceSuppressed,
+            EdgeFieldUpdate::ContributesTo(_) => EdgeField::ContributesTo,
         }
     }
 
@@ -156,10 +227,12 @@ mod mutation_gap_tests {
         assert_eq!(EdgeField::Tags.column(), "tags");
         assert_eq!(EdgeField::Requires.column(), "requires");
         assert_eq!(EdgeField::AdviceSuppressed.column(), "advice_suppressed");
+        assert_eq!(EdgeField::ContributesTo.column(), "contributes_to");
 
         assert!(EdgeField::is_edge_column("tags"));
         assert!(EdgeField::is_edge_column("requires"));
         assert!(EdgeField::is_edge_column("advice_suppressed"));
+        assert!(EdgeField::is_edge_column("contributes_to"));
         assert!(!EdgeField::is_edge_column("content"));
         assert!(!EdgeField::is_edge_column("tag"));
 

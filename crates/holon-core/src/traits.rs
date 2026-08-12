@@ -903,9 +903,7 @@ async fn create_block_via_cells(
             new_id,
             content,
             &std::collections::HashMap::<String, holon_api::Value>::new(),
-            &Tags::default(),
-            &[],
-            &[],
+            &holon_api::BlockEdges::default(),
         )
         .await
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;

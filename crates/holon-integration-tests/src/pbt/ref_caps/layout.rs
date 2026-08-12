@@ -258,6 +258,7 @@ impl RefLayoutMutate for ReferenceState {
             EdgeFieldUpdate::Tags(tags) => block.tags = tags.clone(),
             EdgeFieldUpdate::Requires(reqs) => block.requires = reqs.clone(),
             EdgeFieldUpdate::AdviceSuppressed(reqs) => block.advice_suppressed = reqs.clone(),
+            EdgeFieldUpdate::ContributesTo(reqs) => block.contributes_to = reqs.clone(),
         }
     }
 

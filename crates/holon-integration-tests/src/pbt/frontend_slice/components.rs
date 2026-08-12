@@ -2084,7 +2084,9 @@ impl SutOrgRender for HeadlessFrontendComponent {
              FROM block_tags WHERE block_id = b.id), '[]') AS tags, COALESCE((SELECT \
              json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS \
              requires, COALESCE((SELECT json_group_array(lesson_id) FROM advice_suppressed WHERE \
-             anchor_id = b.id), '[]') AS advice_suppressed FROM block_raw b";
+             anchor_id = b.id), '[]') AS advice_suppressed, COALESCE((SELECT \
+             json_group_array(target_id) FROM block_contributes_to WHERE block_id = b.id), '[]') \
+             AS contributes_to FROM block_raw b";
         let rows = self
             .engine
             .db_handle()
