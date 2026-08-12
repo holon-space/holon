@@ -2511,6 +2511,7 @@ dependencies = [
  "futures-signals",
  "holon-expr",
  "holon-macros",
+ "holon-pattern",
  "once_cell",
  "opentelemetry",
  "regex",
@@ -2608,6 +2609,7 @@ dependencies = [
  "holon-filesystem",
  "holon-macros",
  "holon-oracles",
+ "holon-org-format",
  "memory-stats",
  "premortem",
  "serde",
@@ -2640,6 +2642,7 @@ dependencies = [
  "holon-filesystem",
  "holon-macros",
  "loro",
+ "parking_lot",
  "rand 0.9.4",
  "security-framework",
  "serde",
@@ -2655,6 +2658,7 @@ dependencies = [
 name = "holon-macros"
 version = "0.1.0"
 dependencies = [
+ "holon-pattern",
  "proc-macro2",
  "quote",
  "syn 2.0.118",
@@ -2687,6 +2691,17 @@ dependencies = [
  "sha2 0.10.9",
  "tracing",
  "uuid",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
+name = "holon-pattern"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
  "workspace-hack 0.1.0",
 ]
 

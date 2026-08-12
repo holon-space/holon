@@ -34,7 +34,9 @@ pub fn build(ba: BA) -> AnyView {
                 .unwrap_or_else(|| op.entity_name.to_string());
             let op_name = op.name.clone();
             let session = ba.ctx.session.clone();
-            let handle = ba.ctx.runtime_handle.clone();
+            let spawner: std::sync::Arc<dyn holon_api::spawner::Spawner> = std::sync::Arc::new(
+                holon_api::spawner::TokioSpawner::new(ba.ctx.runtime_handle.clone()),
+            );
             let last_dispatched: Rc<RefCell<String>> = Rc::new(RefCell::new(content));
 
             let mapped: Binding<Str> = Binding::mapping(
@@ -51,7 +53,7 @@ pub fn build(ba: BA) -> AnyView {
                         params.insert("field".into(), Value::String(field.clone()));
                         params.insert("value".into(), Value::String(new_string));
                         holon_frontend::operations::dispatch_operation(
-                            &handle,
+                            &spawner,
                             &session,
                             entity_name.clone(),
                             op_name.clone(),

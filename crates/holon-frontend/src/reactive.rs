@@ -600,6 +600,13 @@ pub trait BuilderServices: Send + Sync {
         Some(self.runtime_handle())
     }
 
+    /// Authority for detached operation dispatch. Defaults to the runtime this
+    /// impl already hands out, so an impl overrides it only to take control of
+    /// when spawned work runs.
+    fn spawner(&self) -> Arc<dyn holon_api::spawner::Spawner> {
+        Arc::new(holon_api::spawner::TokioSpawner::new(self.runtime_handle()))
+    }
+
     /// Enumerate the vault's templates (blocks carrying the `template`
     /// property) for the slash-command picker. Default empty — a stub/headless
     /// service without a block projection offers no templates. The engine impl
