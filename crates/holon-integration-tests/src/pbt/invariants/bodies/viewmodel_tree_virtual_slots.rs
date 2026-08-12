@@ -156,8 +156,8 @@ where
 
         // ── Bug 2: focused page title must use the `page_title` variant ─────
         // The page_title variant is a bare `text` h1; the `default` variant's
-        // fingerprint is a `state_toggle`. Blocks are flattened siblings in the
-        // tree collection, so a focus-root node's subtree is that block's own
+        // fingerprint is a `state_toggle`. Within one collection blocks are
+        // flattened siblings, so a block node's subtree is that block's own
         // rendering — a `state_toggle` in it means the wrong variant fired.
         for focus_root in ref_.focus_root_ids(CapRegion::Main) {
             // The focus-root id occurs MULTIPLE times in the snapshot (left
@@ -170,8 +170,13 @@ where
             // tree root, and no occurrence of it may carry a state_toggle.
             // A snapshot with no occurrence of the id stays a non-failure
             // (same "not rendered here" gate as before).
+            // A `live_block` carries the id of the block it DELEGATES to, and
+            // its subtree is that block's whole render rather than its own row
+            // — so it is a boundary, not an occurrence. The delegated render's
+            // own level-0 row still appears below it and is checked.
             for block_node in root
                 .walk()
+                .filter(|n| n.kind != "live_block")
                 .filter(|n| n.entity_id.as_deref() == Some(focus_root.as_str()))
             {
                 let toggles = block_node

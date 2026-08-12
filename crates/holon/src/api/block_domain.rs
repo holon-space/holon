@@ -19,6 +19,10 @@ const BLOCK_WITH_QUERY_SOURCE_SQL: &str =
 
 pub use holon_api::ROOT_LAYOUT_BLOCK_ID;
 
+/// Bounds the focus-root subtree walk. Blocks nested deeper than this do not
+/// reach the panel; the cycle guard in the same CTE covers malformed parentage.
+const MAX_ROOT_SUBTREE_DEPTH: u32 = 20;
+
 // NOTE (bug 2A): `virtual_parent: true` on a collection render is a SENTINEL
 // meaning "parent new blocks under the query's focus root". This is a
 // query-source block path (`render_entity` → `collection_render_from_profile`),
@@ -92,8 +96,18 @@ impl<'a> BlockDomain<'a> {
         }
 
         let block_info = match self.load_block_with_query_source(block_id).await {
-            Ok(info) => info,
-            Err(_) => return self.render_leaf_block(block_id).await,
+            Ok(info) => Some(info),
+            Err(_) => None,
+        };
+        let Some(block_info) = block_info else {
+            // A block with no query source of its own renders as a bare leaf,
+            // except when a region has navigated to it: then it stands for its
+            // whole subtree and must supply the descendants query itself.
+            return if self.is_focus_root(block_id).await? {
+                self.render_region_root(block_id).await
+            } else {
+                self.render_leaf_block(block_id).await
+            };
         };
 
         // WP3 / C-revised ruling loud guard: a rule's trigger/action blocks are
@@ -520,6 +534,58 @@ impl<'a> BlockDomain<'a> {
         } else {
             Ok(None)
         }
+    }
+
+    /// Whether a region's navigation cursor currently rests on `block_id`.
+    async fn is_focus_root(&self, block_id: &EntityUri) -> Result<bool> {
+        let sql = "SELECT fr.root_id FROM focus_roots fr JOIN navigation_cursor nc ON nc.region = \
+                   fr.region AND nc.history_id = fr.history_id WHERE fr.root_id = $block_id"
+            .to_string();
+        let mut params = HashMap::new();
+        params.insert("block_id".to_string(), Value::String(block_id.to_string()));
+
+        let rows = self
+            .engine
+            .execute_query(sql, params, None)
+            .await
+            .with_context(|| format!("resolving whether {block_id} is a region's focus root"))?;
+
+        Ok(!rows.is_empty())
+    }
+
+    /// Render a focus root that authors no query source: its subtree, through
+    /// the profile's collection view.
+    ///
+    /// The walk descends through plain blocks and stops at `Page` children —
+    /// a page owns a file and renders as its own root, so it contributes one
+    /// row here and no descendants.
+    async fn render_region_root(
+        &self,
+        block_id: &EntityUri,
+    ) -> Result<(RenderExpr, RowChangeStream)> {
+        let sql = format!(
+            "WITH RECURSIVE subtree AS ( \
+               SELECT b.id AS node_id, 0 AS depth, CAST(b.id AS TEXT) AS visited \
+               FROM {table} b WHERE b.id = $block_id \
+               UNION ALL \
+               SELECT child.id, subtree.depth + 1, subtree.visited || ',' || CAST(child.id AS TEXT) \
+               FROM subtree \
+               JOIN {table} child ON child.parent_id = subtree.node_id \
+               LEFT JOIN block_tags pt ON pt.block_id = subtree.node_id AND pt.tag = 'Page' \
+               WHERE subtree.depth < {MAX_ROOT_SUBTREE_DEPTH} \
+                 AND ',' || subtree.visited || ',' NOT LIKE '%,' || CAST(child.id AS TEXT) || ',%' \
+                 AND (subtree.depth = 0 OR pt.block_id IS NULL) \
+             ) \
+             SELECT d.* FROM subtree JOIN {table} d ON d.id = subtree.node_id",
+            table = crate::storage::BLOCK_READ_TABLE,
+        );
+        let mut params = HashMap::new();
+        params.insert("block_id".to_string(), Value::String(block_id.to_string()));
+
+        let change_stream = self.engine.query_and_watch(sql, params, None).await?;
+        let render_expr = self.collection_render_expr(block_id).await?;
+
+        Ok((render_expr, change_stream))
     }
 
     async fn render_leaf_block(

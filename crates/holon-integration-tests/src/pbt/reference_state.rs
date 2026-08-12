@@ -227,6 +227,86 @@ pub fn default_root_render_expr() -> RenderExpr {
     )
 }
 
+/// The delegation node's name in its shadow-builder form. The only production
+/// delegation form is the bare `live_block()`, which reaches the interpreter as
+/// a `FunctionCall` resolving the target from the row's `id` column. The
+/// explicit-target form (`live_block("block:x")`, which parses to
+/// [`RenderExpr::LiveBlock`]) is seeded nowhere, so the ref asserts against it
+/// rather than guessing at a model for it.
+const LIVE_BLOCK_BUILDER: &str = "live_block";
+
+/// Whether `expr` hands its rows to another block's own render via
+/// `live_block()`.
+pub fn contains_live_block(expr: &RenderExpr) -> bool {
+    match expr {
+        RenderExpr::LiveBlock { .. } => {
+            unreachable!(
+                "explicit-target live_block(..) is seeded nowhere; the ref models only bare live_block()"
+            )
+        }
+        RenderExpr::FunctionCall { name, .. } if name == LIVE_BLOCK_BUILDER => true,
+        RenderExpr::FunctionCall { args, .. } => args.iter().any(|a| contains_live_block(&a.value)),
+        RenderExpr::Array { items } => items.iter().any(contains_live_block),
+        RenderExpr::Object { fields } => fields.values().any(contains_live_block),
+        RenderExpr::BinaryOp { left, right, .. } => {
+            contains_live_block(left) || contains_live_block(right)
+        }
+        RenderExpr::ColumnRef { .. } | RenderExpr::Literal { .. } => false,
+    }
+}
+
+/// Replace every `live_block()` delegation node in `expr` with `replacement`,
+/// recursing through the whole render tree.
+///
+/// A `live_block()` template hands each row to that block's own render, which
+/// the ref cannot evaluate — interpreting the raw node yields zero widgets and
+/// makes every block-interaction transition look impossible. The delegate a
+/// focus root without its own query resolves to is the profile collection over
+/// its subtree, so `main_rendered_block_ids` already expands the ROWS to that
+/// subtree; this is the same model applied to the TEMPLATE those rows render
+/// through.
+pub fn substitute_live_block(expr: RenderExpr, replacement: &RenderExpr) -> RenderExpr {
+    use holon_api::render_types::Arg;
+    match expr {
+        RenderExpr::LiveBlock { .. } => {
+            unreachable!(
+                "explicit-target live_block(..) is seeded nowhere; the ref models only bare live_block()"
+            )
+        }
+        RenderExpr::FunctionCall { ref name, .. } if name == LIVE_BLOCK_BUILDER => {
+            replacement.clone()
+        }
+        RenderExpr::FunctionCall { name, args } => RenderExpr::FunctionCall {
+            name,
+            args: args
+                .into_iter()
+                .map(|a| Arg {
+                    name: a.name,
+                    value: substitute_live_block(a.value, replacement),
+                })
+                .collect(),
+        },
+        RenderExpr::Array { items } => RenderExpr::Array {
+            items: items
+                .into_iter()
+                .map(|i| substitute_live_block(i, replacement))
+                .collect(),
+        },
+        RenderExpr::Object { fields } => RenderExpr::Object {
+            fields: fields
+                .into_iter()
+                .map(|(k, v)| (k, substitute_live_block(v, replacement)))
+                .collect(),
+        },
+        RenderExpr::BinaryOp { op, left, right } => RenderExpr::BinaryOp {
+            op,
+            left: Box::new(substitute_live_block(*left, replacement)),
+            right: Box::new(substitute_live_block(*right, replacement)),
+        },
+        other @ (RenderExpr::ColumnRef { .. } | RenderExpr::Literal { .. }) => other,
+    }
+}
+
 /// Backward-compatible string slice for code that still needs raw strings.
 pub fn valid_render_expression_strings() -> Vec<String> {
     valid_render_expressions()
@@ -1002,6 +1082,37 @@ impl ReferenceState {
         self.main_layout_renders_widget(block_id, &["draggable"])
     }
 
+    /// The active main-panel render expression with both indirections prod
+    /// resolves before the frontend ever interprets it substituted away, so the
+    /// oracle's interpreted tree matches the SUT's.
+    ///
+    /// Two nodes stand for a render the raw expression does not contain:
+    /// `collection_view()`, which prod's `render_for_block` swaps for the
+    /// profile-derived collection, and `live_block()`, which hands the row to
+    /// another block's own render. Both resolve to the ref's canonical default
+    /// collection — every visible row renders `render_entity()`, whose block
+    /// profile carries the `state_toggle`, the `editable_text` and the
+    /// `draggable`.
+    pub fn resolved_main_panel_render_expr(&self) -> RenderExpr {
+        let expr = self
+            .main_panel_render_expr()
+            .or_else(|| self.root_render_expr())
+            .cloned()
+            .unwrap_or_else(default_root_render_expr);
+
+        let expr = if holon::api::block_domain::contains_collection_view(&expr) {
+            holon::api::block_domain::substitute_collection_view(expr, &default_root_render_expr())
+        } else {
+            expr
+        };
+
+        if contains_live_block(&expr) {
+            substitute_live_block(expr, &fc("render_entity", vec![]))
+        } else {
+            expr
+        }
+    }
+
     /// Whether the active main-panel layout's item template renders
     /// `block_id`'s row with any of `widgets` (by `widget_name`). Renders
     /// the row through the shadow interpreter (the same
@@ -1012,13 +1123,11 @@ impl ReferenceState {
     fn main_layout_renders_widget(&self, block_id: &EntityUri, widgets: &[&str]) -> bool {
         use holon_frontend::reactive::BuilderServices;
 
-        let Some(expr) = self
-            .main_panel_render_expr()
-            .or_else(|| self.root_render_expr())
-        else {
+        if self.main_panel_render_expr().is_none() && self.root_render_expr().is_none() {
             return false;
-        };
-        let Some(item_template) = holon_frontend::reactive_view_model::extract_item_template(expr)
+        }
+        let expr = self.resolved_main_panel_render_expr();
+        let Some(item_template) = holon_frontend::reactive_view_model::extract_item_template(&expr)
         else {
             return false;
         };
@@ -1033,18 +1142,17 @@ impl ReferenceState {
 
     /// The active main-panel layout query, as a [`TestQuery`].
     ///
-    /// Default layout (no user `index.org`) → the navigation-aware
-    /// [`QuerySource::FocusRootDescendants`] (GQL `focus_root` +
-    /// `CHILD_OF*0..20`). A user `index.org` → the [`QuerySource`]
+    /// Default layout (no user `index.org`) → [`QuerySource::FocusRootOnly`],
+    /// the form `assets/default/index.org` seeds: the panel selects the
+    /// focus-root row alone and delegates its subtree to that root's own
+    /// render via `live_block()`. A user `index.org` → the [`QuerySource`]
     /// recovered from its main-panel query source block (via
     /// [`QuerySource::recognize`]), bound to the layout block as the
     /// navigation-blind `from children` context.
     pub fn active_main_query(&self) -> TestQuery {
         if !self.has_user_index_org() {
-            return TestQuery::layout(QuerySource::FocusRootDescendants {
-                region: "main".to_string(),
-                max_depth: 20,
-                stop_at_pages: false,
+            return TestQuery::layout(QuerySource::FocusRootOnly {
+                region: Region::Main.as_str().to_string(),
             });
         }
         let source = self
@@ -1085,10 +1193,24 @@ impl ReferenceState {
         let query = self.active_main_query();
         let mut focus_roots = std::collections::BTreeMap::new();
         focus_roots.insert("main".to_string(), self.rendered_focus_root(Region::Main));
-        query
+        let mut ids: BTreeSet<EntityUri> = query
             .rendered_block_ids(&self.domain.block_state.blocks, &focus_roots)
             .into_iter()
-            .collect()
+            .collect();
+
+        // A panel whose query selects only the focus-root row delegates the
+        // subtree to that root's own render, so the rendered set is the row
+        // plus what the delegate draws — the same page-stopping walk the
+        // backend synthesizes for a root that authors no query of its own.
+        if let QuerySource::FocusRootOnly { region } = &query.source {
+            let delegated = TestQuery::layout(QuerySource::FocusRootDescendants {
+                region: region.clone(),
+                max_depth: crate::pbt::query::MAIN_PANEL_MAX_DEPTH,
+                stop_at_pages: true,
+            });
+            ids.extend(delegated.rendered_block_ids(&self.domain.block_state.blocks, &focus_roots));
+        }
+        ids
     }
 
     /// Whether the active layout's item template renders blocks interactively —

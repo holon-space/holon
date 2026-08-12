@@ -1,11 +1,11 @@
 //! Language-neutral query representation for PBT testing.
 //!
 //! @pbt kind oracle
-//! @pbt gen `QuerySource` has 5 variants but the file generator only mints 3
-//!   (AllBlocks, DirectChildren, DescendantsOfAny); FocusRootDescendants and
-//!   PageBlocks are seeded by the default layout / start_app only, never by a
-//!   user-authored index.org override — so a layout-override bug specific to
-//!   the focus-root or page-blocks traversal is not reachable via WriteOrgFile
+//! @pbt gen `QuerySource` has 6 variants but the file generator only mints 3
+//!   (AllBlocks, DirectChildren, DescendantsOfAny); FocusRootDescendants,
+//!   FocusRootOnly and PageBlocks are seeded by the default layout / start_app
+//!   only, never by a user-authored index.org override — so a layout-override
+//!   bug specific to those traversals is not reachable via WriteOrgFile
 //! @pbt gen watched-query generator (`generate_test_query`) is fixed: always
 //!   AllBlocks + the same 6 columns + 0..=2 preds drawn from a 4-element
 //!   `generate_predicate` set (Ne/Eq×2/IsNotNull) — no Lt/Gt/Contains, no
@@ -91,6 +91,11 @@ pub enum QuerySource {
         /// not.
         stop_at_pages: bool,
     },
+    /// Navigation-aware: the focus-root row(s) for `region` and nothing else.
+    /// The main panel's form — it delegates the subtree to the focus root's
+    /// own render via `live_block()`, so its own query selects one row per
+    /// open root.
+    FocusRootOnly { region: String },
     /// The production seeded left-sidebar watch from
     /// `assets/default/index.org`: every page block except the
     /// `__default__` seed page. SQL-only — `SELECT b.* FROM block b JOIN
@@ -157,7 +162,7 @@ impl QuerySource {
                 }
             }
             QueryLanguage::HolonSql => {
-                if q.contains("focus_roots") && q.contains("focus_descendants") {
+                if q.contains("focus_roots") {
                     // Canonical prod keys (`Region::as_str()`): a focus SQL
                     // filters `navigation_history.region`, whose values are
                     // exactly what `focus_pin` writes. Default to `Main` when no
@@ -169,10 +174,19 @@ impl QuerySource {
                     } else {
                         Region::Main
                     };
-                    QuerySource::FocusRootDescendants {
-                        region: region.as_str().to_string(),
-                        max_depth: MAIN_PANEL_MAX_DEPTH,
-                        stop_at_pages: true,
+                    // No descendant walk in the SQL means the panel selects the
+                    // root row alone and delegates its subtree to that root's
+                    // own render.
+                    if q.contains("focus_descendants") {
+                        QuerySource::FocusRootDescendants {
+                            region: region.as_str().to_string(),
+                            max_depth: MAIN_PANEL_MAX_DEPTH,
+                            stop_at_pages: true,
+                        }
+                    } else {
+                        QuerySource::FocusRootOnly {
+                            region: region.as_str().to_string(),
+                        }
                     }
                 } else if q.contains("parent_id") && q.contains("content_type") {
                     QuerySource::DirectChildren {
@@ -348,6 +362,9 @@ impl TestQuery {
             QuerySource::DirectChildren { .. } => "from children".to_string(),
             QuerySource::DescendantsOfAny { .. } => "from descendants".to_string(),
             QuerySource::FocusRootDescendants { .. } => "from focused_children".to_string(),
+            QuerySource::FocusRootOnly { .. } => {
+                unreachable!("FocusRootOnly is SQL-only (seeded main-panel query)")
+            }
             QuerySource::PageBlocks => {
                 unreachable!("PageBlocks is SQL-only (seeded sidebar watch)")
             }
@@ -403,7 +420,9 @@ impl TestQuery {
                 ));
                 "block".to_string()
             }
-            QuerySource::DescendantsOfAny { .. } | QuerySource::FocusRootDescendants { .. } => {
+            QuerySource::DescendantsOfAny { .. }
+            | QuerySource::FocusRootDescendants { .. }
+            | QuerySource::FocusRootOnly { .. } => {
                 // These transitive/navigation-aware forms have no flat-SQL
                 // surface in the PBT; only PRQL/GQL emit them. `to_sql` is the
                 // watched-query path (always AllBlocks/DirectChildren).
@@ -476,6 +495,9 @@ impl TestQuery {
                 ),
                 "d",
             ),
+            QuerySource::FocusRootOnly { .. } => {
+                unreachable!("FocusRootOnly is SQL-only (seeded main-panel query)")
+            }
             QuerySource::PageBlocks => {
                 unreachable!("PageBlocks is SQL-only (seeded sidebar watch)")
             }
@@ -560,6 +582,11 @@ impl TestQuery {
                 "MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..{max_depth}]-(d:block) WHERE \
                  fr.region = '{region}' AND root.id = fr.root_id RETURN d"
             ),
+            (QuerySource::FocusRootOnly { region }, _) => format!(
+                "SELECT root.* FROM focus_roots fr JOIN block root ON root.id = fr.root_id JOIN \
+                 navigation_cursor nc ON nc.region = fr.region AND nc.history_id = fr.history_id \
+                 WHERE fr.region = '{region}'"
+            ),
             (QuerySource::PageBlocks, _) => {
                 unreachable!("PageBlocks is a watched query, not a layout query")
             }
@@ -569,6 +596,7 @@ impl TestQuery {
             QuerySource::DescendantsOfAny { .. } | QuerySource::FocusRootDescendants { .. } => {
                 QueryLanguage::HolonGql
             }
+            QuerySource::FocusRootOnly { .. } => QueryLanguage::HolonSql,
             _ => lang,
         };
         (q, effective)
@@ -648,6 +676,13 @@ impl TestQuery {
                         .collect()
                 }
             }
+            QuerySource::FocusRootOnly { region } => focus_roots
+                .get(region)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|id| blocks.contains_key(id))
+                .collect(),
             QuerySource::PageBlocks => {
                 let default_page = EntityUri::block("__default__");
                 blocks
@@ -863,4 +898,91 @@ pub(crate) fn descendant_within_stopping_at_pages(
         current = parent;
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use holon_api::EntityUri;
+    use holon_api::QueryLanguage;
+    use holon_api::Region;
+
+    use super::QuerySource;
+
+    const DEFAULT_INDEX_ORG: &str = include_str!("../../../../assets/default/index.org");
+
+    /// The `holon_sql` body of the `#+BEGIN_SRC holon_sql :id <id>` block.
+    fn seeded_sql(org: &str, id: &str) -> String {
+        let header = format!("#+BEGIN_SRC holon_sql :id {id}");
+        let start = org
+            .find(&header)
+            .unwrap_or_else(|| panic!("{id} holon_sql block missing from the shipped index.org"))
+            + header.len();
+        let body = &org[start..];
+        let end = body
+            .find("#+END_SRC")
+            .unwrap_or_else(|| panic!("{id} holon_sql block is unterminated"));
+        body[..end].trim().to_string()
+    }
+
+    /// **The ref↔asset pin for the main panel's query form.**
+    ///
+    /// `ReferenceState::active_main_query` hardcodes the default layout's
+    /// source instead of reading the org, so a change to the shipped
+    /// `assets/default/index.org` can silently desynchronize the oracle from
+    /// production. This pins both ends against the asset: the SQL the app
+    /// actually seeds must recognize as [`QuerySource::FocusRootOnly`] — the
+    /// row-only form that delegates its subtree through `live_block()` —
+    /// and NOT as the descendant-walking form the panel used to run.
+    ///
+    /// @pbt kind harness
+    /// @pbt covers main-panel-query-form — the oracle's model of the default
+    /// main panel must match the query the shipped index.org seeds.
+    #[test]
+    fn seeded_main_panel_sql_recognizes_as_focus_root_only() {
+        let sql = seeded_sql(DEFAULT_INDEX_ORG, "default-main-panel::src::0");
+        assert!(
+            sql.contains("focus_roots") && !sql.contains("focus_descendants"),
+            "the shipped main-panel SQL must select the focus-root row alone \
+             and delegate the subtree via live_block(): {sql}"
+        );
+
+        let recognized = QuerySource::recognize(
+            &sql,
+            QueryLanguage::HolonSql,
+            &EntityUri::block("default-main-panel"),
+        );
+        assert_eq!(
+            recognized,
+            QuerySource::FocusRootOnly {
+                region: Region::Main.as_str().to_string(),
+            },
+            "shipped main-panel SQL recognized as the wrong source form: {sql}"
+        );
+    }
+
+    /// The sibling pin: the descendant-walking form must still recognize as
+    /// [`QuerySource::FocusRootDescendants`], so the split in `recognize`
+    /// discriminates on the `focus_descendants` CTE rather than collapsing
+    /// both forms onto whichever arm was written last.
+    ///
+    /// @pbt kind harness
+    /// @pbt covers main-panel-query-form
+    #[test]
+    fn focus_descendant_sql_still_recognizes_as_descendants() {
+        let sql = "WITH RECURSIVE focus_descendants AS (SELECT b.id FROM block b JOIN \
+                   focus_roots fr ON b.id = fr.root_id) SELECT d.* FROM focus_roots fr JOIN \
+                   focus_descendants d ON 1 = 1 WHERE fr.region = 'main'";
+        assert_eq!(
+            QuerySource::recognize(
+                sql,
+                QueryLanguage::HolonSql,
+                &EntityUri::block("default-main-panel"),
+            ),
+            QuerySource::FocusRootDescendants {
+                region: Region::Main.as_str().to_string(),
+                max_depth: super::MAIN_PANEL_MAX_DEPTH,
+                stop_at_pages: true,
+            },
+        );
+    }
 }

@@ -20,27 +20,12 @@ SELECT b.* FROM block b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = 
 :WIDGET_ONLY: t
 :END:
 #+BEGIN_SRC render :id default-main-panel::render::0
-column(collection_view(), divider(), accordion(#{title: "Linked references", icon: "link", max_height_fraction: 0.33}, live_query(#{sql: "SELECT bl.* FROM backlinks bl JOIN focus_roots fr ON bl.target_id = fr.root_id JOIN navigation_cursor nc ON nc.region = fr.region AND nc.history_id = fr.history_id WHERE fr.region = 'main' ORDER BY bl.content ASC", item_template: selectable(row(icon("orgmode"), spacer(6), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})})))
+column(columns(#{item_template: live_block()}), divider(), accordion(#{title: "Linked references", icon: "link", max_height_fraction: 0.33}, live_query(#{sql: "SELECT bl.* FROM backlinks bl JOIN focus_roots fr ON bl.target_id = fr.root_id JOIN navigation_cursor nc ON nc.region = fr.region AND nc.history_id = fr.history_id WHERE fr.region = 'main' ORDER BY bl.content ASC", item_template: selectable(row(icon("orgmode"), spacer(6), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})})))
 #+END_SRC
 #+BEGIN_SRC holon_sql :id default-main-panel::src::0
-WITH RECURSIVE focus_descendants AS (
-  SELECT b.id AS node_id, b.id AS source_id, 0 AS depth, CAST(b.id AS TEXT) AS visited
-  FROM block b
-  JOIN focus_roots fr ON b.id = fr.root_id
-  UNION ALL
-  SELECT child.id, focus_descendants.source_id, focus_descendants.depth + 1, focus_descendants.visited || ',' || CAST(child.id AS TEXT)
-  FROM focus_descendants
-  JOIN block child ON child.parent_id = focus_descendants.node_id
-  LEFT JOIN block_tags pt ON pt.block_id = focus_descendants.node_id AND pt.tag = 'Page'
-  WHERE focus_descendants.depth < 20
-    AND ',' || focus_descendants.visited || ',' NOT LIKE '%,' || CAST(child.id AS TEXT) || ',%'
-    AND (focus_descendants.depth = 0 OR pt.block_id IS NULL)
-)
-SELECT d.*
+SELECT root.*
 FROM focus_roots fr
 JOIN block root ON root.id = fr.root_id
-JOIN focus_descendants ON focus_descendants.source_id = root.id
-JOIN block d ON d.id = focus_descendants.node_id
 JOIN navigation_cursor nc ON nc.region = fr.region AND nc.history_id = fr.history_id
 WHERE fr.region = 'main'
 #+END_SRC

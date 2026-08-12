@@ -3656,11 +3656,19 @@ entities:
         }
     }
 
-    /// Shared fixture for the embedded-page tests: boots a `Journals.org` shell
-    /// with a non-seed Page heading (`test-date-page`) and a child note
+    /// Shared fixture for the embedded-page tests: boots a `structural-page`
+    /// shell with a non-seed Page heading (`test-date-page`) and a child note
     /// (`test-date-child`) under it, registers the frontend caps, and focuses
-    /// the main panel on `block:journals` so the date page renders embedded.
-    /// Returns `(comp, caps, journals, date_page, child)`.
+    /// the main panel on the container so the date page renders embedded.
+    /// Returns `(comp, caps, container, date_page, child)`.
+    ///
+    /// The container is deliberately a PLAIN page, not `block:journals`: the
+    /// journals page authors its own feed render, which expands every day
+    /// entry by contract, so it cannot witness the collapsed-lazy default.
+    /// Journals-topology embedding is covered instead by
+    /// [`journal_feed_via_main_panel_focus_shows_feed`], which asserts the
+    /// opposite (expanded, newest-first, divider-separated) contract under
+    /// the real `block:journals` page.
     async fn setup_embedded_page_sut() -> (
         Arc<HeadlessFrontendComponent>,
         CapMap,
@@ -3671,8 +3679,8 @@ entities:
         use holon_pbt_core::capabilities::CapRegion;
         use holon_pbt_core::capabilities::SutFocusWrite;
 
-        let journals_org = concat!(
-            "#+ID: journals\n",
+        const STRUCTURAL_PAGE_ORG: &str = concat!(
+            "#+ID: structural-page\n",
             "* 2026-07-14 :Page:\n",
             ":PROPERTIES:\n",
             ":ID: test-date-page\n",
@@ -3684,14 +3692,10 @@ entities:
             ":END:\n",
             "This child should be lazy-loaded.\n",
         );
-        const STRUCTURAL_PAGE_ORG: &str = "#+ID: structural-page\n";
 
         let comp = Arc::new(
             HeadlessFrontendComponent::new(
-                &[
-                    ("Journals.org", journals_org),
-                    ("structural-page.org", STRUCTURAL_PAGE_ORG),
-                ],
+                &[("structural-page.org", STRUCTURAL_PAGE_ORG)],
                 Duration::from_millis(600),
             )
             .await,
@@ -3703,30 +3707,28 @@ entities:
         caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
         tokio::time::sleep(SETTLE).await;
 
-        let journals = holon_api::EntityUri::parse("block:journals").expect("journals id");
+        let container = holon_api::EntityUri::block("structural-page");
         let date_page = holon_api::EntityUri::block("test-date-page");
         let child = holon_api::EntityUri::block("test-date-child");
 
-        // Navigate the SUT focus to journals so the date page appears in the
-        // main panel.
-        comp.apply_navigate_focus(CapRegion::Main, &journals).await;
+        comp.apply_navigate_focus(CapRegion::Main, &container).await;
         tokio::time::sleep(SETTLE).await;
 
-        (comp, caps, journals, date_page, child)
+        (comp, caps, container, date_page, child)
     }
 
     /// The ref-model oracle matching [`setup_embedded_page_sut`]: seeds
-    /// structural-page, models `test-date-page` as a non-seed page child of
-    /// journals with `test-date-child` under it, and focuses Main on journals.
+    /// structural-page, models `test-date-page` as a non-seed page child of it
+    /// with `test-date-child` under that, and focuses Main on the container.
     fn embedded_page_ref(
-        journals: &EntityUri,
+        container: &EntityUri,
         date_page: &EntityUri,
         child: &EntityUri,
     ) -> ReferenceState {
         use holon_pbt_core::capabilities::RefNavHistoryMut;
 
         let mut oracle = structural_ref();
-        let mut date_block = Block::new_text(date_page.clone(), journals.clone(), "2026-07-14");
+        let mut date_block = Block::new_text(date_page.clone(), container.clone(), "2026-07-14");
         date_block.set_page(true);
         oracle
             .domain
@@ -3749,17 +3751,18 @@ entities:
             .block_state
             .block_documents
             .insert(child.clone(), date_page.clone());
-        oracle.nav_focus(holon_api::Region::Main, journals);
+        oracle.nav_focus(holon_api::Region::Main, container);
         oracle
     }
 
     /// **Phase A GREEN (enforced): embedded page renders collapsed + lazy.**
     ///
-    /// Boots the embedded-page topology, focuses Main on `block:journals`, then
-    /// runs `inv-embedded-page-collapsed-lazy`. Both display prongs pass: (a)
-    /// the `embedded_page` profile variant wraps the page in a collapsed
-    /// `expand_toggle`, and (b) the holon_sql recursive CTE stops at non-root
-    /// page boundaries so no descendants leak into the widget tree snapshot.
+    /// Boots the embedded-page topology, focuses Main on the container page,
+    /// then runs `inv-embedded-page-collapsed-lazy`. Both display prongs pass:
+    /// (a) the `embedded_page` profile variant wraps the page in a
+    /// collapsed `expand_toggle`, and (b) the holon_sql recursive CTE stops
+    /// at non-root page boundaries so no descendants leak into the widget
+    /// tree snapshot.
     ///
     /// The expand half (drive `set_block_expanded`, assert the SUT toggle
     /// reports expanded + children load) lives in the separate,
@@ -3771,12 +3774,12 @@ entities:
 
         use crate::pbt::composed::invariants::embedded_page_collapsed_lazy;
 
-        let (_comp, caps, journals, date_page, child) = setup_embedded_page_sut().await;
+        let (_comp, caps, container, date_page, child) = setup_embedded_page_sut().await;
 
         let registry: Vec<Box<dyn CapInvariant>> = vec![embedded_page_collapsed_lazy::wire()];
 
         let resolved_a = {
-            let oracle = embedded_page_ref(&journals, &date_page, &child);
+            let oracle = embedded_page_ref(&container, &date_page, &child);
             let resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
             drop_ref_off_thread(oracle);
             resolved
@@ -3819,7 +3822,7 @@ entities:
 
         use crate::pbt::composed::invariants::embedded_page_collapsed_lazy;
 
-        let (comp, caps, journals, date_page, child) = setup_embedded_page_sut().await;
+        let (comp, caps, container, date_page, child) = setup_embedded_page_sut().await;
 
         let registry: Vec<Box<dyn CapInvariant>> = vec![embedded_page_collapsed_lazy::wire()];
 
@@ -3831,7 +3834,7 @@ entities:
         tokio::time::sleep(Duration::from_millis(3000)).await;
 
         let resolved_b = {
-            let mut oracle = embedded_page_ref(&journals, &date_page, &child);
+            let mut oracle = embedded_page_ref(&container, &date_page, &child);
             oracle.set_expanded_view_local(&date_page, true);
             let resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
             drop_ref_off_thread(oracle);
@@ -4195,11 +4198,6 @@ entities:
     /// journals — the delivery/navigation architecture change the plan's §8.4
     /// stop-criterion reserves for its own task.
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "RED on main AND re-measured red 2026-08-11: journal feed render_source \
-                unreachable via focus navigation. Fix = focus-root panel delegation \
-                (panel query + CDC stream re-pointed per navigation), which is a \
-                delivery/navigation architecture change — ESCALATED, out of the \
-                journals lane's timebox (plan §8.4). BugFunnel row 34"]
     async fn journal_feed_via_main_panel_focus_shows_feed() {
         use holon_pbt_core::capabilities::CapRegion;
         use holon_pbt_core::capabilities::SutFocusWrite;
@@ -4257,9 +4255,19 @@ entities:
             feed.collect_by_kind("expand_toggle").len(),
         );
 
+        // Scoped to the panel's delegated subtree, not the whole window: the
+        // panel's own chrome divider and the sidebar's would otherwise be
+        // counted as feed separators.
+        let delegated = root
+            .walk()
+            .find(|n| n.kind == "live_block" && n.entity_id.as_deref() == Some("block:journals"))
+            .unwrap_or_else(|| {
+                panic!("main panel must delegate to block:journals via live_block: {root:#?}")
+            });
+
         // The app's focus path MUST show the journals feed: default-expanded
-        // embedded pages, newest-first, divider-separated. These fail today.
-        let toggles = root.collect_by_kind("expand_toggle");
+        // embedded pages, newest-first, divider-separated.
+        let toggles = delegated.collect_by_kind("expand_toggle");
         let pos = |id: &str| {
             toggles
                 .iter()
@@ -4277,7 +4285,7 @@ entities:
             );
         }
         assert_eq!(
-            root.collect_by_kind("divider").len(),
+            delegated.collect_by_kind("divider").len(),
             toggles.len(),
             "one divider() per feed entry in the main panel: {root:#?}"
         );
