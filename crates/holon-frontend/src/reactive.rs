@@ -39,6 +39,7 @@ use holon_api::render_types::RenderExpr;
 use holon_api::streaming::UiEvent;
 use holon_api::widget_spec::DataRow;
 use holon_api::widget_spec::EnrichedRow;
+use tracing::Instrument;
 
 use crate::FrontendSession;
 use crate::WidgetState;
@@ -3604,47 +3605,51 @@ impl BuilderServices for ReactiveEngine {
                 ),
             );
         }
-        self.runtime_handle.spawn(async move {
-            match session
-                .execute_operation(&entity_name, &op_name, params)
-                .await
-            {
-                Ok(response) => {
-                    apply_structural_focus(
-                        &focused_block,
-                        &caret_seed,
-                        &op_name,
-                        &response.response,
-                    );
-                    // The delete succeeded: now it is safe to drop focus from the
-                    // gone block (a refused delete never reaches this arm).
-                    if let Some(target) = &clear_focus_target {
-                        clear_focus_after_delete(&focused_block, target);
+        let dispatch_span = interaction_span(entity_name.as_str(), &op_name);
+        self.runtime_handle.spawn(
+            async move {
+                match session
+                    .execute_operation(&entity_name, &op_name, params)
+                    .await
+                {
+                    Ok(response) => {
+                        apply_structural_focus(
+                            &focused_block,
+                            &caret_seed,
+                            &op_name,
+                            &response.response,
+                        );
+                        // The delete succeeded: now it is safe to drop focus from the
+                        // gone block (a refused delete never reaches this arm).
+                        if let Some(target) = &clear_focus_target {
+                            clear_focus_after_delete(&focused_block, target);
+                        }
+                        journal.settle(journal_seq, Ok(()));
                     }
-                    journal.settle(journal_seq, Ok(()));
-                }
-                Err(e) => {
-                    journal.settle(journal_seq, Err(format!("{e:#}")));
-                    // A refused/failed op writes nothing: retire its latency
-                    // entry so no later unrelated delivery for the row closes
-                    // it as a phantom sample.
-                    if let Some(target) = &latency_target {
-                        holon_api::latency_e2e::interaction_failed(&op_name, target);
+                    Err(e) => {
+                        journal.settle(journal_seq, Err(format!("{e:#}")));
+                        // A refused/failed op writes nothing: retire its latency
+                        // entry so no later unrelated delivery for the row closes
+                        // it as a phantom sample.
+                        if let Some(target) = &latency_target {
+                            holon_api::latency_e2e::interaction_failed(&op_name, target);
+                        }
+                        // Disclose the failed write: the UI already reflects the
+                        // user's gesture, so a dropped error would silently look
+                        // like success. Records + logs (PBT/monitoring seam) AND
+                        // routes the verbatim message to a CommandFailed toast.
+                        surface_op_failure(
+                            session.error_tracker(),
+                            &op_failure_sink,
+                            entity_name.as_str(),
+                            &op_name,
+                            &e,
+                        );
                     }
-                    // Disclose the failed write: the UI already reflects the
-                    // user's gesture, so a dropped error would silently look
-                    // like success. Records + logs (PBT/monitoring seam) AND
-                    // routes the verbatim message to a CommandFailed toast.
-                    surface_op_failure(
-                        session.error_tracker(),
-                        &op_failure_sink,
-                        entity_name.as_str(),
-                        &op_name,
-                        &e,
-                    );
                 }
             }
-        });
+            .instrument(dispatch_span),
+        );
     }
 
     fn present_op(
@@ -3711,78 +3716,82 @@ impl BuilderServices for ReactiveEngine {
 
         let session = self.session.clone();
         let (focused_block, caret_seed) = self.ui_state.focus_handles();
-        Box::pin(async move {
-            // Latency stage (dispatch->op-applied): a user action enters the
-            // pipeline here. `block` is the entity the op targets; `action` the
-            // op name (split_block, indent, outdent, cycle_state, ...). The push
-            // pipeline (Loro commit -> projection -> CDC rows) runs downstream and
-            // is measured by the `projection`/`rows` stages. Greppable via
-            // target="holon_latency".
-            let block = intent
-                .params
-                .get("id")
-                .and_then(|v| v.as_string())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| intent.entity_name.as_str().to_string());
-            // End-to-end latency: start the interaction clock here;
-            // `holon_api::latency_e2e` closes it when the target's row lands
-            // in a LiveData mirror (stage="e2e").
-            let latency_target = intent
-                .params
-                .get("id")
-                .and_then(|v| v.as_string())
-                .map(String::from);
-            if let Some(target) = &latency_target {
-                holon_api::latency_e2e::interaction_dispatched(
-                    &intent.op_name,
-                    target,
-                    holon_api::latency_e2e::Observable::BlockRow(
-                        holon_api::latency_e2e::write_seq_from_params(&intent.params),
-                    ),
-                );
-            }
-            let t_dispatch = std::time::Instant::now();
-            let outcome = session
-                .execute_operation(&intent.entity_name, &intent.op_name, intent.params)
-                .await;
-            match &outcome {
-                Ok(_) => journal.settle(journal_seq, Ok(())),
-                Err(e) => {
-                    journal.settle(journal_seq, Err(format!("{e:#}")));
-                    // A refused/failed op writes nothing: retire its latency
-                    // entry so no later unrelated delivery for the row closes
-                    // it as a phantom sample.
-                    if let Some(target) = &latency_target {
-                        holon_api::latency_e2e::interaction_failed(&intent.op_name, target);
+        let dispatch_span = interaction_span(intent.entity_name.as_str(), &intent.op_name);
+        Box::pin(
+            async move {
+                // Latency stage (dispatch->op-applied): a user action enters the
+                // pipeline here. `block` is the entity the op targets; `action` the
+                // op name (split_block, indent, outdent, cycle_state, ...). The push
+                // pipeline (Loro commit -> projection -> CDC rows) runs downstream and
+                // is measured by the `projection`/`rows` stages. Greppable via
+                // target="holon_latency".
+                let block = intent
+                    .params
+                    .get("id")
+                    .and_then(|v| v.as_string())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| intent.entity_name.as_str().to_string());
+                // End-to-end latency: start the interaction clock here;
+                // `holon_api::latency_e2e` closes it when the target's row lands
+                // in a LiveData mirror (stage="e2e").
+                let latency_target = intent
+                    .params
+                    .get("id")
+                    .and_then(|v| v.as_string())
+                    .map(String::from);
+                if let Some(target) = &latency_target {
+                    holon_api::latency_e2e::interaction_dispatched(
+                        &intent.op_name,
+                        target,
+                        holon_api::latency_e2e::Observable::BlockRow(
+                            holon_api::latency_e2e::write_seq_from_params(&intent.params),
+                        ),
+                    );
+                }
+                let t_dispatch = std::time::Instant::now();
+                let outcome = session
+                    .execute_operation(&intent.entity_name, &intent.op_name, intent.params)
+                    .await;
+                match &outcome {
+                    Ok(_) => journal.settle(journal_seq, Ok(())),
+                    Err(e) => {
+                        journal.settle(journal_seq, Err(format!("{e:#}")));
+                        // A refused/failed op writes nothing: retire its latency
+                        // entry so no later unrelated delivery for the row closes
+                        // it as a phantom sample.
+                        if let Some(target) = &latency_target {
+                            holon_api::latency_e2e::interaction_failed(&intent.op_name, target);
+                        }
                     }
                 }
+                let response = outcome.with_context(|| {
+                    format!(
+                        "dispatch_intent_sync: {}.{} failed",
+                        intent.entity_name, intent.op_name
+                    )
+                })?;
+                tracing::info!(
+                    target: "holon_latency",
+                    stage = "dispatch",
+                    action = %intent.op_name,
+                    block = %block,
+                    ms = t_dispatch.elapsed().as_millis() as u64,
+                    "holon_latency",
+                );
+                // Same in-process structural-focus projection as `dispatch_intent`.
+                apply_structural_focus(
+                    &focused_block,
+                    &caret_seed,
+                    &intent.op_name,
+                    &response.response,
+                );
+                if let Some(target) = &clear_focus_target {
+                    clear_focus_after_delete(&focused_block, target);
+                }
+                Ok(())
             }
-            let response = outcome.with_context(|| {
-                format!(
-                    "dispatch_intent_sync: {}.{} failed",
-                    intent.entity_name, intent.op_name
-                )
-            })?;
-            tracing::info!(
-                target: "holon_latency",
-                stage = "dispatch",
-                action = %intent.op_name,
-                block = %block,
-                ms = t_dispatch.elapsed().as_millis() as u64,
-                "holon_latency",
-            );
-            // Same in-process structural-focus projection as `dispatch_intent`.
-            apply_structural_focus(
-                &focused_block,
-                &caret_seed,
-                &intent.op_name,
-                &response.response,
-            );
-            if let Some(target) = &clear_focus_target {
-                clear_focus_after_delete(&focused_block, target);
-            }
-            Ok(())
-        })
+            .instrument(dispatch_span),
+        )
     }
 
     fn dispatch_intent_awaitable(
@@ -3815,40 +3824,46 @@ impl BuilderServices for ReactiveEngine {
                 ),
             );
         }
-        Box::pin(async move {
-            match session
-                .execute_operation(&entity_name, &op_name, params)
-                .await
-            {
-                Ok(response) => {
-                    apply_structural_focus(
-                        &focused_block,
-                        &caret_seed,
-                        &op_name,
-                        &response.response,
-                    );
-                    if let Some(target) = &clear_focus_target {
-                        clear_focus_after_delete(&focused_block, target);
+        let dispatch_span = interaction_span(entity_name.as_str(), &op_name);
+        Box::pin(
+            async move {
+                match session
+                    .execute_operation(&entity_name, &op_name, params)
+                    .await
+                {
+                    Ok(response) => {
+                        apply_structural_focus(
+                            &focused_block,
+                            &caret_seed,
+                            &op_name,
+                            &response.response,
+                        );
+                        if let Some(target) = &clear_focus_target {
+                            clear_focus_after_delete(&focused_block, target);
+                        }
+                        journal.settle(journal_seq, Ok(()));
+                        Ok(response.delivery)
                     }
-                    journal.settle(journal_seq, Ok(()));
-                    Ok(response.delivery)
-                }
-                Err(e) => {
-                    journal.settle(journal_seq, Err(format!("{e:#}")));
-                    // A refused/failed op writes nothing: retire its latency
-                    // entry so no later unrelated delivery for the row closes
-                    // it as a phantom sample.
-                    if let Some(target) = &latency_target {
-                        holon_api::latency_e2e::interaction_failed(&op_name, target);
+                    Err(e) => {
+                        journal.settle(journal_seq, Err(format!("{e:#}")));
+                        // A refused/failed op writes nothing: retire its latency
+                        // entry so no later unrelated delivery for the row closes
+                        // it as a phantom sample.
+                        if let Some(target) = &latency_target {
+                            holon_api::latency_e2e::interaction_failed(&op_name, target);
+                        }
+                        // Disclose the failed write (same seam as `dispatch_intent`);
+                        // the caller ALSO surfaces it as a visible toast.
+                        session.error_tracker().record_error();
+                        tracing::error!(
+                            "dispatch_intent_awaitable: {entity_name}.{op_name}: {e:#}"
+                        );
+                        Err(e)
                     }
-                    // Disclose the failed write (same seam as `dispatch_intent`);
-                    // the caller ALSO surfaces it as a visible toast.
-                    session.error_tracker().record_error();
-                    tracing::error!("dispatch_intent_awaitable: {entity_name}.{op_name}: {e:#}");
-                    Err(e)
                 }
             }
-        })
+            .instrument(dispatch_span),
+        )
     }
 
     fn dispatch_intent_awaiting_result(
@@ -3878,34 +3893,38 @@ impl BuilderServices for ReactiveEngine {
                 ),
             );
         }
-        Box::pin(async move {
-            match session
-                .execute_operation(&entity_name, &op_name, params)
-                .await
-            {
-                Ok(outcome) => {
-                    apply_structural_focus(
-                        &focused_block,
-                        &caret_seed,
-                        &op_name,
-                        &outcome.response,
-                    );
-                    journal.settle(journal_seq, Ok(()));
-                    Ok(outcome.response)
-                }
-                Err(e) => {
-                    journal.settle(journal_seq, Err(format!("{e:#}")));
-                    if let Some(target) = &latency_target {
-                        holon_api::latency_e2e::interaction_failed(&op_name, target);
+        let dispatch_span = interaction_span(entity_name.as_str(), &op_name);
+        Box::pin(
+            async move {
+                match session
+                    .execute_operation(&entity_name, &op_name, params)
+                    .await
+                {
+                    Ok(outcome) => {
+                        apply_structural_focus(
+                            &focused_block,
+                            &caret_seed,
+                            &op_name,
+                            &outcome.response,
+                        );
+                        journal.settle(journal_seq, Ok(()));
+                        Ok(outcome.response)
                     }
-                    session.error_tracker().record_error();
-                    tracing::error!(
-                        "dispatch_intent_awaiting_result: {entity_name}.{op_name}: {e:#}"
-                    );
-                    Err(e)
+                    Err(e) => {
+                        journal.settle(journal_seq, Err(format!("{e:#}")));
+                        if let Some(target) = &latency_target {
+                            holon_api::latency_e2e::interaction_failed(&op_name, target);
+                        }
+                        session.error_tracker().record_error();
+                        tracing::error!(
+                            "dispatch_intent_awaiting_result: {entity_name}.{op_name}: {e:#}"
+                        );
+                        Err(e)
+                    }
                 }
             }
-        })
+            .instrument(dispatch_span),
+        )
     }
 
     fn follow_dangling_link(&self, target: String, region: String) {
@@ -4520,6 +4539,19 @@ fn clear_focus_after_delete(focused_block: &Mutable<Option<EntityUri>>, target: 
         // ALLOW(direct_focus_mutation): clear focus of a deleted block (ref model)
         focused_block.set(None);
     }
+}
+
+/// Root span for one user interaction. Every `dispatch_intent*` variant hands
+/// its detached future this span, so the operation, the Turso writes it causes,
+/// and the `ChangeOrigin` trace context that rides the CDC hop all share one
+/// trace id instead of each becoming a disconnected root.
+fn interaction_span(entity_name: &str, op_name: &str) -> tracing::Span {
+    tracing::span!(
+        tracing::Level::INFO,
+        "interaction.dispatch",
+        "operation.entity" = entity_name,
+        "operation.name" = op_name
+    )
 }
 
 /// Surface a fire-and-forget op-execution failure. Records it on the monitoring

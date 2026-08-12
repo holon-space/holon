@@ -2233,10 +2233,7 @@ impl LoroBackend {
         self.emit_change(Change::Updated {
             id: id.to_string(),
             data: block,
-            origin: ChangeOrigin::Local {
-                operation_id: None,
-                trace_id: None,
-            },
+            origin: ChangeOrigin::local_with_current_span(),
         });
         Ok(())
     }
@@ -2275,10 +2272,7 @@ impl LoroBackend {
         self.emit_change(Change::Updated {
             id: id.to_string(),
             data: block,
-            origin: ChangeOrigin::Local {
-                operation_id: None,
-                trace_id: None,
-            },
+            origin: ChangeOrigin::local_with_current_span(),
         });
         Ok(())
     }
@@ -2355,10 +2349,7 @@ impl LoroBackend {
         self.emit_change(Change::Updated {
             id: id.to_string(),
             data: block,
-            origin: ChangeOrigin::Local {
-                operation_id: None,
-                trace_id: None,
-            },
+            origin: ChangeOrigin::local_with_current_span(),
         });
         Ok(())
     }
@@ -2417,10 +2408,7 @@ impl LoroBackend {
         self.emit_change(Change::Updated {
             id: id.to_string(),
             data: block,
-            origin: ChangeOrigin::Local {
-                operation_id: None,
-                trace_id: None,
-            },
+            origin: ChangeOrigin::local_with_current_span(),
         });
         Ok(())
     }
@@ -2462,10 +2450,7 @@ impl LoroBackend {
         self.emit_change(Change::Updated {
             id: id.to_string(),
             data: block,
-            origin: ChangeOrigin::Local {
-                operation_id: None,
-                trace_id: None,
-            },
+            origin: ChangeOrigin::local_with_current_span(),
         });
         Ok(())
     }
@@ -2565,10 +2550,7 @@ impl LoroBackend {
         self.emit_change(Change::Updated {
             id: id.to_string(),
             data: block,
-            origin: ChangeOrigin::Local {
-                operation_id: None,
-                trace_id: None,
-            },
+            origin: ChangeOrigin::local_with_current_span(),
         });
         Ok(())
     }
@@ -2613,10 +2595,7 @@ impl LoroBackend {
         self.emit_change(Change::Updated {
             id: id.to_string(),
             data: block,
-            origin: ChangeOrigin::Local {
-                operation_id: None,
-                trace_id: None,
-            },
+            origin: ChangeOrigin::local_with_current_span(),
         });
         Ok(())
     }
@@ -2682,10 +2661,7 @@ impl LoroBackend {
 
         self.emit_change(Change::Created {
             data: created_block.clone(),
-            origin: ChangeOrigin::Local {
-                operation_id: None,
-                trace_id: None,
-            },
+            origin: ChangeOrigin::local_with_current_span(),
         });
 
         Ok(created_block)
@@ -2799,10 +2775,7 @@ impl LoroBackend {
         for block in &created {
             self.emit_change(Change::Created {
                 data: block.clone(),
-                origin: ChangeOrigin::Local {
-                    operation_id: None,
-                    trace_id: None,
-                },
+                origin: ChangeOrigin::local_with_current_span(),
             });
         }
         Ok(created)
@@ -2836,10 +2809,7 @@ impl LoroBackend {
         self.emit_change(Change::Updated {
             id: id.to_string(),
             data: block,
-            origin: ChangeOrigin::Local {
-                operation_id: None,
-                trace_id: None,
-            },
+            origin: ChangeOrigin::local_with_current_span(),
         });
         Ok(())
     }
@@ -2876,10 +2846,7 @@ impl LoroBackend {
         self.emit_change(Change::Updated {
             id: id.to_string(),
             data: block,
-            origin: ChangeOrigin::Local {
-                operation_id: None,
-                trace_id: None,
-            },
+            origin: ChangeOrigin::local_with_current_span(),
         });
         Ok(())
     }
@@ -2911,10 +2878,7 @@ impl LoroBackend {
         self.emit_change(Change::Updated {
             id: id.to_string(),
             data: block,
-            origin: ChangeOrigin::Local {
-                operation_id: None,
-                trace_id: None,
-            },
+            origin: ChangeOrigin::local_with_current_span(),
         });
         Ok(())
     }
@@ -3098,10 +3062,7 @@ impl LoroBackend {
         self.emit_change(Change::Updated {
             id: target_id.to_string(),
             data: block,
-            origin: ChangeOrigin::Local {
-                operation_id: None,
-                trace_id: None,
-            },
+            origin: ChangeOrigin::local_with_current_span(),
         });
         Ok(())
     }
@@ -3961,10 +3922,7 @@ impl CoreOperations for LoroBackend {
         self.emit_change(Change::Updated {
             id: id.to_string(),
             data: updated_block,
-            origin: ChangeOrigin::Local {
-                operation_id: None,
-                trace_id: None,
-            },
+            origin: ChangeOrigin::local_with_current_span(),
         });
         Ok(())
     }
@@ -4019,10 +3977,7 @@ impl CoreOperations for LoroBackend {
             }
             self.emit_change(Change::Deleted {
                 id: id.to_string(),
-                origin: ChangeOrigin::Local {
-                    operation_id: None,
-                    trace_id: None,
-                },
+                origin: ChangeOrigin::local_with_current_span(),
             });
         }
         Ok(())
@@ -4118,10 +4073,7 @@ impl CoreOperations for LoroBackend {
         self.emit_change(Change::Updated {
             id: id.to_string(),
             data: moved_block,
-            origin: ChangeOrigin::Local {
-                operation_id: None,
-                trace_id: None,
-            },
+            origin: ChangeOrigin::local_with_current_span(),
         });
         Ok(())
     }
@@ -4259,10 +4211,7 @@ impl CoreOperations for LoroBackend {
         for block in &created_blocks {
             self.emit_change(Change::Created {
                 data: block.clone(),
-                origin: ChangeOrigin::Local {
-                    operation_id: None,
-                    trace_id: None,
-                },
+                origin: ChangeOrigin::local_with_current_span(),
             });
         }
 
@@ -4314,10 +4263,7 @@ impl CoreOperations for LoroBackend {
         for id in unique_ids {
             self.emit_change(Change::Deleted {
                 id,
-                origin: ChangeOrigin::Local {
-                    operation_id: None,
-                    trace_id: None,
-                },
+                origin: ChangeOrigin::local_with_current_span(),
             });
         }
 

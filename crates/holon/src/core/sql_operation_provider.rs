@@ -1394,12 +1394,14 @@ impl SqlOperationProvider {
         // value hasn't changed. This replaces the SQL `IS NOT` chain which
         // still fired an application-level Event even when 0 rows were touched.
         //
-        // DIFF_GUARD_SKIP columns (`updated_at`, `created_at`) are always
-        // regenerated to `now` — we keep them in the SET clause when real
-        // content changed, but if they're the ONLY remaining pairs after
-        // equality-dropping the others, we return None (timestamp-only update
-        // is not a meaningful change and must not publish an Event).
-        const DIFF_GUARD_SKIP: &[&str] = &["updated_at", "created_at"];
+        // DIFF_GUARD_SKIP columns are regenerated on every write — the
+        // timestamps to `now`, `_change_origin` to the calling span's trace
+        // context. We keep them in the SET clause when real content changed,
+        // but if they're the ONLY remaining pairs after equality-dropping the
+        // others, we return None: a bookkeeping-only update is not a meaningful
+        // change and must not publish an Event. Omitting `_change_origin` here
+        // would make EVERY update meaningful, since its value never repeats.
+        const DIFF_GUARD_SKIP: &[&str] = &["updated_at", "created_at", "_change_origin"];
         if !update_pairs.is_empty() {
             let col_names: Vec<String> = update_pairs
                 .iter()
@@ -4095,6 +4097,19 @@ impl OriginTaggedWrites for SqlOperationProvider {
             } else {
                 None
             };
+            // Provenance for the CDC hop: the reader side reassembles this into
+            // a `BatchTraceContext`, the only way a change can be tied back to
+            // the write that caused it once it crosses onto the Turso worker.
+            // Stamped here because `_change_origin` is written by the storage
+            // layer, never by intent (`BlockWriteField` rejects it). A held
+            // create is a re-observation of a row already present, so it is
+            // skipped along with everything else that would re-stamp the row.
+            if held.is_none() && self.known_columns.contains(holon_api::CHANGE_ORIGIN_COLUMN) {
+                params.insert(
+                    holon_api::CHANGE_ORIGIN_COLUMN.into(),
+                    Value::String(holon_api::ChangeOrigin::local_with_current_span().to_json()),
+                );
+            }
             let caller_sort_key = params.get("sort_key").cloned();
             row_sql.extend(self.apply_position(&mut params, position).await?);
             if held.is_some() {
@@ -4815,7 +4830,7 @@ mod two_phase_fk_tests {
         for ddl in [
             "PRAGMA foreign_keys = ON",
             "CREATE TABLE block_raw (id TEXT PRIMARY KEY, content TEXT, created_at INTEGER, \
-             updated_at INTEGER)",
+             updated_at INTEGER, _change_origin TEXT)",
             "CREATE TABLE block_requires (block_id TEXT NOT NULL, required_id TEXT NOT NULL, \
              PRIMARY KEY (block_id, required_id), FOREIGN KEY (block_id) REFERENCES block_raw(id) \
              ON DELETE CASCADE, FOREIGN KEY (required_id) REFERENCES block_raw(id) ON DELETE \

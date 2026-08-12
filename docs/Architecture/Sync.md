@@ -161,7 +161,7 @@ Each block contains:
         ▼ (on_loro_changed observes commit, diffs vs base)
   LoroProjection + BlockConsolidator (single writer)
         │
-        ▼ (raw write, tagged origin=loro on _change_origin)
+        ▼ (raw write; _change_origin carries the writing span's trace context)
   Turso block_raw INSERT/UPDATE/DELETE
         │
         ▼
@@ -518,7 +518,7 @@ keeps only shared vocabulary (re-exports of `EventOrigin`, `PublishErrorTracker`
                            │
                            ▼
           LoroProjection / BlockConsolidator      ← single writer
-          (writes block_raw, tagged origin=loro on _change_origin)
+          (writes block_raw; _change_origin carries the trace context)
                            │
                            ▼
                   Turso CDC → block matview

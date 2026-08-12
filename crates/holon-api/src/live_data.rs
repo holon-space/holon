@@ -388,6 +388,43 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                 };
                 batches_seen += 1;
                 let seq = batch.metadata.seq;
+                // The actor outlives every interaction, so its own span is a
+                // root. Applying a batch belongs to the interaction that WROTE
+                // it: parent to the context the batch carried across the CDC
+                // hop, so the `stage="rows"` event below joins that trace.
+                let apply_span = tracing::info_span!(
+                    parent: None,
+                    "live_data.apply_batch",
+                    source = source_name,
+                    seq,
+                );
+                if let Some(span_ctx) = batch
+                    .metadata
+                    .trace_context
+                    .as_ref()
+                    .and_then(|ctx| ctx.to_span_context())
+                {
+                    use opentelemetry::trace::TraceContextExt;
+                    use tracing_opentelemetry::OpenTelemetrySpanExt;
+                    let trace_id = span_ctx.trace_id();
+                    // The actor has no error channel, so a failed re-parent is
+                    // disclosed rather than propagated: the batch still applies,
+                    // but its span stays a root and the write that caused it
+                    // becomes untraceable.
+                    if let Err(e) = apply_span.set_parent(
+                        opentelemetry::Context::new().with_remote_span_context(span_ctx),
+                    ) {
+                        tracing::warn!(
+                            source = source_name,
+                            seq,
+                            %trace_id,
+                            error = %e,
+                            "LiveData: could not re-parent apply span to the writing trace — this \
+                             batch stays a disconnected trace root"
+                        );
+                    }
+                }
+                let _apply_guard = apply_span.enter();
                 let changes: Vec<Change<StorageEntity>> =
                     batch.inner.items.into_iter().map(Into::into).collect();
                 let change_count = changes.len();
