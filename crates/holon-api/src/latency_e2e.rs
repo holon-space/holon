@@ -72,7 +72,7 @@
 //!   Observable)` pairs an applied batch made visible (see
 //!   [`touched_entities`]). Closes the matching entries and emits, per closure:
 //!
-//!   `tracing::debug!(target="holon_latency", stage="e2e", action, block,
+//!   `tracing::info!(target="holon_latency", stage="e2e", action, block,
 //!   source, ms)`
 //!
 //! # SLO endpoint: projection-visible, deliberately NOT frame-present
@@ -288,7 +288,7 @@ pub fn interaction_failed(action: &str, target: &str) {
     PENDING_LEN.store(pending.len(), Ordering::Release);
     drop(pending);
     if let Some(r) = retired {
-        tracing::debug!(
+        tracing::info!(
             target: "holon_latency",
             stage = "e2e_retired",
             action = %r.action,
