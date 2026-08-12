@@ -13,7 +13,6 @@ crates/holon-api/src/lib.rs	serde_json::to_string(self).unwrap_or_default()
 crates/holon-api/src/lib.rs	Value::Object(map) => serde_json::to_string(map).unwrap_or_default(),
 crates/holon-api/src/reactive.rs	let _ = tx.send(n * 100).await;
 crates/holon-api/src/render_dsl.rs	if let Ok(expr) = serde_json::from_str::<RenderExpr>(trimmed) {
-crates/holon-api/src/streaming.rs	if let Ok(ctx) = CURRENT_TRACE_CONTEXT.try_with(|ctx| ctx.clone()) {
 crates/holon-app/src/loro_seams.rs	BlockContent::source(lang, content.clone().unwrap_or_default())
 crates/holon-app/src/loro_seams.rs	BlockContent::text(content.clone().unwrap_or_default())
 crates/holon-app/src/mcp_integrations.rs	Err(e) => {

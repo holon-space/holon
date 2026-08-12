@@ -272,9 +272,9 @@ pub use render_types::{
 // Re-export streaming types
 pub use streaming::{
     Batch, BatchMapChange, BatchMapChangeWithMetadata, BatchMetadata, BatchTraceContext,
-    BatchWithMetadata, BlockChange, CHANGE_ORIGIN_COLUMN, CURRENT_TRACE_CONTEXT, Change,
-    ChangeOrigin, EnrichedChangeStream, MapChange, StreamPosition, SyncTokenUpdate, UiEvent,
-    WatchHandle, WatcherCommand, WithMetadata,
+    BatchWithMetadata, BlockChange, CHANGE_ORIGIN_COLUMN, Change, ChangeOrigin,
+    EnrichedChangeStream, MapChange, StreamPosition, SyncTokenUpdate, UiEvent, WatchHandle,
+    WatcherCommand, WithMetadata,
 };
 // Re-export typed domain types
 pub use types::{

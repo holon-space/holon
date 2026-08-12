@@ -471,6 +471,31 @@ The MCP sync pipeline carries span context through the full cycle:
 - `resource_fetch{uri}` — individual MCP resource read
 - `subscription_resync{uri}` — notification-triggered resync
 
+### Per-interaction traces
+
+One user interaction opens one `interaction.dispatch` span (every
+`dispatch_intent*` seam in `crates/holon-frontend/src/reactive.rs`), and the
+detached operation runs instrumented with it. Its write path shares one trace
+id: `interaction.dispatch` → `dispatcher.execute_operation` →
+`backend.execute_operation` → the fingerprinted Turso `query`/`execute` spans →
+the Loro commit → `provider.orgmode.sync_changes`.
+
+Build with `--features otel` and point `HOLON_LOG=otlp` at an OTLP collector
+(`OTEL_EXPORTER_OTLP_ENDPOINT`, default `http://localhost:4318`) to view them.
+`HOLON_LOG=stderr:json` shows the same span context without a collector.
+
+Reading the change back is a second trace. `SqlOperationProvider`'s batch writer
+stamps `_change_origin` with the writing span's trace context, which survives
+Turso's CDC hop and re-parents `live_data.apply_batch`, so a mirror apply and its
+`stage="rows"` event belong to the trace of the pass that wrote the row.
+
+That is the PROJECTION's trace, not the interaction's: the Loro→SQL projection
+runs on its own long-lived pass, and one pass may consolidate ops from several
+interactions. Joining the two halves needs the interaction's context carried on
+the projection queue entry.
+`crates/holon-integration-tests/tests/interaction_trace_connectivity.rs` pins
+both halves and the seam between them.
+
 ## Quality gates (two-tier)
 
 This is a colocated jj+git repo: **git hooks do not fire for jj commits**, so the

@@ -14,13 +14,6 @@ use crate::ApiError;
 use crate::RenderExpr;
 use crate::render_types::RenderVariant;
 
-// Task-local storage for trace context propagation through async call chains
-tokio::task_local! {
-    /// Current trace context for the executing task
-    /// Set at FFI boundary, read by BatchTraceContext::from_current_span()
-    pub static CURRENT_TRACE_CONTEXT: BatchTraceContext;
-}
-
 /// Position in the change stream to start watching from.
 ///
 /// Used with `watch_changes_since()` to control whether to receive current
@@ -121,23 +114,19 @@ impl ChangeOrigin {
         }
     }
 
-    /// Extract trace context (operation_id, trace_id) from task-local or
-    /// current span
+    /// Extract trace context (operation_id, trace_id) from the current span.
+    ///
+    /// Propagation is span-based: the `dispatch_intent*` entry points open an
+    /// interaction span and `.instrument()` the detached future with it, so
+    /// every write below inherits that trace id.
     ///
     /// Priority:
-    /// 1. Task-local CURRENT_TRACE_CONTEXT (most reliable for async
-    ///    propagation)
-    /// 2. OpenTelemetry span context (via set_parent)
-    /// 3. Last resort: derive from the tracing span ID // ALLOW(fallback): doc
+    /// 1. OpenTelemetry span context (via set_parent)
+    /// 2. Last resort: derive from the tracing span ID // ALLOW(fallback): doc
     ///    enumerates resolution order
     ///
     /// flutter_rust_bridge:ignore
     fn extract_trace_context_from_current_span() -> (Option<String>, Option<String>) {
-        // First, try task-local storage (most reliable for async propagation)
-        if let Ok(ctx) = CURRENT_TRACE_CONTEXT.try_with(|ctx| ctx.clone()) {
-            return (Some(ctx.span_id), Some(ctx.trace_id));
-        }
-
         use opentelemetry::trace::TraceContextExt;
         use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -522,22 +511,16 @@ impl BatchTraceContext {
         self.trace_flags & 0x01 != 0
     }
 
-    /// Extract trace context from task-local storage or current span
+    /// Extract trace context from the current span.
     ///
     /// Priority:
-    /// 1. Task-local CURRENT_TRACE_CONTEXT (set at FFI boundary)
-    /// 2. OpenTelemetry Context::current()
-    /// 3. Tracing span context (via set_parent)
-    /// 4. Last resort: derive from the tracing span ID // ALLOW(fallback): doc
+    /// 1. OpenTelemetry Context::current()
+    /// 2. Tracing span context (via set_parent)
+    /// 3. Last resort: derive from the tracing span ID // ALLOW(fallback): doc
     ///    enumerates resolution order
     ///
     /// flutter_rust_bridge:ignore
     pub fn from_current_span() -> Option<Self> {
-        // First, try task-local storage (most reliable for async propagation)
-        if let Ok(ctx) = CURRENT_TRACE_CONTEXT.try_with(|ctx| ctx.clone()) {
-            return Some(ctx);
-        }
-
         use opentelemetry::trace::TraceContextExt;
         use tracing_opentelemetry::OpenTelemetrySpanExt;
 
