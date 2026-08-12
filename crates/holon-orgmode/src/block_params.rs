@@ -179,6 +179,13 @@ pub fn build_block_params(
         params.insert(k.into(), Value::String(v));
     }
 
+    // `drawer_properties()` hides the `_`-prefixed authored-order carrier, so
+    // the loop above cannot reach it. The renderer reads it back from the store
+    // to replay the order the drawer was authored in.
+    if let Some(order) = block.get_property(crate::models::org_props::DRAWER_ORDER) {
+        params.insert(crate::models::org_props::DRAWER_ORDER.into(), order);
+    }
+
     // The file is authoritative for its own drawer: a key it USED to declare
     // and no longer does must be cleared from the store, not merged forward.
     // `drawer_properties()` never yields `_`-prefixed keys, so store-managed
