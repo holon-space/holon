@@ -146,16 +146,21 @@ impl OpDispatchWriter {
                 .await
                 .map(|_| ()),
             DispatchSink::Frontend(reactive) => {
-                reactive
-                    .dispatch_intent_sync(holon_frontend::operations::OperationIntent::new(
+                // Awaiting door normally; the fire-and-forget one production
+                // GPUI handlers use while the composed keystone has this engine
+                // armed for an interleaved transition kind.
+                holon_frontend::reactive::dispatch_intent_through_armed_door(
+                    reactive,
+                    holon_frontend::operations::OperationIntent::new(
                         entity,
                         op.to_string(),
                         params
                             .into_iter()
                             .map(|(k, v)| (k.to_string(), v))
                             .collect(),
-                    ))
-                    .await
+                    ),
+                )
+                .await
             }
         }
     }

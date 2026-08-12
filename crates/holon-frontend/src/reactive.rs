@@ -1901,6 +1901,14 @@ pub struct UiState {
     /// content — the only blocks the reaper may delete. See
     /// [`crate::creation_slot`].
     ephemeral_newborns: Arc<crate::creation_slot::EphemeralNewborns>,
+    /// Which dispatch door the UI-adjacent commit seams
+    /// ([`crate::headless_editor_mirror`] and the PBT op writer) take:
+    /// `false` (always, outside an armed PBT run) = `dispatch_intent_sync`,
+    /// which awaits the operation; `true` = `dispatch_intent`, the
+    /// fire-and-forget door production GPUI handlers use, so two writes of one
+    /// gesture can be in flight together. Per-engine, never process-global, so
+    /// two composed cases running side by side cannot arm each other.
+    detached_dispatch: std::sync::atomic::AtomicBool,
 }
 
 impl UiState {
@@ -1918,6 +1926,7 @@ impl UiState {
             op_failure_sink: Mutex::new(None),
             dispatch_journal: Arc::new(crate::dispatch_journal::DispatchJournal::new()),
             ephemeral_newborns: Arc::new(crate::creation_slot::EphemeralNewborns::new()),
+            detached_dispatch: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -1929,6 +1938,21 @@ impl UiState {
     /// Shared handle to this engine's dispatch journal.
     pub fn dispatch_journal(&self) -> Arc<crate::dispatch_journal::DispatchJournal> {
         self.dispatch_journal.clone()
+    }
+
+    /// Whether the UI-adjacent commit seams take the fire-and-forget door. See
+    /// the field's docs; `false` outside an armed PBT run.
+    pub fn detached_dispatch(&self) -> bool {
+        self.detached_dispatch
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Arm/disarm the fire-and-forget door for this engine. The composed
+    /// keystone's masked arm sets it around ONE transition and clears it again,
+    /// so the door choice is scoped to the transitions the mask names.
+    pub fn set_detached_dispatch(&self, on: bool) {
+        self.detached_dispatch
+            .store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Install the op-execution failure sink (frontend shell wiring). Each
@@ -4740,6 +4764,31 @@ fn dangling_nav_superseded(
     focus_now: &Option<EntityUri>,
 ) -> bool {
     focus_at_click != focus_now
+}
+
+/// Dispatch one intent through the door `engine` is currently armed for.
+///
+/// Outside an armed PBT run this is exactly `dispatch_intent_sync(intent)
+/// .await` — the awaiting door every UI-adjacent test seam has always used.
+/// When the composed keystone arms a transition kind
+/// (`HOLON_PBT_SCHED_KINDS`), it becomes `dispatch_intent`, the fire-and-forget
+/// door production GPUI keystroke/click handlers use, so the writes of one
+/// gesture can be in flight together and the harness can order them.
+///
+/// The detached arm returns `Ok(())` before the operation runs: its failure is
+/// surfaced by the same `op_failure_sink` + `error_tracker` path production
+/// uses (`dispatch_intent`'s `Err` arm), and observed by the keystone's
+/// `inv-no-observed-errors` — not swallowed.
+pub async fn dispatch_intent_through_armed_door(
+    engine: &Arc<ReactiveEngine>,
+    intent: crate::operations::OperationIntent,
+) -> Result<()> {
+    if engine.ui_state().detached_dispatch() {
+        let services: &dyn BuilderServices = engine.as_ref();
+        services.dispatch_intent(intent);
+        return Ok(());
+    }
+    engine.dispatch_intent_sync(intent).await
 }
 
 /// Dispatch `intents` as ONE ordered fire-and-forget chain: a single spawned
