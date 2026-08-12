@@ -766,7 +766,8 @@ impl ReactiveEngineDriver {
         modifiers: holon_api::ClickModifiers,
     ) -> Result<()> {
         let root_uri = holon_api::root_layout_block_uri();
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let resolve_budget = Duration::from_secs(2);
+        let deadline = Instant::now() + resolve_budget;
         loop {
             let resolved = self.engine.snapshot_resolved(&root_uri);
             // Scope the intent lookup to the clicked region. The same
@@ -794,6 +795,13 @@ impl ReactiveEngineDriver {
                 break;
             }
             if Instant::now() >= deadline {
+                tracing::warn!(
+                    entity_id = %entity_id,
+                    region,
+                    deadline_ms = resolve_budget.as_millis() as u64,
+                    "click_entity: entity never appeared in the resolved tree; the click binds no \
+                     intent and degrades to bare focus (no navigate)."
+                );
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;

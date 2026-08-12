@@ -36,6 +36,10 @@ pub struct MatviewStats {
     leased_views: AtomicU64,
     active_leases: AtomicU64,
     pinned: AtomicU64,
+    /// Bumped every time the actor drops a view out from under its users.
+    /// Readers that cache "this view exists" compare against it to learn that
+    /// their answer is stale — see `MatviewManager`'s shared view state.
+    reap_epoch: AtomicU64,
 }
 
 /// Sample of [`MatviewStats`]. Coherent as a whole: the actor publishes all
@@ -51,6 +55,18 @@ pub struct MatviewStatsSnapshot {
 }
 
 impl MatviewStats {
+    /// Current reap epoch. Changes iff the actor has dropped a view since it
+    /// was last read.
+    pub fn reap_epoch(&self) -> u64 {
+        self.reap_epoch.load(Ordering::Relaxed)
+    }
+
+    /// Record that views were dropped. Called by the actor from every path
+    /// that removes a view it did not just create.
+    pub(crate) fn note_reap(&self) {
+        self.reap_epoch.fetch_add(1, Ordering::Release);
+    }
+
     pub fn snapshot(&self) -> MatviewStatsSnapshot {
         MatviewStatsSnapshot {
             leased_views: self.leased_views.load(Ordering::Relaxed),

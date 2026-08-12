@@ -485,9 +485,18 @@ impl DbHandle {
             .await
             .map_err(|_| StorageError::DatabaseError("Actor channel closed".to_string()))?;
 
-        response_rx
-            .await
-            .map_err(|_| StorageError::DatabaseError("Actor response channel closed".to_string()))?
+        let outcome = response_rx.await.map_err(|_| {
+            StorageError::DatabaseError("Actor response channel closed".to_string())
+        })?;
+        // Every drop issued from OUTSIDE the actor arrives here — the base-view
+        // rebuild cascade (`drop_dependent_views`), advice synthesis, the MCP
+        // sidecar. Bumping at this boundary rather than at each of them is what
+        // stops a future caller from dropping a view that readers still believe
+        // in. The actor's own reaps never pass through here and bump themselves.
+        if outcome.is_ok() && drops_a_view(sql) {
+            self.matview_stats.note_reap();
+        }
+        outcome
     }
 
     /// Register a foreign data wrapper as a virtual table.
@@ -904,6 +913,18 @@ impl DbHandle {
         &self.cdc_broadcast
     }
 
+    /// Current reap epoch of this database — see `MatviewStats::reap_epoch`.
+    pub(crate) fn reap_epoch(&self) -> u64 {
+        self.matview_stats.reap_epoch()
+    }
+
+    /// A witness for "which database is this?", shared by every clone of this
+    /// handle and distinct between databases. `Weak` so a registry keyed by it
+    /// can tell a live database from a dead one whose allocation was reused.
+    pub(crate) fn database_witness(&self) -> std::sync::Weak<std::sync::atomic::AtomicU64> {
+        Arc::downgrade(&self.cdc_seq)
+    }
+
     /// Subscribe to the CDC broadcast channel for raw row-level change events.
     pub fn subscribe_row_changes(&self) -> broadcast::Receiver<BatchWithMetadata<RowChange>> {
         self.cdc_broadcast.subscribe()
@@ -1306,6 +1327,19 @@ fn ddl_target_name(sql: &str) -> &str {
         }
     }
     "ddl"
+}
+
+/// Whether `sql` removes a view — `DROP VIEW`, with or without `IF EXISTS`.
+/// Turso spells a materialized view's removal the same way.
+fn drops_a_view(sql: &str) -> bool {
+    let mut tokens = sql.split_whitespace();
+    let Some(first) = tokens.next() else {
+        return false;
+    };
+    first.eq_ignore_ascii_case("drop")
+        && tokens
+            .next()
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("view"))
 }
 
 fn trace_sql(tag: &str, sql: &str) {
@@ -2955,6 +2989,8 @@ impl TursoBackend {
                 .available_resources
                 .remove(&Resource::schema(name.clone()));
         }
+        // Anyone caching "this view exists" is now wrong.
+        state.matview_stats.note_reap();
         state.publish_matview_stats();
         tracing::debug!(view = %view_name, "[TursoBackend::Actor] reaped unleased matview");
     }
@@ -3011,6 +3047,7 @@ impl TursoBackend {
             }
         }
         state.generation += 1;
+        state.matview_stats.note_reap();
         state.publish_matview_stats();
 
         if dropped > 0 {

@@ -355,14 +355,12 @@ pub struct MatviewManager {
     fdw_backed_tables: Arc<tokio::sync::RwLock<HashSet<String>>>,
     /// Optional hook called after FDW cache priming.
     hook: Arc<tokio::sync::RwLock<Option<Arc<dyn MatviewHook>>>>,
-    /// In-memory cache of view names known to exist in `sqlite_master`.
-    /// Populated by `ensure_view`/`preload` after the first existence check or
-    /// successful CREATE, so subsequent calls skip the SQL round trip. Cleared
-    /// by `drop_stale_views`. Process-local; views are deterministic hashes of
-    /// their SELECT SQL so re-issuing CREATE under contention is safe (`IF NOT
-    /// EXISTS`), but each redundant existence query was 5-15 ms and they
-    /// dominated PBT `check_invariants` overhead.
+    /// Cache of view names known to exist in `sqlite_master`, and the DDL
+    /// mutex guarding create-if-absent. Both come from [`shared_for_database`],
+    /// so every manager on one database sees one cache and one mutex.
     known_views: Arc<tokio::sync::RwLock<HashSet<String>>>,
+    /// Reap epoch `known_views` was established under; see [`SharedViewState`].
+    validated_at: Arc<AtomicU64>,
     /// Counters for measuring cache effectiveness. `cache_hits` is the number
     /// of `ensure_view`/`preload` calls that returned via the in-memory cache
     /// without a `view_exists` SQL round trip. `exists_calls` is the number of
@@ -373,16 +371,76 @@ pub struct MatviewManager {
     ddl_creates: Arc<AtomicU64>,
 }
 
+/// The view-existence cache and DDL mutex belonging to ONE database.
+#[derive(Clone)]
+struct SharedViewState {
+    known_views: Arc<tokio::sync::RwLock<HashSet<String>>>,
+    ddl_mutex: Arc<tokio::sync::Mutex<()>>,
+    /// Reap epoch the cache's contents were established under. The actor drops
+    /// views on its own schedule (`reap_view`), so a name learned before a reap
+    /// says nothing about the schema now.
+    validated_at: Arc<AtomicU64>,
+}
+
+/// Live databases' [`SharedViewState`], keyed by the address of the database's
+/// witness and validated against the witness itself.
+///
+/// Keyed PER DATABASE, never per process: view names are content hashes of
+/// their SELECT (`compute_view_name`), so the same name denotes different
+/// views in different databases, and one process routinely holds several
+/// (every test binary). A process-wide cache would let a view created in one
+/// database suppress the `CREATE` in another, leaving a query reading a view
+/// that does not exist.
+static SHARED_VIEW_STATE: std::sync::Mutex<
+    Option<HashMap<usize, (std::sync::Weak<AtomicU64>, SharedViewState)>>,
+> = std::sync::Mutex::new(None);
+
+/// The state every `MatviewManager` on `db_handle`'s database must share,
+/// creating it on first use with `seed_mutex`.
+///
+/// A dead entry is replaced rather than reused: the key is an allocation
+/// address, and a database that has been dropped can leave its address to a
+/// new one.
+fn shared_for_database(
+    db_handle: &DbHandle,
+    seed_mutex: Arc<tokio::sync::Mutex<()>>,
+) -> SharedViewState {
+    let witness = db_handle.database_witness();
+    let key = witness.as_ptr() as usize;
+    let mut guard = SHARED_VIEW_STATE
+        .lock()
+        .expect("SHARED_VIEW_STATE poisoned");
+    let table = guard.get_or_insert_with(HashMap::new);
+    if let Some((known_witness, state)) = table.get(&key)
+        && known_witness.strong_count() > 0
+        && std::sync::Weak::ptr_eq(known_witness, &witness)
+    {
+        return state.clone();
+    }
+    let state = SharedViewState {
+        known_views: Arc::new(tokio::sync::RwLock::new(HashSet::new())),
+        ddl_mutex: seed_mutex,
+        validated_at: Arc::new(AtomicU64::new(db_handle.reap_epoch())),
+    };
+    table.insert(key, (witness, state.clone()));
+    state
+}
+
 impl MatviewManager {
+    /// `ddl_mutex` seeds the database's shared mutex if this is the first
+    /// manager on it; a later manager adopts the one already there, so two
+    /// managers can never serialise their DDL against different locks.
     pub fn new(db_handle: DbHandle, ddl_mutex: Arc<tokio::sync::Mutex<()>>) -> Self {
         let demux_cmd_tx = Self::spawn_demux(db_handle.cdc_broadcast().clone());
+        let shared = shared_for_database(&db_handle, ddl_mutex);
         Self {
             db_handle,
             demux_cmd_tx,
-            ddl_mutex,
+            ddl_mutex: shared.ddl_mutex,
             fdw_backed_tables: Arc::new(tokio::sync::RwLock::new(HashSet::new())),
             hook: Arc::new(tokio::sync::RwLock::new(None)),
-            known_views: Arc::new(tokio::sync::RwLock::new(HashSet::new())),
+            known_views: shared.known_views,
+            validated_at: shared.validated_at,
             cache_hits: Arc::new(AtomicU64::new(0)),
             exists_calls: Arc::new(AtomicU64::new(0)),
             ddl_creates: Arc::new(AtomicU64::new(0)),
@@ -874,7 +932,17 @@ impl MatviewManager {
         }
     }
 
+    /// Whether the cache still vouches for `view_name`.
+    ///
+    /// A reap since the cache was established discards it wholesale rather than
+    /// tracking which names died: reaps are rare next to hits, and each
+    /// surviving view costs one `view_exists` probe to re-learn.
     async fn is_view_known(&self, view_name: &str) -> bool {
+        let epoch = self.db_handle.reap_epoch();
+        if self.validated_at.swap(epoch, Ordering::Relaxed) != epoch {
+            self.known_views.write().await.clear();
+            return false;
+        }
         self.known_views.read().await.contains(view_name)
     }
 
