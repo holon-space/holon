@@ -235,7 +235,12 @@ impl HeadlessEditorMirror {
             vm.apply_local_edit(new_text)?
         };
         if let Some(intent) = intent {
-            engine.dispatch_intent_sync(intent).await?;
+            // The keystroke content-commit door. Normally awaiting; the composed
+            // keystone's interleaving mask flips this engine to the
+            // fire-and-forget door production GPUI types through
+            // (`editor_view.rs:1070`), which is what lets two keystrokes of one
+            // `TypeChars` be in flight together.
+            crate::reactive::dispatch_intent_through_armed_door(engine, intent).await?;
         }
         Ok(())
     }

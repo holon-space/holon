@@ -254,6 +254,55 @@ pub trait ComposedSlice {
         caps: &mut CapMap,
     );
 
+    /// The transition's KIND — the string the interleaving mask
+    /// (`HOLON_PBT_SCHED_KINDS`) keys on. Default: the `Debug` head token,
+    /// which is what the latency summary already labels a transition with. A
+    /// slice whose alphabet has an exact name for a kind overrides this so the
+    /// mask's alphabet is that name-set rather than a derived string
+    /// (`WideE2E` returns `E2ETransition::variant_name`).
+    fn transition_kind(t: &Self::Transition) -> String {
+        action_label(t)
+    }
+
+    /// Apply one transition through the FIRE-AND-FORGET dispatch door — the
+    /// door production GPUI click/keystroke handlers use (`dispatch_intent`),
+    /// where [`apply_transition`](Self::apply_transition) drives the awaiting
+    /// one (`dispatch_intent_sync`). Called ONLY for a masked kind; the
+    /// difference is what lets two intents of one transition be in flight
+    /// together.
+    ///
+    /// Default: delegate, so a slice with no fire-and-forget door is
+    /// unaffected and correct by construction (it simply never overlaps, which
+    /// the harness's overlap probe then reports honestly).
+    async fn apply_transition_detached(
+        transition: &Self::Transition,
+        ref_state: &ReferenceState,
+        caps: &mut CapMap,
+        _: &Self::Handle,
+    ) {
+        Self::apply_transition(transition, ref_state, caps).await;
+    }
+
+    /// Seeded partial drain after a detached apply, before the settle: give the
+    /// in-flight tasks `steps` scheduling opportunities so the ordering the
+    /// seed picked is the one that happens. Default: `steps` yields, which is
+    /// the whole mechanism for a slice on a real tokio runtime.
+    async fn pump(_: &Self::Handle, _: &CapMap, steps: u32) {
+        for _ in 0..steps {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// The dispatch journal of the slice's booted frontend, when it has one —
+    /// the harness's overlap probe. `None` (the default) means the slice cannot
+    /// observe in-flight intents, so an armed run over it reports "unobserved"
+    /// rather than claiming an overlap it never measured.
+    fn dispatch_journal(
+        _: &Self::Handle,
+    ) -> Option<Arc<holon_frontend::dispatch_journal::DispatchJournal>> {
+        None
+    }
+
     /// Settle after a transition's write before reading the projections.
     /// Default: a flat `sleep(SETTLE)` (correct for a synchronous store,
     /// ≈0). A slice whose SUT projects asynchronously (`WideE2E`: Turso CDC
@@ -332,6 +381,105 @@ pub trait ComposedSlice {
     }
 }
 
+/// Drive one MASKED transition through the fire-and-forget door and prove the
+/// overlap it exists to create actually happened.
+///
+/// A pump that drains every intent before the next one is dispatched is a no-op
+/// dressed as a feature, so this samples the slice's dispatch journal while the
+/// detached apply runs and reports the peak in-flight count. The report is
+/// GATED, per senior-review amendment A2: because the settle still runs before
+/// the tick's oracle, overlap can only happen BETWEEN THE INTENTS OF ONE
+/// TRANSITION. A kind that dispatches a single intent (`DeleteBackward` is one
+/// chord) can never show more than one in flight, so it is measured and logged
+/// but never asserted on — only a transition that actually emitted ≥ 2 intents
+/// must show an overlap.
+async fn interleave_armed_apply<S: ComposedSlice>(
+    transition: &S::Transition,
+    ref_state: &ReferenceState,
+    caps: &mut CapMap,
+    handle: &S::Handle,
+    kind: &str,
+    plan: super::interleave::InterleavePlan,
+) {
+    let journal = S::dispatch_journal(handle);
+    let mark = journal.as_ref().map(|j| j.mark());
+    let mut peak = 0usize;
+
+    {
+        let armed = async {
+            S::apply_transition_detached(transition, ref_state, caps, handle).await;
+            S::pump(handle, caps, plan.steps).await;
+        };
+        tokio::pin!(armed);
+        loop {
+            tokio::select! {
+                // The apply is polled first every iteration, so the sampler
+                // observes it rather than starving it.
+                biased;
+                () = &mut armed => break,
+                () = tokio::task::yield_now() => {
+                    if let (Some(j), Some(m)) = (journal.as_ref(), mark) {
+                        peak = peak.max(pending_since(j, m, kind));
+                    }
+                }
+            }
+        }
+    }
+
+    let (emitted, still_pending) = match (journal.as_ref(), mark) {
+        (Some(j), Some(m)) => {
+            let entries = j.since(m).unwrap_or_else(|e| {
+                panic!("[interleave] dispatch journal readback for {kind}: {e:#}")
+            });
+            let pending = entries.iter().filter(|e| e.outcome.is_pending()).count();
+            (Some(entries.len()), pending)
+        }
+        _ => (None, 0),
+    };
+    peak = peak.max(still_pending);
+
+    // Printed, not `tracing::info!`d: an armed run is opt-in and this line IS
+    // its result, so it must not depend on `RUST_LOG`. Unarmed runs never reach
+    // here, so the keystone's output is unchanged.
+    match emitted {
+        Some(n) => eprintln!(
+            "[interleave] {kind}: seed={} steps={} intents={n} peak_in_flight={peak}",
+            plan.seed, plan.steps,
+        ),
+        None => eprintln!(
+            "[interleave] {kind}: seed={} steps={} UNOBSERVED (this draw booted no frontend, so \
+             it has no dispatch journal and no fire-and-forget door)",
+            plan.seed, plan.steps,
+        ),
+    }
+
+    if let Some(emitted) = emitted {
+        assert!(
+            emitted < 2 || peak > 1,
+            "[interleave] '{kind}' (seed {seed}) dispatched {emitted} intents through the \
+             fire-and-forget door but never had more than {peak} in flight — the arming did not \
+             widen the interleaving, so a green run over it proves nothing. Either the door swap \
+             did not take effect for this kind, or the pump drained each intent before the next \
+             was dispatched.",
+            seed = plan.seed,
+        );
+    }
+}
+
+/// Intents dispatched since `mark` that have not settled — the in-flight count.
+fn pending_since(
+    journal: &holon_frontend::dispatch_journal::DispatchJournal,
+    mark: u64,
+    kind: &str,
+) -> usize {
+    journal
+        .since(mark)
+        .unwrap_or_else(|e| panic!("[interleave] dispatch journal readback for {kind}: {e:#}"))
+        .iter()
+        .filter(|e| e.outcome.is_pending())
+        .count()
+}
+
 /// A per-check window-settle hook. The §Round-5 windowed harness
 /// ([`ComposedSut::from_parts`]) injects a closure that pumps the gpui window
 /// to a fixed point before invariants read its geometry; the headless proptest
@@ -392,6 +540,10 @@ pub struct ComposedSut<S: ComposedSlice> {
     /// from it + the engagement ledger + the drawn wiring. Empty and unread on
     /// the default (flag-off) path, so runs stay byte-identical.
     telemetry: std::cell::RefCell<super::telemetry::CaseTelemetry>,
+    /// This case's transition counter — the interleaving axis's tick, so two
+    /// occurrences of one masked kind draw two different pump budgets from the
+    /// same seed. Bumped once per `apply`, read nowhere else.
+    tick: std::cell::Cell<u64>,
     _slice: PhantomData<S>,
 }
 
@@ -439,6 +591,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
             settle,
             engaged: std::cell::RefCell::new(std::collections::BTreeMap::new()),
             telemetry: std::cell::RefCell::new(super::telemetry::new_case()),
+            tick: std::cell::Cell::new(0),
             _slice: PhantomData,
         }
     }
@@ -583,6 +736,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             settle: Box::new(|| {}),
             engaged: std::cell::RefCell::new(std::collections::BTreeMap::new()),
             telemetry: std::cell::RefCell::new(super::telemetry::new_case()),
+            tick: std::cell::Cell::new(0),
             _slice: PhantomData,
         }
     }
@@ -596,6 +750,14 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
         // moves `action`), record after the timed apply. No-op when the flag is
         // off — `record_label` stays `None`.
         let record_label = super::telemetry::telemetry_enabled().then(|| action.clone());
+        // Interleaving axis (Increment 2): the kind the mask keys on, and this
+        // transition's position in the sequence — together they seed the pump so
+        // two ticks of one kind explore two schedules. `plan` is `None` for every
+        // kind on an unarmed run.
+        let kind = S::transition_kind(&transition);
+        let tick = sut.tick.get();
+        sut.tick.set(tick + 1);
+        let plan = super::interleave::plan_for(&kind, tick);
         let (before, after, action_us) = {
             // Split the borrow: `settle_after_apply` reads `&sut.handle` while the apply
             // writes `&mut sut.caps` — disjoint fields, so borrow each separately before
@@ -617,8 +779,34 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
                 // with their real measured duration by the invariant below.
                 let wedge = crate::pbt::invariants::bodies::settle_budget::wedge_deadline();
                 let progressed = tokio::time::timeout(wedge, async {
-                    S::apply_transition(&transition, ref_state, caps).await;
-                    S::settle_after_apply(handle, caps).await;
+                    match plan {
+                        // UNMASKED — the same two statements, in the same order,
+                        // this harness has always run. `plan_for` returns `None`
+                        // for every kind unless `HOLON_PBT_SCHED_KINDS` is set,
+                        // so this is the whole behaviour of an unarmed run.
+                        None => {
+                            S::apply_transition(&transition, ref_state, caps).await;
+                            S::settle_after_apply(handle, caps).await;
+                        }
+                        // MASKED — the fire-and-forget door plus a seeded pump
+                        // closes the overlap window instead of the settle. The
+                        // settle still runs before any invariant reads state, so
+                        // the per-tick oracle stays exactly as strict as it is
+                        // unarmed; what changes is the ORDER the writes reached
+                        // the store in.
+                        Some(p) => {
+                            interleave_armed_apply::<S>(
+                                &transition,
+                                ref_state,
+                                caps,
+                                handle,
+                                &kind,
+                                p,
+                            )
+                            .await;
+                            S::settle_after_apply(handle, caps).await;
+                        }
+                    }
                 })
                 .await;
                 assert!(

@@ -1677,6 +1677,46 @@ impl ComposedSlice for WideE2E {
         converge_projections(handle, crate::pbt::composed::soak_seed::soak_settle()).await;
     }
 
+    /// The mask's alphabet is the transition enum's own variant names, not a
+    /// string derived from `Debug` — so `HOLON_PBT_SCHED_KINDS=TypeChars` names
+    /// exactly `E2ETransition::TypeChars` and a typo cannot silently arm
+    /// nothing.
+    fn transition_kind(t: &E2ETransition) -> String {
+        t.variant_name().to_string()
+    }
+
+    /// Arm this session's engine for the fire-and-forget dispatch door, apply,
+    /// disarm. Scoping the door to the transition (rather than the whole run)
+    /// is what makes a red attributable to the masked kind: every other
+    /// transition in the sequence still runs the awaiting door it always did.
+    ///
+    /// A Loro-only draw has no `ReactiveEngine`, so it has no fire-and-forget
+    /// door and simply runs the ordinary apply — its armed run then reports an
+    /// unobserved overlap rather than a false one.
+    async fn apply_transition_detached(
+        transition: &E2ETransition,
+        ref_state: &ReferenceState,
+        caps: &mut CapMap,
+        handle: &WideHandle,
+    ) {
+        let engine = handle.reactive();
+        if let Some(e) = &engine {
+            e.ui_state().set_detached_dispatch(true);
+        }
+        Self::apply_transition(transition, ref_state, caps).await;
+        if let Some(e) = &engine {
+            e.ui_state().set_detached_dispatch(false);
+        }
+    }
+
+    /// The overlap probe's source: the engine's own record of what it
+    /// dispatched and what has not settled yet.
+    fn dispatch_journal(
+        handle: &WideHandle,
+    ) -> Option<Arc<holon_frontend::dispatch_journal::DispatchJournal>> {
+        handle.reactive().map(|r| r.ui_state().dispatch_journal())
+    }
+
     /// Clear the frontend component's per-tick `widget_tree_snapshot` memo
     /// before the next mutation, so the ~12 snapshot-reading ViewModel/render
     /// invariants share ONE recompute per settle tick without ever observing a

@@ -276,6 +276,13 @@ macro_rules! declare_e2e_transitions {
         }
 
         impl $enum_name {
+            /// Every variant name, in declaration order — the KIND ALPHABET.
+            /// The composed harness's interleaving mask parses against this, so
+            /// a mask naming a kind that does not exist fails loud instead of
+            /// silently arming nothing.
+            pub const VARIANT_NAMES: &'static [&'static str] =
+                &[ $( stringify!($variant) ),* ];
+
             /// Variant name for trace logging and Markov-weighting in
             /// generators that bias on the previous transition kind.
             pub fn variant_name(&self) -> &'static str {

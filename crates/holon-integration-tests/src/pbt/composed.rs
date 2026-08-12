@@ -65,6 +65,14 @@ pub mod reseed_observer;
 #[cfg(any(test, feature = "pbt"))]
 pub mod harness;
 
+/// The harness's scheduler-seed + transition-kind mask
+/// (`HOLON_PBT_SCHED_KINDS`): which kinds run through the fire-and-forget
+/// dispatch door with a seeded pump instead of the awaiting door and the
+/// per-transition settle. EMPTY unless armed, so an unarmed run is
+/// byte-identical.
+#[cfg(any(test, feature = "pbt"))]
+pub mod interleave;
+
 /// Per-case structured telemetry for the ONE composed keystone (weights-spike
 /// step 0): env-gated (`HOLON_PBT_TELEMETRY=1`) machine-parseable per-case
 /// lines measuring transition-kind/bigram diversity, wiring, invariant

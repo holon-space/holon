@@ -201,6 +201,52 @@ so a run log yields per-wiring case counts.
 - `HOLON_PBT_WIRING_AXES="storage;sync;actors"` — scope the drawn universe (fail-loud on
   a typo), e.g. `"Loro;;"` for all-Loro-only runs.
 
+**Interleaving (the scheduler-seed + kind-mask axis).** Unarmed, the keystone awaits
+every write and settles all three projections between transitions, so no two writes are
+ever in flight and a task-ordering bug is ungeneratable. Arming a transition kind makes
+THAT kind run through the fire-and-forget dispatch door production GPUI uses, with a
+seeded pump instead of the immediate await. Arm one kind at a time so every red names a
+`(kind, seed)` pair; the per-transition settle still runs before the tick's invariants,
+so the oracle is exactly as strict as it is unarmed.
+
+- `HOLON_PBT_SCHED_KINDS` — comma-separated `E2ETransition` variant names, or `all`.
+  **Unset ⇒ empty mask ⇒ the harness runs its pre-existing code path, unchanged.** An
+  unknown name panics rather than silently arming nothing.
+- `HOLON_PBT_SCHED_SEED` — `u64` scheduler seed (default `0`). Mixed with the kind and
+  the transition's index, so two ticks of one kind draw different pump budgets.
+- `HOLON_PBT_SCHED_STEPS` — max pump steps per masked transition (default `8`).
+
+Each masked transition prints `[interleave] <Kind>: seed=… steps=… intents=N
+peak_in_flight=M`. A transition that dispatched ≥ 2 intents but never had more than one
+in flight FAILS LOUD: a masked run that did not overlap proves nothing, so it must not
+read as green. Kinds that dispatch a single intent per transition can never overlap
+(the window is intra-transition) and are observed, never asserted on.
+
+**The seed widens the interleaving; it does not replay it.** The armed door
+(`dispatch_intent_through_armed_door`) hands the intent to
+`ReactiveEngine::dispatch_intent`, which spawns onto the ambient tokio
+multi-thread runtime (`reactive.rs:3633`), not through Increment 1's injectable
+`Spawner` seam (`holon_api::spawner::Spawner`). The pump's `steps` yields are
+therefore raced against real OS thread scheduling: the `(kind, seed)` pair
+reproducibly selects the *pump budget* (verified: identical seed ⇒ identical
+`seed=…` and `steps=…` on every `[interleave]` line, though how many such lines
+a run reaches varies), but NOT the resulting
+interleaving or which invariant an armed red trips — repeated runs of the same
+`(kind, seed)` have been observed to fail on different blocks and different
+oracles. Treat an armed red as one triaged sample of a widened window, not as
+a reproducible case: don't expect `HOLON_PBT_SCHED_SEED` alone to reproduce a
+specific finding, and capture the actual failing log alongside the finding
+when triaging it (see BugFunnel). Routing the armed door through the
+`Spawner` seam with a deterministic (single-thread, seed-ordered) executor
+would narrow this gap; it is deferred, not built, and is a candidate for
+Increment 3. It would not close it: tasks spawned inside `loro`, inside the
+vendored `turso`, or at any `tokio::spawn` not yet routed through the seam
+still run on tokio's own scheduler.
+
+An armed run is an OBSERVATION run, not a gate. Its reds are triage input:
+`bug-gap-triage` them into `docs/Testing/BugFunnel.md` and decide reference-model vs SUT
+before funding a fix.
+
 **Product surface ↔ grid points** (reduced surface: GPUI desktop+mobile, dioxus-web,
 MCP; tui/flutter/ply/waterui are archived and deliberately NOT in the axes):
 
