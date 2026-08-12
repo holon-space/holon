@@ -113,9 +113,7 @@ pub async fn seed_default_layout(
                 &block.id,
                 block.to_block_content(),
                 &block.properties,
-                &block.tags,
-                &block.requires,
-                &block.advice_suppressed,
+                &holon_api::BlockEdges::of(block),
             )
             .await
             .map_err(|e| anyhow::anyhow!("seed create_in_tree({}): {e:#}", block.id))?;

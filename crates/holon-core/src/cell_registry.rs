@@ -22,7 +22,6 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use holon_api::BlockContent;
 use holon_api::EntityUri;
-use holon_api::Tags;
 
 use crate::cell::Cell;
 use crate::cell::CellBacking;
@@ -80,9 +79,6 @@ pub trait EntityCellRegistry: Send + Sync {
     ///
     /// Default impl returns `Ok(false)` so registries that don't support
     /// authoritative creates opt out for free.
-    // Grouping these into a params struct is a public trait-API change across
-    // every implementor and call site — out of proportion to the lint.
-    #[allow(clippy::too_many_arguments)]
     async fn create_entity(
         &self,
         _: &EntityUri,
@@ -90,9 +86,7 @@ pub trait EntityCellRegistry: Send + Sync {
         _: &EntityUri,
         _: BlockContent,
         _: &std::collections::HashMap<String, holon_api::Value>,
-        _: &Tags,
-        _: &[EntityUri],
-        _: &[EntityUri],
+        _: &holon_api::BlockEdges,
     ) -> Result<bool> {
         Ok(false)
     }
@@ -401,9 +395,7 @@ mod tests {
                     &uri,
                     holon_api::BlockContent::text("x"),
                     &std::collections::HashMap::new(),
-                    &holon_api::Tags::default(),
-                    &[],
-                    &[],
+                    &holon_api::BlockEdges::default(),
                 )
                 .await
                 .unwrap()

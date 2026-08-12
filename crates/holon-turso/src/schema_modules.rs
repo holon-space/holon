@@ -284,7 +284,8 @@ async fn migrate_junction_dropping_target_fk(
 
 /// Block junction-table schema module.
 ///
-/// Owns `block_requires` and `block_tags` (the production junction tables).
+/// Owns the production junction tables (`block_requires`, `block_tags`,
+/// `advice_suppressed`, `block_contributes_to`).
 /// FKs target `block_raw`. The chained matviews that depend on these
 /// junctions (`block` matview, `block_requirement_edges`) are owned by
 /// `BlockMatviewSchemaModule` and `BlockRequirementEdgesSchemaModule`
@@ -302,6 +303,7 @@ impl SchemaModule for BlockSchemaModule {
             Resource::schema("block_requires"),
             Resource::schema("block_tags"),
             Resource::schema("advice_suppressed"),
+            Resource::schema("block_contributes_to"),
         ]
     }
 
@@ -363,6 +365,11 @@ impl SchemaModule for BlockSchemaModule {
         }
         tracing::debug!("[BlockSchemaModule] advice_suppressed table created");
 
+        for stmt in sql_statements(include_str!("../sql/schema/block_contributes_to.sql")) {
+            db_handle.execute_ddl(stmt).await?;
+        }
+        tracing::debug!("[BlockSchemaModule] block_contributes_to table created");
+
         tracing::info!("[BlockSchemaModule] Junction tables ready");
         Ok(())
     }
@@ -389,6 +396,13 @@ impl SchemaModule for BlockSchemaModule {
                 join_table: "advice_suppressed".to_string(),
                 source_col: "anchor_id".to_string(),
                 target_col: "lesson_id".to_string(),
+            },
+            EdgeFieldDescriptor {
+                entity: "block".to_string(),
+                field: "contributes_to".to_string(),
+                join_table: "block_contributes_to".to_string(),
+                source_col: "block_id".to_string(),
+                target_col: "target_id".to_string(),
             },
         ]
     }

@@ -39,7 +39,6 @@ use holon_api::block::Block;
 use holon_api::capability::Consolidator;
 use holon_api::entity_uri::EntityUri;
 use holon_api::types::ContentType;
-use holon_api::types::Tags;
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::traits::Result as BlockOrderingResult;
 use holon_filesystem::AliasRegistrar;
@@ -423,9 +422,7 @@ impl BlockOrdering for LoroBlockOrdering {
         _: &EntityUri,
         _: BlockContent,
         _: &HashMap<String, Value>,
-        _: &Tags,
-        _: &[EntityUri],
-        _: &[EntityUri],
+        _: &holon_api::BlockEdges,
     ) -> BlockOrderingResult<bool> {
         Ok(false)
     }

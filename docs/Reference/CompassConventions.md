@@ -9,7 +9,7 @@ schema; everything else is content.
 | Key | Value grammar | Example |
 |---|---|---|
 | `compass` | the item type: `mission`, `problem`, `goal`, `strategy`, `challenge`, `dimension-current`, `dimension-ideal` | `:compass: goal` |
-| `contributes-to` | bare block ID, or `[[Page Name]]` when the target is a page, or the sentinel `none` | `:contributes-to: compass-m1` |
+| `contributes-to` | space- or comma-separated bare block IDs; omit the key when the item advances nothing | `:contributes-to: compass-m1` |
 | `last-reviewed` | ISO date or ISO datetime | `:last-reviewed: 2026-08-11` |
 | `provenance` | `explicit` \| `inferred` \| `deduced` | `:provenance: explicit` |
 | `review-cadence` | ISO-8601 duration | `:review-cadence: P30D` |
@@ -29,8 +29,10 @@ ideal state, and an ideal state at its mission.
    keys, so the value survives in the store but is erased from disk on the next
    write-back — the one silent, one-way loss.
 3. **Never author an empty value.** A valueless drawer entry does not come back
-   from the parse at all; the key vanishes. Use an explicit sentinel (`none`)
-   instead.
+   from the parse at all; the key vanishes. Omit the whole key instead — for
+   `contributes-to` that is how the empty edge set is written, exactly as for
+   `:REQUIRES:`. The legacy `none` sentinel still parses to the empty set, and
+   the renderer drops it on write-back.
 4. **Author the drawer in ASCII-alphabetical order, after `:ID:`.** Authored
    drawer order is replayed from `_drawer_order`, which the `_`-prefix filter
    removes from the DRAWER only — the carrier persists in the stored properties
@@ -58,11 +60,14 @@ Its recommended key set is pinned by
 `recommended_compass_key_set_is_byte_stable` in
 `crates/holon-org-format/tests/compass_property_key_probe.rs`.
 
-`contributes-to` was added to that probe and measured before the rename landed:
-SURVIVES and idempotent in every form the schema uses — bare slug, `[[id:…][…]]`
-link, `[[Page Name]]` link, and the `none` sentinel — on both the file→file and
-the store-origin path, with the canonical alphabetical document byte-stable
-across two write-back passes.
+`contributes-to` is a TYPED EDGE, not a drawer string: the parser lifts it into
+`Block.contributes_to` at the boundary and the renderer rebuilds the key from
+the junction-hydrated set, with the scheme stripped and the ids sorted (the
+junction hydration is unordered, so a sorted canonical form is what makes the
+round trip deterministic). Authoring form is therefore BARE IDS only — the
+`[[Page Name]]` link form the templates once used names no block id and does not
+resolve to an edge. Pinned by `compass_edges_survive_the_store_as_typed_edges`
+in `crates/holon-app/tests/org_store_org_round_trip.rs`.
 
 Two premises that probe RETIRED: general underscores in identifiers do NOT get
 mangled (only the `_` PREFIX loses data), and `INTERNAL_KEYS` are dropped at
@@ -95,9 +100,10 @@ rather than minting a stale review date.
 
 Two different modal strengths, two different homes — do not conflate:
 
-- `contributes-to` (Compass drawer property): CONTRIBUTION. Doing X advances Y;
-  neither necessary nor sufficient. Drives the agenda query ("what advances
-  goal X" = reverse closure over `contributes-to`).
+- `contributes-to` (`Block.contributes_to`, `block_contributes_to` junction):
+  CONTRIBUTION. Doing X advances Y; neither necessary nor sufficient. Drives the
+  agenda query ("what advances goal X" = reverse closure over
+  `block_contributes_to.target_id`).
 - `requires` (the EXISTING typed edge, `Block.requires`,
   `crates/holon-api/src/block.rs:312`, `block_requires` junction table):
   NECESSITY. Y requires X means missing X blocks Y. Drives

@@ -47,7 +47,6 @@ use std::sync::atomic::Ordering;
 
 use holon_api::BlockContent;
 use holon_api::EntityUri;
-use holon_api::Tags;
 use holon_api::repository::CoreOperations;
 use loro::LoroDoc;
 use loro::TreeParentId;
@@ -116,9 +115,7 @@ async fn create(backend: &LoroBackend, parent: EntityUri, id: &str) {
             BlockContent::text(id),
             Some(EntityUri::block(id)),
             &HashMap::new(),
-            &Tags::default(),
-            &[],
-            &[],
+            &holon_api::BlockEdges::default(),
         )
         .await
         .unwrap();

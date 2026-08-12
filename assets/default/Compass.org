@@ -4,7 +4,6 @@
 :TEMPLATE: compass-mission
 :TEMPLATE_VARS: title, reviewed, provenance=explicit
 :compass: mission
-:contributes-to: none
 :last-reviewed: {{reviewed}}
 :provenance: {{provenance}}
 :review-cadence: P180D
@@ -23,7 +22,7 @@
 :TEMPLATE: compass-problem
 :TEMPLATE_VARS: title, mission, reviewed, provenance=explicit
 :compass: problem
-:contributes-to: [[{{mission}}]]
+:contributes-to: {{mission}}
 :last-reviewed: {{reviewed}}
 :provenance: {{provenance}}
 :review-cadence: P180D
@@ -42,7 +41,7 @@
 :TEMPLATE: compass-goal
 :TEMPLATE_VARS: title, metric, target, current=unknown, mission, reviewed, provenance=explicit
 :compass: goal
-:contributes-to: [[{{mission}}]]
+:contributes-to: {{mission}}
 :last-reviewed: {{reviewed}}
 :provenance: {{provenance}}
 :review-cadence: P30D
@@ -73,7 +72,7 @@
 :TEMPLATE: compass-strategy
 :TEMPLATE_VARS: title, goal, reviewed, provenance=explicit
 :compass: strategy
-:contributes-to: [[{{goal}}]]
+:contributes-to: {{goal}}
 :last-reviewed: {{reviewed}}
 :provenance: {{provenance}}
 :review-cadence: P30D
@@ -92,7 +91,7 @@
 :TEMPLATE: compass-challenge
 :TEMPLATE_VARS: title, strategy, reviewed, provenance=explicit
 :compass: challenge
-:contributes-to: [[{{strategy}}]]
+:contributes-to: {{strategy}}
 :last-reviewed: {{reviewed}}
 :provenance: {{provenance}}
 :review-cadence: P90D
@@ -111,7 +110,7 @@
 :TEMPLATE: compass-dimension-current
 :TEMPLATE_VARS: dimension, ideal, reviewed, provenance=explicit
 :compass: dimension-current
-:contributes-to: [[{{ideal}}]]
+:contributes-to: {{ideal}}
 :last-reviewed: {{reviewed}}
 :provenance: {{provenance}}
 :review-cadence: P90D
@@ -130,7 +129,7 @@
 :TEMPLATE: compass-dimension-ideal
 :TEMPLATE_VARS: dimension, mission, reviewed, provenance=explicit
 :compass: dimension-ideal
-:contributes-to: [[{{mission}}]]
+:contributes-to: {{mission}}
 :last-reviewed: {{reviewed}}
 :provenance: {{provenance}}
 :review-cadence: P90D

@@ -861,6 +861,7 @@ impl OrgBlockExt for Block {
             "tags",
             "requires",
             "advice_suppressed",
+            "contributes_to",
             "scheduled",
             "deadline",
             "org_properties",
@@ -950,6 +951,22 @@ impl OrgBlockExt for Block {
                 .map(|uri| uri.id().to_string())
                 .collect();
             result.insert("ADVICE_SUPPRESSED".to_string(), bare.join(" "));
+        }
+
+        // `contributes_to` mirrors `requires` — a typed edge field rebuilt into
+        // its drawer with the scheme stripped, sorted so the round-trip is
+        // deterministic through the store's unordered junction hydration. The
+        // key is lowercase kebab-case: Compass keys are lowercase by convention
+        // so they can never collide with org's own UPPER-CASE typed keys
+        // (docs/Reference/CompassConventions.md).
+        if !self.contributes_to.is_empty() {
+            let mut bare: Vec<String> = self
+                .contributes_to
+                .iter()
+                .map(|uri| uri.id().to_string())
+                .collect();
+            bare.sort();
+            result.insert("contributes-to".to_string(), bare.join(" "));
         }
 
         // `collapsed` is document state (Martin ruling 2026-07-11), written

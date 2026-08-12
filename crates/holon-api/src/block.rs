@@ -324,6 +324,15 @@ pub struct Block {
     #[edge_field]
     pub advice_suppressed: Vec<EntityUri>,
 
+    /// Compass contribution edges: block IDs this block advances. CONTRIBUTION,
+    /// not necessity — see `requires` for the hard-dependency edge and
+    /// docs/Reference/CompassConventions.md for the two arc directions. Stored
+    /// in the `block_contributes_to` junction table (edge field), serialized as
+    /// the `:contributes-to:` drawer, and read from the `block` matview's
+    /// hydrated `contributes_to` JSON array.
+    #[edge_field]
+    pub contributes_to: Vec<EntityUri>,
+
     // --- Content fields (flattened from BlockContent) ---
     /// Text content (raw text or source code)
     pub content: String,
@@ -382,6 +391,7 @@ impl Default for Block {
             tags: Tags::default(),
             requires: Vec::new(),
             advice_suppressed: Vec::new(),
+            contributes_to: Vec::new(),
             content: String::new(),
             content_type: ContentType::Text,
             source_language: None,
@@ -932,6 +942,16 @@ impl TryFrom<crate::StorageEntity> for Block {
                 })
             })
             .collect::<anyhow::Result<Vec<EntityUri>>>()?;
+        let contributes_to = require_string_array(&row, "contributes_to", &id)?
+            .into_iter()
+            .map(|s| {
+                EntityUri::parse_owned(s.clone()).map_err(|e| {
+                    anyhow::anyhow!(
+                        "block {id}: 'contributes_to' entry {s:?} is not a valid URI: {e}"
+                    )
+                })
+            })
+            .collect::<anyhow::Result<Vec<EntityUri>>>()?;
         let marks = match row.get("marks") {
             None | Some(Value::Null) => None,
             Some(Value::Json(s)) | Some(Value::String(s)) => {
@@ -972,6 +992,7 @@ impl TryFrom<crate::StorageEntity> for Block {
             tags,
             requires,
             advice_suppressed,
+            contributes_to,
             content,
             content_type,
             source_language,
@@ -1117,6 +1138,9 @@ pub struct BlockWire {
     /// Junction-derived edge field (advice-suppression set). See `tags`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub advice_suppressed: Vec<EntityUri>,
+    /// Junction-derived edge field (Compass contribution set). See `tags`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contributes_to: Vec<EntityUri>,
 }
 
 impl From<&Block> for BlockWire {
@@ -1137,6 +1161,7 @@ impl From<&Block> for BlockWire {
             tags: b.tags.to_vec(),
             requires: b.requires.clone(),
             advice_suppressed: b.advice_suppressed.clone(),
+            contributes_to: b.contributes_to.clone(),
         }
     }
 }
@@ -1149,6 +1174,7 @@ impl From<BlockWire> for Block {
             tags: w.tags.into(),
             requires: w.requires,
             advice_suppressed: w.advice_suppressed,
+            contributes_to: w.contributes_to,
             content: w.content,
             content_type: w.content_type,
             source_language: w.source_language,
@@ -1472,6 +1498,7 @@ mod mutation_gap_tests {
                 ("tags", Value::Array(vec![Value::String("a".to_string())])),
                 ("requires", Value::Array(vec![])),
                 ("advice_suppressed", Value::Array(vec![])),
+                ("contributes_to", Value::Array(vec![])),
                 ("collapsed", Value::Integer(0)),
                 ("widget_only", Value::Integer(0)),
             ]

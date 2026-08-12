@@ -159,6 +159,21 @@ impl<R: RefLifecycle + RefBlockTree + RefLayout + RefLayoutInteract + RefWiring 
                 .boxed();
             arms.push((2, requires_arm));
 
+            // `contributes_to` arm: same single-edge shape as `requires`, for
+            // the Compass contribution edge.
+            let elig = eligible.clone();
+            let contributes_arm = (0..n, 0..n)
+                .prop_filter(
+                    "contributes-to target must differ from subject",
+                    |(i, j)| i != j,
+                )
+                .prop_map(move |(i, j)| SetEdgeField {
+                    block_id: elig[i].clone(),
+                    update: EdgeFieldUpdate::ContributesTo(vec![elig[j].clone()]),
+                })
+                .boxed();
+            arms.push((2, contributes_arm));
+
             // `advice_suppressed` arm: mirrors `requires` — a single dismissal
             // edge to a *distinct* existing block (ADR 0021 exclusion set). The
             // general (unbiased) sub-arm keeps weight 1.
@@ -249,10 +264,11 @@ impl<R: RefLifecycle + RefBlockTree + RefLayoutInteract + RefWiring + RefLayoutM
                 Reason::FocusedInLayoutBlocks,
             ),
         ];
-        // A `requires` / `advice_suppressed` edge must point at an existing block.
+        // Every block-referencing edge must point at an existing block.
         let edge_targets = match &self.update {
             EdgeFieldUpdate::Requires(targets) => Some(targets),
             EdgeFieldUpdate::AdviceSuppressed(targets) => Some(targets),
+            EdgeFieldUpdate::ContributesTo(targets) => Some(targets),
             EdgeFieldUpdate::Tags(_) => None,
         };
         if let Some(targets) = edge_targets {

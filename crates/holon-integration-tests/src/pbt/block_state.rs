@@ -107,16 +107,19 @@ impl BlockState {
                 let mut b = b.clone();
                 b.id = resolve(&b.id);
                 b.parent_id = resolve(&b.parent_id);
-                // `requires` is an edge field of block-id references; remap its
-                // targets into SUT ID space too so an edge-field comparison
-                // (e.g. `/matview`) matches when a dependency points at a
-                // minted (split-reconciled) block, not just a stable seed id.
-                b.requires = b.requires.iter().map(|u| resolve(u)).collect();
-                // `advice_suppressed` is likewise an edge field of block-id
-                // references (ADR 0021 dismissal set); remap its targets the
-                // same way, or a dismissal pointing at a split-reconciled block
-                // keeps the synthetic id and diverges from the SUT's resolved id.
-                b.advice_suppressed = b.advice_suppressed.iter().map(|u| resolve(u)).collect();
+                // Every edge field of block-id references is remapped too:
+                // an edge pointing at a minted (split-reconciled) block would
+                // otherwise keep the synthetic id and diverge spuriously in
+                // `inv-blocks-match-ref/matview`. `targets_mut` yields exactly
+                // the block-referencing fields, so a new one is covered here on
+                // the day it is declared.
+                for field in holon_api::EdgeField::ALL {
+                    if let Some(targets) = field.targets_mut(&mut b) {
+                        for t in targets.iter_mut() {
+                            *t = resolve(t);
+                        }
+                    }
+                }
                 (b.id.clone(), b)
             })
             .collect();

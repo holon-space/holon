@@ -483,6 +483,7 @@ impl SutEdgeFieldWrite for EdgeFieldWriter {
             EdgeFieldUpdate::AdviceSuppressed(reqs) => {
                 ("advice_suppressed", self.resolved_targets(reqs))
             }
+            EdgeFieldUpdate::ContributesTo(reqs) => ("contributes_to", self.resolved_targets(reqs)),
         };
         let mut params: StorageEntity = HashMap::new();
         params.insert("id".into(), Value::String(rid.to_string()));

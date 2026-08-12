@@ -872,6 +872,14 @@ impl CrudOperations<Block> for LoroBlockOperations {
                 .collect(),
             None => Vec::new(),
         };
+        let contributes_to: Vec<EntityUri> = match fields.get("contributes_to") {
+            Some(v) => edge_string_targets(v, "contributes_to")?
+                .iter()
+                // ALLOW(entity_uri_from_raw): edge target from create op params dict
+                .map(|s| EntityUri::from_raw(s))
+                .collect(),
+            None => Vec::new(),
+        };
 
         // Build the appropriate BlockContent based on content_type. Image must
         // map to the dedicated variant — otherwise the block is stored in Loro
@@ -938,9 +946,12 @@ impl CrudOperations<Block> for LoroBlockOperations {
                     block_content,
                     block_uri,
                     &HashMap::new(),
-                    &tags,
-                    &requires,
-                    &advice_suppressed,
+                    &holon_api::BlockEdges {
+                        tags,
+                        requires,
+                        advice_suppressed,
+                        contributes_to,
+                    },
                 )
                 .await
                 .map_err(|e| format!("Failed to create block: {}", e))?

@@ -25,7 +25,6 @@ use holon_api::ContentType;
 use holon_api::EntityUri;
 use holon_api::SourceBlock;
 use holon_api::StreamPosition;
-use holon_api::Tags;
 use holon_api::Value;
 use holon_api::block_mutation::BlockMutation;
 use holon_api::block_mutation::BlockTreeView;
@@ -452,9 +451,9 @@ fn read_properties_from_meta(meta: &loro::LoroMap) -> HashMap<String, Value> {
     // Edge-typed fields (junction tables, not raw columns) get the same
     // treatment for the same reason — they leak in as `Array([])` and, being
     // absent from the SQL `properties` blob, trip the identical divergence.
-    props.remove("tags");
-    props.remove("requires");
-    props.remove("advice_suppressed");
+    for field in holon_api::EdgeField::ALL {
+        props.remove(field.column());
+    }
     for key in RESERVED_PROPERTY_KEYS {
         props.remove(*key);
     }
@@ -549,14 +548,13 @@ fn read_block_from_tree(
         .unwrap_or(0);
 
     let tags = read_tags_from_meta(&meta);
-    let requires = read_requires_from_meta(&meta);
-    let advice_suppressed = read_advice_suppressed_from_meta(&meta);
 
     let mut block = Block::from_block_content(id, parent_id, content);
     block.set_properties_map(properties);
     block.tags = tags.into();
-    block.requires = requires;
-    block.advice_suppressed = advice_suppressed;
+    block.requires = read_edge_from_meta(&meta, "requires");
+    block.advice_suppressed = read_edge_from_meta(&meta, "advice_suppressed");
+    block.contributes_to = read_edge_from_meta(&meta, "contributes_to");
     block.collapsed = collapsed;
     block.widget_only = widget_only;
     block.created_at = created_at;
@@ -599,42 +597,24 @@ pub(crate) fn node_is_page(tree: &loro::LoroTree, tid: loro::TreeID) -> anyhow::
         .any(|t| t == holon_api::block::PAGE_TAG))
 }
 
-/// Read the `requires` JSON-encoded list (org-edna dependency edge field) from
-/// a node's metadata. Stored under a dedicated `requires` meta key — like
-/// `tags`, it is an edge field (the `block_requires` junction), never part of
-/// the generic `properties` blob. Returns an empty `Vec` when absent. Malformed
-/// JSON in a present value is corruption of our own metadata — fail loud.
-fn read_requires_from_meta(meta: &loro::LoroMap) -> Vec<EntityUri> {
-    meta.get_typed("requires", |val| val.as_string().map(|s| s.to_string()))
+/// Read one block-referencing edge field's JSON-encoded target list from a
+/// node's metadata. Each such field lives under its own meta key — like `tags`,
+/// it is an edge field (a junction table), never part of the generic
+/// `properties` blob. Empty when absent; malformed JSON in a present value is
+/// corruption of our own metadata — fail loud.
+fn read_edge_from_meta(meta: &loro::LoroMap, key: &str) -> Vec<EntityUri> {
+    meta.get_typed(key, |val| val.as_string().map(|s| s.to_string()))
         .map(|s| {
             serde_json::from_str::<Vec<String>>(&s)
-                .unwrap_or_else(|e| panic!("corrupt `requires` metadata JSON {s:?}: {e}"))
+                .unwrap_or_else(|e| panic!("corrupt `{key}` metadata JSON {s:?}: {e}"))
                 .into_iter()
-                .map(|r| EntityUri::parse_owned(r).expect("stored requires must be a valid URI"))
+                .map(|r| {
+                    EntityUri::parse_owned(r)
+                        .unwrap_or_else(|e| panic!("stored {key} entry is not a valid URI: {e}"))
+                })
                 .collect()
         })
         .unwrap_or_default()
-}
-
-/// Read the `advice_suppressed` JSON-encoded list (advice-suppression exclusion
-/// set, ADR 0021) from a node's metadata. Mirrors `read_requires_from_meta`:
-/// an edge field stored under its own meta key (the `advice_suppressed`
-/// junction), never in the generic `properties` blob. Empty when absent;
-/// malformed JSON is corruption of our own metadata — fail loud.
-fn read_advice_suppressed_from_meta(meta: &loro::LoroMap) -> Vec<EntityUri> {
-    meta.get_typed("advice_suppressed", |val| {
-        val.as_string().map(|s| s.to_string())
-    })
-    .map(|s| {
-        serde_json::from_str::<Vec<String>>(&s)
-            .unwrap_or_else(|e| panic!("corrupt `advice_suppressed` metadata JSON {s:?}: {e}"))
-            .into_iter()
-            .map(|r| {
-                EntityUri::parse_owned(r).expect("stored advice_suppressed must be a valid URI")
-            })
-            .collect()
-    })
-    .unwrap_or_default()
 }
 
 /// Check if two snapshotted blocks differ in content, structure, ordering, or
@@ -1027,9 +1007,7 @@ pub struct NewBlockWithProperties {
     pub id: EntityUri,
     pub content: BlockContent,
     pub properties: HashMap<String, Value>,
-    pub tags: Tags,
-    pub requires: Vec<EntityUri>,
-    pub advice_suppressed: Vec<EntityUri>,
+    pub edges: holon_api::BlockEdges,
 }
 
 /// Write ONE new node (node + STABLE_ID + content + properties + edge fields +
@@ -1099,23 +1077,29 @@ fn write_new_node(
     // `read_block_from_tree` and writes `block_tags`. The `Page` tag in
     // particular makes a document resolvable — dropping it here orphans
     // every doc. `requires` and `advice_suppressed` (ADR 0021) mirror it.
-    if !request.tags.is_empty() {
-        let serialized = serde_json::to_string(&request.tags)
-            .map_err(|e| anyhow::anyhow!("serialize tags: {e}"))?;
-        meta.insert("tags", loro::LoroValue::from(serialized.as_str()))?;
-    }
-    if !request.requires.is_empty() {
-        let serialized = serde_json::to_string(&request.requires)
-            .map_err(|e| anyhow::anyhow!("serialize requires: {e}"))?;
-        meta.insert("requires", loro::LoroValue::from(serialized.as_str()))?;
-    }
-    if !request.advice_suppressed.is_empty() {
-        let serialized = serde_json::to_string(&request.advice_suppressed)
-            .map_err(|e| anyhow::anyhow!("serialize advice_suppressed: {e}"))?;
-        meta.insert(
-            "advice_suppressed",
-            loro::LoroValue::from(serialized.as_str()),
-        )?;
+    let mut edge_carrier = Block::from_block_content(
+        EntityUri::block(&stable_id),
+        EntityUri::no_parent(),
+        BlockContent::text(""),
+    );
+    request.edges.apply_to(&mut edge_carrier);
+    for field in holon_api::EdgeField::ALL {
+        if field.is_empty(&edge_carrier) {
+            continue;
+        }
+        let Value::Array(targets) = field.param_value(&edge_carrier) else {
+            unreachable!("EdgeField::param_value is always an Array");
+        };
+        let plain: Vec<&str> = targets
+            .iter()
+            .map(|v| {
+                v.as_string()
+                    .expect("EdgeField::param_value yields string entries")
+            })
+            .collect();
+        let serialized = serde_json::to_string(&plain)
+            .map_err(|e| anyhow::anyhow!("serialize {}: {e}", field.column()))?;
+        meta.insert(field.column(), loro::LoroValue::from(serialized.as_str()))?;
     }
     meta.insert("created_at", loro::LoroValue::from(now))?;
     meta.insert("updated_at", loro::LoroValue::from(now))?;
@@ -1130,9 +1114,7 @@ fn write_new_node(
         request.content.clone(),
     );
     block.set_properties_map(request.properties.clone());
-    block.tags = request.tags.clone();
-    block.requires = request.requires.clone();
-    block.advice_suppressed = request.advice_suppressed.clone();
+    request.edges.apply_to(&mut block);
     block.created_at = now;
     block.updated_at = now;
     Ok((block, node))
@@ -2647,18 +2629,13 @@ impl LoroBackend {
     /// empty `properties` over the row the create wrote (the `props_check` /
     /// "Value::Object serialization" divergence). The trait `create_block`
     /// delegates here with an empty map.
-    // Grouping these into a params struct would ripple across the 13 call
-    // sites in 4 other crates that construct this argument list positionally.
-    #[allow(clippy::too_many_arguments)]
     pub async fn create_block_with_properties(
         &self,
         parent_id: EntityUri,
         content: BlockContent,
         id: Option<EntityUri>,
         properties: &HashMap<String, Value>,
-        tags: &Tags,
-        requires: &[EntityUri],
-        advice_suppressed: &[EntityUri],
+        edges: &holon_api::BlockEdges,
     ) -> Result<Block, ApiError> {
         let now = self.now_millis();
         let stable_id = match &id {
@@ -2686,9 +2663,7 @@ impl LoroBackend {
             id: child_uri.clone(),
             content: content.clone(),
             properties: properties.clone(),
-            tags: tags.clone(),
-            requires: requires.to_vec(),
-            advice_suppressed: advice_suppressed.to_vec(),
+            edges: edges.clone(),
         };
         let (created_block, tree_id) = write_doc
             .with_write(|doc| {
@@ -3956,9 +3931,7 @@ impl CoreOperations for LoroBackend {
             content,
             id,
             &HashMap::new(),
-            &Tags::default(),
-            &[],
-            &[],
+            &holon_api::BlockEdges::default(),
         )
         .await
     }
@@ -4587,6 +4560,8 @@ mod diff_checkout_race_tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::Ordering;
 
+    use holon_api::Tags;
+
     use super::*;
     use crate::LoroDocument;
 
@@ -4605,9 +4580,10 @@ mod diff_checkout_race_tests {
                 BlockContent::text("parent"),
                 Some(EntityUri::block("parent")),
                 &props,
-                &tags,
-                &[],
-                &[],
+                &holon_api::BlockEdges {
+                    tags: tags.clone(),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();
@@ -4637,9 +4613,7 @@ mod diff_checkout_race_tests {
                 BlockContent::text("parent"),
                 Some(EntityUri::block("parent")),
                 &HashMap::new(),
-                &Tags::default(),
-                &[],
-                &[],
+                &holon_api::BlockEdges::default(),
             )
             .await
             .unwrap();
@@ -4668,9 +4642,7 @@ mod diff_checkout_race_tests {
                 BlockContent::text("child"),
                 Some(EntityUri::block("child")),
                 &HashMap::new(),
-                &Tags::default(),
-                &[],
-                &[],
+                &holon_api::BlockEdges::default(),
             )
             .await;
         assert!(
@@ -4699,9 +4671,7 @@ mod diff_checkout_race_tests {
                 BlockContent::text("hello"),
                 Some(EntityUri::block("b1")),
                 &HashMap::new(),
-                &Tags::default(),
-                &[],
-                &[],
+                &holon_api::BlockEdges::default(),
             )
             .await
             .unwrap();
@@ -4758,9 +4728,7 @@ mod diff_checkout_race_tests {
                 BlockContent::text("parent"),
                 Some(EntityUri::block("parent")),
                 &HashMap::new(),
-                &Tags::default(),
-                &[],
-                &[],
+                &holon_api::BlockEdges::default(),
             )
             .await
             .unwrap();
@@ -4812,9 +4780,10 @@ mod diff_checkout_race_tests {
                 BlockContent::text("child"),
                 Some(EntityUri::block("child")),
                 &props,
-                &tags,
-                &[],
-                &[],
+                &holon_api::BlockEdges {
+                    tags: tags.clone(),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();
@@ -4869,9 +4838,10 @@ mod diff_checkout_race_tests {
                 BlockContent::text("child"),
                 Some(EntityUri::block("child")),
                 &props,
-                &tags,
-                &[],
-                &[],
+                &holon_api::BlockEdges {
+                    tags: tags.clone(),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();
@@ -5428,9 +5398,7 @@ mod half_born_node_tests {
                 BlockContent::text(id),
                 Some(EntityUri::block(id)),
                 &HashMap::new(),
-                &Tags::default(),
-                &[],
-                &[],
+                &holon_api::BlockEdges::default(),
             )
             .await
             .unwrap();

@@ -49,7 +49,9 @@ impl SinkReader for TursoSinkReader {
              json_group_array(tag) FROM block_tags WHERE block_id = b.id), '[]') AS tags, \
              COALESCE((SELECT json_group_array(required_id) FROM block_requires WHERE block_id = \
              b.id), '[]') AS requires, COALESCE((SELECT json_group_array(lesson_id) FROM \
-             advice_suppressed WHERE anchor_id = b.id), '[]') AS advice_suppressed FROM {table} b \
+             advice_suppressed WHERE anchor_id = b.id), '[]') AS advice_suppressed, \
+             COALESCE((SELECT json_group_array(target_id) FROM block_contributes_to WHERE \
+             block_id = b.id), '[]') AS contributes_to FROM {table} b \
              WHERE b.id != '{sentinel}'",
             table = BLOCK_WRITE_TABLE,
             sentinel = holon_api::EntityUri::no_parent().as_str(),
@@ -120,6 +122,7 @@ mod tests {
             "CREATE TABLE block_tags (block_id TEXT, tag TEXT)",
             "CREATE TABLE block_requires (block_id TEXT, required_id TEXT)",
             "CREATE TABLE advice_suppressed (anchor_id TEXT, lesson_id TEXT)",
+            "CREATE TABLE block_contributes_to (block_id TEXT, target_id TEXT)",
         ] {
             db_handle.execute_ddl(ddl).await.expect("create junction");
         }

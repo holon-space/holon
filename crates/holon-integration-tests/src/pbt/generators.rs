@@ -388,6 +388,11 @@ pub fn generate_org_file_content_with_keywords(
                 // field end-to-end (parser → Loro/SQL junction → projection →
                 // renderer) — the path that was previously never generated.
                 prop::bool::ANY,
+                // `make_contributes`: same predecessor trick as `make_requires`,
+                // for the Compass CONTRIBUTION edge (`:contributes-to:`). A
+                // separate axis so a regression in one edge field cannot be
+                // masked by the other still projecting.
+                prop::bool::ANY,
                 // Parent selector (extended-gen axis 2): heading `i` parents to
                 // `sel % (i + 1)` — 0 = doc root, k = heading `k-1`. Same
                 // predecessor trick as `make_requires`: only already-built
@@ -411,7 +416,7 @@ pub fn generate_org_file_content_with_keywords(
             // predecessor by id. Collected up front because the dependency
             // target (`ids[i-1]`) must be known while building block `i`.
             // Uniquified (see `uniquify_ids`): org files require unique `:ID:`s.
-            let ids = uniquify_ids(headings.iter().map(|(_, id, _, _, _)| id.clone()));
+            let ids = uniquify_ids(headings.iter().map(|(_, id, _, _, _, _)| id.clone()));
             // First pass: resolve each heading's parent. Flat (doc root) by
             // default; under extended gen, heading `i` parents to
             // `sel % (i + 1)` (0 = root, k = heading k-1) — well-founded by
@@ -420,7 +425,7 @@ pub fn generate_org_file_content_with_keywords(
                 .iter()
                 .enumerate()
                 .map(
-                    |(i, (_, _, _, _, parent_sel))| match *parent_sel as usize % (i + 1) {
+                    |(i, (_, _, _, _, _, parent_sel))| match *parent_sel as usize % (i + 1) {
                         0 => doc_uri.clone(),
                         k => EntityUri::block(&ids[k - 1]),
                     },
@@ -429,27 +434,37 @@ pub fn generate_org_file_content_with_keywords(
             let blocks: Vec<Block> = headings
                 .into_iter()
                 .enumerate()
-                .map(|(i, (headline, _, make_task, make_requires, _))| {
-                    let mut b =
-                        Block::new_text(EntityUri::block(&ids[i]), parents[i].clone(), &headline);
-                    b.set_property("ID", Value::String(ids[i].clone()));
-                    // Assign a task keyword to ~50% of headlines when keywords exist.
-                    // Cycle through keywords using the index for variety.
-                    if make_task && !all_keywords.is_empty() {
-                        let kw = &all_keywords[i % all_keywords.len()];
-                        b.set_task_state(Some(TaskState::from_keyword(kw)));
-                    }
-                    // Single-element requires (depend on the previous TRUE
-                    // sibling — same parent, so nesting stays orthogonal to
-                    // the requires axis) — kept to one entry so the
-                    // order-insensitive junction read can't false-diff against
-                    // the parsed order.
-                    // Stored as a `block:` URI to match the parser boundary.
-                    if make_requires && i > 0 && parents[i] == parents[i - 1] {
-                        b.requires = vec![EntityUri::block(&ids[i - 1])];
-                    }
-                    b
-                })
+                .map(
+                    |(i, (headline, _, make_task, make_requires, make_contributes, _))| {
+                        let mut b = Block::new_text(
+                            EntityUri::block(&ids[i]),
+                            parents[i].clone(),
+                            &headline,
+                        );
+                        b.set_property("ID", Value::String(ids[i].clone()));
+                        // Assign a task keyword to ~50% of headlines when keywords exist.
+                        // Cycle through keywords using the index for variety.
+                        if make_task && !all_keywords.is_empty() {
+                            let kw = &all_keywords[i % all_keywords.len()];
+                            b.set_task_state(Some(TaskState::from_keyword(kw)));
+                        }
+                        // Single-element requires (depend on the previous TRUE
+                        // sibling — same parent, so nesting stays orthogonal to
+                        // the requires axis) — kept to one entry so the
+                        // order-insensitive junction read can't false-diff against
+                        // the parsed order.
+                        // Stored as a `block:` URI to match the parser boundary.
+                        if make_requires && i > 0 && parents[i] == parents[i - 1] {
+                            b.requires = vec![EntityUri::block(&ids[i - 1])];
+                        }
+                        // Contribution edge, same single-element shape and
+                        // predecessor eligibility as `requires`.
+                        if make_contributes && i > 0 && parents[i] == parents[i - 1] {
+                            b.contributes_to = vec![EntityUri::block(&ids[i - 1])];
+                        }
+                        b
+                    },
+                )
                 .collect();
             (filename, blocks)
         });

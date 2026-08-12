@@ -115,7 +115,6 @@ mod tests {
 
     use holon_api::BlockContent;
     use holon_api::EntityUri;
-    use holon_api::Tags;
     use holon_api::Value;
     use holon_api::repository::CoreOperations;
     use loro::ExportMode;
@@ -135,9 +134,7 @@ mod tests {
                 BlockContent::text(SECRET),
                 Some(EntityUri::block("secret")),
                 &HashMap::new(),
-                &Tags::default(),
-                &[],
-                &[],
+                &holon_api::BlockEdges::default(),
             )
             .await
             .unwrap();
@@ -183,9 +180,7 @@ mod tests {
                 BlockContent::text(SECRET),
                 Some(EntityUri::block("secret")),
                 &HashMap::new(),
-                &Tags::default(),
-                &[],
-                &[],
+                &holon_api::BlockEdges::default(),
             )
             .await
             .unwrap();
@@ -342,9 +337,7 @@ mod tests {
                 BlockContent::text("unrelated"),
                 Some(EntityUri::block("unrelated")),
                 &HashMap::new(),
-                &Tags::default(),
-                &[],
-                &[],
+                &holon_api::BlockEdges::default(),
             )
             .await
             .unwrap();

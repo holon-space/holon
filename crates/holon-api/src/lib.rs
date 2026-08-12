@@ -193,7 +193,7 @@ pub use clock::InjectedClock;
 pub use clock::SystemClock;
 pub use clock::TestClock;
 // Re-export the block edge-field category
-pub use edge_field::{EdgeField, EdgeFieldUpdate};
+pub use edge_field::{BlockEdges, EdgeField, EdgeFieldUpdate};
 // Re-export entity types (for Entity derive macro)
 pub use entity::{
     DynamicEntity, FieldLifetime, FieldSchema, IntoEntity, POSITION_AFTER_BLOCK_ID_PARAM,
