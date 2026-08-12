@@ -7,13 +7,14 @@ use holon_api::render_eval::eval_to_value;
 use holon_api::render_types::OperationDescriptor;
 use holon_api::render_types::OperationWiring;
 use holon_api::render_types::RenderExpr;
+use holon_api::spawner::Spawner;
 use holon_api::widget_spec::DataRow;
 
 use crate::FrontendSession;
 use crate::RenderContext;
 
 pub fn dispatch_operation(
-    handle: &tokio::runtime::Handle,
+    spawner: &Arc<dyn Spawner>,
     session: &Arc<FrontendSession>,
     entity_name: &EntityName,
     op_name: String,
@@ -37,7 +38,7 @@ pub fn dispatch_operation(
             ),
         );
     }
-    handle.spawn(async move {
+    spawner.spawn(Box::pin(async move {
         if let Err(e) = session
             .execute_operation(&entity_name, &op_name, params)
             .await
@@ -50,7 +51,7 @@ pub fn dispatch_operation(
             session.error_tracker().record_error();
             tracing::error!("Operation {entity_name}.{op_name} failed: {e}");
         }
-    });
+    }));
 }
 
 // TODO: How does this relate to MatchedOperation? Please DRY and SRP if

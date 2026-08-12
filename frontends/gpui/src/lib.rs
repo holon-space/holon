@@ -1371,7 +1371,8 @@ impl Render for HolonApp {
                 .on_key_down({
                     let nav = nav.clone();
                     let session = session.clone();
-                    let rt_handle = rt_handle.clone();
+                    let spawner: Arc<dyn holon_api::spawner::Spawner> =
+                        Arc::new(holon_api::spawner::TokioSpawner::new(rt_handle.clone()));
                     let services: Arc<dyn BuilderServices> = self.app_model.read(cx).engine.clone();
                     move |event: &gpui::KeyDownEvent, _window, cx: &mut App| {
                         let keys = keystroke_to_keys(&event.keystroke);
@@ -1404,7 +1405,7 @@ impl Render for HolonApp {
                                 holon_api::Value::String(entity_id.to_string()),
                             );
                             holon_frontend::operations::dispatch_operation(
-                                &rt_handle,
+                                &spawner,
                                 &session,
                                 &EntityName::new(entity_name),
                                 operation.name,
