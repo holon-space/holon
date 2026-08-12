@@ -1,0 +1,90 @@
+name: Deploy observability report to Pages
+
+# Publishes the static health report (observability/report/) together with the
+# run data (runs.json + YAMLs) pulled from the `observability` release, at
+# /obs/ on the custom domain. The apex (holon.space/) is reserved for the
+# hosted web app; this workflow only owns the /obs/ subtree.
+#
+# WHY this exists instead of the report fetching the release directly:
+# GitHub release assets are served from a blob host that sends NO
+# Access-Control-Allow-Origin header, so a Pages page cannot fetch them
+# cross-origin. This workflow downloads them server-side (no CORS applies) and
+# co-locates them with the report, so the report reads `runs.json` same-origin.
+#
+# Triggers: push to main touching the report or this workflow, and manual
+# dispatch. Run it after `just obs-push` to refresh the live site.
+#
+# One-time setup (repo owner): Settings → Pages → Source: "GitHub Actions".
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - "observability/report/**"
+      - ".github/workflows/pages.yml"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # The release is the canonical, indefinitely-retained data store. Pull it
+      # server-side (gh is authenticated via the ambient GITHUB_TOKEN, which has
+      # `contents: read`); no CORS applies here.
+      - name: Download run data from the observability release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p site/obs/runs
+          if gh release view observability >/dev/null 2>&1; then
+            # Cumulative index the report fetches (clobber = in-place replace).
+            gh release download observability --pattern 'runs.json' \
+              --dir site/obs --clobber
+            # Canonical YAMLs, exposed under /obs/runs/ for custom analysis.
+            gh release download observability --pattern '*.yaml' \
+              --dir site/obs/runs --clobber || true
+          else
+            # No runs published yet — ship an empty index so the report renders
+            # its "no runs yet" state instead of erroring.
+            printf '%s\n' '{"schema":1,"updated_at":"","count":0,"runs":[]}' \
+              > site/obs/runs.json
+          fi
+
+      - name: Copy the static report
+        run: |
+          cp observability/report/index.html \
+             observability/report/app.js \
+             observability/report/app.css \
+             observability/report/config.js \
+             site/obs/
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

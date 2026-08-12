@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Holon — health report</title>
+    <link rel="stylesheet" href="app.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <h1>Holon</h1>
+        <span class="subtitle">quality &amp; test-run observability</span>
+      </div>
+      <div class="source" id="source-badge" title="data source">…</div>
+    </header>
+
+    <main>
+      <section id="summary" class="summary" hidden>
+        <div class="card metric" id="card-runs"></div>
+        <div class="card metric" id="card-green"></div>
+        <div class="card metric" id="card-red"></div>
+        <div class="card metric" id="card-verdict"></div>
+        <div class="card metric" id="card-lastrun"></div>
+        <div class="card metric" id="card-trend"></div>
+      </section>
+
+      <section class="section" id="history-section" hidden>
+        <h2>History</h2>
+        <div class="charts">
+          <figure class="chart">
+            <figcaption>Duration per run (ms)</figcaption>
+            <div id="chart-duration" class="chart-canvas"></div>
+          </figure>
+          <figure class="chart">
+            <figcaption>Panics per run</figcaption>
+            <div id="chart-panics" class="chart-canvas"></div>
+          </figure>
+        </div>
+      </section>
+
+      <section class="section" id="runs-section" hidden>
+        <h2>Runs</h2>
+        <div class="filters" id="filters"></div>
+        <table class="runs" id="runs-table">
+          <thead>
+            <tr>
+              <th>started</th>
+              <th>kind</th>
+              <th>verdict</th>
+              <th>cases</th>
+              <th>duration</th>
+              <th>panics</th>
+              <th>host</th>
+              <th>git</th>
+            </tr>
+          </thead>
+          <tbody id="runs-body"></tbody>
+        </table>
+      </section>
+
+      <section class="section" id="captures-section" hidden>
+        <h2>Visual evidence</h2>
+        <div class="captures-toolbar">
+          <select id="capture-select" aria-label="capture session"></select>
+          <button id="capture-prev" type="button">◀</button>
+          <button id="capture-next" type="button">▶</button>
+          <button id="capture-play" type="button">▶ Play</button>
+          <input
+            id="capture-slider"
+            type="range"
+            min="0"
+            max="0"
+            value="0"
+            aria-label="frame"
+          />
+          <span id="capture-label" class="muted"></span>
+        </div>
+        <div class="capture-stage">
+          <img id="capture-img" alt="captured frame" hidden />
+          <p id="capture-empty" class="muted">Select a capture session.</p>
+        </div>
+      </section>
+
+      <section class="section" id="detail-section" hidden>
+        <h2>Run detail</h2>
+        <div id="detail"></div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span
+        >Data files: <code>runs.json</code> +
+        <code>runs/&lt;id&gt;.yaml</code> — declarative, yours to analyse.</span
+      >
+      <span id="footer-updated"></span>
+    </footer>
+
+    <script src="config.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

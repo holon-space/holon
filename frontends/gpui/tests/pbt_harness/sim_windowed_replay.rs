@@ -13,12 +13,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use gpui::HeadlessAppContext;
 use gpui::InputEvent;
 use gpui::Keystroke;
 use gpui::MouseButton;
 use gpui::Pixels;
 use gpui::Point;
-use gpui::TestApp;
 use holon_api::EntityUri;
 use holon_api::KeyChord;
 use holon_api::Region;
@@ -34,7 +34,7 @@ use holon_gpui::geometry::BoundsRegistry;
 /// One sim pump cycle: real tokio time for backend watchers, drain gpui
 /// tasks (test builds draw dirty windows inside flush_effects), fire fake
 /// timers, drain again, promote staged bounds.
-fn pump_cycle(app: &TestApp, bounds: &BoundsRegistry) {
+fn pump_cycle(app: &HeadlessAppContext, bounds: &BoundsRegistry) {
     // Real wall-clock pause: the backend's multi-thread tokio runtime
     // advances on its own worker threads — no block_on needed (and driver
     // methods may already be inside a tokio context where block_on panics).
@@ -50,10 +50,10 @@ fn pump_cycle(app: &TestApp, bounds: &BoundsRegistry) {
 // ---------------------------------------------------------------------------
 
 /// Direct-dispatch UserDriver for TestPlatform. Holds a raw pointer to a
-/// harness-owned `TestApp`. SAFETY: the owner outlives all SimUserDriver
-/// instances; all access is from one thread.
+/// harness-owned `HeadlessAppContext`. SAFETY: the owner outlives all
+/// SimUserDriver instances; all access is from one thread.
 pub(crate) struct SimUserDriver {
-    app_ptr: *const TestApp,
+    app_ptr: *const HeadlessAppContext,
     window: gpui::AnyWindowHandle,
     bounds: BoundsRegistry,
     engine: Arc<ReactiveEngine>,
@@ -70,14 +70,14 @@ unsafe impl Send for SimUserDriver {}
 
 impl SimUserDriver {
     /// Construct a driver over an already-launched, settled window. SAFETY: the
-    /// caller must keep the `TestApp` `app_ptr` points at alive and untouched
-    /// for the driver's lifetime, and use the driver only from the gpui
-    /// thread (the same contract `with_windowed_wide_sut` upholds). Used by
-    /// the windowed composition slice (`gpui_window_slice`) and the
+    /// caller must keep the `HeadlessAppContext` `app_ptr` points at alive and
+    /// untouched for the driver's lifetime, and use the driver only from the
+    /// gpui thread (the same contract `with_windowed_wide_sut` upholds). Used
+    /// by the windowed composition slice (`gpui_window_slice`) and the
     /// composed windowed harness.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        app_ptr: *const TestApp,
+        app_ptr: *const HeadlessAppContext,
         window: gpui::AnyWindowHandle,
         bounds: BoundsRegistry,
         engine: Arc<ReactiveEngine>,
@@ -98,7 +98,7 @@ impl SimUserDriver {
     /// state MUST settle before the next one: advance tokio so backend
     /// signals deliver → drain gpui tasks → promote staged bounds.
     fn update_and_settle<R>(&self, f: impl FnOnce(&mut gpui::App) -> R) -> R {
-        let app = unsafe { &mut *(self.app_ptr as *mut TestApp) };
+        let app = unsafe { &mut *(self.app_ptr as *mut HeadlessAppContext) };
         let r = app.update(|cx| f(cx));
         // Release &mut, then advance tokio + pump gpui + flush bounds.
         let app = unsafe { &*self.app_ptr };

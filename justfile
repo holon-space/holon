@@ -844,3 +844,44 @@ prepush:
         -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
         2>&1 | tee /tmp/prepush-keystone.log
     echo "== Tier 2 PASS =="
+
+# --- Observability ----------------------------------------------------------
+# Run records are emitted by every keystone/GPUI PBT run as a side effect (see
+# crates/holon-integration-tests/src/pbt/run_result.rs) into
+# .observability/runs/*.result.json. These recipes convert them to canonical
+# YAML and publish to the GitHub `observability` release (indefinite retention,
+# CORS-open for the Pages report). Local runs are a first-class source — see
+# docs/Proposals/observability-report.md.
+
+# Convert local .result.json -> canonical .yaml + rebuild the cumulative
+# runs.json index. Idempotent; reads only, writes under .observability/.
+obs-collect:
+    python3 scripts/holon_obs.py collect
+
+# Collect, then upload runs.json (--clobber) and any new runs/<id>.yaml to the
+# GitHub `observability` release via `gh`. Pure upload — runs NO tests.
+obs-push:
+    python3 scripts/holon_obs.py push
+
+# Serve .observability/ over HTTP so the report can be opened locally (browsers
+# block file:// fetch of the JSON data).
+obs-serve port='8000':
+    python3 scripts/holon_obs.py serve --port {{port}}
+
+# Run the GPUI Gherkin replay with offscreen PIXEL capture (macOS only — the
+# Metal headless renderer; on Linux no renderer exists and frames are skipped).
+# Writes a frame sequence + events.jsonl into
+# .observability/captures/<stamp>-gherkin/, refreshes runs.json + captures.json,
+# then serves the report so the flipbook is immediately viewable at
+# http://127.0.0.1:8000/observability/report/.
+gherkin-replay-capture feature='frontends/gpui/tests/features/ordinary_block_interaction.feature':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    dir=".observability/captures/${stamp}-gherkin"
+    mkdir -p "$dir"
+    echo "capturing frames to $dir"
+    HOLON_CAPTURE_DIR="$dir" GHERKIN_FEATURE="$(pwd)/{{feature}}" \
+        cargo test -p holon-gpui --features pbt --test gpui_gherkin_replay -- --test-threads=1
+    just obs-collect
+    echo "frames: $dir"

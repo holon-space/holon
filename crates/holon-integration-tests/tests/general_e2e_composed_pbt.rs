@@ -33,17 +33,61 @@ use holon_integration_tests::pbt::composed::live_mcp::LiveMcpE2E;
 use holon_integration_tests::pbt::composed::live_mcp::WideE2ELiveMcpMachine;
 use holon_integration_tests::pbt::composed::live_mcp::capture_live_cap_set;
 use holon_integration_tests::pbt::composed::wide_e2e::WideE2E;
-use proptest_state_machine::prop_state_machine;
+use holon_integration_tests::pbt::composed::wide_e2e::WideE2EMachine;
+use holon_integration_tests::pbt::run_result::RunResultGuard;
+use proptest::test_runner::Config;
+use proptest::test_runner::TestRunner;
+use proptest_state_machine::ReferenceStateMachine;
+use proptest_state_machine::StateMachineTest;
 
-prop_state_machine! {
-    #![proptest_config(proptest::test_runner::Config {
-        cases: std::env::var("PROPTEST_CASES").ok().and_then(|s| s.parse().ok()).unwrap_or(16),
+/// Hand-rolled transcription of the `prop_state_machine!` keystone so the run
+/// emits an observability [`RunResultGuard`] record (green **and** red) with no
+/// separate orchestrated run.
+///
+/// Faithful to the macro's expansion, deliberately: same `Config` (env-driven
+/// `cases`, `max_shrink_iters: 200`, `failure_persistence: None`), same
+/// `sequential_strategy(1..40)`, same `test_sequential`, and — critically —
+/// the same terminal failure panic `"{}\n{}", err, runner` that `proptest!`
+/// emits, so `scripts/keystone-known-reds.sh`'s normalization of the final
+/// panic ("Test failed: ….") is byte-identical and no new NOVEL signature is
+/// fabricated. `contextualize_config` (env overrides) and
+/// `test_name`/`source_file` mirror the `#![proptest_config]` fn form, which
+/// does NOT call `force_no_fork`, so neither does this.
+#[test]
+fn general_e2e_composed_pbt() {
+    let cases: u32 = std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(16);
+
+    let mut guard = RunResultGuard::new("keystone", cases);
+
+    let mut config = proptest::test_runner::contextualize_config(Config {
+        cases,
         max_shrink_iters: 200,
         failure_persistence: None,
-        .. proptest::test_runner::Config::default()
-    })]
-    #[test]
-    fn general_e2e_composed_pbt(sequential 1..40 => ComposedSut<WideE2E>);
+        ..Config::default()
+    });
+    config.test_name = Some(concat!(module_path!(), "::general_e2e_composed_pbt"));
+    config.source_file = Some(file!());
+
+    let strategy = <WideE2EMachine as ReferenceStateMachine>::sequential_strategy(1..40);
+    let mut runner = TestRunner::new(config.clone());
+    let result = runner.run(&strategy, |(initial_state, transitions, seen_counter)| {
+        <ComposedSut<WideE2E> as StateMachineTest>::test_sequential(
+            config.clone(),
+            initial_state,
+            transitions,
+            seen_counter,
+        );
+        Ok(())
+    });
+    match result {
+        Ok(()) => guard.set_green(),
+        // Stays red; panic recorded via the global hook. The message replicates
+        // `proptest!`'s terminal panic so classification is unchanged.
+        Err(e) => panic!("{}\n{}", e, runner),
+    }
 }
 
 /// The out-of-process twin of `general_e2e_composed_pbt`: the SAME keystone
@@ -86,6 +130,9 @@ fn general_e2e_composed_pbt_live_mcp() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(8);
+
+    let mut guard = RunResultGuard::new("keystone-live-mcp", cases);
+
     let config = Config {
         cases,
         max_shrink_iters: 0,
@@ -103,7 +150,10 @@ fn general_e2e_composed_pbt_live_mcp() {
         );
         Ok(())
     });
-    result.expect("live-mcp composed keystone diverged from the oracle");
+    match result {
+        Ok(()) => guard.set_green(),
+        Err(e) => panic!("live-mcp composed keystone diverged from the oracle: {e:?}"),
+    }
 }
 
 /// **Large-vault SOAK RUNG — reproduce the full-reseed leak (BugFunnel row 71)
@@ -204,6 +254,7 @@ fn soak_reseed_reproduction() {
     let target = soak_seed::soak_reseed_reason();
     let assert_p95 = soak_seed::soak_assert_p95_ms();
     const SEEDS: usize = 3;
+    let mut guard = RunResultGuard::new("soak-reseed", SEEDS as u32);
     // Post-boot floor: the soak seeder emits exactly `blocks` block ids, each
     // draining into `block_raw`. Allow 10% slack for the flat boot settle, but a
     // gross under-seed (boot ended unsettled) fails loud below.
@@ -360,6 +411,7 @@ fn soak_reseed_reproduction() {
             );
         }
     }
+    guard.set_green();
 }
 
 /// **Vault-scale NAVIGATION-LATENCY soak rung — reproduce the cold
@@ -488,6 +540,7 @@ fn soak_nav_latency() {
     let roots = doc_count.min(MAX_ROOTS);
     let budget = soak_seed::soak_nav_budget_ms();
     let hard_assert = soak_seed::soak_nav_hard_assert();
+    let mut guard = RunResultGuard::new("soak-nav", roots as u32);
     // Post-boot floor: the soak seeder emits exactly `blocks` block ids draining
     // into `block_raw`; allow 10% slack for the flat boot settle. A gross
     // under-seed (boot ended unsettled) means we'd be measuring an empty vault —
@@ -685,4 +738,5 @@ fn soak_nav_latency() {
             );
         }
     }
+    guard.set_green();
 }

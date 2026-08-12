@@ -59,6 +59,10 @@ specs/.current-epic
 
 # archidoc IR scratch output
 _context/
+
+# Observability run records — emitted by every keystone/GPUI PBT run as a side
+# effect; uploaded to the GitHub `observability` release by `just obs-push`.
+.observability/
 frontends/gpui/android/build-release/
 frontends/gpui/android/build-release-aab/
 

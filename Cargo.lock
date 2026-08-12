@@ -5269,6 +5269,7 @@ dependencies = [
  "holon-oracles",
  "holon-orgmode",
  "holon-pbt-core",
+ "image",
  "insta",
  "io-surface",
  "log",

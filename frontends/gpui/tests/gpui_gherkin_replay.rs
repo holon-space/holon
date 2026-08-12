@@ -16,6 +16,7 @@ mod pbt_harness;
 
 use holon_integration_tests::pbt::fixtures::FixtureSource;
 use holon_integration_tests::pbt::fixtures::gherkin::GherkinFixtureSource;
+use holon_integration_tests::pbt::run_result::RunResultGuard;
 use pbt_harness::windowed_wide::replay_fixture_windowed;
 
 fn feature_path() -> String {
@@ -38,6 +39,9 @@ fn main() {
         !fixtures.is_empty(),
         "gpui_gherkin_replay expects at least one scenario in {path:?}"
     );
+
+    let mut guard = RunResultGuard::new("gherkin-replay", fixtures.len() as u32);
+
     for fixture in &fixtures {
         eprintln!(
             "[Holon Gherkin Replay] replaying {:?} ({} steps) from {path}",
@@ -48,6 +52,7 @@ fn main() {
             std::panic::resume_unwind(payload);
         }
     }
+    guard.set_green();
     eprintln!(
         "[Holon Gherkin Replay] PASS — {} scenario(s) replayed GREEN through the windowed \
          ComposedSut<WideE2E>",

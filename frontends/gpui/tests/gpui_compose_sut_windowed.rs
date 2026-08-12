@@ -34,8 +34,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use gpui::AssetSource;
+use gpui::HeadlessAppContext;
 use gpui::PlatformTextSystem;
-use gpui::TestApp;
 use holon_api::EntityUri;
 use holon_api::Region;
 use holon_frontend::geometry::GeometryProvider;
@@ -76,7 +76,7 @@ fn real_text_system() -> Arc<dyn PlatformTextSystem> {
 /// pump until the element count is stable and no `"loading"` placeholders
 /// remain.
 fn settle_to_fixed_point(
-    app: &mut TestApp,
+    app: &mut HeadlessAppContext,
     bounds: &BoundsRegistry,
     runtime: &tokio::runtime::Runtime,
     timeout: Duration,
@@ -115,7 +115,9 @@ fn settle_to_fixed_point(
 fn window_renders_compose_sut_base_and_base_hosts_backend() {
     let text_system = real_text_system();
     let assets: Arc<dyn AssetSource> = Arc::new(());
-    let mut app = TestApp::with_text_system_and_assets(text_system, assets);
+    let mut app = HeadlessAppContext::with_platform(text_system, assets, || {
+        gpui_platform::current_headless_renderer()
+    });
 
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
 
@@ -201,7 +203,8 @@ fn window_renders_compose_sut_base_and_base_hosts_backend() {
     );
 
     // gpui teardown (mirror `gpui_window_slice.rs`): release the window entities,
-    // shut the app down, then leak the `!Send` TestApp + the booted composition
+    // shut the app down, then leak the `!Send` HeadlessAppContext + the booted
+    // composition
     // so their Drops don't run the gpui leak detector / drop the session's
     // tokio runtime in async context. The process exits right after the test,
     // so the leak is inert.
@@ -223,7 +226,9 @@ fn overlay_windowed_caps_composes_layout_backend_and_driver_over_a_live_window()
     // `SimUserDriver` construction over a compose_sut window.
     let text_system = real_text_system();
     let assets: Arc<dyn AssetSource> = Arc::new(());
-    let mut app = TestApp::with_text_system_and_assets(text_system, assets);
+    let mut app = HeadlessAppContext::with_platform(text_system, assets, || {
+        gpui_platform::current_headless_renderer()
+    });
 
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
     let resolver: IdResolver = Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
@@ -270,7 +275,7 @@ fn overlay_windowed_caps_composes_layout_backend_and_driver_over_a_live_window()
         .get()
         .expect("interaction_tx set by the window interaction pump")
         .clone();
-    let app_ptr: *const TestApp = &app;
+    let app_ptr: *const HeadlessAppContext = &app;
     let driver: Arc<dyn UserDriver> = Arc::new(SimUserDriver::new(
         app_ptr,
         rebind.window(),
@@ -350,7 +355,7 @@ fn windowed_composed_sut_runs_full_catalog_green_on_the_initial_frame() {
     // block/storage families AND the windowed geometry/focus families, GREEN
     // against ONE `wide_e2e_ref()` oracle in a single SUT (the repoint's whole
     // point: one SUT, not E2ESut + a parallel windowed check).
-    with_windowed_wide_sut(|sut, oracle| {
+    with_windowed_wide_sut(|sut, oracle, _sink| {
         ComposedSut::<WideE2E>::check_invariants(&sut, oracle);
         eprintln!(
             "[compose_sut-windowed-3b] PASS - ComposedSut<WideE2E>::check_invariants ran the \
@@ -371,7 +376,7 @@ fn windowed_composed_sut_drives_a_click_gesture_sequence_green() {
     // Every tick re-checks the unified catalog. `ClickBlock` is non-minting, so the
     // per-tick id-reconcile is a no-op. Proves the apply -> window-gesture ->
     // settle -> check loop.
-    with_windowed_wide_sut(|mut sut, oracle0| {
+    with_windowed_wide_sut(|mut sut, oracle0, _sink| {
         // The initial frame must be green before we drive anything.
         ComposedSut::<WideE2E>::check_invariants(&sut, oracle0);
 
@@ -421,7 +426,7 @@ fn windowed_composed_sut_replays_a_fixture_via_replay_steps_green() {
     // steer the ONE PBT windowed. The fixture is post-boot only (no `StartApp`
     // — the composed alphabet has none; the SUT is already booted by the
     // harness), matching composed-keystone captures.
-    with_windowed_wide_sut(|sut, oracle| {
+    with_windowed_wide_sut(|sut, oracle, _sink| {
         let steps = vec![
             FixtureStep::Action(E2ETransition::ClickBlock(ClickBlock {
                 region: Region::Main,
@@ -470,7 +475,7 @@ fn windowed_split_then_clickblock_resolves_minted_id() {
 
     use holon_integration_tests::pbt::transitions::SplitBlock;
 
-    with_windowed_wide_sut(|mut sut, oracle0| {
+    with_windowed_wide_sut(|mut sut, oracle0, _sink| {
         ComposedSut::<WideE2E>::check_invariants(&sut, oracle0);
         let mut oracle = oracle0.clone();
         let iters: usize = std::env::var("SPLIT_AMP_ITERS")

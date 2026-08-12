@@ -79,8 +79,8 @@ default = ["desktop"]
 desktop = ["dep:gpui_platform"]
 mobile = ["dep:gpui-mobile"]
 chrome-trace = [
-    "holon-frontend/chrome-trace",
-    "holon-integration-tests?/chrome-trace",
+  "holon-frontend/chrome-trace",
+  "holon-integration-tests?/chrome-trace",
 ]
 heap-profile = ["holon-frontend/heap-profile"]
 # tokio-console async-stall profiler for the live app. Build with
@@ -94,7 +94,9 @@ pbt = ["dep:holon-integration-tests"]
 gpui = { git = "https://github.com/zed-industries/zed", rev = "56104fb17e6c5849900a4c282f42d1bfea294121" }
 
 # Desktop-only: native platform (macOS/Linux/Windows)
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "56104fb17e6c5849900a4c282f42d1bfea294121", optional = true, features = ["font-kit"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "56104fb17e6c5849900a4c282f42d1bfea294121", optional = true, features = [
+  "font-kit",
+] }
 
 # Mobile-only: platform implementations for iOS/Android
 gpui-mobile = { git = "https://github.com/itsbalamurali/gpui-mobile", optional = true }
@@ -180,13 +182,22 @@ holon-integration-tests = { path = "../../crates/holon-integration-tests" }
 holon-layout-testing = { path = "../../crates/holon-layout-testing" }
 holon-pbt-core = { path = "../../crates/holon-pbt-core" }
 validated = "1.0"
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "56104fb17e6c5849900a4c282f42d1bfea294121", features = ["font-kit"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "56104fb17e6c5849900a4c282f42d1bfea294121", features = [
+  "font-kit",
+  "test-support",
+] }
+# Offscreen pixel capture in windowed PBT tests: `capture_screenshot` returns an
+# `image::RgbaImage`; the png feature enables `save` (image is already a
+# workspace dep via holon-integration-tests).
+image = { version = "0.25", default-features = false, features = ["png"] }
 # Fast-UI test layer (tests/support, tests/layout_*): pulls in TestAppContext,
 # VisualTestContext, add_window_view, run_until_parked, the TestPlatform, etc.
 # Test-support is the upstream feature flag that gates these; nothing in
 # release builds sees any of it. DO NOT remove — `tests/support/mod.rs` relies
 # on it via gpui::{TestAppContext, WindowOptions, WindowBounds, AppContext, …}.
-gpui = { git = "https://github.com/zed-industries/zed", rev = "56104fb17e6c5849900a4c282f42d1bfea294121", features = ["test-support"] }
+gpui = { git = "https://github.com/zed-industries/zed", rev = "56104fb17e6c5849900a4c282f42d1bfea294121", features = [
+  "test-support",
+] }
 # Property-based tests (tests/gpui_composed_windowed_loop and friends).
 proptest = "1"
 # Windowed proptest-state-machine generation/shrinking for the composed windowed
