@@ -79,9 +79,10 @@ round-trip byte-stable — the old "mangles underscored identifiers" claim is
 refuted. The REAL round-trip hazards: `_`-prefixed property KEYS are silently
 erased from disk on write-back (crates/holon-org-format/src/models.rs:886,908),
 and an empty property value drops its key entirely. Authored drawer order
-SURVIVES the store (measured 2026-08-11, ratified by Martin): the
-`_drawer_order` carrier persists in the stored properties bag and the renderer
-replays it — pinned by crates/holon-app/tests/org_store_org_round_trip.rs. See
+SURVIVES the store on BOTH production write legs — the Loro projection writer
+and the org-ingest param builder: the `_drawer_order` carrier persists in the
+stored properties bag and the renderer replays it. Pinned by
+crates/holon-app/tests/org_store_org_round_trip.rs. See
 docs/Reference/CompassConventions.md.
 
 # Development

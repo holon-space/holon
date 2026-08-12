@@ -95,10 +95,20 @@ async fn setup_production_schema(handle: &holon::storage::turso::DbHandle) {
         .expect("LinkSchemaModule");
 }
 
-/// Write `doc` + `blocks` through the production write path
-/// (`block_to_params` → `SqlOperationProvider`) and read the document's blocks
-/// back through the production read path (`CacheBlockReader::get_blocks`).
-async fn through_the_store(doc: &Block, blocks: &[Block]) -> Vec<Block> {
+/// Which production param builder packs a block for the write.
+#[derive(Clone, Copy)]
+enum WriteLeg {
+    /// The Loro projection writer.
+    Loro,
+    /// The file-ingest builder `FileSyncController` calls for every parsed
+    /// block — the leg a vault boot takes.
+    OrgIngest,
+}
+
+/// Write `doc` + `blocks` through the production write path (`leg`'s param
+/// builder → `SqlOperationProvider`) and read the document's blocks back
+/// through the production read path (`CacheBlockReader::get_blocks`).
+async fn through_the_store(doc: &Block, blocks: &[Block], leg: WriteLeg) -> Vec<Block> {
     let (_backend, handle) = TursoBackend::new_in_memory()
         .await
         .expect("turso must start in memory");
@@ -116,13 +126,22 @@ async fn through_the_store(doc: &Block, blocks: &[Block]) -> Vec<Block> {
     // The doc root goes first: the headlines' `parent_id` is the doc, and
     // `block_raw`'s parent FK rejects a child whose parent is absent.
     for (i, block) in std::iter::once(doc).chain(blocks.iter()).enumerate() {
-        let params = block_to_params(&holon::api::SnapshotBlock {
-            block: block.clone(),
-            // `get_blocks` orders by sort_key; minting is the ordering
-            // authority's business, so hand out distinct increasing keys to
-            // hold sibling order fixed while this test looks at properties.
-            sort_key: format!("{i:010}"),
-        });
+        // `get_blocks` orders by sort_key; minting is the ordering authority's
+        // business, so hand out distinct increasing keys to hold sibling order
+        // fixed while this test looks at properties.
+        let sort_key = format!("{i:010}");
+        let params = match leg {
+            WriteLeg::Loro => block_to_params(&holon::api::SnapshotBlock {
+                block: block.clone(),
+                sort_key,
+            }),
+            WriteLeg::OrgIngest => {
+                let mut params =
+                    holon_orgmode::build_block_params(block, &block.parent_id, &doc.id, None);
+                params.insert("sort_key".into(), holon_api::Value::String(sort_key));
+                params
+            }
+        };
         provider
             .execute_operation(&entity, "create", params)
             .await
@@ -145,14 +164,14 @@ async fn through_the_store(doc: &Block, blocks: &[Block]) -> Vec<Block> {
 /// existing PBTs cover) and after a real store round trip. Returns both, so a
 /// caller can attribute any difference to the store leg alone — every
 /// org-format quirk applies identically to the two sides.
-async fn render_both_ways(source: &str) -> (String, String) {
+async fn render_both_ways(source: &str, leg: WriteLeg) -> (String, String) {
     let path = Path::new(FILE);
     let parsed = parse_org_file(path, source, &EntityUri::no_parent(), Path::new(ROOT))
         .expect("the fixture must parse");
 
     let from_parser =
         OrgRenderer::render_document(&parsed.document, &parsed.blocks, path, &parsed.document.id);
-    let restored = through_the_store(&parsed.document, &parsed.blocks).await;
+    let restored = through_the_store(&parsed.document, &parsed.blocks, leg).await;
     let after_store =
         OrgRenderer::render_document(&parsed.document, &restored, path, &parsed.document.id);
 
@@ -166,7 +185,7 @@ async fn render_both_ways(source: &str) -> (String, String) {
 /// churning bytes on every ingest.
 #[tokio::test(flavor = "multi_thread")]
 async fn alphabetical_compass_drawer_is_byte_stable_through_the_store() {
-    let (from_parser, after_store) = render_both_ways(ALPHABETICAL).await;
+    let (from_parser, after_store) = render_both_ways(ALPHABETICAL, WriteLeg::Loro).await;
 
     assert_eq!(
         from_parser, ALPHABETICAL,
@@ -206,7 +225,7 @@ async fn non_alphabetical_drawer_order_survives_the_store() {
     )
     .expect("the fixture must parse");
 
-    let restored = through_the_store(&parsed.document, &parsed.blocks).await;
+    let restored = through_the_store(&parsed.document, &parsed.blocks, WriteLeg::Loro).await;
 
     let anchor = restored
         .iter()
@@ -248,5 +267,42 @@ async fn non_alphabetical_drawer_order_survives_the_store() {
         without_carrier, ALPHABETICAL,
         "without `_drawer_order` the renderer falls back to its alphabetical tiebreak — so the \
          authored order above is replayed FROM the carrier, not a coincidence of sorting"
+    );
+}
+
+/// The same claim on the leg a vault boot takes: `FileSyncController` packs
+/// every parsed block with `FileFormat::build_block_params`, not with the Loro
+/// projection writer the two tests above exercise.
+#[tokio::test(flavor = "multi_thread")]
+async fn non_alphabetical_drawer_order_survives_the_ingest_leg() {
+    let path = Path::new(FILE);
+    let parsed = parse_org_file(
+        path,
+        NON_ALPHABETICAL,
+        &EntityUri::no_parent(),
+        Path::new(ROOT),
+    )
+    .expect("the fixture must parse");
+
+    let restored = through_the_store(&parsed.document, &parsed.blocks, WriteLeg::OrgIngest).await;
+
+    let anchor = restored
+        .iter()
+        .find(|b| b.id.id() == "compass-anchor")
+        .expect("the headline must come back from the store");
+    assert!(
+        anchor
+            .get_property(holon_org_format::org_props::DRAWER_ORDER)
+            .is_some(),
+        "mechanism: `build_block_params` must carry the authored-order carrier into the store — \
+         without it the byte comparison below proves nothing"
+    );
+
+    let after_store =
+        OrgRenderer::render_document(&parsed.document, &restored, path, &parsed.document.id);
+    assert_eq!(
+        after_store, NON_ALPHABETICAL,
+        "a non-alphabetically authored drawer must round-trip org → ingest → store → org \
+         byte-identical"
     );
 }
