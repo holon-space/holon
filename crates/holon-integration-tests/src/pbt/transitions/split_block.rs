@@ -19,6 +19,7 @@ use holon_pbt_core::capabilities::CapCursor;
 use holon_pbt_core::capabilities::CapRegion;
 use holon_pbt_core::capabilities::RefBlockTree;
 use holon_pbt_core::capabilities::RefBlockTreeMut;
+use holon_pbt_core::capabilities::RefEditorMirror;
 use holon_pbt_core::capabilities::RefEditorMirrorMut;
 use holon_pbt_core::capabilities::RefFocus;
 use holon_pbt_core::capabilities::RefFocusMut;
@@ -166,7 +167,7 @@ pub struct SplitBlock {
 
 // ── Capability-bound free functions (Phase 3) ─────────────────────
 
-pub fn split_block_preconditions<R: RefBlockTree + RefLifecycle>(
+pub fn split_block_preconditions<R: RefBlockTree + RefEditorMirror + RefLifecycle>(
     block_id: &EntityUri,
     position: usize,
     state: &R,
@@ -187,7 +188,19 @@ pub fn split_block_preconditions<R: RefBlockTree + RefLifecycle>(
     let content = state.block_content(block_id);
     checks.push(check(content.is_some(), Reason::FocusedBlockMissing));
     checks.push(check(state.is_text_block(block_id), Reason::FocusedNotText));
-    if let Some(text) = content {
+    // `apply` COMMITS the active editor's pending text BEFORE it splits, so the
+    // content column read here is not the surface the split will cut. Validate
+    // against the buffer instead when it is dirty on this block — the model's
+    // own rule that the editor buffer IS the block's source projection
+    // (`commit_active_editor_if_changed`). The commit can still shorten that
+    // buffer by a task keyword the source channel strips;
+    // `split_block_apply_to_ref` refuses the residual the way prod's
+    // `BlockOperations::split_block` does.
+    let pending = (state.active_editor_dirty()
+        && state.active_editor_block().as_ref() == Some(block_id))
+    .then(|| state.active_editor_text())
+    .flatten();
+    if let Some(text) = pending.or(content) {
         checks.push(check(position <= text.len(), Reason::PreconditionFailed));
         // Positions are byte offsets that MUST sit on a char boundary: prod
         // positions come from an editor caret (always boundary-aligned), and
@@ -213,7 +226,7 @@ pub fn split_block_preconditions<R: RefBlockTree + RefLifecycle>(
         .map(|_| ())
 }
 
-pub fn split_block_weighted_generator<R: RefBlockTree + RefLifecycle>(
+pub fn split_block_weighted_generator<R: RefBlockTree + RefEditorMirror + RefLifecycle>(
     state: &R,
 ) -> Validated<(u32, BoxedStrategy<SplitBlock>), Reason> {
     let mut candidates: Vec<(EntityUri, usize)> = vec![];
@@ -261,6 +274,26 @@ pub fn split_block_apply_to_ref<
     // refreshes idle editors; an unconditional commit here produced the
     // Full/Loro divergence of 2026-06-11).
     commit_active_editor_if_dirty(state);
+    // Prod REFUSES a position the post-commit content cannot carry:
+    // `BlockOperations::split_block` returns Err on out-of-range and on a
+    // mid-codepoint byte, leaving the tree untouched (crates/holon-core/src/
+    // traits.rs). Two producers still present one here. The commit above can
+    // shorten the content by a task keyword the source channel strips, past a
+    // position the precondition measured on the buffer; and `PressKey(Enter)`
+    // hands over an editor caret measured on the SURFACE while the split cuts
+    // the CONTENT column under it (a tasked block shows `TODO milk` and stores
+    // `milk`). Refuse both the way prod does instead of reaching
+    // `split_content_marks`'s assert, which is a correct guard for its own
+    // callers and must stay.
+    // A MISSING block is not a refusal and must not fold into one: prod answers
+    // it with its own Err, and reaching it here means the reference lost a block
+    // it is still being asked to split — a model bug, loud by design.
+    let content = state.block_content(block_id).unwrap_or_else(|| {
+        panic!("split_block_apply_to_ref: block {block_id} is absent from the reference")
+    });
+    if position > content.len() || !content.is_char_boundary(position) {
+        return;
+    }
     state.push_undo_snapshot();
     let focus_target = state.split_block(block_id, position);
     // Production returns the TEXT-bearing lower block as the focus target
@@ -288,7 +321,7 @@ pub fn split_block_apply_to_ref<
 
 // ── E2E trait impls (delegate to _cap fns) ────────────────────────
 
-impl<R: RefBlockTree + RefLifecycle> TransitionFactory<R> for SplitBlock {
+impl<R: RefBlockTree + RefEditorMirror + RefLifecycle> TransitionFactory<R> for SplitBlock {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
         // Single-sourced from the `cap_transition!` below — cannot drift with the
         // `S: SutBlockTreeWrite` dispatch bound (both come from the one cap token).
@@ -338,5 +371,131 @@ impl crate::pbt::transition_budgets::SqlBudget for SplitBlock {
             ddl: 0,
             tolerance: update.tolerance + create.tolerance,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pbt::composed::wide_e2e::wide_e2e_ref;
+    use crate::pbt::ui_types::ActiveEditor;
+
+    /// The block the seeded oracle offers to `SplitBlock` as its first move,
+    /// with the content column it stores.
+    fn seeded_target(state: &crate::pbt::reference_state::ReferenceState) -> (EntityUri, String) {
+        let id = EntityUri::block("parent");
+        let stored = state
+            .block_content(&id)
+            .expect("wide_e2e_ref seeds block:parent with text")
+            .to_string();
+        assert!(
+            stored.chars().count() >= 2,
+            "fixture must carry splittable text, got {stored:?}"
+        );
+        (id, stored)
+    }
+
+    /// HALF 1. `apply` COMMITS the active editor's pending text before it
+    /// splits, so a position validated against the content column is validated
+    /// against a surface the split never sees. The end-of-content position is
+    /// legal on the stored text and illegal on the shorter buffer that will
+    /// replace it, so opening that buffer must flip the verdict — nothing else
+    /// about the state changes between the two calls.
+    #[test]
+    fn split_position_is_validated_against_the_dirty_editor_buffer() {
+        let mut state = wide_e2e_ref();
+        let (id, stored) = seeded_target(&state);
+
+        assert!(
+            split_block_preconditions(&id, stored.len(), &state).is_good(),
+            "baseline: end-of-content is a legal split with no editor open"
+        );
+
+        // What a mid-line Backspace leaves behind: one char shorter, DIRTY and
+        // UNCOMMITTED (`press_key.rs`'s cursor>0 arm does not commit).
+        let mut shorter = stored.clone();
+        shorter.pop();
+        state.ui.tab.active_editor = Some(ActiveEditor {
+            block_id: id.clone(),
+            in_memory_content: shorter.clone(),
+            cursor_byte: shorter.len(),
+            dirty: true,
+        });
+
+        assert!(
+            split_block_preconditions(&id, shorter.len(), &state).is_good(),
+            "end of the PENDING buffer stays legal"
+        );
+        assert!(
+            split_block_preconditions(&id, stored.len(), &state).is_fail(),
+            "byte {} is past the {}-byte buffer `apply` is about to commit",
+            stored.len(),
+            shorter.len()
+        );
+    }
+
+    /// A clean editor is NOT committed by `apply` (prod's data subscription
+    /// refreshes idle editors), so its text must not narrow the position.
+    #[test]
+    fn a_clean_editor_buffer_does_not_narrow_the_split_position() {
+        let mut state = wide_e2e_ref();
+        let (id, stored) = seeded_target(&state);
+        let mut shorter = stored.clone();
+        shorter.pop();
+        state.ui.tab.active_editor = Some(ActiveEditor {
+            block_id: id.clone(),
+            in_memory_content: shorter,
+            cursor_byte: 0,
+            dirty: false,
+        });
+
+        assert!(
+            split_block_preconditions(&id, stored.len(), &state).is_good(),
+            "a stale clean mirror is never committed, so the content column still governs"
+        );
+    }
+
+    /// HALF 2. Prod answers a position the content column cannot carry with
+    /// `Err("Split position N exceeds content length M")` and leaves the tree
+    /// untouched. `PressKey(Enter)` reaches this funnel with an editor caret
+    /// measured on the SURFACE — on a tasked block that is `TODO <content>`,
+    /// so the caret legitimately sits past the content's end. The reference
+    /// must refuse it the same way, not reach `split_content_marks`'s assert.
+    #[test]
+    fn a_split_position_the_content_cannot_carry_is_refused_not_asserted() {
+        let mut state = wide_e2e_ref();
+        let (id, stored) = seeded_target(&state);
+        let blocks_before = state.domain.block_state.blocks.len();
+
+        split_block_apply_to_ref(&id, stored.len() + 5, &mut state);
+
+        assert_eq!(
+            state.block_content(&id).expect("block survives a refusal"),
+            stored,
+            "a refused split must not rewrite the content column"
+        );
+        assert_eq!(
+            state.domain.block_state.blocks.len(),
+            blocks_before,
+            "a refused split must not mint the tail block"
+        );
+    }
+
+    /// The same refusal for a mid-codepoint byte — prod's second `Err` arm.
+    #[test]
+    fn a_mid_codepoint_split_position_is_refused_not_asserted() {
+        let mut state = wide_e2e_ref();
+        let id = EntityUri::block("parent");
+        state.set_block_content(&id, "äö");
+        let blocks_before = state.domain.block_state.blocks.len();
+
+        split_block_apply_to_ref(&id, 1, &mut state);
+
+        assert_eq!(
+            state.block_content(&id).expect("block survives a refusal"),
+            "äö",
+            "a mid-codepoint split must not rewrite the content column"
+        );
+        assert_eq!(state.domain.block_state.blocks.len(), blocks_before);
     }
 }
