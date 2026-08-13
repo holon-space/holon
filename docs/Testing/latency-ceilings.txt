@@ -64,20 +64,47 @@
 # MEASURED SENSITIVITY (not a derived claim — see lane sensitivity sweeps)
 # Replaying real run logs with every duration scaled by a uniform factor puts
 # the crossover BETWEEN 1.6x AND 1.8x: 1.2x/1.4x/1.6x pass, 1.8x and 2.0x fail,
-# consistently across three different base runs. How many of the three gated
-# rungs go red at 1.8x depends on which run is used as the base (2 of 3 or 3 of
-# 3), because a ceiling set from the WORST observed p50 leaves more headroom on
-# a fast run. So: this gate reliably catches a uniform regression of ~1.8x or
-# worse, and may or may not catch one between 1.6x and 1.8x. It is a tripwire
-# against gross regression, not a benchmark, and it cannot see a 10% drift.
+# consistently across three different base runs. The sweep covered the
+# NavigateFocus / TypeChars / set_field rungs; how many of them go red at 1.8x
+# depends on which run is used as the base (2 of 3 or 3 of 3), because a ceiling
+# set from the WORST observed p50 leaves more headroom on a fast run. So: this
+# gate reliably catches a uniform regression of ~1.8x or worse, and may or may
+# not catch one between 1.6x and 1.8x. It is a tripwire against gross
+# regression, not a benchmark, and it cannot see a 10% drift. The two SplitBlock
+# rungs have not been through this sweep.
+#
+# A RUN CAN BE INVALID RATHER THAN RED
+# Wall-clock latency here moves more with host business than with any code
+# change: across 12 runs of this corpus on unmodified code, `total.p50.
+# SplitBlock` tracks the mean boot `matview_ddl` duration with Spearman +0.94
+# over a 19x span of it, and at the top of that span `NavigateFocus` — flat
+# everywhere else — came in at 399ms against its then-374ms ceiling. So
+# `measure_latency.py` reads that mean first and, above the `--max-contention-ms`
+# a caller passes (the recipes pass 30; the script default is 0, off), exits 3
+# having scored NOTHING. Exit 3 is INVALID, exit 1 is
+# a rung genuinely over its ceiling; a build script must not treat them alike.
+# The covariate is production boot DDL, so a tree that adds matviews or slows
+# DDL raises it too and turns the gate INVALID rather than red. That direction
+# fails safe — exit 3 is non-zero at every call site — but an INVALID run is a
+# reason to look at the tree, not only at the host.
+#
+# 30ms is calibrated on the dev host and is machine-local, exactly like the
+# ceilings below. On a quiet machine nothing is rejected — all three
+# calibration runs cleared it — so this does not become a gate people re-run
+# until green.
 #
 # HOW TO RE-RATCHET
-# Run `just latency-gate` at least THREE times WHILE other builds are running
-# (that is normal load on this machine), take the WORST p50 per rung, and set
-# the ceiling to that worst p50 * 1.6, rounded up. Never ratchet from a single
-# quiet run: a ceiling set that way turns every busy run red, which trains
-# people to ignore the gate — the failure mode that matters more than a few ms
-# of sensitivity.
+# Run `just latency-gate` at least THREE times and keep only the runs it
+# ADMITS, take the WORST p50 per rung among those, and set the ceiling to that
+# worst p50 * 1.6, rounded up.
+#
+# Calibrating on admitted runs is what the contention precondition changed.
+# The older instruction was to calibrate WHILE other builds ran, which bought
+# headroom for contention by widening every ceiling. A ceiling widened that way
+# is dead margin now: a run that busy is refused before any rung is scored, so
+# the margin covers a case that can no longer reach the gate. It also cost real
+# sensitivity — recalibrating on admitted runs moved all three existing ceilings
+# DOWN, by 8% to 40%, and admitted two rungs that could not be gated at all.
 #
 # Format: `<e2e|total>.<p50|p95>.<action> = ms` for a GATED rung, or
 # `report.<e2e|total>.<p50|p95>.<action>` (no value) for a REPORT-ONLY rung that
@@ -87,35 +114,30 @@
 # by the parser but none are defined here, deliberately — see above.
 
 # ── GATED rungs ──────────────────────────────────────────────────────────────
-# Basis: calibration runs under contending workspace builds; ceiling = worst
-# observed p50 * 1.6. Measured p50 spread on unmodified code for these three is
-# 1.08x - 1.32x, comfortably inside the margin.
+# Basis: three ADMITTED runs (boot matview_ddl mean 12.2 / 9.1 / 14.4 ms) with
+# the OTel span layer recording at `info`, which is how the recipes now run it.
+# Ceiling = worst admitted p50 * 1.6. A fourth run measured 91.0 ms on the
+# covariate and was excluded; its SplitBlock p50 of 213.5 against the admitted
+# 93.5-143.5 is the whole argument for excluding it.
 
-total.p50.NavigateFocus = 374   # worst p50 233.5 (runs: 233.5 225.0 219.0)
-total.p50.TypeChars     = 219   # worst p50 136.5 (runs: 136.5 123.5 125.0)
-e2e.p50.set_field       =  40   # worst p50  25.0 (runs:  25.0  16.5  18.0)
+total.p50.NavigateFocus = 345   # worst p50 215.5 (runs: 215.5 206.0 210.0)
+total.p50.TypeChars     = 196   # worst p50 122.5 (runs: 117.0 118.0 122.5)
+e2e.p50.set_field       =  24   # worst p50  15.0 (runs:  12.0  12.0  15.0)
 
 # `e2e.navigate` is deliberately absent — see the correlator blind spot above.
 
-# ── REPORT-ONLY rungs: the two SplitBlock rungs ──────────────────────────────
-# These are NOT gated, and the reason is a measurement problem, not a decision
-# that split latency does not matter.
+# ── The two SplitBlock rungs ─────────────────────────────────────────────────
+# These were report-only while the slow mode that made them flap (p50 ~115 on
+# the same corpus a verifier run measured at 280.5) was unattributed. It is
+# attributed: the mode is HOST CONTENTION, not the split path. Within one run
+# SplitBlock is unimodal — 20 occurrences span 78-120ms wall — while between
+# runs its p50 tracks the boot matview_ddl mean almost perfectly. Split is the
+# most SQL-heavy transition on the corpus at 33-41 reads per occurrence, so it
+# amplifies a per-statement cost multiplier that navigation barely registers.
 #
-# On unmodified code, under the contention this file itself calls normal (one
-# `cargo check --features pbt` running), the SplitBlock p50 varies by 2.45x -
-# 2.59x run to run. No honest wall-clock ceiling exists at that spread: any
-# ceiling loose enough to stop flapping is loose enough to miss a real 2x
-# regression, which is decoration.
-#
-# The spread is also not simple noise. The distribution is BIMODAL — a verifier
-# run measured p50 280.5 / p95 457.2 / max 651.0 on the same corpus that
-# elsewhere measures p50 ~115, i.e. a distinct SLOW MODE rather than a uniformly
-# stretched distribution. Something in the split path is contention-sensitive in
-# a way the other three rungs are not.
-#
-# So the SplitBlock latency ceiling is BLOCKED ON attributing that slow mode,
-# not abandoned. Once the mode is explained (and, if it is a defect, fixed),
-# these two rungs should be re-measured and gated like the others. Until then
-# they are printed every run so the number stays in front of people.
-report.total.p50.SplitBlock
-report.e2e.p50.split_block
+# That makes them gateable: the contention precondition above refuses the runs
+# that produced the slow mode, and these ceilings are calibrated on the runs
+# that remain.
+
+total.p50.SplitBlock    = 230   # worst p50 143.5 (runs:  93.5 100.0 143.5)
+e2e.p50.split_block     =  66   # worst p50  41.0 (runs:  26.0  26.0  41.0)

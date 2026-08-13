@@ -325,17 +325,17 @@ pbt-layout-override cases='64' *FLAGS:
 # Drives the REAL pipeline (dispatch -> Loro commit -> LoroProjection resample ->
 # Turso/matview CDC -> reactive rows) through the headless composed keystone with the
 # `holon_latency` tracing target enabled, then prints a per-action count/p50/p95/max
-# table plus per-stage cost. Measures everything EXCEPT final GPU paint. HOLON_OTEL_FILTER=off
-# silences the OTel span layer so its recording cost doesn't distort the numbers.
+# table plus per-stage cost. Measures everything EXCEPT final GPU paint, and
+# records OTel spans at their default `info` so a slow run can be explained.
 measure-latency cases='16' *FLAGS:
     #!/usr/bin/env bash
     set -euo pipefail
-    RUST_LOG="holon_latency=debug" HOLON_OTEL_FILTER=off PROPTEST_CASES={{cases}} \
+    RUST_LOG="holon_latency=debug" PROPTEST_CASES={{cases}} \
         cargo test -p holon-integration-tests --features pbt \
         --test general_e2e_composed_pbt -- --nocapture {{FLAGS}} \
         > /tmp/holon-latency.log 2>&1 || true
     echo "raw log: /tmp/holon-latency.log ($(grep -c holon_latency /tmp/holon-latency.log || true) events)"
-    python3 scripts/measure_latency.py /tmp/holon-latency.log
+    python3 scripts/measure_latency.py /tmp/holon-latency.log --max-contention-ms 30
 
 # Latency RATCHET gate — per-rung interaction->visible ceilings over two stages:
 # the PROD `stage=e2e` measurement (the exact quantity the runtime
@@ -382,7 +382,7 @@ latency-gate ceilings='docs/Testing/latency-ceilings.txt':
     # DISCLOSED, not swallowed and not fatal — a run that died early loses
     # samples, which the --min-samples floor below turns into a hard failure.
     status=0
-    RUST_LOG="holon_latency=debug" HOLON_OTEL_FILTER=off \
+    RUST_LOG="holon_latency=debug" \
         HOLON_HAND_AUTHORED_SIDECAR="hand-authored-regressions/latency-ratchet.jsonl" \
         cargo test -p holon-integration-tests --features pbt \
         --test hand_authored_regressions -- --nocapture > "$log" 2>&1 || status=$?
@@ -390,7 +390,17 @@ latency-gate ceilings='docs/Testing/latency-ceilings.txt':
     # Floor of 18: every rung is driven >= 20 times by construction, so a count
     # below this means the replay lost transitions, not that the workload is
     # small. See the corpus header for why the counts are >= 20.
-    python3 scripts/measure_latency.py "$log" --ratchet {{ceilings}} --min-samples 18
+    # Three outcomes, and a caller must read $? not just its truthiness: 0 green,
+    # 1 a rung over its ceiling, 3 the host was too busy to judge (see the
+    # ceilings header). 3 propagates rather than being swallowed, so an
+    # unjudgeable run can never be mistaken for a passing one.
+    gate=0
+    python3 scripts/measure_latency.py "$log" --ratchet {{ceilings}} --min-samples 18 \
+        --max-contention-ms 30 || gate=$?
+    if [ "$gate" -eq 3 ]; then
+        echo "latency-gate: INVALID (not red) — nothing was judged; re-run on a quiet machine."
+    fi
+    exit "$gate"
 
 # Scale-soak: drive the REAL pipeline against a seeded 5–10k-block vault WITH CRDT on,
 # measuring per-action latency vs the p95<200ms SLO plus RSS growth. Boots the keystone
@@ -421,7 +431,7 @@ soak size='5000' actions='320' settle_ms='30000' per_doc='200' soften='':
     HOLON_SOAK_SEED_BLOCKS={{size}} HOLON_SOAK_SETTLE_MS={{settle_ms}} \
         HOLON_SOAK_BLOCKS_PER_DOC={{per_doc}} HOLON_PBT_FORCE_FULL=1 \
         HOLON_PBT_INVARIANTS="{{soften}}" \
-        RUST_LOG="holon_latency=debug" HOLON_OTEL_FILTER=off PROPTEST_CASES="$cases" \
+        RUST_LOG="holon_latency=debug" PROPTEST_CASES="$cases" \
         cargo test -p holon-integration-tests --features pbt \
         --test general_e2e_composed_pbt -- --nocapture \
         > "$log" 2>&1 || echo "NOTE: test exited non-zero (see $log tail) — latency data below is still valid"
@@ -434,7 +444,10 @@ soak size='5000' actions='320' settle_ms='30000' per_doc='200' soften='':
         echo ""
         echo "action_total events: $(grep -c 'stage=action_total' "$log" || true)"
         echo ""
-        python3 scripts/measure_latency.py "$log" --fail-over-p95 200 || true
+        # No contention precondition here: its threshold is calibrated on the
+        # ratchet corpus, and a seeded 5-10k-block vault raises boot DDL by
+        # workload rather than by contention.
+        python3 scripts/measure_latency.py "$log" --fail-over-p95 200 --max-contention-ms 0 || true
         echo ""
         echo "== RSS (resident set, MB) =="
         awk -F, 'NR>1{v=$2; if(NR==2)start=v; if(v>peak)peak=v; end=v; n++}

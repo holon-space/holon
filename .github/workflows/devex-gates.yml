@@ -119,18 +119,25 @@ jobs:
             libfontconfig1-dev libwayland-dev libxkbcommon-dev \
             libxcb1-dev libx11-dev libasound2-dev libudev-dev libssl-dev
 
+      # OTel spans record at their default `info`, matching the local recipes, so
+      # a slow CI run carries the same evidence a local one does. Costs ~3% on
+      # the steadiest rung, against a 2000ms threshold.
       - name: Run headless keystone with latency tracing
         run: |
           set -o pipefail
-          RUST_LOG="holon_latency=debug" HOLON_OTEL_FILTER=off \
+          RUST_LOG="holon_latency=debug" \
             cargo test -p holon-integration-tests --features pbt \
             --test general_e2e_composed_pbt -- --nocapture \
             2>&1 | tee holon-latency.log
 
+      # The contention precondition stays off here: its threshold is calibrated
+      # on a dev host, and a shared runner's boot DDL is a different population.
+      # Passed explicitly rather than relying on the script default, which is a
+      # local-tooling choice this job should not track.
       - name: Enforce p95 threshold
         run: |
           python3 scripts/measure_latency.py holon-latency.log \
-            --fail-over-p95 "${P95_THRESHOLD_MS}"
+            --fail-over-p95 "${P95_THRESHOLD_MS}" --max-contention-ms 0
 
   # -- 3. Web worker "zero ERRORs" smoke -------------------------------------
   # Boots the dioxus-web frontend (Dioxus main thread + holon-worker Web Worker) in a
