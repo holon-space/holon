@@ -53,7 +53,6 @@ jobs:
               - 'crates/**'
               - 'frontends/gpui/**'
               - 'frontends/tui/**'
-              - 'frontends/ply/**'
               - 'frontends/mcp/**'
               - 'Cargo.toml'
               - 'Cargo.lock'

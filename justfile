@@ -692,7 +692,7 @@ analyze:
     echo "All analyzers passed."
 
 # Watch & run a UI frontend (recompiles on source changes)
-# chrome-trace available for: gpui, blinc, ply
+# chrome-trace available for: gpui, blinc
 # Only kills the old app if the new build succeeds.
 watch ui='gpui' *FLAGS:
     #!/usr/bin/env bash

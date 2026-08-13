@@ -158,7 +158,7 @@ duplicate documents). One vault, one syncer: Holon. See
 ## Vision Documents
 
 | Document | Contents |
-|----------|----------|
+| ---------- | ---------- |
 | [docs/Vision.md](docs/Vision.md) | Technical vision & phased roadmap |
 | [docs/Vision/LongTerm.md](docs/Vision/LongTerm.md) | Philosophical foundation: Integral Theory, flow psychology, the Holon promise |
 | [docs/Vision/AI.md](docs/Vision/AI.md) | Three AI roles (Watcher, Integrator, Guide), trust ladder, privacy model |

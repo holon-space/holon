@@ -1,42 +1,42 @@
 [workspace]
 members = [
-    "crates/holon",
-    "crates/holon-advice",
-    "crates/holon-api",
-    "crates/holon-core",
-    "crates/holon-turso",
-    "crates/holon-engine",
-    "crates/holon-expr",
-    "crates/holon-pattern",
-    "crates/holon-org-format",
-    "crates/holon-toon",
-    "crates/holon-orgmode",
-    "crates/holon-markdown",
-    "crates/holon-filesystem",
-    "crates/holon-frontend",
-    "crates/holon-app",
-    "crates/holon-block-roundtrip-testing",
-    "crates/holon-layout-testing",
-    "crates/holon-loro-testing",
-    "crates/holon-turso-testing",
-    "crates/holon-oracles",
-    "crates/holon-pbt-core",
-    "crates/holon-integration-tests",
-    "crates/holon-mcp-client",
-    "crates/holon-mcp-mock",
-    "crates/holon-macros",
-    "crates/holon-macros-test",
-    "crates/holon-petri",
-    "crates/holon-profiles",
-    "crates/holon-loro",
-    "crates/holon-sharing",
-    "crates/holon-architecture-tests",
-    "frontends/tui",
-    "frontends/mcp",
-    "frontends/gpui",
-    "tools",
-    "workspace-hack",
-    "experiments/lorotree-spike",
+  "crates/holon",
+  "crates/holon-advice",
+  "crates/holon-api",
+  "crates/holon-core",
+  "crates/holon-turso",
+  "crates/holon-engine",
+  "crates/holon-expr",
+  "crates/holon-pattern",
+  "crates/holon-org-format",
+  "crates/holon-toon",
+  "crates/holon-orgmode",
+  "crates/holon-markdown",
+  "crates/holon-filesystem",
+  "crates/holon-frontend",
+  "crates/holon-app",
+  "crates/holon-block-roundtrip-testing",
+  "crates/holon-layout-testing",
+  "crates/holon-loro-testing",
+  "crates/holon-turso-testing",
+  "crates/holon-oracles",
+  "crates/holon-pbt-core",
+  "crates/holon-integration-tests",
+  "crates/holon-mcp-client",
+  "crates/holon-mcp-mock",
+  "crates/holon-macros",
+  "crates/holon-macros-test",
+  "crates/holon-petri",
+  "crates/holon-profiles",
+  "crates/holon-loro",
+  "crates/holon-sharing",
+  "crates/holon-architecture-tests",
+  "frontends/tui",
+  "frontends/mcp",
+  "frontends/gpui",
+  "tools",
+  "workspace-hack",
+  "experiments/lorotree-spike",
 ]
 exclude = [
   # naga 27 (via wgpu) + codespan-reporting 0.12 = WriteColor trait error
@@ -81,7 +81,11 @@ miette = "7.4"
 # === Observability ===
 tracing = "0.1"
 tracing-core = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tracing-subscriber = { version = "0.3", features = [
+  "env-filter",
+  "fmt",
+  "json",
+] }
 tracing-opentelemetry = { version = "0.32", features = ["tracing-log"] }
 tracing-appender = "0.2"
 tracing-chrome = "0.7"
@@ -125,8 +129,16 @@ rhai = { version = "1", features = ["sync"] }
 sqlparser = "0.61"
 
 # === Network ===
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+reqwest = { version = "0.13", default-features = false, features = [
+  "json",
+  "rustls-no-provider",
+] }
+rustls = { version = "0.23", default-features = false, features = [
+  "ring",
+  "logging",
+  "std",
+  "tls12",
+] }
 iroh = { version = "0.96.0", default-features = false }
 
 # === Testing ===
@@ -190,7 +202,13 @@ prqlc = { git = "https://github.com/nightscape/prql.git", branch = "main" }
 prqlc-parser = { git = "https://github.com/nightscape/prql.git", branch = "main" }
 gql-parser = { git = "https://github.com/holon-space/gql-to-sql.git", branch = "main" }
 gql-transform = { git = "https://github.com/holon-space/gql-to-sql.git", branch = "main" }
-fluxdi = { git = "https://github.com/holon-space/fluxdi", branch = "dev", features = ["thread-safe", "async-factory", "lifecycle", "dynamic", "eager-resolution"] }
+fluxdi = { git = "https://github.com/holon-space/fluxdi", branch = "dev", features = [
+  "thread-safe",
+  "async-factory",
+  "lifecycle",
+  "dynamic",
+  "eager-resolution",
+] }
 r3bl_tui = { git = "https://github.com/nightscape/r3bl-open-core.git", branch = "main" }
 
 # === Internal crates ===

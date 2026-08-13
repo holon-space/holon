@@ -9,6 +9,7 @@ Holon is a Personal Knowledge & Task Management system that treats external syst
 ### External Systems as First-Class Citizens
 
 Data from external systems is stored in a format as close to the source as possible:
+
 - All operations available in the external system can be performed locally
 - All data can be displayed without loss
 - Round-trip fidelity when syncing back
@@ -37,6 +38,7 @@ UI ← CDC Stream ← QueryableCache ← Sync Provider
 Users specify data needs using PRQL, GQL (ISO/IEC 39075 graph queries), or raw SQL. Rendering is specified in a sibling render block using Rhai syntax.
 
 **PRQL** (primary) + **render sibling**:
+
 ```org
 #+BEGIN_SRC holon_prql
 from children
@@ -48,11 +50,11 @@ list(#{item_template: render_block()})
 ```
 
 **GQL** (graph queries, compiled to SQL using tables and FK relations):
+
 ```
 MATCH (p:Person)-[:KNOWS]->(f:Person)
 RETURN p.name, f.name
 ```
-
 
 All query languages can be paired with a sibling render block (`source_language: render`) using Rhai map syntax (`#{key: value}`).
 
@@ -88,7 +90,6 @@ frontends/
 ├── blinc/           # Native Rust GUI frontend (blinc-app)
 ├── mcp/             # MCP server frontend (stdio + HTTP)
 ├── dioxus/          # Dioxus frontend
-├── ply/             # Ply frontend
 ├── tui/             # Terminal UI frontend
 └── waterui/         # WaterUI frontend
 ```
@@ -96,7 +97,7 @@ frontends/
 ### Crate Responsibilities
 
 | Crate | Purpose |
-|-------|---------|
+| ------- | --------- |
 | `holon-api` | Value types, Operation descriptors, Change/CDC types, `TypeDefinition`, `IntoEntity`/`TryFromEntity` traits. No frontend-specific deps. |
 | `holon-core` | Core traits: DataSource, CrudOperations, BlockOperations, OperationRegistry. Also provides default implementations for BlockOperations (indent, outdent, move, split) |
 | `holon-engine` | Standalone Petri-net engine CLI. YAML-defined nets with Rhai guards, WSJF-based ranking, what-if analysis. No dependency on `holon` crate. |
@@ -217,6 +218,7 @@ Operations return `OperationResult` which includes `Vec<FieldDelta>` for CDC-lev
 ### QueryableCache
 
 Wraps a `TypeDefinition` and `DbHandle` to provide:
+
 - Local caching in Turso (SQLite) via the actor-based `DbHandle`
 - CDC streaming of changes
 - Operation dispatch to external systems
@@ -244,7 +246,7 @@ QueryableCache subscribes to changes from sync providers via broadcast channels.
 **Stream Ingestion Methods:**
 
 | Method | Purpose |
-|--------|---------|
+| -------- | --------- |
 | `ingest_stream(rx)` | Subscribe to `broadcast::Receiver<Vec<Change<T>>>` and apply changes to cache |
 | `ingest_stream_with_metadata(rx)` | Subscribe with metadata (sync tokens) for atomic data+token saves |
 | `apply_batch(changes, sync_token)` | Synchronously apply a batch of changes (for ordered ingestion) |
@@ -332,7 +334,7 @@ pub struct TursoBackend {
 **Key Components:**
 
 | Component | Purpose |
-|-----------|---------|
+| ----------- | --------- |
 | `DbCommand` | Enum of database operations (Query, Execute, ExecuteDdl, Transaction, etc.) sent via channel |
 | `DbHandle` | Lightweight clone-able handle wrapping `mpsc::Sender<DbCommand>` — the primary API for all DB access |
 | `StorageBackend` trait | CRUD operations: `create_entity`, `get`, `query`, `insert`, `update`, `delete` |
@@ -352,6 +354,7 @@ let _ = db_handle.execute_ddl("CREATE TABLE IF NOT EXISTS ...").await?;
 ```
 
 **Platform Support:**
+
 - **Unix-like systems** (macOS, Linux, BSD, iOS): Full file-based storage via `UnixIO`
 - **Windows**: Falls back to in-memory storage (cross-platform IO support pending in turso-core)
 
@@ -368,6 +371,7 @@ let results = db_handle.query(
 ```
 
 The `StorageBackend` trait implementation provides standard operations:
+
 - `create_entity(schema)` - Creates table with indexes from `TypeDefinition`
 - `get(entity, id)` - Retrieves single row by primary key
 - `query(entity, filter)` - Queries with `Filter` predicates (`Eq`, `In`, `And`, `Or`, `IsNull`)
@@ -411,7 +415,7 @@ pub fn row_changes(&self) -> RowChangeStream {
 The `coalesce_row_changes()` function optimizes CDC events within a batch to prevent UI flicker:
 
 | Input Pattern | Output | Reason |
-|---------------|--------|--------|
+| --------------- | -------- | -------- |
 | DELETE + INSERT (same entity) | UPDATE | Prevents widget destruction/recreation |
 | INSERT + DELETE (same entity) | (nothing) | Net no-op, skip both events |
 | Standalone INSERT/UPDATE/DELETE | Unchanged | Pass through as-is |
@@ -504,6 +508,7 @@ CREATE TABLE commands (
 ```
 
 **Indexes:**
+
 - `idx_commands_pending` - Finds pending commands for sync (filtered on `status = 'pending'`)
 - `idx_commands_entity` - Finds commands by entity for ordering
 
@@ -546,6 +551,7 @@ This solves async-in-sync issues when evaluating operation preconditions by load
 #### Design Notes
 
 The command sourcing system is designed to enable:
+
 1. **Offline-first operation**: Commands persist locally before external sync
 2. **Idempotency**: Client-generated UUIDs prevent duplicate processing
 3. **Entity-level ordering**: Commands grouped by entity for consistent sync
@@ -568,6 +574,7 @@ All three paths produce pure SQL. Rendering is **decoupled** from query compilat
 ### EAV Graph Schema
 
 GQL queries operate on an Entity-Attribute-Value schema with 14 tables:
+
 - `nodes`, `edges` — graph structure
 - `node_labels` — label-based node classification
 - `property_keys` — shared key dictionary
@@ -617,6 +624,7 @@ render_block(block_id) → (WidgetSpec, CDC)  (called for each block to render)
 When the frontend encounters a `BlockRef { block_id }` in a render expression, it calls `render_block(block_id)` on the backend, which returns the data, render instructions, and CDC stream.
 
 **`render_block(block_id)` pipeline:**
+
 ```
 1. Load block by ID + find query source child (prql/gql/sql) + optional render sibling
 2. Compile query source to SQL
@@ -628,6 +636,7 @@ When the frontend encounters a `BlockRef { block_id }` in a render expression, i
 ```
 
 **Render source blocks** use Rhai syntax in org blocks with `source_language: render`:
+
 ```org
 #+BEGIN_SRC render :id my-block::render::0
 list(#{item_template: render_block()})
@@ -635,12 +644,14 @@ list(#{item_template: render_block()})
 ```
 
 **`render_block()` in item templates**: When used as an `item_template` argument (e.g., `list(#{item_template: render_block()})`), the Flutter `RenderBlockWidgetBuilder` dispatches per-row based on:
+
 1. Row profile render expression (if present — IoC from backend)
 2. Query blocks (content_type=source, language=prql/gql/sql) → `BlockRefWidget` (recursive)
 3. Other source blocks → `source_editor`
 4. Default → `editable_text(content)` with synthesized `set_field`/`split_block` operations
 
 **Profile Resolution** (BackendEngine.attach_row_profiles):
+
 ```
 For each row:
   - Look up EntityProfile by row's entity scheme in the `id` column
@@ -707,6 +718,7 @@ pub struct RowProfile {
 ```
 
 **Resolution algorithm** (`EntityProfile::resolve`):
+
 1. If `ProfileContext.preferred_variant` is set, try that variant first
 2. Evaluate variants in specificity order (descending)
 3. First variant whose Rhai condition evaluates to `true` wins
@@ -746,6 +758,7 @@ pub struct ProfileContext {
 #### Deleted Crates / Modules
 
 The following were removed as part of this refactoring:
+
 - `crates/holon-prql-render/` — PRQL → SQL + RenderSpec compilation (entire crate deleted)
 - `crates/query-render/` — lineage analysis, parser, types (entire crate deleted)
 - `crates/holon/src/core/transform/` — AST transform pipeline (EntityTypeInjector, ColumnPreservation, JsonAggregation)
@@ -755,7 +768,7 @@ The following were removed as part of this refactoring:
 The render pipeline follows Model-View-ViewModel (MVVM). The three layers are:
 
 | Layer | Holon Component | Responsibility |
-|-------|-----------------|----------------|
+| ------- | ----------------- | ---------------- |
 | **Model** | Turso/Loro (blocks, documents, queries) | Domain data, persistence, CDC streams |
 | **ViewModel** | `ViewModel` tree (`holon-frontend`) | Platform-agnostic presentation tree produced by the render interpreter from `WidgetSpec` + `RenderExpr` |
 | **View** | Flutter widgets, GPUI elements, Dioxus components, TUI cells | Platform-specific UI — mechanical 1:1 mapping from `NodeKind` variants to native widgets |
@@ -847,7 +860,7 @@ The command menu ViewModel is produced by shared Rust code — written once, ren
 **Performance characteristics:**
 
 | Event type | Frequency | ViewModel round-trip | Cost |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Normal keystroke | ~5/sec | No | 0 |
 | Trigger check | ~5/sec | No (local match) | ~100ns |
 | Trigger fire | ~1/min | Yes | ~1ms |
@@ -873,6 +886,7 @@ final result = await renderBlock(blockId: rootBlockId, isRoot: true);
 ```
 
 **Widget dispatch** via `RenderInterpreter` (registry-based):
+
 - `columns(...)` → screen layout with sidebar/main/right columns
 - `list(#{item_template: ...})` → virtualized ListView
 - `tree(#{parent_id: ..., sortkey: ..., item_template: ...})` → AnimatedTreeView
@@ -883,6 +897,7 @@ final result = await renderBlock(blockId: rootBlockId, isRoot: true);
 **Operation inheritance**: `RenderInterpreter` inherits `availableOperations` from parent context when a FunctionCall node has no wirings. This allows `render_block()` to inject operations that flow through to `editable_text()`.
 
 **FRB-generated Dart types** (in `lib/src/rust/third_party/holon_api/`):
+
 - `WidgetSpec` — `{renderExpr: RenderExpr, data: List<ResolvedRow>, actions: List<ActionSpec>}`
 - `ResolvedRow` — `{data: Map<String, Value>, profile: RowProfile?}`
 - `RowProfile` — `{name: String, render: RenderExpr, operations: List<OperationDescriptor>}`
@@ -890,12 +905,13 @@ final result = await renderBlock(blockId: rootBlockId, isRoot: true);
 - `OperationDescriptor`, `OperationWiring`, `Arg`, `OperationParam`, `ParamMapping`
 
 **FRB-ignored types** (exist in Rust but NOT generated for Flutter):
+
 - `RenderSpec`, `RowTemplate`, `ViewSpec`, `FilterExpr`, `Operation`, `RenderableItem`
 
 #### Key Files
 
 | Path | Description |
-|------|-------------|
+| ------ | ------------- |
 | `crates/holon-frontend/src/view_model.rs` | ViewModel, NodeKind, LazyChildren — platform-agnostic presentation tree (MVVM ViewModel layer) |
 | `crates/holon/src/entity_profile.rs` | EntityProfile, RowProfile, RowVariant, ProfileResolver, ProfileResolving trait |
 | `crates/holon-api/src/widget_spec.rs` | WidgetSpec, ResolvedRow, ActionSpec |
@@ -944,6 +960,7 @@ pub trait TaskOperations<T>: CrudOperations<T> {
 ```
 
 Generates `OperationDescriptor` with:
+
 - Required parameters and their types
 - Affected fields for UI updates
 - Preconditions for availability
@@ -982,7 +999,7 @@ pub struct UndoStack {
 **Key Methods:**
 
 | Method | Purpose |
-|--------|---------|
+| -------- | --------- |
 | `push(original, inverse)` | Add operation to undo stack, clear redo stack |
 | `pop_for_undo()` | Get inverse operation for undo, move to redo stack |
 | `pop_for_redo()` | Get operation for redo, move to undo stack |
@@ -1055,7 +1072,7 @@ pub enum OperationStatus {
 **Status Transitions:**
 
 | From | To | When |
-|------|-----|------|
+| ------ | ----- | ------ |
 | PendingSync | Undone | Undo action (cancels pending sync) |
 | PendingSync | Synced | Sync completes successfully (future) |
 | Synced | Undone | Undo action on synced operation |
@@ -1179,7 +1196,7 @@ impl TryFromEntity for TodoistTask {
 **Field Attributes:**
 
 | Attribute | Effect |
-|-----------|--------|
+| ----------- | -------- |
 | `#[primary_key]` | Marks field as PRIMARY KEY |
 | `#[indexed]` | Creates index on this column |
 | `#[reference(entity)]` | Foreign key reference |
@@ -1248,6 +1265,7 @@ where
 **`#[affects("field1", "field2")]`**
 
 Declares which database fields an operation modifies. Used for:
+
 - UI reactivity (only re-render affected widgets)
 - Conflict detection
 - Audit logging
@@ -1307,13 +1325,14 @@ absence.
 The macro automatically infers parameter types for `OperationDescriptor`:
 
 | Rust Type | Inferred TypeHint |
-|-----------|-------------------|
+| ----------- | ------------------- |
 | `&str`, `String` | `TypeHint::String` |
 | `bool` | `TypeHint::Bool` |
 | `i64`, `i32` | `TypeHint::Number` |
 | `*_id` (naming convention) | `TypeHint::EntityId { entity_name }` |
 
 Parameters ending in `_id` are automatically detected as entity references:
+
 - `project_id` → `TypeHint::EntityId { entity_name: "project" }`
 - `parent_id` → `TypeHint::EntityId { entity_name: "parent" }`
 
@@ -1462,7 +1481,7 @@ MCP Server (e.g. ai.todoist.net/mcp)
 #### Components
 
 | Component | File | Purpose |
-|-----------|------|---------|
+| ----------- | ------ | --------- |
 | `McpOperationProvider` | `mcp_provider.rs` | Connects to MCP server, caches `OperationDescriptor`s from tool schemas, executes tools via `call_tool`. Holds `McpRunningService` to keep the connection alive. |
 | `McpSidecar` | `mcp_sidecar.rs` | YAML config that patches UI affordances onto MCP tools: entity mapping, `affected_fields`, `triggered_by`, `param_overrides`, and the DEPRECATED `precondition` (see below). |
 | `RhaiPrecondition` | `mcp_sidecar.rs` | **Deprecated, ignored.** Parse-don't-validate wrapper: the Rhai expression is still syntax-checked at YAML deserialization time, so a malformed one fails loudly at load. Nothing reads it beyond that — it reaches no descriptor and gates no operation. |
@@ -1639,7 +1658,7 @@ impl Resource {
 The system includes these core modules:
 
 | Module | Provides | Requires |
-|--------|----------|----------|
+| -------- | ---------- | ---------- |
 | `CoreSchemaModule` | `blocks`, `documents`, `directories` | (none) |
 | `BlockHierarchySchemaModule` | `blocks_with_paths` | `blocks` |
 | `NavigationSchemaModule` | `navigation_history`, `navigation_cursor`, `current_focus` | (none) |
@@ -1794,6 +1813,7 @@ pub fn create_core_schema_registry() -> SchemaRegistry {
 To add a new table or view:
 
 1. **Create a SchemaModule** in `storage/schema_modules.rs`:
+
    ```rust
    pub struct MyNewSchemaModule;
 
@@ -1809,6 +1829,7 @@ To add a new table or view:
    ```
 
 2. **Register in factory**:
+
    ```rust
    pub fn create_core_schema_registry() -> SchemaRegistry {
        let mut registry = SchemaRegistry::new();
@@ -1825,7 +1846,7 @@ The registry automatically determines the correct initialization order.
 ### Key Files
 
 | Path | Description |
-|------|-------------|
+| ------ | ------------- |
 | `crates/holon/src/storage/schema_module.rs` | `SchemaModule` trait, `SchemaRegistry`, topological sort |
 | `crates/holon/src/storage/schema_modules.rs` | Concrete module implementations |
 | `crates/holon/src/storage/resource.rs` | `Resource` enum |
@@ -1921,7 +1942,7 @@ enum FieldLifetime {
 Propagation rules:
 
 | Lifetime | Loro | Org/YAML | Turso | CRDT merge | Reconstruction |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | `Persistent` | Yes | Yes | Yes | Yes | From Loro |
 | `Computed` | No | No | Yes | No (derived) | Recompute from persistent fields |
 | `Transient` | No | No | Yes | No (device-local) | Re-fetch from DT source |
@@ -2061,7 +2082,7 @@ Each confirmed edge increases graph density without adding nodes. Denser graphs 
 Built-in types (`Block`, `Document`) use the compile-time `#[derive(Entity)]` macro which generates `IntoEntity` + `TryFromEntity` + `TypeDefinition`. User-defined types use YAML definitions that produce `TypeDefinition` at runtime. The two coexist:
 
 | Type | Definition | Schema | Extension table |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Block | `#[derive(Entity)]` in Rust | Compile-time `IntoEntity`/`TryFromEntity` | `block` table (universal) |
 | Document | `#[derive(Entity)]` in Rust | Compile-time `IntoEntity`/`TryFromEntity` | `documents` table |
 | Person | YAML in `types/person.yaml` | Runtime from type definition | `person` table (generated) |
@@ -2116,7 +2137,7 @@ pub trait Marking       { fn tokens(&self) -> Vec<&dyn TokenState>; fn add_token
 ### Key Components
 
 | Component | File | Purpose |
-|-----------|------|---------|
+| ----------- | ------ | --------- |
 | `Engine` | `engine.rs` | Core simulation: `enabled()` finds fireable bindings, `fire()` executes a transition, `rank()` produces WSJF-ordered `RankedTransition` list |
 | `RhaiEvaluator` | `guard.rs` | Rhai-based guard/precondition evaluation, postcondition attribute updates, compiled expression caching |
 | `ObjectiveResult` | `objective.rs` | Evaluates objective function over current marking state |
@@ -2131,6 +2152,7 @@ pub trait Marking       { fn tokens(&self) -> Vec<&dyn TokenState>; fn add_token
 ## Ordering with Fractional Indexing
 
 Block ordering uses fractional indexing:
+
 - Sort keys are base-26-like strings
 - Supports arbitrary insertion without rewriting all keys
 - Automatic rebalancing when keys get too long
@@ -2146,24 +2168,25 @@ Block ordering uses fractional indexing:
 ### Supported Frontends
 
 | Frontend | Status | Notes |
-|----------|--------|-------|
+| ---------- | -------- | ------- |
 | GPUI | Primary | Native Rust GUI (runs on Android via Dioxus), embeds MCP server |
 | Flutter | Active | FFI bridge via flutter_rust_bridge |
 | Blinc | Active | Native Rust GUI via blinc-app |
 | MCP | Active | Model Context Protocol server (stdio + HTTP modes) |
 | Dioxus | Experimental | Dioxus-based frontend |
-| Ply | Experimental | Ply-based frontend |
 | TUI | Experimental | Terminal UI frontend |
 | WaterUI | Experimental | WaterUI-based frontend |
 
 ## Consistency Model
 
 ### Local Consistency
+
 - Database transactions ensure atomic updates
 - CDC delivers changes in commit order
 - UI reflects committed state
 
 ### External Consistency
+
 - Eventually consistent (5-30 second typical delay)
 - Last-write-wins for concurrent edits
 - Sync tokens prevent duplicate processing
@@ -2237,7 +2260,7 @@ Holon uses a **hybrid data model** where different storage technologies are used
 Loro, OrgMode, and Iroh are independently toggleable via environment variables:
 
 | Component | Env Var | Default |
-|-----------|---------|---------|
+| ----------- | --------- | --------- |
 | OrgMode | `HOLON_ORGMODE_ROOT` (path) | OFF |
 | Loro | `HOLON_LORO_ENABLED` (truthy) | OFF |
 | Iroh | (bundled with Loro, future: separate) | OFF |
@@ -2245,7 +2268,7 @@ Loro, OrgMode, and Iroh are independently toggleable via environment variables:
 All 4 combinations of OrgMode × Loro are valid:
 
 | OrgMode | Loro | Behavior |
-|---------|------|----------|
+| --------- | ------ | ---------- |
 | OFF | OFF | Core app with Turso-only storage, last-write-wins |
 | ON | OFF | Org file sync, blocks written directly to Turso via `SqlOperationProvider` |
 | OFF | ON | Loro CRDT for conflict resolution, no org file watching |
@@ -2271,6 +2294,7 @@ Loro stores hierarchical block data using an adjacency-list model:
 | `children_by_parent` | `LoroMap<String, LoroList<String>>` | Parent → children mapping |
 
 Each block contains:
+
 - `content_type`, `content_raw` (or `source_*` for code blocks)
 - `parent_id` – reference to parent block
 - `created_at`, `updated_at` – timestamps
@@ -2280,7 +2304,7 @@ Each block contains:
 **Implementation Components**
 
 | Component | Location | Purpose |
-|-----------|----------|---------|
+| ----------- | ---------- | --------- |
 | `LoroModule` | `crates/holon/src/sync/loro_module.rs` | Standalone DI module for Loro services (independent of OrgMode) |
 | `LoroBlockOperations` | `crates/holon/src/sync/loro_block_operations.rs` | `OperationProvider` impl that routes writes through Loro CRDT |
 | `LoroDocumentStore` | `crates/holon/src/sync/loro_document_store.rs` | Manages Loro CRDT documents on disk |
@@ -2352,7 +2376,7 @@ pub struct CollaborativeDoc {
 **Key Features:**
 
 | Feature | Description |
-|---------|-------------|
+| --------- | ------------- |
 | Loro CRDT | Conflict-free replicated data type for text and structured data |
 | Iroh P2P | Decentralized peer discovery and connection via `iroh::Endpoint` |
 | ALPN routing | Documents identified by `loro-sync/{doc_id}` protocol string |
@@ -2395,6 +2419,7 @@ Documents converge via CRDT merge
 ```
 
 **Platform Support:**
+
 - **Unix-like systems**: Full Iroh P2P support
 - **WASM**: Local-only mode (document operations work, no P2P sync)
 
@@ -2416,7 +2441,7 @@ pub struct LoroBackend {
 **Trait Implementations:**
 
 | Trait | Purpose |
-|-------|---------|
+| ------- | --------- |
 | `CoreOperations` | CRUD operations: `get_block`, `create_block`, `update_block`, `delete_block`, `move_block` |
 | `Lifecycle` | Document lifecycle: `create_new`, `open_existing`, `dispose` |
 | `P2POperations` | Peer-to-peer sync: `get_node_id`, `connect_to_peer`, `accept_connections` |
@@ -2518,7 +2543,7 @@ pub struct SourceBlock {
 Helper functions serialize content to/from Loro maps:
 
 | Function | Purpose |
-|----------|---------|
+| ---------- | --------- |
 | `read_content_from_map(block_map)` | Deserializes `BlockContent` from Loro fields (handles backward compatibility with old string format) |
 | `write_content_to_map(block_map, content)` | Serializes `BlockContent` fields (`content_type`, `content_raw`, or `source_*` fields) |
 | `read_properties_from_map(block_map)` | Deserializes custom `properties` from JSON string |
@@ -2527,7 +2552,7 @@ Helper functions serialize content to/from Loro maps:
 **Block Storage Fields:**
 
 | Field | Type | Description |
-|-------|------|-------------|
+| ------- | ------ | ------------- |
 | `content_type` | String | "text" or "source" |
 | `content_raw` | String | Raw text (for text blocks) |
 | `source_language` | String | Language (for source blocks) |
@@ -2559,6 +2584,7 @@ fn is_ancestor(ancestor_id: &str, descendant_id: &str, doc: &LoroDoc) -> Result<
 ```
 
 Before moving block `A` under new parent `B`, the algorithm checks:
+
 1. Walk from `B` up to root via `parent_id` links
 2. If `A` is found during the walk → cycle detected → reject with error
 3. Otherwise → move is safe → proceed
@@ -2588,7 +2614,7 @@ impl<T> DocumentRepository for T where
 **Trait Details:**
 
 | Trait | Key Methods | Use Case |
-|-------|-------------|----------|
+| ------- | ------------- | ---------- |
 | `CoreOperations` | `get_block`, `create_block`, `update_block`, `delete_block`, `move_block`, batch variants | Required for all backends |
 | `Lifecycle` | `create_new`, `open_existing`, `dispose` | Required for all backends |
 | `P2POperations` | `get_node_id`, `connect_to_peer`, `accept_connections` | Optional - only for networked backends |
@@ -2614,7 +2640,7 @@ impl P2POperations for LoroBackend { /* ... */ }
 **CoreOperations Methods:**
 
 | Method | Purpose |
-|--------|---------|
+| -------- | --------- |
 | `get_block(id)` | Retrieve single block by ID |
 | `get_all_blocks(traversal)` | Get all blocks with depth filtering |
 | `list_children(parent_id)` | Get ordered child IDs |
@@ -2633,6 +2659,7 @@ The `EventBus` provides unified event publication/subscription across all data s
 **Location**: `crates/holon/src/sync/event_bus.rs`, `crates/holon/src/sync/event_subscriber.rs`
 
 **Key Features:**
+
 - Unified event publication across all data sources
 - **Origin-based loop prevention**: Each `EventSubscriber` declares its `origin()` (e.g., "loro", "org") and skips events from its own origin
 - Event origin tracking (Loro, Org, Turso, UI)
@@ -2708,7 +2735,7 @@ pub struct OperationLogStore {
 **Key Components:**
 
 | Component | Purpose |
-|-----------|---------|
+| ----------- | --------- |
 | `OperationLogEntry` | Entity storing operation, inverse, status, timestamps |
 | `OperationLogStore` | Persistent store implementing `OperationLogOperations` trait |
 | `OperationLogObserver` | Observer that automatically logs operations for undo |
@@ -2719,7 +2746,7 @@ pub struct OperationLogStore {
 Operations track their status through the following states:
 
 | Status | Description |
-|--------|-------------|
+| -------- | ------------- |
 | `PendingSync` | Initial state - operation executed but not yet synced (future sync support) |
 | `Synced` | Operation confirmed synced to external system (future sync support) |
 | `Undone` | Operation was undone - available for redo |
@@ -2741,6 +2768,7 @@ CREATE TABLE operations (
 ```
 
 **Indexes:**
+
 - `idx_operations_created_at` - For ordering and trimming old entries
 - `idx_operations_entity_name` - For entity-specific queries
 
@@ -2830,6 +2858,7 @@ CDC fires automatically when the `operations` table changes, allowing the UI to 
 #### Future: Offline Sync
 
 The `PendingSync` → `Synced` status flow is designed for future offline sync support:
+
 - Operations start as `PendingSync`
 - Background worker syncs to external systems
 - On success: status becomes `Synced`
@@ -2838,7 +2867,7 @@ The `PendingSync` → `Synced` status flow is designed for future offline sync s
 ## Key Files
 
 | Path | Description |
-|------|-------------|
+| ------ | ------------- |
 | `crates/holon-core/src/traits.rs` | Core trait definitions (DataSource, CrudOperations, BlockOperations) |
 | `crates/holon-core/src/undo.rs` | In-memory UndoStack for session-level undo/redo |
 | `crates/holon-core/src/operation_log.rs` | OperationLogEntry entity and OperationStatus enum |

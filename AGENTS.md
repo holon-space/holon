@@ -24,7 +24,6 @@ holon/
 ├── frontends/               # UI frontends (each is a separate workspace member)
 │   ├── gpui/                # GPUI desktop frontend
 │   ├── tui/                 # Terminal UI frontend
-│   ├── ply/                 # Ply frontend
 │   ├── mcp/                 # MCP server frontend
 │   └── flutter/             # Flutter/Dart + flutter_rust_bridge
 ├── experiments/             # Spikes and prototypes (not production)
@@ -43,7 +42,7 @@ All shared dependency versions are declared once under `[workspace.dependencies]
 The project uses [`just`](https://github.com/casey/just) as a task runner. Run `just` with no arguments to list all available recipes.
 
 | Command | What it does |
-|---|---|
+| --- | --- |
 | `just build` | Builds the full workspace |
 | `just test` | Runs all workspace unit/integration tests |
 | `just clippy` | Runs Clippy across all targets |
@@ -53,7 +52,7 @@ The project uses [`just`](https://github.com/casey/just) as a task runner. Run `
 | `just machete` | Finds unused dependencies |
 | `just pbt <name>` | Runs a property-based test suite (`general`, `petri`, `orgmode`, `loro`) |
 | `just pbt-all` | Runs all PBT suites sequentially |
-| `just watch <ui>` | Hot-reloads a frontend (`gpui`, `tui`, `ply`) |
+| `just watch <ui>` | Hot-reloads a frontend (`gpui`, `tui`) |
 | `just coverage` | Collects runtime code coverage |
 
 For faster test runs, prefer `cargo nextest` (configured in `.config/nextest.toml`):
@@ -84,6 +83,7 @@ The project uses three complementary testing strategies:
 3. **BDD / acceptance tests** — via `cucumber`. See `CUCUMBER_SETUP.md` for setup details.
 
 **Conventions:**
+
 - Name test functions descriptively: `test_<behaviour>_when_<condition>`.
 - Use `serial_test` for tests that cannot run concurrently.
 - Use `tempfile` for any test that touches the filesystem.
@@ -106,6 +106,7 @@ test:     adding or updating tests
 ```
 
 **Pull requests:**
+
 - Keep PRs focused — one logical change per PR.
 - Run `just lint` locally before pushing; CI will reject PRs that fail any check.
 - Reference related issues or design documents (e.g. `docs/Architecture.md`, `docs/Vision.md`) in the PR description where applicable.
