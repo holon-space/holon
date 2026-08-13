@@ -19,6 +19,9 @@
 
 use anyhow::Context;
 use anyhow::Result;
+use holon_api::ContentType;
+use holon_api::EntityUri;
+use holon_api::PAGE_TAG;
 use holon_api::QueryLanguage;
 use holon_api::SourceLanguage;
 use holon_api::Value;
@@ -298,6 +301,108 @@ pub async fn graft_promotion_target_row(env: &TestEnvironment) -> Result<()> {
         .await
         .context("graft the promotion target row under Main focus root")?;
     Ok(())
+}
+
+// ── Journals-feed viewport scenario (A-lane increment A1) ───────────────────
+
+/// The seeded journals page every day page hangs under. `block:journals` is
+/// part of the default vault (`assets/default/Journals.org`), so the fixture
+/// grafts INTO it rather than creating it.
+pub const JOURNALS_ID: &str = "journals";
+/// Day pages the viewport rung grafts. The windowed harness gives the main
+/// panel ~970px and the feed draws a day every ~32px, so 30 days fill it
+/// exactly and the rest fall below the fold — which is what makes "expanded
+/// because on screen" and "expanded because the feed expands everything"
+/// separable outcomes.
+///
+/// Sized ABOVE the oracle's capacity ceiling, not merely above the visible
+/// count. That ceiling is `panel_height / MIN_FEED_ROW_HEIGHT` = 61 rows here
+/// (`onscreen_capacity`), and a fixture at or under it lets a SUT claim the
+/// whole feed is on screen without exceeding what the panel could physically
+/// hold — which blinds the bounded law and, with it, the whole oracle.
+pub const JOURNAL_DAY_COUNT: usize = 70;
+/// Content prefix of the row each day page owns. A day with no children would
+/// materialise nothing when expanded, so expansion would cost nothing to leak.
+pub const JOURNAL_ENTRY_MARKER: &str = "JENTRY-";
+
+/// Block id of day page `i`.
+pub fn journal_day_id(i: usize) -> String {
+    format!("jday-{i:03}")
+}
+
+/// Content of day page `i`: an ISO date, which is what the feed sorts on
+/// (`ORDER BY content DESC`). 28 days per month keeps every generated date
+/// valid without a calendar.
+pub fn journal_day_content(i: usize) -> String {
+    format!("2026-{:02}-{:02}", 1 + i / 28, 1 + i % 28)
+}
+
+/// Graft `day_count` day pages under the vault's `block:journals`,
+/// each owning one plain child row. Returns `(id, content)` per day in creation
+/// order (oldest first) so the ref can be seeded with the same pairs.
+///
+/// A day page is a `Page`-tagged child of `block:journals` — the predicate
+/// `journal_day_pages_matview.sql` uses — so these are day pages by the same
+/// definition production reads.
+///
+/// The caller must re-settle the window afterwards.
+pub async fn graft_journal_days(
+    env: &TestEnvironment,
+    day_count: usize,
+) -> Result<Vec<(String, String)>> {
+    let journals = EntityUri::block(JOURNALS_ID);
+    let existing = env
+        .query_sql(&format!(
+            "SELECT id FROM block_raw WHERE id = '{}'",
+            journals.as_str()
+        ))
+        .await
+        .context("look up the seeded journals page")?;
+    anyhow::ensure!(
+        !existing.is_empty(),
+        "the booted vault has no {} — the journals fixture grafts INTO the seeded page, so \
+         without it every day page would be parented to nothing",
+        journals.as_str(),
+    );
+
+    let mut days = Vec::with_capacity(day_count);
+    for i in 0..day_count {
+        let id = journal_day_id(i);
+        let content = journal_day_content(i);
+        create_page_block(env, &id, journals.as_str(), &content)
+            .await
+            .with_context(|| format!("graft day page {id} under {}", journals.as_str()))?;
+        env.create_block(
+            &format!("{id}-entry"),
+            &id,
+            &format!("{JOURNAL_ENTRY_MARKER}{i:03}"),
+        )
+        .await
+        .with_context(|| format!("graft the entry row of day page {id}"))?;
+        days.push((id, content));
+    }
+    Ok(days)
+}
+
+/// `block.create` with the `Page` tag — the only shape
+/// [`TestEnvironment::create_block`] cannot express, and the one the journals
+/// feed's day-page predicate selects on.
+async fn create_page_block(
+    env: &TestEnvironment,
+    id: &str,
+    parent_id: &str,
+    content: &str,
+) -> Result<()> {
+    let mut params: holon_api::StorageEntity = std::collections::HashMap::new();
+    params.insert("id".into(), Value::String(EntityUri::block(id).to_string()));
+    params.insert("parent_id".into(), Value::String(parent_id.to_string()));
+    params.insert("content".into(), Value::String(content.to_string()));
+    params.insert("content_type".into(), ContentType::Text.into());
+    params.insert(
+        "tags".into(),
+        Value::Array(vec![Value::String(PAGE_TAG.to_string())]),
+    );
+    env.test_ctx().execute_op("block", "create", params).await
 }
 
 /// Content of the row [`graft_undo_blur_pair`] edits. Two words, so an appended

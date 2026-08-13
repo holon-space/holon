@@ -2393,6 +2393,19 @@ pub trait RefToggle {
     fn is_expanded(&self, id: &EntityUri) -> bool;
 }
 
+/// Reference-side journals-feed membership, in the feed's own render order.
+///
+/// Scopes `inv-journal-feed-viewport-lazy` to the pages the feed draws: an
+/// embedded page reached any other way keeps the plain collapsed-lazy rule,
+/// whose authority is [`RefToggle::is_expanded`] alone.
+#[holon_macros::capmap_adapter]
+pub trait RefJournalFeed {
+    /// Day pages the journals feed draws, newest first. Empty when the feed is
+    /// not the rendered Main root — the feed draws only while `block:journals`
+    /// IS that root, so every other topology has no feed pages at all.
+    fn feed_day_pages(&self) -> Vec<EntityUri>;
+}
+
 /// Reference-side toggle-widget mutations (`ExpandToggle` / `ToggleCollapse` /
 /// `ToggleDrawer`). Each flip is single-sourced here so the generic transitions
 /// and the concrete `LayoutRef` adapters share one implementation.

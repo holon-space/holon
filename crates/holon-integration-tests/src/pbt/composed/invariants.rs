@@ -44,6 +44,7 @@ pub mod frontend_engine;
 pub mod frontend_no_error_widgets;
 pub mod frontend_root_not_error;
 pub mod inline_row_mount_present;
+pub mod journal_feed_viewport_lazy;
 pub mod journal_one_per_day;
 pub mod live_block_shell_present;
 pub mod live_children_match_ref;
