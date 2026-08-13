@@ -2,9 +2,9 @@
 //!
 //! @pbt kind ref
 //! @pbt covers expand-collapse — `is_expanded` (embedded-page lazy-collapse
-//!   model) + task-state keyword for the ViewModel `value_fn_provider`
-//!   invariants. Untracked toggles default open (see `widget_state`,
-//! disclosed).
+//!   model, plus the journals feed's default-expanded day pages) + task-state
+//!   keyword for the ViewModel `value_fn_provider` invariants. Untracked
+//!   toggles default open (see `widget_state`, disclosed).
 
 use std::sync::Arc;
 
@@ -18,7 +18,7 @@ use super::parse_id;
 
 impl RefToggle for ReferenceState {
     fn is_expanded(&self, id: &EntityUri) -> bool {
-        self.ui.tab.expanded_toggles.contains(id)
+        self.ui.tab.expanded_toggles.contains(id) || self.renders_via_journal_feed(id)
     }
 }
 
@@ -144,6 +144,28 @@ impl holon_pbt_core::capabilities::RefTaskStateToggle for ReferenceState {
 }
 
 impl ReferenceState {
+    /// Whether `id` is drawn by the journals feed, which renders its day pages
+    /// OPEN with no user gesture — so `expanded_toggles` (a record of
+    /// gestures) can never carry it.
+    ///
+    /// Both of prod's authorities, in order: the main panel delegates to the
+    /// focus root's own render, so the feed draws only while `block:journals`
+    /// IS the rendered Main root; and its source `journal_feed` projects
+    /// `1 AS expand_default` over exactly the `Page`-tagged children of
+    /// `block:journals`, selecting the `embedded_page_expanded` profile
+    /// variant with `default_expanded: true`.
+    fn renders_via_journal_feed(&self, id: &EntityUri) -> bool {
+        let journals = EntityUri::block("journals");
+        self.domain
+            .block_state
+            .blocks
+            .get(id)
+            .is_some_and(|b| b.is_page() && b.parent_id == journals)
+            && self
+                .rendered_focus_root(holon_api::Region::Main)
+                .contains(&journals)
+    }
+
     /// The task-state ring the block's owning document declares — the same
     /// authority production's `cycle_task_state` reads, resolved over the ref's
     /// own block tree so a divergence convicts the SUT's ring.

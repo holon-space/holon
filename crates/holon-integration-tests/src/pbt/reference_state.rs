@@ -1203,12 +1203,24 @@ impl ReferenceState {
         // plus what the delegate draws — the same page-stopping walk the
         // backend synthesizes for a root that authors no query of its own.
         if let QuerySource::FocusRootOnly { region } = &query.source {
+            // Journals delegates to its `journal_feed` (the Page-tagged day
+            // pages), not a descendant walk from journals: a non-page child of
+            // journals is absent from the feed and renders nothing.
+            let mut delegated_roots = focus_roots.clone();
+            if delegated_roots
+                .get(region)
+                .is_some_and(|r| r.contains(&EntityUri::block("journals")))
+            {
+                delegated_roots.insert(region.clone(), self.journal_feed_day_pages());
+            }
             let delegated = TestQuery::layout(QuerySource::FocusRootDescendants {
                 region: region.clone(),
                 max_depth: crate::pbt::query::MAIN_PANEL_MAX_DEPTH,
                 stop_at_pages: true,
             });
-            ids.extend(delegated.rendered_block_ids(&self.domain.block_state.blocks, &focus_roots));
+            ids.extend(
+                delegated.rendered_block_ids(&self.domain.block_state.blocks, &delegated_roots),
+            );
         }
         ids
     }
@@ -1419,12 +1431,42 @@ impl ReferenceState {
         block_id: &EntityUri,
         focus_roots: &std::collections::BTreeSet<EntityUri>,
     ) -> bool {
+        let journals = EntityUri::block("journals");
+        // Journals renders through its `journal_feed` — the Page-tagged day
+        // pages — not a descendant walk from journals itself. A non-page child
+        // of journals is absent from the feed and renders nothing, so root the
+        // page-stopping walk at the day pages instead of journals.
+        if focus_roots.contains(&journals) {
+            if block_id == &journals {
+                return true;
+            }
+            let day_pages = self.journal_feed_day_pages();
+            return crate::pbt::query::descendant_within_stopping_at_pages(
+                &self.domain.block_state.blocks,
+                block_id,
+                &day_pages,
+                crate::pbt::query::MAIN_PANEL_MAX_DEPTH,
+            );
+        }
         crate::pbt::query::descendant_within_stopping_at_pages(
             &self.domain.block_state.blocks,
             block_id,
             focus_roots,
             crate::pbt::query::MAIN_PANEL_MAX_DEPTH,
         )
+    }
+
+    /// The Page-tagged children of `block:journals` — the exact predicate
+    /// `journal_feed` selects (mirrors [`QuerySource::JournalFeed`]).
+    fn journal_feed_day_pages(&self) -> std::collections::BTreeSet<EntityUri> {
+        let journals = EntityUri::block("journals");
+        self.domain
+            .block_state
+            .blocks
+            .values()
+            .filter(|b| b.is_page() && b.parent_id == journals)
+            .map(|b| b.id.clone())
+            .collect()
     }
 
     /// Whether a click on `uri` in `region` is predicted to dispatch

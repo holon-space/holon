@@ -2657,8 +2657,26 @@ entities:
                 dump(c, &p, out);
             }
         }
+        // PERMANENT is the claim, so poll for a clean tree rather than judging
+        // one post-boot frame: a `live_block` still resolving its first query is
+        // a legal transient, and under suite-level CPU contention that frame can
+        // outlive the boot. Fail only if placeholders SURVIVE the budget.
         let mut out = Vec::new();
-        dump(&snap, "", &mut out);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut snap = snap;
+        loop {
+            out.clear();
+            dump(&snap, "", &mut out);
+            if out.is_empty() || std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(SETTLE).await;
+            snap = bundle
+                .caps
+                .expect::<dyn SutRenderer>()
+                .widget_tree_snapshot_fresh()
+                .await;
+        }
         assert!(
             out.is_empty(),
             "booted widget tree holds permanent loading/unknown placeholders — every \
@@ -3665,10 +3683,11 @@ entities:
     /// The container is deliberately a PLAIN page, not `block:journals`: the
     /// journals page authors its own feed render, which expands every day
     /// entry by contract, so it cannot witness the collapsed-lazy default.
-    /// Journals-topology embedding is covered instead by
-    /// [`journal_feed_via_main_panel_focus_shows_feed`], which asserts the
-    /// opposite (expanded, newest-first, divider-separated) contract under
-    /// the real `block:journals` page.
+    /// The journals half of the contract is the sibling
+    /// [`setup_embedded_page_sut_journals`] /
+    /// [`embedded_page_under_journals_feed_renders_expanded`], which runs the
+    /// SAME invariant over the `block:journals` topology — keep both, or the
+    /// invariant only ever sees one of the two authored defaults.
     async fn setup_embedded_page_sut() -> (
         Arc<HeadlessFrontendComponent>,
         CapMap,
@@ -3858,6 +3877,309 @@ entities:
         eprintln!(
             "[embedded_page_expand_toggle_drives_expanded] Phase B GREEN: expanded toggle \
              accepted, descendants permitted."
+        );
+    }
+
+    /// The journals-topology twin of [`setup_embedded_page_sut`]: boots a
+    /// `block:journals` shell holding one non-seed day Page (`day-0714`) with a
+    /// child note, and focuses Main on `block:journals` — the topology the
+    /// keystone's boot draw produces (prod focuses Main on `block:journals` on
+    /// a fresh DB, and `journals_auto_create` mints a day page under it).
+    ///
+    /// `structural-page.org` is booted alongside so [`structural_ref`] — the
+    /// base of both oracles — stays an honest model of the SUT's block tree.
+    /// Returns `(comp, caps, journals, day_page, child)`.
+    async fn setup_embedded_page_sut_journals() -> (
+        Arc<HeadlessFrontendComponent>,
+        CapMap,
+        EntityUri,
+        EntityUri,
+        EntityUri,
+    ) {
+        use holon_pbt_core::capabilities::CapRegion;
+        use holon_pbt_core::capabilities::SutFocusWrite;
+
+        const STRUCTURAL_PAGE_ORG: &str = "#+ID: structural-page\n";
+        const JOURNALS_ORG: &str = concat!(
+            "#+ID: journals\n",
+            "* 2026-07-14 :Page:\n",
+            ":PROPERTIES:\n:ID: day-0714\n:END:\n",
+            "Log for the 14th.\n",
+            "** morning note\n",
+            ":PROPERTIES:\n:ID: day-0714-child\n:END:\n",
+            "This child is loaded with the day.\n",
+        );
+
+        let comp = Arc::new(
+            HeadlessFrontendComponent::new(
+                &[
+                    ("structural-page.org", STRUCTURAL_PAGE_ORG),
+                    ("Journals.org", JOURNALS_ORG),
+                ],
+                Duration::from_millis(600),
+            )
+            .await,
+        );
+        let mut caps = CapMap::new();
+        comp.clone().register_non_gesture(&mut caps);
+        comp.clone()
+            .register_gesture_writes(&mut caps, comp.driver());
+        caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
+        tokio::time::sleep(SETTLE).await;
+
+        let journals = holon_api::EntityUri::block("journals");
+        let day_page = holon_api::EntityUri::block("day-0714");
+        let child = holon_api::EntityUri::block("day-0714-child");
+
+        comp.apply_navigate_focus(CapRegion::Main, &journals).await;
+        tokio::time::sleep(SETTLE).await;
+
+        (comp, caps, journals, day_page, child)
+    }
+
+    /// The ref-model oracle matching [`setup_embedded_page_sut_journals`]:
+    /// models the day page as a non-seed `Page` child of the seeded
+    /// `block:journals` with its note under it, and focuses Main on journals.
+    fn embedded_page_journals_ref(
+        journals: &EntityUri,
+        day_page: &EntityUri,
+        child: &EntityUri,
+    ) -> ReferenceState {
+        use holon_pbt_core::capabilities::RefNavHistoryMut;
+
+        let mut oracle = structural_ref();
+        let mut day_block = Block::new_text(day_page.clone(), journals.clone(), "2026-07-14");
+        day_block.set_page(true);
+        oracle
+            .domain
+            .block_state
+            .blocks
+            .insert(day_page.clone(), day_block);
+        oracle
+            .domain
+            .block_state
+            .block_documents
+            .insert(day_page.clone(), day_page.clone());
+        let child_block = Block::new_text(child.clone(), day_page.clone(), "morning note");
+        oracle
+            .domain
+            .block_state
+            .blocks
+            .insert(child.clone(), child_block);
+        oracle
+            .domain
+            .block_state
+            .block_documents
+            .insert(child.clone(), day_page.clone());
+        oracle.nav_focus(holon_api::Region::Main, journals);
+        oracle
+    }
+
+    /// **The journals feed's day pages are DEFAULT-EXPANDED, and the oracle
+    /// must model that.**
+    ///
+    /// The `structural-page` sibling rung above witnesses the global default
+    /// (a plain embedded page renders COLLAPSED). This rung witnesses the
+    /// other authored contract, which the keystone's own boot topology hits on
+    /// every draw: when Main is focused on `block:journals`, the panel
+    /// delegates to that page's own render, whose source is
+    /// `SELECT * FROM journal_feed`. `journal_feed` projects `1 AS
+    /// expand_default` (`journal_feed_matview.sql:37`) over every `Page`-tagged
+    /// child of `block:journals` (`journal_day_pages_matview.sql`), which
+    /// selects the `embedded_page_expanded` profile variant with
+    /// `default_expanded: true` (`block_profile.yaml`) — so the day page's
+    /// `expand_toggle` renders OPEN with no user interaction.
+    ///
+    /// `RefToggle::is_expanded` used to read only `expanded_toggles` — the set
+    /// of pages a user gesture opened — and so called every feed day page
+    /// collapsed. That is what made the composed keystone RED
+    /// (`lane-logs/fix/RED-journals-rung.log`): `inv-embedded-page-collapsed-
+    /// lazy` reported the auto-created `Journals/2026-01-15` page "collapsed in
+    /// the ref model but the widget tree toggle reports expanded=true".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embedded_page_under_journals_feed_renders_expanded() {
+        use holon_pbt_core::composition::CapInvariant;
+
+        use crate::pbt::composed::invariants::embedded_page_collapsed_lazy;
+
+        let (_comp, caps, journals, day_page, child) = setup_embedded_page_sut_journals().await;
+
+        let registry: Vec<Box<dyn CapInvariant>> = vec![embedded_page_collapsed_lazy::wire()];
+
+        let resolved = {
+            let oracle = embedded_page_journals_ref(&journals, &day_page, &child);
+            let resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
+            drop_ref_off_thread(oracle);
+            resolved
+        };
+        let report = run_with_seeded_ref(&registry, &caps, resolved).await;
+        let ran: Vec<_> = report.ran_ids().into_iter().collect();
+        assert!(
+            ran.iter()
+                .any(|id| *id == "inv-embedded-page-collapsed-lazy"),
+            "inv-embedded-page-collapsed-lazy must select + run on the journals topology — a \
+             SKIP here means the fixture stopped producing a non-seed page under the main focus \
+             root, and the rung is vacuous (ran: {ran:?})"
+        );
+        let failures = report.failures();
+        assert!(
+            failures.is_empty(),
+            "the journals feed's day pages are DEFAULT-EXPANDED by contract (journal_feed \
+             projects expand_default=1 → embedded_page_expanded → default_expanded: true), so \
+             the oracle must call them expanded too. Failures: {failures:?}"
+        );
+        eprintln!(
+            "[embedded_page_under_journals_feed_renders_expanded] GREEN: feed day page expanded \
+             in BOTH the SUT widget tree and the ref model."
+        );
+    }
+
+    /// Journals-topology twin of [`setup_embedded_page_sut_journals`] that adds
+    /// a NON-page text child (`stray-note`) directly under `block:journals` —
+    /// the block the `journal_feed` matview must omit (its predicate is
+    /// `tag = 'Page' AND parent_id = 'block:journals'`, so a plain text child
+    /// of journals never surfaces in the feed).
+    async fn setup_journals_stray_sut() -> (
+        Arc<HeadlessFrontendComponent>,
+        CapMap,
+        EntityUri,
+        EntityUri,
+        EntityUri,
+        EntityUri,
+    ) {
+        use holon_pbt_core::capabilities::CapRegion;
+        use holon_pbt_core::capabilities::SutFocusWrite;
+
+        const STRUCTURAL_PAGE_ORG: &str = "#+ID: structural-page\n";
+        const JOURNALS_ORG: &str = concat!(
+            "#+ID: journals\n",
+            "* 2026-07-14 :Page:\n",
+            ":PROPERTIES:\n:ID: day-0714\n:END:\n",
+            "Log for the 14th.\n",
+            "** morning note\n",
+            ":PROPERTIES:\n:ID: day-0714-child\n:END:\n",
+            "This child is loaded with the day.\n",
+            "* stray note\n",
+            ":PROPERTIES:\n:ID: stray-note\n:END:\n",
+            "A non-page note directly under journals.\n",
+        );
+
+        let comp = Arc::new(
+            HeadlessFrontendComponent::new(
+                &[
+                    ("structural-page.org", STRUCTURAL_PAGE_ORG),
+                    ("Journals.org", JOURNALS_ORG),
+                ],
+                Duration::from_millis(600),
+            )
+            .await,
+        );
+        let mut caps = CapMap::new();
+        comp.clone().register_non_gesture(&mut caps);
+        comp.clone()
+            .register_gesture_writes(&mut caps, comp.driver());
+        caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
+        tokio::time::sleep(SETTLE).await;
+
+        let journals = holon_api::EntityUri::block("journals");
+        let day_page = holon_api::EntityUri::block("day-0714");
+        let child = holon_api::EntityUri::block("day-0714-child");
+        let stray = holon_api::EntityUri::block("stray-note");
+
+        comp.apply_navigate_focus(CapRegion::Main, &journals).await;
+        tokio::time::sleep(SETTLE).await;
+
+        (comp, caps, journals, day_page, child, stray)
+    }
+
+    /// Oracle matching [`setup_journals_stray_sut`]: the day page + note from
+    /// [`embedded_page_journals_ref`], plus a non-page text child of journals.
+    fn journals_stray_ref(
+        journals: &EntityUri,
+        day_page: &EntityUri,
+        child: &EntityUri,
+        stray: &EntityUri,
+    ) -> ReferenceState {
+        let mut oracle = embedded_page_journals_ref(journals, day_page, child);
+        oracle.domain.block_state.blocks.insert(
+            stray.clone(),
+            Block::new_text(
+                stray.clone(),
+                journals.clone(),
+                "A non-page note under journals",
+            ),
+        );
+        oracle
+            .domain
+            .block_state
+            .block_documents
+            .insert(stray.clone(), journals.clone());
+        oracle
+    }
+
+    /// **The journals feed omits non-page children of `block:journals`, and the
+    /// rendered-set oracle must agree.**
+    ///
+    /// The sibling rung above pins the default-expanded half of the same
+    /// contract. This rung pins the SELECT half: `journal_feed` (chained on
+    /// `journal_day_pages`) selects `tag = 'Page' AND parent_id =
+    /// 'block:journals'`, so a NON-page child of journals renders nothing in
+    /// the Main panel. `main_panel_renders_within` used to model the panel as a
+    /// descendant walk from journals — which includes non-page children — so
+    /// `inv-main-panel-rows-match-focus` demanded a row prod is right to omit.
+    /// That is the composed keystone red this rung makes a unit: `block:gen-1`
+    /// (a plain text child of journals created by `CreateBlockUnderFocus`)
+    /// renders nothing, but the oracle counted it as required.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn journals_feed_omits_non_page_child_from_main_panel() {
+        use holon_pbt_core::composition::CapInvariant;
+
+        use crate::pbt::composed::invariants::main_panel_rows_match_focus;
+
+        let (_comp, caps, journals, day_page, child, stray) = setup_journals_stray_sut().await;
+
+        let registry: Vec<Box<dyn CapInvariant>> = vec![main_panel_rows_match_focus::wire()];
+
+        let resolved = {
+            let oracle = journals_stray_ref(&journals, &day_page, &child, &stray);
+            // The oracle's own visibility predicate is the contract under test:
+            // the day page and its note render, the stray does not.
+            assert!(
+                oracle.main_panel_renders(&day_page),
+                "the Page day entry must render in the journals Main panel"
+            );
+            assert!(
+                oracle.main_panel_renders(&child),
+                "the note under the day entry must render (lazily) in the panel"
+            );
+            assert!(
+                !oracle.main_panel_renders(&stray),
+                "a non-page child of journals is absent from journal_feed and must render nothing"
+            );
+            let resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
+            drop_ref_off_thread(oracle);
+            resolved
+        };
+
+        let report = run_with_seeded_ref(&registry, &caps, resolved).await;
+        let ran: Vec<_> = report.ran_ids().into_iter().collect();
+        assert!(
+            ran.iter()
+                .any(|id| *id == "inv-main-panel-rows-match-focus"),
+            "inv-main-panel-rows-match-focus must select + run on the journals topology — a SKIP \
+             here means the stray did not reach the SUT block tree and the rung is vacuous (ran: \
+             {ran:?})"
+        );
+        let failures = report.failures();
+        assert!(
+            failures.is_empty(),
+            "journal_feed omits non-page children of journals by contract (journal_day_pages \
+             predicate = tag='Page' AND parent_id='block:journals'), so the oracle must not \
+             demand a row for them. Failures: {failures:?}"
+        );
+        eprintln!(
+            "[journals_feed_omits_non_page_child_from_main_panel] GREEN: non-page child of \
+             journals excluded from the Main-panel required set."
         );
     }
 
@@ -4339,22 +4661,33 @@ entities:
         );
         tokio::time::sleep(SETTLE).await;
 
-        let root = comp.widget_tree_snapshot().await;
-
-        // Locate the left-sidebar subtree (scheme-agnostic match on the seeded
-        // layout block id).
-        let sidebar = root
-            .walk()
-            .find(|n| {
-                n.entity_id
-                    .as_deref()
-                    .is_some_and(|e| e.contains("default-left-sidebar"))
-            })
-            .unwrap_or(&root);
-
-        // The rendered page rows carry the page block id as entity_id, in
-        // pre-order (render) order.
-        let order: Vec<String> = sidebar.walk().filter_map(|n| n.entity_id.clone()).collect();
+        // The claim is the ORDER of the two rows, so poll until both have
+        // populated: the sidebar's live_query lands asynchronously and under
+        // suite-level CPU contention a single post-settle snapshot can race it,
+        // which reads as "no rows" rather than as a wrong order.
+        let mut order: Vec<String> = Vec::new();
+        for _ in 0..40 {
+            let root = comp.widget_tree_snapshot_fresh().await;
+            // Locate the left-sidebar subtree (scheme-agnostic match on the
+            // seeded layout block id).
+            let sidebar = root
+                .walk()
+                .find(|n| {
+                    n.entity_id
+                        .as_deref()
+                        .is_some_and(|e| e.contains("default-left-sidebar"))
+                })
+                .unwrap_or(&root);
+            // The rendered page rows carry the page block id as entity_id, in
+            // pre-order (render) order.
+            order = sidebar.walk().filter_map(|n| n.entity_id.clone()).collect();
+            if order.iter().any(|e| e.contains("ssort-apple"))
+                && order.iter().any(|e| e.contains("ssort-zebra"))
+            {
+                break;
+            }
+            tokio::time::sleep(SETTLE).await;
+        }
         let pos = |needle: &str| order.iter().position(|e| e.contains(needle));
         let apple = pos("ssort-apple");
         let zebra = pos("ssort-zebra");

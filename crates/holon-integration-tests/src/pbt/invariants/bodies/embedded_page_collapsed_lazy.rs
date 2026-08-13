@@ -9,11 +9,16 @@
 //!
 //! Embedded page-blocks (non-seed pages that are strict descendants of the Main
 //! region's current focus root) must render with an `expand_toggle` widget node
-//! targeting them. When collapsed (default / ref not in `expanded_toggles`):
-//! `expanded=="false"` AND no ref-known strict descendant of the page may
-//! appear in the main-panel widget tree (children are lazy-loaded on expand).
-//! When expanded (ref in `expanded_toggles`): `expanded=="true"` OR descendants
-//! MAY appear (settle-tolerant — the lazy live_query fires asynchronously).
+//! targeting them. When the ref reports collapsed: `expanded=="false"` AND no
+//! ref-known strict descendant of the page may appear in the main-panel widget
+//! tree (children are lazy-loaded on expand). When the ref reports expanded:
+//! `expanded=="true"` OR descendants MAY appear (settle-tolerant — the lazy
+//! live_query fires asynchronously).
+//!
+//! `RefToggle::is_expanded` is the authority for which of the two applies, and
+//! it models BOTH ways a page can be open: a user gesture recorded in
+//! `expanded_toggles`, and the journals feed's authored `default_expanded`
+//! (see `ref_caps::toggle::renders_via_journal_feed`).
 //!
 //! Skip semantics: returns Skip when the widget tree / main-panel is not ready
 //! (same gating as `inv-main-panel-rows-match-focus`) or when the ref contains

@@ -96,6 +96,14 @@ pub enum QuerySource {
     /// own render via `live_block()`, so its own query selects one row per
     /// open root.
     FocusRootOnly { region: String },
+    /// The journals page's OWN feed source (`SELECT * FROM journal_feed`),
+    /// reached when the main panel delegates to a focused `block:journals`.
+    /// The `journal_feed` matview chains on `journal_day_pages`, whose whole
+    /// predicate is `block_tags.tag = 'Page' AND parent_id = 'block:journals'`
+    /// — so the feed lists the day pages and NOTHING else under journals (not
+    /// its source blocks, not plain text children). The root id is hardcoded
+    /// in the matview DDL, so it is not a parameter here either.
+    JournalFeed,
     /// The production seeded left-sidebar watch from
     /// `assets/default/index.org`: every page block except the
     /// `__default__` seed page. SQL-only — `SELECT b.* FROM block b JOIN
@@ -162,7 +170,9 @@ impl QuerySource {
                 }
             }
             QueryLanguage::HolonSql => {
-                if q.contains("focus_roots") {
+                if q.contains("journal_feed") {
+                    QuerySource::JournalFeed
+                } else if q.contains("focus_roots") {
                     // Canonical prod keys (`Region::as_str()`): a focus SQL
                     // filters `navigation_history.region`, whose values are
                     // exactly what `focus_pin` writes. Default to `Main` when no
@@ -365,6 +375,9 @@ impl TestQuery {
             QuerySource::FocusRootOnly { .. } => {
                 unreachable!("FocusRootOnly is SQL-only (seeded main-panel query)")
             }
+            QuerySource::JournalFeed => {
+                unreachable!("JournalFeed is SQL-only (the journals page's own source)")
+            }
             QuerySource::PageBlocks => {
                 unreachable!("PageBlocks is SQL-only (seeded sidebar watch)")
             }
@@ -422,7 +435,8 @@ impl TestQuery {
             }
             QuerySource::DescendantsOfAny { .. }
             | QuerySource::FocusRootDescendants { .. }
-            | QuerySource::FocusRootOnly { .. } => {
+            | QuerySource::FocusRootOnly { .. }
+            | QuerySource::JournalFeed => {
                 // These transitive/navigation-aware forms have no flat-SQL
                 // surface in the PBT; only PRQL/GQL emit them. `to_sql` is the
                 // watched-query path (always AllBlocks/DirectChildren).
@@ -497,6 +511,9 @@ impl TestQuery {
             ),
             QuerySource::FocusRootOnly { .. } => {
                 unreachable!("FocusRootOnly is SQL-only (seeded main-panel query)")
+            }
+            QuerySource::JournalFeed => {
+                unreachable!("JournalFeed is SQL-only (the journals page's own source)")
             }
             QuerySource::PageBlocks => {
                 unreachable!("PageBlocks is SQL-only (seeded sidebar watch)")
@@ -587,6 +604,9 @@ impl TestQuery {
                  navigation_cursor nc ON nc.region = fr.region AND nc.history_id = fr.history_id \
                  WHERE fr.region = '{region}'"
             ),
+            (QuerySource::JournalFeed, _) => {
+                "SELECT * FROM journal_feed ORDER BY content DESC".to_string()
+            }
             (QuerySource::PageBlocks, _) => {
                 unreachable!("PageBlocks is a watched query, not a layout query")
             }
@@ -683,6 +703,14 @@ impl TestQuery {
                 .into_iter()
                 .filter(|id| blocks.contains_key(id))
                 .collect(),
+            QuerySource::JournalFeed => {
+                let journals = EntityUri::block("journals");
+                blocks
+                    .values()
+                    .filter(|b| b.is_page() && b.parent_id == journals)
+                    .map(|b| b.id.clone())
+                    .collect()
+            }
             QuerySource::PageBlocks => {
                 let default_page = EntityUri::block("__default__");
                 blocks

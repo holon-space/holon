@@ -2378,7 +2378,9 @@ pub trait RefWatchesMut {
 }
 
 /// Reference-side expand-toggle read surface (`ExpandToggle`'s generator +
-/// precondition). Backing: `ui.tab.expanded_toggles`.
+/// precondition). Answers what the SUT would RENDER, so an implementation owes
+/// both the gestures it recorded (`ui.tab.expanded_toggles`) and any authored
+/// `default_expanded` its render context supplies.
 ///
 /// `#[capmap_adapter]` hosts the read side on `CapMap` (sync, owned return) so
 /// composed-slice invariants can gate on it via `Needs`, exactly like sibling
