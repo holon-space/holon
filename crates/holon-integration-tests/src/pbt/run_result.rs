@@ -225,11 +225,24 @@ impl RunResultGuard {
         if self.disabled {
             return;
         }
-        let _ = std::fs::create_dir_all(&self.dir);
-        let path = self.dir.join(format!("{}.result.json", self.result.run_id));
-        if let Ok(json) = serde_json::to_string_pretty(&self.result) {
-            let _ = std::fs::write(path, json);
+        if let Err(e) = self.write_record() {
+            // Drop also runs while unwinding, where a panic aborts the
+            // process; stderr plus an ERROR event is the loudest this spot can
+            // be.
+            eprintln!("[run-result] MISSING RUN RECORD: {e:#}");
+            tracing::error!("run-result: {e:#}");
         }
+    }
+
+    fn write_record(&self) -> anyhow::Result<()> {
+        use anyhow::Context as _;
+
+        std::fs::create_dir_all(&self.dir)
+            .with_context(|| format!("create result dir {}", self.dir.display()))?;
+        let path = self.dir.join(format!("{}.result.json", self.result.run_id));
+        let json = serde_json::to_string_pretty(&self.result)
+            .with_context(|| format!("serialize run record {}", self.result.run_id))?;
+        std::fs::write(&path, json).with_context(|| format!("write {}", path.display()))
     }
 }
 
@@ -272,5 +285,59 @@ mod tests {
         let json = std::fs::read_to_string(&path).expect("result file exists");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
         assert_eq!(parsed["verdict"], "red");
+    }
+
+    /// An unusable output directory must name the directory AND keep the io
+    /// error, so a run whose record is missing says why.
+    #[test]
+    fn an_unwritable_dir_yields_an_enriched_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let blocker = tmp.path().join("blocker");
+        std::fs::write(&blocker, b"not a directory").expect("blocker file");
+        let dir = blocker.join("runs");
+
+        let mut guard = RunResultGuard::with_dir("unit", 1, dir.clone(), false);
+        // Keep the drop path from repeating the same failure on stderr.
+        guard.finalized = true;
+        let err = guard
+            .write_record()
+            .expect_err("a file in the directory path must fail the write");
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains(&dir.display().to_string()), "{msg}");
+        assert!(
+            err.chain().count() >= 2,
+            "the io error must survive as the source: {msg}"
+        );
+    }
+
+    /// A record the drop path cannot write must be disclosed, not swallowed:
+    /// the run is red-by-default and a missing file with no message reads as
+    /// "the harness never ran".
+    #[cfg(feature = "otel-testing")]
+    #[test]
+    fn a_failed_drop_write_discloses_the_error() {
+        use crate::test_tracing::SpanCollector;
+        use crate::test_tracing::begin_test_scope;
+
+        // The capture layer must be installed before the guard drops, else the
+        // ERROR event reaches no subscriber.
+        let collector = SpanCollector::global();
+        begin_test_scope();
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let blocker = tmp.path().join("blocker");
+        std::fs::write(&blocker, b"not a directory").expect("blocker file");
+        let dir = blocker.join("runs");
+
+        drop(RunResultGuard::with_dir("unit", 1, dir.clone(), false));
+
+        let problems = collector.captured_problems();
+        assert!(
+            problems.iter().any(
+                |p| p.message.contains("run-result") && p.message.contains("create result dir")
+            ),
+            "the drop path must disclose the failed write: {problems:?}"
+        );
     }
 }
