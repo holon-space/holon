@@ -1,0 +1,58 @@
+name: Build observability site (reusable)
+
+# Produces the static `/obs/` site (report + run data pulled from the
+# `observability` release) as an artifact. Consumed by BOTH deploy workflows:
+#   - pages.yml  (obs-only deploy, fast path)
+#   - web.yml    (full app + /obs/ deploy)
+#
+# GitHub release assets are NOT browser-fetchable (the blob host sends no
+# Access-Control-Allow-Origin header), so the data is downloaded server-side
+# here and co-located with the report; the report then reads `runs.json`
+# same-origin.
+
+on:
+  workflow_call:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write # upload-artifact
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Download run data from the observability release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p obs/runs
+          if gh release view observability >/dev/null 2>&1; then
+            # Cumulative index the report fetches (clobber = in-place replace).
+            gh release download observability --pattern 'runs.json' \
+              --dir obs --clobber
+            # Canonical YAMLs, exposed under /obs/runs/ for custom analysis.
+            gh release download observability --pattern '*.yaml' \
+              --dir obs/runs --clobber || true
+          else
+            # No runs published yet — ship an empty index so the report renders
+            # its "no runs yet" state instead of erroring.
+            printf '%s\n' '{"schema":1,"updated_at":"","count":0,"runs":[]}' \
+              > obs/runs.json
+          fi
+
+      - name: Copy the static report
+        run: |
+          cp observability/report/index.html \
+             observability/report/app.js \
+             observability/report/app.css \
+             observability/report/config.js \
+             obs/
+
+      - name: Upload obs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-site
+          path: obs
+          retention-days: 1
