@@ -22,6 +22,29 @@ impl RefToggle for ReferenceState {
     }
 }
 
+impl holon_pbt_core::capabilities::RefJournalFeed for ReferenceState {
+    fn feed_day_pages(&self) -> Vec<EntityUri> {
+        let journals = EntityUri::block("journals");
+        if !self
+            .rendered_focus_root(holon_api::Region::Main)
+            .contains(&journals)
+        {
+            return Vec::new();
+        }
+        let mut days: Vec<&holon_api::block::Block> = self
+            .domain
+            .block_state
+            .blocks
+            .values()
+            .filter(|b| b.is_page() && b.parent_id == journals)
+            .collect();
+        // The feed's render sorts `-content` and day-page content is an ISO
+        // date, so descending content IS newest-first.
+        days.sort_by(|a, b| b.content.cmp(&a.content));
+        days.into_iter().map(|b| b.id.clone()).collect()
+    }
+}
+
 impl RefToggleMut for ReferenceState {
     fn set_expanded(&mut self, id: &EntityUri, expanded: bool) {
         if expanded {

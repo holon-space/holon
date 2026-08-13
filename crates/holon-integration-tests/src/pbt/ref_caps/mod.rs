@@ -163,6 +163,10 @@ impl holon_pbt_core::composition::CapProvider for ReferenceState {
         // keystone). Harmless to existing slices: selection ANDs SUT∧ref cap sets,
         // and only the frontend slice supplying `SutRenderer` selects it.
         caps.insert(self.clone() as Arc<dyn RefToggle>);
+        // `RefJournalFeed` scopes `inv-journal-feed-viewport-lazy` to the feed's
+        // own day pages. Harmless to existing slices: only a slice supplying
+        // windowed `SutLayout` geometry selects that invariant.
+        caps.insert(self.clone() as Arc<dyn holon_pbt_core::capabilities::RefJournalFeed>);
         // `RefAdvice` carries the advice-weave expectation (ADR 0021/0022) the
         // `advice rows woven` keystone invariant reads. Harmless to existing
         // slices: selection ANDs SUT∧ref cap sets, and only a slice supplying the

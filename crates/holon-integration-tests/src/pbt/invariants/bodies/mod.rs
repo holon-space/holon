@@ -35,6 +35,7 @@ pub mod companion_has_no_child_page_headings;
 pub mod display_placement_canonical_inert;
 pub mod embedded_page_collapsed_lazy;
 pub mod every_page_has_its_own_file;
+pub mod journal_feed_viewport_lazy;
 pub mod no_errors;
 pub mod no_orphan_blocks;
 pub mod no_page_under_non_page;

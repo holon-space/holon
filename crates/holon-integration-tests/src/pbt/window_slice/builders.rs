@@ -317,6 +317,54 @@ pub fn window_ref_caps_seeded() -> CapMap {
     reference_state_ref_caps(Resolved::identity(ref_state).map(Arc::new))
 }
 
+/// Reference `CapMap` for the journals-feed viewport rung: an oracle whose Main
+/// focus sits on `block:journals` and whose blocks are the SAME day pages
+/// [`graft_journal_days`](super::seed::graft_journal_days) grafted into the
+/// window, in the same order. `days` is that call's return value.
+///
+/// Three things must all hold before `inv-journal-feed-viewport-lazy` can reach
+/// a verdict, and this builder is what supplies them:
+/// `RefJournalFeed::feed_day_pages` reads the day pages off the ref's own
+/// blocks and returns them only while `block:journals` is the RENDERED Main
+/// focus root, and the invariant resolves the main panel through
+/// `RefLayout::main_panel_block_id`, which is `Some` only while the ref knows
+/// `block:default-main-panel`.
+pub fn window_ref_caps_journal_feed(days: &[(String, String)]) -> CapMap {
+    use holon_api::Block;
+    use holon_api::EntityUri;
+    use holon_api::Region;
+    use holon_orgmode::models::OrgBlockExt;
+    use holon_pbt_core::capabilities::RefNavHistoryMut;
+
+    let mut ref_state = fresh_reference_state(holon_pbt_core::Wiring::full());
+
+    let main_panel = EntityUri::block("default-main-panel");
+    ref_state.domain.block_state.blocks.insert(
+        main_panel.clone(),
+        Block::new_text(main_panel, EntityUri::no_parent(), "Main Panel"),
+    );
+
+    let journals = EntityUri::block(super::seed::JOURNALS_ID);
+    let mut journals_block = Block::new_text(journals.clone(), EntityUri::no_parent(), "Journals");
+    journals_block.set_page(true);
+    ref_state
+        .domain
+        .block_state
+        .blocks
+        .insert(journals.clone(), journals_block);
+
+    for (seq, (id, content)) in days.iter().enumerate() {
+        let uri = EntityUri::block(id);
+        let mut day = Block::new_text(uri.clone(), journals.clone(), content);
+        day.set_page(true);
+        day.set_sequence(seq as i64);
+        ref_state.domain.block_state.blocks.insert(uri, day);
+    }
+
+    ref_state.nav_focus(Region::Main, &journals);
+    reference_state_ref_caps(Resolved::identity(ref_state).map(Arc::new))
+}
+
 /// Like [`window_ref_caps_seeded`] but with a planted **content** divergence on
 /// `c1` ([`Plant::Content`] ⇒ the ref says `c1-WRONG`). Paired with an
 /// unplanted grafted SUT tree, `inv-displayed-text` must **fail** on `c1` — the

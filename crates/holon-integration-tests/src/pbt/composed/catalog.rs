@@ -170,6 +170,10 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // children lazy-loaded. Needs SutRenderer + RefBlockTree/RefLayout/
         // RefViewSelection/RefFocus/RefToggle.
         invariants::embedded_page_collapsed_lazy::wire(),
+        // Journals-feed day pages must be expanded exactly while they are in the
+        // rendered window. Needs the windowed SutLayout geometry, so only the
+        // window slice selects it.
+        invariants::journal_feed_viewport_lazy::wire(),
         // Auto-derived by `capability_pair! { pub trait ViewSelection … }` in
         // holon-pbt-core (the `#[compare] fn current_view` method).
         holon_pbt_core::capabilities::inv_pair_view_selection_current_view(),
