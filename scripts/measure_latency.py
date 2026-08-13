@@ -29,6 +29,22 @@ the `holon_oracles` latency-slo oracle judges — separately per action, against
 per-action ceilings from a checked-in file. Every action named in the ceilings
 file MUST produce at least `--min-samples` samples, so a run that silently
 stopped measuring fails instead of passing vacuously.
+
+`--max-contention-ms` is a VALIDITY PRECONDITION, not a rung. A machine busy
+enough moves wall-clock latency far more than any code change does: measured
+over 12 runs of the same corpus on unmodified code, `total.p50.SplitBlock`
+tracks the mean boot `matview_ddl` duration with Spearman +0.94 across a 19x
+span of that covariate, and at the top of the range even `NavigateFocus` — flat
+everywhere else — breached its ceiling. Judging such a run answers a question
+about the host, not the tree, so it exits 3 (INVALID) with no rung scored,
+which is distinct from exit 1 (a rung is genuinely over its ceiling). It is OFF
+unless asked for: the threshold is machine-local, so a caller on a different
+host must pick its own or leave it at 0.
+
+The covariate is production boot DDL, so a change that adds matviews or slows
+DDL raises it too, and such a change turns the gate INVALID rather than red.
+Exit 3 is non-zero everywhere, so that direction fails safe — but it does mean
+an INVALID run is a reason to look at the tree, not only at the host.
 """
 import re
 import sys
@@ -90,6 +106,17 @@ def num(fields, key):
         return float(fields[key])
     except (KeyError, ValueError):
         return None
+
+
+# Boot DDL against a contended SQLite/Turso layer is the cheapest available
+# proxy for how much the host was fighting this run.
+CONTENTION_STAGE = "matview_ddl"
+
+
+def contention_ms(misc_by_stage):
+    """Mean `matview_ddl` duration, or None when the run emitted none."""
+    vals = misc_by_stage.get(CONTENTION_STAGE)
+    return sum(vals) / len(vals) if vals else None
 
 
 def read_ceilings(path):
@@ -185,6 +212,13 @@ def main():
     if "--min-samples" in args:
         i = args.index("--min-samples")
         min_samples = int(args[i + 1])
+        del args[i:i + 2]
+    # Opt-in: any threshold is calibrated on one machine, so callers name their
+    # own rather than inheriting another host's number.
+    max_contention = 0.0
+    if "--max-contention-ms" in args:
+        i = args.index("--max-contention-ms")
+        max_contention = float(args[i + 1])
         del args[i:i + 2]
     if len(args) != 1:
         print(__doc__)
@@ -347,6 +381,22 @@ def main():
         print(f"\nDOMINATOR: projection accounts for {proj_sum:.0f}ms across "
               f"{len(proj_ms)} passes vs {tot_sum:.0f}ms of end-to-end action wall "
               f"({100*proj_sum/tot_sum:.0f}% of total action time).")
+
+    if max_contention > 0:
+        c = contention_ms(misc_by_stage)
+        if c is None:
+            print(f"\nRUN INVALID: no stage={CONTENTION_STAGE} events, so the "
+                  f"contention covariate is unmeasurable and no rung can be judged. "
+                  f"Pass --max-contention-ms 0 to score anyway.", file=sys.stderr)
+            sys.exit(3)
+        if c > max_contention:
+            print(f"\nRUN INVALID: {CONTENTION_STAGE} mean {c:.1f}ms exceeds the "
+                  f"{max_contention:.1f}ms limit — the host was too busy for this "
+                  f"run's latency to mean anything. No rung scored; re-run on a "
+                  f"quiet machine.", file=sys.stderr)
+            sys.exit(3)
+        print(f"\ncontention: {CONTENTION_STAGE} mean {c:.1f}ms "
+              f"(limit {max_contention:.1f}ms) — run admitted")
 
     if ratchet is not None:
         by_stage = {"e2e": e2e_by_action, "total": total_by_action}
