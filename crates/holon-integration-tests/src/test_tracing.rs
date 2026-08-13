@@ -1411,11 +1411,25 @@ pub fn write_folded_stacks(spans: &[SpanData], path: &std::path::Path) {
     }
 }
 
-/// Generate a folded stacks file for spans from the heaviest transition
-/// in the current collector. Call after the test run completes.
+/// File name for one folded-stacks write:
+/// `{seq}-{pid}-{transition_key}.folded`.
+///
+/// A transition key repeats many times per run and test binaries may share one
+/// output directory, so the write counter and the pid are what keep each write
+/// its own file; `seq` also orders the files by when they were written.
+fn folded_file_name(transition_key: &str) -> String {
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{seq:04}-{}-{transition_key}.folded", std::process::id())
+}
+
+/// Generate a folded stacks file for the spans currently in the collector.
+/// Call after a transition completes.
 ///
 /// Only writes if `HOLON_PERF_FLAMEGRAPH` env var is set (to a directory path).
-/// File is named `{transition_key}.folded`.
 pub fn maybe_write_flamegraph(collector: &SpanCollector, transition_key: &str) {
     let dir = match std::env::var("HOLON_PERF_FLAMEGRAPH") {
         Ok(d) if !d.is_empty() => std::path::PathBuf::from(d),
@@ -1449,13 +1463,38 @@ pub fn maybe_write_flamegraph(collector: &SpanCollector, transition_key: &str) {
         })
         .collect();
 
-    let path = dir.join(format!("{transition_key}.folded"));
+    let path = dir.join(folded_file_name(transition_key));
     write_folded_stacks(&perf_spans, &path);
     eprintln!(
         "[flamegraph] Written {} spans to {}",
         perf_spans.len(),
         path.display()
     );
+}
+
+#[cfg(test)]
+mod folded_stacks_tests {
+    use super::*;
+
+    /// Two writes for the SAME transition key must leave two files: a run
+    /// visits a key many times and the later visits must not erase the earlier.
+    #[test]
+    fn repeated_writes_for_one_key_keep_both_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // SAFETY: nextest runs every test in its own process, so nothing else
+        // reads the environment while this write happens.
+        unsafe { std::env::set_var("HOLON_PERF_FLAMEGRAPH", dir.path()) };
+
+        let collector = SpanCollector::global();
+        begin_test_scope();
+        tracing::info_span!("query").in_scope(|| {});
+
+        maybe_write_flamegraph(collector, "ApplyTransition");
+        maybe_write_flamegraph(collector, "ApplyTransition");
+
+        let written = std::fs::read_dir(dir.path()).expect("read dir").count();
+        assert_eq!(written, 2, "both writes must survive");
+    }
 }
 
 #[cfg(test)]
