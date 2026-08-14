@@ -439,6 +439,75 @@ impl BatchTraceContext {
         }
     }
 
+    /// The distinct, USABLE OTel contexts among `origins`.
+    ///
+    /// An entry that does not resolve to a valid span context names no span
+    /// anything can reach, so it is not an attribution. Callers decide whether
+    /// to detach a span from its ambient parent by asking THIS, never by
+    /// asking whether `origins` is non-empty — the two differ, and the gap is
+    /// exactly how a span ends up detached with nothing attached to it.
+    ///
+    /// flutter_rust_bridge:ignore
+    pub fn resolve_all(origins: &[Self]) -> Vec<opentelemetry::trace::SpanContext> {
+        let mut distinct: Vec<opentelemetry::trace::SpanContext> = Vec::new();
+        for ctx in origins.iter().filter_map(Self::to_span_context) {
+            if ctx.is_valid() && !distinct.contains(&ctx) {
+                distinct.push(ctx);
+            }
+        }
+        distinct
+    }
+
+    /// Tie `span` to the interactions that caused the work it measures:
+    /// parent to the first context, OTel links to the rest (ruling D3.a).
+    ///
+    /// For a stage that consolidates — a CDC batch, a coalesced write-back
+    /// pass — several interactions share one span; keeping only the first is
+    /// how the largest class of work became unattributable to begin with.
+    /// `subject` names the consolidating stage in the disclosure a failed
+    /// re-parent emits.
+    ///
+    /// `contexts` comes from [`resolve_all`](Self::resolve_all) and must be
+    /// non-empty; `span` must have been opened `parent: None`, since
+    /// attribution REPLACES the ambient parent.
+    ///
+    /// flutter_rust_bridge:ignore
+    pub fn attribute(
+        span: &tracing::Span,
+        contexts: &[opentelemetry::trace::SpanContext],
+        subject: &str,
+    ) {
+        use opentelemetry::trace::TraceContextExt;
+        use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+        debug_assert!(
+            !contexts.is_empty(),
+            "{subject}: attributing to nothing leaves a detached root — the caller must keep \
+             its ambient parent instead"
+        );
+        let mut contexts = contexts.iter();
+        if let Some(parent) = contexts.next() {
+            let trace_id = parent.trace_id();
+            // No error channel here — the caller is a detached actor and the
+            // work still happens; a failed re-parent costs traceability, not
+            // correctness, so it is disclosed rather than propagated.
+            if let Err(e) = span
+                .set_parent(opentelemetry::Context::new().with_remote_span_context(parent.clone()))
+            {
+                tracing::warn!(
+                    subject,
+                    %trace_id,
+                    error = %e,
+                    "could not re-parent to the writing trace — this span stays a \
+                     disconnected trace root"
+                );
+            }
+        }
+        for link in contexts {
+            span.add_link(link.clone());
+        }
+    }
+
     /// Create a BatchTraceContext from OpenTelemetry span context
     ///
     /// flutter_rust_bridge:ignore

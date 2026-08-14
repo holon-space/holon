@@ -557,16 +557,25 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                 }
 
                 let (rerender_tx, rerender_rx) =
-                    tokio::sync::mpsc::unbounded_channel::<OrgRerender>();
+                    tokio::sync::mpsc::unbounded_channel::<RerenderMsg>();
                 if let Some(feed) = block_feed.clone() {
                     let tx = rerender_tx.clone();
                     let disclosure = share_disclosure.clone();
                     let disclosed: Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
                         Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
-                    let authority = Arc::new(crate::home_authority::BlockHomeAuthority::new(
-                        feed_block_reader.clone(),
-                        home_ordering,
-                    ));
+                    // The authority's reads happen while the combinator is
+                    // still folding, so they PEEK: the write-back pass below
+                    // is the one that takes the provenance.
+                    let feed_for_provenance = feed.clone();
+                    let authority = Arc::new(
+                        crate::home_authority::BlockHomeAuthority::new(
+                            feed_block_reader.clone(),
+                            home_ordering,
+                        )
+                        .with_provenance(Arc::new(move |id: &str| {
+                            feed_for_provenance.provenance_for(id)
+                        })),
+                    );
                     let degraded = writeback_disclosure.clone();
                     let feed_for_stream = feed.clone();
 
@@ -614,6 +623,17 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                             std::collections::HashSet::new();
 
                         while let Some(item) = supervised.recv().await {
+                            // The interaction that wrote this block, taken from
+                            // the feed rather than from the ambient span: this
+                            // task is spawned at container construction, so its
+                            // span is the process boot.
+                            let origins = match &item {
+                                Supervised::Diff(HomedDiff::Upsert { key, .. })
+                                | Supervised::Diff(HomedDiff::Remove { key, .. }) => {
+                                    feed.take_provenance(key)
+                                }
+                                Supervised::Reset => Vec::new(),
+                            };
                             // `None` routes nothing at all — see
                             // [`route_homed_block`].
                             let msg: Option<OrgRerender> = match item {
@@ -622,7 +642,7 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                                     // Drop the dead incarnation's derived state,
                                     // then cover the incoming seed with one bulk
                                     // render off the authority.
-                                    let _ = tx.send(OrgRerender::Reset);
+                                    let _ = tx.send(RerenderMsg::unattributed(OrgRerender::Reset));
                                     Some(OrgRerender::All)
                                 }
                                 Supervised::Diff(HomedDiff::Upsert {
@@ -680,8 +700,8 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                                     }
                                 }
                             };
-                            if let Some(msg) = msg {
-                                let _ = tx.send(msg);
+                            if let Some(rerender) = msg {
+                                let _ = tx.send(RerenderMsg { rerender, origins });
                             }
                         }
                     });
@@ -740,6 +760,56 @@ pub enum OrgRerender {
     /// converge via a debounced re-render of every tracked file, read from the
     /// authority rather than the holder.
     All,
+}
+
+/// A re-render request plus the interactions that caused it.
+///
+/// The block feed publishes its diffs through a `futures-signals` map, which
+/// carries values only, and both ends of this channel are tasks spawned at
+/// container construction — so the writing context has to travel ON the
+/// message or not at all.
+pub struct RerenderMsg {
+    pub rerender: OrgRerender,
+    /// The writing contexts of the CDC batch behind this request: the parent
+    /// first, consolidated co-writers after (ruling D3.a). Empty for boot
+    /// seeding and for stream restarts, which no interaction asked for.
+    pub origins: Vec<holon_api::BatchTraceContext>,
+}
+
+impl RerenderMsg {
+    /// A request no interaction can claim.
+    pub fn unattributed(rerender: OrgRerender) -> Self {
+        Self {
+            rerender,
+            origins: Vec::new(),
+        }
+    }
+}
+
+/// The projection span for one coalesced write-back pass, tied to the
+/// interactions the pass serves.
+///
+/// Attribution has to REPLACE the ambient parent — this runs on the controller
+/// task, spawned at container construction, so that parent is the process boot,
+/// the orphan this exists to remove. With nothing to bill (boot seeding, a
+/// stream restart) the pass keeps that ambient parent instead: a boring parent
+/// beats no parent.
+pub fn block_feed_pass_span(drained: &[RerenderMsg]) -> tracing::Span {
+    let origins: Vec<holon_api::BatchTraceContext> = drained
+        .iter()
+        .flat_map(|m| m.origins.iter().cloned())
+        .collect();
+    let contexts = holon_api::BatchTraceContext::resolve_all(&origins);
+    if contexts.is_empty() {
+        return tracing::info_span!("org.on_block_feed", messages = drained.len());
+    }
+    let span = tracing::info_span!(
+        parent: None,
+        "org.on_block_feed",
+        messages = drained.len(),
+    );
+    holon_api::BatchTraceContext::attribute(&span, &contexts, "org.on_block_feed");
+    span
 }
 
 /// Parse the combinator's document-relative previous-sibling id.
@@ -901,7 +971,7 @@ pub async fn run_file_sync_controller(
     mut controller: FileSyncController,
     root_directory: PathBuf,
     idle_signal_weak: std::sync::Weak<OrgSyncIdleSignal>,
-    mut rerender_rx: tokio::sync::mpsc::UnboundedReceiver<OrgRerender>,
+    mut rerender_rx: tokio::sync::mpsc::UnboundedReceiver<RerenderMsg>,
     ready_sender: std::sync::Arc<std::sync::Mutex<Option<FileWatcherReadySender>>>,
     fs: Arc<dyn holon_filesystem::FileSystem>,
     change_source: Arc<dyn holon_filesystem::FileChangeSource>,
@@ -1231,29 +1301,28 @@ pub async fn run_file_sync_controller(
                     }
                 }
             }
-            Some(rerender) = rerender_rx.recv() => {
-                let span = tracing::info_span!("org.on_block_feed");
+            Some(first) = rerender_rx.recv() => {
+                // Drain everything the channel already holds before doing any
+                // I/O. The feed fans one message per member, so a single page
+                // toggle or re-home arrives as a burst that is fully queued by
+                // the time the first message wakes this loop. Rendering per
+                // message made that burst cost one render per member; draining
+                // first lets `on_block_changed_coalesced` spend one render per
+                // DOCUMENT. Pure latency win — nothing waits for a timer, and a
+                // lone message drains to a batch of one.
+                let mut drained = vec![first];
+                while let Ok(next) = rerender_rx.try_recv() {
+                    drained.push(next);
+                }
+                let span = block_feed_pass_span(&drained);
                 async {
-                    // Drain everything the channel already holds before doing any
-                    // I/O. The feed fans one message per member, so a single page
-                    // toggle or re-home arrives as a burst that is fully queued by
-                    // the time the first message wakes this loop. Rendering per
-                    // message made that burst cost one render per member; draining
-                    // first lets `on_block_changed_coalesced` spend one render per
-                    // DOCUMENT. Pure latency win — nothing waits for a timer, and a
-                    // lone message drains to a batch of one.
-                    let mut drained = vec![rerender];
-                    while let Ok(next) = rerender_rx.try_recv() {
-                        drained.push(next);
-                    }
-
                     // Order is preserved and `Reset` is a barrier: it means the
                     // stream that produced everything before it is gone, so any
                     // fold accumulated earlier in this batch must be discarded
                     // with the holder rather than rendered after the reset.
                     let mut pending_blocks: Vec<(EntityUri, BlockDelta)> = Vec::new();
                     for msg in drained {
-                        match msg {
+                        match msg.rerender {
                             OrgRerender::Block { doc, delta } => {
                                 pending_blocks.push((doc, *delta));
                             }

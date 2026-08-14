@@ -80,7 +80,24 @@ pub struct LiveData<T: Clone + Send + Sync + 'static> {
     /// stale relative to its underlying matview — exactly the
     /// `right_sidebar` `focus_roots` flake after `NavigateBack`.
     rowid_to_key: Mutex<HashMap<String, String>>,
+    /// Per-key trace contexts of the CDC batches that last touched a key, for
+    /// consumers that run on their own task and so cannot see the applying
+    /// span. The `futures-signals` map between them carries values only, so a
+    /// downstream projection (org write-back) has no other way to name the
+    /// interaction it serves.
+    ///
+    /// Written before the keys reach the signal map, so a consumer woken by
+    /// the signal always finds the provenance already there.
+    provenance: Mutex<HashMap<String, Vec<crate::streaming::BatchTraceContext>>>,
 }
+
+/// Keys retained in [`LiveData::provenance`] before the log is dropped whole.
+///
+/// Only mirrors whose rows carry `_change_origin` record anything, and the
+/// only consumer drains per key on every diff, so the steady state is a
+/// handful of entries; reaching the cap means the consumer is gone and the
+/// log would otherwise grow for the life of the process.
+const PROVENANCE_MAX_KEYS: usize = 4096;
 
 impl<T: Clone + Send + Sync + 'static> LiveData<T> {
     pub fn new(
@@ -113,6 +130,7 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
             seq_advanced: Arc::new(Notify::new()),
             items_changed: Arc::new(Notify::new()),
             rowid_to_key: Mutex::new(rowid_to_key),
+            provenance: Mutex::new(HashMap::new()),
         })
     }
 
@@ -266,12 +284,31 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
 
     /// Apply a batch of CDC changes incrementally.
     pub fn apply_changes(&self, changes: Vec<Change<StorageEntity>>) {
+        self.apply_changes_with_origins(changes, &[]);
+    }
+
+    /// Apply a batch and record `origins` as the provenance of every key the
+    /// batch upserts, for [`take_provenance`](Self::take_provenance).
+    ///
+    /// `origins` is the batch's writing contexts — the parent first, the
+    /// consolidated writers past it after (ruling D3.a). An empty slice
+    /// records nothing: a mirror whose projection drops `_change_origin`
+    /// has no provenance to offer and must not fabricate one.
+    pub fn apply_changes_with_origins(
+        &self,
+        changes: Vec<Change<StorageEntity>>,
+        origins: &[crate::streaming::BatchTraceContext],
+    ) {
         let applied_any = !changes.is_empty();
         let mut lock = self.items.lock_mut();
         let mut rowid_map = self
             .rowid_to_key
             .lock()
             .expect("rowid_to_key mutex poisoned");
+        // Held across the loop so every key's provenance is in place before
+        // the signal map publishes it — the consumer wakes on that publish.
+        let mut provenance = (!origins.is_empty())
+            .then(|| self.provenance.lock().expect("provenance mutex poisoned"));
         for change in changes {
             match change {
                 Change::Created { data, .. } | Change::Updated { data, .. } => {
@@ -309,6 +346,18 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                     if let Some(rowid) = extract_rowid(&data) {
                         rowid_map.insert(rowid, id.clone());
                     }
+                    if let Some(log) = provenance.as_deref_mut() {
+                        if log.len() >= PROVENANCE_MAX_KEYS && !log.contains_key(&id) {
+                            tracing::warn!(
+                                keys = log.len(),
+                                "LiveData: provenance log hit its cap — nothing is draining it, \
+                                 so write-back spans lose their link to the writing interaction \
+                                 until a consumer reconnects"
+                            );
+                            log.clear();
+                        }
+                        log.insert(id.clone(), origins.to_vec());
+                    }
                     lock.insert_cloned(id, Arc::new(parsed));
                 }
                 Change::Deleted { id, .. } => {
@@ -317,6 +366,10 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                     // `id_fn`'s composite key never matches that. Try direct
                     // removal first (the entity-id case), then fall back to
                     // the rowid → user-key map populated by Created/Updated.
+                    if let Some(log) = provenance.as_deref_mut() {
+                        let key = rowid_map.get(&id).cloned().unwrap_or_else(|| id.clone());
+                        log.insert(key, origins.to_vec());
+                    }
                     if lock.remove(&id).is_some() {
                         // Direct match — drop any rowid mapping that pointed
                         // at this user key so the map doesn't grow stale.
@@ -338,11 +391,40 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                 }
             }
         }
+        drop(provenance);
         drop(rowid_map);
         drop(lock);
         if applied_any {
             self.items_changed.notify_waiters();
         }
+    }
+
+    /// Read, without consuming, the trace contexts of the batch that last
+    /// touched `key`.
+    ///
+    /// For stages that run BEFORE the projection consuming the diff — the home
+    /// authority reads a block to place it, then the write-back pass renders
+    /// it. The pass is the one that takes.
+    pub fn provenance_for(&self, key: &str) -> Vec<crate::streaming::BatchTraceContext> {
+        self.provenance
+            .lock()
+            .expect("provenance mutex poisoned")
+            .get(key)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Take the trace contexts of the batch that last touched `key`, if the
+    /// mirror behind it carries `_change_origin`.
+    ///
+    /// Draining: a projection attributes each diff once, and a key that is
+    /// re-read without a new batch has no interaction left to name.
+    pub fn take_provenance(&self, key: &str) -> Vec<crate::streaming::BatchTraceContext> {
+        self.provenance
+            .lock()
+            .expect("provenance mutex poisoned")
+            .remove(key)
+            .unwrap_or_default()
     }
 
     /// Spawn a background task that listens to the CDC stream and applies
@@ -398,43 +480,24 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                     source = source_name,
                     seq,
                 );
-                if let Some(span_ctx) = batch
+                // The batch consolidates whatever landed in one commit window,
+                // so it routinely serves several writers. The same contexts go
+                // to the mirror, so a projection running on its own task can
+                // name them too.
+                let origins: Vec<crate::streaming::BatchTraceContext> = batch
                     .metadata
                     .trace_context
-                    .as_ref()
-                    .and_then(|ctx| ctx.to_span_context())
-                {
-                    use opentelemetry::trace::TraceContextExt;
-                    use tracing_opentelemetry::OpenTelemetrySpanExt;
-                    let trace_id = span_ctx.trace_id();
-                    // The actor has no error channel, so a failed re-parent is
-                    // disclosed rather than propagated: the batch still applies,
-                    // but its span stays a root and the write that caused it
-                    // becomes untraceable.
-                    if let Err(e) = apply_span.set_parent(
-                        opentelemetry::Context::new().with_remote_span_context(span_ctx),
-                    ) {
-                        tracing::warn!(
-                            source = source_name,
-                            seq,
-                            %trace_id,
-                            error = %e,
-                            "LiveData: could not re-parent apply span to the writing trace — this \
-                             batch stays a disconnected trace root"
-                        );
-                    }
-                }
-                // The batch consolidates whatever landed in one commit window,
-                // so the writers past the first get links rather than a parent
-                // they would have to share (ruling D3.a).
-                for ctx in batch
-                    .metadata
-                    .linked_contexts
                     .iter()
-                    .filter_map(|ctx| ctx.to_span_context())
-                {
-                    use tracing_opentelemetry::OpenTelemetrySpanExt;
-                    apply_span.add_link(ctx);
+                    .chain(batch.metadata.linked_contexts.iter())
+                    .cloned()
+                    .collect();
+                let contexts = crate::streaming::BatchTraceContext::resolve_all(&origins);
+                if !contexts.is_empty() {
+                    crate::streaming::BatchTraceContext::attribute(
+                        &apply_span,
+                        &contexts,
+                        "live_data.apply_batch",
+                    );
                 }
                 let _apply_guard = apply_span.enter();
                 let changes: Vec<Change<StorageEntity>> =
@@ -445,7 +508,7 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                 // correlator AFTER apply below.
                 let touched = crate::latency_e2e::touched_entities(source_name, &changes);
                 let t_rows = std::time::Instant::now();
-                live.apply_changes(changes);
+                live.apply_changes_with_origins(changes, &origins);
                 crate::latency_e2e::rows_delivered(
                     source_name,
                     touched.iter().map(|(id, obs)| (id.as_str(), *obs)),
