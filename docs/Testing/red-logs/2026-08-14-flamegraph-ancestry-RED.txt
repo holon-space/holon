@@ -1,0 +1,21 @@
+# RED — task #18 flamegraph ancestry, before the fix
+# cargo nextest run -p holon-integration-tests --lib --features holon-integration-tests/pbt -E 'test(folded_stacks)'
+
+ Nextest run ID 80e1a6c8-83f7-4e11-8e2a-5c1fba37904c with nextest profile: default
+    Starting 2 tests across 1 binary (369 tests skipped)
+       START [         ] (1/2) holon-integration-tests test_tracing::folded_stacks_tests::folded_stacks_keep_ancestors_that_are_not_perf_spans
+[flamegraph] Written 2 spans to /var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpW8A2z0/0000-86070-ApplyTransition.folded
+
+thread 'test_tracing::folded_stacks_tests::folded_stacks_keep_ancestors_that_are_not_perf_spans' (931596212) panicked at crates/holon-integration-tests/src/test_tracing.rs:1527:9:
+folded output must carry the full ancestry, got:
+query 1389
+frontend.render 2505
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+        FAIL [   0.162s] (1/2) holon-integration-tests test_tracing::folded_stacks_tests::folded_stacks_keep_ancestors_that_are_not_perf_spans
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.181s] 1/2 tests run: 0 passed, 1 failed, 369 skipped
+        FAIL [   0.162s] (1/2) holon-integration-tests test_tracing::folded_stacks_tests::folded_stacks_keep_ancestors_that_are_not_perf_spans
+warning: 1/2 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed
