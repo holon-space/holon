@@ -235,7 +235,7 @@ keystone-scale size='25000' cases='1' settle_ms='900000' per_doc='200' *FLAGS:
     echo "log: $log"
     HOLON_SOAK_SEED_BLOCKS={{size}} HOLON_SOAK_SETTLE_MS={{settle_ms}} \
         HOLON_SOAK_BLOCKS_PER_DOC={{per_doc}} HOLON_PBT_FORCE_FULL=1 \
-        RUST_LOG="holon_latency=debug" HOLON_OTEL_FILTER=off \
+        RUST_LOG="holon_latency=debug" \
         PROPTEST_CASES={{cases}} cargo test \
         -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
         -- --nocapture {{FLAGS}} 2>&1 | tee "$log"
