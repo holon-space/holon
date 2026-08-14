@@ -141,17 +141,15 @@ impl ChangeOrigin {
         let span_ctx = span_ref.span_context();
 
         if span_ctx.is_valid() {
-            // We have a valid OTel context - use the trace_id from it
-            // For operation_id, use the tracing span's own ID
-            let trace_id = format!("{:032x}", span_ctx.trace_id());
-
-            // Get the tracing span's ID for operation correlation
-            let operation_id = span
-                .id()
-                .map(|id| format!("{:016x}", id.into_u64()))
-                .unwrap_or_else(|| format!("{:016x}", span_ctx.span_id()));
-
-            return (Some(operation_id), Some(trace_id));
+            // Both halves come from the OTel context because both are consumed
+            // as one: `to_batch_trace_context` hands them to `set_parent` as a
+            // W3C parent. A `tracing` registry Id here would be a span id that
+            // exists in no trace — a parent edge that dangles while still
+            // looking connected.
+            return (
+                Some(format!("{:016x}", span_ctx.span_id())),
+                Some(format!("{:032x}", span_ctx.trace_id())),
+            );
         }
 
         (None, None)
@@ -383,6 +381,15 @@ pub struct BatchMetadata {
     pub relation_name: String,
     /// OpenTelemetry trace context for the batch (if available)
     pub trace_context: Option<BatchTraceContext>,
+    /// The remaining writers whose rows this batch consolidates, in first-seen
+    /// order after [`Self::trace_context`].
+    ///
+    /// One CDC event carries whatever landed in the same commit window, so it
+    /// routinely serves several interactions at once. Ruling D3.a: the reader
+    /// parents its apply to the first and LINKS the rest, rather than picking
+    /// one arbitrarily and leaving the others unattributable.
+    #[serde(default)]
+    pub linked_contexts: Vec<BatchTraceContext>,
     /// Sync token to update atomically with the data changes
     pub sync_token: Option<SyncTokenUpdate>,
     /// Monotonic per-process emission counter assigned at the CDC tap.

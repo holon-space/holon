@@ -84,6 +84,7 @@ fn data_batch(generation: u64) -> UiEvent {
             metadata: BatchMetadata {
                 relation_name: "rows".into(),
                 trace_context: None,
+                linked_contexts: Vec::new(),
                 sync_token: None,
                 seq: 0,
             },
