@@ -59,6 +59,11 @@ const REQUIRED_SPANS: &[&str] = &[
 /// interaction's root.
 const BACKGROUND_ROOTS: &[&str] = &["live_data.subscribe_actor", "live_data.stream_next"];
 
+/// The coalesced org write-back pass. Both ends of the channel feeding it are
+/// tasks spawned at container construction, so its only possible attribution is
+/// the context the block feed carried on the message.
+const ORG_WRITE_BACK_PASS: &str = "org.on_block_feed";
+
 fn trace_id(span: &SpanData) -> String {
     format!("{:032x}", span.span_context.trace_id())
 }
@@ -136,8 +141,27 @@ fn one_interaction_produces_one_connected_trace() {
         // The write-back trails the op return.
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
+            // Wait for the PROPERTY, not for a proxy: the controller also runs
+            // unattributed passes (boot seeding, the ingest poll), and stopping
+            // at the first `org.on_block_feed` to appear routinely stopped
+            // before the attributed one had run.
             let spans = collector.finished_spans();
-            if spans.iter().any(|s| s.name == "live_data.apply_batch") {
+            let attributed: Vec<String> = spans
+                .iter()
+                .filter(|s| s.name == "live_data.apply_batch")
+                .filter(|s| s.parent_span_id != SpanId::INVALID)
+                .filter(|s| {
+                    s.attributes
+                        .iter()
+                        .any(|kv| kv.key.as_str() == "source" && kv.value.as_str() == "block")
+                })
+                .map(|s| trace_id(s))
+                .collect();
+            if !attributed.is_empty()
+                && spans
+                    .iter()
+                    .any(|s| s.name == ORG_WRITE_BACK_PASS && attributed.contains(&trace_id(s)))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -273,11 +297,73 @@ fn one_interaction_produces_one_connected_trace() {
                 attrs.join(", ")
             );
         }
-        // No assertion that every apply carries a parent: some mirror sources
-        // apply batches whose rows never had a `_change_origin` to begin with,
-        // which fails here about three runs in four for reasons this file
-        // cannot fix. Tracked as task #27; asserting it would poison the three
-        // properties above, which are stable.
+        // No assertion that EVERY apply carries a parent: three of the four
+        // mirror sources watch projections whose SELECT list omits
+        // `_change_origin` (`focus_roots`, and the two live-entity reads), so
+        // their batches structurally cannot be attributed — measured, task #27.
+        // The `block` source can be, and is, asserted below.
+        let block_applies: Vec<&&SpanData> = applies
+            .iter()
+            .filter(|a| {
+                a.attributes
+                    .iter()
+                    .any(|kv| kv.key.as_str() == "source" && kv.value.as_str() == "block")
+            })
+            .collect();
+        assert!(
+            !block_applies.is_empty(),
+            "no `live_data.apply_batch` for the `block` source: the one mirror whose \
+             projection carries `_change_origin` never applied this write"
+        );
+        // Existence, not universality: `local_with_current_span` yields
+        // `(None, None)` when no OTel context is in scope, so the boot ingest's
+        // own rows carry an EMPTY origin and their batches are honestly
+        // unattributable. They keep arriving during this window. The claim is
+        // that the write this interaction issued is attributed.
+        let parented_applies: Vec<&&&SpanData> = block_applies
+            .iter()
+            .filter(|a| a.parent_span_id != SpanId::INVALID)
+            .collect();
+        assert!(
+            !parented_applies.is_empty(),
+            "every `block` mirror apply is an unparented root: this mirror's rows DO carry \
+             `_change_origin`, so a total absence of parents is a break in the stamp → CDC \
+             → re-parent chain, not the boot-ingest case"
+        );
+
+        // (d) THE WRITE-BACK PASS IS BILLABLE. `org.on_block_feed` runs on the
+        // file-sync controller task, spawned at container construction, and is
+        // fed over a channel by a second such task — so before the provenance
+        // the feed now carries, it could only be a child of the process boot.
+        // It joins the trace of the pass that WROTE the row (the same trace the
+        // mirror apply joins), not the interaction's: the Loro→SQL projection
+        // between them is a long-lived pass, and that gap is this file's
+        // standing caveat, not this assertion's business.
+        let write_backs: Vec<&SpanData> = spans
+            .iter()
+            .filter(|s| s.name == ORG_WRITE_BACK_PASS)
+            .collect();
+        assert!(
+            !write_backs.is_empty(),
+            "no `{ORG_WRITE_BACK_PASS}` span: this draw never reached the feed-driven org \
+             write-back, so the attribution below would be vacuous"
+        );
+        let apply_traces: Vec<String> = parented_applies.iter().map(|a| trace_id(a)).collect();
+        // Existence, not universality: the controller also runs passes no
+        // interaction asked for — boot seeding, the ingest poll — and those are
+        // roots of their own, because the task they run on is spawned at
+        // container construction and holds no span to inherit. The claim is
+        // that the pass serving THIS write is billed to it.
+        assert!(
+            write_backs
+                .iter()
+                .any(|pass| apply_traces.contains(&trace_id(pass))),
+            "no `{ORG_WRITE_BACK_PASS}` joined a trace the `block` mirror applied \
+             ({apply_traces:?}): the passes sit in {:?}, so the feed's provenance never \
+             reached the write-back and the org write this interaction caused is billable \
+             to nobody",
+            write_backs.iter().map(|p| trace_id(p)).collect::<Vec<_>>()
+        );
 
         // Reported, not asserted. The window around one dispatch also catches
         // work no interaction owns — a second `backend.execute_operation` from

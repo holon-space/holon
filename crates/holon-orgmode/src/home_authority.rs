@@ -22,6 +22,7 @@ use holon_filesystem::BlockReader;
 use holon_filesystem::BlockRowMemo;
 use holon_filesystem::MemoSeam;
 use holon_filesystem::nearest_page_ancestor;
+use tracing::Instrument;
 
 /// Everything one `home_by` fold burst has already asked the authority.
 ///
@@ -96,6 +97,32 @@ pub struct BlockHomeAuthority {
     /// Counts authoritative point reads, so a benchmark can attribute the
     /// O(subtree) fan-out cost of a cross-document reparent.
     locate_reads: Arc<AtomicU64>,
+    provenance: Option<ProvenanceLookup>,
+}
+
+/// Names the interactions that wrote a block, so this authority's reads can be
+/// billed to them. Supplied by the composition root off the block feed; a
+/// container without one (tests, the no-feed wiring) simply bills nothing.
+pub type ProvenanceLookup = Arc<dyn Fn(&str) -> Vec<holon_api::BatchTraceContext> + Send + Sync>;
+
+/// Open one authority-read span, billed to whoever wrote the block it reads.
+///
+/// Attribution has to REPLACE the ambient parent, which on the write-back
+/// resolver task is the process boot — hence `parent: None`. With nothing to
+/// bill, the span keeps its ambient parent instead: a missing parent is worse
+/// than a boring one.
+macro_rules! billed_span {
+    ($self:expr, $name:literal, $id:expr) => {{
+        let contexts =
+            holon_api::BatchTraceContext::resolve_all(&$self.origins_for($id));
+        if contexts.is_empty() {
+            tracing::info_span!($name)
+        } else {
+            let span = tracing::info_span!(parent: None, $name);
+            holon_api::BatchTraceContext::attribute(&span, &contexts, $name);
+            span
+        }
+    }};
 }
 
 impl BlockHomeAuthority {
@@ -104,7 +131,22 @@ impl BlockHomeAuthority {
             reader,
             ordering,
             locate_reads: Arc::new(AtomicU64::new(0)),
+            provenance: None,
         }
+    }
+
+    /// Bill this authority's reads to the interactions the feed recorded for
+    /// the blocks it is asked about.
+    pub fn with_provenance(mut self, lookup: ProvenanceLookup) -> Self {
+        self.provenance = Some(lookup);
+        self
+    }
+
+    fn origins_for(&self, ids: &[&str]) -> Vec<holon_api::BatchTraceContext> {
+        let Some(lookup) = self.provenance.as_ref() else {
+            return Vec::new();
+        };
+        ids.iter().flat_map(|id| lookup(id)).collect()
     }
 
     /// Number of authoritative point reads issued so far.
@@ -229,30 +271,36 @@ impl BlockHomeAuthority {
 impl HomeAuthority<DocHome> for BlockHomeAuthority {
     type Memo = HomeBurstMemo;
 
-    #[tracing::instrument(skip_all, name = "home.locate")]
     async fn locate(
         &self,
         id: &str,
         memo: &mut HomeBurstMemo,
     ) -> Result<Option<Placement<DocHome>>> {
-        let uri = EntityUri::parse(id)?;
-        let Some(block) = memo
-            .rows
-            .get(self.reader.as_ref(), &uri, Some(&self.locate_reads))
-            .await?
-        else {
-            return Ok(None);
-        };
-        // `no_parent` is the tree's root sentinel, expressed to the combinator
-        // as "no parent" so the root group is keyed uniformly with `None`.
-        let parent = if block.parent_id == EntityUri::no_parent() {
-            None
-        } else {
-            Some(block.parent_id.as_str().to_string())
-        };
-        // The walk below starts at the row just read, which the memo now holds.
-        let doc = self.resolve_doc(&uri, memo).await?;
-        Ok(Some(Placement { doc, parent }))
+        let span = billed_span!(self, "home.locate", &[id]);
+        async move {
+            let uri = EntityUri::parse(id)?;
+            let Some(block) = memo
+                .rows
+                .get(self.reader.as_ref(), &uri, Some(&self.locate_reads))
+                .await?
+            else {
+                return Ok(None);
+            };
+            // `no_parent` is the tree's root sentinel, expressed to the
+            // combinator as "no parent" so the root group is keyed uniformly
+            // with `None`.
+            let parent = if block.parent_id == EntityUri::no_parent() {
+                None
+            } else {
+                Some(block.parent_id.as_str().to_string())
+            };
+            // The walk below starts at the row just read, which the memo now
+            // holds.
+            let doc = self.resolve_doc(&uri, memo).await?;
+            Ok(Some(Placement { doc, parent }))
+        }
+        .instrument(span)
+        .await
     }
 
     #[tracing::instrument(skip_all, name = "home.children_of")]
@@ -269,23 +317,27 @@ impl HomeAuthority<DocHome> for BlockHomeAuthority {
         Ok(kids.into_iter().map(|k| k.as_str().to_string()).collect())
     }
 
-    #[tracing::instrument(skip_all, name = "home.prev_sibling")]
     async fn prev_sibling(&self, id: &str, memo: &mut HomeBurstMemo) -> Result<Option<String>> {
-        let uri = EntityUri::parse(id)?;
-        if let Some(hit) = memo.prev_sibling.get(&uri).cloned() {
-            if memo.dual_read() {
-                agree(
-                    "prev_sibling",
-                    &uri,
-                    &hit,
-                    &self.read_prev_sibling(&uri).await?,
-                )?;
+        let span = billed_span!(self, "home.prev_sibling", &[id]);
+        async move {
+            let uri = EntityUri::parse(id)?;
+            if let Some(hit) = memo.prev_sibling.get(&uri).cloned() {
+                if memo.dual_read() {
+                    agree(
+                        "prev_sibling",
+                        &uri,
+                        &hit,
+                        &self.read_prev_sibling(&uri).await?,
+                    )?;
+                }
+                return Ok(hit.map(|p| p.as_str().to_string()));
             }
-            return Ok(hit.map(|p| p.as_str().to_string()));
+            let prev = self.derive_prev_sibling(&uri, memo).await?;
+            memo.prev_sibling.insert(uri, prev.clone());
+            Ok(prev.map(|p| p.as_str().to_string()))
         }
-        let prev = self.derive_prev_sibling(&uri, memo).await?;
-        memo.prev_sibling.insert(uri, prev.clone());
-        Ok(prev.map(|p| p.as_str().to_string()))
+        .instrument(span)
+        .await
     }
 
     #[tracing::instrument(skip_all, name = "home.subtree_of")]
