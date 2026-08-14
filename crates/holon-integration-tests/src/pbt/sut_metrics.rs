@@ -389,6 +389,12 @@ impl MetricsSut {
             eprintln!("[inv-sql-budget ORIGIN] {key}:\n{origin}");
         }
 
-        SqlBudgetReport { enforce, errors }
+        SqlBudgetReport {
+            enforce,
+            errors,
+            observed_statements: metrics.sql_read_count
+                + metrics.sql_write_count
+                + metrics.sql_ddl_count,
+        }
     }
 }

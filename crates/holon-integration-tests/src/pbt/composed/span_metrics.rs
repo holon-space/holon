@@ -140,6 +140,7 @@ impl ComposedBudget for ComposedSpanMetrics {
             return SqlBudgetReport {
                 enforce: false,
                 errors: Vec::new(),
+                observed_statements: 0,
             };
         };
         let ref_state = self.frozen_ref.borrow();
@@ -153,9 +154,38 @@ impl ComposedBudget for ComposedSpanMetrics {
 /// Composed twin of [`InvSqlBudget`] (same id), dispatched over a `CapMap`:
 /// reads the budget decision from the [`ComposedBudget`] cap and applies the
 /// identical enforce/skip/ok decision. The budget is OFF by default
-/// (`HOLON_PERF_BUDGET`), so a clean run is `Ok`; unenforced violations are
-/// `Skipped`; only enforced violations `Fail`.
+/// (`HOLON_PERF_BUDGET`), so a clean run over a non-empty window is `Ok`;
+/// unenforced violations are `Skipped`; only enforced violations `Fail`. See
+/// [`budget_verdict`] for the empty-window case.
 pub struct InvComposedBudget;
+
+/// The verdict, extracted from the cap read so the vacuity rule is
+/// unit-testable without a `CapMap`.
+///
+/// An empty budget window (`observed_statements == 0`) reports `Skipped`, not
+/// `Ok`: the engagement ledger counts every non-`Skipped` verdict as "exercised
+/// with teeth", and a clean verdict over zero statements would claim SQL
+/// coverage the tick never had.
+fn budget_verdict(report: &SqlBudgetReport) -> InvariantResult {
+    match (report.enforce, report.errors.is_empty()) {
+        (true, false) => InvariantResult::Fail(format!(
+            "[inv-sql-budget] {} budget violation(s):\n  {}",
+            report.errors.len(),
+            report.errors.join("\n  "),
+        )),
+        (false, false) => InvariantResult::Skipped(format!(
+            "HOLON_PERF_BUDGET off — {} unenforced violation(s): {}",
+            report.errors.len(),
+            report.errors.join("; "),
+        )),
+        (_, true) if report.observed_statements == 0 => InvariantResult::Skipped(
+            "vacuous — the budget window observed 0 SQL statements (reads+writes+ddl); the \
+             wall/RSS ceilings still passed"
+                .to_string(),
+        ),
+        (_, true) => InvariantResult::Ok,
+    }
+}
 
 #[allow(async_fn_in_trait)]
 impl Invariant<CapMap, CapMap> for InvComposedBudget {
@@ -164,19 +194,66 @@ impl Invariant<CapMap, CapMap> for InvComposedBudget {
     }
 
     async fn check(&self, _: &CapMap, sut: &CapMap) -> InvariantResult {
-        let report = sut.budget_report();
-        match (report.enforce, report.errors.is_empty()) {
-            (true, false) => InvariantResult::Fail(format!(
-                "[inv-sql-budget] {} budget violation(s):\n  {}",
-                report.errors.len(),
-                report.errors.join("\n  "),
-            )),
-            (false, false) => InvariantResult::Skipped(format!(
-                "HOLON_PERF_BUDGET off — {} unenforced violation(s): {}",
-                report.errors.len(),
-                report.errors.join("; "),
-            )),
-            (_, true) => InvariantResult::Ok,
+        budget_verdict(&sut.budget_report())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn report(enforce: bool, errors: &[&str], observed_statements: usize) -> SqlBudgetReport {
+        SqlBudgetReport {
+            enforce,
+            errors: errors.iter().map(|e| (*e).to_string()).collect(),
+            observed_statements,
         }
+    }
+
+    #[test]
+    fn empty_window_is_skipped_not_ok() {
+        match budget_verdict(&report(false, &[], 0)) {
+            InvariantResult::Skipped(reason) => assert!(
+                reason.contains("0 SQL statements"),
+                "the skip reason must name the empty window; got: {reason}"
+            ),
+            other => panic!("a zero-statement window must not report engagement; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn window_with_sql_is_ok() {
+        assert!(matches!(
+            budget_verdict(&report(false, &[], 1)),
+            InvariantResult::Ok
+        ));
+    }
+
+    /// Arming the budget does not rescue an empty window: there is still no
+    /// SQL to compare against a ceiling.
+    #[test]
+    fn enforcement_does_not_rescue_an_empty_window() {
+        assert!(matches!(
+            budget_verdict(&report(true, &[], 0)),
+            InvariantResult::Skipped(_)
+        ));
+    }
+
+    #[test]
+    fn violations_outrank_the_vacuity_rule() {
+        assert!(matches!(
+            budget_verdict(&report(true, &["reads 9/2"], 0)),
+            InvariantResult::Fail(_)
+        ));
+    }
+
+    /// The pre-existing enforce/skip split for real violations is untouched by
+    /// the vacuity rule.
+    #[test]
+    fn unenforced_violations_stay_skipped() {
+        assert!(matches!(
+            budget_verdict(&report(false, &["reads 9/2"], 42)),
+            InvariantResult::Skipped(_)
+        ));
     }
 }

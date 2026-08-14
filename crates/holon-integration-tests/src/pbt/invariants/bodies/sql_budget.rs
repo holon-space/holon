@@ -54,5 +54,9 @@ mod otel {
         /// Budget Error violation messages (reads/writes/ddl/wall/rss over
         /// budget).
         pub errors: Vec<String>,
+        /// SQL statements (reads + writes + DDL) the budget window observed.
+        /// Zero means every SQL ceiling was satisfied by an empty window, so a
+        /// clean verdict proves nothing about SQL cost.
+        pub observed_statements: usize,
     }
 }

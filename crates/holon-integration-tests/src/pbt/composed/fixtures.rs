@@ -444,6 +444,10 @@ pub fn viewmodel_map(error_count: Option<usize>) -> CapMap {
 pub struct FixtureBudget {
     pub enforce: bool,
     pub errors: Vec<String>,
+    /// SQL statements the modelled window observed. A clean report over 0 of
+    /// them is `Skipped`, not `Ok`, so a fixture that means "clean and
+    /// exercised" must set this.
+    pub observed_statements: usize,
 }
 
 #[cfg(feature = "otel-testing")]
@@ -452,6 +456,7 @@ impl crate::pbt::composed::span_metrics::ComposedBudget for FixtureBudget {
         crate::pbt::invariants::bodies::sql_budget::SqlBudgetReport {
             enforce: self.enforce,
             errors: self.errors.clone(),
+            observed_statements: self.observed_statements,
         }
     }
 }

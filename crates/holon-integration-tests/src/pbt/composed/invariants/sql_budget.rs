@@ -6,8 +6,9 @@
 //! provider (the `wide_e2e` slice's `ComposedSpanMetrics` over the production
 //! full-headless CapMap) selects it; storage-only / pure slices deselect it
 //! (disclosed, not faked). The budget is OFF by default (`HOLON_PERF_BUDGET`),
-//! so a clean run is `Ok` / unenforced violations are `Skipped`; the catch test
-//! injects an enforced violation through the fixture.
+//! so a clean run over a non-empty window is `Ok` / unenforced violations and
+//! empty windows are `Skipped`; the catch test injects an enforced violation
+//! through the fixture.
 
 use holon_pbt_core::RunMode;
 use holon_pbt_core::composition::Attribution;
@@ -34,13 +35,18 @@ pub fn wire() -> Box<dyn CapInvariant> {
 
 #[cfg(test)]
 mod tests {
+    use holon_pbt_core::invariant::InvariantResult;
+
     use crate::pbt::composed::fixtures::*;
 
-    /// Positive: a budget surface reporting clean ⇒ selected (a
-    /// `ComposedBudget` is wired) and passing.
+    /// Positive: a budget surface reporting clean over a NON-empty window ⇒
+    /// selected (a `ComposedBudget` is wired) and engaged.
     #[tokio::test]
     async fn sql_budget_passes_when_clean() {
-        let sut = budget_map(FixtureBudget::default());
+        let sut = budget_map(FixtureBudget {
+            observed_statements: 3,
+            ..FixtureBudget::default()
+        });
         let report = run_selected(&composed_invariant_catalog(), &sut, &CapMap::new()).await;
 
         assert!(
@@ -48,10 +54,33 @@ mod tests {
             "wiring ComposedBudget must select inv-sql-budget; ran={:?}",
             report.ran_ids(),
         );
+        let verdict = report
+            .ran
+            .iter()
+            .find(|(id, _)| id.0 == "inv-sql-budget")
+            .map(|(_, r)| r);
         assert!(
-            report.failures().is_empty(),
-            "a clean budget must pass: {:?}",
-            report.failures(),
+            matches!(verdict, Some(InvariantResult::Ok)),
+            "a clean budget over 3 statements must be Ok, not a skip the engagement ledger \
+             would read as vacuous; got {verdict:?}",
+        );
+    }
+
+    /// The vacuity rule at the dispatched level: a clean report over an EMPTY
+    /// window must not reach the engagement ledger as a gate-passed verdict.
+    #[tokio::test]
+    async fn sql_budget_is_skipped_on_an_empty_window() {
+        let sut = budget_map(FixtureBudget::default());
+        let report = run_selected(&composed_invariant_catalog(), &sut, &CapMap::new()).await;
+
+        let verdict = report
+            .ran
+            .iter()
+            .find(|(id, _)| id.0 == "inv-sql-budget")
+            .map(|(_, r)| r);
+        assert!(
+            matches!(verdict, Some(InvariantResult::Skipped(_))),
+            "a window with 0 SQL statements must report Skipped; got {verdict:?}",
         );
     }
 
@@ -86,6 +115,7 @@ mod tests {
         let sut = budget_map(FixtureBudget {
             enforce: true,
             errors: vec!["reads 99/3 over budget".to_string()],
+            observed_statements: 99,
         });
         let report = run_selected(&composed_invariant_catalog(), &sut, &CapMap::new()).await;
 

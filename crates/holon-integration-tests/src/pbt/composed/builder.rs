@@ -565,11 +565,14 @@ async fn compose_sut_seeded_impl(
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
+            let seed_blocks = std::env::var("HOLON_SOAK_SEED_BLOCKS").unwrap_or_default();
             assert!(
                 frontend_sync_handle.is_some(),
-                "compose_sut full mode: LoroSyncControllerHandle never resolved within the boot \
-                 poll budget (>=2s, HOLON_SOAK_SETTLE_MS-scaled) of headless boot — peer deltas \
-                 would not project to Turso. See the A0 probe."
+                "compose_sut full mode: LoroSyncControllerHandle never resolved within the \
+                 {boot_poll_ms}ms boot poll budget of headless boot — peer deltas would not \
+                 project to Turso. The budget is HOLON_SOAK_SETTLE_MS and defaults to 2000ms \
+                 whatever the seed size; this boot ran with \
+                 HOLON_SOAK_SEED_BLOCKS={seed_blocks:?}. See the A0 probe."
             );
         }
         scaffold_ids = booted_scaffold_ids(&caps).await;
