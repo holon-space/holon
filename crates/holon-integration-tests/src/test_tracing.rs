@@ -1372,20 +1372,33 @@ pub fn current_rss_bytes() -> usize {
 ///
 /// Each line: `ancestor;parent;span_name duration_us`
 /// Open the output with `inferno-flamegraph` or `speedscope` for visualization.
-pub fn write_folded_stacks(spans: &[SpanData], path: &std::path::Path) {
+///
+/// `all_spans` is the whole window while `names` selects which spans get a
+/// line: ancestry walks `parent_span_id` through the spans that are not
+/// emitted, so a stack keeps its real path instead of ending at the first
+/// unselected ancestor.
+///
+/// Returns the number of folded lines written.
+pub fn write_folded_stacks(
+    all_spans: &[SpanData],
+    names: &[&str],
+    path: &std::path::Path,
+) -> usize {
     use std::io::Write;
 
     use opentelemetry::trace::SpanId;
 
-    // Index spans by their span_id for parent lookup
-    let by_id: HashMap<SpanId, &SpanData> = spans
+    let by_id: HashMap<SpanId, &SpanData> = all_spans
         .iter()
         .map(|s| (s.span_context.span_id(), s))
         .collect();
 
     let mut lines: Vec<String> = Vec::new();
 
-    for span in spans {
+    for span in all_spans
+        .iter()
+        .filter(|s| names.contains(&s.name.as_ref()))
+    {
         // Build the stack from leaf to root
         let mut stack = vec![span.name.as_ref().to_string()];
         let mut current = span;
@@ -1409,6 +1422,7 @@ pub fn write_folded_stacks(spans: &[SpanData], path: &std::path::Path) {
     for line in &lines {
         writeln!(file, "{line}").expect("failed to write flamegraph line");
     }
+    lines.len()
 }
 
 /// File name for one folded-stacks write:
@@ -1443,34 +1457,29 @@ pub fn maybe_write_flamegraph(collector: &SpanCollector, transition_key: &str) {
         return;
     }
 
-    // Write SQL + render + CDC spans for a complete performance picture
-    let perf_spans: Vec<_> = spans
-        .into_iter()
-        .filter(|s| {
-            matches!(
-                s.name.as_ref(),
-                "query"
-                    | "execute"
-                    | "execute_ddl"
-                    | "execute_ddl_with_deps"
-                    | "compile_to_sql"
-                    | "execute_query"
-                    | "query_and_watch"
-                    | "frontend.render"
-                    | "queryable_cache.ingest_batch"
-                    | "queryable_cache.cdc_emission"
-            )
-        })
-        .collect();
-
     let path = dir.join(folded_file_name(transition_key));
-    write_folded_stacks(&perf_spans, &path);
+    let written = write_folded_stacks(&spans, PERF_SPAN_NAMES, &path);
     eprintln!(
-        "[flamegraph] Written {} spans to {}",
-        perf_spans.len(),
+        "[flamegraph] Written {written} stacks to {}",
         path.display()
     );
 }
+
+/// SQL + render + CDC spans — the ones that get their own folded line, for a
+/// complete performance picture. Everything else in the window still carries
+/// ancestry for them.
+const PERF_SPAN_NAMES: &[&str] = &[
+    "query",
+    "execute",
+    "execute_ddl",
+    "execute_ddl_with_deps",
+    "compile_to_sql",
+    "execute_query",
+    "query_and_watch",
+    "frontend.render",
+    "queryable_cache.ingest_batch",
+    "queryable_cache.cdc_emission",
+];
 
 #[cfg(test)]
 mod folded_stacks_tests {
@@ -1494,6 +1503,42 @@ mod folded_stacks_tests {
 
         let written = std::fs::read_dir(dir.path()).expect("read dir").count();
         assert_eq!(written, 2, "both writes must survive");
+    }
+
+    /// A folded stack is only readable as a flamegraph if it carries the whole
+    /// path down to the leaf. Ancestors that are not themselves perf spans
+    /// (here `resolve_doc`) still have to appear, otherwise every `query` lands
+    /// on the root and the graph attributes nothing.
+    #[test]
+    fn folded_stacks_keep_ancestors_that_are_not_perf_spans() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // SAFETY: nextest runs every test in its own process, so nothing else
+        // reads the environment while this write happens.
+        unsafe { std::env::set_var("HOLON_PERF_FLAMEGRAPH", dir.path()) };
+
+        let collector = SpanCollector::global();
+        begin_test_scope();
+        tracing::info_span!("frontend.render").in_scope(|| {
+            tracing::info_span!("resolve_doc").in_scope(|| {
+                tracing::info_span!("query")
+                    .in_scope(|| std::thread::sleep(Duration::from_millis(1)));
+            });
+        });
+
+        maybe_write_flamegraph(collector, "ApplyTransition");
+
+        let file = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .next()
+            .expect("one folded file")
+            .expect("dir entry");
+        let folded = std::fs::read_to_string(file.path()).expect("read folded file");
+        assert!(
+            folded
+                .lines()
+                .any(|line| line.starts_with("frontend.render;resolve_doc;query ")),
+            "folded output must carry the full ancestry, got:\n{folded}"
+        );
     }
 }
 
