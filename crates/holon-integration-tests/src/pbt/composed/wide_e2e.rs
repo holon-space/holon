@@ -1723,7 +1723,6 @@ impl ComposedSlice for WideE2E {
     /// reported as a wedge, never degraded.
     async fn await_boundary(
         handle: &WideHandle,
-        caps: &CapMap,
         boundary: Boundary,
         window: BoundaryWindow,
         deadline: Duration,
@@ -1795,7 +1794,6 @@ impl ComposedSlice for WideE2E {
                     waited: started.elapsed(),
                 };
             }
-            let _ = caps;
             tokio::time::sleep(poll).await;
         }
     }

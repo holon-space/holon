@@ -4,8 +4,9 @@
 //! point between transitions, so it cannot generate a task-ordering bug: no two
 //! writes are ever in flight together. This module is the arming switch that
 //! lets a NAMED transition kind run through the fire-and-forget dispatch door
-//! (the door production GPUI uses) with a seeded pump instead of the immediate
-//! await, so intents of one transition overlap.
+//! (the door production GPUI uses) with a seeded SCHEDULE instead of the
+//! immediate await, so intents of one transition overlap and the gaps between
+//! them are decided by the seed.
 //!
 //! **Unset means unchanged.** [`plan_for`] returns `None` for every kind when
 //! `HOLON_PBT_SCHED_KINDS` is unset, and the harness's unmasked arm is the same
@@ -16,7 +17,7 @@
 //! |---|---|---|
 //! | `HOLON_PBT_SCHED_KINDS` | comma-separated `E2ETransition` variant names, or `all` | unset ⇒ EMPTY mask ⇒ behaviour identical |
 //! | `HOLON_PBT_SCHED_SEED` | `u64` scheduler seed | `0` |
-//! | `HOLON_PBT_SCHED_STEPS` | max pump steps per masked transition | `8` |
+//! | `HOLON_PBT_SCHED_SHAPE` | `burst` \| `mixed` \| `serial` | `mixed` |
 //!
 //! Read ONCE into a `OnceLock` at first use and never again, so the arming
 //! decision cannot race a concurrent test — the form `reseed_observer.rs`
@@ -25,22 +26,61 @@
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
+use crate::pbt::composed::boundary::Boundary;
+use crate::pbt::composed::boundary::Resume;
 use crate::pbt::transitions::E2ETransition;
 
-/// The default `HOLON_PBT_SCHED_STEPS`.
-const DEFAULT_MAX_STEPS: u32 = 8;
+/// Which gaps a shape puts between the dispatches of one transition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shape {
+    /// Every gap is `Immediate` — dispatch-all-then-settle. A case recorded
+    /// under this schedule replays as the schedule it was recorded under.
+    Burst,
+    /// Seeded draw across the whole space.
+    Mixed,
+    /// Every gap waits for one intent to settle — fully drained dispatches.
+    Serial,
+}
 
-/// How a masked transition is scheduled: the seeded pump budget and the seed
-/// that produced it. Attribution handle for a red — `(kind, seed)`.
+/// How a masked transition is scheduled: the seed, and the shape the gaps are
+/// drawn from. Attribution handle for a red — `(kind, seed)`.
+///
+/// The per-slot predicates are drawn LAZILY ([`InterleavePlan::resume_at`]):
+/// a transition's dispatch count is not known until it runs (a `TypeChars`
+/// draw dispatches one intent per character), and a lazy draw needs no length.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InterleavePlan {
-    /// Pump steps to run after the detached apply, before the settle.
-    pub steps: u32,
-    /// The per-(kind, tick) seed the steps were drawn from. Reported in the
-    /// armed run's log line to attribute the budget — NOT to replay the red:
-    /// the pump yields race real thread scheduling, so the same seed widens
-    /// the interleaving without reproducing it (see docs/Testing/PBT.md).
+    /// The per-(kind, tick) seed every slot's predicate is drawn from.
+    /// Reported in the armed run's log line. It reproduces the SCHEDULE
+    /// byte-for-byte; it does not reproduce the interleaving, because which of
+    /// two permitted completions lands first is still the real system's call
+    /// (see docs/Testing/PBT.md).
     pub seed: u64,
+    pub shape: Shape,
+}
+
+impl InterleavePlan {
+    /// The predicate governing the gap AFTER dispatch `slot`.
+    pub fn resume_at(&self, slot: u64) -> Resume {
+        match self.shape {
+            Shape::Burst => Resume::Immediate,
+            Shape::Serial => Resume::Wait(Boundary::AfterIntents(1)),
+            Shape::Mixed => draw_resume(mix(self.seed ^ slot.wrapping_mul(0xD1B5_4A32_D192_ED03))),
+        }
+    }
+}
+
+/// Half the slots dispatch straight on, so a mixed run keeps reaching the
+/// burst corner as well as the drained ones. `AfterQuiescence` is rare: it
+/// settles everything, which ends the overlap the arming exists to create.
+fn draw_resume(draw: u64) -> Resume {
+    match draw % 100 {
+        0..=49 => Resume::Immediate,
+        50..=74 => Resume::Wait(Boundary::AfterIntents(1)),
+        75..=84 => Resume::Wait(Boundary::AfterIntents(2)),
+        85..=97 => Resume::Wait(Boundary::AfterCdcBatch),
+        _ => Resume::Wait(Boundary::AfterQuiescence),
+    }
 }
 
 /// Which kinds are armed. `all` expands to the whole alphabet at parse time
@@ -56,7 +96,7 @@ enum Mask {
 struct Arming {
     mask: Mask,
     seed: u64,
-    max_steps: u32,
+    shape: Shape,
 }
 
 static ARMING: OnceLock<Arming> = OnceLock::new();
@@ -65,7 +105,7 @@ fn arming() -> &'static Arming {
     ARMING.get_or_init(|| Arming {
         mask: parse_kinds(std::env::var("HOLON_PBT_SCHED_KINDS").ok().as_deref()),
         seed: parse_u64("HOLON_PBT_SCHED_SEED", 0),
-        max_steps: parse_u64("HOLON_PBT_SCHED_STEPS", DEFAULT_MAX_STEPS as u64) as u32,
+        shape: parse_shape(std::env::var("HOLON_PBT_SCHED_SHAPE").ok().as_deref()),
     })
 }
 
@@ -109,6 +149,20 @@ fn parse_kinds(raw: Option<&str>) -> Mask {
     }
 }
 
+/// Parse the shape at the boundary. An unknown name fails loud for the same
+/// reason a mis-spelled kind does: it would silently run a schedule nobody
+/// asked for and report its result as if it were the requested one.
+fn parse_shape(raw: Option<&str>) -> Shape {
+    match raw.map(str::trim) {
+        None | Some("") | Some("mixed") => Shape::Mixed,
+        Some("burst") => Shape::Burst,
+        Some("serial") => Shape::Serial,
+        Some(other) => {
+            panic!("HOLON_PBT_SCHED_SHAPE must be burst, mixed or serial, got {other:?}")
+        }
+    }
+}
+
 fn parse_u64(var: &str, default: u64) -> u64 {
     match std::env::var(var) {
         Err(_) => default,
@@ -124,7 +178,7 @@ fn parse_u64(var: &str, default: u64) -> u64 {
 /// masked — which is EVERY kind unless `HOLON_PBT_SCHED_KINDS` is set.
 ///
 /// `tick` is the transition's index in the sequence, so two occurrences of the
-/// same kind in one run get different pump budgets from one seed.
+/// same kind in one run get different schedules from one seed.
 pub fn plan_for(kind: &str, tick: u64) -> Option<InterleavePlan> {
     plan_with(arming(), kind, tick)
 }
@@ -137,18 +191,14 @@ fn plan_with(arming: &Arming, kind: &str, tick: u64) -> Option<InterleavePlan> {
         return None;
     }
     let seed = mix(arming.seed ^ hash_kind(kind) ^ tick.wrapping_mul(0x9E37_79B9_7F4A_7C15));
-    let steps = if arming.max_steps == 0 {
-        0
-    } else {
-        (seed % (arming.max_steps as u64 + 1)) as u32
-    };
-    Some(InterleavePlan { steps, seed })
+    Some(InterleavePlan {
+        seed,
+        shape: arming.shape,
+    })
 }
 
 /// splitmix64 — the same deterministic stream `soak_seed` uses, so a seed
-/// reproduces the PUMP BUDGET byte-for-byte across hosts. The budget is not
-/// the schedule: the yields it buys are raced against the ambient tokio
-/// runtime, so the resulting interleaving is not reproducible.
+/// reproduces the SCHEDULE byte-for-byte across hosts.
 fn mix(mut x: u64) -> u64 {
     x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
     let mut z = x;
@@ -214,7 +264,7 @@ mod tests {
         let arming = Arming {
             mask: Mask::Empty,
             seed: 0,
-            max_steps: DEFAULT_MAX_STEPS,
+            shape: Shape::Mixed,
         };
         for name in E2ETransition::VARIANT_NAMES {
             assert!(
@@ -229,32 +279,88 @@ mod tests {
         let arming = Arming {
             mask: Mask::Kinds(["TypeChars".to_string()].into_iter().collect()),
             seed: 7,
-            max_steps: DEFAULT_MAX_STEPS,
+            shape: Shape::Mixed,
         };
         assert!(plan_with(&arming, "TypeChars", 0).is_some());
         assert!(plan_with(&arming, "DeleteBackward", 0).is_none());
     }
 
-    /// A pump budget is reproducible from its seed, and two ticks of the same
-    /// kind do not get the same budget (otherwise one seed explores one
-    /// interleaving).
+    /// A schedule is reproducible from its seed, and two ticks of the same kind
+    /// do not get the same one (otherwise one seed explores one schedule).
     #[test]
-    fn the_plan_is_seed_deterministic_and_tick_varying() {
+    fn the_schedule_is_seed_deterministic_and_tick_varying() {
         let arming = Arming {
             mask: Mask::Kinds(["TypeChars".to_string()].into_iter().collect()),
             seed: 42,
-            max_steps: DEFAULT_MAX_STEPS,
+            shape: Shape::Mixed,
         };
         let a = plan_with(&arming, "TypeChars", 3).expect("masked");
         let b = plan_with(&arming, "TypeChars", 3).expect("masked");
         assert_eq!(a, b);
-        let budgets: BTreeSet<u32> = (0..16)
-            .map(|t| plan_with(&arming, "TypeChars", t).expect("masked").steps)
+        assert_eq!(schedule_of(&a), schedule_of(&b));
+
+        let schedules: BTreeSet<Vec<Resume>> = (0..16)
+            .map(|t| schedule_of(&plan_with(&arming, "TypeChars", t).expect("masked")))
             .collect();
         assert!(
-            budgets.len() > 1,
-            "every tick drew the same pump budget — the tick is not reaching the seed"
+            schedules.len() > 1,
+            "every tick drew the same schedule — the tick is not reaching the seed"
         );
-        assert!(budgets.iter().all(|s| *s <= DEFAULT_MAX_STEPS));
+    }
+
+    fn schedule_of(plan: &InterleavePlan) -> Vec<Resume> {
+        (0..24).map(|slot| plan.resume_at(slot)).collect()
+    }
+
+    /// The compatibility contract: `burst` is dispatch-all-then-settle at every
+    /// slot, so a case recorded under that schedule replays under it.
+    #[test]
+    fn the_burst_shape_never_waits() {
+        let arming = Arming {
+            mask: Mask::Kinds(["TypeChars".to_string()].into_iter().collect()),
+            seed: 42,
+            shape: Shape::Burst,
+        };
+        let plan = plan_with(&arming, "TypeChars", 5).expect("masked");
+        assert!(schedule_of(&plan).iter().all(|r| *r == Resume::Immediate));
+    }
+
+    #[test]
+    fn the_serial_shape_drains_every_slot() {
+        let arming = Arming {
+            mask: Mask::Kinds(["TypeChars".to_string()].into_iter().collect()),
+            seed: 42,
+            shape: Shape::Serial,
+        };
+        let plan = plan_with(&arming, "TypeChars", 5).expect("masked");
+        assert!(
+            schedule_of(&plan)
+                .iter()
+                .all(|r| *r == Resume::Wait(Boundary::AfterIntents(1)))
+        );
+    }
+
+    /// A mixed schedule must contain both kinds of slot: all-`Immediate` would
+    /// silently be `burst`, and no-`Immediate` would never reach the corner the
+    /// recorded regressions live on.
+    #[test]
+    fn the_mixed_shape_draws_both_immediate_and_waiting_slots() {
+        let arming = Arming {
+            mask: Mask::Kinds(["TypeChars".to_string()].into_iter().collect()),
+            seed: 1,
+            shape: Shape::Mixed,
+        };
+        let drawn = schedule_of(&plan_with(&arming, "TypeChars", 0).expect("masked"));
+        assert!(drawn.iter().any(|r| *r == Resume::Immediate), "{drawn:?}");
+        assert!(
+            drawn.iter().any(|r| matches!(r, Resume::Wait(_))),
+            "{drawn:?}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "HOLON_PBT_SCHED_SHAPE")]
+    fn an_unknown_shape_fails_loud() {
+        parse_shape(Some("drained"));
     }
 }

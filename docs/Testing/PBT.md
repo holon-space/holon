@@ -213,35 +213,39 @@ so the oracle is exactly as strict as it is unarmed.
   **Unset ⇒ empty mask ⇒ the harness runs its pre-existing code path, unchanged.** An
   unknown name panics rather than silently arming nothing.
 - `HOLON_PBT_SCHED_SEED` — `u64` scheduler seed (default `0`). Mixed with the kind and
-  the transition's index, so two ticks of one kind draw different pump budgets.
-- `HOLON_PBT_SCHED_STEPS` — max pump steps per masked transition (default `8`).
+  the transition's index, so two ticks of one kind draw different schedules.
+- `HOLON_PBT_SCHED_SHAPE` — `burst`, `mixed` (default) or `serial`.
 
-Each masked transition prints `[interleave] <Kind>: seed=… steps=… intents=N
-peak_in_flight=M`. A transition that dispatched ≥ 2 intents but never had more than one
-in flight FAILS LOUD: a masked run that did not overlap proves nothing, so it must not
-read as green. Kinds that dispatch a single intent per transition can never overlap
-(the window is intra-transition) and are observed, never asserted on.
+A masked transition's schedule is one resume predicate per dispatch: `Immediate`
+dispatches the next intent straight away, and the waiting predicates suspend the driver
+until an intent settles (`AfterIntents(n)`), until the CDC watermark advances
+(`AfterCdcBatch`), or until every projection reaches a fixed point
+(`AfterQuiescence`). `burst` is all-`Immediate` — dispatch-all-then-settle, the schedule
+every case recorded before schedule points existed replays under. `serial` waits for one
+intent to settle at every slot. `mixed` draws across the space.
 
-**The seed widens the interleaving; it does not replay it.** The armed door
-(`dispatch_intent_through_armed_door`) hands the intent to
-`ReactiveEngine::dispatch_intent`, which spawns onto the ambient tokio
-multi-thread runtime (`reactive.rs:3633`), not through Increment 1's injectable
-`Spawner` seam (`holon_api::spawner::Spawner`). The pump's `steps` yields are
-therefore raced against real OS thread scheduling: the `(kind, seed)` pair
-reproducibly selects the *pump budget* (verified: identical seed ⇒ identical
-`seed=…` and `steps=…` on every `[interleave]` line, though how many such lines
-a run reaches varies), but NOT the resulting
-interleaving or which invariant an armed red trips — repeated runs of the same
-`(kind, seed)` have been observed to fail on different blocks and different
-oracles. Treat an armed red as one triaged sample of a widened window, not as
-a reproducible case: don't expect `HOLON_PBT_SCHED_SEED` alone to reproduce a
-specific finding, and capture the actual failing log alongside the finding
-when triaging it (see BugFunnel). Routing the armed door through the
-`Spawner` seam with a deterministic (single-thread, seed-ordered) executor
-would narrow this gap; it is deferred, not built, and is a candidate for
-Increment 3. It would not close it: tasks spawned inside `loro`, inside the
-vendored `turso`, or at any `tokio::spawn` not yet routed through the seam
-still run on tokio's own scheduler.
+Each masked transition prints `[interleave] <Kind>: seed=… shape=… intents=N
+peak_in_flight=M slots=… waits=… conformed=…`. Two things fail loud. A transition whose
+schedule never waited but never had two intents in flight means the door swap did not
+take effect. A transition that dispatched ≥ 2 intents and reached NO schedule point means
+its driver does not call `schedule_point()`, so the seeded schedule was never applied.
+`inv-schedule-conformance` additionally checks that every waiting slot got the boundary it
+asked for, and `inv-schedule-coverage` that the armed axis reaches more than one schedule
+shape across the run.
+
+**The seed reproduces the SCHEDULE, not the interleaving.** A schedule's waits are
+causally enforced — the driver does not dispatch again until the boundary it asked for
+has been observed — so `(kind, seed)` reproducibly selects which boundary each slot
+waits for, and `inv-schedule-conformance` proves each wait was honoured. What stays
+outside the seed's control is which of two *already-permitted* completions lands first:
+the armed door (`dispatch_intent_through_armed_door`) hands the intent to
+`ReactiveEngine::dispatch_intent`, which spawns onto the ambient tokio multi-thread
+runtime (`reactive.rs:3633`) rather than through the injectable `Spawner` seam
+(`holon_api::spawner::Spawner`), and tasks spawned inside `loro` or the vendored `turso`
+never touch that seam at all. So an armed red is attributable to its `(kind, seed,
+shape)` schedule but need not reproduce on a rerun — repeated runs of one `(kind, seed)`
+have been observed to fail on different blocks and different oracles. Capture the failing
+log alongside the finding when triaging it (see BugFunnel).
 
 An armed run is an OBSERVATION run, not a gate. Its reds are triage input:
 `bug-gap-triage` them into `docs/Testing/BugFunnel.md` and decide reference-model vs SUT

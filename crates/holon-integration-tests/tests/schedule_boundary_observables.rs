@@ -21,7 +21,6 @@ use holon_integration_tests::pbt::composed::wide_e2e::WideHandle;
 use holon_integration_tests::pbt::composed::wide_e2e::boot_and_seed_wide;
 use holon_integration_tests::pbt::composed::wide_e2e::frontend_wired;
 use holon_integration_tests::pbt::composed::wide_e2e::wide_e2e_ref;
-use holon_pbt_core::composition::CapMap;
 
 /// The seeded block every `WIDE_TREE_ORG` draw carries.
 const TARGET: &str = "block:c1";
@@ -36,7 +35,7 @@ fn wedge_budget() -> Duration {
 /// still alive.
 fn with_wide_sut<F>(body: F)
 where
-    F: AsyncFnOnce(&CapMap, &WideHandle),
+    F: AsyncFnOnce(&WideHandle),
 {
     let ref_state = frontend_wired(wide_e2e_ref());
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -45,7 +44,7 @@ where
         .expect("multi-thread runtime");
     let resolver = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
     let (caps, handle, _) = rt.block_on(boot_and_seed_wide(&resolver, &ref_state));
-    rt.block_on(body(&caps, &handle));
+    rt.block_on(body(&handle));
     drop(caps);
     drop(handle);
 }
@@ -72,18 +71,13 @@ async fn dispatch_detached(handle: &WideHandle, content: &str) {
 
 #[test]
 fn an_in_flight_intent_settles_within_the_window() {
-    with_wide_sut(async |caps, handle| {
+    with_wide_sut(async |handle| {
         let window = BoundaryWindow::open(WideE2E::dispatch_journal(handle).as_deref());
         dispatch_detached(handle, "typed").await;
 
-        let outcome = WideE2E::await_boundary(
-            handle,
-            caps,
-            Boundary::AfterIntents(1),
-            window,
-            wedge_budget(),
-        )
-        .await;
+        let outcome =
+            WideE2E::await_boundary(handle, Boundary::AfterIntents(1), window, wedge_budget())
+                .await;
 
         let evidence = outcome
             .evidence()
@@ -94,18 +88,12 @@ fn an_in_flight_intent_settles_within_the_window() {
 
 #[test]
 fn a_write_advances_the_cdc_watermark() {
-    with_wide_sut(async |caps, handle| {
+    with_wide_sut(async |handle| {
         let window = BoundaryWindow::open(WideE2E::dispatch_journal(handle).as_deref());
         dispatch_detached(handle, "cdc").await;
 
-        let outcome = WideE2E::await_boundary(
-            handle,
-            caps,
-            Boundary::AfterCdcBatch,
-            window,
-            wedge_budget(),
-        )
-        .await;
+        let outcome =
+            WideE2E::await_boundary(handle, Boundary::AfterCdcBatch, window, wedge_budget()).await;
 
         assert!(
             outcome.evidence().is_some(),
@@ -118,18 +106,13 @@ fn a_write_advances_the_cdc_watermark() {
 /// was dispatched in the window.
 #[test]
 fn a_boundary_nothing_can_cross_is_refused_before_waiting() {
-    with_wide_sut(async |caps, handle| {
+    with_wide_sut(async |handle| {
         let window = BoundaryWindow::open(WideE2E::dispatch_journal(handle).as_deref());
 
         let started = std::time::Instant::now();
-        let outcome = WideE2E::await_boundary(
-            handle,
-            caps,
-            Boundary::AfterIntents(1),
-            window,
-            wedge_budget(),
-        )
-        .await;
+        let outcome =
+            WideE2E::await_boundary(handle, Boundary::AfterIntents(1), window, wedge_budget())
+                .await;
 
         match outcome {
             BoundaryOutcome::Unobservable(reason) => {
@@ -151,18 +134,12 @@ fn a_boundary_nothing_can_cross_is_refused_before_waiting() {
 /// the deadline would report a wedge over a system that is merely idle.
 #[test]
 fn a_cdc_batch_with_nothing_written_is_refused_before_waiting() {
-    with_wide_sut(async |caps, handle| {
+    with_wide_sut(async |handle| {
         let window = BoundaryWindow::open(WideE2E::dispatch_journal(handle).as_deref());
 
         let started = std::time::Instant::now();
-        let outcome = WideE2E::await_boundary(
-            handle,
-            caps,
-            Boundary::AfterCdcBatch,
-            window,
-            wedge_budget(),
-        )
-        .await;
+        let outcome =
+            WideE2E::await_boundary(handle, Boundary::AfterCdcBatch, window, wedge_budget()).await;
 
         match outcome {
             BoundaryOutcome::Unobservable(reason) => {
@@ -179,18 +156,13 @@ fn a_cdc_batch_with_nothing_written_is_refused_before_waiting() {
 /// come back as a degrade.
 #[test]
 fn in_flight_work_past_the_deadline_is_a_wedge_not_a_degrade() {
-    with_wide_sut(async |caps, handle| {
+    with_wide_sut(async |handle| {
         let window = BoundaryWindow::open(WideE2E::dispatch_journal(handle).as_deref());
         dispatch_detached(handle, "wedged").await;
 
-        let outcome = WideE2E::await_boundary(
-            handle,
-            caps,
-            Boundary::AfterIntents(1),
-            window,
-            Duration::ZERO,
-        )
-        .await;
+        let outcome =
+            WideE2E::await_boundary(handle, Boundary::AfterIntents(1), window, Duration::ZERO)
+                .await;
 
         match outcome {
             BoundaryOutcome::TimedOutWithPendingWork { pending, .. } => {
