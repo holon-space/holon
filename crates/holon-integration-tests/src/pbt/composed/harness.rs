@@ -283,16 +283,6 @@ pub trait ComposedSlice {
         Self::apply_transition(transition, ref_state, caps).await;
     }
 
-    /// Seeded partial drain after a detached apply, before the settle: give the
-    /// in-flight tasks `steps` scheduling opportunities so the ordering the
-    /// seed picked is the one that happens. Default: `steps` yields, which is
-    /// the whole mechanism for a slice on a real tokio runtime.
-    async fn pump(_: &Self::Handle, _: &CapMap, steps: u32) {
-        for _ in 0..steps {
-            tokio::task::yield_now().await;
-        }
-    }
-
     /// Wait — bounded by `deadline` — for the completion boundary `boundary`
     /// names, measured against the dispatch window `window` opened before the
     /// transition dispatched.
@@ -303,7 +293,6 @@ pub trait ComposedSlice {
     /// stand in for a wedge would hide the wedge.
     async fn await_boundary(
         _: &Self::Handle,
-        _: &CapMap,
         _: super::boundary::Boundary,
         _: super::boundary::BoundaryWindow,
         _: std::time::Duration,
@@ -423,16 +412,20 @@ async fn interleave_armed_apply<S: ComposedSlice>(
 ) -> Option<super::schedule_signature::Recording> {
     let journal = S::dispatch_journal(handle);
     let mark = journal.as_ref().map(|j| j.mark());
+    let window = super::boundary::BoundaryWindow::open(journal.as_deref());
+    let wedge = crate::pbt::invariants::bodies::settle_budget::wedge_deadline();
     let mut peak = 0usize;
     let mut recording = journal
         .as_ref()
         .map(|j| super::schedule_signature::Recording::start(j, kind));
 
+    let (requests, mut inbox) = tokio::sync::mpsc::unbounded_channel();
+    let scheduler = super::schedule_point::Scheduler::new(plan, requests);
+
     {
-        let armed = async {
+        let armed = super::schedule_point::with_scheduler(std::rc::Rc::clone(&scheduler), async {
             S::apply_transition_detached(transition, ref_state, caps, handle).await;
-            S::pump(handle, caps, plan.steps).await;
-        };
+        });
         tokio::pin!(armed);
         loop {
             tokio::select! {
@@ -440,6 +433,37 @@ async fn interleave_armed_apply<S: ComposedSlice>(
                 // observes it rather than starving it.
                 biased;
                 () = &mut armed => break,
+                // A schedule point is waiting: the driver cannot dispatch again
+                // until this boundary is answered, which is what makes the
+                // seeded schedule causal rather than advisory.
+                Some(request) = inbox.recv() => {
+                    // Sample either side of the wait: the yield arm cannot run
+                    // while this one is awaiting, so without these two the
+                    // dispatch before the boundary and the completion after it
+                    // would collapse into one later sample and an interleaved
+                    // schedule would be recorded as a burst.
+                    if let Some(j) = journal.as_ref() {
+                        recording.as_mut().expect("journal implies a recording").sample(j);
+                    }
+                    let outcome = S::await_boundary(handle, request.boundary, window, wedge).await;
+                    if let (Some(j), Some(m)) = (journal.as_ref(), mark) {
+                        peak = peak.max(pending_since(j, m, kind));
+                        recording.as_mut().expect("journal implies a recording").sample(j);
+                    }
+                    if let super::boundary::BoundaryOutcome::TimedOutWithPendingWork {
+                        pending, waited,
+                    } = outcome {
+                        panic!(
+                            "[inv-settle-budget] WEDGED at a schedule point: '{kind}' {}",
+                            super::boundary::BoundaryOutcome::wedge_report(
+                                request.boundary, pending, waited,
+                            ),
+                        );
+                    }
+                    request.reply.send(outcome).unwrap_or_else(|_| {
+                        panic!("[schedule-point] '{kind}' abandoned its wait before the answer")
+                    });
+                }
                 () = tokio::task::yield_now() => {
                     if let (Some(j), Some(m)) = (journal.as_ref(), mark) {
                         peak = peak.max(pending_since(j, m, kind));
@@ -465,26 +489,59 @@ async fn interleave_armed_apply<S: ComposedSlice>(
     // Printed, not `tracing::info!`d: an armed run is opt-in and this line IS
     // its result, so it must not depend on `RUST_LOG`. Unarmed runs never reach
     // here, so the keystone's output is unchanged.
+    let records = scheduler.records();
+    let checked = super::schedule_point::assert_conformance(kind, plan.seed, &records);
+    let waits = records
+        .iter()
+        .filter(|r| matches!(r.resume, super::boundary::Resume::Wait(_)))
+        .count();
     match emitted {
         Some(n) => eprintln!(
-            "[interleave] {kind}: seed={} steps={} intents={n} peak_in_flight={peak}",
-            plan.seed, plan.steps,
+            "[interleave] {kind}: seed={} shape={:?} intents={n} peak_in_flight={peak} \
+             slots={} waits={waits} conformed={checked}",
+            plan.seed,
+            plan.shape,
+            scheduler.reached(),
         ),
         None => eprintln!(
-            "[interleave] {kind}: seed={} steps={} UNOBSERVED (this draw booted no frontend, so \
+            "[interleave] {kind}: seed={} shape={:?} UNOBSERVED (this draw booted no frontend, so \
              it has no dispatch journal and no fire-and-forget door)",
-            plan.seed, plan.steps,
+            plan.seed, plan.shape,
         ),
     }
 
-    if let Some(emitted) = emitted {
+    // A transition whose driver never reaches a schedule point ran its whole
+    // schedule as one burst. Green over that proves nothing about the schedule
+    // the seed drew, so it is reported rather than passed off.
+    if let Some(n) = emitted {
+        assert!(
+            n < 2 || scheduler.reached() > 0,
+            "[schedule-point] '{kind}' (seed {seed}) dispatched {n} intents through the \
+             fire-and-forget door but reached NO schedule point — its driver does not call \
+             `schedule_point()`, so the seeded schedule was never applied and a green run over it \
+             proves nothing about interleaving.",
+            seed = plan.seed,
+        );
+    }
+
+    // Coverage is judged only over runs whose schedules actually asked to wait
+    // (AM-P1): a burst-only run reaching one shape is the compatibility arm
+    // behaving correctly, not a finding.
+    if waits > 0 && emitted.is_some_and(|n| n >= 2) {
+        super::schedule_signature::note_schedule_exercised();
+    }
+
+    // Overlap is owed only by a schedule that never asked to wait: those
+    // dispatches go out back to back, so two of them MUST be in flight
+    // together. A schedule with waits drained on purpose, and its proof is the
+    // conformance oracle above, not the peak.
+    if let (Some(emitted), 0) = (emitted, waits) {
         assert!(
             emitted < 2 || peak > 1,
             "[interleave] '{kind}' (seed {seed}) dispatched {emitted} intents through the \
-             fire-and-forget door but never had more than {peak} in flight — the arming did not \
-             widen the interleaving, so a green run over it proves nothing. Either the door swap \
-             did not take effect for this kind, or the pump drained each intent before the next \
-             was dispatched.",
+             fire-and-forget door with no wait between them, yet never had more than {peak} in \
+             flight — the door swap did not take effect for this kind, so a green run over it \
+             proves nothing.",
             seed = plan.seed,
         );
     }

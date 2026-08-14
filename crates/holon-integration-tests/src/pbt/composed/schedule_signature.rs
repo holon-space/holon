@@ -16,6 +16,8 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use holon_frontend::dispatch_journal::DispatchJournal;
 
@@ -113,16 +115,35 @@ fn observed() -> &'static Mutex<BTreeMap<Shape, usize>> {
     OBSERVED.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-/// `inv-schedule-coverage`: the armed axis must reach more than one schedule.
+fn exercised() -> &'static AtomicBool {
+    static EXERCISED: AtomicBool = AtomicBool::new(false);
+    &EXERCISED
+}
+
+/// Record that a multi-intent transition actually drew a waiting slot — the
+/// precondition for judging coverage at all.
+pub fn note_schedule_exercised() {
+    exercised().store(true, Ordering::Release);
+}
+
+/// `inv-schedule-coverage`: when a schedule asked to wait, the run must
+/// actually reach an interleaved schedule.
 ///
-/// Called per sequence once the mask is armed. Judges the PROCESS, not the
-/// sequence: a single sequence rarely holds enough multi-intent masked
-/// transitions to distinguish "one schedule is reachable" from "this sequence
-/// was short".
+/// Called per sequence. Judges the PROCESS, not the sequence: a single sequence
+/// rarely holds enough multi-intent masked transitions to distinguish "no
+/// interleaving is reachable" from "this sequence was short".
+///
+/// The claim is causal rather than a count of shapes. "At least two distinct
+/// shapes" would false-red a `serial` run, which asks every slot to drain and
+/// so reaches exactly one shape on purpose; what actually matters is that
+/// asking to wait CHANGES the schedule that results.
 pub fn assert_coverage() {
-    // Snapshot and release: asserting under the lock poisons the registry for
-    // every later sequence, and a poisoned registry reports the poison instead
-    // of the schedule finding.
+    // A run whose schedules never asked to wait cannot be evidence that waiting
+    // fails to change the schedule — `burst` is exactly that run, by
+    // construction. Judging it would turn the compatibility arm into a red.
+    if !exercised().load(Ordering::Acquire) {
+        return;
+    }
     let observed: BTreeMap<Shape, usize> = observed()
         .lock()
         .expect("schedule signature registry")
@@ -132,12 +153,11 @@ pub fn assert_coverage() {
         return;
     }
     assert!(
-        observed.len() >= 2,
-        "[inv-schedule-coverage] {total} masked multi-intent transitions all produced the SAME \
-         schedule shape {:?} — only the dispatch-all-then-settle schedule is reachable, because \
-         the pump waits on yields (which cost microseconds) rather than on completion boundaries \
-         (which take milliseconds). An arming axis that explores one schedule proves nothing \
-         about the others.",
+        observed.contains_key(&Shape::Interleaved),
+        "[inv-schedule-coverage] {total} masked multi-intent transitions drew waiting slots, yet \
+         every one of them still produced a {:?} schedule — only dispatch-all-then-settle is \
+         reachable, so the schedule points are not suspending the driver and a green run over \
+         them proves nothing about the other schedules.",
         observed.keys().collect::<Vec<_>>(),
     );
 }

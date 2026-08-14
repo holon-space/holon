@@ -2254,6 +2254,7 @@ impl HeadlessFrontendComponent {
                          failed: {e:#}"
                     )
                 });
+            crate::pbt::composed::schedule_point::schedule_point().await;
         }
         if let Some(block) = self.reactive.focused_block() {
             self.settle_block_content(&block).await;
@@ -2270,6 +2271,7 @@ impl HeadlessFrontendComponent {
                 .unwrap_or_else(|e| {
                     panic!("[SutEditorMirrorWrite::apply_delete_backward] backspace failed: {e:#}")
                 });
+            crate::pbt::composed::schedule_point::schedule_point().await;
         }
         if let Some(block) = self.reactive.focused_block() {
             self.settle_block_content(&block).await;

@@ -11,7 +11,7 @@ use std::time::Duration;
 use holon_frontend::dispatch_journal::DispatchJournal;
 
 /// What the scheduler waits for before releasing the next dispatch.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Resume {
     /// Release the next dispatch at once.
     Immediate,
@@ -21,7 +21,7 @@ pub enum Resume {
 /// A boundary the system crosses on its own. Separate from [`Resume`] so
 /// "wait for nothing" cannot be handed to a function whose whole job is to
 /// wait.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Boundary {
     /// `n` more of the in-flight intents settled.
     AfterIntents(u8),
@@ -72,6 +72,24 @@ pub enum BoundaryOutcome {
 }
 
 impl BoundaryOutcome {
+    /// The wedge report, worded for what the deadline actually found: work
+    /// still in flight reads differently from work that finished without ever
+    /// producing the projection the boundary names, and a reader has to be able
+    /// to tell which one they are looking at.
+    pub fn wedge_report(boundary: Boundary, pending: usize, waited: Duration) -> String {
+        match pending {
+            0 => format!(
+                "waited {waited:?} for {boundary:?} with NOTHING left in flight — the dispatch \
+                 completed without ever producing it, so this boundary does not follow from this \
+                 work"
+            ),
+            n => format!(
+                "waited {waited:?} for {boundary:?} with {n} intent(s) STILL in flight — the \
+                 dispatch or its projection is not progressing"
+            ),
+        }
+    }
+
     pub fn evidence(&self) -> Option<&BoundaryEvidence> {
         match self {
             Self::Observed(e) => Some(e),

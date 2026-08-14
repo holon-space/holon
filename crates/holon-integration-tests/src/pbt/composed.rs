@@ -79,10 +79,14 @@ pub mod interleave;
 pub mod schedule_signature;
 
 /// The completion boundaries a masked transition can wait on (an intent
-/// settling, a CDC batch, a reactive apply, full quiescence) and what waiting
-/// for one produced.
+/// settling, a CDC batch, full quiescence) and what waiting for one produced.
 #[cfg(any(test, feature = "pbt"))]
 pub mod boundary;
+
+/// The suspension sites between one transition's dispatches, and the seeded
+/// scheduler that decides which of them wait.
+#[cfg(any(test, feature = "pbt"))]
+pub mod schedule_point;
 
 /// Per-case structured telemetry for the ONE composed keystone (weights-spike
 /// step 0): env-gated (`HOLON_PBT_TELEMETRY=1`) machine-parseable per-case
