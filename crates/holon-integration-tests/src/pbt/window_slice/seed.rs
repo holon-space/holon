@@ -1,13 +1,11 @@
-//! Increment 3a SUT-side seeding: graft the **fixed shared** `parent`/`c1`/`c2`
-//! tree into a live window's backend so the windowed `inv-displayed-text`
-//! oracle has known blocks to compare against (approach **B1** — graft under
-//! the Main panel's rendered focus root).
+//! SUT-side seeding: graft fixtures into a live window's backend so the
+//! windowed oracles have known blocks to read.
 //!
 //! The Main panel renders the descendants of `focus_roots.root_id` (region
-//! `main`). Attaching `parent` directly under that root makes
-//! `parent`/`c1`/`c2` render as text widgets, and because the ids are the same
-//! fixed ids the ref
-//! seeds ([`crate::pbt::composed::subsystem_seed::seed_ref_tree`] /
+//! `main`), so every graft here hangs under [`GRAFT_PAGE_ID`] and navigates
+//! Main onto it. Grafted blocks then render as text widgets, and because the
+//! ids are the same fixed ids the ref seeds
+//! ([`crate::pbt::composed::subsystem_seed::seed_ref_tree`] /
 //! [`super::builders::window_ref_caps_seeded`]), the rendered widgets resolve
 //! to ref-known blocks and the text comparison bites. The vault's pre-existing
 //! random-UUID blocks stay unknown to the ref and are skipped.
@@ -32,26 +30,41 @@ use crate::pbt::composed::seed_primitives::PARENT;
 use crate::pbt::composed::seed_primitives::fixed_ids;
 use crate::test_environment::TestEnvironment;
 
-/// Query the `root_id` the Main panel renders descendants of. Fail-loud: the
-/// windowed slice boots a Turso session via `start_app`, so `focus_roots` must
-/// exist and carry a `main` row once the window has settled.
-async fn main_focus_root(env: &TestEnvironment) -> Result<String> {
-    let rows = env
-        .engine()
-        .execute_query(
-            "SELECT root_id FROM focus_roots WHERE region = 'main'".to_string(),
-            std::collections::HashMap::new(),
-            None,
-        )
+/// The plain page every windowed graft hangs under.
+pub const GRAFT_PAGE_ID: &str = "wslice-graft-page";
+/// Title of [`GRAFT_PAGE_ID`]. Distinct from anything the default vault ships
+/// so a painted row carrying it can only have come from this page.
+pub const GRAFT_PAGE_CONTENT: &str = "Windowed Graft Page";
+
+/// Create [`GRAFT_PAGE_ID`] and navigate the Main region onto it, returning its
+/// URI — the root the grafts below attach to.
+///
+/// A booted vault lands the Main panel on `block:journals`, which renders
+/// through `SELECT * FROM journal_feed` (`assets/default/Journals.org`) and so
+/// shows only its `Page`-tagged children. Plain rows grafted under whatever the
+/// Main panel happens to be focused on would therefore never reach the screen;
+/// a plain page renders its descendants as an outline, which is what every
+/// caller here needs.
+async fn focused_graft_root(env: &TestEnvironment) -> Result<String> {
+    let page = EntityUri::block(GRAFT_PAGE_ID);
+    create_page_block(
+        env,
+        GRAFT_PAGE_ID,
+        EntityUri::no_parent().as_str(),
+        GRAFT_PAGE_CONTENT,
+    )
+    .await
+    .context("create the plain page the windowed grafts hang under")?;
+
+    let mut params: holon_api::StorageEntity = std::collections::HashMap::new();
+    params.insert("region".into(), Value::from(holon_api::Region::Main));
+    params.insert("block_id".into(), Value::String(page.as_str().to_string()));
+    env.test_ctx()
+        .execute_op("navigation", "focus", params)
         .await
-        .context("query focus_roots for the Main render root")?;
-    let row = rows
-        .first()
-        .context("focus_roots has no 'main' row — window not settled / no focus")?;
-    match row.get("root_id") {
-        Some(Value::String(s)) => Ok(s.clone()),
-        other => anyhow::bail!("focus_roots.root_id is not a string: {other:?}"),
-    }
+        .context("focus the Main region on the graft page")?;
+
+    Ok(page.as_str().to_string())
 }
 
 /// Graft the fixed `parent`/`c1`/`c2` tree under the Main focus root of a live,
@@ -61,7 +74,7 @@ async fn main_focus_root(env: &TestEnvironment) -> Result<String> {
 /// mapping is the identity. The caller must re-settle the window afterwards so
 /// the new blocks paint before the invariants read geometry/VM.
 pub async fn graft_displayed_text_tree(env: &TestEnvironment) -> Result<()> {
-    let root = main_focus_root(env).await?;
+    let root = focused_graft_root(env).await?;
     let ids = fixed_ids();
     env.create_block(ids.parent.as_str(), &root, PARENT)
         .await
@@ -102,7 +115,7 @@ pub const NESTED_QUERY_ROW_COUNT: usize = 3;
 ///
 /// The caller must re-settle the window afterwards.
 pub async fn graft_nested_query_block(env: &TestEnvironment) -> Result<()> {
-    let root = main_focus_root(env).await?;
+    let root = focused_graft_root(env).await?;
 
     env.create_block(NESTED_QUERY_DATA_ID, &root, "NQ Data")
         .await
@@ -194,7 +207,7 @@ pub const BAND_POST_COUNT_SCROLL: usize = 60;
 ///
 /// The caller must re-settle the window afterwards.
 pub async fn graft_band_geometry_page(env: &TestEnvironment, post_count: usize) -> Result<()> {
-    let root = main_focus_root(env).await?;
+    let root = focused_graft_root(env).await?;
 
     for i in 1..=2 {
         env.create_block(
@@ -279,7 +292,7 @@ pub const CHORD_TARGET_CONTENT: &str = "Chord target row";
 /// tests that press a chord into a real editor. Deliberately childless so a
 /// structural op's effect on the block count is unambiguous.
 pub async fn graft_chord_target_row(env: &TestEnvironment) -> Result<()> {
-    let root = main_focus_root(env).await?;
+    let root = focused_graft_root(env).await?;
     env.create_block(CHORD_TARGET_ID, &root, CHORD_TARGET_CONTENT)
         .await
         .context("graft the chord target row under Main focus root")?;
@@ -296,7 +309,7 @@ pub const PROMOTION_TARGET_CONTENT: &str = "milk";
 /// Graft a single plain, task-less row under the Main focus root: the target
 /// for typing a task keyword at the head of a real editor.
 pub async fn graft_promotion_target_row(env: &TestEnvironment) -> Result<()> {
-    let root = main_focus_root(env).await?;
+    let root = focused_graft_root(env).await?;
     env.create_block(PROMOTION_TARGET_ID, &root, PROMOTION_TARGET_CONTENT)
         .await
         .context("graft the promotion target row under Main focus root")?;
@@ -421,7 +434,7 @@ pub const UNDO_BLUR_SIBLING_CONTENT: &str = "beta three";
 /// signal (`local_edit_epoch`) is a PROCESS-GLOBAL map keyed by row id, so two
 /// arms sharing a row id would sample each other's edits.
 pub async fn graft_undo_blur_pair(env: &TestEnvironment, suffix: &str) -> Result<(String, String)> {
-    let root = main_focus_root(env).await?;
+    let root = focused_graft_root(env).await?;
     let edit_id = format!("undo-edit-target-{suffix}");
     let blur_id = format!("undo-blur-sibling-{suffix}");
     env.create_block(&edit_id, &root, UNDO_EDIT_CONTENT)
