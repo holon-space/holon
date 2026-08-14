@@ -4930,6 +4930,7 @@ mod tests {
                     metadata: BatchMetadata {
                         relation_name: "t".into(),
                         trace_context: None,
+                        linked_contexts: Vec::new(),
                         sync_token: None,
                         seq: 0,
                     },
@@ -5030,6 +5031,7 @@ mod tests {
                 metadata: BatchMetadata {
                     relation_name: "journals".into(),
                     trace_context: None,
+                    linked_contexts: Vec::new(),
                     sync_token: None,
                     seq: 0,
                 },
@@ -5902,6 +5904,7 @@ mod tests {
                 metadata: holon_api::streaming::BatchMetadata {
                     relation_name: String::new(),
                     trace_context: None,
+                    linked_contexts: Vec::new(),
                     sync_token: None,
                     seq: 0,
                 },
@@ -5937,6 +5940,7 @@ mod tests {
                 metadata: holon_api::streaming::BatchMetadata {
                     relation_name: String::new(),
                     trace_context: None,
+                    linked_contexts: Vec::new(),
                     sync_token: None,
                     seq: 0,
                 },
@@ -5971,6 +5975,7 @@ mod tests {
                 metadata: holon_api::streaming::BatchMetadata {
                     relation_name: String::new(),
                     trace_context: None,
+                    linked_contexts: Vec::new(),
                     sync_token: None,
                     seq: 0,
                 },
@@ -6022,6 +6027,7 @@ mod tests {
                 metadata: holon_api::streaming::BatchMetadata {
                     relation_name: String::new(),
                     trace_context: None,
+                    linked_contexts: Vec::new(),
                     sync_token: None,
                     seq: 0,
                 },

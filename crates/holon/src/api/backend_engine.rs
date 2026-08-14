@@ -692,6 +692,7 @@ impl BackendEngine {
                 metadata: BatchMetadata {
                     relation_name: view_name.clone(),
                     trace_context: None,
+                    linked_contexts: Vec::new(),
                     sync_token: None,
                     seq: 0,
                 },

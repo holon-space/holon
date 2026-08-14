@@ -335,6 +335,7 @@ impl SyncableProvider for OrgModeSyncProvider {
         let file_metadata = BatchMetadata {
             relation_name: "file".to_string(),
             trace_context,
+            linked_contexts: Vec::new(),
             sync_token: None,
             seq: 0,
         };

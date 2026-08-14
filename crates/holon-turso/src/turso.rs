@@ -1852,7 +1852,16 @@ impl TursoBackend {
     /// Process a CDC event into a BatchWithMetadata<RowChange>
     fn process_cdc_event(event: &RelationChangeEvent) -> BatchWithMetadata<RowChange> {
         let mut raw_changes = Vec::new();
-        let mut batch_trace_context: Option<BatchTraceContext> = None;
+        // First-seen order, deduplicated: the batch is attributed to the first
+        // writer and linked to the rest (ruling D3.a).
+        let mut origins: Vec<BatchTraceContext> = Vec::new();
+        fn record(origins: &mut Vec<BatchTraceContext>, origin: &ChangeOrigin) {
+            if let Some(ctx) = origin.to_batch_trace_context()
+                && !origins.contains(&ctx)
+            {
+                origins.push(ctx);
+            }
+        }
 
         // Convert column names to Arc<str> once per event; rows below only Arc::clone
         let columns: Vec<Arc<str>> = event
@@ -1869,9 +1878,7 @@ impl TursoBackend {
                             TursoBackend::parse_row_values_with_schema(&values, &columns);
                         data.insert("_rowid".into(), Value::String(change.id.to_string()));
                         let origin = extract_change_origin_from_data(&data);
-                        if batch_trace_context.is_none() {
-                            batch_trace_context = origin.to_batch_trace_context();
-                        }
+                        record(&mut origins, &origin);
                         ChangeData::Created { data, origin }
                     } else {
                         continue;
@@ -1883,9 +1890,7 @@ impl TursoBackend {
                             TursoBackend::parse_row_values_with_schema(&values, &columns);
                         data.insert("_rowid".into(), Value::String(change.id.to_string()));
                         let origin = extract_change_origin_from_data(&data);
-                        if batch_trace_context.is_none() {
-                            batch_trace_context = origin.to_batch_trace_context();
-                        }
+                        record(&mut origins, &origin);
                         let entity_id = data
                             .get("id")
                             .and_then(|v| match v {
@@ -1915,9 +1920,7 @@ impl TursoBackend {
                             })
                             .unwrap_or_else(|| change.id.to_string());
                         let origin = extract_change_origin_from_data(&data);
-                        if batch_trace_context.is_none() {
-                            batch_trace_context = origin.to_batch_trace_context();
-                        }
+                        record(&mut origins, &origin);
                         ChangeData::Deleted {
                             id: entity_id,
                             origin,
@@ -1946,7 +1949,8 @@ impl TursoBackend {
         };
         let metadata = BatchMetadata {
             relation_name: event.relation_name.clone(),
-            trace_context: batch_trace_context,
+            trace_context: origins.first().cloned(),
+            linked_contexts: origins.into_iter().skip(1).collect(),
             sync_token: None,
             // Filled in by `set_change_callback` in `new_with_options` after
             // `process_cdc_event` returns — process-wide monotonic counter.

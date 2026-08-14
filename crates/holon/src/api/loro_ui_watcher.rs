@@ -346,6 +346,7 @@ async fn run_watch_loop(
                 metadata: BatchMetadata {
                     relation_name: "loro_structural".to_string(),
                     trace_context: None,
+                    linked_contexts: Vec::new(),
                     sync_token: None,
                     seq,
                 },

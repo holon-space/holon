@@ -424,6 +424,18 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                         );
                     }
                 }
+                // The batch consolidates whatever landed in one commit window,
+                // so the writers past the first get links rather than a parent
+                // they would have to share (ruling D3.a).
+                for ctx in batch
+                    .metadata
+                    .linked_contexts
+                    .iter()
+                    .filter_map(|ctx| ctx.to_span_context())
+                {
+                    use tracing_opentelemetry::OpenTelemetrySpanExt;
+                    apply_span.add_link(ctx);
+                }
                 let _apply_guard = apply_span.enter();
                 let changes: Vec<Change<StorageEntity>> =
                     batch.inner.items.into_iter().map(Into::into).collect();
