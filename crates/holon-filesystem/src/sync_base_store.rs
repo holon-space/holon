@@ -27,6 +27,8 @@ use std::sync::Mutex;
 use holon_api::SnapshotBlock;
 #[cfg(test)]
 use holon_api::block::Block;
+// `info!` is only reached from the native `load_base`.
+#[cfg(not(target_arch = "wasm32"))]
 use tracing::info;
 use tracing::warn;
 
@@ -70,10 +72,14 @@ impl BaseKey {
 
     /// Encode to a single string for sidecar storage (JSON object keys must be
     /// strings). `peer`/`file` are joined by NUL, which neither contains.
+    /// Sidecar-only, so native-only — both callers are the gated
+    /// `persist`/`load_base` pair.
+    #[cfg(not(target_arch = "wasm32"))]
     fn encode(&self) -> String {
         format!("{}\u{0}{}", self.peer, self.file)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn decode(s: &str) -> Option<Self> {
         s.split_once('\u{0}').map(|(peer, file)| Self {
             peer: peer.to_string(),
@@ -136,7 +142,11 @@ impl SyncBaseStore {
         }
     }
 
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    // Gated to match `fs_port` itself, NOT to the wasm32-unknown demo: the
+    // atomic write goes through `fs_port`, which needs `tokio::fs` and `ignore`
+    // and so exists on no wasm target. Widening `fs_port` instead was tried and
+    // refuted — see lane-logs/t31-legB-optionA.log.
+    #[cfg(not(target_arch = "wasm32"))]
     fn persist(&self) {
         let Some(path) = self.sidecar_path.as_ref() else {
             return;
@@ -172,9 +182,15 @@ impl SyncBaseStore {
         }
     }
 
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    #[cfg(target_arch = "wasm32")]
     fn persist(&self) {
-        // wasm32 demo is in-memory; no sidecar persistence.
+        // No sidecar on wasm — `fs_port` (tokio::fs) exists on no wasm target.
+        // A sidecar path here would mean loads that are never written back, so
+        // say so instead of dropping the write silently.
+        debug_assert!(
+            self.sidecar_path.is_none(),
+            "sidecar persistence is not available on wasm, but a sidecar path is set"
+        );
     }
 }
 
@@ -201,7 +217,10 @@ impl BaseStore for SyncBaseStore {
     }
 }
 
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+// Gated to match `persist` exactly. A target that reads a base it can never
+// write back would boot from a permanently stale sidecar — read and write must
+// agree on which targets have one.
+#[cfg(not(target_arch = "wasm32"))]
 fn load_base(path: &Path) -> HashMap<BaseKey, Arc<HashMap<String, SnapshotBlock>>> {
     // The sidecar stores an encoded-key map (`peer\0file` → blocks). A sidecar
     // written by the pre-Phase-3 single-map format won't decode to this shape,
@@ -241,8 +260,14 @@ fn load_base(path: &Path) -> HashMap<BaseKey, Arc<HashMap<String, SnapshotBlock>
     }
 }
 
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-fn load_base(_: &Path) -> HashMap<BaseKey, Arc<HashMap<String, SnapshotBlock>>> {
+#[cfg(target_arch = "wasm32")]
+fn load_base(path: &Path) -> HashMap<BaseKey, Arc<HashMap<String, SnapshotBlock>>> {
+    // Unseeded, not "loaded empty": the matching `persist` cannot write, so a
+    // caller handing us a path has a sidecar that would never round-trip.
+    warn!(
+        "[SyncBaseStore] sidecar {} ignored: no sidecar persistence on wasm; starting unseeded",
+        path.display()
+    );
     HashMap::new()
 }
 
