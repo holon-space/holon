@@ -293,6 +293,26 @@ pub trait ComposedSlice {
         }
     }
 
+    /// Wait — bounded by `deadline` — for the completion boundary `boundary`
+    /// names, measured against the dispatch window `window` opened before the
+    /// transition dispatched.
+    ///
+    /// Default: [`BoundaryOutcome::Unobservable`], because a slice with no
+    /// completion observables cannot report having crossed one. A slice that
+    /// CAN observe the boundary must never take this arm — a degrade that can
+    /// stand in for a wedge would hide the wedge.
+    async fn await_boundary(
+        _: &Self::Handle,
+        _: &CapMap,
+        _: super::boundary::Boundary,
+        _: super::boundary::BoundaryWindow,
+        _: std::time::Duration,
+    ) -> super::boundary::BoundaryOutcome {
+        super::boundary::BoundaryOutcome::Unobservable(
+            "slice exposes no completion observables".to_string(),
+        )
+    }
+
     /// The dispatch journal of the slice's booted frontend, when it has one —
     /// the harness's overlap probe. `None` (the default) means the slice cannot
     /// observe in-flight intents, so an armed run over it reports "unobserved"
@@ -400,10 +420,13 @@ async fn interleave_armed_apply<S: ComposedSlice>(
     handle: &S::Handle,
     kind: &str,
     plan: super::interleave::InterleavePlan,
-) {
+) -> Option<super::schedule_signature::Recording> {
     let journal = S::dispatch_journal(handle);
     let mark = journal.as_ref().map(|j| j.mark());
     let mut peak = 0usize;
+    let mut recording = journal
+        .as_ref()
+        .map(|j| super::schedule_signature::Recording::start(j, kind));
 
     {
         let armed = async {
@@ -420,6 +443,7 @@ async fn interleave_armed_apply<S: ComposedSlice>(
                 () = tokio::task::yield_now() => {
                     if let (Some(j), Some(m)) = (journal.as_ref(), mark) {
                         peak = peak.max(pending_since(j, m, kind));
+                        recording.as_mut().expect("journal implies a recording").sample(j);
                     }
                 }
             }
@@ -464,6 +488,7 @@ async fn interleave_armed_apply<S: ComposedSlice>(
             seed = plan.seed,
         );
     }
+    recording
 }
 
 /// Intents dispatched since `mark` that have not settled — the in-flight count.
@@ -795,7 +820,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
                         // unarmed; what changes is the ORDER the writes reached
                         // the store in.
                         Some(p) => {
-                            interleave_armed_apply::<S>(
+                            let recording = interleave_armed_apply::<S>(
                                 &transition,
                                 ref_state,
                                 caps,
@@ -805,6 +830,16 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
                             )
                             .await;
                             S::settle_after_apply(handle, caps).await;
+                            // Most intents settle during the settle, not during
+                            // the detached apply, so the signature is only whole
+                            // once the settle has run.
+                            if let (Some(rec), Some(j)) = (recording, S::dispatch_journal(handle)) {
+                                eprintln!(
+                                    "[schedule-signature] {kind}: seed={} {}",
+                                    p.seed,
+                                    rec.finish(&j),
+                                );
+                            }
                         }
                     }
                 })
@@ -1114,6 +1149,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
     /// accumulator, deferred (see the audit's "validate on the two F1
     /// invariants first, then sweep").
     fn teardown(sut: Self, ref_state: ReferenceState) {
+        super::schedule_signature::assert_coverage();
         let ledger = sut.engaged.borrow();
         // Weights-spike telemetry: one machine-parseable per-case line
         // (`[pbt-telemetry] {json}`) from the accumulated transitions + this

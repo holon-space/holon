@@ -73,6 +73,17 @@ pub mod harness;
 #[cfg(any(test, feature = "pbt"))]
 pub mod interleave;
 
+/// `inv-schedule-coverage`: which dispatch/completion interleavings the armed
+/// axis actually reached, accumulated across the process.
+#[cfg(any(test, feature = "pbt"))]
+pub mod schedule_signature;
+
+/// The completion boundaries a masked transition can wait on (an intent
+/// settling, a CDC batch, a reactive apply, full quiescence) and what waiting
+/// for one produced.
+#[cfg(any(test, feature = "pbt"))]
+pub mod boundary;
+
 /// Per-case structured telemetry for the ONE composed keystone (weights-spike
 /// step 0): env-gated (`HOLON_PBT_TELEMETRY=1`) machine-parseable per-case
 /// lines measuring transition-kind/bigram diversity, wiring, invariant

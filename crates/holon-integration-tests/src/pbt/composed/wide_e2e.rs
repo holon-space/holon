@@ -47,6 +47,11 @@ use proptest::strategy::BoxedStrategy;
 use proptest::strategy::Strategy;
 use proptest_state_machine::ReferenceStateMachine;
 
+use crate::pbt::composed::boundary::Boundary;
+use crate::pbt::composed::boundary::BoundaryEvidence;
+use crate::pbt::composed::boundary::BoundaryOutcome;
+use crate::pbt::composed::boundary::BoundaryWindow;
+use crate::pbt::composed::boundary::settled_and_pending;
 use crate::pbt::composed::builder::compose_sut;
 use crate::pbt::composed::builder::compose_sut_seeded;
 use crate::pbt::composed::builder::compose_sut_seeded_with_peer_id;
@@ -1706,6 +1711,92 @@ impl ComposedSlice for WideE2E {
         Self::apply_transition(transition, ref_state, caps).await;
         if let Some(e) = &engine {
             e.ui_state().set_detached_dispatch(false);
+        }
+    }
+
+    /// Wait for a real completion boundary: an intent settling in the dispatch
+    /// journal, the Turso CDC watermark advancing, or every projection reaching
+    /// a fixed point.
+    ///
+    /// The pre-check decides `Unobservable` BEFORE waiting, so reaching the
+    /// deadline means work that should have crossed the boundary did not —
+    /// reported as a wedge, never degraded.
+    async fn await_boundary(
+        handle: &WideHandle,
+        caps: &CapMap,
+        boundary: Boundary,
+        window: BoundaryWindow,
+        deadline: Duration,
+    ) -> BoundaryOutcome {
+        let journal = Self::dispatch_journal(handle);
+        let in_flight = || match (journal.as_ref(), window.journal_mark) {
+            (Some(j), Some(m)) => settled_and_pending(j, m),
+            _ => (0, 0),
+        };
+        let started = std::time::Instant::now();
+
+        if let Boundary::AfterQuiescence = boundary {
+            converge_projections(handle, deadline).await;
+            return BoundaryOutcome::Observed(BoundaryEvidence {
+                boundary,
+                waited: started.elapsed(),
+                detail: "projections reached a combined fixed point".to_string(),
+            });
+        }
+
+        let (settled_at_entry, pending_at_entry) = in_flight();
+        let engine = handle.engine();
+        let unobservable = match boundary {
+            Boundary::AfterIntents(n) if pending_at_entry < n as usize => Some(format!(
+                "{pending_at_entry} intent(s) in flight, so {n} completion(s) can never be observed"
+            )),
+            Boundary::AfterCdcBatch if engine.is_none() => {
+                Some("draw booted no Turso engine".to_string())
+            }
+            Boundary::AfterCdcBatch if pending_at_entry == 0 => {
+                Some("no intent in flight to drive a projection".to_string())
+            }
+            _ => None,
+        };
+        if let Some(reason) = unobservable {
+            return BoundaryOutcome::Unobservable(reason);
+        }
+
+        let cdc_at_entry = engine.map(|e| e.db_handle().cdc_emitted_watermark());
+        let poll = Duration::from_millis(2);
+        loop {
+            let crossed = match boundary {
+                Boundary::AfterIntents(n) => {
+                    let (settled, _) = in_flight();
+                    (settled >= settled_at_entry + n as usize)
+                        .then(|| format!("settled {settled_at_entry} -> {settled}"))
+                }
+                Boundary::AfterCdcBatch => {
+                    let now = engine
+                        .expect("pre-check kept the engine")
+                        .db_handle()
+                        .cdc_emitted_watermark();
+                    (Some(now) != cdc_at_entry)
+                        .then(|| format!("cdc watermark {:?} -> {now}", cdc_at_entry))
+                }
+                Boundary::AfterQuiescence => unreachable!("handled before the pre-check"),
+            };
+            if let Some(detail) = crossed {
+                return BoundaryOutcome::Observed(BoundaryEvidence {
+                    boundary,
+                    waited: started.elapsed(),
+                    detail,
+                });
+            }
+            if started.elapsed() >= deadline {
+                let (_, pending) = in_flight();
+                return BoundaryOutcome::TimedOutWithPendingWork {
+                    pending,
+                    waited: started.elapsed(),
+                };
+            }
+            let _ = caps;
+            tokio::time::sleep(poll).await;
         }
     }
 
