@@ -3,8 +3,8 @@
 //! runs on the composition path rather than via `E2ESut`.
 //!
 //! Architecture under test (the E4 Send/`!Send` split):
-//!   - The `!Send` gpui `TestApp` + frame-pump live here in the harness; we
-//!     settle the window to a fixed point.
+//!   - The `!Send` gpui `HeadlessAppContext` + frame-pump live here in the
+//!     harness; we settle the window to a fixed point.
 //!   - `GpuiWindowComponent` (in the `holon-integration-tests` lib) holds only
 //!     the `Send` `BoundsRegistry` clone (as `Box<dyn GeometryProvider>`) and
 //!     provides `SutLayout` on a `CapMap` like any other component.
@@ -45,8 +45,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use gpui::AssetSource;
+use gpui::HeadlessAppContext;
 use gpui::PlatformTextSystem;
-use gpui::TestApp;
 use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::reactive::BuilderServices;
 use holon_gpui::geometry::BoundsRegistry;
@@ -95,7 +95,7 @@ fn real_text_system() -> Arc<dyn PlatformTextSystem> {
 /// the element count is stable and no `"loading"` placeholders remain. Panics
 /// if it never settles.
 fn settle_to_fixed_point(
-    app: &mut TestApp,
+    app: &mut HeadlessAppContext,
     bounds: &BoundsRegistry,
     runtime: &tokio::runtime::Runtime,
     timeout: Duration,
@@ -134,7 +134,9 @@ fn settle_to_fixed_point(
 fn capmap_hosts_windowed_sutlayout_over_real_geometry() {
     let text_system = real_text_system();
     let assets: Arc<dyn AssetSource> = Arc::new(());
-    let mut app = TestApp::with_text_system_and_assets(text_system, assets);
+    let mut app = HeadlessAppContext::with_platform(text_system, assets, || {
+        gpui_platform::current_headless_renderer()
+    });
 
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
     let env = runtime
@@ -402,7 +404,7 @@ fn capmap_hosts_windowed_sutlayout_over_real_geometry() {
         .get()
         .expect("interaction_tx set by the window interaction pump")
         .clone();
-    let app_ptr: *const TestApp = &app;
+    let app_ptr: *const HeadlessAppContext = &app;
     let driver = SimUserDriver::new(
         app_ptr,
         _rebind.window(),
@@ -492,7 +494,8 @@ fn capmap_hosts_windowed_sutlayout_over_real_geometry() {
          focus oracle bites on the composition path"
     );
 
-    // Leak the !Send TestApp (gpui leak detector); process exits after the test.
+    // Leak the !Send HeadlessAppContext (gpui leak detector); process exits after
+    // the test.
     drop(_rebind);
     app.update(|cx| cx.shutdown());
     app.run_until_parked();
@@ -532,7 +535,9 @@ const MIN_ROW_HEIGHT_PX: f32 = 8.0;
 fn nested_live_block_paints_the_rows_its_model_holds() {
     let text_system = real_text_system();
     let assets: Arc<dyn AssetSource> = Arc::new(());
-    let mut app = TestApp::with_text_system_and_assets(text_system, assets);
+    let mut app = HeadlessAppContext::with_platform(text_system, assets, || {
+        gpui_platform::current_headless_renderer()
+    });
 
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
     let env = runtime
@@ -726,7 +731,7 @@ impl BandPage {
 /// ([`graft_band_geometry_page`]) and settle it until the band has painted its
 /// rows (bounded — on a build where the band paints nothing this returns after
 /// the deadline and the caller's precondition assert reports that).
-fn boot_band_page(app: &mut TestApp, post_count: usize) -> BandPage {
+fn boot_band_page(app: &mut HeadlessAppContext, post_count: usize) -> BandPage {
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
     let env = runtime
         .block_on(async { TestEnvironment::new(runtime.clone()) })
@@ -930,7 +935,7 @@ fn ancestor_chain(bounds: &BoundsRegistry, marker: &str) -> Vec<String> {
 ///
 /// SAFETY: `app` must outlive the returned driver and stay on the gpui thread
 /// (the contract `SimUserDriver::new` documents).
-fn band_driver(app: &TestApp, page: &BandPage) -> SimUserDriver {
+fn band_driver(app: &HeadlessAppContext, page: &BandPage) -> SimUserDriver {
     let interaction_tx = page
         .debug_services
         .interaction_tx
@@ -967,7 +972,9 @@ fn band_driver(app: &TestApp, page: &BandPage) -> SimUserDriver {
 fn band_rows_do_not_overlap_the_following_sibling_row() {
     let text_system = real_text_system();
     let assets: Arc<dyn AssetSource> = Arc::new(());
-    let mut app = TestApp::with_text_system_and_assets(text_system, assets);
+    let mut app = HeadlessAppContext::with_platform(text_system, assets, || {
+        gpui_platform::current_headless_renderer()
+    });
     let page = boot_band_page(&mut app, BAND_POST_COUNT_OVERLAP);
 
     // Reveal the BAND, not the sibling: `scroll_to_entity` brings its target to
@@ -1119,7 +1126,9 @@ fn band_rows_do_not_overlap_the_following_sibling_row() {
 fn page_with_a_nested_band_scrolls_to_its_last_row() {
     let text_system = real_text_system();
     let assets: Arc<dyn AssetSource> = Arc::new(());
-    let mut app = TestApp::with_text_system_and_assets(text_system, assets);
+    let mut app = HeadlessAppContext::with_platform(text_system, assets, || {
+        gpui_platform::current_headless_renderer()
+    });
     let page = boot_band_page(&mut app, BAND_POST_COUNT_SCROLL);
 
     let driver = band_driver(&app, &page);

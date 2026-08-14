@@ -39,7 +39,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use gpui::AssetSource;
-use gpui::TestApp;
+use gpui::HeadlessAppContext;
 use holon_api::EntityUri;
 use holon_api::Key;
 use holon_api::KeyChord;
@@ -64,7 +64,7 @@ fn real_text_system() -> Arc<dyn gpui::PlatformTextSystem> {
 }
 
 /// Same cross-runtime fixed-point settle the other TestPlatform tests use.
-fn settle(app: &mut TestApp, bounds: &BoundsRegistry, timeout: Duration) {
+fn settle(app: &mut HeadlessAppContext, bounds: &BoundsRegistry, timeout: Duration) {
     let start = Instant::now();
     let mut last_count = 0usize;
     let mut stable_iters = 0u32;
@@ -139,7 +139,9 @@ fn projected_text(
 fn the_focused_row_paints_its_vault_syntax_and_cmd_z_walks_the_text_back() {
     let text_system = real_text_system();
     let assets: Arc<dyn AssetSource> = Arc::new(());
-    let mut app = TestApp::with_text_system_and_assets(text_system, assets);
+    let mut app = HeadlessAppContext::with_platform(text_system, assets, || {
+        gpui_platform::current_headless_renderer()
+    });
 
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
     // Writes driven from the gpui thread reach Loro's `emit_change`, which
@@ -278,7 +280,7 @@ fn the_focused_row_paints_its_vault_syntax_and_cmd_z_walks_the_text_back() {
     // Labelled, and FALLIBLE: the driver refuses to press a chord into a row
     // whose editable_text does not hold window focus, so the delivery result
     // travels as data and each call site decides whether a refusal is fatal.
-    let press_cmd_z = |app: &mut TestApp, label: &str| -> Result<(), String> {
+    let press_cmd_z = |app: &mut HeadlessAppContext, label: &str| -> Result<(), String> {
         let delivered = futures::executor::block_on(driver.send_key_chord(
             &root_id,
             &root_tree,
