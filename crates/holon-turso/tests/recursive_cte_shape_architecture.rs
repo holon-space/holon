@@ -5,8 +5,9 @@
 //! enforced that, so a hand-written `holon_sql` block could silently return
 //! wrong data or abort the process. This test makes the accident deliberate.
 //!
-//! Two properties are enforced here, both measured against the engine at our
-//! pin (`lane-logs/research-j1p-unpark.md`, B-audit):
+//! Three properties are enforced here. The first two are measured against the
+//! engine at our pin (`lane-logs/research-j1p-unpark.md`, B-audit); the third
+//! guards a fork-head regression and is measured there:
 //!
 //! - **Single-arm base case.** A multi-arm base case (`VALUES(1),(2)`) makes
 //!   `UNION ALL` drop distinct rows and makes recursion run to the 100000
@@ -18,12 +19,14 @@
 //!   tree walk inherently joins a base table, which is why no production CTE
 //!   has the join-free shape.
 //!
-//! A third property is deliberately **not** enforced yet — see
-//! `a_recursive_arm_never_left_joins_on_its_own_base_row` below. Do not
-//! "finish" it by widening either test above into a blanket ban on `LEFT JOIN`
-//! in the recursive arm: four of the six production CTEs contain one and are
-//! measured safe, so that ban is a false red. The narrow rule is the correct
-//! one, and it is red on `turso_seams.rs` today.
+//! - **No `LEFT JOIN` on the arm's own base row.** That shape fails to
+//!   terminate on upstream's rewritten recursive-CTE engine, which arrives with
+//!   the re-pin. See `a_recursive_arm_never_left_joins_on_its_own_base_row`
+//!   below.
+//!
+//! Do not widen any of these into a blanket ban on `LEFT JOIN` in the
+//! recursive arm: four of the six production CTEs contain one and are measured
+//! safe, so that ban is a false red. The narrow rules are the correct ones.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -400,21 +403,33 @@ fn every_production_recursive_cte_has_a_single_arm_base_and_a_join_bearing_recur
     );
 }
 
-/// NOT YET ENFORCED — `#[ignore]` is deliberate and tracked by task #22.
-///
 /// A recursive arm that `LEFT JOIN`s on the base-table row that arm itself
-/// produces never terminates at the fork head (`a94102c2`). Measured trigger,
-/// bisected: the `IS NULL` anti-join predicate is irrelevant (it hangs with no
-/// predicate at all), an `INNER JOIN` in the same position is fine, a
+/// produces never terminates on upstream's rewritten recursive-CTE engine.
+/// Measured trigger: the `IS NULL` anti-join predicate is irrelevant (it hangs
+/// with no predicate at all), an `INNER JOIN` in the same position is fine, a
 /// `LEFT JOIN` whose `ON` references the CTE row is fine, and the arm's driving
-/// table does not matter. Our pin `54f3cc5` does not have the defect, so this
-/// is a regression that only bites on re-pin.
+/// table does not matter. Reading the emitted program shows why: the hash-join
+/// build side reads the recursive reference, so it is loop-variant, yet it is
+/// emitted under `Once` — built from the first iteration and never rebuilt, so
+/// the probe re-derives the same rows forever. Our pin does not have the
+/// defect; it arrives with the re-pin.
 ///
-/// `turso_seams.rs` violates this today, at both the `get_blocks` walk and the
-/// doc shape gate. Un-ignore this test as part of the re-pin, once those two
-/// are rewritten to `LEFT JOIN` on the CTE row.
+/// ## The remedy is `NOT EXISTS`, NOT a `LEFT JOIN` on the CTE row
+///
+/// An earlier note here prescribed rewriting the arm to `LEFT JOIN … ON
+/// bt.block_id = d.id`. That is SEMANTICALLY WRONG and was measured wrong on
+/// the engine we ship today: a row already in `descendants` can never carry
+/// the `Page` tag, so keying the check on it moves the sub-document boundary
+/// down one level and admits the `Page` itself. It looks correct only on a
+/// fixture whose `Page` sits among the document's direct children, where the
+/// base arm rejects it before the recursive arm is consulted — which is what
+/// every fixture had, and how the wrong remedy got written down.
+///
+/// This test cannot catch that: it constrains the SHAPE of a `LEFT JOIN`, and
+/// the wrong rewrite satisfies it. The semantics are pinned separately by
+/// `holon-app`'s `doc_membership_page_boundary_below_root`, which puts the
+/// `Page` at depth 1. Keep both — neither implies the other.
 #[test]
-#[ignore = "red on turso_seams.rs until the re-pin rewrites it (task #22)"]
 fn a_recursive_arm_never_left_joins_on_its_own_base_row() {
     let ctes = find_production_ctes();
     assert!(ctes.len() >= KNOWN_PRODUCTION_CTES, "scanner is broken");
