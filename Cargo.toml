@@ -100,7 +100,11 @@ opentelemetry-appender-tracing = "0.31"
 
 # === Time/IDs ===
 chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["v4", "serde"] }
+# `v5` is used by holon-api (deterministic id derivation). It was never declared
+# here — on native some other crate in the graph turned it on and holon-api
+# compiled by luck; on wasm32-unknown-unknown nothing does, so the omission
+# surfaced as `no associated function named new_v5`.
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 ulid = "1.1"
 fluent-uri = { version = "0.3", features = ["serde"] }
 
@@ -182,6 +186,10 @@ premortem = "0.6"
 orgize = { git = "https://github.com/holon-space/orgize.git", branch = "holon" }
 libsql = { version = "0.9", features = ["core", "remote"] }
 getrandom = { version = "0.3", features = ["wasm_js"] }
+# getrandom 0.2 lives beside 0.3 in the graph (ahash/const-random pull it) and
+# has its own, differently-named browser opt-in: 0.3 wants `wasm_js` + a cfg,
+# 0.2 wants `js`. Aliased so a crate can name the older major explicitly.
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 
 # === External git deps ===
 # Local path overrides in .cargo/config.toml (not checked in)

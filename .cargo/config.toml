@@ -10,6 +10,14 @@ rustflags = [
   "threads=8",
 ]
 
+# getrandom 0.3 refuses to build for the browser target unless the backend is
+# named as a cfg — its `wasm_js` FEATURE alone is documented as insufficient,
+# and the crate emits a compile_error! saying so. Nothing else selects a
+# backend, so this is what makes `cargo check -p holon-frontend --target
+# wasm32-unknown-unknown` compile at all.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg", "getrandom_backend=\"wasm_js\""]
+
 # Android NDK configuration for cross-compilation
 [target.aarch64-linux-android]
 linker = "aarch64-linux-android33-clang"

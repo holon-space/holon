@@ -15,7 +15,12 @@ PATH_ARGS="${1:-crates/ frontends/}"
 FOUND=0
 
 # Always-excluded test surfaces (this audit targets prod code).
-TEST_EXCLUDE='/tests/|_test\.rs|_pbt\.rs'
+# `/target/`: the recursive grep starts at `frontends/`, and the out-of-workspace
+# `frontends/holon-worker` keeps its own `target/` there — so running
+# `just check-worker-wasm` drops vendored build-script `.rs` into this scan and
+# the ratchet judges third-party code. Same defect archlint had (BugFunnel
+# 2026-08-15, ORACLE).
+TEST_EXCLUDE='/target/|/tests/|_test\.rs|_pbt\.rs'
 ALLOW_TOKEN='ALLOW('
 
 header() {

@@ -82,6 +82,22 @@ memory-stats.workspace = true
 # clap: the derive feature works on wasi (env-var reading via WASI environ_get).
 # Do NOT add `env` feature here to avoid pulling os-env detection code.
 clap = { version = "4", features = ["derive"] }
+# `reactive.rs` mints EntityUris with `uuid::Uuid::new_v4()` on every target, so
+# the native-only listing above left the wasm build with no `uuid` at all.
+uuid.workspace = true
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+# getrandom reaches this target only transitively, so nothing turns on its
+# `wasm_js` feature and it refuses to build. The crate demands BOTH the feature
+# and the `--cfg getrandom_backend` rustflag (.cargo/config.toml) — naming it
+# here is what puts the feature in the graph. Browser target only: wasi has a
+# real random source and must not take the js backend.
+getrandom.workspace = true
+# getrandom 0.2 is a SECOND major in this target's graph (via ahash/const-random)
+# and needs its own `js` opt-in — uuid's `js` does not reach it.
+getrandom_02.workspace = true
+# Same shape holon-loro already uses for this target.
+uuid = { workspace = true, features = ["js"] }
 
 [dev-dependencies]
 tempfile.workspace = true

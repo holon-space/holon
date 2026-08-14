@@ -504,11 +504,29 @@ into hooks with `scripts/install-git-hooks.sh` (bypass a run with `--no-verify`)
 
 | Tier | Command | When | What runs |
 |------|---------|------|-----------|
-| 1 | `just precommit` | every commit | defensive-code ratchet + `cargo check --workspace` |
-| 2 | `just prepush` | every push | full keystone (`PROPTEST_CASES=16`, incl. persisted regression seeds) |
+| 1 | `just precommit` | every commit | defensive-code ratchet + `just gate-compile` + out-of-workspace worker |
+| 2 | `just prepush` | every push | `just gate-arch`, then the full keystone (`PROPTEST_CASES=16`, incl. persisted regression seeds) |
+| L | `just landing-gate` | before reporting a lane done, and before weaving | fmt · `gate-compile` · `gate-arch` · `keystone-smoke` · `hand-authored` |
 
 Notes:
 
+- **Why `gate-compile` and not `cargo check --workspace`**: the bare form builds
+  only lib and bin targets, so a test binary that no longer compiles is
+  indistinguishable from a green one. `gate-compile` adds `--all-targets` and
+  the two pbt features — the minimum needed to compile a test target at all.
+  Measured 2026-08-15: warm 5.4s, the same as the bare check it replaced; only
+  the first run after a rebase pays the test-target compile.
+- **Every gate recipe needs a shebang.** A `just` recipe body without
+  `#!/usr/bin/env bash` runs under `sh -cu`, which has no `pipefail`, so a body
+  ending in `| tee` exits with *tee's* status — the gate passes however red the
+  command was. `gate-compile`, `gate-arch` and `hand-authored` carry the shebang
+  for this reason. Nine other recipes (`test`, `clippy`, `build`, `deny`, …)
+  still have the defect; see the 2026-08-15 BugFunnel ORACLE row.
+- **Why lanes should compose `landing-gate` rather than their own string**: the
+  gate strings drifted per lane, and a lane spelling the feature list
+  differently is a lane running a different gate. Its body is recipe names and
+  bare flags only — no parens, no nested quotes — so it survives being passed
+  through `parallel … -- <cmd>`, which sheds a quote layer.
 - **Defensive-code ratchet** (`scripts/defensive-ratchet.sh`): runs
   `scripts/check-defensive-code.sh` and compares against the committed baseline
   `scripts/defensive-baseline.txt` (the pre-existing stock of violations).

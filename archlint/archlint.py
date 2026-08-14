@@ -654,6 +654,11 @@ def collect_all_files() -> list[Path]:
         files.append(REPO_ROOT / "Cargo.toml")
     # Repo-root markdown (for HANDOFF check)
     files.extend(REPO_ROOT.glob("*.md"))
+    # Build output is not our source. `frontends/holon-worker` is out-of-workspace
+    # and owns a nested `target/`, so `just check-worker-wasm` drops build-script
+    # `.rs` output right inside the globbed tree — linting it made this scan's
+    # verdict depend on which OTHER gate ran first in the same checkout.
+    files = [f for f in files if "target" not in f.relative_to(REPO_ROOT).parts]
     return [f.resolve() for f in files if f.exists()]
 
 

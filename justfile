@@ -829,34 +829,82 @@ coverage-flutter:
 # jj does not fire git hooks — run these by hand (or scripts/install-git-hooks.sh
 # wires them up for plain-git users). See DEVELOPMENT.md "Quality gates".
 
+# The canonical typecheck. `--all-targets` plus the two pbt features is what it
+# takes to compile a TEST target at all: a bare `cargo check --workspace` builds
+# only lib+bin, so eight windowed GPUI test binaries were uncompilable for days
+# while every gate reported green (BugFunnel 2026-08-14 PERCEPTION). Lanes
+# compose THIS recipe instead of retyping the feature list — a lane that spells
+# the features differently is a lane running a different gate.
+gate-compile:
+    #!/usr/bin/env bash
+    # pipefail is REQUIRED, exactly as on `hand-authored` above: without a
+    # shebang `just` runs the body under `sh -cu`, the exit status is `tee`'s,
+    # and the recipe passes however red the compile is.
+    set -euo pipefail
+    cargo check --workspace --all-targets \
+        --features holon-integration-tests/pbt,holon-gpui/pbt \
+        2>&1 | tee /tmp/gate-compile.log
+
+# Architecture rules (archlint + the Rust-side structural tests). Its own
+# package, so `cargo nextest run --workspace` was the only thing that ran it and
+# no gate runs that — a red architecture test sat on main for 4 days
+# (BugFunnel 2026-08-12).
+gate-arch:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo nextest run -p holon-architecture-tests 2>&1 | tee /tmp/gate-arch.log
+
 # Tier 1 pre-commit gate: defensive-code ratchet + workspace typecheck.
-# MEASURED (2026-07-07): warm `cargo check --workspace` = 5.4s; ratchet ~5s CPU.
+# MEASURED (2026-08-14): warm `just gate-compile` = 12s; ratchet ~5s CPU. The
+# FIRST run after a rebase compiles every test target and costs minutes.
 # A keystone smoke was CUT from this tier: even PROPTEST_CASES=2 takes ~4.5min
 # because proptest unconditionally replays the persisted regression seeds and
 # each case pays full composed-SUT boot — it belongs in `just prepush` (Tier 2).
-# Assumes a warm build cache; the first run after a big rebase pays compile cost.
 precommit:
     #!/usr/bin/env bash
     set -euo pipefail
     echo "== Tier 1 [1/3]: defensive-code ratchet =="
     ./scripts/defensive-ratchet.sh
-    echo "== Tier 1 [2/3]: cargo check --workspace =="
-    cargo check --workspace 2>&1 | tee /tmp/precommit-check.log
+    echo "== Tier 1 [2/3]: workspace typecheck incl. every test target =="
+    just gate-compile
     echo "== Tier 1 [3/3]: out-of-workspace worker =="
     just check-worker-wasm
     echo "== Tier 1 PASS =="
 
-# Tier 2 pre-push gate: full keystone at default PROPTEST_CASES=16 (includes the
-# persisted regression seeds in tests/general_e2e_composed_pbt.proptest-regressions).
-# MEASURED (2026-07-07): green run ~5min quiet; a RED run that shrinks can take ~15min.
+# Tier 2 pre-push gate: architecture rules, then the full keystone at default
+# PROPTEST_CASES=16 (includes the persisted regression seeds in
+# tests/general_e2e_composed_pbt.proptest-regressions). Architecture runs FIRST:
+# it is 40s against the keystone's 5min, so a structural red fails fast.
+# MEASURED (2026-07-07): green keystone ~5min quiet; a RED run that shrinks ~15min.
 prepush:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "== Tier 2: full keystone (PROPTEST_CASES=16) =="
+    echo "== Tier 2 [1/2]: architecture rules =="
+    just gate-arch
+    echo "== Tier 2 [2/2]: full keystone (PROPTEST_CASES=16) =="
     PROPTEST_CASES=16 cargo test \
         -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
         2>&1 | tee /tmp/prepush-keystone.log
     echo "== Tier 2 PASS =="
+
+# The composed landing gate: what a lane runs before reporting done and what the
+# orchestrator runs before weaving. One recipe name, so it survives being passed
+# through `parallel ... -- <cmd>` (which sheds a quote layer, so no gate string
+# may carry parens or nested quotes).
+landing-gate:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "== landing [1/5]: fmt =="
+    cargo fmt --all -- --check
+    echo "== landing [2/5]: typecheck incl. every test target =="
+    just gate-compile
+    echo "== landing [3/5]: architecture rules =="
+    just gate-arch
+    echo "== landing [4/5]: keystone smoke =="
+    just keystone-smoke
+    echo "== landing [5/5]: hand-authored regressions =="
+    just hand-authored
+    echo "== landing gate PASS =="
 
 # --- Observability ----------------------------------------------------------
 # Run records are emitted by every keystone/GPUI PBT run as a side effect (see
