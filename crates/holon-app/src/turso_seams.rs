@@ -196,12 +196,20 @@ impl BlockReader for CacheBlockReader {
         // (sub-document boundary; the Rust BFS did the same by skipping
         // `block.is_page()`). Depth bound 100 matches existing
         // `find_document_uri` shape.
+        //
+        // The `Page` test is `NOT EXISTS` over `block_tags`, not a `LEFT JOIN`
+        // anti-join. It must key on `b.id` — the child about to be admitted —
+        // and keeping it a subquery makes that unmistakable: a `LEFT JOIN`
+        // spelling invites keying it on the CTE row instead, which admits the
+        // `Page` itself (`doc_membership_page_boundary_below_root`). It also
+        // keeps the recursive arm free of the `LEFT JOIN` shape that fails to
+        // terminate on newer Turso (`recursive_cte_shape_architecture`).
         let sql = format!(
-            "WITH RECURSIVE descendants(id, depth_acc) AS ( SELECT b.id, 0 FROM {table} b LEFT \
-             JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' WHERE b.parent_id = \
-             $doc_id AND bt.block_id IS NULL UNION ALL SELECT b.id, d.depth_acc + 1 FROM {table} \
-             b JOIN descendants d ON b.parent_id = d.id LEFT JOIN block_tags bt ON bt.block_id = \
-             b.id AND bt.tag = 'Page' WHERE bt.block_id IS NULL AND d.depth_acc < 100 ) SELECT \
+            "WITH RECURSIVE descendants(id, depth_acc) AS ( SELECT b.id, 0 FROM {table} b WHERE \
+             b.parent_id = $doc_id AND NOT EXISTS (SELECT 1 FROM block_tags bt WHERE bt.block_id \
+             = b.id AND bt.tag = 'Page') UNION ALL SELECT b.id, d.depth_acc + 1 FROM {table} b \
+             JOIN descendants d ON b.parent_id = d.id WHERE NOT EXISTS (SELECT 1 FROM block_tags \
+             bt WHERE bt.block_id = b.id AND bt.tag = 'Page') AND d.depth_acc < 100 ) SELECT \
              {HYDRATED_BLOCK_COLUMNS} FROM {table} b JOIN descendants d ON \
              d.id = b.id ORDER BY b.sort_key, b.id",
             table = BLOCK_WRITE_TABLE,
@@ -246,11 +254,11 @@ impl BlockReader for CacheBlockReader {
         // edge subquery and the ORDER BY dropped. Only `parent_id` is carried
         // beyond the id, because the gate compares shape and nothing else.
         let sql = format!(
-            "WITH RECURSIVE descendants(id, depth_acc) AS ( SELECT b.id, 0 FROM {table} b LEFT \
-             JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' WHERE b.parent_id = \
-             $doc_id AND bt.block_id IS NULL UNION ALL SELECT b.id, d.depth_acc + 1 FROM {table} \
-             b JOIN descendants d ON b.parent_id = d.id LEFT JOIN block_tags bt ON bt.block_id = \
-             b.id AND bt.tag = 'Page' WHERE bt.block_id IS NULL AND d.depth_acc < 100 ) SELECT \
+            "WITH RECURSIVE descendants(id, depth_acc) AS ( SELECT b.id, 0 FROM {table} b WHERE \
+             b.parent_id = $doc_id AND NOT EXISTS (SELECT 1 FROM block_tags bt WHERE bt.block_id \
+             = b.id AND bt.tag = 'Page') UNION ALL SELECT b.id, d.depth_acc + 1 FROM {table} b \
+             JOIN descendants d ON b.parent_id = d.id WHERE NOT EXISTS (SELECT 1 FROM block_tags \
+             bt WHERE bt.block_id = b.id AND bt.tag = 'Page') AND d.depth_acc < 100 ) SELECT \
              b.id, b.parent_id FROM {table} b JOIN descendants d ON d.id = b.id",
             table = BLOCK_WRITE_TABLE,
         );
