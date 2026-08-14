@@ -47,7 +47,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use gpui::AssetSource;
-use gpui::TestApp;
+use gpui::HeadlessAppContext;
 use holon_api::EntityUri;
 use holon_api::Key;
 use holon_api::KeyChord;
@@ -71,7 +71,7 @@ fn real_text_system() -> Arc<dyn gpui::PlatformTextSystem> {
 }
 
 /// Same cross-runtime fixed-point settle the other TestPlatform tests use.
-fn settle(app: &mut TestApp, bounds: &BoundsRegistry, timeout: Duration) {
+fn settle(app: &mut HeadlessAppContext, bounds: &BoundsRegistry, timeout: Duration) {
     let start = Instant::now();
     let mut last_count = 0usize;
     let mut stable_iters = 0u32;
@@ -139,10 +139,11 @@ fn painted_texts(bounds: &BoundsRegistry, entity: &str) -> Vec<String> {
 /// This binary is the first windowed rung to carry MORE THAN ONE `#[test]`
 /// (`live_promotion_windowed.rs`, the template, has exactly one), and two
 /// windowed apps must not be alive in one process at the same time: each arm
-/// builds its own `TestApp` plus its own tokio runtime, and the engine still
-/// reaches `tokio::spawn` from paths that assume the entering thread's reactor
-/// (the task #74 exposure). Under libtest's default parallelism the three arms
-/// start together and the process SIGABRTs before libtest prints anything.
+/// builds its own `HeadlessAppContext` plus its own tokio runtime, and the
+/// engine still reaches `tokio::spawn` from paths that assume the entering
+/// thread's reactor (the task #74 exposure). Under libtest's default
+/// parallelism the three arms start together and the process SIGABRTs before
+/// libtest prints anything.
 ///
 /// A poisoned lock is deliberately taken anyway: the panic that poisoned it is
 /// already a reported failure, and swallowing the remaining arms would hide
@@ -163,7 +164,9 @@ fn drive_undo_then_blur(
 
     let text_system = real_text_system();
     let assets: Arc<dyn AssetSource> = Arc::new(());
-    let mut app = TestApp::with_text_system_and_assets(text_system, assets);
+    let mut app = HeadlessAppContext::with_platform(text_system, assets, || {
+        gpui_platform::current_headless_renderer()
+    });
 
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
     // Writes driven from the gpui thread reach Loro's `emit_change`, which

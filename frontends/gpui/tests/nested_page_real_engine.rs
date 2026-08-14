@@ -20,7 +20,8 @@
 //!
 //! Run: `cargo test -p holon-gpui --features pbt --test nested_page_real_engine
 //! -- --test-threads=1 --nocapture`
-//! ⚠ `--test-threads=1` mandatory (gpui `TestApp` is not parallel-safe).
+//! ⚠ `--test-threads=1` mandatory (gpui `HeadlessAppContext` is not
+//! parallel-safe).
 
 #[path = "pbt_harness/mod.rs"]
 mod pbt_harness;
@@ -32,11 +33,11 @@ use std::time::Duration;
 use std::time::Instant;
 
 use gpui::AssetSource;
+use gpui::HeadlessAppContext;
 use gpui::InputEvent;
 use gpui::MouseButton;
 use gpui::Pixels;
 use gpui::Point;
-use gpui::TestApp;
 use holon_api::EntityUri;
 use holon_frontend::expand_toggle_id_for;
 use holon_frontend::geometry::GeometryProvider;
@@ -168,7 +169,9 @@ fn chevron_glyph(bounds: &BoundsRegistry) -> Option<String> {
 fn a_real_engine_nested_page_paints_its_children_when_opened() {
     let text_system = real_text_system();
     let assets: Arc<dyn AssetSource> = Arc::new(());
-    let mut app = TestApp::with_text_system_and_assets(text_system, assets);
+    let mut app = HeadlessAppContext::with_platform(text_system, assets, || {
+        gpui_platform::current_headless_renderer()
+    });
 
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
     let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));

@@ -30,7 +30,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use gpui::AssetSource;
-use gpui::TestApp;
+use gpui::HeadlessAppContext;
 use holon_api::EntityUri;
 use holon_api::Key;
 use holon_api::KeyChord;
@@ -57,7 +57,7 @@ fn real_text_system() -> Arc<dyn gpui::PlatformTextSystem> {
 
 /// Same cross-runtime fixed-point settle the other TestPlatform tests use.
 fn settle(
-    app: &mut TestApp,
+    app: &mut HeadlessAppContext,
     bounds: &BoundsRegistry,
     runtime: &tokio::runtime::Runtime,
     timeout: Duration,
@@ -132,7 +132,9 @@ fn window_entry<'a>(dispatched: &'a [DispatchedIntent], action: &str) -> &'a Dis
 fn window_registry_chords_reach_their_window() {
     let text_system = real_text_system();
     let assets: Arc<dyn AssetSource> = Arc::new(());
-    let mut app = TestApp::with_text_system_and_assets(text_system, assets);
+    let mut app = HeadlessAppContext::with_platform(text_system, assets, || {
+        gpui_platform::current_headless_renderer()
+    });
 
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
     let env = runtime.block_on(async { TestEnvironment::new(runtime.clone()).unwrap() });
