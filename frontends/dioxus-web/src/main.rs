@@ -98,11 +98,45 @@ enum BootState {
         cold_start_ms: u64,
     },
     Failed(String),
+    /// The browser denies a precondition the worker needs. Distinct from
+    /// `Failed` because no amount of clearing local data can grant it, so the
+    /// card must not offer the reset remedy.
+    PlatformUnsupported(String),
     /// Engine came up but `block:root-layout` is absent from the projection.
     /// With the IVM-reopen fix this should be unreachable, but if the local DB
     /// is genuinely corrupt we say so loudly and offer a recoverable reset (B2)
     /// rather than sitting on a green lie.
     NoRootLayout,
+}
+
+/// `None` when the page can host the worker. Otherwise a user-facing reason
+/// naming the missing precondition — the worker is `wasm32-wasip1-threads` and
+/// needs `SharedArrayBuffer`, which the browser only exposes to a
+/// cross-origin-isolated page.
+fn missing_platform_precondition() -> Option<String> {
+    // Read both off the global rather than via typed web-sys accessors: the
+    // `crossOriginIsolated` binding needs a web-sys feature this crate does not
+    // enable, and `SharedArrayBuffer` has no typed accessor at all.
+    let global = js_sys::global();
+    let prop = |name: &str| js_sys::Reflect::get(&global, &name.into()).ok(); // ALLOW(ok): a failed Reflect::get means the property is unreachable — exactly the "missing" condition being reported
+
+    if prop("crossOriginIsolated").and_then(|v| v.as_bool()) != Some(true) {
+        return Some(
+            "This page is not cross-origin isolated, so the database engine cannot start. On \
+             holon.space that isolation is installed by a service worker — if your browser blocks \
+             service workers (private/incognito restrictions, an extension, or a site setting for \
+             this domain), reload once with them allowed."
+                .to_string(),
+        );
+    }
+    if prop("SharedArrayBuffer").is_none_or(|v| v.is_undefined()) {
+        return Some(
+            "This browser does not expose SharedArrayBuffer, which the database engine requires. \
+             It is usually disabled by a privacy setting or an enterprise policy."
+                .to_string(),
+        );
+    }
+    None
 }
 
 #[component]
@@ -112,6 +146,17 @@ fn App() -> Element {
 
     use_future(move || async move {
         let t0 = now_ms();
+
+        // Preflight the two platform preconditions the worker cannot run
+        // without. Both come from cross-origin isolation, which on a static
+        // host is faked by the coi-serviceworker; if a browser blocks service
+        // workers (policy, extension, or site setting) the worker fails deep
+        // inside wasm instantiation with an opaque message. Name the real
+        // cause here instead.
+        if let Some(reason) = missing_platform_precondition() {
+            boot_state.set(BootState::PlatformUnsupported(reason));
+            return;
+        }
 
         let bridge = match WorkerBridge::spawn(WORKER_URL).await {
             Ok(b) => b,
@@ -163,7 +208,7 @@ fn App() -> Element {
 
         // Connect the MCP relay bridge (best-effort; reconnects automatically on
         // close).
-        connect_mcp_relay(bridge.clone());
+        connect_mcp_relay(bridge.clone(), 0);
 
         // Seed the viewport BEFORE the first watch so the root
         // `if_space(...)` picks the real breakpoint on the first paint,
@@ -172,23 +217,23 @@ fn App() -> Element {
         install_resize_listener(bridge.clone());
 
         // The root layout block has a well-known id set by seed_default_layout.
-        let root_val =
-            match bridge
-                .call(
-                    "engineExecuteQuery",
-                    [format!(
-                        "SELECT id FROM {BLOCK_READ_TABLE} WHERE id='block:root-layout' LIMIT 1"
-                    )
-                    .into()], // ALLOW(sql): startup readiness probe before BackendEngine is wired
+        let root_val = match bridge
+            .call(
+                "engineExecuteQuery",
+                [format!(
+                    // ALLOW(sql): startup readiness probe before BackendEngine is wired
+                    "SELECT id FROM {BLOCK_READ_TABLE} WHERE id='block:root-layout' LIMIT 1"
                 )
-                .await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    boot_state.set(BootState::Failed(format!("root block query: {e}")));
-                    return;
-                }
-            };
+                .into()],
+            )
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                boot_state.set(BootState::Failed(format!("root block query: {e}")));
+                return;
+            }
+        };
 
         let root_id = match extract_first_id(&root_val) {
             Some(id) => id,
@@ -316,6 +361,9 @@ fn App() -> Element {
                     BootState::Failed(err) => rsx! {
                         span { style: "color: #ff5252; font-size: 0.8em;", "⚠ {err}" }
                     },
+                    BootState::PlatformUnsupported(_) => rsx! {
+                        span { style: "color: #ff5252; font-size: 0.8em;", "⚠ browser cannot host the engine" }
+                    },
                     BootState::NoRootLayout => rsx! {
                         span { style: "color: #ffb020; font-size: 0.8em;", "⚠ local data corrupt" }
                     },
@@ -341,6 +389,18 @@ fn App() -> Element {
                                       and re-seeds a fresh one — try that if the failure looks like \
                                       corrupt local state.",
                             detail: Some(err.clone()),
+                            reset: true,
+                        }
+                    },
+                    (BootState::PlatformUnsupported(reason), _) => rsx! {
+                        RecoveryCard {
+                            accent: "#ff5252",
+                            title: "This browser cannot run Holon",
+                            message: "Holon's database engine needs a capability your browser is not \
+                                      granting this page. Clearing local data cannot help — the \
+                                      missing precondition is described below.",
+                            detail: Some(reason.clone()),
+                            reset: false,
                         }
                     },
                     (BootState::NoRootLayout, _) => rsx! {
@@ -352,6 +412,7 @@ fn App() -> Element {
                                       incomplete. Reset local data to rebuild a fresh vault. This only \
                                       clears data stored in THIS browser (OPFS).",
                             detail: None,
+                            reset: true,
                         }
                     },
                     (BootState::Ready { .. }, Some(vm)) => rsx! {
@@ -374,7 +435,15 @@ fn App() -> Element {
 /// optional raw-error detail block, and the Reset action. Kept to simple inline
 /// CSS; final palette harmonization happens at merge with the styling stream.
 #[component]
-fn RecoveryCard(accent: String, title: String, message: String, detail: Option<String>) -> Element {
+fn RecoveryCard(
+    accent: String,
+    title: String,
+    message: String,
+    detail: Option<String>,
+    /// False for failures a fresh vault cannot fix, where offering the reset
+    /// would send the user down a remedy that provably does not apply.
+    reset: bool,
+) -> Element {
     rsx! {
         div {
             style: "height: 100%; display: flex; align-items: center; justify-content: center; padding: 24px;",
@@ -401,7 +470,9 @@ fn RecoveryCard(accent: String, title: String, message: String, detail: Option<S
                         "{detail}"
                     }
                 }
-                ResetDataButton {}
+                if reset {
+                    ResetDataButton {}
+                }
             }
         }
     }
@@ -493,24 +564,52 @@ fn install_resize_listener(bridge: WorkerBridge) {
     closure.forget();
 }
 
+/// How many consecutive failed relay connects before giving up. A static host
+/// (GitHub Pages) has no hub to reach, so an uncapped retry is a permanent 1 Hz
+/// failure loop for the life of the page.
+const MCP_RELAY_MAX_ATTEMPTS: u32 = 5;
+
 /// Connect to the MCP relay hub as `role=browser`. All incoming tool calls
 /// are forwarded to the worker via `engineMcpTool` and the results are sent
-/// back. Reconnects automatically after 1 second when the hub closes (handles
-/// `trunk --watch` restarts without requiring a page reload).
-fn connect_mcp_relay(bridge: WorkerBridge) {
-    let host = web_sys::window()
-        .and_then(|w| w.location().host().ok()) // ALLOW(ok): web-sys JsValue error has no Display; default below
+/// back.
+///
+/// An unreachable hub does NOT fail in `WebSocket::new` — construction only
+/// rejects a malformed or scheme-forbidden URL. The failure arrives later as
+/// `onclose` without a preceding `onopen`, so that is what counts a consecutive
+/// attempt; after `MCP_RELAY_MAX_ATTEMPTS` of them the retry stops with a
+/// disclosed warning. An `onclose` that DID open is a hub restart
+/// (`trunk --watch`), so it reconnects with the count reset.
+fn connect_mcp_relay(bridge: WorkerBridge, attempt: u32) {
+    let location = web_sys::window().map(|w| w.location());
+    let host = location
+        .as_ref()
+        .and_then(|l| l.host().ok()) // ALLOW(ok): web-sys JsValue error has no Display; default below
         .unwrap_or_else(|| "localhost:8765".to_string());
-    let url = format!("ws://{host}/mcp-hub?role=browser");
+    // A ws:// socket from an https:// page is refused by the browser before any
+    // request leaves, so the scheme must follow the page's.
+    let scheme = match location.as_ref().and_then(|l| l.protocol().ok()) // ALLOW(ok): web-sys JsValue error has no Display; ws default below
+    {
+        Some(p) if p == "https:" => "wss",
+        _ => "ws",
+    };
+    let url = format!("{scheme}://{host}/mcp-hub?role=browser");
 
     let ws = match web_sys::WebSocket::new(&url) {
         Ok(ws) => ws,
         Err(e) => {
-            tracing::warn!("[mcp-relay] connect failed: {e:?} — will retry in 1s");
+            if attempt + 1 >= MCP_RELAY_MAX_ATTEMPTS {
+                tracing::warn!(
+                    "[mcp-relay] connect to {url} failed {} times ({e:?}) — giving up; MCP \
+                     tooling is unavailable for this page",
+                    attempt + 1
+                );
+                return;
+            }
+            tracing::warn!("[mcp-relay] connect to {url} failed: {e:?} — will retry in 1s");
             let bridge_clone = bridge.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 gloo_timers::future::TimeoutFuture::new(1000).await;
-                connect_mcp_relay(bridge_clone);
+                connect_mcp_relay(bridge_clone, attempt + 1);
             });
             return;
         }
@@ -518,6 +617,17 @@ fn connect_mcp_relay(bridge: WorkerBridge) {
 
     MCP_WS.with(|slot| *slot.borrow_mut() = Some(ws.clone()));
     tracing::debug!("[mcp-relay] connecting to {url}");
+
+    // Distinguishes "the hub was never there" from "the hub restarted": only
+    // onclose WITHOUT a preceding onopen counts toward the attempt cap.
+    let opened = std::rc::Rc::new(std::cell::Cell::new(false));
+    let opened_on_open = opened.clone();
+    let onopen: Closure<dyn Fn(web_sys::Event)> =
+        Closure::wrap(Box::new(move |_: web_sys::Event| {
+            opened_on_open.set(true);
+        }));
+    ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
+    onopen.forget();
 
     // onmessage: receive tool call requests from the native relay.
     let bridge_msg = bridge.clone();
@@ -589,15 +699,28 @@ fn connect_mcp_relay(bridge: WorkerBridge) {
     ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
     onmessage.forget();
 
-    // onclose: clear slot and reconnect after 1 second.
+    // onclose: clear the slot, then either reconnect or give up. This is where
+    // an unreachable hub surfaces — see this function's doc comment.
+    let url_on_close = url.clone();
     let onclose: Closure<dyn Fn(web_sys::CloseEvent)> =
         Closure::wrap(Box::new(move |_: web_sys::CloseEvent| {
-            tracing::debug!("[mcp-relay] disconnected — reconnecting in 1 s");
             MCP_WS.with(|slot| *slot.borrow_mut() = None);
+            // A socket that opened proves the hub exists, so its close is a
+            // restart and the count starts over; one that never opened is
+            // another consecutive failure to reach it.
+            let next = if opened.get() { 0 } else { attempt + 1 };
+            if next >= MCP_RELAY_MAX_ATTEMPTS {
+                tracing::warn!(
+                    "[mcp-relay] could not reach {url_on_close} in {next} attempts — giving up; \
+                     MCP tooling is unavailable for this page"
+                );
+                return;
+            }
+            tracing::debug!("[mcp-relay] disconnected — reconnecting in 1 s (attempt {next})");
             let bridge = bridge.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 gloo_timers::future::TimeoutFuture::new(1000).await;
-                connect_mcp_relay(bridge);
+                connect_mcp_relay(bridge, next);
             });
         }));
     ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));

@@ -333,6 +333,16 @@ mod backend {
             .block_on(async { super::seed::seed_default_layout(&engine).await })
             .map_err(|e| super::nerr("seed_default_layout", e))?;
 
+        // Start the action + holon_rule watchers. Native does this in holon-app
+        // `wiring.rs`; this hand-rolled mirror omitted it, so the seeded
+        // `daily_journal` rule never fired and the journals feed stayed empty.
+        // Must run after seed_default_layout so the rule blocks exist to discover.
+        runtime
+            .block_on(async {
+                holon::api::action_watcher::start_action_watchers(engine.clone()).await
+            })
+            .map_err(|e| super::nerr("start_action_watchers", e))?;
+
         // Build the FrontendSession from the engine's capabilities, mirroring
         // the production Turso wiring (holon-app `wiring.rs`): the BackendEngine
         // provides the query/operation/ui-watcher capabilities, and the block
@@ -1474,6 +1484,8 @@ mod backend {
                     let res = svc
                         .execute_raw_sql(
                             &format!(
+                                // ALLOW(sql): reset_vault self-check enumerating the rebuilt
+                                // vault's block ids, via the sanctioned HolonService raw-SQL seam
                                 "SELECT id FROM {} ORDER BY id",
                                 holon::storage::BLOCK_WRITE_TABLE
                             ),
