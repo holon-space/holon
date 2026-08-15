@@ -502,6 +502,8 @@ pbt-lib-slices:
 
 # Run cargo-mutants on a specific file (defaults to petri.rs)
 mutants file='crates/holon/src/petri.rs' timeout='300':
+    #!/usr/bin/env bash
+    set -euo pipefail
     cargo mutants \
         --manifest-path crates/holon/Cargo.toml \
         --file {{file}} \
@@ -522,14 +524,20 @@ icons *FLAGS:
 
 # Workspace build
 build *FLAGS: icons
+    #!/usr/bin/env bash
+    set -euo pipefail
     cargo build --workspace {{FLAGS}} 2>&1 | tee /tmp/holon-build.log
 
 # Clippy across workspace
 clippy:
+    #!/usr/bin/env bash
+    set -euo pipefail
     cargo clippy --workspace --all-targets 2>&1 | tee /tmp/holon-clippy.log
 
 # Run all workspace tests (not PBTs — those are slow)
 test:
+    #!/usr/bin/env bash
+    set -euo pipefail
     cargo nextest run --workspace 2>&1 | tee /tmp/holon-test.log
 
 # Rot guard for the out-of-workspace wasi worker: `cargo check --workspace`
@@ -543,7 +551,11 @@ test:
 check-worker-wasm:
     #!/usr/bin/env bash
     set -euo pipefail
-    rustup target add wasm32-wasip1-threads
+    # Install only when missing: `rustup target add` reaches the network even for
+    # an already-installed target, and this recipe runs at every commit.
+    if ! rustup target list --installed | grep -qx wasm32-wasip1-threads; then
+        rustup target add wasm32-wasip1-threads
+    fi
     EMNAPI_LINK_DIR="$(mktemp -d)" cargo check \
         --manifest-path frontends/holon-worker/Cargo.toml \
         --target wasm32-wasip1-threads --features browser \
@@ -553,6 +565,25 @@ check-worker-wasm:
         --lib --no-default-features \
         2>&1 | tee /tmp/holon-worker-native-test.log
 
+# Rot guard for the BROWSER target. `check-worker-wasm` above covers only
+# wasm32-wasip1-threads, so a crate that compiles native and wasi but not
+# wasm32-unknown-unknown was caught by no gate at all — a native-only dep in
+# holon-frontend's graph (tracing-appender → the unmaintained `symlink` crate)
+# sat there until someone ran this by hand (BugFunnel 2026-08-15 D15.b). The
+# `getrandom_backend` rustflag this target needs lives in .cargo/config.toml.
+# MEASURED (2026-08-15): warm 2s. Only the first build of the wasm dep graph
+# costs minutes — the same warm/cold profile `gate-compile` already has.
+check-frontend-wasm:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Install only when missing — see check-worker-wasm: `rustup target add` is a
+    # network touch even when the target is already there.
+    if ! rustup target list --installed | grep -qx wasm32-unknown-unknown; then
+        rustup target add wasm32-unknown-unknown
+    fi
+    cargo check -p holon-frontend --target wasm32-unknown-unknown \
+        2>&1 | tee /tmp/holon-frontend-wasm-check.log
+
 # --- Code Quality -----------------------------------------------------------
 
 # Check formatting
@@ -561,14 +592,20 @@ fmt-check:
 
 # Audit dependencies for vulnerabilities, license issues, and bans
 deny:
+    #!/usr/bin/env bash
+    set -euo pipefail
     cargo deny check 2>&1 | tee /tmp/holon-deny.log
 
 # Find unused dependencies
 machete:
+    #!/usr/bin/env bash
+    set -euo pipefail
     cargo machete 2>&1 | tee /tmp/holon-machete.log
 
 # Detect copy-pasted code (requires: npx or npm i -g jscpd)
 duplication:
+    #!/usr/bin/env bash
+    set -euo pipefail
     npx jscpd . 2>&1 | tee /tmp/holon-duplication.log
 
 # Run all lints and quality checks locally
@@ -657,10 +694,14 @@ crap-baseline:
 
 # Dependency audit (vulnerabilities, licenses, bans).
 analyze-deny:
+    #!/usr/bin/env bash
+    set -euo pipefail
     cargo deny check 2>&1 | tee /tmp/holon-analyze-deny.log
 
 # Unused dependency detection.
 analyze-machete:
+    #!/usr/bin/env bash
+    set -euo pipefail
     cargo machete 2>&1 | tee /tmp/holon-analyze-machete.log
 
 # Lint with clippy at the workspace level.
@@ -854,34 +895,45 @@ gate-arch:
     set -euo pipefail
     cargo nextest run -p holon-architecture-tests 2>&1 | tee /tmp/gate-arch.log
 
-# Tier 1 pre-commit gate: defensive-code ratchet + workspace typecheck.
-# MEASURED (2026-08-14): warm `just gate-compile` = 12s; ratchet ~5s CPU. The
-# FIRST run after a rebase compiles every test target and costs minutes.
+# Tier 1 pre-commit gate: gate-integrity lints, defensive-code ratchet, typecheck.
+# The justfile guard runs FIRST and costs ~10ms: a never-fail recipe invalidates
+# every later verdict in this file, so it is checked before anything trusts one.
+# MEASURED (2026-08-15): the whole warm tier = 64s end-to-end (gate-compile 12s,
+# ratchet ~5s, check-frontend-wasm 2s, the rest worker). The FIRST run after a
+# rebase compiles every test target and costs minutes — the one-off both wasm
+# checks pay too.
 # A keystone smoke was CUT from this tier: even PROPTEST_CASES=2 takes ~4.5min
 # because proptest unconditionally replays the persisted regression seeds and
 # each case pays full composed-SUT boot — it belongs in `just prepush` (Tier 2).
 precommit:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "== Tier 1 [1/3]: defensive-code ratchet =="
+    echo "== Tier 1 [1/5]: justfile pipefail guard =="
+    ./scripts/check-justfile-pipefail.sh
+    echo "== Tier 1 [2/5]: defensive-code ratchet =="
     ./scripts/defensive-ratchet.sh
-    echo "== Tier 1 [2/3]: workspace typecheck incl. every test target =="
+    echo "== Tier 1 [3/5]: workspace typecheck incl. every test target =="
     just gate-compile
-    echo "== Tier 1 [3/3]: out-of-workspace worker =="
+    echo "== Tier 1 [4/5]: browser-target typecheck =="
+    just check-frontend-wasm
+    echo "== Tier 1 [5/5]: out-of-workspace worker =="
     just check-worker-wasm
     echo "== Tier 1 PASS =="
 
 # Tier 2 pre-push gate: architecture rules, then the full keystone at default
 # PROPTEST_CASES=16 (includes the persisted regression seeds in
-# tests/general_e2e_composed_pbt.proptest-regressions). Architecture runs FIRST:
-# it is 40s against the keystone's 5min, so a structural red fails fast.
+# tests/general_e2e_composed_pbt.proptest-regressions). The two cheap checks run
+# FIRST — architecture 40s, browser-target 2s warm, against the keystone's 5min —
+# so a structural or browser-target red fails fast.
 # MEASURED (2026-07-07): green keystone ~5min quiet; a RED run that shrinks ~15min.
 prepush:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "== Tier 2 [1/2]: architecture rules =="
+    echo "== Tier 2 [1/3]: architecture rules =="
     just gate-arch
-    echo "== Tier 2 [2/2]: full keystone (PROPTEST_CASES=16) =="
+    echo "== Tier 2 [2/3]: browser-target typecheck =="
+    just check-frontend-wasm
+    echo "== Tier 2 [3/3]: full keystone (PROPTEST_CASES=16) =="
     PROPTEST_CASES=16 cargo test \
         -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
         2>&1 | tee /tmp/prepush-keystone.log
@@ -894,15 +946,17 @@ prepush:
 landing-gate:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "== landing [1/5]: fmt =="
+    echo "== landing [1/6]: fmt =="
     cargo fmt --all -- --check
-    echo "== landing [2/5]: typecheck incl. every test target =="
+    echo "== landing [2/6]: typecheck incl. every test target =="
     just gate-compile
-    echo "== landing [3/5]: architecture rules =="
+    echo "== landing [3/6]: browser-target typecheck =="
+    just check-frontend-wasm
+    echo "== landing [4/6]: architecture rules =="
     just gate-arch
-    echo "== landing [4/5]: keystone smoke =="
+    echo "== landing [5/6]: keystone smoke =="
     just keystone-smoke
-    echo "== landing [5/5]: hand-authored regressions =="
+    echo "== landing [6/6]: hand-authored regressions =="
     just hand-authored
     echo "== landing gate PASS =="
 

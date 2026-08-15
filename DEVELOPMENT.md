@@ -504,9 +504,9 @@ into hooks with `scripts/install-git-hooks.sh` (bypass a run with `--no-verify`)
 
 | Tier | Command | When | What runs |
 |------|---------|------|-----------|
-| 1 | `just precommit` | every commit | defensive-code ratchet + `just gate-compile` + out-of-workspace worker |
-| 2 | `just prepush` | every push | `just gate-arch`, then the full keystone (`PROPTEST_CASES=16`, incl. persisted regression seeds) |
-| L | `just landing-gate` | before reporting a lane done, and before weaving | fmt · `gate-compile` · `gate-arch` · `keystone-smoke` · `hand-authored` |
+| 1 | `just precommit` | every commit | justfile pipefail guard · defensive-code ratchet · `just gate-compile` · `check-frontend-wasm` · out-of-workspace worker |
+| 2 | `just prepush` | every push | `just gate-arch` · `just check-frontend-wasm` · the full keystone (`PROPTEST_CASES=16`, incl. persisted regression seeds) |
+| L | `just landing-gate` | before reporting a lane done, and before weaving | fmt · `gate-compile` · `check-frontend-wasm` · `gate-arch` · `keystone-smoke` · `hand-authored` |
 
 Notes:
 
@@ -519,9 +519,26 @@ Notes:
 - **Every gate recipe needs a shebang.** A `just` recipe body without
   `#!/usr/bin/env bash` runs under `sh -cu`, which has no `pipefail`, so a body
   ending in `| tee` exits with *tee's* status — the gate passes however red the
-  command was. `gate-compile`, `gate-arch` and `hand-authored` carry the shebang
-  for this reason. Nine other recipes (`test`, `clippy`, `build`, `deny`, …)
-  still have the defect; see the 2026-08-15 BugFunnel ORACLE row.
+  command was. Every recipe that pipes into `tee` therefore carries the shebang
+  and `set -euo pipefail`, and `scripts/check-justfile-pipefail.sh` enforces it
+  as Tier 1 step 1 — the check costs ~10ms and a never-fail recipe would
+  invalidate every later verdict in the file. See the 2026-08-15 BugFunnel
+  ORACLE row for the nine recipes that carried the defect.
+  The guard credits `pipefail` only when a real `set` command enables it, and a
+  later `set +o pipefail` takes it away again — the word inside an echo string
+  or a comment protects nothing. It also fails loudly on a file it parses to
+  zero recipes, since reporting OK there would be the same false green it
+  exists to prevent. Its adversarial fixture is
+  `lane-logs/t40-guard-adversarial-fixture.justfile`.
+- **Why `check-frontend-wasm` is separate from `check-worker-wasm`**: they are
+  different targets. The worker check covers `wasm32-wasip1-threads`; nothing
+  covered `wasm32-unknown-unknown`, so a crate that compiled native and wasi but
+  not the browser was caught by no gate — `tracing-appender` pulled the
+  unmaintained `symlink` crate into holon-frontend's browser graph and sat there
+  until someone checked by hand (BugFunnel 2026-08-15 D15.b). Measured
+  2026-08-15: warm 2s; only the first build of the wasm dep graph costs minutes —
+  the same warm/cold profile `gate-compile` has, which is why it earns a Tier 1
+  slot and still runs again at Tier 2 and landing: a 2s check is free insurance.
 - **Why lanes should compose `landing-gate` rather than their own string**: the
   gate strings drifted per lane, and a lane spelling the feature list
   differently is a lane running a different gate. Its body is recipe names and
