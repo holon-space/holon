@@ -54,6 +54,7 @@ pub fn init_from(spec: &str) -> LogGuard {
 }
 
 pub struct LogGuard {
+    #[cfg(not(target_arch = "wasm32"))]
     _file_guards: Vec<tracing_appender::non_blocking::WorkerGuard>,
     #[cfg(feature = "chrome-trace")]
     _chrome_trace_guard: Option<crate::memory_monitor::chrome_trace::FlushGuard>,
@@ -186,6 +187,7 @@ fn parse_single_dest(s: &str) -> LogDest {
 fn init_with_destinations(destinations: &[LogDest]) -> LogGuard {
     use tracing_subscriber::Layer;
 
+    #[cfg(not(target_arch = "wasm32"))]
     let mut file_guards = Vec::new();
     let mut layers: Vec<Box<dyn Layer<tracing_subscriber::Registry> + Send + Sync>> = Vec::new();
 
@@ -225,6 +227,16 @@ fn init_with_destinations(destinations: &[LogDest]) -> LogGuard {
                         .with_filter(env_filter()),
                 ));
             }
+            // wasm32 has no writer thread and no filesystem to write to, so the
+            // request is unsatisfiable rather than degraded. Panicking matches
+            // the two arms below (`otlp` without the feature, unknown
+            // destination) and is the only disclosure that survives
+            // wasm32-unknown-unknown, where stderr is a discard sink.
+            #[cfg(target_arch = "wasm32")]
+            LogDest::File(path, _) => {
+                panic!("HOLON_LOG=file://{path} is unavailable on wasm32: no file logging");
+            }
+            #[cfg(not(target_arch = "wasm32"))]
             LogDest::File(path, format) => {
                 let file = std::fs::File::create(path)
                     .unwrap_or_else(|e| panic!("Cannot create log file '{path}': {e}"));
@@ -293,6 +305,7 @@ fn init_with_destinations(destinations: &[LogDest]) -> LogGuard {
     install_panic_hook();
 
     LogGuard {
+        #[cfg(not(target_arch = "wasm32"))]
         _file_guards: file_guards,
         #[cfg(feature = "chrome-trace")]
         _chrome_trace_guard: Some(chrome_guard),
