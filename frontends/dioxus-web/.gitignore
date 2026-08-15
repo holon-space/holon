@@ -1,0 +1,5 @@
+# Static site assembled by build-pages.mjs, plus the coi-serviceworker it
+# downloads. Both are build outputs rebuilt from dist/ + the worker wasm; the
+# tree is ~43 MB and must never reach a commit.
+site/
+.coi-serviceworker.min.js

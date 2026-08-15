@@ -2,3 +2,4 @@
 # commit it — it's 600+ MB on dev profile. serve.mjs now serves it directly
 # from cargo target/, so this file should never exist in the worker root.
 holon_worker.wasm32-wasi.wasm
+holon_worker.wasm32-wasi.debug.wasm
