@@ -60,8 +60,7 @@ impl OperationSubset {
     }
 }
 
-#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
+#[async_trait]
 impl OperationProvider for OperationSubset {
     fn operations(&self) -> Vec<OperationDescriptor> {
         self.inner
@@ -107,8 +106,7 @@ mod tests {
 
     struct FullProvider;
 
-    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
-    #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
+    #[async_trait]
     impl OperationProvider for FullProvider {
         fn operations(&self) -> Vec<OperationDescriptor> {
             ["create", "delete", "block_to_page_plan"]
