@@ -18,6 +18,10 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
         return rsx! {};
     };
     let child_vm = (**child).clone();
+    // Addressable by entity for the web arm's `click_entity`: rendered-text
+    // carries this already, but a selectable's clickable surface is the
+    // wrapper, and its child may render no text node at all (sidebar rows).
+    let dom_entity_id = node.row_id().unwrap_or_default(); // ALLOW(ok): a selectable without a row_id is a non-entity surface; the empty id is deliberately unaddressable (real ids are scheme-qualified, "" cannot collide)
 
     let click_intents: HashMap<ClickModifiers, OperationIntent> = node
         .operations
@@ -42,6 +46,7 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
     rsx! {
         div {
             "data-role": "selectable",
+            "data-entity-id": "{dom_entity_id}",
             style: "cursor: pointer;",
             onclick: move |evt| {
                 let m = evt.modifiers();

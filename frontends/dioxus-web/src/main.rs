@@ -109,6 +109,20 @@ enum BootState {
     NoRootLayout,
 }
 
+impl BootState {
+    /// Stable slug for the `data-boot-state` attribute the web-arm driver
+    /// awaits.
+    fn marker(&self) -> &'static str {
+        match self {
+            BootState::Booting => "booting",
+            BootState::Ready { .. } => "ready",
+            BootState::Failed(_) => "failed",
+            BootState::PlatformUnsupported(_) => "platform-unsupported",
+            BootState::NoRootLayout => "no-root-layout",
+        }
+    }
+}
+
 /// `None` when the page can host the worker. Otherwise a user-facing reason
 /// naming the missing precondition — the worker is `wasm32-wasip1-threads` and
 /// needs `SharedArrayBuffer`, which the browser only exposes to a
@@ -347,6 +361,10 @@ fn App() -> Element {
             // ── Title bar ───────────────────────────────────────────────────
             div {
                 style: "display: flex; align-items: center; gap: 8px; padding: 6px 12px; background: #1a1a2e; border-bottom: 1px solid #2a2a3a; flex-shrink: 0;",
+                // Machine-readable boot state. The web-arm driver awaits this
+                // instead of scraping the badge text, so a failed boot fails
+                // the test loudly instead of timing out.
+                "data-boot-state": "{s.marker()}",
                 span { style: "font-weight: bold; color: #e0e0e0;", "Holon" }
                 match &s {
                     BootState::Booting => rsx! {

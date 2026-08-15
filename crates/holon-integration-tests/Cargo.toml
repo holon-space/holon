@@ -59,6 +59,10 @@ tokio-console = ["dep:console-subscriber", "otel-testing", "tokio/tracing"]
 # profiled. Run: cargo run --release --example diag_harness \
 #   --no-default-features --features test-infra,heap-profile
 heap-profile = ["holon-frontend/heap-profile"]
+# Web arm (dioxus-web under test): `WebUserDriver` drives a real Chrome over
+# CDP. Off by default — it pulls a browser-automation stack no other tier
+# needs, and the arm only runs against a served `dist/`.
+web-arm = ["test-infra", "dep:chromiumoxide", "dep:futures-util", "dep:serde_json"]
 # Cold-boot ingest benchmark: init a RUST_LOG fmt subscriber in diag_harness so
 # the `boot_*` holon_latency events are captured. Run:
 #   HOLON_SOAK_SEED_FILES=200 RUST_LOG=holon_latency=debug \
@@ -153,6 +157,8 @@ console-subscriber = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
 memory-stats = { workspace = true, optional = true }
+chromiumoxide = { version = "=0.9.1", optional = true }
+futures-util = { version = "0.3", optional = true }
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]

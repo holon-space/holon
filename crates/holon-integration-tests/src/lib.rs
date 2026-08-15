@@ -52,6 +52,8 @@ pub mod test_environment;
 #[cfg(feature = "otel-testing")]
 pub mod test_tracing;
 pub mod ui_driver;
+#[cfg(feature = "web-arm")]
+pub mod web_user_driver;
 pub mod widget_state;
 
 pub use assertions::assert_block_order;
