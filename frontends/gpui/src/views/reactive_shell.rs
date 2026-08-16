@@ -791,15 +791,26 @@ impl Render for ReactiveShell {
             // such height, so it falls through to the content-height arm below.
             // Shell-less compositions still split at `columns::render` — ONE
             // implementation (`render_accordion_split`), two call sites.
-            if self.placement == ShellPlacement::Panel && builders::has_accordion_child(tree) {
+            if self.placement == ShellPlacement::Panel {
                 let sid = gpui::ElementId::from(SharedString::from(format!("{scroll_id}-main")));
-                return builders::render_accordion_split(
-                    div().size_full(),
-                    tree,
-                    sid,
-                    None,
-                    &gpui_ctx,
-                );
+                if builders::has_accordion_child(tree) {
+                    return builders::render_accordion_split(
+                        div().size_full(),
+                        tree,
+                        sid,
+                        None,
+                        &gpui_ctx,
+                    );
+                }
+                // …and the same split when the backend's query-source
+                // `view_mode_switcher` wraps that column (every panel whose
+                // block has both a query and a render source — the seeded main
+                // panel and both sidebars). The switcher renders one mode into
+                // one slot, so it moves nothing: split the slot column and
+                // overlay the mode bar.
+                if let Some(column) = builders::vms_slot_accordion_column(tree) {
+                    return builders::render_accordion_split_slot(tree, &column, sid, &gpui_ctx);
+                }
             }
             // Plain block tree. A PANEL-placed shell mirrors the eager arm above
             // (id + overflow_y_scroll on the size_full div): without the scroll

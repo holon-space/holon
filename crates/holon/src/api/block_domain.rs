@@ -307,7 +307,7 @@ impl<'a> BlockDomain<'a> {
         }
     }
 
-    pub(crate) fn wrap_in_query_source_switcher(
+    pub fn wrap_in_query_source_switcher(
         block_id: &holon_api::EntityUri,
         result_expr: RenderExpr,
         query_source: &str,

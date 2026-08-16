@@ -265,6 +265,34 @@ pub(crate) fn render_content_height(
     container.into_any_element()
 }
 
+/// SPLIT main-panel variant: the slot holds the panel's accordion-bearing
+/// `column`, so run the flow-panel split (virtualized main region + pinned
+/// accordion footer) on that column and overlay the mode bar. Reached from the
+/// `Panel`-placed block shell, whose tree root is this switcher because the
+/// backend wraps every query-plus-render panel in it — see
+/// [`super::column::vms_slot_accordion_column`]. Same overlay shape as
+/// [`render_virtualized`]; `column` is the slot content that predicate
+/// resolved.
+pub(crate) fn render_accordion_split_slot(
+    node: &ReactiveViewModel,
+    column: &ReactiveViewModel,
+    scroll_id: gpui::ElementId,
+    ctx: &GpuiRenderContext,
+) -> AnyElement {
+    let split =
+        super::column::render_accordion_split(div().size_full(), column, scroll_id, None, ctx);
+    let mut container = div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .relative()
+        .child(div().flex_1().min_h_0().w_full().child(split));
+    if let Some(switcher_bar) = build_switcher_bar(node, ctx) {
+        container = container.child(switcher_bar);
+    }
+    container.into_any_element()
+}
+
 /// VIRTUALIZED main-panel variant (Inc 5): renders the slot collection through
 /// the nested collection-mode `ReactiveShell` + `gpui::list` (only viewport
 /// rows built per frame) instead of `render_content_height`'s eager

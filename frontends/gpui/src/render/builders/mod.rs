@@ -11,6 +11,7 @@ pub mod style;
 // column).
 pub(crate) use column::has_accordion_child;
 pub(crate) use column::render_accordion_split;
+pub(crate) use column::vms_slot_accordion_column;
 pub(crate) use drawer::SidebarResizeState;
 pub(crate) use drawer::drag_sidebar_to;
 pub(crate) use drawer::finalize_sidebar_resize;
@@ -18,6 +19,7 @@ pub(crate) use tree_item::collapse_state as tree_item_collapse_state;
 // Scan-weight contract between a parent's disclosure and a leaf's bullet —
 // asserted by the sidebar disclosure affordance test.
 pub use tree_item::{DISCLOSURE_WEIGHT, LEAF_BULLET_WEIGHT};
+pub(crate) use view_mode_switcher::render_accordion_split_slot;
 
 holon_macros::builder_registry!("src/render/builders",
     skip: [prelude, columns, style],

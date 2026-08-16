@@ -40,6 +40,28 @@ pub(crate) fn has_accordion_child(node: &ReactiveViewModel) -> bool {
     node.widget_name().as_deref() == Some("column") && node.children.iter().any(|c| is_accordion(c))
 }
 
+/// The accordion-bearing `column` hiding one slot below a `view_mode_switcher`
+/// root, if that is what `node` is.
+///
+/// The backend wraps a panel whose block has BOTH a query source and a render
+/// source in the query-source switcher (`block_domain.rs`,
+/// `wrap_in_query_source_switcher`), so production's panel-tree root is a
+/// `view_mode_switcher` and the authored `column` sits in its slot — the shape
+/// both sidebars already have. The switcher renders exactly ONE mode into that
+/// slot, so it changes nothing about where the column's content sits: splitting
+/// the slot column is the same split, one level down. Without this,
+/// [`has_accordion_child`] is false for the real seeded main panel and its
+/// accordion falls through to `accordion::render`'s placement-error widget.
+pub(crate) fn vms_slot_accordion_column(
+    node: &ReactiveViewModel,
+) -> Option<std::sync::Arc<ReactiveViewModel>> {
+    if node.widget_name().as_deref() != Some("view_mode_switcher") {
+        return None;
+    }
+    let column = node.slot.as_ref()?.content.get_cloned();
+    has_accordion_child(&column).then_some(column)
+}
+
 /// True when `node` is a main-panel flow `column` that hosts the scrollable
 /// outline — it carries either a pinned `accordion` footer OR a scrollable
 /// collection (`tree`/`list`/`live_query`/`collection_view`). Such columns
@@ -54,6 +76,71 @@ pub(crate) fn is_main_panel_flow_column(node: &ReactiveViewModel) -> bool {
             .children
             .iter()
             .any(|c| is_accordion(c) || holds_collection(c))
+}
+
+#[cfg(test)]
+mod split_target_tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use holon_frontend::ReactiveViewModel;
+    use holon_frontend::reactive_view_model::ReactiveSlot;
+
+    use super::has_accordion_child;
+    use super::vms_slot_accordion_column;
+
+    fn node(widget: &str, children: Vec<ReactiveViewModel>) -> ReactiveViewModel {
+        ReactiveViewModel {
+            children: children.into_iter().map(Arc::new).collect(),
+            ..ReactiveViewModel::from_widget(widget, HashMap::new())
+        }
+    }
+
+    fn switcher_over(slot: ReactiveViewModel) -> ReactiveViewModel {
+        ReactiveViewModel {
+            slot: Some(ReactiveSlot::new(slot)),
+            ..ReactiveViewModel::from_widget("view_mode_switcher", HashMap::new())
+        }
+    }
+
+    #[test]
+    fn switcher_over_accordion_column_resolves_to_that_column() {
+        let tree = switcher_over(node("column", vec![node("accordion", vec![])]));
+        let column = vms_slot_accordion_column(&tree).expect("the slot column must be found");
+        assert!(has_accordion_child(&column));
+    }
+
+    /// The sidebar firewall: both sidebars are switcher-wrapped columns today
+    /// and must keep taking the eager content-height path, never the split.
+    #[test]
+    fn switcher_over_plain_column_is_not_a_split_target() {
+        let tree = switcher_over(node("column", vec![node("list", vec![])]));
+        assert!(vms_slot_accordion_column(&tree).is_none());
+    }
+
+    /// Mode switched to `source`: the slot holds the query editor, so the split
+    /// must stop firing until the switcher goes back to the result mode.
+    #[test]
+    fn switcher_over_non_column_is_not_a_split_target() {
+        let tree = switcher_over(node("source_editor", vec![]));
+        assert!(vms_slot_accordion_column(&tree).is_none());
+    }
+
+    /// Transparency is ONE level and switcher-only — an accordion buried in a
+    /// `row` (or any other container) stays misplaced and keeps rendering the
+    /// fail-loud placement error.
+    #[test]
+    fn switcher_over_row_wrapped_accordion_is_not_a_split_target() {
+        let tree = switcher_over(node("row", vec![node("accordion", vec![])]));
+        assert!(vms_slot_accordion_column(&tree).is_none());
+    }
+
+    #[test]
+    fn a_bare_column_is_not_a_switcher_target() {
+        let tree = node("column", vec![node("accordion", vec![])]);
+        assert!(has_accordion_child(&tree));
+        assert!(vms_slot_accordion_column(&tree).is_none());
+    }
 }
 
 /// Render a scrollable collection at CONTENT height (eager, non-virtualized).

@@ -4,18 +4,30 @@
 //! `columns(column(list, divider, accordion(text rows)))` shape as a VM tree),
 //! this test drives the REAL render expression authored in
 //! `assets/default/index.org` for `block:default-main-panel`
-//! (`column(collection_view(), divider(), accordion(#{... max_height_fraction:
-//! 0.33 ...}, live_query(#{... backlinks ...})))`). It parses that exact string
-//! with the production `parse_render_dsl`, so a regression that breaks the
-//! seeded expression — a bad edit to `index.org`, a parser change, or a rewire
-//! of the accordion split — fails HERE.
+//! (`column(columns(#{item_template: live_block()}), divider(),
+//! accordion(#{... max_height_fraction: 0.33 ...}, live_query(#{...
+//! backlinks ...})))`). It parses that exact string with the production
+//! `parse_render_dsl` AND applies the production wrap the backend puts around
+//! it, so a regression that breaks the seeded expression — a bad edit to
+//! `index.org`, a parser change, or a rewire of the accordion split — fails
+//! HERE.
+//!
+//! The wrap is load-bearing, not decoration: `block:default-main-panel` has
+//! both a query source and a render source, so
+//! `block_domain::render_expr_for_block` hands the parsed expression to
+//! `wrap_in_query_source_switcher` and the panel tree's ROOT becomes a
+//! `view_mode_switcher`, with the authored `column` in its slot. Calling the
+//! real function (rather than mirroring it) is what keeps this test's topology
+//! equal to production's — an earlier version omitted the wrap, rendered a bare
+//! `column` root, and therefore could not see the accordion placement-error
+//! break that shipped for a day.
 //!
 //! Two seed-time / backend-bound leaves have no backend in this fast-UI layer,
 //! so they get faithful stand-ins that preserve the geometry under test:
-//!   - `collection_view()` — a seed marker that production substitutes with the
-//!     block's profile-derived (content-height) outline collection. We swap in
-//!     a static content-height `list` of data-bound rows at the VM level (the
-//!     same recipe `accordion_bounded_pbt` uses for its outline).
+//!   - the outline `columns(#{item_template: live_block()})` — production feeds
+//!     it the focused root's children. We swap in a static content-height
+//!     `list` of data-bound rows at the VM level (the same recipe
+//!     `accordion_bounded_pbt` uses for its outline).
 //!   - `live_query(#{... backlinks ...})` — fed by `TestServices`' canned
 //!     `watch_query_live` (see `support/mod.rs`).
 //!
@@ -81,9 +93,8 @@ const OUTLINE_N: usize = 40;
 /// which rounds; matches `accordion_bounded_pbt`'s `EPS`.
 const EPS: f32 = 2.0;
 
-/// Pull the `default-main-panel::render::0` SRC block body out of the seed org.
-fn extract_main_panel_render() -> String {
-    let start = "#+BEGIN_SRC render :id default-main-panel::render::0";
+/// Pull a named SRC block's body out of the seed org.
+fn extract_src_block(header: &str) -> String {
     let mut body = Vec::new();
     let mut in_block = false;
     for line in SEED_ORG.lines() {
@@ -92,24 +103,24 @@ fn extract_main_panel_render() -> String {
                 break;
             }
             body.push(line);
-        } else if line.contains(start) {
+        } else if line.contains(header) {
             in_block = true;
         }
     }
     assert!(
         !body.is_empty(),
-        "the seed must contain a `{start}` render block — did the id change?"
+        "the seed must contain a `{header}` block — did the id change?"
     );
     body.join("\n")
 }
 
-/// Replace the `collection_view()` seed marker with an empty `list()` sentinel
-/// (later populated at the VM level). Mirrors the recursive shape of
-/// `block_domain::substitute_collection_view`.
-fn substitute_collection_view(expr: RenderExpr) -> RenderExpr {
+/// Replace the seed's outline call — `columns(#{item_template: live_block()})`,
+/// which production feeds from the focused root's children — with an empty
+/// `list()` sentinel, populated at the VM level in step 3.
+fn substitute_outline(expr: RenderExpr) -> RenderExpr {
     match expr {
         RenderExpr::FunctionCall { name, args } => {
-            if name == "collection_view" {
+            if name == "columns" {
                 return RenderExpr::FunctionCall {
                     name: "list".to_string(),
                     args: vec![],
@@ -121,23 +132,23 @@ fn substitute_collection_view(expr: RenderExpr) -> RenderExpr {
                     .into_iter()
                     .map(|a| Arg {
                         name: a.name,
-                        value: substitute_collection_view(a.value),
+                        value: substitute_outline(a.value),
                     })
                     .collect(),
             }
         }
         RenderExpr::BinaryOp { op, left, right } => RenderExpr::BinaryOp {
             op,
-            left: Box::new(substitute_collection_view(*left)),
-            right: Box::new(substitute_collection_view(*right)),
+            left: Box::new(substitute_outline(*left)),
+            right: Box::new(substitute_outline(*right)),
         },
         RenderExpr::Array { items } => RenderExpr::Array {
-            items: items.into_iter().map(substitute_collection_view).collect(),
+            items: items.into_iter().map(substitute_outline).collect(),
         },
         RenderExpr::Object { fields } => RenderExpr::Object {
             fields: fields
                 .into_iter()
-                .map(|(k, v)| (k, substitute_collection_view(v)))
+                .map(|(k, v)| (k, substitute_outline(v)))
                 .collect(),
         },
         other => other,
@@ -196,14 +207,22 @@ fn rows_with_entity_prefix<'a>(
 fn seeded_main_panel_renders_capped_accordion_split(cx: &mut TestAppContext) {
     cx.update(|cx| gpui_component::init(cx));
 
-    // 1. The REAL seeded expression, parsed by the production DSL parser.
-    let src = extract_main_panel_render();
+    // 1. The REAL seeded expression, parsed by the production DSL parser, then
+    //    wrapped by the REAL backend wrap (`block:default-main-panel` carries both
+    //    a render source and a `holon_sql` query source, so production always
+    //    applies it). The panel tree's root is therefore a `view_mode_switcher`
+    //    holding the authored column — production's shape.
+    let src = extract_src_block("#+BEGIN_SRC render :id default-main-panel::render::0");
     assert!(
         src.contains("max_height_fraction: 0.33"),
         "seed cap fraction drifted from this test's FRACTION={FRACTION}; got:\n{src}"
     );
-    let column_expr = substitute_collection_view(
-        parse_render_dsl(&src).expect("seeded main-panel render must parse"),
+    let query_src = extract_src_block("#+BEGIN_SRC holon_sql :id default-main-panel::src::0");
+    let panel_expr = holon::api::block_domain::BlockDomain::wrap_in_query_source_switcher(
+        &holon_api::EntityUri::block("default-main-panel"),
+        substitute_outline(parse_render_dsl(&src).expect("seeded main-panel render must parse")),
+        &query_src,
+        holon_api::QueryLanguage::HolonSql,
     );
 
     // 2. Interpret through a QUIESCENT `TestServices` threaded as the builder
@@ -214,15 +233,28 @@ fn seeded_main_panel_renders_capped_accordion_split(cx: &mut TestAppContext) {
     let services: Arc<dyn holon_frontend::reactive::BuilderServices> = services;
     let interp = holon_frontend::shadow_builders::build_shadow_interpreter();
     let ctx = RenderContext::default();
-    let mut column_vm = interp.interpret(&column_expr, &ctx, &*services);
+    let panel_vm = interp.interpret(&panel_expr, &ctx, &*services);
+    assert_eq!(
+        panel_vm.widget_name().as_deref(),
+        Some("view_mode_switcher"),
+        "the backend wrap must put a view_mode_switcher at the panel tree's root"
+    );
 
-    // 3. Swap the `list()` sentinel for a populated content-height outline.
-    let sentinel = column_vm
-        .children
-        .iter()
-        .position(|c| c.widget_name().as_deref() == Some("list"))
-        .expect("substituted `collection_view` -> `list` sentinel must be a direct column child");
-    column_vm.children[sentinel] = Arc::new(outline_collection());
+    // 3. Swap the `list()` sentinel for a populated content-height outline. The
+    //    column now lives in the switcher's slot; mutate it in place (the VM is
+    //    uniquely held here, straight out of `interpret`).
+    {
+        let slot = panel_vm.slot.as_ref().expect("the wrap gives it a slot");
+        let mut content = slot.content.lock_mut();
+        let column = Arc::get_mut(&mut content)
+            .expect("slot content is uniquely held immediately after interpret");
+        let sentinel = column
+            .children
+            .iter()
+            .position(|c| c.widget_name().as_deref() == Some("list"))
+            .expect("substituted outline -> `list` sentinel must be a direct column child");
+        column.children[sentinel] = Arc::new(outline_collection());
+    }
 
     // 4. PRODUCTION-FAITHFUL composition: register the accordion column as
     //    `block:default-main-panel` and wrap it in a `live_block`, so the tree
@@ -234,7 +266,7 @@ fn seeded_main_panel_renders_capped_accordion_split(cx: &mut TestAppContext) {
     //    fired the split at `columns::render` and MASKED the prod break where the
     //    accordion rendered the placement-error div — the environment-parity
     //    lesson.) The block tree is handed out once via `watch_live`.
-    let column_slot = std::sync::Mutex::new(Some(column_vm));
+    let column_slot = std::sync::Mutex::new(Some(panel_vm));
     let thunk: support::BlockTreeThunk = Arc::new(move || {
         column_slot
             .lock()
@@ -280,6 +312,21 @@ fn seeded_main_panel_renders_capped_accordion_split(cx: &mut TestAppContext) {
         .max_by(|a, b| a.height.total_cmp(&b.height))
         .unwrap();
 
+    // The split ran, not the placement-error widget. `accordion::render`'s
+    // fail-loud error div is ALSO tagged `accordion`, so presence alone proves
+    // nothing — but that div renders a bare error string and NO children, while
+    // the split renders the seed's `live_query` inside the footer. This is the
+    // assertion that separates "the panel works" from "the panel shows
+    // `accordion must be a direct child of a main-panel column`".
+    let live_queries: Vec<&ElementInfo> = snap.of_type("live_query").collect();
+    assert!(
+        !live_queries.is_empty(),
+        "the seeded accordion must wrap a `live_query` node (the backlinks source) — \
+         no `live_query` means the accordion rendered the childless placement-error \
+         widget instead of the flow-panel split.\n{}",
+        snap.dump()
+    );
+
     // Bounded: the accordion region never EXCEEDS its `max_h(relative(0.33))`
     // cap. (Cap SATURATION — the R4 "greedy live_query fills to the cap" claim —
     // is NOT asserted here: the fast-UI stub cannot render the live_query
@@ -302,14 +349,7 @@ fn seeded_main_panel_renders_capped_accordion_split(cx: &mut TestAppContext) {
     );
 
     // The split wired the seed's `live_query` INSIDE the accordion footer (not
-    // as a sibling / main-region child): a `live_query` node is present at/below
-    // the accordion region top.
-    let live_queries: Vec<&ElementInfo> = snap.of_type("live_query").collect();
-    assert!(
-        !live_queries.is_empty(),
-        "the seeded accordion must wrap a `live_query` node (the backlinks source).\n{}",
-        snap.dump()
-    );
+    // as a sibling / main-region child).
     assert!(
         live_queries.iter().any(|lq| lq.y >= acc.y - EPS),
         "the backlinks `live_query` must render inside the pinned accordion footer \
