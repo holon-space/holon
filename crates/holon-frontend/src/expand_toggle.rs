@@ -54,42 +54,51 @@ pub fn expand_toggle_effects(
     }
 }
 
+/// A `set_field("collapsed")` wiring as an `expand_toggle` node carries it.
+/// Shared with `reactive_view_model`'s walk test so both sides of the seam —
+/// deciding the effects and locating the node they are decided from — are
+/// exercised against one fixture.
 #[cfg(test)]
-mod tests {
+pub(crate) fn test_set_field_wiring() -> OperationWiring {
     use holon_api::render_types::OperationDescriptor;
     use holon_api::render_types::OperationParam;
     use holon_api::render_types::TypeHint;
 
+    OperationWiring {
+        modified_param: String::new(),
+        descriptor: OperationDescriptor {
+            entity_name: EntityName::new("block"),
+            entity_short_name: "block".into(),
+            name: "set_field".into(),
+            display_name: "set_field".into(),
+            required_params: vec![OperationParam {
+                name: "value".into(),
+                type_hint: TypeHint::Bool,
+                description: String::new(),
+            }],
+            affected_fields: vec!["collapsed".to_string()],
+            id_column: "id".to_string(),
+            description: String::new(),
+            param_mappings: vec![],
+            target_scope: holon_api::TargetScope::Block,
+            boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+            menu_exposure: holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::Test,
+            },
+            trigger: None,
+            bound_params: Default::default(),
+            guard: holon_api::pattern::OpGuard::None,
+            arcs: holon_api::arcs::TransitionArcs::Undeclared,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
     use super::*;
 
     fn set_field_wiring() -> OperationWiring {
-        OperationWiring {
-            modified_param: String::new(),
-            descriptor: OperationDescriptor {
-                entity_name: EntityName::new("block"),
-                entity_short_name: "block".into(),
-                name: "set_field".into(),
-                display_name: "set_field".into(),
-                required_params: vec![OperationParam {
-                    name: "value".into(),
-                    type_hint: TypeHint::Bool,
-                    description: String::new(),
-                }],
-                affected_fields: vec!["collapsed".to_string()],
-                id_column: "id".to_string(),
-                description: String::new(),
-                param_mappings: vec![],
-                target_scope: holon_api::TargetScope::Block,
-                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
-                menu_exposure: holon_api::MenuExposure::NotListed {
-                    surface: holon_api::NonMenuSurface::Test,
-                },
-                trigger: None,
-                bound_params: Default::default(),
-                guard: holon_api::pattern::OpGuard::None,
-                arcs: holon_api::arcs::TransitionArcs::Undeclared,
-            },
-        }
+        test_set_field_wiring()
     }
 
     /// Expanding writes the store open AND clears `collapsed` on the row —

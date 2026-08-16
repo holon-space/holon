@@ -415,21 +415,16 @@ pub trait UserDriver: Send + Sync {
 
     /// Set block `target`'s expand/collapse state to `expanded`.
     ///
-    /// UPDATE (2026-07-11, Martin ruling): collapse IS document state now —
-    /// the production chevron (`render/builders/expand_toggle.rs`) dispatches
-    /// a real `set_field(collapsed)` `OperationIntent` alongside the local
-    /// gate poke, so it is undoable/synced/provenance-tagged like any other
-    /// field write. The doc below (poke the view-local `Mutable` gate
-    /// directly) still describes what each headless/windowed driver here
-    /// does — that remains a faithful simulation of "the user clicked the
-    /// chevron" for gesture-level PBT driving, since the local gate is what
-    /// gates lazy materialisation and what `find_expand_toggle_gate` can
-    /// reach. It does NOT yet dispatch the op, so a driver-driven toggle does
-    /// not itself exercise the durability/undo path — see the keystone-rung
-    /// note this leaves for a future assert-collapsed-persisted rung.
-    /// - headless (`ReactiveEngineDriver`): find the `expand_toggle` node in a
-    ///   reactive snapshot and `gate.set(expanded)` — the same poke the GPUI
-    ///   handler performs.
+    /// Collapse IS document state (2026-07-11, Martin ruling): the production
+    /// chevron (`render/builders/expand_toggle.rs`) dispatches a real
+    /// `set_field(collapsed)` `OperationIntent` alongside the local gate poke,
+    /// so it is undoable/synced/provenance-tagged like any other field write.
+    /// Every driver here performs both legs, and every one of them sources
+    /// them from `expand_toggle::expand_toggle_effects` — no driver decides
+    /// the writes for itself.
+    /// - headless (`ReactiveEngineDriver`): locate the `expand_toggle` node in
+    ///   a reactive snapshot with `find_expand_toggle`, `gate.set(expanded)`,
+    ///   then perform the legs the shared decision returns.
     /// - windowed (`GpuiUserDriver` / `SimUserDriver`): synthesize a real click
     ///   on the chevron registered under `expand_toggle_id_for(target)`, so the
     ///   production handler flips the gate AND dispatches `set_field` exactly
@@ -912,27 +907,35 @@ impl UserDriver for ReactiveEngineDriver {
         // Explicit / mounted toggle: a block whose render expr carries
         // `expand_toggle` renders a live gate directly in the one-shot
         // root-layout snapshot AND collapse is DOCUMENT state (2026-07-11
-        // ruling). Flip the node gate for an immediate mounted re-render,
-        // record the view-local seed, and dispatch `set_field(collapsed)` so
-        // the SUT block row changes — the same three writes the production
-        // chevron handler performs.
-        if let Some(gate) = self
+        // ruling). Flip the node gate for an immediate mounted re-render, then
+        // perform exactly the writes `expand_toggle_effects` decides off that
+        // node's wiring — the same call the GPUI chevron handler makes, so a
+        // node the production handler would leave view-local stays view-local
+        // here too.
+        if let Some(found) = self
             .engine
             .snapshot_reactive(&root_uri)
-            .find_expand_toggle_gate(bare)
+            .find_expand_toggle(bare)
         {
-            gate.set(expanded);
+            found.gate.set(expanded);
+            let fx = crate::expand_toggle::expand_toggle_effects(
+                bare,
+                expanded,
+                &found.operations,
+                found.entity_name.as_ref(),
+                found.row_id.as_deref(),
+            );
             self.engine
                 .ui_state()
-                .set_block_expanded_view(bare, expanded);
-            let intent = OperationIntent::set_field(
-                &EntityName::new("block"),
-                "set_field",
-                target.as_str(),
-                "collapsed",
-                Value::Boolean(!expanded),
-            );
-            self.engine.dispatch_intent_sync(intent).await?;
+                .set_block_expanded_view(&fx.view_store.0, fx.view_store.1);
+            match fx.intent {
+                Some(intent) => self.engine.dispatch_intent_sync(intent).await?,
+                None => tracing::warn!(
+                    target_id = %bare,
+                    "set_block_expanded: no set_field(collapsed) wiring or row id on the \
+                     expand_toggle node — the fold is view-local and will not persist"
+                ),
+            }
             return Ok(());
         }
 

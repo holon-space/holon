@@ -400,6 +400,16 @@ impl SendState {
     }
 }
 
+/// The `expand_toggle` node a chevron click acts on, as located by
+/// [`ReactiveViewModel::find_expand_toggle`]: the view-local gate plus the
+/// wiring inputs of [`crate::expand_toggle::expand_toggle_effects`].
+pub struct ExpandToggleTarget {
+    pub gate: Mutable<bool>,
+    pub operations: Vec<OperationWiring>,
+    pub entity_name: Option<EntityName>,
+    pub row_id: Option<String>,
+}
+
 pub struct ReactiveViewModel {
     /// The render expression this node was built from.
     /// For leaf nodes: `text(...)`, `badge(...)`, etc.
@@ -546,19 +556,20 @@ impl ReactiveViewModel {
         self.data.get_cloned()
     }
 
-    /// Find the view-local `expanded` `Mutable<bool>` of the `expand_toggle`
-    /// node whose `target_id` prop equals `target_id` (a bare block id, no
-    /// `block:` scheme), walking children + slot + materialised lazy slot.
+    /// Find the `expand_toggle` node whose `target_id` prop equals `target_id`
+    /// (a bare block id, no `block:` scheme), walking children + slot +
+    /// materialised lazy slot, and return everything a chevron click needs: the
+    /// view-local gate plus the node's operation wiring.
     ///
     /// Block expansion has no engine representation — it is per-widget view
     /// state (the GPUI chevron's `on_mouse_down` flips this very gate, and
-    /// `Block` documents "collapsed is NOT stored ... kept locally"). This is
-    /// the single walk shared by the headless test gate
-    /// (`set_expand_toggle_gate`)
-    /// and `ReactiveEngineDriver::set_block_expanded`, so both poke the exact
-    /// node the production handler does. Returns a clone of the gate handle
-    /// (cheap — `Mutable` is `Arc`-backed).
-    pub fn find_expand_toggle_gate(&self, target_id: &str) -> Option<Mutable<bool>> {
+    /// `Block` documents "collapsed is NOT stored ... kept locally"). The
+    /// wiring travels with the gate so
+    /// `ReactiveEngineDriver::set_block_expanded`
+    /// feeds `expand_toggle::expand_toggle_effects` the same inputs the GPUI
+    /// builder reads off the node it renders — the driver decides nothing about
+    /// the writes itself. Handles are cheap clones (`Mutable` is `Arc`-backed).
+    pub fn find_expand_toggle(&self, target_id: &str) -> Option<ExpandToggleTarget> {
         if matches!(self.widget_name().as_deref(), Some("expand_toggle")) {
             let props = self.props.lock_ref();
             let is_match = props
@@ -569,25 +580,30 @@ impl ReactiveViewModel {
             drop(props);
             if is_match {
                 if let Some(gate) = self.expanded.as_ref() {
-                    return Some(gate.clone());
+                    return Some(ExpandToggleTarget {
+                        gate: gate.clone(),
+                        operations: self.operations.clone(),
+                        entity_name: self.entity_name(),
+                        row_id: self.row_id(),
+                    });
                 }
             }
         }
         for child in &self.children {
-            if let Some(gate) = child.find_expand_toggle_gate(target_id) {
-                return Some(gate);
+            if let Some(found) = child.find_expand_toggle(target_id) {
+                return Some(found);
             }
         }
         if let Some(slot) = self.slot.as_ref() {
             let content = slot.content.lock_ref();
-            if let Some(gate) = content.find_expand_toggle_gate(target_id) {
-                return Some(gate);
+            if let Some(found) = content.find_expand_toggle(target_id) {
+                return Some(found);
             }
         }
         if let Some(lazy) = self.lazy_slot.as_ref() {
             if let Some(materialised) = lazy.cache.get_cloned() {
-                if let Some(gate) = materialised.find_expand_toggle_gate(target_id) {
-                    return Some(gate);
+                if let Some(found) = materialised.find_expand_toggle(target_id) {
+                    return Some(found);
                 }
             }
         }
@@ -2157,5 +2173,109 @@ mod tests {
             "fresh thunk must not be invoked when cache carries content forward"
         );
         assert_eq!(old_counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    fn expand_toggle_node(
+        target_id: &str,
+        row_id: &str,
+        operations: Vec<OperationWiring>,
+    ) -> Arc<ReactiveViewModel> {
+        let data: Arc<DataRow> = Arc::new(
+            [("id".to_string(), Value::String(row_id.to_string()))]
+                .into_iter()
+                .collect(),
+        );
+        Arc::new(ReactiveViewModel {
+            expr: Mutable::new(RenderExpr::FunctionCall {
+                name: "expand_toggle".to_string(),
+                args: vec![],
+            }),
+            data: Mutable::new(data).read_only(),
+            props: Mutable::new(
+                [(
+                    "target_id".to_string(),
+                    Value::String(target_id.to_string()),
+                )]
+                .into_iter()
+                .collect(),
+            ),
+            expanded: Some(Mutable::new(false)),
+            operations,
+            ..Default::default()
+        })
+    }
+
+    /// The walk carries the node's WIRING out with the gate, not just the gate.
+    ///
+    /// This is what lets `ReactiveEngineDriver::set_block_expanded` hand the
+    /// node's own `operations`/entity/row id to `expand_toggle_effects` instead
+    /// of hardcoding `("block", "set_field")`: a wired node yields the document
+    /// write, and an UNWIRED one yields none, which is the case a hardcoded
+    /// driver dispatched a write production would never have sent.
+    #[test]
+    fn find_expand_toggle_carries_the_nodes_wiring() {
+        let wired = ReactiveViewModel {
+            expr: Mutable::new(row_expr()),
+            children: vec![expand_toggle_node(
+                "block:a",
+                "block:a",
+                vec![crate::expand_toggle::test_set_field_wiring()],
+            )],
+            ..Default::default()
+        };
+        let found = wired
+            .find_expand_toggle("block:a")
+            .expect("nested expand_toggle must be found");
+        assert_eq!(found.row_id.as_deref(), Some("block:a"));
+        assert_eq!(found.entity_name, Some(EntityName::new("block")));
+
+        let fx = crate::expand_toggle::expand_toggle_effects(
+            "block:a",
+            true,
+            &found.operations,
+            found.entity_name.as_ref(),
+            found.row_id.as_deref(),
+        );
+        assert_eq!(fx.view_store, ("block:a".to_string(), true));
+        let intent = fx.intent.expect("wired node must yield the document write");
+        assert_eq!(
+            intent.params.get("value"),
+            Some(&Value::Boolean(false)),
+            "expanding clears `collapsed`"
+        );
+
+        let unwired = ReactiveViewModel {
+            expr: Mutable::new(row_expr()),
+            children: vec![expand_toggle_node("block:b", "block:b", vec![])],
+            ..Default::default()
+        };
+        let found = unwired
+            .find_expand_toggle("block:b")
+            .expect("unwired expand_toggle must still be found");
+        assert!(found.operations.is_empty());
+        let fx = crate::expand_toggle::expand_toggle_effects(
+            "block:b",
+            true,
+            &found.operations,
+            found.entity_name.as_ref(),
+            found.row_id.as_deref(),
+        );
+        assert_eq!(fx.view_store, ("block:b".to_string(), true));
+        assert!(
+            fx.intent.is_none(),
+            "an unwired node folds view-locally — no document write"
+        );
+    }
+
+    /// A `target_id` no node carries resolves to nothing, so the driver takes
+    /// its embedded-page branch instead of poking an unrelated gate.
+    #[test]
+    fn find_expand_toggle_misses_on_unknown_target() {
+        let tree = ReactiveViewModel {
+            expr: Mutable::new(row_expr()),
+            children: vec![expand_toggle_node("block:a", "block:a", vec![])],
+            ..Default::default()
+        };
+        assert!(tree.find_expand_toggle("block:zzz").is_none());
     }
 }
