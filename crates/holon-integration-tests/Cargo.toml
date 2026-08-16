@@ -62,7 +62,7 @@ heap-profile = ["holon-frontend/heap-profile"]
 # Web arm (dioxus-web under test): `WebUserDriver` drives a real Chrome over
 # CDP. Off by default — it pulls a browser-automation stack no other tier
 # needs, and the arm only runs against a served `dist/`.
-web-arm = ["test-infra", "dep:chromiumoxide", "dep:futures-util", "dep:serde_json"]
+web-arm = ["test-infra", "dep:chromiumoxide", "dep:futures-util", "dep:serde_json", "dep:holon-mcp"]
 # Cold-boot ingest benchmark: init a RUST_LOG fmt subscriber in diag_harness so
 # the `boot_*` holon_latency events are captured. Run:
 #   HOLON_SOAK_SEED_FILES=200 RUST_LOG=holon_latency=debug \

@@ -68,6 +68,8 @@ use holon_frontend::reactive_view_model::ReactiveViewModel;
 use holon_frontend::user_driver::UserDriver;
 use tokio::task::JoinHandle;
 
+use crate::web_relay_oracle::WebRelayOracle;
+
 /// One rendered entity as the browser currently shows it.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct RenderedNode {
@@ -92,13 +94,26 @@ Array.from(document.querySelectorAll('[data-entity-id]')).map(e => ({
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// How long the rendered set must hold still before a gesture counts as
-/// settled. Override with `HOLON_WEB_SETTLE_MS`.
+/// settled WITHOUT a relay oracle. Override with `HOLON_WEB_SETTLE_MS`.
 fn settle_window() -> Duration {
     Duration::from_millis(match std::env::var("HOLON_WEB_SETTLE_MS") {
         Ok(v) => v
             .parse()
             .unwrap_or_else(|e| panic!("HOLON_WEB_SETTLE_MS={v:?} is not a valid u64: {e}")),
         Err(_) => 300,
+    })
+}
+
+/// How long the rendered set must hold still AFTER the engine has reported
+/// convergence. This window no longer has to cover engine round-trips — only
+/// the render that follows a converged engine — so it is a fraction of
+/// [`settle_window`]. Override with `HOLON_WEB_RENDER_WINDOW_MS`.
+fn render_window() -> Duration {
+    Duration::from_millis(match std::env::var("HOLON_WEB_RENDER_WINDOW_MS") {
+        Ok(v) => v
+            .parse()
+            .unwrap_or_else(|e| panic!("HOLON_WEB_RENDER_WINDOW_MS={v:?} is not a valid u64: {e}")),
+        Err(_) => 60,
     })
 }
 
@@ -115,14 +130,43 @@ pub struct WebUserDriver {
     console_task: JoinHandle<()>,
     /// Gesture → last observable DOM change, for the most recent verb.
     last_effect: Mutex<Duration>,
+    /// Engine-convergence time reported by the relay for the most recent verb.
+    /// `None` on a DOM-only driver.
+    last_engine_wait: Mutex<Option<Duration>>,
     settle_window: Duration,
     quiescence_timeout: Duration,
+    /// The authoritative channel. When present it is the PRIMARY settled
+    /// signal and the DOM window drops to [`render_window`]; when absent the
+    /// driver is DOM-only, which increment 1 measured to be unsound for
+    /// quiescence (see [`Self::await_quiescence`]).
+    oracle: Option<Arc<WebRelayOracle>>,
 }
 
 impl WebUserDriver {
+    /// Launch with only the DOM channel. Sound for gesture *effects*, NOT for
+    /// quiescence — prefer [`Self::launch_with_oracle`].
+    pub async fn launch(url: &str, headless: bool) -> Result<Self> {
+        Self::launch_inner(url, headless, None).await
+    }
+
+    /// Launch and attach the relay oracle as the primary settled signal. The
+    /// oracle must already be connected to the same hub the page dials, and
+    /// the page must be the only `role=browser` socket on it.
+    pub async fn launch_with_oracle(
+        url: &str,
+        headless: bool,
+        oracle: Arc<WebRelayOracle>,
+    ) -> Result<Self> {
+        Self::launch_inner(url, headless, Some(oracle)).await
+    }
+
     /// Launch Chrome, open `url` in a fresh incognito browser context (which is
     /// what makes OPFS empty per case), and wait for the app to render.
-    pub async fn launch(url: &str, headless: bool) -> Result<Self> {
+    async fn launch_inner(
+        url: &str,
+        headless: bool,
+        oracle: Option<Arc<WebRelayOracle>>,
+    ) -> Result<Self> {
         let mut builder = BrowserConfig::builder().args(vec![
             // The app needs crossOriginIsolated for wasm-wasip1-threads; the
             // server sends COOP/COEP, these keep Chrome from vetoing it.
@@ -185,11 +229,23 @@ impl WebUserDriver {
             console,
             console_task,
             last_effect: Mutex::new(Duration::ZERO),
-            settle_window: settle_window(),
+            last_engine_wait: Mutex::new(None),
+            settle_window: if oracle.is_some() {
+                render_window()
+            } else {
+                settle_window()
+            },
             quiescence_timeout: Duration::from_secs(30),
+            oracle,
         };
         driver.assert_cross_origin_isolated().await?;
         driver.await_boot().await?;
+        // Only now can the oracle prove itself: the page dials the hub during
+        // boot, so a liveness check before this point tests the hub, not the
+        // engine.
+        if let Some(oracle) = &driver.oracle {
+            oracle.await_ready(driver.quiescence_timeout).await?;
+        }
         driver.await_quiescence().await?;
         Ok(driver)
     }
@@ -264,22 +320,46 @@ impl WebUserDriver {
         Ok(nodes)
     }
 
-    /// Wait until the rendered set has been unchanged for a whole settle
-    /// window.
+    /// Wait until the gesture has settled. Two channels, in the order D4.a
+    /// rules for:
     ///
-    /// CDP has no auto-waiting and increment 1 has no engine-side quiescence
-    /// signal (that is what the MCP relay brings in increment 2), so settling
-    /// is inferred from the DOM. A settle *window* rather than two equal reads:
-    /// a gesture travels dioxus → worker → engine → projection → DOM and the
-    /// worker only advances on a 16ms tick pump, so the DOM sits unchanged for
-    /// tens of milliseconds mid-flight. Two equal reads declared victory there
-    /// and the spike watched a block split land one gesture too late.
+    /// 1. **Relay (primary, when attached).** The engine reports its own
+    ///    convergence over MCP. This is the sound signal: a gesture travels
+    ///    dioxus → worker → engine → projection → DOM and the worker only
+    ///    advances on a 16ms tick pump, so the DOM sits unchanged mid-flight —
+    ///    increment 1 watched a DOM-stability rule declare a block split
+    ///    settled one gesture early (design §4a).
+    /// 2. **DOM (secondary).** Even a converged engine has not rendered yet, so
+    ///    the rendered set must still hold still — but only for
+    ///    [`render_window`], since no further engine work can arrive.
     ///
-    /// Records the gesture→last-DOM-change delay in `last_effect`, which is the
-    /// number that means something for latency: the rest is settle padding.
+    /// Without an oracle the DOM window is the ONLY signal and widens to
+    /// [`settle_window`]; that mode is retained for the increment-1 spike and
+    /// is documented as unsound for quiescence.
+    ///
+    /// Records the gesture→last-DOM-change delay in `last_effect` and the
+    /// engine's own convergence time in `last_engine_wait`.
     pub async fn await_quiescence(&self) -> Result<()> {
         let start = Instant::now();
-        let mut last_change = start;
+        match &self.oracle {
+            Some(oracle) => {
+                let report = oracle
+                    .await_quiescence(self.quiescence_timeout)
+                    .await
+                    .context(
+                        "relay oracle failed to observe engine convergence — the web arm's \
+                         primary settled signal is gone, so no assertion after this gesture \
+                         would mean anything",
+                    )?;
+                *self.last_engine_wait.lock().unwrap() = Some(report.waited);
+            }
+            None => *self.last_engine_wait.lock().unwrap() = None,
+        }
+        // Seeded AFTER the relay wait, not at `start`: the relay round-trip
+        // easily exceeds the render window, and a `last_change` still anchored
+        // at `start` would satisfy the stability test on the first poll — the
+        // DOM channel would assert nothing at all.
+        let mut last_change = Instant::now();
         let mut previous = self.render_key(&self.refresh_snapshot().await?);
         loop {
             tokio::time::sleep(POLL_INTERVAL).await;
@@ -305,6 +385,18 @@ impl WebUserDriver {
     /// means the gesture produced no rendered change at all.
     pub fn last_effect(&self) -> Duration {
         *self.last_effect.lock().unwrap()
+    }
+
+    /// Engine convergence time the relay reported for the most recent verb.
+    /// `None` on a DOM-only driver.
+    pub fn last_engine_wait(&self) -> Option<Duration> {
+        *self.last_engine_wait.lock().unwrap()
+    }
+
+    /// The authoritative channel, for assertions that must not be read off the
+    /// DOM. `None` on a DOM-only driver.
+    pub fn oracle(&self) -> Option<&Arc<WebRelayOracle>> {
+        self.oracle.as_ref()
     }
 
     fn render_key(&self, nodes: &[RenderedNode]) -> String {
@@ -474,8 +566,10 @@ impl UserDriver for WebUserDriver {
         _: HashMap<String, Value>,
     ) -> Result<()> {
         bail!(
-            "WebUserDriver::synthetic_dispatch({entity}.{op}) is increment 2 — it routes over the \
-             MCP relay hub, which the oracle increment brings up."
+            "WebUserDriver::synthetic_dispatch({entity}.{op}) is a DECLARED CAP. The relay could \
+             carry it (`execute_operation`), but the web arm exists to prove the DOM→intent \
+             wiring, so a transition that needs synthetic dispatch is skipped rather than \
+             smuggled past the layer under test."
         )
     }
 

@@ -158,7 +158,11 @@ wss.on('connection', (ws, req) => {
   })
 
   ws.on('close', () => {
-    hub[role] = null
+    // Only clear the slot if it still holds THIS socket. A replaced socket's
+    // close fires after its replacement registered, so an unconditional clear
+    // drops the live peer — which is exactly the per-case browser swap the web
+    // arm performs between PBT cases.
+    if (hub[role] === ws) hub[role] = null
     console.log(`[mcp-hub] ${role} disconnected`)
   })
 

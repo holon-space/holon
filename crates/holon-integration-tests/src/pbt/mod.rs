@@ -16,6 +16,7 @@ pub mod file_adapter_state;
 pub mod fixtures;
 pub mod frontend_slice;
 pub mod generators;
+pub mod hand_authored;
 pub mod invariant_mode_override;
 pub mod invariants;
 pub mod layout_bridge;

@@ -885,6 +885,27 @@ gate-compile:
     cargo check --workspace --all-targets \
         --features holon-integration-tests/pbt,holon-gpui/pbt \
         2>&1 | tee /tmp/gate-compile.log
+    just check-web-arm
+
+# Web arm (dioxus-web under test) typecheck. `gate-compile` above resolves
+# `--features holon-integration-tests/pbt,holon-gpui/pbt`, which does NOT enable
+# `web-arm` — so the driver, the relay oracle and the keystone-replay layer
+# compiled under no gate at all and could rot silently between browser runs.
+#
+# Compile-only, and that is sufficient: every web-arm test is `#[ignore]`d
+# because it needs a served `dist/` and a local Chrome, so this recipe needs
+# neither. `--all-targets` is what reaches the test files themselves; without it
+# only the library half is checked.
+#
+# Typecheck the browser arm, which no other gate compiles.
+check-web-arm:
+    #!/usr/bin/env bash
+    # pipefail is REQUIRED, exactly as in gate-compile above: without it the
+    # exit status is `tee`'s and the recipe passes however red the compile is.
+    set -euo pipefail
+    cargo check -p holon-integration-tests --all-targets \
+        --features web-arm,pbt \
+        2>&1 | tee /tmp/check-web-arm.log
 
 # Architecture rules (archlint + the Rust-side structural tests). Its own
 # package, so `cargo nextest run --workspace` was the only thing that ran it and

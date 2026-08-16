@@ -52,6 +52,10 @@ pub mod test_environment;
 #[cfg(feature = "otel-testing")]
 pub mod test_tracing;
 pub mod ui_driver;
+#[cfg(all(feature = "web-arm", feature = "pbt"))]
+pub mod web_arm;
+#[cfg(feature = "web-arm")]
+pub mod web_relay_oracle;
 #[cfg(feature = "web-arm")]
 pub mod web_user_driver;
 pub mod widget_state;

@@ -125,6 +125,50 @@ settled and the harness observed the new block only on the *next* gesture.
 The settle window is the increment-1 stand-in; the MCP-relay quiescence D4.a
 already rules for is the real fix, and this is empirical support for it.
 
+## 4b. Increment 2 result (measured 2026-08-16)
+
+D4.a holds, and the relay quiescence removes the padding §4a predicted it
+would.
+
+- **Primary signal is the relay.** `WebUserDriver::await_quiescence` now calls
+  the browser engine's `await_quiescence` tool (CDC watermark, 50ms unchanged
+  window) and only then waits for the DOM — for `HOLON_WEB_RENDER_WINDOW_MS`
+  (60ms default) instead of the 300ms `HOLON_WEB_SETTLE_MS` window, because a
+  converged engine can produce no further work. The DOM window is retained as
+  the disclosed secondary; a relay failure is a hard error, not a silent
+  fallback to the weaker signal.
+- **Measured:** engine convergence 133–221ms per gesture; click+`end`+`enter`
+  (3 gestures, 3 relay round-trips, 3 render windows) 665–843ms wall. The
+  spread is machine load, not variance in the app: the low end is an idle
+  machine, the high end the same assertion with four sibling lanes compiling.
+  Increment 1's comparable figure was 316ms p50 for ONE op, i.e. ~950ms for
+  three. Treat these as an order-of-magnitude check, not an SLO measurement —
+  in-browser performance measurement is explicitly out of scope (§6).
+- **Dual oracle, three points.** `web_arm::read_and_cross_check` asserts DOM
+  rendered-set ⊆ engine `debug_pbt_snapshot`; that the `block_raw` row COUNT is
+  at least the number of live blocks the block query reports (raw SQL, one
+  layer below the projection — a count, NOT a set subset, because `block_raw`
+  also holds rows the block query filters out, so only that direction is sound
+  without re-implementing the filter in the harness); and rendered text against
+  committed content. The split test then requires all three to move together:
+  engine 20→21, DOM 3→4, `block_raw` 21→22.
+- **Red-first proof.** Commenting out `start_action_watchers` in the worker's
+  boot and rebuilding the wasm turns
+  `web_arm_rule_engine_materializes_the_day_page` red for exactly its reason
+  (19 blocks, no block carrying today's date, the `daily_journal` rule block
+  present but never fired); restoring and rebuilding turns it green.
+  `lane-logs/webpbt-inc2-red.log` / `-green.log`.
+
+**Keystone replay is BLOCKED, and the blocker is a defect the arm found.** The
+corpus is authored over the wide seed (`block:parent`/`c1`/`c2`), which a
+browser can only get from the `reset_vault` tool — and that tool leaves the
+live page bound to the torn-down engine (BugFunnel 2026-08-16, ENVIRONMENT), so
+its blocks never become gesture-reachable. The replay leg is wired end to end
+against the keystone's own loader and caps all 60 cases with a reason; it
+starts asserting as soon as a page-side rebind-on-reset lands. Second, smaller
+cap: `CreateBlockUnderFocus` pins the created block's id, which no gesture can
+choose, so it needs the composed harness's synthetic→real reconcile.
+
 ## 5. Risks
 
 - **Flake:** browser timing under CI load; mitigated by quiescence-await, no
