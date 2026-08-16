@@ -3880,6 +3880,87 @@ entities:
         );
     }
 
+    /// The MOUNTED branch of `set_block_expanded` must dispatch the document
+    /// write. Collapsing is the observable direction: `collapsed` starts
+    /// absent, so only a real dispatch can make it `1`.
+    ///
+    /// IGNORED — NO HEADLESS TOPOLOGY REACHES THE BRANCH, so this cannot go
+    /// green here and cannot serve as its regression guard. Measured, not
+    /// assumed: enumerating every node of `snapshot_reactive(root_layout)` in
+    /// this fixture AND in `setup_embedded_page_sut` finds ZERO `expand_toggle`
+    /// nodes under any spelling, including inside slots and materialised lazy
+    /// caches. The embedded-page topology has none by design (its toggle is
+    /// synthesized during recursive resolve — the reason the driver's second
+    /// branch exists at all), and this fixture renders an EMPTY root layout
+    /// because a bare org file carries no root-layout scaffolding.
+    ///
+    /// The branch is HARNESS-ONLY: no production frontend calls it.
+    /// `GpuiUserDriver` synthesizes a chevron click
+    /// (`gpui/user_driver.rs:767`) and never reaches `find_expand_toggle`,
+    /// and the worker writes only the expansion store. So un-ignoring this
+    /// needs a harness topology that MOUNTS an `expand_toggle` node in the
+    /// root layout, not a windowed port. Until then the scheme convention
+    /// is pinned by `find_expand_toggle_requires_the_schemed_id` in
+    /// `reactive_view_model`.
+    #[ignore = "no headless topology mounts an expand_toggle in the root layout, so this branch \
+                cannot run; needs a mounting fixture, not a windowed port"]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mounted_expand_toggle_dispatches_the_collapsed_write() {
+        use holon_pbt_core::capabilities::CapRegion;
+        use holon_pbt_core::capabilities::SutFocusWrite;
+
+        const MOUNTED_ORG: &str = concat!(
+            "#+ID: mounted-page\n",
+            "* A section with a mounted toggle\n",
+            ":PROPERTIES:\n",
+            ":ID: mounted-toggle\n",
+            ":END:\n",
+            "#+BEGIN_SRC render :id mounted-toggle::render::0\n",
+            "expand_toggle(#{header: text(col(\"content\")), content: text(\"body\")})\n",
+            "#+END_SRC\n",
+        );
+
+        let comp = Arc::new(
+            HeadlessFrontendComponent::new(
+                &[("mounted-page.org", MOUNTED_ORG)],
+                Duration::from_millis(600),
+            )
+            .await,
+        );
+        tokio::time::sleep(SETTLE).await;
+
+        let page = holon_api::EntityUri::block("mounted-page");
+        let toggle = holon_api::EntityUri::block("mounted-toggle");
+        comp.apply_navigate_focus(CapRegion::Main, &page).await;
+        tokio::time::sleep(SETTLE).await;
+
+        comp.driver()
+            .set_block_expanded(&toggle, false)
+            .await
+            .expect("set_block_expanded must succeed for a mounted expand_toggle");
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        let rows = comp
+            .sql_query("SELECT id, collapsed FROM block_raw WHERE id = 'block:mounted-toggle'")
+            .await;
+        let collapsed = rows
+            .first()
+            .and_then(|r| r.get("collapsed"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        assert_eq!(
+            collapsed, 1,
+            "collapsing a MOUNTED expand_toggle must dispatch set_field(collapsed) — got \
+             collapsed={collapsed}, i.e. the driver never took the mounted-gate branch. KNOWN \
+             CAUSE (why this test is #[ignore]d): this fixture's root layout mounts NO \
+             expand_toggle node, so `find_expand_toggle` has nothing to match and the driver \
+             falls through to the embedded-page branch, which writes no document field. Fix the \
+             FIXTURE (mount a real toggle), not the scheme handling — the scheme mismatch this \
+             test originally caught is fixed and pinned by \
+             `find_expand_toggle_requires_the_schemed_id`. Rows: {rows:?}"
+        );
+    }
+
     /// The journals-topology twin of [`setup_embedded_page_sut`]: boots a
     /// `block:journals` shell holding one non-seed day Page (`day-0714`) with a
     /// child note, and focuses Main on `block:journals` — the topology the

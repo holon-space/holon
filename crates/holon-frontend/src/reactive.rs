@@ -1975,9 +1975,9 @@ impl UiState {
     /// can tell the toggle actually rendered (fail-loud companion to
     /// [`Self::set_block_expanded_view`]).
     pub(crate) fn block_expanded_view(&self, target_id: &str) -> Option<bool> {
-        // Normalize the key: the driver strips the `block:` scheme while the
-        // `expand_toggle` builder reads the (schemed) row `id`. Keying on the
-        // bare id makes both sides agree.
+        // Scheme-agnostic key, so a caller holding either spelling of a block id
+        // reaches the same entry. Node LOOKUP is not: `find_expand_toggle`
+        // compares against the builder's schemed `target_id` prop verbatim.
         let key = target_id.strip_prefix("block:").unwrap_or(target_id);
         self.expanded_view_observed
             .lock()

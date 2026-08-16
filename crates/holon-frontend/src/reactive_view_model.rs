@@ -556,10 +556,15 @@ impl ReactiveViewModel {
         self.data.get_cloned()
     }
 
-    /// Find the `expand_toggle` node whose `target_id` prop equals `target_id`
-    /// (a bare block id, no `block:` scheme), walking children + slot +
-    /// materialised lazy slot, and return everything a chevron click needs: the
-    /// view-local gate plus the node's operation wiring.
+    /// Find the `expand_toggle` node whose `target_id` prop equals `target_id`,
+    /// walking children + slot + materialised lazy slot, and return everything
+    /// a chevron click needs: the view-local gate plus the node's operation
+    /// wiring.
+    ///
+    /// `target_id` is SCHEMED (`block:…`) — the comparison is a plain string
+    /// equality against the prop the `expand_toggle` builder writes, and that
+    /// builder takes it from the row's `id` column, which carries the scheme.
+    /// Passing a stripped id matches nothing.
     ///
     /// Block expansion has no engine representation — it is per-widget view
     /// state (the GPUI chevron's `on_mouse_down` flips this very gate, and
@@ -2176,7 +2181,6 @@ mod tests {
     }
 
     fn expand_toggle_node(
-        target_id: &str,
         row_id: &str,
         operations: Vec<OperationWiring>,
     ) -> Arc<ReactiveViewModel> {
@@ -2191,13 +2195,14 @@ mod tests {
                 args: vec![],
             }),
             data: Mutable::new(data).read_only(),
+            // `target_id` IS the row id, scheme and all — the shadow builder
+            // writes `row["id"]` verbatim. Deriving it here (rather than taking
+            // it as a second argument) keeps the fixture from expressing a node
+            // the real builder cannot produce.
             props: Mutable::new(
-                [(
-                    "target_id".to_string(),
-                    Value::String(target_id.to_string()),
-                )]
-                .into_iter()
-                .collect(),
+                [("target_id".to_string(), Value::String(row_id.to_string()))]
+                    .into_iter()
+                    .collect(),
             ),
             expanded: Some(Mutable::new(false)),
             operations,
@@ -2217,7 +2222,6 @@ mod tests {
         let wired = ReactiveViewModel {
             expr: Mutable::new(row_expr()),
             children: vec![expand_toggle_node(
-                "block:a",
                 "block:a",
                 vec![crate::expand_toggle::test_set_field_wiring()],
             )],
@@ -2246,7 +2250,7 @@ mod tests {
 
         let unwired = ReactiveViewModel {
             expr: Mutable::new(row_expr()),
-            children: vec![expand_toggle_node("block:b", "block:b", vec![])],
+            children: vec![expand_toggle_node("block:b", vec![])],
             ..Default::default()
         };
         let found = unwired
@@ -2273,9 +2277,34 @@ mod tests {
     fn find_expand_toggle_misses_on_unknown_target() {
         let tree = ReactiveViewModel {
             expr: Mutable::new(row_expr()),
-            children: vec![expand_toggle_node("block:a", "block:a", vec![])],
+            children: vec![expand_toggle_node("block:a", vec![])],
             ..Default::default()
         };
         assert!(tree.find_expand_toggle("block:zzz").is_none());
+    }
+
+    /// The lookup key is the SCHEMED id, and a stripped one matches nothing.
+    ///
+    /// Stripping `block:` before the lookup made the driver's mounted-gate
+    /// branch dead for every real node — it silently fell through to the
+    /// embedded-page branch and wrote no document field. Nothing caught it
+    /// because the store keys scheme-agnostically, so only this comparison ever
+    /// saw the difference.
+    #[test]
+    fn find_expand_toggle_requires_the_schemed_id() {
+        let tree = ReactiveViewModel {
+            expr: Mutable::new(row_expr()),
+            children: vec![expand_toggle_node("block:a", vec![])],
+            ..Default::default()
+        };
+        assert!(
+            tree.find_expand_toggle("block:a").is_some(),
+            "the schemed id — what the builder stores — must match"
+        );
+        assert!(
+            tree.find_expand_toggle("a").is_none(),
+            "a stripped id must NOT match; a caller that strips is looking up a key no \
+             expand_toggle node ever carries"
+        );
     }
 }

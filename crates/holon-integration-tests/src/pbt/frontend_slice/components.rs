@@ -1193,7 +1193,7 @@ impl HeadlessFrontendComponent {
     /// Run a read-only SQL statement against the headless engine and return the
     /// raw rows (the `SutSqlProjection` read surface — mirrors the sql_slice's
     /// `query`). Fail-loud on error.
-    async fn sql_query(&self, sql: &str) -> Vec<holon_api::StorageEntity> {
+    pub(crate) async fn sql_query(&self, sql: &str) -> Vec<holon_api::StorageEntity> {
         self.engine
             .db_handle()
             .query(sql, std::collections::HashMap::new())

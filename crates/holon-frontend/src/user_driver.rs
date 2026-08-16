@@ -901,8 +901,10 @@ impl UserDriver for ReactiveEngineDriver {
     /// not is a harness/production divergence at the affordance under test.
     async fn set_block_expanded(&self, target: &EntityUri, expanded: bool) -> Result<()> {
         let root_uri = holon_api::root_layout_block_uri();
+        // SCHEMED throughout: the `expand_toggle` builder stores `target_id`
+        // from the row's `id` column, which carries the scheme, so a stripped
+        // key matches no real node. The expansion store normalizes either form.
         let target_str = target.as_str();
-        let bare = target_str.strip_prefix("block:").unwrap_or(target_str);
 
         // Explicit / mounted toggle: a block whose render expr carries
         // `expand_toggle` renders a live gate directly in the one-shot
@@ -915,11 +917,11 @@ impl UserDriver for ReactiveEngineDriver {
         if let Some(found) = self
             .engine
             .snapshot_reactive(&root_uri)
-            .find_expand_toggle(bare)
+            .find_expand_toggle(target_str)
         {
             found.gate.set(expanded);
             let fx = crate::expand_toggle::expand_toggle_effects(
-                bare,
+                target_str,
                 expanded,
                 &found.operations,
                 found.entity_name.as_ref(),
@@ -931,7 +933,7 @@ impl UserDriver for ReactiveEngineDriver {
             match fx.intent {
                 Some(intent) => self.engine.dispatch_intent_sync(intent).await?,
                 None => tracing::warn!(
-                    target_id = %bare,
+                    target_id = %target_str,
                     "set_block_expanded: no set_field(collapsed) wiring or row id on the \
                      expand_toggle node — the fold is view-local and will not persist"
                 ),
@@ -947,7 +949,7 @@ impl UserDriver for ReactiveEngineDriver {
         // generation.
         self.engine
             .ui_state()
-            .set_block_expanded_view(bare, expanded);
+            .set_block_expanded_view(target_str, expanded);
 
         // Fail loud: force the render pipeline to rebuild (recursive `snapshot`
         // warms one nested level per call, so loop to a short deadline like the
@@ -956,12 +958,12 @@ impl UserDriver for ReactiveEngineDriver {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let _ = self.engine.snapshot(&root_uri);
-            if self.engine.ui_state().expand_toggle_observed(bare) {
+            if self.engine.ui_state().expand_toggle_observed(target_str) {
                 return Ok(());
             }
             if Instant::now() >= deadline {
                 tracing::warn!(
-                    target_id = %bare,
+                    target_id = %target_str,
                     %root_uri,
                     "set_block_expanded: recorded view-local expansion for a target that renders \
                      no expand_toggle; the flip will not be visible (view-state write absorbed)."
