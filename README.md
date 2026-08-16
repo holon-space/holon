@@ -68,7 +68,6 @@ frontends/
 ├── gpui/         # GPUI frontend (primary)
 ├── mcp/          # MCP server frontend (stdio + HTTP)
 ├── tui/          # Terminal UI frontend
-├── dioxus/       # Dioxus frontend
 ├── dioxus-web/   # Dioxus web frontend (wasm32, trunk build)
 ├── holon-worker/ # Holon backend as a Web Worker (wasm32-wasip1-threads)
 └── waterui/      # WaterUI frontend

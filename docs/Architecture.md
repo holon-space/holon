@@ -103,7 +103,6 @@ frontends/
 ├── gpui/        # GPUI frontend (primary — desktop; mobile via gpui-mobile feature)
 ├── mcp/         # MCP server frontend (stdio + HTTP)
 ├── tui/         # Terminal UI frontend
-├── dioxus/      # Dioxus frontend (prototype)
 ├── dioxus-web/  # Dioxus web frontend (prototype)
 ├── holon-worker/ # Web worker support
 └── waterui/     # WaterUI frontend (excluded from workspace — upstream compatibility issues)

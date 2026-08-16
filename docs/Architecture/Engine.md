@@ -57,7 +57,7 @@ Block ordering uses fractional indexing:
 | GPUI | Primary | Desktop. Mobile via `gpui-mobile` optional dep (`frontends/gpui/Cargo.toml`); screen-layout optimization ongoing. Embeds MCP server. |
 | TUI | Active | Keyboard-driven terminal UI. |
 | MCP | Active | Model Context Protocol server (stdio + HTTP modes). |
-| Dioxus / dioxus-web | Prototype | Core works; not actively tested. Both are currently in the workspace `exclude` list (root `Cargo.toml`): `dioxus` temporarily (cocoa version conflict with gpui — see the TEMP comment), `dioxus-web` permanently (wasm32-only, built via `trunk`). |
+| dioxus-web | Prototype | Browser frontend over the `holon-worker` Web Worker; core works, not actively tested. Permanently in the workspace `exclude` list (root `Cargo.toml`) because it is wasm32-only; built via `trunk` and compile-checked by `just check-dioxus-web-wasm`. The desktop Dioxus prototype (`frontends/dioxus/`) has been deleted. |
 | Flutter | Deprecated | Directory removed; integrating a second language/toolstack was too painful. |
 | WaterUI | Excluded from workspace | Upstream compatibility issues. |
 | Blinc | — | `blinc` feature flag in `crates/holon-frontend/Cargo.toml`, not a frontend directory; excluded from workspace due to upstream compatibility issues. |

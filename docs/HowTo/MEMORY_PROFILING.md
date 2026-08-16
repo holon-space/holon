@@ -28,8 +28,8 @@ Produces a JSON file showing **which code allocated how much memory**.
 ### Step 1: Build with profiling
 
 ```bash
-# For Dioxus
-cargo build -p holon-dioxus --features heap-profile
+# For GPUI
+cargo build -p holon-gpui --features heap-profile
 
 # For other frontends, forward the feature:
 cargo build -p <frontend> --features holon-frontend/heap-profile
@@ -38,7 +38,7 @@ cargo build -p <frontend> --features holon-frontend/heap-profile
 ### Step 2: Run and reproduce the leak
 
 ```bash
-HOLON_VAULT_ROOT=/path/to/org/files RUST_LOG=info ./target/debug/holon-dioxus
+HOLON_VAULT_ROOT=/path/to/org/files RUST_LOG=info ./target/debug/holon-gpui
 ```
 
 Let the app run until memory growth is visible in the monitor logs.

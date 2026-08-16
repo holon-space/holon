@@ -584,6 +584,22 @@ check-frontend-wasm:
     cargo check -p holon-frontend --target wasm32-unknown-unknown \
         2>&1 | tee /tmp/holon-frontend-wasm-check.log
 
+# Rot guard for the browser FRONTEND crate. `check-frontend-wasm` above covers
+# holon-frontend, the shared library; dioxus-web is the app that consumes it and
+# is OUTSIDE the cargo workspace (wasm32-only, root Cargo.toml `exclude`), so
+# `cargo check --workspace` never sees it and its call sites rot silently
+# whenever a holon-frontend signature changes. Hence --manifest-path rather than
+# -p. Normally built via `trunk`; this is the cheap typecheck-only leg.
+check-dioxus-web-wasm:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! rustup target list --installed | grep -qx wasm32-unknown-unknown; then
+        rustup target add wasm32-unknown-unknown
+    fi
+    cargo check --manifest-path frontends/dioxus-web/Cargo.toml \
+        --target wasm32-unknown-unknown \
+        2>&1 | tee /tmp/holon-dioxus-web-wasm-check.log
+
 # --- Code Quality -----------------------------------------------------------
 
 # Check formatting
@@ -929,15 +945,17 @@ gate-arch:
 precommit:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "== Tier 1 [1/5]: justfile pipefail guard =="
+    echo "== Tier 1 [1/6]: justfile pipefail guard =="
     ./scripts/check-justfile-pipefail.sh
-    echo "== Tier 1 [2/5]: defensive-code ratchet =="
+    echo "== Tier 1 [2/6]: defensive-code ratchet =="
     ./scripts/defensive-ratchet.sh
-    echo "== Tier 1 [3/5]: workspace typecheck incl. every test target =="
+    echo "== Tier 1 [3/6]: workspace typecheck incl. every test target =="
     just gate-compile
-    echo "== Tier 1 [4/5]: browser-target typecheck =="
+    echo "== Tier 1 [4/6]: browser-target typecheck =="
     just check-frontend-wasm
-    echo "== Tier 1 [5/5]: out-of-workspace worker =="
+    echo "== Tier 1 [5/6]: out-of-workspace browser frontend =="
+    just check-dioxus-web-wasm
+    echo "== Tier 1 [6/6]: out-of-workspace worker =="
     just check-worker-wasm
     echo "== Tier 1 PASS =="
 
@@ -950,11 +968,13 @@ precommit:
 prepush:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "== Tier 2 [1/3]: architecture rules =="
+    echo "== Tier 2 [1/4]: architecture rules =="
     just gate-arch
-    echo "== Tier 2 [2/3]: browser-target typecheck =="
+    echo "== Tier 2 [2/4]: browser-target typecheck =="
     just check-frontend-wasm
-    echo "== Tier 2 [3/3]: full keystone (PROPTEST_CASES=16) =="
+    echo "== Tier 2 [3/4]: out-of-workspace browser frontend =="
+    just check-dioxus-web-wasm
+    echo "== Tier 2 [4/4]: full keystone (PROPTEST_CASES=16) =="
     PROPTEST_CASES=16 cargo test \
         -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
         2>&1 | tee /tmp/prepush-keystone.log
@@ -967,17 +987,19 @@ prepush:
 landing-gate:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "== landing [1/6]: fmt =="
+    echo "== landing [1/7]: fmt =="
     cargo fmt --all -- --check
-    echo "== landing [2/6]: typecheck incl. every test target =="
+    echo "== landing [2/7]: typecheck incl. every test target =="
     just gate-compile
-    echo "== landing [3/6]: browser-target typecheck =="
+    echo "== landing [3/7]: browser-target typecheck =="
     just check-frontend-wasm
-    echo "== landing [4/6]: architecture rules =="
+    echo "== landing [4/7]: out-of-workspace browser frontend =="
+    just check-dioxus-web-wasm
+    echo "== landing [5/7]: architecture rules =="
     just gate-arch
-    echo "== landing [5/6]: keystone smoke =="
+    echo "== landing [6/7]: keystone smoke =="
     just keystone-smoke
-    echo "== landing [6/6]: hand-authored regressions =="
+    echo "== landing [7/7]: hand-authored regressions =="
     just hand-authored
     echo "== landing gate PASS =="
 

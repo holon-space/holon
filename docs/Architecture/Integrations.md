@@ -418,15 +418,19 @@ delete.
 
 ## Frontend Architecture
 
-Holon's primary frontend is **GPUI** — a native Rust desktop application. The Dioxus frontend (see below) is a **prototype**: the core works, but it is not actively tested. See [Engine.md §Supported Frontends](Engine.md) for the full status table.
+Holon's primary frontend is **GPUI** — a native Rust desktop application. The Dioxus-web frontend (see below) is a **prototype**: the core works, but it is not actively tested. See [Engine.md §Supported Frontends](Engine.md) for the full status table.
 
-### Dioxus Frontend (Prototype)
+### Dioxus-Web Frontend (Prototype)
 
 Inversion of Control: the frontend asks for what to render, the backend
-resolves everything. The engine runs in-process (a desktop webview via
-`dioxus::desktop`; `frontends/dioxus/src/main.rs`), so there is no FFI — the
-frontend calls the backend API directly on the shared tokio runtime. The real
-surface (all signatures verified against the code):
+resolves everything. `holon-frontend` and `BackendEngine` run inside a
+dedicated `wasm32-wasip1-threads` Web Worker (the `holon-worker` crate).
+`frontends/dioxus-web` still depends on `holon-frontend`, `holon-api`, and
+`holon-macros` at compile time for the shared render types — which is why it
+needs its own rot guard (`just check-dioxus-web-wasm`) — but at RUNTIME the
+process boundary carries nothing except the JSON wire format over
+`postMessage`; there is no FFI and no shared engine handle. The backend
+surface the worker drives (all signatures verified against the code):
 
 ```rust
 // crates/holon/src/api/block_domain.rs — resolve a block into a render
@@ -451,50 +455,25 @@ impl FrontendSession {
         entity_name: &EntityName,
         op_name: &str,
         params: HashMap<String, Value>,
-    ) -> Result<Option<Value>>;
+    ) -> Result<holon_api::OpOutcome>;
 }
 ```
 
 The frontend never sends queries — it only sends block IDs and receives render
 instructions. Clicks become writes through one funnel: display builders build
-an `OperationIntent` and `dispatch_intent()`
-(`frontends/dioxus/src/render/builders/dispatch.rs`) spawns
-`FrontendSession::execute_operation` onto the tokio runtime, fire-and-forget
-with loud error logging.
+an `OperationIntent`, `intent_to_wire()`
+(`frontends/dioxus-web/src/editor.rs`) serializes it, and the worker's
+`dispatch_intent_chain` runs it through `FrontendSession::execute_operation`.
 
 ### Reactive Updates
 
-The Dioxus frontend subscribes to `ViewModel` snapshots via
-`ReactiveEngine::watch` (`crates/holon-frontend/src/reactive.rs`) and bridges
-them into a Dioxus signal. The actual loop from
-`frontends/dioxus/src/main.rs` `App()`:
-
-```rust
-let mut view_model: Signal<Option<ViewModel>> = use_signal(|| None);
-
-// Bridge: tokio watch stream (Send) -> dioxus signal (!Send), carrying the
-// root-layout ViewModel snapshots produced by ReactiveEngine::watch.
-let watch_rx = use_hook(move || {
-    let (tx, rx) = tokio::sync::watch::channel::<Option<ViewModel>>(None);
-    rt.spawn(async move {
-        let uri = holon_api::root_layout_block_uri();
-        let mut stream = engine.watch(&uri);
-        while let Some(rvm) = stream.next().await {
-            if tx.send(Some(rvm.snapshot())).is_err() { break; }
-        }
-    });
-    rx
-});
-
-use_future(move || {
-    let mut rx = watch_rx.clone();
-    async move {
-        while rx.changed().await.is_ok() {
-            view_model.set(rx.borrow_and_update().clone());
-        }
-    }
-});
-```
+The frontend subscribes to `ViewModel` snapshots produced by
+`ReactiveEngine::watch` (`crates/holon-frontend/src/reactive.rs`) inside the
+worker, and bridges the `WatchEnvelope` messages into a Dioxus signal
+(`frontends/dioxus-web/src/main.rs` `App()`). `WorkerBridge::on_snapshot`
+deserializes each envelope into a `Signal<Option<ViewModel>>`, and `BootState`
+flips to `Ready` only on the first envelope that actually carries a
+projection — a subscription that never delivers must not read as green.
 
 No explicit refresh calls — UI state derives from the change stream, and
 Dioxus's fine-grained reactivity handles re-rendering.

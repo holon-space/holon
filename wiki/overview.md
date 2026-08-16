@@ -87,7 +87,7 @@ holon/
 │   ├── mcp/                 # MCP server frontend (stdio + HTTP)
 │   ├── tui/                 # Terminal UI
 │   ├── waterui/             # WaterUI prototype
-│   └── dioxus/              # Dioxus (web/mobile) frontend
+│   └── dioxus-web/          # Dioxus web frontend (wasm32, trunk build)
 ├── docs/                    # Developer docs (ORG_SYNTAX.md, etc.)
 ├── scripts/                 # Log analysis scripts (PM4Py, Drain3, metrics)
 ├── sql/                     # SQL schema files (blocks.sql, etc.)

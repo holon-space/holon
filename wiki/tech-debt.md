@@ -93,7 +93,7 @@ DDL in `crates/holon/src/storage/schema_modules.rs` defines `created_at TEXT NOT
 
 ### 8. Abandoned frontend prototypes still in the repo
 
-`frontends/tui/`, `frontends/waterui/`, `frontends/dioxus/` exist alongside the active GPUI frontend and demoted Flutter frontend. These are past experiments that add noise to the dependency graph.
+`frontends/tui/`, `frontends/waterui/` exist alongside the active GPUI frontend and demoted Flutter frontend. These are past experiments that add noise to the dependency graph. (`frontends/dioxus/` — the desktop Dioxus prototype — has been deleted.)
 
 **Fix direction**: delete or move to an `archive/` branch. If kept, mark clearly in their `Cargo.toml` or README as archived.
 

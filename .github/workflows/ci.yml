@@ -146,6 +146,14 @@ jobs:
       - name: Check holon-worker (wasm32-wasip1-threads)
         run: just check-worker-wasm
 
+      # Same rot guard, other out-of-workspace crate: dioxus-web is wasm32-only
+      # and excluded from the root workspace, so its call sites into
+      # holon-frontend rot invisibly until someone builds it. web.yml also runs
+      # this, but that workflow is release/pages-scoped — the drift has to fail
+      # on push/PR to be worth anything.
+      - name: Check dioxus-web (wasm32-unknown-unknown)
+        run: just check-dioxus-web-wasm
+
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 

@@ -116,7 +116,7 @@ test:     adding or updating tests
 
 - `cargo deny check` (via `just deny`) enforces allowed SPDX licenses and checks for known advisories. The allowed set is defined in `deny.toml`.
 - Do **not** add dependencies with licenses outside the allow-list without updating `deny.toml` and justifying the addition.
-- Some frontends (`waterui`, `dioxus`, `blinc`) are excluded from the workspace due to known upstream compatibility issues — see the comments in the root `Cargo.toml` before attempting to re-enable them.
+- Three frontends sit in the root `Cargo.toml` `exclude` list, each for a different reason stated in the comment above its entry: `waterui` (upstream naga/codespan-reporting conflict), `holon-worker` (own workspace and lockfile, targets `wasm32-wasip1-threads`), and `dioxus-web` (wasm32-only — `web-sys`/`js-sys` do not build for native). Read those comments before attempting to re-enable one. Because `cargo check --workspace` cannot see them, they have dedicated rot guards that a change to a shared signature must keep green: `just check-dioxus-web-wasm` runs in `precommit`, `prepush`, and `landing-gate`, while `just check-worker-wasm` runs in `precommit` only.
 
 ## Agent-Specific Instructions
 

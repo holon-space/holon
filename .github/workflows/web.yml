@@ -81,6 +81,19 @@ jobs:
             --manifest-path ./Cargo.toml --output-dir . || true
           ls -lh target/wasm32-wasip1-threads/release-official/holon_worker.wasm
 
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      # Typecheck before the trunk bundle: a holon-frontend signature change
+      # rots dioxus-web's call sites silently (it is outside the root cargo
+      # workspace), and a plain `cargo check` names the drift far more legibly
+      # than the same error surfacing from inside a trunk build. Invoked through
+      # `just` so CI and the local gates run the SAME step — see ci.yml.
+      - name: Typecheck dioxus-web for wasm32-unknown-unknown
+        run: just check-dioxus-web-wasm
+
       - name: Build dioxus-web bundle (release)
         working-directory: frontends/dioxus-web
         run: trunk build --release

@@ -34,7 +34,7 @@ Holon is a reactive personal knowledge management (PKM) system built in Rust. It
 | ------ | ---------- | --------- |
 | [service-frontend-gpui.md](components/service-frontend-gpui.md) | `gpui` | **Primary** — GPUI desktop/mobile UI; ReactiveShell, block rendering, navigation |
 | [service-frontend-mcp.md](components/service-frontend-mcp.md) | `mcp` | MCP server exposing backend tools + resources to AI agents |
-| [service-frontend-dioxus.md](components/service-frontend-dioxus.md) | `dioxus` + `dioxus-web` | Web UI via Dioxus (SSR/CSR/WASM) |
+| [service-frontend-dioxus.md](components/service-frontend-dioxus.md) | `dioxus-web` | Browser UI via Dioxus (WASM/CSR) |
 | [service-frontend-other.md](components/service-frontend-other.md) | TUI / WaterUI / Flutter / holon-worker | Secondary frontends |
 
 ### Test Crates (`crates/`)

@@ -52,10 +52,6 @@ exclude = [
   # dioxus-web targets wasm32 only; web-sys/js-sys are not available on native
   # so cargo check --workspace would fail. Build via `trunk build` instead.
   "frontends/dioxus-web",
-  # TEMP (W3 local only): dioxus 0.7 pulls cocoa 0.25 which conflicts with
-  # gpui's pinned cocoa =0.26.0 during workspace resolution. Excluded so the
-  # TUI can build/run in isolation. Revert before landing.
-  "frontends/dioxus",
 ]
 resolver = "2"
 

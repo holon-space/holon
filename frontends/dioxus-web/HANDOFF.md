@@ -2,6 +2,12 @@
 
 **Audience:** whoever picks up the browser frontend next.
 
+> **Stale references below:** `frontends/dioxus/` (the desktop port this
+> document repeatedly cites as "the working reference" for the render layer)
+> has been deleted. Those passages are kept as a record of how the browser
+> render layer was derived; `frontends/dioxus-web/src/render/builders/` is now
+> the only copy.
+
 ## ✅ RUNS IN A BROWSER (2026-06-18, W4 follow-on, end-to-end)
 Both wasm crates compile, `node serve.mjs` serves them, and the app **boots in a
 real browser (verified via Playwright): "ready (~2 s)", the wasm worker engine

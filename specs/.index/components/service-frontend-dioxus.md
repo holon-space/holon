@@ -1,22 +1,21 @@
 ---
 name: frontend-dioxus
-description: Web UI frontends built with Dioxus framework (SSR/CSR/WASM)
+description: Browser UI frontend built with Dioxus (WASM/CSR)
 type: reference
 source_type: component
-source_id: frontends/dioxus/ + frontends/dioxus-web/
+source_id: frontends/dioxus-web/
 category: service
 fetch_timestamp: 2026-04-23
 ---
 
-## frontends/dioxus + frontends/dioxus-web
+## frontends/dioxus-web
 
-**Purpose**: Web-targeting UI frontends using the Dioxus framework. `dioxus` targets SSR/desktop, `dioxus-web` targets WASM/CSR. Secondary priority behind GPUI.
+**Purpose**: Browser-targeting UI frontend using the Dioxus framework, compiled to WASM/CSR. Secondary priority behind GPUI. The former `frontends/dioxus/` SSR/desktop crate has been deleted.
 
 ### Crates
 
 | Crate | Source | Target |
 |-------|--------|--------|
-| `holon-dioxus` | `frontends/dioxus/` (29 files) | SSR / desktop |
 | `holon-dioxus-web` | `frontends/dioxus-web/` (42 files) | WASM / browser |
 
 ### Related

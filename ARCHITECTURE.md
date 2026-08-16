@@ -89,7 +89,7 @@ frontends/
 ├── flutter/         # Flutter frontend with FFI bridge
 ├── blinc/           # Native Rust GUI frontend (blinc-app)
 ├── mcp/             # MCP server frontend (stdio + HTTP)
-├── dioxus/          # Dioxus frontend
+├── dioxus-web/      # Dioxus web frontend (wasm32, trunk build)
 ├── tui/             # Terminal UI frontend
 └── waterui/         # WaterUI frontend
 ```
@@ -2173,7 +2173,7 @@ Block ordering uses fractional indexing:
 | Flutter | Active | FFI bridge via flutter_rust_bridge |
 | Blinc | Active | Native Rust GUI via blinc-app |
 | MCP | Active | Model Context Protocol server (stdio + HTTP modes) |
-| Dioxus | Experimental | Dioxus-based frontend |
+| dioxus-web | Experimental | Browser frontend (wasm32) over the holon-worker Web Worker |
 | TUI | Experimental | Terminal UI frontend |
 | WaterUI | Experimental | WaterUI-based frontend |
 
