@@ -983,10 +983,21 @@ impl DispatchingOperationEngine {
         // — an out-of-bounds mark that aborts EVERY render in
         // `scalar_range_to_bytes`. Derive both label and span from the trimmed
         // content (a no-op for the already-trimmed planner read, robust against
-        // any untrimmed source), then clamp defensively so a mark can never be
-        // born out of bounds regardless of what the planner supplied.
+        // any untrimmed source). The span is then in bounds by construction —
+        // it is derived from the very string it decorates.
         let label = plan.origin_content.trim_end().to_string();
-        let mut link_marks = vec![MarkSpan::new(
+        // Non-empty by `sanitize_page_title`'s contract, which the planner
+        // enforces by refusing to build a plan without a title
+        // (`sql_operation_provider.rs:3765`). Asserted because that guarantee
+        // lives in another crate, and an empty label would mint a ZERO-WIDTH
+        // Link mark that every read boundary silently DROPS rather than reports.
+        assert!(
+            !label.is_empty(),
+            "convert_block_to_page: origin {} produced an empty page title — \
+             sanitize_page_title must reject it before a plan exists",
+            plan.origin_id
+        );
+        let link_marks = vec![MarkSpan::new(
             0,
             label.chars().count(),
             InlineMark::Link {
@@ -994,7 +1005,6 @@ impl DispatchingOperationEngine {
                 label: label.clone(),
             },
         )];
-        holon_api::canonicalize_marks_against(&label, &mut link_marks);
         let mut sf = StorageEntity::new();
         sf.insert("id".into(), Value::String(plan.origin_id.clone()));
         sf.insert("field".into(), Value::String("marks".into()));

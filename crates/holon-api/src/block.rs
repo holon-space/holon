@@ -965,20 +965,9 @@ impl TryFrom<crate::StorageEntity> for Block {
                     // outlives `content` (a decoupled marks-only write, or a
                     // content-only trim that shortened the text). Without this,
                     // a corrupt persisted row aborts EVERY render of the block
-                    // in `scalar_range_to_bytes`. Fail-loud: name the block id
-                    // here for row attribution (the clamp itself also warns).
-                    let content_chars = content.chars().count();
-                    if marks
-                        .iter()
-                        .any(|m| m.start > content_chars || m.end > content_chars)
-                    {
-                        tracing::warn!(
-                            block_id = %id,
-                            content_chars,
-                            "block deserialization: out-of-bounds mark span clamped to content"
-                        );
-                    }
-                    crate::canonicalize_marks_against(&content, &mut marks);
+                    // in `scalar_range_to_bytes`. The heal owns the single
+                    // disclosure and names this block id in it.
+                    crate::canonicalize_marks_against(&content, &mut marks, id.as_str());
                     Some(marks)
                 }
             }

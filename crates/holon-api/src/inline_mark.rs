@@ -234,7 +234,7 @@ impl InlineMark {
 /// Multiple `MarkSpan`s with overlapping ranges are allowed; the renderer
 /// is responsible for coalescing per output format (org cannot represent
 /// arbitrary overlap; markdown can via nesting).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct MarkSpan {
     pub start: usize,
     pub end: usize,
@@ -250,6 +250,49 @@ impl MarkSpan {
             "MarkSpan: start ({start}) must be <= end ({end})"
         );
         Self { start, end, mark }
+    }
+}
+
+/// The wire shape, deserialized structurally before `start <= end` is checked.
+/// Deriving `Deserialize` on `MarkSpan` itself would reconstruct the struct
+/// field-by-field and bypass every constructor.
+#[derive(Deserialize)]
+struct MarkSpanWire {
+    start: usize,
+    end: usize,
+    #[serde(flatten)]
+    mark: InlineMark,
+}
+
+/// Parse, don't validate: an inverted span is not a `MarkSpan` and never
+/// becomes one. `start <= end` is the half of the invariant a span can prove
+/// about ITSELF, so it belongs here, at the point the value enters the type.
+///
+/// The other half — `end <= content.chars().count()` — is deliberately NOT
+/// checked here and cannot be: a `MarkSpan` does not know its content. That
+/// stays a disclosed heal at the one read boundary that holds both halves of
+/// the pair ([`canonicalize_marks_against`], called from the SQL row
+/// deserializer), which is where writes we do not author — MCP
+/// `execute_raw_sql` and `insert_data` accept arbitrary `marks` JSON — land.
+impl<'de> Deserialize<'de> for MarkSpan {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = MarkSpanWire::deserialize(deserializer)?;
+        if wire.start > wire.end {
+            return Err(serde::de::Error::custom(format!(
+                "MarkSpan: inverted span — start ({}) must be <= end ({}) for a {} mark",
+                wire.start,
+                wire.end,
+                wire.mark.loro_key(),
+            )));
+        }
+        Ok(Self {
+            start: wire.start,
+            end: wire.end,
+            mark: wire.mark,
+        })
     }
 }
 
@@ -307,30 +350,38 @@ pub fn canonicalize_marks(marks: &mut Vec<MarkSpan>) {
 
 /// Clamp every mark span into the bounds of `content`, then canonicalize.
 ///
-/// This is the SINGLE read-boundary choke point that guarantees a corrupt
-/// persisted `(content, marks)` pair — a mark whose `end` exceeds
-/// `content.chars().count()` — can never reach a projection or the GPUI
-/// renderer, where an out-of-bounds span aborts EVERY paint of the block in
-/// `scalar_range_to_bytes` (the crash that made a page permanently
-/// un-openable). Such a mark arises when a producer writes a full-span mark
-/// decoupled from the content (`convert_block_to_page`) or a later content-only
-/// trim shortens the text without adjusting marks.
+/// This is the ONLY range-vs-content heal in the system (D27.a), and it lives
+/// here because this is the one boundary that holds BOTH halves of the pair. A
+/// mark whose `end` exceeds `content.chars().count()` aborts every paint of the
+/// block in `scalar_range_to_bytes` — the crash that made a page permanently
+/// un-openable — so the pair is repaired once, on the way in, rather than
+/// guarded at each of the renderers downstream.
 ///
-/// Fail-loud, not silent (project error philosophy): each clamp emits a loud
-/// `warn!` naming the offending span and the content length — a disclosed
-/// degraded read, not a cosmetic fix. A span clamped to empty is then dropped
-/// by [`canonicalize_marks`]. Callers that also know the block id should log it
-/// at the call site for row-level attribution.
-pub fn canonicalize_marks_against(content: &str, marks: &mut Vec<MarkSpan>) {
+/// It is a heal rather than a hard `Err` because this boundary is where writes
+/// we do not author land: MCP `execute_raw_sql` and `insert_data` accept
+/// arbitrary `marks` JSON against any table, so a corrupt row here is not
+/// necessarily a bug in our code and must not brick the page that holds it.
+/// Spans we DO author are kept honest by construction instead — `MarkSpan`'s
+/// `Deserialize` rejects an inverted span outright, and `MarkSpan::new`
+/// asserts.
+///
+/// Fail-loud, not silent (project error philosophy): every clamp emits one
+/// `warn!` naming `block_id`, the offending span and the content length — a
+/// disclosed degraded read, not a cosmetic fix. `block_id` is what makes the
+/// line actionable, so it is a parameter rather than something the caller is
+/// asked to remember to log. A span clamped to empty is then dropped by
+/// [`canonicalize_marks`].
+pub fn canonicalize_marks_against(content: &str, marks: &mut Vec<MarkSpan>, block_id: &str) {
     let len = content.chars().count();
     for m in marks.iter_mut() {
         if m.start > len || m.end > len {
             tracing::warn!(
+                block_id,
                 mark_start = m.start,
                 mark_end = m.end,
                 content_chars = len,
-                "canonicalize_marks_against: mark span exceeds content length; \
-                 clamping (corrupt persisted marks)"
+                "mark span exceeds content length; clamping to render degraded \
+                 (corrupt persisted marks for this block)"
             );
             m.start = m.start.min(len);
             m.end = m.end.min(len);
@@ -987,7 +1038,7 @@ mod tests {
         // or a later content-only trim) must be clamped to the content length —
         // otherwise it aborts every render in scalar_range_to_bytes.
         let mut marks = vec![MarkSpan::new(0, 5, InlineMark::Bold)];
-        canonicalize_marks_against("abc", &mut marks); // "abc" = 3 scalars
+        canonicalize_marks_against("abc", &mut marks, "block:test"); // "abc" = 3 scalars
         assert_eq!(marks, vec![MarkSpan::new(0, 3, InlineMark::Bold)]);
     }
 
@@ -996,7 +1047,7 @@ mod tests {
         // start and end both past the content clamp to (len, len) = empty, which
         // canonicalize then drops.
         let mut marks = vec![MarkSpan::new(4, 6, InlineMark::Italic)];
-        canonicalize_marks_against("ab", &mut marks); // "ab" = 2 scalars
+        canonicalize_marks_against("ab", &mut marks, "block:test"); // "ab" = 2 scalars
         assert!(
             marks.is_empty(),
             "fully out-of-bounds mark survived: {marks:?}"
@@ -1008,7 +1059,7 @@ mod tests {
         // Multi-byte content: a 3-scalar string ("a你好") whose byte length is 7.
         // A mark 0..3 is in-bounds by SCALARS and must be preserved untouched.
         let mut marks = vec![MarkSpan::new(0, 3, InlineMark::Bold)];
-        canonicalize_marks_against("a你好", &mut marks);
+        canonicalize_marks_against("a你好", &mut marks, "block:test");
         assert_eq!(marks, vec![MarkSpan::new(0, 3, InlineMark::Bold)]);
     }
 
@@ -1181,5 +1232,46 @@ mod tests {
     #[should_panic(expected = "start (5) must be <= end (3)")]
     fn span_rejects_inverted_range() {
         MarkSpan::new(5, 3, InlineMark::Bold);
+    }
+
+    /// The derived `Deserialize` used to bypass `MarkSpan::new`'s assert, so a
+    /// persisted `{"start":5,"end":2}` reconstructed silently and only the GPUI
+    /// renderer's clamp stood between it and a paint abort. Parsing is now the
+    /// check: an inverted span is an `Err`, and the message names both offsets
+    /// so the row is identifiable from the log alone.
+    #[test]
+    fn deserialize_rejects_an_inverted_span() {
+        let e = serde_json::from_str::<MarkSpan>(r#"{"start":5,"end":2,"kind":"Bold"}"#)
+            .expect_err("an inverted span must not deserialize");
+        let msg = e.to_string();
+        assert!(
+            msg.contains("start (5)") && msg.contains("end (2)"),
+            "the error must name both offsets, got {msg:?}"
+        );
+    }
+
+    /// The whole-list boundary, which is what storage actually calls: one bad
+    /// span fails the parse rather than being healed into the set.
+    #[test]
+    fn marks_from_json_rejects_an_inverted_span() {
+        let e = marks_from_json(
+            r#"[{"start":0,"end":2,"kind":"Bold"},{"start":9,"end":4,"kind":"Italic"}]"#,
+        )
+        .expect_err("an inverted span must fail the list parse");
+        assert!(
+            e.to_string().contains("start (9)"),
+            "the error must name the offending span, got {e}"
+        );
+    }
+
+    /// The discriminating control: `end` past the content is NOT a parse error.
+    /// `MarkSpan` alone cannot see the content, so range-vs-content stays the
+    /// read boundary's disclosed heal (`canonicalize_marks_against`). If this
+    /// ever starts failing, the two policies have been conflated.
+    #[test]
+    fn deserialize_accepts_an_in_order_span_regardless_of_content_length() {
+        let span: MarkSpan =
+            serde_json::from_str(r#"{"start":3,"end":9001,"kind":"Bold"}"#).expect("in-order");
+        assert_eq!((span.start, span.end), (3, 9001));
     }
 }

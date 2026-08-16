@@ -169,26 +169,6 @@ fn plain_caret_click(
 /// never fires — the caret capture would silently no-op. Owning the click on
 /// the text div itself (same mechanism as the plain `plain_caret_click` path)
 /// avoids that shadowing and keeps one code path for both.
-/// Bring every span inside `0..=content_chars` so the downstream consumers —
-/// `build_highlights`, and the shared `link_content_segments` whose contract is
-/// to ASSERT on an out-of-range mark — only ever see in-range input.
-///
-/// `.max(start)` is the anti-inversion half and is not redundant:
-/// `MarkSpan::new` asserts `start <= end`, but the derived `Deserialize`
-/// bypasses that assert and `canonicalize_marks` only drops zero-width spans,
-/// so a persisted `{"start":5,"end":2}` reaches here. Without the clamp it
-/// would abort the very paint this whole path exists to keep alive.
-fn clamp_marks_to(content_chars: usize, marks: &[MarkSpan]) -> Vec<MarkSpan> {
-    marks
-        .iter()
-        .map(|ms| {
-            let start = ms.start.min(content_chars);
-            let end = ms.end.min(content_chars).max(start);
-            MarkSpan::new(start, end, ms.mark.clone())
-        })
-        .collect()
-}
-
 fn styled_run_render(
     el_id: &str,
     content: &str,
@@ -197,48 +177,12 @@ fn styled_run_render(
     services: std::sync::Arc<dyn holon_frontend::reactive::BuilderServices>,
     ctx: &GpuiRenderContext,
 ) -> (AnyElement, Vec<holon_api::StyledRun>) {
-    // Never abort on a corrupt persisted mark. A mark span outliving its
-    // content ("N..M exceeds text length K") aborts EVERY paint of this block —
-    // a page permanently un-openable. Disclosed degraded render: log loud with
-    // the block id (fail-loud, not silent) and clamp the offending span here,
-    // so everything downstream — `build_highlights` and the shared
-    // `link_content_segments`, whose own contract is to assert on an
-    // out-of-range mark — only ever sees in-range spans. The durable fix is the
-    // read-boundary `canonicalize_marks_against`; this is the render-layer net.
-    let content_chars = content.chars().count();
-    let clamped = clamp_marks_to(content_chars, marks);
-    for ms in marks {
-        if ms.end > content_chars {
-            // First occurrence per block stays loud (ERROR) so the corruption
-            // is disclosed once; per-frame repaint repeats drop to debug! to
-            // avoid the 1847×/block spam (BugFunnel N7). No global mute — a
-            // different corrupt block gets its own loud first line.
-            let first = crate::render::warn_throttle::first_time_seen((
-                "rendered_text_mark_overflow",
-                block_uri.as_str(),
-            ));
-            if first {
-                tracing::error!(
-                    block_id = %block_uri.as_str(),
-                    mark_start = ms.start,
-                    mark_end = ms.end,
-                    content_chars,
-                    "rendered_text: mark span exceeds content length; rendering \
-                     degraded (clamped). Corrupt persisted marks for this block."
-                );
-            } else {
-                tracing::debug!(
-                    block_id = %block_uri.as_str(),
-                    mark_start = ms.start,
-                    mark_end = ms.end,
-                    content_chars,
-                    "rendered_text: mark span exceeds content length (repeat; \
-                     first occurrence for this block logged at ERROR)."
-                );
-            }
-        }
-    }
-
+    // `marks` arrives from `marks_of`, the projection-path read boundary, which
+    // has already healed the span against this block's content and disclosed
+    // the repair. Nothing is left to clamp here, so the spans handed to
+    // `build_highlights` and to the shared `link_content_segments` — whose
+    // contract is to assert on an out-of-range mark — are in range by the time
+    // they reach this function.
     // One flowing, wrapping styled text: all marks become highlight runs.
     let highlights = build_highlights(content, marks, ctx);
     // The paint-observable fingerprint, extracted from the SAME highlight runs
@@ -254,7 +198,7 @@ fn styled_run_render(
 
     // Segments carry each link span's byte range + target, so a hit-tested byte
     // offset resolves to either "link (navigate)" or "text (seed caret)".
-    let segments = link_content_segments(content, &clamped);
+    let segments = link_content_segments(content, marks);
 
     let block = block_uri.clone();
     let element = div()
@@ -340,34 +284,6 @@ mod tests {
 
     fn mark(start: usize, end: usize, m: InlineMark) -> MarkSpan {
         MarkSpan::new(start, end, m)
-    }
-
-    /// A mark reaching past its own content must be clamped, not fatal — the
-    /// alternative is a block that aborts every paint, i.e. a permanently
-    /// un-openable page.
-    #[test]
-    fn clamp_brings_an_overlong_span_inside_the_content() {
-        let out = clamp_marks_to(4, &[mark(1, 99, InlineMark::Bold)]);
-        assert_eq!((out[0].start, out[0].end), (1, 4));
-    }
-
-    /// The inversion half. `MarkSpan::new` asserts `start <= end`, so if the
-    /// clamp ever loses its `.max(start)` this test aborts rather than fails —
-    /// which is exactly the production failure it guards.
-    #[test]
-    fn clamp_repairs_a_persisted_inverted_span() {
-        // Round-tripped rather than hand-written so the fixture tracks the
-        // real wire format, and so the test itself proves the constructor's
-        // `start <= end` assert is bypassable by deserialization.
-        let mut wire = serde_json::to_value(mark(2, 5, InlineMark::Bold)).expect("serialize");
-        wire["start"] = 5.into();
-        wire["end"] = 2.into();
-        let inverted: MarkSpan = serde_json::from_value(wire).expect("inverted span deserializes");
-        assert!(inverted.start > inverted.end, "fixture must be inverted");
-
-        let out = clamp_marks_to(10, &[inverted]);
-        assert!(out[0].start <= out[0].end);
-        assert_eq!((out[0].start, out[0].end), (5, 5));
     }
 
     fn rich_style() -> crate::render::rich_text_runs::RichTextStyle {

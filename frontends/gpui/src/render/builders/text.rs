@@ -11,7 +11,6 @@ use gpui::UnderlineStyle;
 use holon_api::EntityRef;
 use holon_api::InlineMark;
 use holon_api::MarkSpan;
-use holon_api::Value;
 use holon_api::link_parser::LinkTargetClassifier;
 use holon_frontend::ReactiveViewModel;
 
@@ -47,13 +46,12 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     }
 
     // `marks` lives on the row data, not on props — it doesn't go through the
-    // DSL args path. Fail loud on malformed JSON: stored marks must be valid.
-    let marks: Option<Vec<MarkSpan>> = match node.entity().get("marks") {
-        Some(Value::String(s)) | Some(Value::Json(s)) if !s.is_empty() && s != "[]" => {
-            Some(holon_api::marks_from_json(s).expect("blocks.marks must be valid JSON"))
-        }
-        _ => None,
-    };
+    // DSL args path. Read through the shared projection boundary so this
+    // builder heals and discloses a corrupt `(content, marks)` pair exactly as
+    // `rendered_text` does, instead of keeping a second, stricter copy of the
+    // same read.
+    let marks: Option<Vec<MarkSpan>> =
+        Some(holon_frontend::link_segments::marks_of(&node.entity())).filter(|m| !m.is_empty());
 
     let mut el = div().line_height(px(26.0));
     if size > 0.0 {

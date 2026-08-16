@@ -122,15 +122,68 @@ pub fn wants_styled_render(content: &str, marks: &[MarkSpan]) -> bool {
     !content.is_empty() && !marks.is_empty()
 }
 
-/// The block's inline marks, read off its entity row. Fail loud on malformed
-/// JSON: stored `blocks.marks` must be valid.
-pub fn marks_of(entity: &DataRow) -> Vec<MarkSpan> {
+/// The block's inline marks, read off its entity row — the read boundary for
+/// the PROJECTION path (D27.a).
+///
+/// Both frontends render from a `DataRow`, never from a typed `Block`, so the
+/// heal in `Block::from_row` is on a different consumer's path and cannot cover
+/// this one. This is where a raw `marks` column becomes spans for anything that
+/// paints, which makes it the only place the `(content, marks)` pair can be
+/// checked before `link_content_segments` — whose contract is to ASSERT on an
+/// out-of-range span — is handed the result.
+///
+/// Two failure shapes, both disclosed and neither fatal, because
+/// `execute_raw_sql` / `insert_data` let an agent write arbitrary JSON into
+/// this column and a stray write must not make a page un-openable:
+/// - marks that do not parse (malformed JSON, or an inverted span, which is a
+///   hard error since D27.a) → the block renders as plain text;
+/// - marks present with no `content` to check them against → dropped, since
+///   nothing has validated them.
+fn read_marks(entity: &DataRow) -> Option<&str> {
     match entity.get("marks") {
-        Some(Value::String(s)) | Some(Value::Json(s)) if !s.is_empty() && s != "[]" => {
-            marks_from_json(s).expect("blocks.marks must be valid JSON")
-        }
-        _ => Vec::new(),
+        Some(Value::String(s)) | Some(Value::Json(s)) if !s.is_empty() && s != "[]" => Some(s),
+        _ => None,
     }
+}
+
+pub fn marks_of(entity: &DataRow) -> Vec<MarkSpan> {
+    let Some(raw) = read_marks(entity) else {
+        return Vec::new();
+    };
+    // A row missing `id` is already anomalous; the label only names the row in
+    // the log, so a placeholder keeps the disclosure readable.
+    let block_id = entity
+        .get("id")
+        .and_then(|v| v.as_string())
+        .unwrap_or("<row without id>"); // ALLOW(fallback): log label only
+
+    let mut marks = match marks_from_json(raw) {
+        Ok(marks) => marks,
+        // ALLOW(degraded_render): surfaced at ERROR below, never swallowed (D27.a)
+        Err(e) => {
+            tracing::error!(
+                block_id,
+                error = %e,
+                marks_json = %raw,
+                "block marks are unreadable; rendering this block as PLAIN TEXT \
+                 (degraded). Corrupt persisted marks for this block."
+            );
+            return Vec::new();
+        }
+    };
+
+    let Some(content) = entity.get("content").and_then(|v| v.as_string()) else {
+        tracing::error!(
+            block_id,
+            mark_count = marks.len(),
+            "block row carries marks but no content column to check them against; \
+             DROPPING the marks (degraded)."
+        );
+        return Vec::new();
+    };
+
+    holon_api::canonicalize_marks_against(content, &mut marks, block_id);
+    marks
 }
 
 /// What a click on a `rendered_text` offset must do, decided by the link kind
@@ -617,5 +670,81 @@ mod tests {
         assert!(marks_of(&row).is_empty());
         row.insert("marks".to_string(), Value::String(String::new()));
         assert!(marks_of(&row).is_empty());
+    }
+
+    /// A row with `marks` but no `content` column: the pair is incomplete, so
+    /// the marks cannot be checked against anything. Drop them and disclose
+    /// rather than render spans nothing has validated.
+    #[test]
+    fn marks_of_drops_marks_when_the_row_carries_no_content() {
+        let mut row = DataRow::new();
+        row.insert(
+            "id".to_string(),
+            Value::String("block:no-content".to_string()),
+        );
+        row.insert(
+            "marks".to_string(),
+            Value::String(r#"[{"start":0,"end":2,"kind":"Bold"}]"#.to_string()),
+        );
+        assert!(
+            marks_of(&row).is_empty(),
+            "marks without content must be dropped, not rendered"
+        );
+    }
+
+    /// The projection-path read boundary (D27.a). `marks_of` is where a
+    /// `DataRow` becomes marks for BOTH frontends, and it is the only boundary
+    /// on that path — the typed `Block::from_row` heal is a different consumer
+    /// — so the range-vs-content heal has to happen here or nowhere.
+    #[test]
+    fn marks_of_heals_a_span_that_outlives_its_content() {
+        let mut row = DataRow::new();
+        row.insert("id".to_string(), Value::String("block:corrupt".to_string()));
+        row.insert("content".to_string(), Value::String("abc".to_string()));
+        row.insert(
+            "marks".to_string(),
+            Value::String(r#"[{"start":0,"end":99,"kind":"Bold"}]"#.to_string()),
+        );
+        assert_eq!(
+            marks_of(&row),
+            vec![MarkSpan::new(0, 3, InlineMark::Bold)],
+            "an out-of-range span must be clamped to the content, not passed through"
+        );
+    }
+
+    /// Unreadable marks must DEGRADE VISIBLY, not abort. An inverted span is a
+    /// hard parse error since D27.a, and `execute_raw_sql` / `insert_data` let
+    /// an agent write one, so `.expect()`ing here would let a stray MCP write
+    /// panic the app. Plain text plus a loud ERROR is priority 2; a crash is
+    /// worse than the corruption it reports.
+    ///
+    /// Asserted on BEHAVIOUR rather than on captured ERROR events: this unit
+    /// harness installs no subscriber, so a capture assertion would pass
+    /// vacuously (the `SpanCollector::global()` gotcha).
+    #[test]
+    fn marks_of_degrades_to_plain_text_when_the_marks_do_not_parse() {
+        let mut row = DataRow::new();
+        row.insert(
+            "id".to_string(),
+            Value::String("block:inverted".to_string()),
+        );
+        row.insert("content".to_string(), Value::String("hello".to_string()));
+        row.insert(
+            "marks".to_string(),
+            Value::String(r#"[{"start":5,"end":2,"kind":"Bold"}]"#.to_string()),
+        );
+        assert!(
+            marks_of(&row).is_empty(),
+            "an inverted span must render the block plain, not abort the paint"
+        );
+
+        row.insert(
+            "marks".to_string(),
+            Value::String("{not json at all".to_string()),
+        );
+        assert!(
+            marks_of(&row).is_empty(),
+            "malformed JSON must render the block plain, not abort the paint"
+        );
     }
 }

@@ -407,7 +407,7 @@ async fn seed_tree(env: &TestEnvironment, case: &MergeCase) {
     env.create_block(LINKER, ROOT, label)
         .await
         .expect("create linker");
-    let mut marks = vec![MarkSpan::new(
+    let marks = vec![MarkSpan::new(
         0,
         label.chars().count(),
         InlineMark::Link {
@@ -415,7 +415,6 @@ async fn seed_tree(env: &TestEnvironment, case: &MergeCase) {
             label: label.to_string(),
         },
     )];
-    holon_api::canonicalize_marks_against(label, &mut marks);
     let mut params: HashMap<String, Value> = HashMap::new();
     params.insert("id".into(), Value::String(uri(LINKER)));
     params.insert("field".into(), Value::String("marks".into()));
