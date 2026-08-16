@@ -90,3 +90,31 @@ fn default_layout_surfaces_two_drawer_handles_after_start_app() {
     assert!(state.drawer_is_open("block:default-left-sidebar"));
     assert!(state.drawer_is_open("block:default-right-sidebar"));
 }
+
+/// An UNTRACKED drawer must fall to its mode default, not to a blanket `true`.
+/// This is the ref side of production `BuilderServices::drawer_open`; a blanket
+/// open would report the first overlay drawer as open and red
+/// `inv-drawer-open-matches-ref` for the wrong reason.
+#[test]
+fn an_untracked_drawer_reads_its_mode_default_on_both_sides() {
+    use holon_frontend::view_model::DrawerMode;
+    use holon_pbt_core::capabilities::RefToggleMut;
+
+    let interp = Arc::new(holon_frontend::render_interpreter::RenderInterpreter::new());
+    let mut state = ReferenceState::new(holon_pbt_core::Wiring::full(), interp);
+    state.action.app_started = true;
+
+    // Production's rule, which both sides below must agree with.
+    assert!(DrawerMode::Shrink.default_open());
+    assert!(!DrawerMode::Overlay.default_open());
+
+    // READ side: the declared shrink sidebars read open with nothing recorded.
+    assert!(state.drawer_is_open("block:default-left-sidebar"));
+
+    // WRITE side: `toggle_drawer` reads through the same default, so an
+    // untracked shrink drawer flips open -> closed (never open -> open).
+    state.toggle_drawer("block:default-left-sidebar");
+    assert!(!state.drawer_is_open("block:default-left-sidebar"));
+    state.toggle_drawer("block:default-left-sidebar");
+    assert!(state.drawer_is_open("block:default-left-sidebar"));
+}

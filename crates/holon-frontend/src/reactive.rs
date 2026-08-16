@@ -1997,6 +1997,14 @@ impl UiState {
             .unwrap()
             .insert(key.to_string(), expanded);
         self.expanded_view_observed.lock().unwrap().remove(key);
+        self.bump_viewport_generation();
+    }
+
+    /// Invalidate every mounted frontend's interpretation. The one signal
+    /// structural view-state changes ride on — viewport/breakpoint changes,
+    /// expand/collapse intent, and drawer open/close all bump it so the next
+    /// re-interpretation reads the new store value.
+    pub(crate) fn bump_viewport_generation(&self) {
         self.viewport_generation
             .set(self.viewport_generation.get() + 1);
     }
@@ -2179,8 +2187,7 @@ impl UiState {
             return;
         }
         self.viewport.set(Some(info));
-        self.viewport_generation
-            .set(self.viewport_generation.get() + 1);
+        self.bump_viewport_generation();
     }
 
     /// Get a snapshot of the current viewport.
@@ -3532,6 +3539,10 @@ impl BuilderServices for ReactiveEngine {
 
     fn set_widget_open(&self, id: &str, open: bool) {
         self.session.set_widget_open(id, open);
+        // The snapshot's `ViewKind::Drawer.open` is stamped at interpretation
+        // time, so a store write that does not invalidate leaves every
+        // snapshot-driven frontend rendering the pre-toggle state forever.
+        self.ui_state.bump_viewport_generation();
     }
 
     fn set_widget_width(&self, id: &str, width: f32, persist: bool) {
@@ -4230,6 +4241,10 @@ pub struct StubBuilderServices {
     /// No registry is wired into a stub, so it resolves the built-in schemes
     /// only.
     link_classifier: holon_api::link_parser::LinkTargetClassifier,
+    /// Explicitly-set widget state, keyed by block id. Empty by default, so an
+    /// unset id keeps reading `WidgetState::default()` exactly as before; tests
+    /// that need a CLOSED drawer set one entry.
+    widget_states: std::collections::HashMap<String, WidgetState>,
 }
 
 fn stub_runtime_handle() -> tokio::runtime::Handle {
@@ -4258,6 +4273,7 @@ impl StubBuilderServices {
             interpreter: Arc::new(crate::shadow_builders::build_shadow_interpreter()),
             rt_handle,
             link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
+            widget_states: std::collections::HashMap::new(),
         }
     }
 
@@ -4266,7 +4282,21 @@ impl StubBuilderServices {
             interpreter: Arc::new(crate::shadow_builders::build_shadow_interpreter()),
             rt_handle,
             link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
+            widget_states: std::collections::HashMap::new(),
         }
+    }
+
+    /// Record an explicit stored open state for `block_id`, the way a user's
+    /// persisted `ui.widgets` entry does.
+    pub fn with_widget_open(mut self, block_id: impl Into<String>, open: bool) -> Self {
+        self.widget_states.insert(
+            block_id.into(),
+            WidgetState {
+                open,
+                ..WidgetState::default()
+            },
+        );
+        self
     }
 }
 
@@ -4289,6 +4319,7 @@ impl BuilderServices for StubBuilderServices {
             interpreter: self.interpreter.clone(),
             rt_handle: self.rt_handle.clone(),
             link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
+            widget_states: self.widget_states.clone(),
         })
     }
 
@@ -4313,8 +4344,12 @@ impl BuilderServices for StubBuilderServices {
         anyhow::bail!("StubBuilderServices does not support live queries")
     }
 
-    fn widget_state(&self, _: &str) -> WidgetState {
-        WidgetState::default()
+    fn widget_state(&self, id: &str) -> WidgetState {
+        // Not an error path: an unset id keeps the stub's documented "every
+        // widget is explicit, open by default" semantics that its
+        // gallery/layout consumers rely on.
+        // ALLOW(stub-widget-default): map miss is the documented default, not a failure
+        self.widget_states.get(id).cloned().unwrap_or_default()
     }
 
     fn set_widget_open(&self, _: &str, _: bool) {

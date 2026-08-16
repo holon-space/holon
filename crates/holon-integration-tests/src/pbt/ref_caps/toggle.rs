@@ -75,7 +75,9 @@ impl RefToggleMut for ReferenceState {
         }
     }
     fn toggle_drawer(&mut self, id: &str) {
-        // Default-open, so an untracked drawer flips to closed.
+        // Reads through `drawer_is_open`, so an UNTRACKED drawer flips away
+        // from its mode default (Shrink open -> closed, Overlay closed -> open)
+        // rather than from a blanket open.
         let current = holon_layout_testing::LayoutRefState::drawer_is_open(self, id);
         self.ui.tab.drawer_open.insert(id.to_string(), !current);
     }

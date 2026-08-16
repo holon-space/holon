@@ -84,6 +84,18 @@ pub(crate) fn view_model_to_snapshot(
             props.insert("target_id".into(), target_id.clone());
             props.insert("expanded".into(), expanded.to_string());
         }
+        ViewKind::Drawer {
+            block_id,
+            mode,
+            open,
+            width,
+            ..
+        } => {
+            props.insert("block_id".into(), block_id.clone());
+            props.insert("mode".into(), mode.as_str().into());
+            props.insert("open".into(), open.to_string());
+            props.insert("width".into(), width.to_string());
+        }
         _ => {}
     }
 

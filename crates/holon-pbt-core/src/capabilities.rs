@@ -2219,6 +2219,11 @@ pub trait RefPinsMut: RefPins {
 /// stack plus the sidebar-navigation prediction gates the `Navigate*`
 /// transitions read. Region-precise (`holon_api::Region`, not the lossy
 /// `CapRegion`) because the nav history is keyed per exact region.
+///
+/// `#[capmap_adapter]` hosts it on `CapMap` (sync trait → no async-trait) so
+/// `inv-drawer-open-matches-ref` can read `drawer_is_open` off the composed
+/// ref.
+#[holon_macros::capmap_adapter]
 pub trait RefNavHistory {
     /// True iff the region's history cursor can move back (has a prior entry).
     fn can_go_back(&self, region: holon_api::Region) -> bool;

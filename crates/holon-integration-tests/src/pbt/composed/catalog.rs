@@ -121,6 +121,7 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         invariants::wheel_occlusion_routing::wire(),
         invariants::displayed_text::wire_widget(),
         invariants::displayed_text::wire_viewmodel(),
+        invariants::drawer_open_matches_ref::wire(),
         // Read-mode inline STYLING at the paint level (bold/italic/underline/
         // strike/code/link). Needs `SutLayout` (painted styled runs) +
         // `SutBackend` (write-side marks); windowed slice only.

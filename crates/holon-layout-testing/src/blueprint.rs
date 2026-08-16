@@ -66,12 +66,15 @@ impl fmt::Debug for BlockHandle {
 
 // ── DrawerHandle ──────────────────────────────────────────────────────────
 
-/// One toggleable drawer discovered while building a blueprint. Drawers
-/// default to open; scenarios may emit `ToggleDrawer { block_id }` actions
-/// targeting any of these ids.
+/// One toggleable drawer discovered while building a blueprint. An untracked
+/// drawer defaults to its MODE's default — `Shrink` open, `Overlay` closed,
+/// the rule `BuilderServices::drawer_open` applies in production — so the mode
+/// travels with the handle rather than being assumed. Scenarios may emit
+/// `ToggleDrawer { block_id }` actions targeting any of these ids.
 #[derive(Clone, Debug)]
 pub struct DrawerHandle {
     pub block_id: String,
+    pub mode: holon_frontend::view_model::DrawerMode,
 }
 
 // ── CollapsibleHandle ─────────────────────────────────────────────────────

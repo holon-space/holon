@@ -34,6 +34,7 @@ pub mod companion_has_no_child_page_headings;
 pub mod complexity_trend;
 pub mod display_placement_canonical_inert;
 pub mod displayed_text;
+pub mod drawer_open_matches_ref;
 pub mod editable_text_has_draggable;
 pub mod embedded_page_collapsed_lazy;
 pub mod every_page_has_its_own_file;

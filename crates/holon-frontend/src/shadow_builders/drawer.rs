@@ -5,6 +5,12 @@ use crate::view_model::DrawerMode;
 
 pub const DEFAULT_DRAWER_WIDTH: f32 = 260.0;
 
+/// Flow width a CLOSED shrink drawer still reserves — the toggle strip GPUI
+/// keeps rendered so a collapsed sidebar stays reachable. Shared so the
+/// layout_hint every frontend allocates from and GPUI's own collapsed column
+/// state the same number.
+pub const DRAWER_TOGGLE_WIDTH: f32 = 12.0;
+
 // A collapsible drawer wrapping a single child.
 //
 // ```text
@@ -67,14 +73,22 @@ holon_macros::widget_builder! {
             None => ViewModel::empty(),
         };
 
+        // The SAME view-store read GPUI performs at render time. Stamping it
+        // here is what lets a snapshot-driven frontend (dioxus-web) collapse a
+        // closed drawer at all — GPUI keeps reading live and ignores the stamp.
+        let open = ba.services.drawer_open(&block_id, mode);
+
         let layout_hint = match mode {
             // Overlay drawers float above siblings — zero flow footprint.
             DrawerMode::Overlay => LayoutHint::Fixed { px: 0.0 },
-            // Shrink drawers always reserve their full width in the partition,
-            // even when closed. The GPUI renderer collapses to 0 inside that slot.
+            // A closed shrink drawer reserves only its toggle strip — the same
+            // collapsed geometry GPUI's `columns` computes for itself.
+            DrawerMode::Shrink if !open => LayoutHint::Fixed {
+                px: DRAWER_TOGGLE_WIDTH,
+            },
             DrawerMode::Shrink => LayoutHint::Fixed { px: width },
         };
 
-        ViewModel::drawer(block_id, mode, width, child).with_layout_hint(layout_hint)
+        ViewModel::drawer(block_id, mode, open, width, child).with_layout_hint(layout_hint)
     }
 }

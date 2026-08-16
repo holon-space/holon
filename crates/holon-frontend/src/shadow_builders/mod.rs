@@ -1,5 +1,6 @@
 mod prelude;
 pub use drawer::DEFAULT_DRAWER_WIDTH;
+pub use drawer::DRAWER_TOGGLE_WIDTH;
 
 use crate::reactive_view_model::ReactiveViewModel;
 

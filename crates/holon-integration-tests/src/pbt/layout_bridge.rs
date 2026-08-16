@@ -20,6 +20,7 @@
 
 use std::sync::OnceLock;
 
+use holon_frontend::view_model::DrawerMode;
 use holon_layout_testing::Clickable;
 use holon_layout_testing::LayoutRefState;
 use holon_layout_testing::blueprint::BlockHandle;
@@ -40,13 +41,26 @@ fn default_drawer_handles() -> &'static [DrawerHandle] {
             vec![
                 DrawerHandle {
                     block_id: "block:default-left-sidebar".to_string(),
+                    mode: DrawerMode::Shrink,
                 },
                 DrawerHandle {
                     block_id: "block:default-right-sidebar".to_string(),
+                    mode: DrawerMode::Shrink,
                 },
             ]
         })
         .as_slice()
+}
+
+/// The declared mode for a drawer id. Unknown ids are `Shrink`: every drawer
+/// the default layout renders is a shrink sidebar, and a shrink default is what
+/// `DrawerMode::default()` means everywhere else in the system.
+fn drawer_mode_of(block_id: &str) -> DrawerMode {
+    default_drawer_handles()
+        .iter()
+        .find(|h| h.block_id == block_id)
+        .map(|h| h.mode)
+        .unwrap_or(DrawerMode::Shrink)
 }
 
 impl LayoutRefState for ReferenceState {
@@ -101,14 +115,16 @@ impl LayoutRefState for ReferenceState {
     }
 
     fn drawer_is_open(&self, block_id: &str) -> bool {
-        // Default to open: production default layout boots both sidebars open.
-        // `ToggleDrawer::apply_to_ref` flips the recorded state.
+        // An untracked drawer falls to its MODE's default, mirroring production
+        // `BuilderServices::drawer_open` — a blanket `true` would report the
+        // first overlay drawer as open and red `inv-drawer-open-matches-ref`
+        // for the wrong reason. `ToggleDrawer::apply_to_ref` flips the record.
         self.ui
             .tab
             .drawer_open
             .get(block_id)
             .copied()
-            .unwrap_or(true)
+            .unwrap_or_else(|| drawer_mode_of(block_id).default_open())
     }
 }
 

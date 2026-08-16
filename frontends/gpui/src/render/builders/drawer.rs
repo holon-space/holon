@@ -1,3 +1,9 @@
+/// Width of the clickable drawer-toggle handle. Stays visible in the
+/// closed state so a user (or the layout PBT's `ToggleDrawer`
+/// transition) can re-open the drawer. Shared between `drawer::render`,
+/// the columns special-case for first/last shrink drawers, and the
+/// collapsed `layout_hint` every other frontend allocates from.
+pub(super) use holon_frontend::DRAWER_TOGGLE_WIDTH;
 use holon_frontend::drawer_toggle_id_for;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
@@ -5,12 +11,6 @@ use holon_frontend::view_model::DrawerMode;
 
 use super::prelude::*;
 use crate::geometry::TransparentTracker;
-
-/// Width of the clickable drawer-toggle handle. Stays visible in the
-/// closed state so a user (or the layout PBT's `ToggleDrawer`
-/// transition) can re-open the drawer. Shared between `drawer::render`
-/// and the columns special-case for first/last shrink drawers.
-pub(super) const DRAWER_TOGGLE_WIDTH: f32 = 12.0;
 
 /// Clamp range for a user-dragged sidebar width. Below the minimum the
 /// panel content is unusable; above the maximum it swallows the main area.

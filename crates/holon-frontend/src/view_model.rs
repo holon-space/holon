@@ -83,6 +83,14 @@ impl DrawerMode {
         }
     }
 
+    /// The render-spec/prop spelling — the inverse of [`Self::from_str`].
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Shrink => "shrink",
+            Self::Overlay => "overlay",
+        }
+    }
+
     /// Whether a drawer of this mode starts open when the user has no stored
     /// preference. `Shrink` drawers (desktop sidebars that reserve width) start
     /// open; `Overlay` drawers (narrow/phone layouts that float over the main
@@ -369,6 +377,13 @@ pub enum ViewKind {
     Drawer {
         block_id: String,
         mode: DrawerMode,
+        /// Effective open state, resolved by the shadow builder from the same
+        /// view-store read GPUI performs at render time
+        /// (`BuilderServices::drawer_open`): an explicit user setting if one is
+        /// stored, else [`DrawerMode::default_open`]. Snapshot-driven frontends
+        /// render the collapsed state from this — without it they can only
+        /// paint every drawer open.
+        open: bool,
         /// Reserved width in logical pixels. Used by the parent columns()
         /// builder (via layout_hint) to compute how much space to allocate.
         width: f32,
@@ -1033,6 +1048,7 @@ impl ViewModel {
     pub fn drawer(
         block_id: impl Into<String>,
         mode: DrawerMode,
+        open: bool,
         width: f32,
         child: ViewModel,
     ) -> Self {
@@ -1040,6 +1056,7 @@ impl ViewModel {
             kind: ViewKind::Drawer {
                 block_id: block_id.into(),
                 mode,
+                open,
                 width,
                 child: Box::new(child),
             },
@@ -1260,16 +1277,15 @@ impl ViewModel {
             ViewKind::Drawer {
                 block_id,
                 mode,
+                open,
                 width,
                 child,
             } => {
-                let mode_str = match mode {
-                    DrawerMode::Shrink => "shrink",
-                    DrawerMode::Overlay => "overlay",
-                };
+                let mode_str = mode.as_str();
+                let state = if *open { "open" } else { "closed" };
                 let _ = writeln!(
                     out,
-                    "{pad}drawer({block_id}, {mode_str}, {width}px){ops_suffix}"
+                    "{pad}drawer({block_id}, {mode_str}, {state}, {width}px){ops_suffix}"
                 );
                 child.fmt_indent(out, indent + 1);
             }
@@ -1664,9 +1680,15 @@ mod tests {
         let tree = ViewModel::layout(
             "columns",
             vec![
-                ViewModel::drawer("left", DrawerMode::Overlay, 260.0, ViewModel::empty()),
+                ViewModel::drawer(
+                    "left",
+                    DrawerMode::Overlay,
+                    false,
+                    260.0,
+                    ViewModel::empty(),
+                ),
                 ViewModel::live_block("main", ViewModel::empty()),
-                ViewModel::drawer("right", DrawerMode::Shrink, 260.0, ViewModel::empty()),
+                ViewModel::drawer("right", DrawerMode::Shrink, true, 260.0, ViewModel::empty()),
             ],
         );
 

@@ -1217,12 +1217,23 @@ impl ReactiveViewModel {
                     child: Box::new(content),
                 }
             }
-            "drawer" => ViewKind::Drawer {
-                block_id: self.prop_str("block_id").unwrap_or_default(),
-                mode: DrawerMode::from_str(self.prop_str("mode").as_deref().unwrap_or("shrink")),
-                width: self.prop_f64("width").unwrap_or(300.0) as f32,
-                child: Box::new(self.children.first().map(|c| snap(c)).unwrap_or_default()),
-            },
+            "drawer" => {
+                let mode =
+                    DrawerMode::from_str(self.prop_str("mode").as_deref().unwrap_or("shrink"));
+                ViewKind::Drawer {
+                    block_id: self.prop_str("block_id").unwrap_or_default(),
+                    mode,
+                    // The `drawer` builder always stamps `open` from the view
+                    // store; the mode default covers a node built without it and
+                    // means what `BuilderServices::drawer_open` means for an
+                    // untracked drawer.
+                    open: self
+                        .prop_bool("open")
+                        .unwrap_or_else(|| mode.default_open()),
+                    width: self.prop_f64("width").unwrap_or(300.0) as f32,
+                    child: Box::new(self.children.first().map(|c| snap(c)).unwrap_or_default()),
+                }
+            }
             "card" => ViewKind::Card {
                 accent: self.prop_str("accent").unwrap_or_default(),
                 children: snap_children(),
@@ -1420,21 +1431,14 @@ impl ReactiveViewModel {
     pub fn drawer(
         block_id: impl Into<String>,
         mode: DrawerMode,
+        open: bool,
         width: f32,
         child: ReactiveViewModel,
     ) -> Self {
         let mut props = HashMap::new();
         props.insert("block_id".to_string(), Value::String(block_id.into()));
-        props.insert(
-            "mode".to_string(),
-            Value::String(
-                match mode {
-                    DrawerMode::Overlay => "overlay",
-                    DrawerMode::Shrink => "shrink",
-                }
-                .to_string(),
-            ),
-        );
+        props.insert("mode".to_string(), Value::String(mode.as_str().to_string()));
+        props.insert("open".to_string(), Value::Boolean(open));
         props.insert("width".to_string(), Value::Float(width as f64));
         Self {
             children: vec![Arc::new(child)],

@@ -306,6 +306,7 @@ pub use row_origin::Occurrence;
 pub use row_origin::OccurrenceId;
 pub use row_origin::RowOrigin;
 pub use shadow_builders::DEFAULT_DRAWER_WIDTH;
+pub use shadow_builders::DRAWER_TOGGLE_WIDTH;
 pub use user_driver::ReactiveEngineDriver;
 pub use user_driver::UserDriver;
 pub use view_model::ViewModel;
@@ -615,6 +616,16 @@ impl<T> FrontendSession<T> {
     }
 
     /// Toggle a widget's open state and persist.
+    ///
+    /// A PURE STORE WRITE — it invalidates nothing, because a `FrontendSession`
+    /// holds no `UiState` (that lives one layer up, in `reactive`). Any caller
+    /// on a frontend that renders from the SNAPSHOT must also invalidate, or
+    /// `ViewKind::Drawer.open` — stamped at interpretation time — keeps its
+    /// pre-toggle value: go through
+    /// [`crate::reactive::BuilderServices::set_widget_open`], which bumps the
+    /// viewport generation for you. GPUI calls this directly and is correct
+    /// without it: it renders live off the view store and self-invalidates with
+    /// its own `rebuild`/`cx.notify`, consuming no snapshot stream.
     pub fn set_widget_open(&self, block_id: &str, open: bool) {
         self.update_ui_settings(|s| {
             s.widgets.entry(block_id.to_string()).or_default().open = open;
