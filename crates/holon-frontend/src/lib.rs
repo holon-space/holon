@@ -220,6 +220,7 @@ pub mod operations;
 /// behind the `pbt` feature so production builds never pull `holon-pbt-core`.
 #[cfg(feature = "pbt")]
 pub mod pbt_caps;
+pub mod platform;
 pub mod popup_menu;
 pub mod preferences;
 pub mod provider_cache;
@@ -371,6 +372,8 @@ pub struct FrontendSession<T = ()> {
     config_dir: PathBuf,
     /// Preference keys locked by CLI/env (read-only in UI).
     locked_keys: HashSet<preferences::PrefKey>,
+    /// What this session's boot path skipped, and why.
+    boot_report: platform::BootReport,
 }
 
 /// Everything a wiring crate (holon-app) supplies to construct a
@@ -391,6 +394,11 @@ pub struct SessionParts {
     pub holon_config: config::HolonConfig,
     pub config_dir: PathBuf,
     pub locked_keys: HashSet<preferences::PrefKey>,
+    /// Proof that this boot path closed its capability ledger, plus what it
+    /// skipped. Required (not optional) so a boot path cannot drop the
+    /// disclosure without failing to compile — see
+    /// [`crate::platform::BootDisclosure::finish`].
+    pub boot_report: platform::BootReport,
 }
 
 impl SessionParts {
@@ -404,7 +412,11 @@ impl SessionParts {
         ui_watcher: Arc<dyn holon_api::UiWatcher>,
         profiles: Arc<dyn holon_api::entity_profile::ProfileResolving>,
         link_classifier: holon_api::link_parser::LinkTargetClassifier,
+        boot_report: platform::BootReport,
     ) -> Self {
+        // Note for the boot ledger: these three lines mean any caller of this
+        // constructor HAS performed `ThemeAndPreferences` and
+        // `PublishErrorTracker` — they should mark those steps performed.
         let theme_registry = Arc::new(theme::ThemeRegistry::load(None));
         let preference_defs = Arc::new(preferences::define_preferences(&theme_registry));
         Self {
@@ -421,6 +433,7 @@ impl SessionParts {
             holon_config: config::HolonConfig::default(),
             config_dir: PathBuf::new(),
             locked_keys: HashSet::new(),
+            boot_report,
         }
     }
 }
@@ -446,6 +459,7 @@ impl FrontendSession<()> {
             holon_config: Mutex::new(parts.holon_config),
             config_dir: parts.config_dir,
             locked_keys: parts.locked_keys,
+            boot_report: parts.boot_report,
         }
     }
 }
@@ -459,6 +473,12 @@ impl<T> FrontendSession<T> {
     /// Get the extra services resolved from DI
     pub fn extras(&self) -> &T {
         &self.extras
+    }
+
+    /// What this session's boot path skipped, and why — the typed form of the
+    /// startup capability warnings, for a frontend that wants to show them.
+    pub fn boot_report(&self) -> &platform::BootReport {
+        &self.boot_report
     }
 
     /// The block read seam, present in **both** wirings (ADR 0004 Phase 9).

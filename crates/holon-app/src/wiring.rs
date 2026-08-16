@@ -37,6 +37,9 @@ use holon_frontend::FrontendSession;
 use holon_frontend::SessionParts;
 use holon_frontend::config::HolonConfig;
 use holon_frontend::config::SessionConfig;
+use holon_frontend::platform::BootDisclosure;
+use holon_frontend::platform::BootStep;
+use holon_frontend::platform::PlatformCapabilities;
 use holon_frontend::preferences::PrefKey;
 use holon_frontend::preferences::{self};
 use holon_frontend::render_services::register_render_services;
@@ -77,6 +80,12 @@ impl FrontendInjectorExt for Injector {
         locked_keys: HashSet<PrefKey>,
     ) -> Result<()> {
         let db_path = holon_config.resolve_db_path(&config_dir);
+
+        // Ledger of which boot steps this assembly actually performs. Steps that
+        // a `#[cfg]` compiles out — or that the hand-mirrored worker assembly
+        // never had — are warned about by `finish()` at the end of the session
+        // factory, so a silently missing feature becomes a startup log line.
+        let disclosure = BootDisclosure::new(PlatformCapabilities::current());
 
         // Lets a legacy-loro-state rejection name this process's actual files.
         holon_loro::mergeable_child::disclose_migration_paths(
@@ -124,6 +133,7 @@ impl FrontendInjectorExt for Injector {
         self.provide::<Arc<holon::sync::DegradedSignalBus>>(Provider::root(|_| {
             Shared::new(Arc::new(holon::sync::DegradedSignalBus::new()))
         }));
+        disclosure.performed(BootStep::DegradedSignalBus);
 
         // Write-back supervision disclosure. Registered UNCONDITIONALLY for the
         // same reason as the bus itself: org write-back runs in every mode, so
@@ -135,6 +145,7 @@ impl FrontendInjectorExt for Injector {
                 bus: (*bus).clone(),
             }) as Arc<dyn holon_filesystem::WritebackDisclosure>
         }));
+        disclosure.performed(BootStep::WritebackDisclosure);
 
         // ThemeRegistry + PreferenceDefs
         let post_write_hook = holon_config.hooks.post_org_write.clone();
@@ -149,12 +160,14 @@ impl FrontendInjectorExt for Injector {
             let pd = Shared::new(preference_defs);
             move |_| pd.clone()
         }));
+        disclosure.performed(BootStep::ThemeAndPreferences);
 
         // UiInfo
         self.provide::<holon_api::UiInfo>(Provider::root({
             let ui = session_config.ui_info.clone();
             move |_| Shared::new(ui.clone())
         }));
+        disclosure.performed(BootStep::UiInfo);
 
         // Conditional modules
         let orgmode_root = holon_config.vault.root.clone();
@@ -191,6 +204,7 @@ impl FrontendInjectorExt for Injector {
                 &configured,
                 &[&turso_state, &loro_state],
             )?;
+            disclosure.performed(BootStep::ConsolidatorEpochGuard);
         }
         #[cfg(not(target_arch = "wasm32"))]
         let mcp_integrations_dir = holon_config.resolve_mcp_integrations_dir(&config_dir);
@@ -275,6 +289,10 @@ impl FrontendInjectorExt for Injector {
 
         // OrgMode (native-only — holon-orgmode uses tokio::fs + tokio::process)
         #[cfg(not(target_arch = "wasm32"))]
+        if orgmode_root.is_none() {
+            disclosure.absent_by_config(BootStep::OrgModeIngest, "no vault root configured");
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(root) = orgmode_root {
             use holon_orgmode::di::OrgModeConfig;
 
@@ -318,22 +336,33 @@ impl FrontendInjectorExt for Injector {
             OrgModeModule
                 .configure(self)
                 .map_err(|e| anyhow::anyhow!("Failed to register OrgModeModule: {}", e))?;
+            disclosure.performed(BootStep::OrgModeIngest);
         }
 
         // MCP integrations (native-only). External providers (Todoist, etc.)
         // are configured here from `{config_dir}/integrations/*.yaml`.
+        #[cfg(not(target_arch = "wasm32"))]
+        if mcp_integrations_dir.is_none() {
+            disclosure.absent_by_config(
+                BootStep::McpIntegrations,
+                "no MCP integrations directory configured",
+            );
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(ref dir) = mcp_integrations_dir {
             let module = crate::mcp_integrations::McpIntegrationsModule::from_dir(dir);
             module
                 .configure(self)
                 .map_err(|e| anyhow::anyhow!("Failed to register McpIntegrationsModule: {}", e))?;
+            disclosure.performed(BootStep::McpIntegrations);
         }
 
         // FrontendSession factory — resolves all dependencies from DI
         #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
         let wait_for_ready = session_config.wait_for_ready;
+        let disclosure = disclosure.clone();
         self.provide::<FrontendSession>(Provider::root_async(move |resolver| {
+            let disclosure = disclosure.clone();
             use tracing::Instrument;
             async move {
                 tracing::info!("[FrontendSession] factory: entering");
@@ -366,6 +395,12 @@ impl FrontendInjectorExt for Injector {
                         if let Some(hook) = holon_core::combine_matview_hooks(hooks) {
                             engine.set_matview_hook(hook).await;
                         }
+                        disclosure.performed(BootStep::McpFdwTables);
+                    } else {
+                        disclosure.absent_by_config(
+                            BootStep::McpFdwTables,
+                            "no MCP integration registry in this container",
+                        );
                     }
                 }
                 .instrument(tracing::info_span!(
@@ -377,6 +412,7 @@ impl FrontendInjectorExt for Injector {
                     .try_resolve::<PublishErrorTracker>()
                     .map(|t| (*t).clone())
                     .unwrap_or_else(|_| PublishErrorTracker::new());
+                disclosure.performed(BootStep::PublishErrorTracker);
                 #[cfg(not(target_arch = "wasm32"))]
                 let ready_signal: Option<
                     tokio::sync::watch::Receiver<Option<Result<(), String>>>,
@@ -384,13 +420,38 @@ impl FrontendInjectorExt for Injector {
                     .try_resolve::<holon_orgmode::di::FileWatcherReadySignal>()
                     .ok()
                     .map(|s| (*s).clone().into_receiver());
+                #[cfg(not(target_arch = "wasm32"))]
+                if ready_signal.is_some() {
+                    disclosure.performed(BootStep::FileWatcherReadySignal);
+                } else {
+                    // No org module registered it — the vault-less configuration.
+                    disclosure.absent_by_config(
+                        BootStep::FileWatcherReadySignal,
+                        "no org file watcher in this configuration",
+                    );
+                }
 
                 // Transition DB to ready
                 async {
                     if let Ok(db_handle_provider) = resolver.try_resolve::<dyn DbHandleProvider>() {
                         let handle = db_handle_provider.handle();
                         if let Err(e) = handle.transition_to_ready().await {
-                            tracing::warn!("Failed to transition actor to ready: {}", e);
+                            // Names the boot step, because the ledger cannot see
+                            // WHY a step is unmarked: without this line the boot
+                            // report blames `transition-db-to-ready` on wiring
+                            // drift and sends the reader hunting a divergence
+                            // that is not there.
+                            tracing::error!(
+                                "boot [component=platform-capabilities]: step \
+                                 `transition-db-to-ready` FAILED at runtime: {e}. The DB actor is \
+                                 still in boot mode. This — not a divergence from the shared \
+                                 wiring — is why the boot report lists that step as skipped."
+                            );
+                        } else {
+                            // Records success, not the attempt: a DB left in
+                            // boot mode is a missing step, and the ledger says
+                            // so instead of reporting the transition as done.
+                            disclosure.performed(BootStep::TransitionDbToReady);
                         }
                     }
                 }
@@ -454,6 +515,7 @@ impl FrontendInjectorExt for Injector {
                         "boot [component=session stage=session-resolve]: \
                              seed_default_layout failed",
                     );
+                    disclosure.performed(BootStep::SeedDefaultLayout);
                 }
                 .instrument(tracing::info_span!(
                     "di.factory.FrontendSession.seed_default_layout"
@@ -514,6 +576,7 @@ impl FrontendInjectorExt for Injector {
                             "boot [component=session stage=session-resolve]: \
                              start_action_watchers failed",
                         );
+                    disclosure.performed(BootStep::StartActionWatchers);
                 }
                 .instrument(tracing::info_span!(
                     "di.factory.FrontendSession.start_action_watchers"
@@ -601,6 +664,7 @@ impl FrontendInjectorExt for Injector {
                     } else {
                         tokio::spawn(post_ready_work);
                     }
+                    disclosure.performed(BootStep::PostReady);
                 }
 
                 let config_dir_val = resolver.resolve::<ConfigDir>();
@@ -612,6 +676,7 @@ impl FrontendInjectorExt for Injector {
                 // boot (an MCP sidecar connecting) without re-wiring.
                 let link_classifier =
                     (*resolver.resolve::<holon_api::link_parser::LinkTargetClassifier>()).clone();
+                disclosure.performed(BootStep::RegistryLinkClassifier);
 
                 let profiles = engine.profile_resolver().clone();
                 let query_engine = Some(engine.clone() as Arc<dyn holon::api::QueryEngine>);
@@ -647,6 +712,9 @@ impl FrontendInjectorExt for Injector {
                     holon_config: (*holon_config).clone(),
                     config_dir: config_dir_val.0.clone(),
                     locked_keys: locked_keys.0.clone(),
+                    // Closes the ledger and logs every step that never ran.
+                    // Required by SessionParts, so it cannot be dropped.
+                    boot_report: disclosure.finish(),
                 }))
             }
             .instrument(tracing::info_span!("di.factory.FrontendSession"))

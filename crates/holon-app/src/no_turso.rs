@@ -24,6 +24,8 @@ use fluxdi::Shared;
 use holon_core::storage::BlockQuerySource;
 use holon_frontend::FrontendSession;
 use holon_frontend::SessionParts;
+use holon_frontend::platform::BootStep;
+use holon_frontend::platform::PlatformCapabilities;
 use holon_frontend::reactive::BuilderServicesSlot;
 use holon_frontend::reactive::RenderInterpreterInjectorExt;
 use holon_frontend::reactive::make_interpret_fn;
@@ -75,6 +77,14 @@ pub fn from_block_query_source(
     )) as Arc<dyn holon::api::UiWatcher>;
     let profiles =
         holon::api::loro_ui_watcher::build_turso_free_profile_resolver(block_query.clone());
+    // Third boot path, and the least complete one: it assembles a session
+    // directly, performing none of the steps the shared wiring runs except the
+    // two `with_capabilities` supplies. Its ledger says exactly that, so
+    // productionizing this path (docs/Plans/BootLadder-2026-07-18.md) starts
+    // from a boot log naming everything it still owes.
+    let disclosure = holon_frontend::platform::BootDisclosure::new(PlatformCapabilities::current());
+    disclosure.performed(BootStep::ThemeAndPreferences);
+    disclosure.performed(BootStep::PublishErrorTracker);
     FrontendSession::from_parts(SessionParts::with_capabilities(
         None,
         block_query,
@@ -83,5 +93,6 @@ pub fn from_block_query_source(
         profiles,
         // No type registry in the Turso-free wiring: built-in schemes only.
         holon_api::link_parser::LinkTargetClassifier::default(),
+        disclosure.finish(),
     ))
 }

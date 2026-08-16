@@ -168,6 +168,9 @@ mod backend {
     use holon_frontend::SessionParts;
     use holon_frontend::command_provider::CommandProvider;
     use holon_frontend::interpret_pure;
+    use holon_frontend::platform::BootDisclosure;
+    use holon_frontend::platform::BootStep;
+    use holon_frontend::platform::PlatformCapabilities;
     use holon_frontend::reactive::BuilderServices;
     use holon_frontend::reactive::ReactiveEngine;
     use holon_frontend::shadow_builders::build_shadow_interpreter;
@@ -267,6 +270,15 @@ mod backend {
     /// current-thread runtime — the seam the reset arm drives the fresh-DB seed
     /// on (the OLD state's runtime is torn down before this runs).
     pub(super) fn build_engine_state(db_path: String) -> napi::Result<EngineState> {
+        // This assembly hand-mirrors holon-app's `add_frontend` (holon-app is
+        // not wasm-buildable, so the worker cannot call it). Record the steps it
+        // DOES perform; `finish()` below warns about every one it does not, so
+        // the difference between the two boot paths is a startup log line
+        // instead of a runtime mystery. `BROWSER_WORKER` rather than
+        // `current()`: the worker keeps its reduced shape even when a CI job
+        // `cargo check`s it for a native target.
+        let disclosure = BootDisclosure::new(PlatformCapabilities::BROWSER_WORKER);
+
         let runtime = Arc::new(
             tokio::runtime::Builder::new_current_thread()
                 .enable_time()
@@ -332,6 +344,7 @@ mod backend {
         runtime
             .block_on(async { super::seed::seed_default_layout(&engine).await })
             .map_err(|e| super::nerr("seed_default_layout", e))?;
+        disclosure.performed(BootStep::SeedDefaultLayout);
 
         // Start the action + holon_rule watchers. Native does this in holon-app
         // `wiring.rs`; this hand-rolled mirror omitted it, so the seeded
@@ -342,6 +355,7 @@ mod backend {
                 holon::api::action_watcher::start_action_watchers(engine.clone()).await
             })
             .map_err(|e| super::nerr("start_action_watchers", e))?;
+        disclosure.performed(BootStep::StartActionWatchers);
 
         // Build the FrontendSession from the engine's capabilities, mirroring
         // the production Turso wiring (holon-app `wiring.rs`): the BackendEngine
@@ -361,6 +375,11 @@ mod backend {
         let query_engine = Some(engine.clone() as Arc<dyn holon::api::QueryEngine>);
         let operation_engine = Some(engine.clone() as Arc<dyn holon::api::OperationEngine>);
         let ui_watcher = engine.clone() as Arc<dyn holon::api::UiWatcher>;
+        // `with_capabilities` builds the theme registry, the preference defs and
+        // a PublishErrorTracker itself, so this path DOES perform those two
+        // steps — the native wiring reaches the identical end state.
+        disclosure.performed(BootStep::ThemeAndPreferences);
+        disclosure.performed(BootStep::PublishErrorTracker);
         let session = Arc::new(FrontendSession::from_parts(
             SessionParts::with_capabilities(
                 query_engine,
@@ -373,6 +392,8 @@ mod backend {
                 // The worker assembles the engine without a DI container, so no
                 // registry-backed classifier is reachable: built-in schemes only.
                 holon_api::link_parser::LinkTargetClassifier::default(),
+                // Closes the ledger and logs what this path skipped.
+                disclosure.finish(),
             ),
         ));
 
