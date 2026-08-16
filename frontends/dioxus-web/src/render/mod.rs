@@ -10,6 +10,8 @@
 //! per-`LiveBlock` subscription) stays in `crate::{bridge, editor}`. Everything
 //! here is pure `ViewModel → Element`.
 
+use dioxus::prelude::*;
+
 pub mod builders;
 
 pub use builders::RenderNode;
@@ -34,3 +36,12 @@ pub struct EntityContext(pub String);
 /// signature.
 #[derive(Clone, Copy, Default)]
 pub struct DioxusRenderContext;
+
+/// Counts worker snapshot envelopes applied to the tree. Monotonic.
+///
+/// Optimistic view state keys on this, never on the value it predicted: a
+/// prediction is valid only while the sequence still reads what it read at
+/// interaction time, so ANY delivery ends the optimism whatever value it
+/// carries, and a later snapshot that happens to return to the predicted
+/// value cannot resurrect a long-past prediction.
+pub static SNAPSHOT_SEQ: GlobalSignal<u64> = Signal::global(|| 0);

@@ -408,6 +408,56 @@ pub(crate) fn intent_to_wire(intent: &OperationIntent) -> serde_json::Value {
     })
 }
 
+/// Send BOTH legs of a chevron click, in order: the view-local expansion
+/// store (which re-seeds the worker's gate and materialises lazy content) and
+/// then the `set_field(collapsed)` document write.
+///
+/// The two legs travel together on purpose. `expand_toggle_effects` exists so
+/// no frontend performs one without the other, and `engineSetBlockExpanded` is
+/// an internal implementation detail of this function — sending it alone folds
+/// the view without recording the fold, which is the exact split the shared
+/// decision was extracted to prevent.
+/// `on_failure` receives the error when the store leg does not land. The
+/// caller MUST use it to drop any optimistic view state and disclose the
+/// failure: without it the chevron would sit open over a worker that never
+/// moved — a silent degradation this repo forbids.
+pub(crate) fn dispatch_expand_toggle(
+    effects: holon_frontend::expand_toggle::ExpandToggleEffects,
+    on_failure: impl FnOnce(String) + 'static,
+) {
+    let (target, expanded) = effects.view_store;
+    let intent = effects.intent;
+    let Some(bridge) = BRIDGE.with(|cell| cell.borrow().clone()) else {
+        let msg = format!("worker bridge not initialized — toggle of {target} was dropped");
+        tracing::error!("[expand_toggle] {msg}");
+        on_failure(msg);
+        return;
+    };
+    wasm_bindgen_futures::spawn_local(async move {
+        if let Err(e) = bridge
+            .call(
+                "engineSetBlockExpanded",
+                [target.clone().into(), expanded.into()],
+            )
+            .await
+        {
+            let msg = format!("worker rejected the fold of {target}: {e}");
+            tracing::error!("[expand_toggle] {msg}");
+            on_failure(msg);
+            return;
+        }
+        match intent {
+            Some(intent) => dispatch_chain(vec![intent_to_wire(&intent)]),
+            // Disclose the degraded fold: the view moved, the document did not,
+            // so this collapse will not survive a reload or reach other devices.
+            None => tracing::warn!(
+                "[expand_toggle] no set_field op wiring or row id for {target} — fold is \
+                 view-local and will not persist"
+            ),
+        }
+    });
+}
+
 /// Send an ordered intent chain through `engineDispatchIntents` — the
 /// single write lane. All content + structural writes go through here so
 /// the worker's `dispatch_intent_chain` serializes them; mixing lanes

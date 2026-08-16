@@ -265,6 +265,13 @@ self.addEventListener('message', async (e) => {
         mod.engineSetVariant(args[0], args[1])
         value = null
         break
+      case 'engineSetBlockExpanded':
+        // args: [targetId, expanded] — view-local leg of a chevron click.
+        // INTERNAL to the expand_toggle affordance: the page must pair it with
+        // the set_field(collapsed) intent, which dispatch_expand_toggle does.
+        mod.engineSetBlockExpanded(args[0], args[1])
+        value = null
+        break
       case 'engineSnapshotView':
         // args: [blockId]
         // Returns JSON string (ViewModel snapshot).

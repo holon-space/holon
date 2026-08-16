@@ -756,6 +756,21 @@ mod backend {
         Ok(())
     }
 
+    /// Record the view-local expansion store leg of a chevron click. Bumping
+    /// the store re-fires `watch_snapshot_stream`, so the `expand_toggle`
+    /// builder re-seeds its gate from it and the lazy content materialises
+    /// into the next snapshot the page receives.
+    ///
+    /// INTERNAL to the `expand_toggle` affordance: this is one of the two legs
+    /// `holon_frontend::expand_toggle::expand_toggle_effects` decides, and the
+    /// page must send both. Callers go through
+    /// `crate::editor::dispatch_expand_toggle`, never this RPC directly.
+    pub(super) fn set_block_expanded(block_id: String, expanded: bool) -> napi::Result<()> {
+        let (reactive, _runtime) = reactive_and_rt("set_block_expanded")?;
+        reactive.set_block_expanded_view(&block_id, expanded);
+        Ok(())
+    }
+
     /// B4: switch the active render variant for a watched block.
     pub(super) fn set_variant(block_id: String, variant: String) -> napi::Result<()> {
         let (reactive, runtime) = reactive_and_rt("set_variant")?;
@@ -1748,6 +1763,15 @@ mod engine_exports {
         caret_offset: Option<u32>,
     ) -> napi::Result<()> {
         backend::set_focus(block_id, caret_offset)
+    }
+
+    /// Record an expand/collapse gesture's view-local leg (the store the
+    /// `expand_toggle` gate is seeded from). The document leg —
+    /// `set_field(collapsed)` — goes through `engine_dispatch_intents`;
+    /// `holon_frontend::expand_toggle::expand_toggle_effects` decides both.
+    #[napi_derive::napi]
+    pub fn engine_set_block_expanded(block_id: String, expanded: bool) -> napi::Result<()> {
+        backend::set_block_expanded(block_id, expanded)
     }
 
     /// Switch the active render variant for a watched block. Errors if the

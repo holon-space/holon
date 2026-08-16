@@ -1,7 +1,5 @@
-use holon_api::Value;
-use holon_frontend::OperationIntent;
+use holon_frontend::expand_toggle::expand_toggle_effects;
 use holon_frontend::expand_toggle_id_for;
-use holon_frontend::operations::find_set_field_op;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 
 use super::prelude::*;
@@ -35,14 +33,8 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     let seed_target = target_id.clone();
     let el_id = format!("expand-toggle-{}", target_id);
 
-    // Dispatch the toggle as a real `set_field(collapsed)` op through the
-    // normal op path (dispatcher -> engine), so collapse is undoable,
-    // provenance-tagged (origin=User) and syncs as document state — not a
-    // view-local poke. `None` when no `set_field` op is wired for this row
-    // (e.g. static design-gallery contexts) — the chevron still folds
-    // locally, it just won't persist.
-    let set_field_op = find_set_field_op("collapsed", &node.operations)
-        .map(|op| (node.entity_name(), op.name.clone()));
+    let operations = node.operations.clone();
+    let entity_name = node.entity_name();
     let row_id = node.row_id();
     let services = ctx.services.clone();
 
@@ -70,25 +62,18 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
         .on_mouse_down(gpui::MouseButton::Left, move |_, window, _cx| {
             let new_val = !expanded_handle.get();
             expanded_handle.set(new_val);
-            // The `Mutable` above lives only as long as THIS view model, and a
-            // profile-driven row is re-synthesized on every resolve. The gate's
-            // durable authority is the view-local expansion store the builder
-            // seeds from, so the click has to land there too or the next
-            // structural rebuild discards it.
-            services.set_block_expanded_view(&seed_target, new_val);
             // Materialisation happens lazily on the next render when
             // `materialize_if_gated()` sees the open gate. No need to
             // call `services.interpret` here.
-            if let (Some((Some(entity_name), op_name)), Some(id)) =
-                (set_field_op.clone(), row_id.clone())
-            {
-                let intent = OperationIntent::set_field(
-                    &entity_name,
-                    &op_name,
-                    &id,
-                    "collapsed",
-                    Value::Boolean(!new_val),
-                );
+            let fx = expand_toggle_effects(
+                &seed_target,
+                new_val,
+                &operations,
+                entity_name.as_ref(),
+                row_id.as_deref(),
+            );
+            services.set_block_expanded_view(&fx.view_store.0, fx.view_store.1);
+            if let Some(intent) = fx.intent {
                 services.dispatch_intent(intent);
             }
             window.refresh();

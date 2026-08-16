@@ -307,6 +307,9 @@ fn App() -> Element {
                         }
                     }
                     view_model.set(Some(env.view_model));
+                    // Every delivery ends any optimistic view state, whatever
+                    // value it carries — see `render::SNAPSHOT_SEQ`.
+                    *render::SNAPSHOT_SEQ.write() += 1;
                     editor::worker_focus::apply(env.focused_block, env.caret_offset);
                     if !ready_on_snapshot.replace(true) {
                         let cold_start_ms = now_ms().saturating_sub(t0);

@@ -93,6 +93,17 @@ export declare function engineResetStorage(): void
 export declare function engineSetFocus(blockId?: string | undefined | null, caretOffset?: number | undefined | null): void
 
 /**
+ * Record an expand/collapse gesture's view-local leg (the store the
+ * `expand_toggle` gate is seeded from). The document leg —
+ * `set_field(collapsed)` — goes through `engineDispatchIntents`;
+ * `holon_frontend::expand_toggle::expand_toggle_effects` decides both.
+ *
+ * INTERNAL to the expand_toggle affordance — never call it alone; the page
+ * sends both legs through `dispatch_expand_toggle`.
+ */
+export declare function engineSetBlockExpanded(blockId: string, expanded: boolean): void
+
+/**
  * Switch the active render variant for a watched block. Errors if the
  * block is not currently being watched (see
  * `ReactiveEngine::set_variant`).

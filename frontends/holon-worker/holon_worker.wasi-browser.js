@@ -71,6 +71,7 @@ export const engineInit = __napiModule.exports.engineInit
 export const engineMcpTool = __napiModule.exports.engineMcpTool
 export const engineReactiveCheck = __napiModule.exports.engineReactiveCheck
 export const engineResetStorage = __napiModule.exports.engineResetStorage
+export const engineSetBlockExpanded = __napiModule.exports.engineSetBlockExpanded
 export const engineSetFocus = __napiModule.exports.engineSetFocus
 export const engineSetVariant = __napiModule.exports.engineSetVariant
 export const engineSetViewport = __napiModule.exports.engineSetViewport
