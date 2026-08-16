@@ -90,8 +90,8 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
                 continue;
             }
             let rendered = super::render(item, ctx);
-            match item.layout_hint {
-                LayoutHint::Fixed { px: fixed_px } => {
+            match item.layout_hint.fixed_px() {
+                Some(fixed_px) => {
                     container = container.child(
                         div()
                             .flex_shrink_0()
@@ -100,7 +100,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
                             .child(rendered),
                     );
                 }
-                LayoutHint::Flex { .. } => {
+                None => {
                     // Same content-height scroll viewport as the drawer flow
                     // panel below (see the `overflow_y_scroll` note there):
                     // the flow child may render an eager content-height
@@ -264,8 +264,8 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
                 continue;
             }
             let rendered = super::render(item, ctx);
-            match item.layout_hint {
-                LayoutHint::Fixed { px: fixed_px } => {
+            match item.layout_hint.fixed_px() {
+                Some(fixed_px) => {
                     container = container.child(
                         div()
                             .flex_shrink_0()
@@ -274,7 +274,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
                             .child(rendered),
                     );
                 }
-                LayoutHint::Flex { .. } => {
+                None => {
                     container = container.child(panel_wrap(move |inner| {
                         inner
                             .id(id)

@@ -265,13 +265,13 @@ pub(crate) fn render_content_height(
     container.into_any_element()
 }
 
-/// SPLIT main-panel variant: the slot holds the panel's accordion-bearing
-/// `column`, so run the flow-panel split (virtualized main region + pinned
-/// accordion footer) on that column and overlay the mode bar. Reached from the
-/// `Panel`-placed block shell, whose tree root is this switcher because the
-/// backend wraps every query-plus-render panel in it — see
-/// [`super::column::vms_slot_accordion_column`]. Same overlay shape as
-/// [`render_virtualized`]; `column` is the slot content that predicate
+/// SPLIT main-panel variant: the slot holds the panel's pin-bearing `column`,
+/// so run the flow-panel split (virtualized main region + pinned footer) on
+/// that column and overlay the mode bar — the one thing that stays
+/// switcher-specific here. Reached from the `Panel`-placed block shell, whose
+/// tree root is this switcher because the backend wraps every query-plus-render
+/// panel in it — see [`super::column::slot_pinned_container`]. Same overlay
+/// shape as [`render_virtualized`]; `column` is the slot content that predicate
 /// resolved.
 pub(crate) fn render_accordion_split_slot(
     node: &ReactiveViewModel,

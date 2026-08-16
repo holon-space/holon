@@ -43,6 +43,11 @@ pub struct BuilderArgs<'a, W> {
     /// The closure captures `services` internally, so callers just pass (expr,
     /// ctx).
     pub interpret: &'a dyn Fn(&RenderExpr, &RenderContext) -> W,
+    /// What the immediate parent container offered this widget (its parent's
+    /// `ctx.offering(..)`). Lives here rather than on `ctx` so it cannot leak:
+    /// `ctx` — the value builders clone for their own children — has already
+    /// had it stripped.
+    pub parent_capability: crate::render_context::ContainerCapability,
 }
 
 /// A single widget builder that knows how to produce a widget of type `W`.
@@ -321,12 +326,25 @@ impl<W> RenderInterpreter<W> {
         services: &dyn BuilderServices,
         interpret_fn: &dyn Fn(&RenderExpr, &RenderContext) -> W,
     ) -> W {
+        // One-level scoping of the parent's offer: the builder learns it through
+        // `parent_capability`, while the `ctx` it clones for its own children
+        // carries `ContainerCapability::None`. Without this strip an `accordion`
+        // wrapped in a `row` inside a `column` would inherit the column's offer.
+        let parent_capability = ctx.parent_capability;
+        let stripped;
+        let ctx = if parent_capability == crate::render_context::ContainerCapability::None {
+            ctx
+        } else {
+            stripped = ctx.offering(crate::render_context::ContainerCapability::None);
+            &stripped
+        };
         let widget = match self.builders.get(name) {
             Some(builder) => builder.build(BuilderArgs {
                 args,
                 ctx,
                 services,
                 interpret: interpret_fn,
+                parent_capability,
             }),
             None => {
                 tracing::warn!("No builder registered for: {name}");
@@ -341,6 +359,7 @@ impl<W> RenderInterpreter<W> {
                         ctx,
                         services,
                         interpret: interpret_fn,
+                        parent_capability,
                     })
             }
         };
@@ -418,6 +437,7 @@ pub fn resolve_props(
         ctx: &ctx,
         services,
         interpret: &noop_interpret,
+        parent_capability: ctx.parent_capability,
     };
 
     // Try the macro-generated fast path first.

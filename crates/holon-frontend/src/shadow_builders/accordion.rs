@@ -1,33 +1,23 @@
 use super::prelude::*;
+use crate::render_context::ContainerCapability;
+use crate::render_context::LayoutHint;
 
 /// Default cap fraction when `max_height_fraction` is omitted (§3).
 pub const DEFAULT_MAX_HEIGHT_FRACTION: f64 = 0.4;
 
-/// Flag key the `column` builder stamps onto its direct children's context so
-/// an `accordion` can prove — at build time — that it is a direct flow-panel
-/// column child. Absent ⇒ a `pinned` accordion is misplaced (§3 placement
-/// guard).
-pub(crate) const ACCORDION_PARENT_FLAG: &str = "accordion_parent";
-
-/// Flag key the `section_stack` builder stamps onto its direct children's
-/// context so an in-flow (`pinned:false`) or `sticky` accordion can prove — at
-/// build time — that it lives inside a section stack. Absent ⇒ those variants
-/// are misplaced (Inc C placement guard).
-pub(crate) const SECTION_STACK_FLAG: &str = "section_stack_parent";
-
 /// Where an accordion is placed — parsed once from the `pinned` / `sticky`
-/// props (parse-don't-validate). Each variant has EXACTLY one legal context,
-/// checked fail-loud at build time:
+/// props (parse-don't-validate). Each variant needs EXACTLY one capability from
+/// its container, checked fail-loud at build time:
 ///
-/// | Placement | props                    | legal context           |
-/// |-----------|--------------------------|-------------------------|
-/// | `Pinned`  | default (`pinned:true`)  | direct flow-column child|
-/// | `InFlow`  | `pinned:false`           | inside a section stack  |
-/// | `Sticky`  | `sticky:true`            | inside a section stack  |
+/// | Placement | props                    | container must offer          |
+/// |-----------|--------------------------|-------------------------------|
+/// | `Pinned`  | default (`pinned:true`)  | `PinToEnd` (a flow column)    |
+/// | `InFlow`  | `pinned:false`           | `ScrollSections`              |
+/// | `Sticky`  | `sticky:true`            | `ScrollSections`              |
 ///
 /// `sticky:true` wins over `pinned` (a sticky overlay is never a pinned
-/// footer). Anything placed outside its legal context renders the standard
-/// error widget — never a silently-misrendered region.
+/// footer). An accordion whose container cannot honour its placement renders
+/// the standard error widget — never a silently-misrendered region.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccordionPlacement {
     Pinned,
@@ -77,30 +67,21 @@ holon_macros::widget_builder! {
         let sticky = ba.args.get_bool("sticky").unwrap_or(false);
         let placement = AccordionPlacement::parse(pinned, sticky);
 
-        // Fail-loud placement guard (§3 + Inc C): each placement has exactly
-        // one legal context, proven by a flag its container stamps. A misplaced
-        // accordion is a visible error, never a silently-unbounded/mispositioned
-        // region — silent degradation here recreates the exact bug class this
-        // feature kills.
-        let is_column_child = ba
-            .ctx
-            .flags
-            .get(ACCORDION_PARENT_FLAG)
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let is_section_stack_child = ba
-            .ctx
-            .flags
-            .get(SECTION_STACK_FLAG)
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let placement_ok = match placement {
-            AccordionPlacement::Pinned => is_column_child,
-            AccordionPlacement::InFlow | AccordionPlacement::Sticky => is_section_stack_child,
+        // Fail-loud placement guard (§3 + Inc C): the container declares what it
+        // can honour, and a placement whose capability is not on offer is a
+        // visible error — never a silently-unbounded/mispositioned region,
+        // which is the exact bug class this feature kills.
+        let required = match placement {
+            AccordionPlacement::Pinned => ContainerCapability::PinToEnd,
+            AccordionPlacement::InFlow | AccordionPlacement::Sticky => {
+                ContainerCapability::ScrollSections
+            }
         };
-        if !placement_ok {
+        if ba.parent_capability != required {
             let need = match placement {
-                AccordionPlacement::Pinned => "a direct child of a main-panel column",
+                AccordionPlacement::Pinned => {
+                    "a direct child of a container that pins trailing-edge children (a column)"
+                }
                 AccordionPlacement::InFlow => "inside a section stack (pinned:false)",
                 AccordionPlacement::Sticky => "inside a section stack (sticky:true)",
             };
@@ -127,15 +108,14 @@ holon_macros::widget_builder! {
         let collapsible = ba.args.get_bool("collapsible").unwrap_or(true);
         let collapsed = ba.args.get_bool("collapsed").unwrap_or(false);
 
-        // Interpret children with BOTH parent flags CLEARED so a nested
-        // accordion (an accordion is neither a column nor a section stack)
-        // errors.
-        let child_ctx = ba.ctx.without_flags();
+        // An accordion offers nothing: `ba.ctx` already carries
+        // `ContainerCapability::None` (the interpreter strips the container's
+        // offer one level down), so a nested accordion errors.
         let children: Vec<ViewModel> = ba
             .args
             .positional_exprs
             .iter()
-            .map(|expr| (ba.interpret)(expr, &child_ctx))
+            .map(|expr| (ba.interpret)(expr, ba.ctx))
             .collect();
 
         let mut __props = std::collections::HashMap::new();
@@ -153,8 +133,17 @@ holon_macros::widget_builder! {
             Value::String(placement.as_str().to_string()),
         );
 
+        // The pinned placement is a LAYOUT declaration, not an identity: the
+        // container reads this hint to decide what to pin at its trailing edge,
+        // so no renderer has to know the widget is called "accordion".
+        let layout_hint = match placement {
+            AccordionPlacement::Pinned => LayoutHint::PinnedToEnd,
+            AccordionPlacement::InFlow | AccordionPlacement::Sticky => LayoutHint::default(),
+        };
+
         ViewModel {
             children: children.into_iter().map(Arc::new).collect(),
+            layout_hint,
             // Live collapse state is the node's `expanded` Mutable, seeded from
             // `collapsed` (§3) — NOT the `ctx.local` ephemeral-key cache that
             // collapsible.rs uses (keyed by title, so it collides across

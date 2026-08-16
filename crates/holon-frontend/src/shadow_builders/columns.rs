@@ -74,20 +74,9 @@ holon_macros::widget_builder! {
                         .count();
                     let gap_total = gap * flow_count.saturating_sub(1) as f32;
 
-                    let fixed_total: f32 = hints
-                        .iter()
-                        .filter_map(|h| match h {
-                            LayoutHint::Fixed { px } => Some(*px),
-                            _ => None,
-                        })
-                        .sum();
-                    let flex_weight_total: f32 = hints
-                        .iter()
-                        .filter_map(|h| match h {
-                            LayoutHint::Flex { weight } => Some(*weight),
-                            _ => None,
-                        })
-                        .sum();
+                    let fixed_total: f32 = hints.iter().filter_map(|h| h.fixed_px()).sum();
+                    let flex_weight_total: f32 =
+                        hints.iter().filter_map(|h| h.flex_weight()).sum();
 
                     let remaining = (parent.width_px - fixed_total - gap_total).max(0.0);
 
@@ -102,9 +91,9 @@ holon_macros::widget_builder! {
                         .into_iter()
                         .zip(exprs.iter())
                         .zip(hints.iter())
-                        .map(|((vm, expr), hint)| match hint {
-                            LayoutHint::Fixed { .. } => vm,
-                            LayoutHint::Flex { weight } => {
+                        .map(|((vm, expr), hint)| match hint.flex_weight() {
+                            None => vm,
+                            Some(weight) => {
                                 let w =
                                     remaining * weight / flex_weight_total.max(f32::EPSILON);
                                 let slot = AvailableSpace {

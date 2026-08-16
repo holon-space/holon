@@ -9,9 +9,9 @@ pub mod style;
 // (shell-less compositions) and the per-block ReactiveShell arm (production,
 // where the main panel is wrapped in a live_block so columns.rs sees no
 // column).
-pub(crate) use column::has_accordion_child;
+pub(crate) use column::has_pinned_child;
 pub(crate) use column::render_accordion_split;
-pub(crate) use column::vms_slot_accordion_column;
+pub(crate) use column::slot_pinned_container;
 pub(crate) use drawer::SidebarResizeState;
 pub(crate) use drawer::drag_sidebar_to;
 pub(crate) use drawer::finalize_sidebar_resize;

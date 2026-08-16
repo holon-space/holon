@@ -1,7 +1,7 @@
 //! Plain (NON-accordion) flow-panel scroll regression (Martin dogfood, real
 //! vault). His persisted user-owned main panel is the PRE-accordion form
 //! `column(collection_view(), divider(), row(icon, spacer, text),
-//! live_query(…))` — no accordion node — so `has_accordion_child` is false and
+//! live_query(…))` — no accordion node — so nothing declares a pin and
 //! it routes through `columns::render`'s PLAIN flow wrapper. That path stopped
 //! scrolling: the outline (56 rows, genuinely overflowing) no-ops on wheel.
 //!
@@ -446,6 +446,9 @@ fn accordion_through_shell_renders_bounded_not_error(cx: &mut TestAppContext) {
         let accordion = ReactiveViewModel {
             children: backlinks,
             expanded: Some(futures_signals::signal::Mutable::new(true)),
+            // What the shadow builder stamps on a `pinned` accordion — the
+            // declaration the split reads.
+            layout_hint: LayoutHint::PinnedToEnd,
             ..ReactiveViewModel::from_widget("accordion", acc_props)
         };
         // Small outline so the accordion footer is IN VIEW (a full 56-row

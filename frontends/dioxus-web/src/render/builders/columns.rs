@@ -41,15 +41,15 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
 /// `Fixed` means "this column was given an exact width", not "this column is a
 /// sidebar"; a spacer and an overlay drawer are `Fixed` too.
 fn col_layout(hint: LayoutHint) -> &'static str {
-    match hint {
-        LayoutHint::Fixed { .. } => "fixed",
-        LayoutHint::Flex { .. } => "flex",
+    match hint.fixed_px() {
+        Some(_) => "fixed",
+        None => "flex",
     }
 }
 
 fn col_flex(hint: LayoutHint) -> String {
-    match hint {
-        LayoutHint::Fixed { px } => format!("flex: 0 0 {px}px;"),
-        LayoutHint::Flex { weight } => format!("flex: {weight} 1 0;"),
+    match hint.fixed_px() {
+        Some(px) => format!("flex: 0 0 {px}px;"),
+        None => format!("flex: {} 1 0;", hint.flex_weight().unwrap_or(1.0)),
     }
 }

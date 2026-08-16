@@ -793,7 +793,7 @@ impl Render for ReactiveShell {
             // implementation (`render_accordion_split`), two call sites.
             if self.placement == ShellPlacement::Panel {
                 let sid = gpui::ElementId::from(SharedString::from(format!("{scroll_id}-main")));
-                if builders::has_accordion_child(tree) {
+                if builders::has_pinned_child(tree) {
                     return builders::render_accordion_split(
                         div().size_full(),
                         tree,
@@ -802,13 +802,13 @@ impl Render for ReactiveShell {
                         &gpui_ctx,
                     );
                 }
-                // …and the same split when the backend's query-source
-                // `view_mode_switcher` wraps that column (every panel whose
-                // block has both a query and a render source — the seeded main
-                // panel and both sidebars). The switcher renders one mode into
-                // one slot, so it moves nothing: split the slot column and
-                // overlay the mode bar.
-                if let Some(column) = builders::vms_slot_accordion_column(tree) {
+                // …and the same split when a slot wrapper sits in front of that
+                // column — production's query-source `view_mode_switcher` for
+                // every panel whose block has both a query and a render source
+                // (the seeded main panel and both sidebars). A slot renders one
+                // content node, so it moves nothing: split the slot's container
+                // and overlay the mode bar.
+                if let Some(column) = builders::slot_pinned_container(tree) {
                     return builders::render_accordion_split_slot(tree, &column, sid, &gpui_ctx);
                 }
             }

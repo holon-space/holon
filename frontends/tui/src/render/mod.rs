@@ -1047,14 +1047,14 @@ fn render_columns(
     let mut flex_total: f32 = 0.0;
     let mut fixed_used: usize = 0;
     for (i, item) in items.iter().enumerate() {
-        match item.layout_hint {
-            LayoutHint::Fixed { px } => {
+        match item.layout_hint.fixed_px() {
+            Some(px) => {
                 let cells = (px / PX_PER_CELL).round().max(0.0) as usize;
                 widths[i] = cells.min(usable_width.saturating_sub(fixed_used));
                 fixed_used = (fixed_used + widths[i]).min(usable_width);
             }
-            LayoutHint::Flex { weight } => {
-                flex_total += weight.max(0.0);
+            None => {
+                flex_total += item.layout_hint.flex_weight().unwrap_or(0.0).max(0.0);
             }
         }
     }
@@ -1066,9 +1066,9 @@ fn render_columns(
             .iter()
             .enumerate()
             .rev()
-            .find_map(|(i, it)| matches!(it.layout_hint, LayoutHint::Flex { .. }).then_some(i));
+            .find_map(|(i, it)| it.layout_hint.flex_weight().is_some().then_some(i));
         for (i, item) in items.iter().enumerate() {
-            if let LayoutHint::Flex { weight } = item.layout_hint {
+            if let Some(weight) = item.layout_hint.flex_weight() {
                 let share = if Some(i) == last_flex_idx {
                     remaining.saturating_sub(allocated)
                 } else {

@@ -37,18 +37,77 @@ pub struct AvailableSpace {
 ///
 /// Overlay drawers use `Fixed { px: 0.0 }` because they don't participate in
 /// flow layout — they float above siblings without consuming horizontal space.
+///
+/// `PinnedToEnd` is the vertical-flow counterpart (CSS `position: sticky` at
+/// the trailing edge / Flutter's `Expanded`-sibling pinning): the child
+/// declares WHERE it sits, its container decides whether it can honour that.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum LayoutHint {
     /// Takes a proportional share of remaining space after Fixed children.
     Flex { weight: f32 },
     /// Takes exactly this many pixels. Does not grow or shrink.
     Fixed { px: f32 },
+    /// Sits at the TRAILING edge of a vertical flow container, outside the
+    /// scrolling region: the siblings above scroll, this child stays put and
+    /// shrinks to its content.
+    ///
+    /// Carries no size: how tall the pinned child may grow is its own concern
+    /// (the `accordion` caps its body at `max_height_fraction` for every
+    /// placement, pinned or not), while WHERE it sits is what the container
+    /// must act on. Horizontal containers (`columns`) have no trailing edge to
+    /// pin to and treat it as an unweighted flex child.
+    PinnedToEnd,
 }
 
 impl Default for LayoutHint {
     fn default() -> Self {
         Self::Flex { weight: 1.0 }
     }
+}
+
+impl LayoutHint {
+    /// The exact pixel width this child claims from a horizontal container, if
+    /// any.
+    pub fn fixed_px(self) -> Option<f32> {
+        match self {
+            Self::Fixed { px } => Some(px),
+            Self::Flex { .. } | Self::PinnedToEnd => None,
+        }
+    }
+
+    /// The proportional share this child claims from a horizontal container,
+    /// or `None` when it claims a fixed width instead.
+    ///
+    /// `PinnedToEnd` speaks about the vertical flow only and makes no width
+    /// claim, so horizontal containers give it the default share.
+    pub fn flex_weight(self) -> Option<f32> {
+        match self {
+            Self::Flex { weight } => Some(weight),
+            Self::PinnedToEnd => Some(1.0),
+            Self::Fixed { .. } => None,
+        }
+    }
+}
+
+/// What the IMMEDIATE parent container can honour for the child being built —
+/// a capability the container declares about ITSELF, never an identity the
+/// child has to recognise.
+///
+/// Scoped to exactly one level by construction: `RenderInterpreter::dispatch`
+/// hands the value to the builder through `BuilderArgs::parent_capability` and
+/// strips it from the `RenderContext` that same builder passes on, so a widget
+/// two levels down (an `accordion` inside a `row` inside a `column`) can never
+/// see it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ContainerCapability {
+    /// Nothing beyond ordinary in-flow stacking.
+    #[default]
+    None,
+    /// Vertical flow container that renders [`LayoutHint::PinnedToEnd`]
+    /// children at its trailing edge while the rest scrolls (`column`).
+    PinToEnd,
+    /// Scroll region that hosts in-flow and sticky sections (`section_stack`).
+    ScrollSections,
 }
 
 static EMPTY_ROW: std::sync::LazyLock<Arc<DataRow>> =
@@ -115,6 +174,11 @@ pub struct RenderContext {
     // ALLOW(fallback): describing the global-viewport merge in pick_active_variant
     /// global viewport is merged in as a fallback by `pick_active_variant`.
     pub available_space: Option<AvailableSpace>,
+    /// What the immediate parent container offers this child — see
+    /// [`ContainerCapability`]. Set by the container via [`Self::offering`],
+    /// read by the child through `BuilderArgs::parent_capability`, and stripped
+    /// by the interpreter so it never reaches a grandchild.
+    pub parent_capability: ContainerCapability,
     /// Render-context flags that participate in `pick_active_variant`
     /// evaluation alongside row columns and `available_space`. Well-known
     /// flags: `role` (e.g. `"page_title"`), `view_mode`, `embed_depth`. Set
@@ -261,6 +325,19 @@ impl RenderContext {
     pub fn with_available_space(&self, space: AvailableSpace) -> Self {
         Self {
             available_space: Some(space),
+            ..self.clone()
+        }
+    }
+
+    /// Declare what this container can honour for the child about to be built.
+    ///
+    /// Every direct child gets the same offer — the container describes its own
+    /// capability and never inspects what the child is. A child whose
+    /// declared layout needs the capability (an `accordion` asking to pin to
+    /// the trailing edge) errors loudly when the offer is absent.
+    pub fn offering(&self, capability: ContainerCapability) -> Self {
+        Self {
+            parent_capability: capability,
             ..self.clone()
         }
     }

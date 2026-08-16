@@ -2332,41 +2332,24 @@ impl ReactiveView {
                         .count();
                     let gap_total = gap * flow_count.saturating_sub(1) as f32;
 
-                    let fixed_total: f32 = hints
-                        .iter()
-                        .filter_map(|h| match h {
-                            LayoutHint::Fixed { px } => Some(px),
-                            _ => None,
-                        })
-                        .sum();
-                    let flex_weight_total: f32 = hints
-                        .iter()
-                        .filter_map(|h| match h {
-                            LayoutHint::Flex { weight } => Some(weight),
-                            _ => None,
-                        })
-                        .sum();
+                    let fixed_total: f32 = hints.iter().filter_map(|h| h.fixed_px()).sum();
+                    let flex_weight_total: f32 = hints.iter().filter_map(|h| h.flex_weight()).sum();
 
                     let remaining = (parent.width_px - fixed_total - gap_total).max(0.0);
 
                     config
                         .iter()
                         .map(|(expr, hint)| {
-                            let child_space = match *hint {
-                                LayoutHint::Fixed { px } => AvailableSpace {
-                                    width_px: px,
-                                    width_physical_px: px * parent.scale_factor,
-                                    ..parent
-                                },
-                                LayoutHint::Flex { weight } => {
-                                    let w =
-                                        remaining * weight / flex_weight_total.max(f32::EPSILON);
-                                    AvailableSpace {
-                                        width_px: w,
-                                        width_physical_px: w * parent.scale_factor,
-                                        ..parent
-                                    }
+                            let width = match hint.flex_weight() {
+                                Some(weight) => {
+                                    remaining * weight / flex_weight_total.max(f32::EPSILON)
                                 }
+                                None => hint.fixed_px().expect("a hint is fixed or flex"),
+                            };
+                            let child_space = AvailableSpace {
+                                width_px: width,
+                                width_physical_px: width * parent.scale_factor,
+                                ..parent
                             };
                             let ctx = crate::RenderContext {
                                 available_space: Some(child_space),

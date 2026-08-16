@@ -4,6 +4,7 @@
 //! `ReactiveViewModel`.
 
 use holon_api::render_types::RenderExpr;
+use holon_frontend::LayoutHint;
 use holon_frontend::ReactiveViewModel;
 use holon_frontend::RenderContext;
 use holon_frontend::StubBuilderServices;
@@ -83,8 +84,54 @@ fn accordion_negative_fraction_is_error_widget() {
     );
 }
 
-// ── Placement guard (§3, senior-review amendment): an accordion that is NOT a
-//    direct child of a flow-panel column must render the error widget. ──
+#[test]
+fn pinned_accordion_declares_the_pin_hint() {
+    let vm = interpret("column(accordion(#{title: \"Linked references\"}))");
+    assert_eq!(
+        vm.children[0].layout_hint,
+        LayoutHint::PinnedToEnd,
+        "a pinned accordion must DECLARE where it belongs — that hint is what \
+         every renderer reads instead of matching on the widget name"
+    );
+}
+
+#[test]
+fn section_stack_accordions_declare_no_pin() {
+    for dsl in [
+        "section_stack(accordion(#{title: \"in flow\", pinned: false}))",
+        "section_stack(accordion(#{title: \"sticky\", sticky: true}))",
+    ] {
+        let vm = interpret(dsl);
+        let acc = &vm.children[0];
+        assert_eq!(acc.widget_name().as_deref(), Some("accordion"), "{dsl}");
+        assert_eq!(
+            acc.layout_hint,
+            LayoutHint::default(),
+            "scroll-integrated placements are not pinned to the container edge: {dsl}"
+        );
+    }
+}
+
+// ── Placement guard (§3, senior-review amendment): an accordion whose
+// container    cannot honour its placement must render the error widget. ──
+
+#[test]
+fn pinned_accordion_inside_a_section_stack_is_error_widget() {
+    let vm = interpret("section_stack(accordion(#{title: \"pinned\"}))");
+    assert!(
+        is_error(&vm.children[0]),
+        "a section stack offers scroll-integrated sections, not trailing-edge pinning"
+    );
+}
+
+#[test]
+fn in_flow_accordion_inside_a_column_is_error_widget() {
+    let vm = interpret("column(accordion(#{title: \"in flow\", pinned: false}))");
+    assert!(
+        is_error(&vm.children[0]),
+        "a column offers trailing-edge pinning, not scroll-integrated sections"
+    );
+}
 
 #[test]
 fn accordion_at_root_is_error_widget() {
@@ -98,10 +145,9 @@ fn accordion_at_root_is_error_widget() {
 
 #[test]
 fn accordion_inside_row_is_error_widget() {
-    // A `row` is a column child, but the accordion nested inside it is NOT a
-    // direct column child. `column` blesses only direct `accordion(...)` child
-    // exprs, so the `row(...)` child is interpreted with the flag stripped and
-    // its inner accordion never sees it — a loud error.
+    // The column offers `PinToEnd` to its DIRECT children only — the offer is
+    // stripped one level down, so the accordion inside the `row` sees nothing
+    // and errors loudly.
     let vm = interpret("column(row(accordion(#{title: \"nested\"})))");
     let row = &vm.children[0];
     assert_eq!(row.widget_name().as_deref(), Some("row"));

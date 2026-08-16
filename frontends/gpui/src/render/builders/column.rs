@@ -1,3 +1,4 @@
+use holon_frontend::LayoutHint;
 use holon_frontend::ReactiveViewModel;
 use holon_frontend::reactive_view::ReactiveView;
 
@@ -23,59 +24,59 @@ fn vms_slot_collection(c: &ReactiveViewModel) -> Option<std::sync::Arc<ReactiveV
     content.collection.clone()
 }
 
-fn is_accordion(c: &ReactiveViewModel) -> bool {
-    c.widget_name().as_deref() == Some("accordion")
+/// True if `c` declares that it belongs at its container's trailing edge,
+/// outside the scrolling region — the trigger for the flow-panel split. The
+/// child declares this in its `LayoutHint`; nothing here knows or cares which
+/// widget it is.
+fn is_pinned_to_end(c: &ReactiveViewModel) -> bool {
+    c.layout_hint == LayoutHint::PinnedToEnd
 }
 
 fn is_live_query(c: &ReactiveViewModel) -> bool {
     c.widget_name().as_deref() == Some("live_query")
 }
 
-/// True if `node` is a `column` with ≥1 direct `accordion` child — the trigger
-/// for the flow-panel split (plan §4). Detected by widget name at render time
-/// (the same mechanism as `holds_collection` / `is_drawer`); a column WITHOUT
-/// an accordion child takes the byte-identical original path (sidebar
-/// firewall).
-pub(crate) fn has_accordion_child(node: &ReactiveViewModel) -> bool {
-    node.widget_name().as_deref() == Some("column") && node.children.iter().any(|c| is_accordion(c))
+/// True if `node` has ≥1 direct child pinned to its trailing edge — the trigger
+/// for the flow-panel split (plan §4). A container without such a child takes
+/// the byte-identical original path (sidebar firewall: sidebar columns hold no
+/// pinned child, so they never reach the split).
+pub(crate) fn has_pinned_child(node: &ReactiveViewModel) -> bool {
+    node.children.iter().any(|c| is_pinned_to_end(c))
 }
 
-/// The accordion-bearing `column` hiding one slot below a `view_mode_switcher`
-/// root, if that is what `node` is.
+/// The pin-bearing container hiding one slot below `node`, if `node` is a
+/// slot-bearing wrapper around one.
 ///
 /// The backend wraps a panel whose block has BOTH a query source and a render
 /// source in the query-source switcher (`block_domain.rs`,
 /// `wrap_in_query_source_switcher`), so production's panel-tree root is a
 /// `view_mode_switcher` and the authored `column` sits in its slot — the shape
-/// both sidebars already have. The switcher renders exactly ONE mode into that
-/// slot, so it changes nothing about where the column's content sits: splitting
-/// the slot column is the same split, one level down. Without this,
-/// [`has_accordion_child`] is false for the real seeded main panel and its
-/// accordion falls through to `accordion::render`'s placement-error widget.
-pub(crate) fn vms_slot_accordion_column(
+/// both sidebars already have. A slot renders exactly ONE content node, so it
+/// changes nothing about where that content sits: splitting the slot's
+/// container is the same split, one level down. Without this,
+/// [`has_pinned_child`] is false for the real seeded main panel and its
+/// accordion is never pinned.
+pub(crate) fn slot_pinned_container(
     node: &ReactiveViewModel,
 ) -> Option<std::sync::Arc<ReactiveViewModel>> {
-    if node.widget_name().as_deref() != Some("view_mode_switcher") {
-        return None;
-    }
-    let column = node.slot.as_ref()?.content.get_cloned();
-    has_accordion_child(&column).then_some(column)
+    let content = node.slot.as_ref()?.content.get_cloned();
+    has_pinned_child(&content).then_some(content)
 }
 
 /// True when `node` is a main-panel flow `column` that hosts the scrollable
-/// outline — it carries either a pinned `accordion` footer OR a scrollable
-/// collection (`tree`/`list`/`live_query`/`collection_view`). Such columns
-/// render through [`render_accordion_split`] so the outline VIRTUALIZES
-/// (`gpui::list`, only viewport rows/frame) while fixed sections pin. The
-/// sidebar's column reaches [`render`]'s eager content-height path instead
-/// (the blank-panel firewall, BugFunnel 230/232) and is never routed here —
-/// only Flex flow panels / the accordion-bearing block-mode arm are.
+/// outline — it carries either a pinned footer OR a scrollable collection
+/// (`tree`/`list`/`live_query`/`collection_view`). Such columns render through
+/// [`render_accordion_split`] so the outline VIRTUALIZES (`gpui::list`, only
+/// viewport rows/frame) while fixed sections pin. The sidebar's column reaches
+/// [`render`]'s eager content-height path instead (the blank-panel firewall,
+/// BugFunnel 230/232) and is never routed here — only Flex flow panels / the
+/// pin-bearing block-mode arm are.
 pub(crate) fn is_main_panel_flow_column(node: &ReactiveViewModel) -> bool {
     node.widget_name().as_deref() == Some("column")
         && node
             .children
             .iter()
-            .any(|c| is_accordion(c) || holds_collection(c))
+            .any(|c| is_pinned_to_end(c) || holds_collection(c))
 }
 
 #[cfg(test)]
@@ -83,17 +84,33 @@ mod split_target_tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    use holon_frontend::LayoutHint;
     use holon_frontend::ReactiveViewModel;
     use holon_frontend::reactive_view_model::ReactiveSlot;
 
-    use super::has_accordion_child;
-    use super::vms_slot_accordion_column;
+    use super::has_pinned_child;
+    use super::slot_pinned_container;
 
     fn node(widget: &str, children: Vec<ReactiveViewModel>) -> ReactiveViewModel {
         ReactiveViewModel {
             children: children.into_iter().map(Arc::new).collect(),
             ..ReactiveViewModel::from_widget(widget, HashMap::new())
         }
+    }
+
+    /// An accordion the shadow layer accepted: its container offered
+    /// `PinToEnd`, so it declares the pin.
+    fn pinned_accordion() -> ReactiveViewModel {
+        ReactiveViewModel {
+            layout_hint: LayoutHint::PinnedToEnd,
+            ..node("accordion", vec![])
+        }
+    }
+
+    /// An accordion whose container could NOT honour the pin — the shadow
+    /// builder returned the fail-loud placement error, which declares no pin.
+    fn misplaced_accordion() -> ReactiveViewModel {
+        node("error", vec![])
     }
 
     fn switcher_over(slot: ReactiveViewModel) -> ReactiveViewModel {
@@ -104,42 +121,44 @@ mod split_target_tests {
     }
 
     #[test]
-    fn switcher_over_accordion_column_resolves_to_that_column() {
-        let tree = switcher_over(node("column", vec![node("accordion", vec![])]));
-        let column = vms_slot_accordion_column(&tree).expect("the slot column must be found");
-        assert!(has_accordion_child(&column));
+    fn switcher_over_pinning_column_resolves_to_that_column() {
+        let tree = switcher_over(node("column", vec![pinned_accordion()]));
+        let column = slot_pinned_container(&tree).expect("the slot column must be found");
+        assert!(has_pinned_child(&column));
     }
 
     /// The sidebar firewall: both sidebars are switcher-wrapped columns today
     /// and must keep taking the eager content-height path, never the split.
+    /// They hold no pin-declaring child, so there is nothing sidebar-specific
+    /// to exclude.
     #[test]
     fn switcher_over_plain_column_is_not_a_split_target() {
         let tree = switcher_over(node("column", vec![node("list", vec![])]));
-        assert!(vms_slot_accordion_column(&tree).is_none());
+        assert!(slot_pinned_container(&tree).is_none());
     }
 
     /// Mode switched to `source`: the slot holds the query editor, so the split
     /// must stop firing until the switcher goes back to the result mode.
     #[test]
-    fn switcher_over_non_column_is_not_a_split_target() {
+    fn switcher_over_non_container_is_not_a_split_target() {
         let tree = switcher_over(node("source_editor", vec![]));
-        assert!(vms_slot_accordion_column(&tree).is_none());
+        assert!(slot_pinned_container(&tree).is_none());
     }
 
-    /// Transparency is ONE level and switcher-only — an accordion buried in a
-    /// `row` (or any other container) stays misplaced and keeps rendering the
-    /// fail-loud placement error.
+    /// An accordion buried in a `row` never gets the pin offered, so the shadow
+    /// layer replaced it with the placement error — nothing declares a pin and
+    /// no split fires.
     #[test]
     fn switcher_over_row_wrapped_accordion_is_not_a_split_target() {
-        let tree = switcher_over(node("row", vec![node("accordion", vec![])]));
-        assert!(vms_slot_accordion_column(&tree).is_none());
+        let tree = switcher_over(node("row", vec![misplaced_accordion()]));
+        assert!(slot_pinned_container(&tree).is_none());
     }
 
     #[test]
-    fn a_bare_column_is_not_a_switcher_target() {
-        let tree = node("column", vec![node("accordion", vec![])]);
-        assert!(has_accordion_child(&tree));
-        assert!(vms_slot_accordion_column(&tree).is_none());
+    fn a_bare_column_is_not_a_slot_target() {
+        let tree = node("column", vec![pinned_accordion()]);
+        assert!(has_pinned_child(&tree));
+        assert!(slot_pinned_container(&tree).is_none());
     }
 }
 
@@ -302,7 +321,7 @@ fn render_main_body(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
         container = container.gap(px(gap));
     }
     for child in &node.children {
-        if is_accordion(child) {
+        if is_pinned_to_end(child) {
             continue;
         }
         container = push_main_child(container, child, ctx);
@@ -366,7 +385,7 @@ pub(crate) fn render_accordion_split(
     wrapper = wrapper.child(main);
 
     for child in &node.children {
-        if is_accordion(child) {
+        if is_pinned_to_end(child) {
             wrapper = wrapper.child(super::tag(
                 ctx,
                 "accordion",

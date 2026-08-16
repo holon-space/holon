@@ -36,6 +36,7 @@ use gpui::point;
 use gpui::px;
 use gpui::size;
 use holon_api::Value;
+use holon_frontend::LayoutHint;
 use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::reactive_view::ReactiveView;
 use holon_frontend::reactive_view_model::CollectionVariant;
@@ -101,6 +102,9 @@ fn root(outline_n: usize, backlink_n: usize, fraction: f64) -> Arc<ReactiveViewM
     let accordion = Arc::new(ReactiveViewModel {
         children: backlink_rows,
         expanded: Some(Mutable::new(true)),
+        // What the shadow builder stamps on a `pinned` accordion — the
+        // declaration the split reads.
+        layout_hint: LayoutHint::PinnedToEnd,
         ..ReactiveViewModel::from_widget("accordion", acc_props)
     });
 
