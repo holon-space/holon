@@ -29,20 +29,14 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
         return rsx! {};
     }
 
-    let intent = (|| {
-        let op = holon_frontend::operations::find_set_field_op(field, &node.operations)?;
-        let states_vec: Vec<String> = states.split(',').map(|s| s.trim().to_string()).collect();
-        let next = holon_api::render_eval::cycle_state(current, &states_vec);
-        let entity_name = node.entity_name().unwrap_or_else(|| op.entity_name.clone());
-        let row_id = node.row_id()?;
-        Some(holon_frontend::OperationIntent::set_field(
-            &entity_name,
-            &op.name,
-            &row_id,
-            field,
-            holon_api::Value::String(next),
-        ))
-    })();
+    let intent = holon_frontend::operations::state_toggle_intent(
+        field,
+        current,
+        states,
+        &node.operations,
+        node.entity_name().as_ref(),
+        node.row_id().as_deref(),
+    );
     if intent.is_none() {
         // Disclose the degraded (display-only) pill: without op wiring or
         // a row id a click can't dispatch — same nodes GPUI renders inert.

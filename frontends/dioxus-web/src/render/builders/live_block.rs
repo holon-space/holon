@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use holon_frontend::live_block_ancestors::LiveBlockAncestors;
 use holon_frontend::view_model::ViewKind;
 
 use super::prelude::*;
@@ -10,14 +11,35 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
     let ViewKind::LiveBlock { block_id, content } = &node.kind else {
         return rsx! {};
     };
+    // Each LiveBlockNode owns a worker-side `engineWatchView` subscription, so
+    // an A→B→A embed without this guard costs a round trip and a live watch
+    // per level, forever. The chain arrives through the Dioxus context an
+    // enclosing LiveBlockNode provides; the outermost one sees none.
+    let ancestors = try_consume_context::<LiveBlockAncestors>().unwrap_or_default(); // ALLOW(ok): the root live_block has no enclosing node, so an absent context IS the empty chain
+    if ancestors.would_cycle(block_id) {
+        tracing::warn!(
+            "[live_block] '{block_id}' would create a cycle (ancestors={:?}) — rendering empty",
+            ancestors.as_slice()
+        );
+        return rsx! {};
+    }
     // Keyed single-item list: when a position-reused scope is handed a
     // different block_id, Dioxus drops the old LiveBlockNode (releasing its
     // subscription + EntityContext via use_drop) and mounts a fresh one,
     // instead of leaving the once-only hooks bound to the previous block.
-    let entries = [(block_id.clone(), (**content).clone())];
+    let entries = [(
+        block_id.clone(),
+        (**content).clone(),
+        ancestors.pushed(block_id),
+    )];
     rsx! {
-        for (bid, c) in entries {
-            LiveBlockNode { key: "{bid}", block_id: bid.clone(), content: c.clone() }
+        for (bid , c , chain) in entries {
+            LiveBlockNode {
+                key: "{bid}",
+                block_id: bid.clone(),
+                content: c.clone(),
+                ancestors: chain.clone(),
+            }
         }
     }
 }
@@ -37,12 +59,12 @@ struct WatchState {
 ///
 /// Each LiveBlockNode owns its own `engineWatchView` subscription for the
 /// target block and renders whatever ViewModel snapshots arrive. The
-/// `content` prop from the parent snapshot is only used as an
-/// initial/fallback render before the cell's own subscription delivers. //
-/// ALLOW(fallback): describes default-branch path, not error swallowing
+/// `content` prop from the parent snapshot is the initial render, shown until
+/// the cell's own subscription delivers its first snapshot.
 #[component]
-fn LiveBlockNode(block_id: String, content: ViewModel) -> Element {
+fn LiveBlockNode(block_id: String, content: ViewModel, ancestors: LiveBlockAncestors) -> Element {
     use_context_provider(|| EntityContext(block_id.clone()));
+    use_context_provider(|| ancestors.clone());
 
     let mut inner_vm: Signal<Option<ViewModel>> = use_signal(|| None);
 

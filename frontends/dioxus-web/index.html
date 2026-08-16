@@ -31,7 +31,6 @@
         --danger:          #e5666b;
 
         --reading-width:   740px;
-        --sidebar-width:   240px;
 
         --radius:          6px;
         --radius-sm:       4px;
@@ -98,38 +97,45 @@
         min-height: 100%;
         gap: 0;
       }
-      .holon-col-sidebar {
-        flex: 0 0 var(--sidebar-width);
-        min-width: 0;
-        align-self: stretch;
-        background: var(--bg-sidebar);
-        border-right: 1px solid var(--border);
-        border-radius: var(--radius);
-        padding: 10px 8px;
-        overflow-y: auto;
-      }
-      .holon-col-main {
-        flex: 1 1 0;
-        min-width: 0;
+      /* A column carries ONLY its `flex` shorthand, set inline from the node's
+         layout_hint. Nothing here may add padding, background or a border: with
+         `box-sizing: border-box` those clamp a `flex: 0 0 0px` column up to
+         their own size, and a zero-width column (a spacer(0) flank, an overlay
+         drawer) has to measure zero. Panel chrome lives on the drawer. */
+      .holon-columns > [data-role="column"] { min-width: 0; align-self: stretch; }
+      .holon-columns > [data-layout="flex"] {
         display: flex;
         justify-content: center;
         padding: 4px 24px 64px;
       }
-      .holon-col-main > * {
+      .holon-columns > [data-layout="flex"] > * {
         width: 100%;
         max-width: var(--reading-width);
       }
-      /* right rail: sizes to its content and collapses to nothing when the
-         panel's query is empty (the seed's default right sidebar). */
-      .holon-col-rail {
-        flex: 0 1 auto;
-        min-width: 0;
-      }
       /* single-column layouts (narrow viewports) still get a centred column */
-      .holon-columns > .holon-col-main:only-child { padding-top: 8px; }
+      .holon-columns > [data-layout="flex"]:only-child { padding-top: 8px; }
+
+      /* ── Side panels ────────────────────────────────────────────────── */
+      /* Keyed on the drawer, not on the layout hint: `Fixed` means "given an
+         exact width", which is also true of spacers and overlay drawers. Scoped
+         to a drawer that IS a column, so a drawer nested inside content does
+         not get app-shell chrome. */
+      .holon-columns > [data-role="column"] > [data-role="drawer"] {
+        height: 100%;
+        background: var(--bg-sidebar);
+        border-radius: var(--radius);
+        padding: 10px 8px;
+        overflow-y: auto;
+      }
+      .holon-columns > [data-role="column"]:first-child > [data-role="drawer"] {
+        border-right: 1px solid var(--border);
+      }
+      .holon-columns > [data-role="column"]:last-child > [data-role="drawer"] {
+        border-left: 1px solid var(--border);
+      }
 
       /* ── Sidebar navigation items ───────────────────────────────────── */
-      .holon-col-sidebar [data-role="selectable"] {
+      [data-role="drawer"] [data-role="selectable"] {
         display: flex;
         align-items: center;
         padding: 4px 8px;
@@ -137,11 +143,11 @@
         color: var(--text-secondary);
         transition: background 90ms ease, color 90ms ease;
       }
-      .holon-col-sidebar [data-role="selectable"]:hover {
+      [data-role="drawer"] [data-role="selectable"]:hover {
         background: var(--surface-hover);
         color: var(--text-primary);
       }
-      .holon-col-sidebar [data-role="selectable"] span { line-height: 1.4; }
+      [data-role="drawer"] [data-role="selectable"] span { line-height: 1.4; }
 
       /* ── Bullets / source-language icon (reveal on row hover) ───────── */
       [data-role="draggable"] { position: relative; transition: opacity 90ms ease; }
@@ -195,12 +201,12 @@
       [data-role="drop-zone"] { transition: background 80ms ease, height 80ms ease; }
 
       /* ── Document title (first block of the focused reading column) ──── */
-      .holon-col-main > [data-block-id] > *:first-child > div:first-child {
+      .holon-columns > [data-layout="flex"] > [data-block-id] > *:first-child > div:first-child {
         margin-bottom: 6px;
       }
-      .holon-col-main > [data-block-id] > *:first-child > div:first-child > span,
-      .holon-col-main > [data-block-id] > *:first-child > div:first-child > [data-role="rendered-text"],
-      .holon-col-main > [data-block-id] > *:first-child > div:first-child > [data-role="editor-cell"] {
+      .holon-columns > [data-layout="flex"] > [data-block-id] > *:first-child > div:first-child > span,
+      .holon-columns > [data-layout="flex"] > [data-block-id] > *:first-child > div:first-child > [data-role="rendered-text"],
+      .holon-columns > [data-layout="flex"] > [data-block-id] > *:first-child > div:first-child > [data-role="editor-cell"] {
         font-size: 1.75em;
         font-weight: 700;
         line-height: 1.25;
@@ -210,9 +216,8 @@
 
       /* ── Narrow viewports ───────────────────────────────────────────── */
       @media (max-width: 640px) {
-        :root { --sidebar-width: 200px; }
-        .holon-col-main { padding: 4px 14px 48px; }
-        .holon-col-sidebar { padding: 8px 6px; }
+        [data-layout="flex"] { padding: 4px 14px 48px; }
+        .holon-columns > [data-role="column"] > [data-role="drawer"] { padding: 8px 6px; }
       }
 
       /* ── Full-screen states (boot / empty) inherit these ────────────── */

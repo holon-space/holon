@@ -34,6 +34,8 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
             // matview pipeline. Parse once at this boundary, fail loud.
             let source = holon_api::entity_uri_from_id_str(&dragged.block_id);
             let target = holon_api::entity_uri_from_id_str(target);
-            services.dispatch_intent(build_drop_intent(&source, &target, entity_name, &op_name));
+            if let Some(intent) = build_drop_intent(&source, &target, entity_name, &op_name) {
+                services.dispatch_intent(intent);
+            }
         })
 }

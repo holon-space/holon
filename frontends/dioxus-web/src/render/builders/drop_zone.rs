@@ -66,18 +66,16 @@ fn DropZoneNode(target_id: Option<String>, entity_name: String, op_name: String)
                     );
                     return;
                 };
-                if source_id == target {
-                    tracing::info!("[dnd] drop on self — no-op");
-                    return;
-                }
                 let source = holon_api::entity_uri_from_id_str(&source_id);
                 let target = holon_api::entity_uri_from_id_str(&target);
-                let intent = build_drop_intent(
+                let Some(intent) = build_drop_intent(
                     &source,
                     &target,
                     holon_api::EntityName::new(&entity_name),
                     &op_name,
-                );
+                ) else {
+                    return;
+                };
                 tracing::info!("[dnd] drop: {source_id} -> {target} via {op_name}");
                 dispatch_chain(vec![intent_to_wire(&intent)]);
             },

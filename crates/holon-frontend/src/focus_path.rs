@@ -180,16 +180,8 @@ pub fn find_click_intent_in_view_model(
         modifiers: holon_api::ClickModifiers,
     ) -> Option<crate::operations::OperationIntent> {
         if node.entity_id().as_ref() == Some(entity_id) {
-            if let Some(op) = node
-                .operations
-                .iter()
-                .find(|ow| ow.descriptor.click_modifiers() == Some(modifiers))
-            {
-                return Some(crate::operations::OperationIntent::new(
-                    op.descriptor.entity_name.clone(),
-                    op.descriptor.name.clone(),
-                    op.descriptor.bound_params.clone(),
-                ));
+            if let Some(intent) = crate::operations::click_intent_for(&node.operations, modifiers) {
+                return Some(intent);
             }
         }
         for child in node.children() {
@@ -368,20 +360,14 @@ pub fn state_toggle_cycle_intent(
         } = &node.kind
         {
             if node.entity_id().as_ref() == Some(entity_id) {
-                // Same op lookup + cycle math the GPUI widget performs.
-                let op = crate::operations::find_set_field_op(field, &node.operations)?;
-                let states_vec: Vec<String> =
-                    states.split(',').map(|s| s.trim().to_string()).collect();
-                let next = holon_api::render_eval::cycle_state(current, &states_vec);
-                let entity_name = node.entity_name().unwrap_or_else(|| op.entity_name.clone());
-                let row_id = node.row_id()?;
-                return Some(crate::operations::OperationIntent::set_field(
-                    &entity_name,
-                    &op.name,
-                    &row_id,
+                return crate::operations::state_toggle_intent(
                     field,
-                    holon_api::Value::String(next),
-                ));
+                    current,
+                    states,
+                    &node.operations,
+                    node.entity_name().as_ref(),
+                    node.row_id().as_deref(),
+                );
             }
         }
         for child in node.children() {

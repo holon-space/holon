@@ -1,7 +1,4 @@
-use std::collections::HashMap;
-
 use holon_api::ClickModifiers;
-use holon_frontend::operations::OperationIntent;
 use holon_frontend::view_model::ViewKind;
 
 use super::prelude::*;
@@ -23,22 +20,7 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
     // wrapper, and its child may render no text node at all (sidebar rows).
     let dom_entity_id = node.row_id().unwrap_or_default(); // ALLOW(ok): a selectable without a row_id is a non-entity surface; the empty id is deliberately unaddressable (real ids are scheme-qualified, "" cannot collide)
 
-    let click_intents: HashMap<ClickModifiers, OperationIntent> = node
-        .operations
-        .iter()
-        .filter_map(|ow| {
-            ow.descriptor.click_modifiers().map(|m| {
-                (
-                    m,
-                    OperationIntent::new(
-                        ow.descriptor.entity_name.clone(),
-                        ow.descriptor.name.clone(),
-                        ow.descriptor.bound_params.clone(),
-                    ),
-                )
-            })
-        })
-        .collect();
+    let click_intents = holon_frontend::operations::click_intents(&node.operations);
     if click_intents.is_empty() {
         return rsx! { RenderNode { node: child_vm } };
     }

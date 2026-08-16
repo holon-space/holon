@@ -1,26 +1,37 @@
-//! Split a block's `content` into alternating plain-text and link runs from
-//! its inline `Link` marks, for read-only ("rendered_text") rendering.
+//! Read-only ("rendered_text") link rendering: split a block's `content` into
+//! alternating plain-text and link runs from its inline `Link` marks, then
+//! route a click on one of those runs to its verb.
 //!
-//! This is the syntax-neutral, frontend-agnostic core of link rendering. GPUI
-//! keeps its own copy inline (it needs `gpui`-specific paint types); the
-//! wasm/dioxus-web frontend — which has no native test harness — consumes this
-//! so the interesting logic (byte-offset splitting, multi-link ordering,
-//! multibyte safety) is unit-tested here in a crate that builds and tests on
-//! the host.
+//! This is the syntax-neutral, frontend-agnostic core every frontend consumes.
+//! Each decision here — where the runs break, which mark kinds make a block
+//! "styled", what a clicked target does — is a pure function over data both a
+//! `ReactiveViewModel` and a snapshot `ViewModel` can supply, so the platform
+//! layers keep only their paint and dispatch mechanics.
 //!
 //! Mark offsets are Unicode-scalar (`char`) positions (see
 //! `holon_api::MarkSpan`); the returned segment text is sliced from `content`
 //! at the corresponding byte offsets.
 
+use holon_api::DataRow;
+use holon_api::EntityName;
 use holon_api::EntityRef;
 use holon_api::InlineMark;
 use holon_api::MarkSpan;
+use holon_api::Value;
+use holon_api::link_parser::LinkTargetClassifier;
+use holon_api::marks_from_json;
+
+use crate::operations::OperationIntent;
 
 /// One run of a block's content: either plain text or a link.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentSegment {
     /// The exact substring of `content` this run covers.
     pub text: String,
+    /// Where `text` sits in `content`. Hit-testing a clicked byte offset back
+    /// to its run needs this; a frontend that only paints the runs in order
+    /// can ignore it.
+    pub byte_range: std::ops::Range<usize>,
     /// `Some` iff this run is a link; carries the link target.
     pub link_target: Option<EntityRef>,
 }
@@ -29,6 +40,157 @@ impl ContentSegment {
     pub fn is_link(&self) -> bool {
         self.link_target.is_some()
     }
+}
+
+/// One run of a block's content carrying everything a read-mode renderer must
+/// paint for it: the text, whether it is a link, and its style attributes.
+///
+/// [`link_content_segments`] answers only "where do the links break"; a
+/// frontend that paints marks needs the style boundaries in the SAME ordered
+/// pass, because both partitions describe the same character sequence and a
+/// renderer emits one node per run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StyledSegment {
+    pub text: String,
+    pub byte_range: std::ops::Range<usize>,
+    pub link_target: Option<EntityRef>,
+    pub flags: holon_api::StyleFlags,
+}
+
+impl StyledSegment {
+    pub fn is_link(&self) -> bool {
+        self.link_target.is_some()
+    }
+}
+
+/// Split `content` at both link boundaries and style-mark boundaries, so one
+/// ordered, contiguous pass of runs carries link targets and paint attributes
+/// together. Runs tile `content` exactly; unstyled, unlinked stretches come
+/// back with default flags and no target.
+pub fn styled_link_segments(content: &str, marks: &[MarkSpan]) -> Vec<StyledSegment> {
+    let links = link_content_segments(content, marks);
+    let styles = holon_api::style_fingerprint(content, marks);
+
+    let mut cuts: Vec<usize> = Vec::with_capacity(links.len() * 2 + styles.len() * 2);
+    cuts.push(0);
+    cuts.push(content.len());
+    for s in &links {
+        cuts.push(s.byte_range.start);
+        cuts.push(s.byte_range.end);
+    }
+    for r in &styles {
+        cuts.push(r.start);
+        cuts.push(r.end);
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+
+    cuts.windows(2)
+        .map(|w| {
+            let (start, end) = (w[0], w[1]);
+            StyledSegment {
+                text: content[start..end].to_string(),
+                byte_range: start..end,
+                link_target: links
+                    .iter()
+                    .find(|s| s.byte_range.start <= start && end <= s.byte_range.end)
+                    .and_then(|s| s.link_target.clone()),
+                // `style_fingerprint` omits unstyled gaps by design, so "no
+                // covering run" means this stretch carries no marks.
+                flags: match styles.iter().find(|r| r.start <= start && end <= r.end) {
+                    Some(r) => r.flags.clone(),
+                    None => holon_api::StyleFlags::default(),
+                },
+            }
+        })
+        .collect()
+}
+
+/// The link target covering `byte_offset`, if that offset lands on a link run.
+pub fn link_at_offset(segments: &[ContentSegment], byte_offset: usize) -> Option<&EntityRef> {
+    segments
+        .iter()
+        .find(|s| s.is_link() && s.byte_range.contains(&byte_offset))
+        .and_then(|s| s.link_target.as_ref())
+}
+
+/// Read mode renders styled runs whenever the block has content AND any mark of
+/// any kind. Gating on *Link* marks only (dogfood 2026-07-22 bug 1) drops a
+/// block whose marks are Bold/Italic/Underline to plain text and silently
+/// loses its formatting, even though the editor styles the same marks.
+pub fn wants_styled_render(content: &str, marks: &[MarkSpan]) -> bool {
+    !content.is_empty() && !marks.is_empty()
+}
+
+/// The block's inline marks, read off its entity row. Fail loud on malformed
+/// JSON: stored `blocks.marks` must be valid.
+pub fn marks_of(entity: &DataRow) -> Vec<MarkSpan> {
+    match entity.get("marks") {
+        Some(Value::String(s)) | Some(Value::Json(s)) if !s.is_empty() && s != "[]" => {
+            marks_from_json(s).expect("blocks.marks must be valid JSON")
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// What a click on a `rendered_text` offset must do, decided by the link kind
+/// under the cursor. Kept as a value so the routing is testable without a
+/// window: the whole class of bugs here is a target reaching the WRONG verb.
+#[derive(Debug, PartialEq, Clone)]
+pub enum LinkClickAction {
+    /// Hand a web address to the platform opener. A URL names no entity, so it
+    /// must never travel as a `navigation.focus` `block_id`.
+    OpenUrl(String),
+    /// Navigate the main region to this entity URI.
+    Navigate(String),
+    /// Create the page chain for a dangling wiki name, then navigate to it.
+    FollowDangling(String),
+    /// Not a followable link: place the caret at the clicked offset.
+    SeedCaret,
+}
+
+/// Route a clicked link target to its verb.
+///
+/// Two gates stand between a scheme-shaped target and navigation, and they ask
+/// different questions. `classifier` answers "is this scheme registered at
+/// all" — an unregistered one must never mint a page. The `block` check
+/// answers "can a region actually SHOW this": a focus root reaches the screen
+/// only through `focus_roots JOIN block`, so a registered-but-viewless scheme
+/// (`tag:`, `person:`, a sidecar entity) would navigate to an empty panel.
+/// Both fall back to caret placement, the same benign outcome as clicking
+/// ordinary text.
+///
+/// Whether the named block INSTANCE exists is not knowable here (no synchronous
+/// read); `navigation.focus` owns that precondition and refuses loudly.
+pub fn link_click_action(
+    target: Option<&EntityRef>,
+    classifier: &LinkTargetClassifier,
+) -> LinkClickAction {
+    match target {
+        Some(EntityRef::External { url }) => LinkClickAction::OpenUrl(url.clone()),
+        Some(target @ EntityRef::Scheme { .. }) => match target.entity_uri() {
+            Some(uri) if classifier.resolves_entity(&uri) && uri.scheme() == "block" => {
+                LinkClickAction::Navigate(uri.to_string())
+            }
+            _ => LinkClickAction::SeedCaret,
+        },
+        Some(EntityRef::Name { name }) => LinkClickAction::FollowDangling(name.clone()),
+        None => LinkClickAction::SeedCaret,
+    }
+}
+
+/// Build a `navigation.focus` intent for the main region targeting `block_id`.
+pub fn nav_focus(block_id: String) -> OperationIntent {
+    OperationIntent::new(
+        EntityName::new("navigation"),
+        "focus".to_string(),
+        [
+            ("region".to_string(), Value::String("main".to_string())),
+            ("block_id".to_string(), Value::String(block_id)),
+        ]
+        .into_iter()
+        .collect(),
+    )
 }
 
 /// Convert a Unicode-scalar range `[start, end)` to a byte range within `text`.
@@ -63,6 +225,7 @@ pub fn link_content_segments(content: &str, marks: &[MarkSpan]) -> Vec<ContentSe
     if link_spans.is_empty() {
         return vec![ContentSegment {
             text: content.to_string(),
+            byte_range: 0..content.len(),
             link_target: None,
         }];
     }
@@ -75,11 +238,13 @@ pub fn link_content_segments(content: &str, marks: &[MarkSpan]) -> Vec<ContentSe
         if range.start > pos {
             segments.push(ContentSegment {
                 text: content[pos..range.start].to_string(),
+                byte_range: pos..range.start,
                 link_target: None,
             });
         }
         segments.push(ContentSegment {
             text: content[range.clone()].to_string(),
+            byte_range: range.clone(),
             link_target: Some((*target).clone()),
         });
         pos = range.end;
@@ -87,6 +252,7 @@ pub fn link_content_segments(content: &str, marks: &[MarkSpan]) -> Vec<ContentSe
     if pos < content.len() {
         segments.push(ContentSegment {
             text: content[pos..].to_string(),
+            byte_range: pos..content.len(),
             link_target: None,
         });
     }
@@ -219,5 +385,237 @@ mod tests {
                 name: "Some Page".to_string()
             })
         );
+    }
+
+    /// F3: an inline link mid-sentence must partition into ordered segments
+    /// that tile the whole content contiguously (no gaps, no overlap). This is
+    /// the data a single wrapping styled text consumes, replacing the old
+    /// per-segment children that stacked onto separate lines.
+    #[test]
+    fn inline_link_partition_tiles_content_contiguously() {
+        let content = "See the Target Page reference inline in this sentence";
+        let start = content.find("Target Page").unwrap();
+        let end = start + "Target Page".len();
+        let segs = link_content_segments(
+            content,
+            &[mark_link(start, end, internal("block:target-page"))],
+        );
+
+        assert_eq!(segs.first().unwrap().byte_range.start, 0);
+        assert_eq!(segs.last().unwrap().byte_range.end, content.len());
+        for w in segs.windows(2) {
+            assert_eq!(
+                w[0].byte_range.end, w[1].byte_range.start,
+                "segments must tile"
+            );
+        }
+        let links: Vec<_> = segs.iter().filter(|s| s.is_link()).collect();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].text, "Target Page");
+        assert!(links[0].link_target.is_some());
+    }
+
+    #[test]
+    fn byte_ranges_track_multibyte_content() {
+        let content = "ab\u{00FC}c";
+        let segs = link_content_segments(content, &[mark_link(2, 3, internal("block:u"))]);
+        assert_eq!(segs[0].byte_range, 0..2);
+        assert_eq!(segs[1].byte_range, 2..4);
+        assert_eq!(segs[2].byte_range, 4..5);
+    }
+
+    #[test]
+    fn link_at_offset_finds_the_link_under_the_offset() {
+        let content = "before [[link]] after";
+        let start = content.find("[[link]]").unwrap();
+        let end = start + "[[link]]".len();
+        let target = internal("block:abc-123");
+        let segs = link_content_segments(content, &[mark_link(start, end, target.clone())]);
+
+        assert_eq!(link_at_offset(&segs, start), Some(&target));
+        assert_eq!(link_at_offset(&segs, end - 1), Some(&target));
+    }
+
+    #[test]
+    fn link_at_offset_outside_a_link_returns_none() {
+        let content = "before [[link]] after";
+        let start = content.find("[[link]]").unwrap();
+        let end = start + "[[link]]".len();
+        let segs = link_content_segments(content, &[mark_link(start, end, internal("block:abc"))]);
+
+        assert!(link_at_offset(&segs, 0).is_none());
+        assert!(link_at_offset(&segs, end).is_none());
+    }
+
+    /// Bug 1 (dogfood 2026-07-22): a block whose ONLY marks are non-link
+    /// (bold/underline) MUST render styled. A gate keyed on a Link mark returns
+    /// false here and the block falls through to plain text — the exact escape,
+    /// still live on the web arm until this predicate was shared.
+    #[test]
+    fn any_mark_kind_wants_styled_render() {
+        assert!(wants_styled_render(
+            "bold text",
+            &[MarkSpan::new(0, 4, InlineMark::Bold)]
+        ));
+        assert!(wants_styled_render(
+            "under",
+            &[MarkSpan::new(0, 4, InlineMark::Underline)]
+        ));
+        assert!(wants_styled_render(
+            "a link",
+            &[mark_link(0, 4, internal("block:x"))]
+        ));
+    }
+
+    #[test]
+    fn no_marks_or_no_content_stays_plain() {
+        assert!(!wants_styled_render("has content", &[]));
+        assert!(!wants_styled_render(
+            "",
+            &[MarkSpan::new(0, 4, InlineMark::Bold)]
+        ));
+    }
+
+    /// The routing table, one row per link kind. `External` going anywhere near
+    /// `Navigate` is the bug that blanked the main panel (BugFunnel 2026-08-08,
+    /// task #17): a URL is not an entity id.
+    #[test]
+    fn link_click_action_routes_each_kind_to_its_verb() {
+        let classifier = LinkTargetClassifier::default();
+
+        assert_eq!(
+            link_click_action(
+                Some(&EntityRef::External {
+                    url: "https://example.com".into()
+                }),
+                &classifier
+            ),
+            LinkClickAction::OpenUrl("https://example.com".into()),
+            "an external URL must go to the platform opener, never to navigation"
+        );
+        assert_eq!(
+            link_click_action(
+                Some(&EntityRef::Scheme {
+                    raw: "block:abc-123".into()
+                }),
+                &classifier
+            ),
+            LinkClickAction::Navigate("block:abc-123".into())
+        );
+        assert_eq!(
+            link_click_action(
+                Some(&EntityRef::Scheme {
+                    raw: "cc-session:0f3a".into()
+                }),
+                &classifier
+            ),
+            LinkClickAction::SeedCaret,
+            "an unregistered scheme must not navigate (and must not mint a page)"
+        );
+        assert_eq!(
+            link_click_action(
+                Some(&EntityRef::Scheme {
+                    raw: "tag:rust".into()
+                }),
+                &classifier
+            ),
+            LinkClickAction::SeedCaret,
+            "`tag` is a REGISTERED scheme with no main-panel view — navigating to it would blank \
+             the panel, so it must not navigate either"
+        );
+        assert_eq!(
+            link_click_action(
+                Some(&EntityRef::Name {
+                    name: "Beta Page".into()
+                }),
+                &classifier
+            ),
+            LinkClickAction::FollowDangling("Beta Page".into())
+        );
+        assert_eq!(
+            link_click_action(None, &classifier),
+            LinkClickAction::SeedCaret
+        );
+    }
+
+    /// `mailto:` is an external address too, and its scheme shape is exactly
+    /// what would otherwise tempt the entity-scheme branch.
+    #[test]
+    fn link_click_action_opens_mailto_rather_than_navigating() {
+        assert_eq!(
+            link_click_action(
+                Some(&EntityRef::External {
+                    url: "mailto:a@b.c".into()
+                }),
+                &LinkTargetClassifier::default()
+            ),
+            LinkClickAction::OpenUrl("mailto:a@b.c".into())
+        );
+    }
+
+    #[test]
+    fn nav_focus_targets_the_main_region() {
+        let intent = nav_focus("block:abc".to_string());
+        assert_eq!(intent.op_name, "focus");
+        assert_eq!(
+            intent.params.get("region"),
+            Some(&Value::String("main".to_string()))
+        );
+        assert_eq!(
+            intent.params.get("block_id"),
+            Some(&Value::String("block:abc".to_string()))
+        );
+    }
+
+    /// The web-arm escape: a block whose only marks are Bold/Underline must
+    /// come back with those attributes ON a run, not as one plain segment.
+    #[test]
+    fn styled_link_segments_carries_non_link_marks() {
+        let content = "plain bold tail";
+        let segs = styled_link_segments(content, &[MarkSpan::new(6, 10, InlineMark::Bold)]);
+
+        let bold: Vec<_> = segs.iter().filter(|s| s.flags.bold).collect();
+        assert_eq!(bold.len(), 1, "exactly one bold run: {segs:?}");
+        assert_eq!(bold[0].text, "bold");
+        assert!(segs.iter().all(|s| !s.is_link()));
+    }
+
+    /// Both partitions in one pass: a link inside a bold span breaks at both
+    /// boundaries, and the runs still tile the content exactly.
+    #[test]
+    fn styled_link_segments_merges_link_and_style_boundaries() {
+        let content = "a [[one]] b";
+        let link_start = content.find("[[one]]").unwrap();
+        let segs = styled_link_segments(
+            content,
+            &[
+                MarkSpan::new(0, content.chars().count(), InlineMark::Bold),
+                mark_link(
+                    link_start,
+                    link_start + "[[one]]".len(),
+                    internal("block:one"),
+                ),
+            ],
+        );
+
+        assert_eq!(segs.first().unwrap().byte_range.start, 0);
+        assert_eq!(segs.last().unwrap().byte_range.end, content.len());
+        for w in segs.windows(2) {
+            assert_eq!(w[0].byte_range.end, w[1].byte_range.start, "runs must tile");
+        }
+        assert!(segs.iter().all(|s| s.flags.bold), "bold covers everything");
+        let links: Vec<_> = segs.iter().filter(|s| s.is_link()).collect();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].text, "[[one]]");
+    }
+
+    #[test]
+    fn marks_of_reads_the_entity_row_and_treats_empty_as_none() {
+        let mut row = DataRow::new();
+        assert!(marks_of(&row).is_empty());
+        row.insert("marks".to_string(), Value::String("[]".to_string()));
+        assert!(marks_of(&row).is_empty());
+        row.insert("marks".to_string(), Value::String(String::new()));
+        assert!(marks_of(&row).is_empty());
     }
 }

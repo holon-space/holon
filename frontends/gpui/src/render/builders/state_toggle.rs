@@ -1,10 +1,7 @@
-use holon_api::Value;
-use holon_api::render_eval::cycle_state;
 use holon_api::render_eval::state_display;
 use holon_api::render_eval::state_icon;
-use holon_frontend::OperationIntent;
 use holon_frontend::ReactiveViewModel;
-use holon_frontend::operations::find_set_field_op;
+use holon_frontend::operations::state_toggle_intent;
 
 use super::prelude::*;
 
@@ -38,7 +35,23 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     let color = semantic_color(ctx, semantic);
     let icon = state_icon(&current);
 
-    let Some(op) = find_set_field_op(&field, &node.operations) else {
+    let row_id = node.row_id();
+    let intent = state_toggle_intent(
+        &field,
+        &current,
+        &states,
+        &node.operations,
+        node.entity_name().as_ref(),
+        row_id.as_deref(),
+    );
+    let Some(intent) = intent else {
+        // Disclose the degraded (display-only) glyph: without op wiring or a
+        // row id a click cannot dispatch.
+        tracing::warn!(
+            block_id = row_id.as_deref().unwrap_or("<none>"),
+            "state_toggle: no set_field op wiring or row id for field '{field}' — rendering \
+             display-only"
+        );
         return div()
             .flex_shrink_0()
             .mt(px(mt))
@@ -53,12 +66,6 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
             .child(icon);
     };
 
-    let row_id = node.row_id();
-    let entity_name = node.entity_name().unwrap_or_else(|| op.entity_name.clone());
-    let op_name = op.name.clone();
-    let field_owned = field.clone();
-    let current_owned = current.clone();
-    let states_vec: Vec<String> = states.split(',').map(|s| s.trim().to_string()).collect();
     let el_id = format!("state-toggle-{}", row_id.as_deref().unwrap_or("unknown"));
     let services = ctx.services.clone();
 
@@ -81,16 +88,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
                 .text_color(color)
                 .child(icon)
                 .on_mouse_down(gpui::MouseButton::Left, move |_, _, _| {
-                    let next = cycle_state(&current_owned, &states_vec);
-                    let Some(ref id) = row_id else { return };
-                    let intent = OperationIntent::set_field(
-                        &entity_name,
-                        &op_name,
-                        id,
-                        &field_owned,
-                        Value::String(next),
-                    );
-                    services.dispatch_intent(intent);
+                    services.dispatch_intent(intent.clone());
                 }),
         )
 }

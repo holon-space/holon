@@ -541,7 +541,10 @@ fn default_icon_name() -> String {
 fn default_icon_size() -> f32 {
     16.0
 }
-fn default_text_size() -> f32 {
+/// Body size. Public because a frontend has to be able to tell "the author
+/// asked for 14" from "nobody asked", which is the difference between painting
+/// a size and letting the stylesheet own it.
+pub fn default_text_size() -> f32 {
     14.0
 }
 fn default_editable_field() -> String {

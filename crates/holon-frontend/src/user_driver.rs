@@ -61,12 +61,24 @@ pub const DROP_TARGET_PARAM: &str = "parent_id";
 /// `UserDriver::drop_entity` default impl both call this. `op_name` comes
 /// from the dropzone widget's declarative spec (see
 /// `ViewKind::DropZone { op_name }`).
+///
+/// `None` when the drop lands on its own source: `move_block{id: S,
+/// parent_id: S}` would make a block its own parent, and whether the engine
+/// rejects it is beside the point — the frontend must not send it. The guard
+/// lives here so every drop path holds it, not just the ones that remembered.
 pub fn build_drop_intent(
     source_id: &EntityUri,
     target_id: &EntityUri,
     target_entity: EntityName,
     op_name: &str,
-) -> OperationIntent {
+) -> Option<OperationIntent> {
+    if source_id == target_id {
+        tracing::info!(
+            block_id = %source_id,
+            "drop_zone: drop on self — no-op"
+        );
+        return None;
+    }
     let mut params = HashMap::new();
     params.insert(
         DROP_SOURCE_PARAM.into(),
@@ -76,7 +88,7 @@ pub fn build_drop_intent(
         DROP_TARGET_PARAM.into(),
         Value::String(target_id.to_string()),
     );
-    OperationIntent::new(target_entity, op_name.into(), params)
+    Some(OperationIntent::new(target_entity, op_name.into(), params))
 }
 
 use crate::focus_path::walk_tree;
@@ -1201,7 +1213,12 @@ impl UserDriver for ReactiveEngineDriver {
         };
 
         let tick_snapshot = self.router.current_tick();
-        let intent = build_drop_intent(source_id, target_id, entity, &op);
+        let Some(intent) = build_drop_intent(source_id, target_id, entity, &op) else {
+            anyhow::bail!(
+                "drop_entity: {source_id} dropped on itself — a block cannot become its own \
+                 parent, and the production drop zones refuse this dispatch too"
+            );
+        };
         self.apply_intent(intent).await?;
         let (window, timeout) = quiescence_config();
         self.router

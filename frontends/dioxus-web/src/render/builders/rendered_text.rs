@@ -1,11 +1,15 @@
 use holon_api::EntityName;
 use holon_api::EntityRef;
-use holon_api::InlineMark;
-use holon_api::MarkSpan;
+use holon_api::StyleFlags;
 use holon_api::Value;
-use holon_api::marks_from_json;
-use holon_frontend::link_segments::ContentSegment;
-use holon_frontend::link_segments::link_content_segments;
+use holon_api::link_parser::LinkTargetClassifier;
+use holon_frontend::link_segments::LinkClickAction;
+use holon_frontend::link_segments::StyledSegment;
+use holon_frontend::link_segments::link_click_action;
+use holon_frontend::link_segments::marks_of;
+use holon_frontend::link_segments::nav_focus;
+use holon_frontend::link_segments::styled_link_segments;
+use holon_frontend::link_segments::wants_styled_render;
 use holon_frontend::operations::OperationIntent;
 use holon_frontend::view_model::ViewKind;
 
@@ -22,39 +26,23 @@ use crate::render::EntityContext;
 /// mounted editor.
 ///
 /// When the block's `marks` (read off `node.entity`, same source GPUI reads)
-/// carry `InlineMark::Link` spans, the content is split into text/link runs
-/// (`holon_frontend::link_segments`) and each link renders as a clickable
-/// element that navigates the main region — GPUI parity for link rendering,
-/// which this frontend previously dropped (rendered every block as plain
-/// text).
+/// carry any mark, the content is split into styled/link runs
+/// (`holon_frontend::link_segments`): link runs are clickable and route
+/// through the shared `link_click_action`, and every run paints its own
+/// bold/italic/underline/strike/code attributes.
 pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
     let ViewKind::RenderedText { content, .. } = &node.kind else {
         return rsx! {};
     };
     let content = content.clone();
     let row_id = node.row_id();
-    let marks = link_marks(&node.entity);
-    let has_links = marks
-        .iter()
-        .any(|m| matches!(m.mark, InlineMark::Link { .. }));
+    let marks = marks_of(&node.entity);
 
-    if has_links && !content.is_empty() {
-        let segments = link_content_segments(&content, &marks);
-        rsx! { LinkedTextNode { segments, row_id } }
+    if wants_styled_render(&content, &marks) {
+        let segments = styled_link_segments(&content, &marks);
+        rsx! { StyledTextNode { segments, row_id } }
     } else {
         rsx! { RenderedTextNode { content, row_id } }
-    }
-}
-
-/// Extract the block's inline marks from its entity row. Fail loud on
-/// malformed JSON: stored `blocks.marks` must be valid (same contract GPUI's
-/// `rendered_text` / `text` builders enforce).
-fn link_marks(entity: &holon_api::DataRow) -> Vec<MarkSpan> {
-    match entity.get("marks") {
-        Some(Value::String(s)) | Some(Value::Json(s)) if !s.is_empty() && s != "[]" => {
-            marks_from_json(s).expect("blocks.marks must be valid JSON")
-        }
-        _ => Vec::new(),
     }
 }
 
@@ -93,17 +81,16 @@ fn RenderedTextNode(content: String, row_id: Option<String>) -> Element {
     }
 }
 
-/// Content with at least one link mark. Plain runs behave like
-/// `RenderedTextNode` (click-to-focus); link runs are visually distinct and
-/// clickable — navigating the main region on click.
+/// Content with marks. Plain runs behave like `RenderedTextNode`
+/// (click-to-focus) and carry their style attributes; link runs are visually
+/// distinct and clickable — routed by the shared `link_click_action`.
 #[component]
-fn LinkedTextNode(segments: Vec<ContentSegment>, row_id: Option<String>) -> Element {
+fn StyledTextNode(segments: Vec<StyledSegment>, row_id: Option<String>) -> Element {
     let entity_id = row_id.or_else(|| try_consume_context::<EntityContext>().map(|c| c.0));
     let dom_entity_id = entity_id.clone().unwrap_or_default();
 
     let style = "white-space: pre-wrap; word-break: break-word; min-height: 1.4em; \
                  padding: 1px 2px; cursor: text;";
-    let link_style = "color: #2f6feb; text-decoration: underline; cursor: pointer;";
 
     rsx! {
         div {
@@ -116,7 +103,9 @@ fn LinkedTextNode(segments: Vec<ContentSegment>, row_id: Option<String>) -> Elem
             },
             for (i , seg) in segments.iter().enumerate() {
                 match &seg.link_target {
-                    None => rsx! { span { key: "{i}", "{seg.text}" } },
+                    None => rsx! {
+                        span { key: "{i}", style: "{run_style(&seg.flags)}", "{seg.text}" }
+                    },
                     Some(EntityRef::External { url }) => {
                         rsx! {
                             a {
@@ -125,7 +114,7 @@ fn LinkedTextNode(segments: Vec<ContentSegment>, row_id: Option<String>) -> Elem
                                 href: "{url}",
                                 target: "_blank",
                                 rel: "noopener noreferrer",
-                                style: "{link_style}",
+                                style: "{link_run_style(&seg.flags)}",
                                 onclick: move |evt| evt.stop_propagation(),
                                 "{seg.text}"
                             }
@@ -137,7 +126,7 @@ fn LinkedTextNode(segments: Vec<ContentSegment>, row_id: Option<String>) -> Elem
                             span {
                                 key: "{i}",
                                 "data-role": "link",
-                                style: "{link_style}",
+                                style: "{link_run_style(&seg.flags)}",
                                 onclick: move |evt| {
                                     evt.stop_propagation();
                                     follow_internal_link(&target);
@@ -150,6 +139,43 @@ fn LinkedTextNode(segments: Vec<ContentSegment>, row_id: Option<String>) -> Elem
             }
         }
     }
+}
+
+/// CSS for one run's paint attributes. The mark→attribute mapping itself lives
+/// in `holon_api::mark_style_flags`; this only spells the flags as CSS.
+fn run_style(flags: &StyleFlags) -> String {
+    let mut css = String::new();
+    if flags.bold {
+        css.push_str("font-weight: 600;");
+    }
+    if flags.italic {
+        css.push_str("font-style: italic;");
+    }
+    let mut decorations: Vec<&str> = Vec::new();
+    if flags.underline {
+        decorations.push("underline");
+    }
+    if flags.strikethrough {
+        decorations.push("line-through");
+    }
+    if !decorations.is_empty() {
+        css.push_str(&format!("text-decoration: {};", decorations.join(" ")));
+    }
+    if flags.background {
+        css.push_str(
+            "background: rgba(128,128,128,0.16); border-radius: 3px; padding: 0 3px; \
+             font-family: ui-monospace, SFMono-Regular, Menlo, monospace;",
+        );
+    }
+    css
+}
+
+/// Link runs add only the affordance. The underline comes from `run_style`,
+/// because `mark_style_flags` already gives a `Link` mark `underline` — adding
+/// a second `text-decoration` here would be overridden by that one anyway, and
+/// would drop the line-through on a struck-out link.
+fn link_run_style(flags: &StyleFlags) -> String {
+    format!("color: #2f6feb; cursor: pointer;{}", run_style(flags))
 }
 
 /// Click on a plain (non-link) run: request read→edit focus for the block via
@@ -176,50 +202,42 @@ fn focus_block(entity_id: Option<String>) {
     });
 }
 
-/// Click on a link run targeting an entity. A target that names an entity
-/// navigates the main region to it (GPUI parity: `navigation.focus`). `Name`
-/// (dangling wiki-link) lazily creates+heals the page chain via
-/// `block.create_page_from_link`; see the gap note below.
+/// Click on a link run targeting an entity. The verb is decided by the shared
+/// `link_click_action`, so the web applies the same two gates as GPUI: an
+/// unregistered scheme must never mint a page, and a registered-but-viewless
+/// scheme (`tag:`, `person:`) must not navigate the main region to an empty
+/// panel.
+///
+/// The classifier carries only `BUILT_IN_LINK_SCHEMES` — the profile registry
+/// lives in the worker. That costs nothing here: navigation additionally
+/// requires the `block` scheme, which is built in, so every target this
+/// frontend can navigate to is one a full registry would classify identically.
 fn follow_internal_link(target: &EntityRef) {
-    let intent = match target {
-        // A colon-bearing target that names no entity (`Meeting/Notes:2026`)
-        // has nothing to navigate to and must never mint a page, so the click
-        // is inert — matching GPUI, which places the caret instead.
-        EntityRef::Scheme { .. } => {
-            let Some(uri) = target.entity_uri() else {
-                return;
-            };
-            OperationIntent::new(
-                EntityName::new("navigation"),
-                "focus".to_string(),
-                [
-                    ("region".to_string(), Value::String("main".to_string())),
-                    ("block_id".to_string(), Value::String(uri.to_string())),
-                ]
-                .into_iter()
-                .collect(),
-            )
-        }
-        EntityRef::Name { name } => {
+    let intent = match link_click_action(Some(target), &LinkTargetClassifier::default()) {
+        LinkClickAction::Navigate(uri) => nav_focus(uri),
+        LinkClickAction::FollowDangling(name) => {
             // GAP vs GPUI: GPUI's `follow_dangling_link` creates the page AND
             // navigates to the fresh leaf in one gesture, threading the create
             // op's response (the new page id) into a `navigation.focus`. The
             // worker exposes no such response-threading export today, and the
             // dispatch lane (`engineDispatchIntents`) is fire-and-forget, so we
             // dispatch the create+heal op only. The link heals on the next
-            // reprojection (this arm becomes `Internal`) and the second click
-            // navigates. Same-gesture navigation for dangling links needs an
-            // `engine_follow_dangling_link` worker export — see BugFunnel.
+            // reprojection and the second click navigates. Same-gesture
+            // navigation needs an `engine_follow_dangling_link` worker export
+            // — see BugFunnel.
             OperationIntent::new(
                 EntityName::new("block"),
                 "create_page_from_link".to_string(),
-                [("target".to_string(), Value::String(name.clone()))]
+                [("target".to_string(), Value::String(name))]
                     .into_iter()
                     .collect(),
             )
         }
-        // External handled by the anchor arm; never reaches here.
-        EntityRef::External { .. } => return,
+        // A caret seed needs a hit-tested byte offset, which this frontend's
+        // click path does not produce; the enclosing div's click already
+        // focuses the block, so an inert link run is the honest outcome.
+        // `OpenUrl` never reaches here — external targets take the anchor arm.
+        LinkClickAction::SeedCaret | LinkClickAction::OpenUrl(_) => return,
     };
     dispatch_chain(vec![intent_to_wire(&intent)]);
 }

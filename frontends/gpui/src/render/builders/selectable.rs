@@ -1,16 +1,13 @@
-use std::collections::HashMap;
-
 use holon_api::ClickModifiers;
 use holon_frontend::ReactiveViewModel;
-use holon_frontend::operations::OperationIntent;
 
 use super::prelude::*;
 
 /// Handles "selectable" interaction wrapper.
 ///
-/// Pre-resolves every click-bound intent on the node into a
-/// `HashMap<ClickModifiers, OperationIntent>` and looks the active modifier
-/// set up on each mouse-down. Adding a new modifier (alt-click, cmd-click)
+/// Looks the active modifier set up in the shared
+/// `operations::click_intents` map on each mouse-down. Adding a new modifier
+/// (alt-click, cmd-click)
 /// is a one-line wiring in the shadow `selectable.rs` plus a profile YAML
 /// entry — no changes here. Any modifier-click `stop_propagation`s so the
 /// row-level click handler doesn't also fire (LogSeq-style "pin to sidebar
@@ -19,22 +16,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     let child = node.children.first().expect("selectable requires a child");
     let child_el = super::render(child, ctx);
 
-    let click_intents: HashMap<ClickModifiers, OperationIntent> = node
-        .operations
-        .iter()
-        .filter_map(|ow| {
-            ow.descriptor.click_modifiers().map(|m| {
-                (
-                    m,
-                    OperationIntent::new(
-                        ow.descriptor.entity_name.clone(),
-                        ow.descriptor.name.clone(),
-                        ow.descriptor.bound_params.clone(),
-                    ),
-                )
-            })
-        })
-        .collect();
+    let click_intents = holon_frontend::operations::click_intents(&node.operations);
     if click_intents.is_empty() {
         return child_el;
     }

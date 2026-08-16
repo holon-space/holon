@@ -1,0 +1,19 @@
+# Platform render builders must consume shared decisions, not re-derive them.
+# Every builder set outside the cargo workspace drifts silently; the rule is
+# what keeps the shared helper used once it exists.
+
+[[smell]]
+id = "builder-click-intent-map"
+pattern = '(descriptor\.click_modifiers\(\)|HashMap\s*<\s*ClickModifiers\s*,)'
+files = "frontends/*/src/render/builders/**/*.rs"
+case_sensitive = true
+message = """
+A platform builder must not resolve click modifiers itself. \
+`holon_frontend::operations::click_intents(&node.operations)` returns the \
+whole `ClickModifiers -> OperationIntent` map, and `click_intent_for` returns \
+one entry; both take the operations slice so the headless drivers and every \
+frontend provably agree — the parity property the PBTs already assume. \
+Hand-rolling the `filter_map` over `descriptor.click_modifiers()` is how five \
+copies of it accumulated. \
+To suppress: // ALLOW(builder-click-intent-map): <reason>
+"""

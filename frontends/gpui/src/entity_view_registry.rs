@@ -274,49 +274,13 @@ pub fn evict_ephemeral_with_prefix(
 
 // ── LiveBlockAncestors ──────────────────────────────────────────────────
 
-/// Chain of `live_block` block ids being rendered up the entity tree.
-///
-/// Replaces the per-call-stack `RECONCILING` thread-local that the old
-/// synchronous `reconcile_children` path used to detect A→B→A cycles. GPUI
-/// renders entities asynchronously across separate render passes, so the
-/// thread-local approach can't see ancestors once the parent's render
-/// returns. Instead the chain is stored on the `ReactiveShell` itself at
-/// creation time (captured from the `GpuiRenderContext` of the creating
-/// frame), then re-emitted into each of the shell's own render frames.
-///
-/// The chain is cheap to extend (one `Vec<String>` clone, typically ≤4
-/// entries) and equality on the contained ids is canonical-string equality
-/// — the same ids that flow into `CacheKey::LiveBlock`.
-#[derive(Clone, Debug, Default)]
-pub struct LiveBlockAncestors {
-    inner: Vec<String>,
-}
-
-impl LiveBlockAncestors {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn contains(&self, id: &str) -> bool {
-        self.inner.iter().any(|x| x == id)
-    }
-
-    /// Return a new chain with `id` appended. The receiver is unchanged so
-    /// callers can keep using the parent chain after spawning a child.
-    pub fn pushed(&self, id: impl Into<String>) -> Self {
-        let mut c = self.inner.clone();
-        c.push(id.into());
-        Self { inner: c }
-    }
-
-    pub fn as_slice(&self) -> &[String] {
-        &self.inner
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
-    }
-}
+/// The cycle rule lives in `holon-frontend` so every frontend holds the same
+/// one. GPUI stores the chain on the `ReactiveShell` at creation time
+/// (captured from the `GpuiRenderContext` of the creating frame), then
+/// re-emits it into each of the shell's own render frames — a thread-local
+/// cannot work here, because GPUI renders entities asynchronously across
+/// separate passes and the parent's render has already returned.
+pub use holon_frontend::live_block_ancestors::LiveBlockAncestors;
 
 #[cfg(test)]
 mod tests {
@@ -429,19 +393,6 @@ mod tests {
         ] {
             assert!(Arc::ptr_eq(&scope.target_cache_for_test(&key), &cache));
         }
-    }
-
-    #[test]
-    fn live_block_ancestors_pushed_is_immutable_copy() {
-        let a = LiveBlockAncestors::new();
-        assert!(a.is_empty());
-        let b = a.pushed("block:A");
-        assert!(a.is_empty(), "parent chain stays unchanged");
-        assert!(b.contains("block:A"));
-        let c = b.pushed("block:B");
-        assert!(c.contains("block:A"));
-        assert!(c.contains("block:B"));
-        assert!(!c.contains("block:C"));
     }
 
     #[test]

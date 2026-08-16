@@ -207,6 +207,7 @@ pub mod input;
 pub mod input_trigger;
 pub(crate) mod link_provider;
 pub mod link_segments;
+pub mod live_block_ancestors;
 pub mod local_edit_epoch;
 pub mod logging;
 pub mod memory_monitor;

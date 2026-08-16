@@ -13,6 +13,78 @@ use holon_api::widget_spec::DataRow;
 use crate::FrontendSession;
 use crate::RenderContext;
 
+/// Every click-bound intent on a node, keyed by the modifier set that selects
+/// it — the lookup table a click handler consults on mouse-down.
+///
+/// Taking the operations SLICE rather than a node keeps this usable from both
+/// view-model representations and from the tree-walking helpers in
+/// `focus_path`, which is what stops each frontend hand-rolling the same
+/// `filter_map` over `descriptor.click_modifiers()`. Adding a modifier is then
+/// a profile-YAML entry plus a shadow-builder wiring, never a change in a
+/// platform builder.
+pub fn click_intents(
+    ops: &[OperationWiring],
+) -> HashMap<holon_api::ClickModifiers, OperationIntent> {
+    ops.iter()
+        .filter_map(|ow| {
+            ow.descriptor.click_modifiers().map(|m| {
+                (
+                    m,
+                    OperationIntent::new(
+                        ow.descriptor.entity_name.clone(),
+                        ow.descriptor.name.clone(),
+                        ow.descriptor.bound_params.clone(),
+                    ),
+                )
+            })
+        })
+        .collect()
+}
+
+/// The single click intent bound to `modifiers`, if any.
+pub fn click_intent_for(
+    ops: &[OperationWiring],
+    modifiers: holon_api::ClickModifiers,
+) -> Option<OperationIntent> {
+    let op = ops
+        .iter()
+        .find(|ow| ow.descriptor.click_modifiers() == Some(modifiers))?;
+    Some(OperationIntent::new(
+        op.descriptor.entity_name.clone(),
+        op.descriptor.name.clone(),
+        op.descriptor.bound_params.clone(),
+    ))
+}
+
+/// The `set_field` intent a `state_toggle` click must dispatch: look up the
+/// setter op for `field`, advance `current` one step through `states`, and
+/// address the write at `row_id`.
+///
+/// `states` is the comma-separated list the widget carries. `entity_name` is
+/// the node's own entity when it has one, otherwise the op's declared entity.
+/// `None` means the toggle is not wired for writing — the caller discloses
+/// that, it is not an error here.
+pub fn state_toggle_intent(
+    field: &str,
+    current: &str,
+    states: &str,
+    ops: &[OperationWiring],
+    entity_name: Option<&EntityName>,
+    row_id: Option<&str>,
+) -> Option<OperationIntent> {
+    let op = find_set_field_op(field, ops)?;
+    let states_vec: Vec<String> = states.split(',').map(|s| s.trim().to_string()).collect();
+    let next = holon_api::render_eval::cycle_state(current, &states_vec);
+    let entity_name = entity_name.unwrap_or(&op.entity_name);
+    Some(OperationIntent::set_field(
+        entity_name,
+        &op.name,
+        row_id?,
+        field,
+        Value::String(next),
+    ))
+}
+
 pub fn dispatch_operation(
     spawner: &Arc<dyn Spawner>,
     session: &Arc<FrontendSession>,

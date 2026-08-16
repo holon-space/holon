@@ -1,25 +1,21 @@
+use holon_frontend::LayoutHint;
 use holon_frontend::view_model::ViewKind;
 
 use super::prelude::*;
 
-/// App-shell columns. GPUI's `columns()` allocates per-column width from each
-/// panel's `ideal_width` / `column_priority` layout hints; the dioxus snapshot
-/// `ViewKind::Columns` does not carry those hints (they are dropped at the
-/// projection boundary — see report), and each panel's real content arrives
-/// asynchronously through its own `live_block` subscription, so at
-/// root-projection time every column's content is still `Empty`/`Loading`.
+/// App-shell columns. Width allocation comes from each child's `layout_hint`,
+/// the same snapshot field GPUI's `columns()` and the TUI already allocate
+/// from: the shared `drawer` builder declares `Fixed`, `spacer` declares its
+/// own width, and everything else keeps the `Flex { weight: 1.0 }` default.
+/// `LayoutHint` maps onto CSS flex directly — `Fixed { px }` is `flex: 0 0
+/// Npx` and `Flex { weight }` is `flex: weight 1 0`.
 ///
-/// The one reliable signal available here is the panel's own `block_id`, which
-/// names its role in the default layout. We map that to a column role:
-///
-///   * a `*sidebar*`/`*left*` panel → a fixed-width navigation sidebar,
-///   * a `*right*` rail → a content-sized column that collapses to nothing when
-///     its query is empty (the seed's right sidebar), and
-///   * everything else → a centred, width-capped reading column.
-///
-/// The proper fix is to plumb `ideal_width`/`column_priority` through the
-/// snapshot so this doesn't depend on well-known ids; until then this keeps
-/// the browser shell readable. Unknown/idless panels fall back to `main`.
+/// The wrapper is purely structural: it carries the flex shorthand and nothing
+/// else. A `Fixed { px: 0 }` child — a `spacer(0)` flank, or an overlay drawer
+/// whose contract is to claim no flow space — must therefore measure 0px, so
+/// the wrapper can never own padding, background or a border under
+/// `box-sizing: border-box`. Panel chrome belongs to the panel: the `drawer`
+/// builder paints it.
 pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
     let ViewKind::Columns { gap, children } = &node.kind else {
         return rsx! {};
@@ -29,7 +25,11 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
     rsx! {
         div { class: "holon-columns", style: "gap: {gap}px;",
             for (key, child) in keyed_children(&children.items) {
-                div { key: "{key}", class: "{col_class(child)}",
+                div {
+                    key: "{key}",
+                    "data-role": "column",
+                    "data-layout": "{col_layout(child.layout_hint)}",
+                    style: "{col_flex(child.layout_hint)}",
                     RenderNode { node: child.clone() }
                 }
             }
@@ -37,52 +37,19 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
     }
 }
 
-#[derive(Clone, Copy)]
-enum ColRole {
-    Sidebar,
-    Rail,
-    Main,
-}
-
-fn col_class(vm: &ViewModel) -> &'static str {
-    match col_role(vm) {
-        ColRole::Sidebar => "holon-col-sidebar",
-        ColRole::Rail => "holon-col-rail",
-        ColRole::Main => "holon-col-main",
+/// Styling hook for the two allocation modes. Deliberately not a role name —
+/// `Fixed` means "this column was given an exact width", not "this column is a
+/// sidebar"; a spacer and an overlay drawer are `Fixed` too.
+fn col_layout(hint: LayoutHint) -> &'static str {
+    match hint {
+        LayoutHint::Fixed { .. } => "fixed",
+        LayoutHint::Flex { .. } => "flex",
     }
 }
 
-fn col_role(vm: &ViewModel) -> ColRole {
-    // A panel with no `live_block` is a placeholder (`spacer(0)` — the seed
-    // emits these for the flanks at narrow breakpoints). Collapse it instead
-    // of handing it an equal flex share and squeezing the real content.
-    let Some(id) = panel_block_id(vm) else {
-        return ColRole::Rail;
-    };
-    let id = id.to_ascii_lowercase();
-    if id.contains("main") {
-        ColRole::Main
-    } else if id.contains("right") {
-        ColRole::Rail
-    } else if id.contains("sidebar") || id.contains("left") || id.contains("nav") {
-        ColRole::Sidebar
-    } else {
-        ColRole::Main
-    }
-}
-
-/// Unwrap the layout wrappers a projected panel may carry (`drawer(...)`,
-/// focusable, etc.) to reach the `live_block` id that names the panel.
-fn panel_block_id(vm: &ViewModel) -> Option<String> {
-    match &vm.kind {
-        ViewKind::LiveBlock { block_id, .. } => Some(block_id.clone()),
-        ViewKind::Focusable { child }
-        | ViewKind::Draggable { child }
-        | ViewKind::Selectable { child }
-        | ViewKind::PieMenu { child, .. }
-        | ViewKind::ViewModeSwitcher { child, .. }
-        | ViewKind::Drawer { child, .. } => panel_block_id(child),
-        ViewKind::RenderBlock { content } => panel_block_id(content),
-        _ => None,
+fn col_flex(hint: LayoutHint) -> String {
+    match hint {
+        LayoutHint::Fixed { px } => format!("flex: 0 0 {px}px;"),
+        LayoutHint::Flex { weight } => format!("flex: {weight} 1 0;"),
     }
 }

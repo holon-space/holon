@@ -1,20 +1,19 @@
-use std::ops::Range;
-
 use gpui::MouseButton;
 use gpui::MouseDownEvent;
 use gpui::SharedString;
 use gpui::StyledText;
-use holon_api::EntityRef;
 use holon_api::EntityUri;
-use holon_api::InlineMark;
 use holon_api::MarkSpan;
-use holon_api::Value;
-use holon_api::marks_from_json;
-use holon_frontend::operations::OperationIntent;
+use holon_frontend::link_segments::LinkClickAction;
+use holon_frontend::link_segments::link_at_offset;
+use holon_frontend::link_segments::link_click_action;
+use holon_frontend::link_segments::link_content_segments;
+use holon_frontend::link_segments::marks_of;
+use holon_frontend::link_segments::nav_focus;
+use holon_frontend::link_segments::wants_styled_render;
 
 use super::prelude::*;
 use crate::render::builders::text::build_highlights;
-use crate::render::rich_text_runs::scalar_range_to_bytes;
 
 /// Read-only sibling of `editable_text`. Renders the block's content as
 /// static text. A click calls `services.set_focus` (ADR 0010: focus is pure
@@ -43,13 +42,7 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
     // ALLOW(entity_uri_from_raw): render-spec rendered_text node row_id (boundary)
     let block_uri = EntityUri::from_raw(&row_id);
 
-    // Extract marks (same pattern as text.rs). Fail loud on malformed JSON.
-    let marks: Option<Vec<MarkSpan>> = match node.entity().get("marks") {
-        Some(Value::String(s)) | Some(Value::Json(s)) if !s.is_empty() && s != "[]" => {
-            Some(marks_from_json(s).expect("blocks.marks must be valid JSON"))
-        }
-        _ => None,
-    };
+    let marks = marks_of(&node.entity());
 
     // The read-mode styling fingerprint the widget ACTUALLY paints: only the
     // styled branch produces highlight runs (derived from the same
@@ -68,20 +61,13 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
             services,
         )
         .into_any_element()
-    } else if wants_styled_render(has_content, marks.as_deref()) {
+    } else if wants_styled_render(&content, &marks) {
         // One `build_highlights` per paint (as on main) — `styled_run_render`
         // returns the painted styled-run fingerprint from that SAME computation,
         // so the observation adds only a cheap run extraction, never a second
         // partition pass (which would double the per-frame cost and widen
         // windowed settle races).
-        let (el, runs) = styled_run_render(
-            &el_id,
-            &content,
-            marks.as_ref().unwrap(),
-            &block_uri,
-            services,
-            ctx,
-        );
+        let (el, runs) = styled_run_render(&el_id, &content, &marks, &block_uri, services, ctx);
         styled_runs = Some(runs);
         el
     } else {
@@ -105,15 +91,6 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
         tracker = tracker.with_styled_runs(runs);
     }
     tracker.into_any_element()
-}
-
-/// Read mode renders styled runs whenever the block has content AND any mark of
-/// any kind. The bug this replaced (dogfood 2026-07-22 bug 1) gated styling on
-/// a *Link* mark only, so a block whose marks were Bold/Italic/Underline fell
-/// to `static_inner` (plain text) and its formatting silently vanished — even
-/// though the editor styled the same marks. Gate on presence of any mark.
-fn wants_styled_render(has_content: bool, marks: Option<&[MarkSpan]>) -> bool {
-    has_content && marks.is_some_and(|m| !m.is_empty())
 }
 
 /// Map a byte offset in the read-projection (styled) text to the byte offset in
@@ -192,6 +169,26 @@ fn plain_caret_click(
 /// never fires — the caret capture would silently no-op. Owning the click on
 /// the text div itself (same mechanism as the plain `plain_caret_click` path)
 /// avoids that shadowing and keeps one code path for both.
+/// Bring every span inside `0..=content_chars` so the downstream consumers —
+/// `build_highlights`, and the shared `link_content_segments` whose contract is
+/// to ASSERT on an out-of-range mark — only ever see in-range input.
+///
+/// `.max(start)` is the anti-inversion half and is not redundant:
+/// `MarkSpan::new` asserts `start <= end`, but the derived `Deserialize`
+/// bypasses that assert and `canonicalize_marks` only drops zero-width spans,
+/// so a persisted `{"start":5,"end":2}` reaches here. Without the clamp it
+/// would abort the very paint this whole path exists to keep alive.
+fn clamp_marks_to(content_chars: usize, marks: &[MarkSpan]) -> Vec<MarkSpan> {
+    marks
+        .iter()
+        .map(|ms| {
+            let start = ms.start.min(content_chars);
+            let end = ms.end.min(content_chars).max(start);
+            MarkSpan::new(start, end, ms.mark.clone())
+        })
+        .collect()
+}
+
 fn styled_run_render(
     el_id: &str,
     content: &str,
@@ -203,10 +200,13 @@ fn styled_run_render(
     // Never abort on a corrupt persisted mark. A mark span outliving its
     // content ("N..M exceeds text length K") aborts EVERY paint of this block —
     // a page permanently un-openable. Disclosed degraded render: log loud with
-    // the block id (fail-loud, not silent) and let `scalar_range_to_bytes`
-    // clamp the offending span. The durable fix is the read-boundary
-    // `canonicalize_marks_against`; this is the render-layer safety net.
+    // the block id (fail-loud, not silent) and clamp the offending span here,
+    // so everything downstream — `build_highlights` and the shared
+    // `link_content_segments`, whose own contract is to assert on an
+    // out-of-range mark — only ever sees in-range spans. The durable fix is the
+    // read-boundary `canonicalize_marks_against`; this is the render-layer net.
     let content_chars = content.chars().count();
+    let clamped = clamp_marks_to(content_chars, marks);
     for ms in marks {
         if ms.end > content_chars {
             // First occurrence per block stays loud (ERROR) so the corruption
@@ -254,7 +254,7 @@ fn styled_run_render(
 
     // Segments carry each link span's byte range + target, so a hit-tested byte
     // offset resolves to either "link (navigate)" or "text (seed caret)".
-    let segments = build_content_segments(content, marks);
+    let segments = link_content_segments(content, &clamped);
 
     let block = block_uri.clone();
     let element = div()
@@ -297,141 +297,6 @@ fn styled_run_render(
     (element, styled_runs)
 }
 
-/// What a click on a `rendered_text` offset must do, decided by the link kind
-/// under the cursor. Kept as a value so the routing is testable without a
-/// window: the whole class of bugs here is a target reaching the WRONG verb.
-#[derive(Debug, PartialEq, Clone)]
-enum LinkClickAction {
-    /// Hand a web address to the platform opener. A URL names no entity, so it
-    /// must never travel as a `navigation.focus` `block_id`.
-    OpenUrl(String),
-    /// Navigate the main region to this entity URI.
-    Navigate(String),
-    /// Create the page chain for a dangling wiki name, then navigate to it.
-    FollowDangling(String),
-    /// Not a followable link: place the caret at the clicked offset.
-    SeedCaret,
-}
-
-/// Route a clicked link target to its verb.
-///
-/// Two gates stand between a scheme-shaped target and navigation, and they ask
-/// different questions. `classifier` (the LIVE registry) answers "is this
-/// scheme registered at all" — an unregistered one must never mint a page. The
-/// `block` check answers "can a region actually SHOW this": a focus root
-/// reaches the screen only through `focus_roots JOIN block`, so a
-/// registered-but-viewless scheme (`tag:`, `person:`, a sidecar entity) would
-/// navigate to an empty panel. Both fall back to caret placement, the same
-/// benign outcome as clicking ordinary text.
-///
-/// Whether the named block INSTANCE exists is not knowable here (no synchronous
-/// read); `navigation.focus` owns that precondition and refuses loudly.
-fn link_click_action(
-    target: Option<&EntityRef>,
-    classifier: &holon_api::link_parser::LinkTargetClassifier,
-) -> LinkClickAction {
-    match target {
-        Some(EntityRef::External { url }) => LinkClickAction::OpenUrl(url.clone()),
-        Some(target @ EntityRef::Scheme { .. }) => match target.entity_uri() {
-            Some(uri) if classifier.resolves_entity(&uri) && uri.scheme() == "block" => {
-                LinkClickAction::Navigate(uri.to_string())
-            }
-            _ => LinkClickAction::SeedCaret,
-        },
-        Some(EntityRef::Name { name }) => LinkClickAction::FollowDangling(name.clone()),
-        None => LinkClickAction::SeedCaret,
-    }
-}
-
-/// Build a `navigation.focus` intent for the main region targeting `block_id`.
-fn nav_focus(block_id: String) -> OperationIntent {
-    OperationIntent::new(
-        "navigation".into(),
-        "focus".into(),
-        [
-            ("region".into(), Value::String("main".into())),
-            ("block_id".into(), Value::String(block_id)),
-        ]
-        .into_iter()
-        .collect(),
-    )
-}
-
-/// One segment of content: either plain text or a link.
-#[derive(Debug, PartialEq, Clone)]
-struct ContentSegment {
-    text: String,
-    byte_range: Range<usize>,
-    is_link: bool,
-    link_target: Option<EntityRef>,
-}
-
-/// Split `content` at link boundaries into alternating text/link segments.
-/// Non-overlapping; links are sorted by start position.
-fn build_content_segments(content: &str, marks: &[MarkSpan]) -> Vec<ContentSegment> {
-    let mut link_spans: Vec<(Range<usize>, &EntityRef)> = marks
-        .iter()
-        .filter_map(|ms| match &ms.mark {
-            InlineMark::Link { target, .. } => {
-                Some((scalar_range_to_bytes(content, ms.start..ms.end), target))
-            }
-            _ => None,
-        })
-        .collect();
-
-    if link_spans.is_empty() {
-        let len = content.len();
-        return vec![ContentSegment {
-            text: content.to_string(),
-            byte_range: 0..len,
-            is_link: false,
-            link_target: None,
-        }];
-    }
-
-    link_spans.sort_by_key(|(r, _)| (r.start, r.end));
-
-    let mut segments = Vec::new();
-    let mut pos = 0;
-
-    for (range, target) in &link_spans {
-        if range.start > pos {
-            segments.push(ContentSegment {
-                text: content[pos..range.start].to_string(),
-                byte_range: pos..range.start,
-                is_link: false,
-                link_target: None,
-            });
-        }
-        segments.push(ContentSegment {
-            text: content[range.clone()].to_string(),
-            byte_range: range.clone(),
-            is_link: true,
-            link_target: Some((*target).clone()),
-        });
-        pos = range.end;
-    }
-
-    if pos < content.len() {
-        segments.push(ContentSegment {
-            text: content[pos..].to_string(),
-            byte_range: pos..content.len(),
-            is_link: false,
-            link_target: None,
-        });
-    }
-
-    segments
-}
-
-/// Find the link target at `byte_offset` within segments.
-fn link_at_offset<'a>(segments: &'a [ContentSegment], byte_offset: usize) -> Option<&'a EntityRef> {
-    segments
-        .iter()
-        .find(|s| s.is_link && s.byte_range.contains(&byte_offset))
-        .and_then(|s| s.link_target.as_ref())
-}
-
 /// Static text element matching `editable_text`'s visual metrics so the
 /// transition from read-only → editable doesn't cause a perceptible jump
 /// when focus changes.
@@ -469,297 +334,40 @@ fn static_inner(content: &str, _: &GpuiRenderContext) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use holon_api::EntityUri;
+    use holon_api::InlineMark;
 
     use super::*;
-
-    fn mark_link(start: usize, end: usize, target: EntityRef) -> MarkSpan {
-        MarkSpan::new(
-            start,
-            end,
-            InlineMark::Link {
-                target,
-                label: String::new(),
-            },
-        )
-    }
-
-    fn internal_uri(id: &str) -> EntityRef {
-        EntityRef::from_uri(&EntityUri::parse(id).unwrap())
-    }
-
-    #[test]
-    fn build_content_segments_no_links_returns_single_text_segment() {
-        let content = "Hello world";
-        let segments = build_content_segments(content, &[]);
-        assert_eq!(segments.len(), 1);
-        assert!(!segments[0].is_link);
-        assert_eq!(segments[0].text, "Hello world");
-        assert!(segments[0].link_target.is_none());
-    }
-
-    #[test]
-    fn build_content_segments_with_link_splits_correctly() {
-        let content = "before [[link]] after";
-        let link_text = "[[link]]";
-        let link_start = content.find(link_text).unwrap();
-        let link_end = link_start + "[[link]]".len();
-        let link_target = internal_uri("block:abc-123");
-
-        let marks = vec![mark_link(link_start, link_end, link_target)];
-
-        let segments = build_content_segments(content, &marks);
-        assert_eq!(segments.len(), 3);
-
-        assert!(!segments[0].is_link);
-        assert_eq!(segments[0].text, "before [[link]] after"[..link_start]);
-
-        assert!(segments[1].is_link);
-        assert_eq!(segments[1].text, link_text);
-        assert!(segments[1].link_target.is_some());
-
-        assert!(!segments[2].is_link);
-        assert_eq!(segments[2].text, " after");
-    }
-
-    #[test]
-    fn build_content_segments_with_multiple_links() {
-        let content = "A [[one]] B [[two]] C";
-        let marks = vec![
-            mark_link(
-                content.find("[[one]]").unwrap(),
-                content.find("[[one]]").unwrap() + "[[one]]".len(),
-                internal_uri("block:one"),
-            ),
-            mark_link(
-                content.find("[[two]]").unwrap(),
-                content.find("[[two]]").unwrap() + "[[two]]".len(),
-                internal_uri("block:two"),
-            ),
-        ];
-
-        let segments = build_content_segments(content, &marks);
-        assert_eq!(segments.len(), 5);
-
-        assert!(!segments[0].is_link);
-        assert_eq!(segments[0].text, "A ");
-
-        assert!(segments[1].is_link);
-        assert_eq!(segments[1].text, "[[one]]");
-
-        assert!(!segments[2].is_link);
-        assert_eq!(segments[2].text, " B ");
-
-        assert!(segments[3].is_link);
-        assert_eq!(segments[3].text, "[[two]]");
-
-        assert!(!segments[4].is_link);
-        assert_eq!(segments[4].text, " C");
-    }
-
-    #[test]
-    fn link_at_offset_finds_link() {
-        let content = "before [[link]] after";
-        let link_text = "[[link]]";
-        let link_start = content.find(link_text).unwrap();
-        let link_end = link_start + link_text.len();
-        let link_target = internal_uri("block:abc-123");
-        let marks = vec![mark_link(link_start, link_end, link_target.clone())];
-        let segments = build_content_segments(content, &marks);
-
-        let found = link_at_offset(&segments, link_start);
-        assert!(found.is_some());
-        assert_eq!(*found.unwrap(), link_target);
-    }
-
-    #[test]
-    fn link_at_offset_outside_link_returns_none() {
-        let content = "before [[link]] after";
-        let link_text = "[[link]]";
-        let link_start = content.find(link_text).unwrap();
-        let link_end = link_start + link_text.len();
-        let link_target = internal_uri("block:abc-123");
-        let marks = vec![mark_link(link_start, link_end, link_target)];
-        let segments = build_content_segments(content, &marks);
-
-        assert!(link_at_offset(&segments, 0).is_none());
-        assert!(link_at_offset(&segments, link_end).is_none());
-    }
-
-    /// The routing table, one row per link kind. `External` going anywhere near
-    /// `Navigate` is the bug that blanked the main panel (BugFunnel 2026-08-08,
-    /// task #17): a URL is not an entity id.
-    #[test]
-    fn link_click_action_routes_each_kind_to_its_verb() {
-        let classifier = holon_api::link_parser::LinkTargetClassifier::default();
-
-        assert_eq!(
-            link_click_action(
-                Some(&EntityRef::External {
-                    url: "https://example.com".into()
-                }),
-                &classifier
-            ),
-            LinkClickAction::OpenUrl("https://example.com".into()),
-            "an external URL must go to the platform opener, never to navigation"
-        );
-        assert_eq!(
-            link_click_action(
-                Some(&EntityRef::Scheme {
-                    raw: "block:abc-123".into()
-                }),
-                &classifier
-            ),
-            LinkClickAction::Navigate("block:abc-123".into())
-        );
-        assert_eq!(
-            link_click_action(
-                Some(&EntityRef::Scheme {
-                    raw: "cc-session:0f3a".into()
-                }),
-                &classifier
-            ),
-            LinkClickAction::SeedCaret,
-            "an unregistered scheme must not navigate (and must not mint a page)"
-        );
-        assert_eq!(
-            link_click_action(
-                Some(&EntityRef::Scheme {
-                    raw: "tag:rust".into()
-                }),
-                &classifier
-            ),
-            LinkClickAction::SeedCaret,
-            "`tag` is a REGISTERED scheme with no main-panel view — navigating to it would blank \
-             the panel, so it must not navigate either"
-        );
-        assert_eq!(
-            link_click_action(
-                Some(&EntityRef::Name {
-                    name: "Beta Page".into()
-                }),
-                &classifier
-            ),
-            LinkClickAction::FollowDangling("Beta Page".into())
-        );
-        assert_eq!(
-            link_click_action(None, &classifier),
-            LinkClickAction::SeedCaret
-        );
-    }
-
-    /// `mailto:` is an external address too, and its scheme shape is exactly
-    /// what would otherwise tempt the entity-scheme branch.
-    #[test]
-    fn link_click_action_opens_mailto_rather_than_navigating() {
-        let classifier = holon_api::link_parser::LinkTargetClassifier::default();
-        assert_eq!(
-            link_click_action(
-                Some(&EntityRef::External {
-                    url: "mailto:a@b.c".into()
-                }),
-                &classifier
-            ),
-            LinkClickAction::OpenUrl("mailto:a@b.c".into())
-        );
-    }
-
-    #[test]
-    fn build_content_segments_handles_link_at_start() {
-        let content = "[[link]] after";
-        let marks = vec![mark_link(
-            0,
-            "[[link]]".len(),
-            internal_uri("block:abc-123"),
-        )];
-        let segments = build_content_segments(content, &marks);
-
-        assert_eq!(segments.len(), 2);
-        assert!(segments[0].is_link);
-        assert_eq!(segments[0].text, "[[link]]");
-        assert!(!segments[1].is_link);
-        assert_eq!(segments[1].text, " after");
-    }
-
-    #[test]
-    fn build_content_segments_handles_link_at_end() {
-        let content = "before [[link]]";
-        let link_start = content.find("[[link]]").unwrap();
-        let link_end = content.len();
-        let marks = vec![mark_link(
-            link_start,
-            link_end,
-            internal_uri("block:abc-123"),
-        )];
-        let segments = build_content_segments(content, &marks);
-
-        assert_eq!(segments.len(), 2);
-        assert!(!segments[0].is_link);
-        assert_eq!(segments[0].text, "before ");
-        assert!(segments[1].is_link);
-        assert_eq!(segments[1].text, "[[link]]");
-    }
-
-    #[test]
-    fn build_content_segments_multibyte_content_splits_correctly() {
-        // "\u{00FC}" = 'ü' = 2 bytes (0xC3 0xBC).
-        // "a" (byte 0) + "b" (byte 1) + "ü" (bytes 2-3) + "c" (byte 4)
-        // = 4 scalar offsets (0..4), 5 bytes total.
-        let content = "ab\u{00FC}c";
-        let marks = vec![mark_link(2, 3, internal_uri("block:abc-123"))];
-        let segments = build_content_segments(content, &marks);
-
-        assert_eq!(segments.len(), 3);
-        assert!(!segments[0].is_link);
-        assert_eq!(segments[0].text, "ab");
-        assert_eq!(segments[0].byte_range, 0..2);
-        assert!(segments[1].is_link);
-        assert_eq!(segments[1].text, "\u{00FC}");
-        assert_eq!(segments[1].byte_range, 2..4);
-        assert!(!segments[2].is_link);
-        assert_eq!(segments[2].text, "c");
-    }
-
-    // --- dogfood 2026-07-22 bug 1 (marks-on-blur) + F3 (inline-link stacking) ---
 
     fn mark(start: usize, end: usize, m: InlineMark) -> MarkSpan {
         MarkSpan::new(start, end, m)
     }
 
-    /// Bug 1: a block whose ONLY marks are non-link (bold/underline) MUST
-    /// render styled. The old gate keyed on a Link mark, so this returned
-    /// false and the block fell to plain `static_inner` — the exact escape.
+    /// A mark reaching past its own content must be clamped, not fatal — the
+    /// alternative is a block that aborts every paint, i.e. a permanently
+    /// un-openable page.
     #[test]
-    fn bold_only_marks_want_styled_render() {
-        let marks = vec![mark(0, 4, InlineMark::Bold)];
-        assert!(
-            wants_styled_render(true, Some(&marks)),
-            "non-link marks must route through the styled renderer"
-        );
+    fn clamp_brings_an_overlong_span_inside_the_content() {
+        let out = clamp_marks_to(4, &[mark(1, 99, InlineMark::Bold)]);
+        assert_eq!((out[0].start, out[0].end), (1, 4));
     }
 
+    /// The inversion half. `MarkSpan::new` asserts `start <= end`, so if the
+    /// clamp ever loses its `.max(start)` this test aborts rather than fails —
+    /// which is exactly the production failure it guards.
     #[test]
-    fn underline_only_marks_want_styled_render() {
-        let marks = vec![mark(0, 4, InlineMark::Underline)];
-        assert!(wants_styled_render(true, Some(&marks)));
-    }
+    fn clamp_repairs_a_persisted_inverted_span() {
+        // Round-tripped rather than hand-written so the fixture tracks the
+        // real wire format, and so the test itself proves the constructor's
+        // `start <= end` assert is bypassable by deserialization.
+        let mut wire = serde_json::to_value(mark(2, 5, InlineMark::Bold)).expect("serialize");
+        wire["start"] = 5.into();
+        wire["end"] = 2.into();
+        let inverted: MarkSpan = serde_json::from_value(wire).expect("inverted span deserializes");
+        assert!(inverted.start > inverted.end, "fixture must be inverted");
 
-    #[test]
-    fn link_marks_still_want_styled_render() {
-        let marks = vec![mark_link(0, 4, internal_uri("block:x"))];
-        assert!(wants_styled_render(true, Some(&marks)));
-    }
-
-    #[test]
-    fn no_marks_stays_plain() {
-        assert!(!wants_styled_render(true, None));
-        assert!(!wants_styled_render(true, Some(&[])));
-    }
-
-    #[test]
-    fn empty_content_never_styled_even_with_marks() {
-        let marks = vec![mark(0, 4, InlineMark::Bold)];
-        assert!(!wants_styled_render(false, Some(&marks)));
+        let out = clamp_marks_to(10, &[inverted]);
+        assert!(out[0].start <= out[0].end);
+        assert_eq!((out[0].start, out[0].end), (5, 5));
     }
 
     fn rich_style() -> crate::render::rich_text_runs::RichTextStyle {
@@ -821,62 +429,5 @@ mod tests {
         // Runs cover every byte (single flowing text, not dropped spans).
         let total: usize = runs.iter().map(|r| r.len).sum();
         assert_eq!(total, content.len());
-    }
-
-    /// F3: an inline link mid-sentence must partition into ordered segments
-    /// that tile the whole content contiguously (no gaps, no overlap). This
-    /// is the data a single wrapping `StyledText`/`InteractiveText`
-    /// consumes, replacing the old per-segment `flex_row` children that
-    /// stacked onto separate lines.
-    #[test]
-    fn inline_link_partition_tiles_content_contiguously() {
-        let content = "See the Target Page reference inline in this sentence";
-        let start = content.find("Target Page").unwrap();
-        let end = start + "Target Page".len();
-        let marks = vec![mark_link(start, end, internal_uri("block:target-page-doc"))];
-        let segments = build_content_segments(content, &marks);
-
-        // Contiguous cover 0..len, in order, no gaps/overlap.
-        assert_eq!(segments.first().unwrap().byte_range.start, 0);
-        assert_eq!(segments.last().unwrap().byte_range.end, content.len());
-        for w in segments.windows(2) {
-            assert_eq!(
-                w[0].byte_range.end, w[1].byte_range.start,
-                "segments must tile"
-            );
-        }
-        // Exactly one link segment, carrying its nav target (interactivity kept).
-        let links: Vec<_> = segments.iter().filter(|s| s.is_link).collect();
-        assert_eq!(links.len(), 1);
-        assert!(
-            links[0].link_target.is_some(),
-            "link segment keeps its target"
-        );
-        assert_eq!(links[0].text, "Target Page");
-    }
-
-    /// Link-interactivity data: the clickable ranges handed to
-    /// `InteractiveText` line up 1:1 with the segment partition, and each
-    /// link range maps to its target by index (the `on_click(ix)` lookup).
-    /// A click on a non-link range maps to `None` (focus the block).
-    #[test]
-    fn clickable_ranges_align_with_targets_by_index() {
-        let content = "a [[one]] b [[two]] c";
-        let one_s = content.find("[[one]]").unwrap();
-        let two_s = content.find("[[two]]").unwrap();
-        let marks = vec![
-            mark_link(one_s, one_s + "[[one]]".len(), internal_uri("block:one")),
-            mark_link(two_s, two_s + "[[two]]".len(), internal_uri("block:two")),
-        ];
-        let segments = build_content_segments(content, &marks);
-        let ranges: Vec<_> = segments.iter().map(|s| s.byte_range.clone()).collect();
-        let targets: Vec<_> = segments.iter().map(|s| s.link_target.clone()).collect();
-
-        assert_eq!(ranges.len(), targets.len());
-        // Indices of link segments carry Internal targets; text segments are None.
-        for (seg, tgt) in segments.iter().zip(&targets) {
-            assert_eq!(seg.is_link, tgt.is_some());
-        }
-        assert_eq!(targets.iter().filter(|t| t.is_some()).count(), 2);
     }
 }

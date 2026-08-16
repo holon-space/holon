@@ -882,15 +882,7 @@ impl ReactiveViewModel {
         &self,
         modifiers: holon_api::ClickModifiers,
     ) -> Option<crate::operations::OperationIntent> {
-        let op = self
-            .operations
-            .iter()
-            .find(|ow| ow.descriptor.click_modifiers() == Some(modifiers))?;
-        Some(crate::operations::OperationIntent::new(
-            op.descriptor.entity_name.clone(),
-            op.descriptor.name.clone(),
-            op.descriptor.bound_params.clone(),
-        ))
+        crate::operations::click_intent_for(&self.operations, modifiers)
     }
 
     /// Convenience: the intent for a primary (no-modifier) click.
