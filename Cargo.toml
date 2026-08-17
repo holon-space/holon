@@ -29,6 +29,7 @@ members = [
   "crates/holon-petri",
   "crates/holon-profiles",
   "crates/holon-loro",
+  "crates/holon-secrets",
   "crates/holon-sharing",
   "crates/holon-architecture-tests",
   "frontends/tui",
@@ -231,6 +232,7 @@ holon-profiles = { path = "crates/holon-profiles" }
 # native builds are unchanged; the wasm worker (holon default-features = false)
 # gets a loro stack with no iroh. holon is the only holon-loro consumer.
 holon-loro = { path = "crates/holon-loro", default-features = false }
+holon-secrets = { path = "crates/holon-secrets" }
 holon-sharing = { path = "crates/holon-sharing" }
 holon-turso = { path = "crates/holon-turso" }
 holon-frontend = { path = "crates/holon-frontend" }

@@ -11,7 +11,7 @@
 //! `SigningAuthority`). If it leaks, an attacker can mint fleet membership; if
 //! it is lost, the owner can no longer enroll devices. It therefore:
 //!
-//! - lives in the OS keychain, not a plaintext file ([`keychain`]);
+//! - lives in the OS keychain, not a plaintext file ([`holon_secrets`]);
 //! - has a one-time [`recovery::RecoveryCode`] so a lost founding device is
 //!   recoverable;
 //! - is generated **lazily** — on the first share/enrollment, never at first
@@ -23,7 +23,6 @@
 //! [`OwnerIdentityKey`] has a redacted `Debug`; its seed never leaves this
 //! module except into the keychain. Signatures and public keys are safe to log.
 
-pub mod keychain;
 pub mod recovery;
 
 use anyhow::Context;
@@ -31,11 +30,14 @@ use anyhow::Result;
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::VerifyingKey;
+use holon_secrets::KeychainStore;
 use serde::Deserialize;
 use serde::Serialize;
 
-use self::keychain::KeychainStore;
 use self::recovery::RecoveryCode;
+
+/// The keychain service every owner-identity secret is filed under.
+pub const OWNER_KEYCHAIN_SERVICE: &str = "space.holon.owner-identity";
 
 /// The keychain account the founding device files its owner seed under.
 pub const FOUNDING_DEVICE_ACCOUNT: &str = "founding-device";
@@ -199,7 +201,7 @@ impl OwnerCustody {
     /// Custody over the founding-device account with the platform keychain.
     pub fn founding_device() -> Self {
         Self {
-            keychain: keychain::platform_keychain(),
+            keychain: holon_secrets::platform_keychain(OWNER_KEYCHAIN_SERVICE),
             account: FOUNDING_DEVICE_ACCOUNT.to_string(),
         }
     }
@@ -280,7 +282,8 @@ impl OwnerCustody {
 
 #[cfg(test)]
 mod tests {
-    use super::keychain::InMemoryKeychainStore;
+    use holon_secrets::InMemoryKeychainStore;
+
     use super::*;
 
     fn custody() -> OwnerCustody {

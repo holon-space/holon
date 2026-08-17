@@ -25,11 +25,12 @@
 //! - **Credential files must be private.** A refresh-token (or client-secret)
 //!   file that is group/world-accessible is *refused loudly* at startup — a
 //!   readable secret is a compromised secret.
-//! - **Fail loud, never fake.** A missing env var / absent credential file
-//!   surfaces as the typed [`UnresolvedVar`] ("not configured yet" → the
-//!   integration is disclosed-skipped), while a *misconfigured* credential (bad
-//!   perms, unreadable, empty, non-JSON token response, refresh failure) is a
-//!   hard error with an actionable message. Nothing silently degrades.
+//! - **Fail loud, never fake.** A missing env var / absent credential file /
+//!   absent keychain entry surfaces as the typed [`UnresolvedVar`] ("not
+//!   configured yet" → the integration is disclosed-skipped), while a
+//!   *misconfigured* credential (bad perms, unreadable, empty, unusable
+//!   keychain, non-JSON token response, refresh failure) is a hard error with
+//!   an actionable message. Nothing silently degrades.
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -49,10 +50,11 @@ use crate::integration_config::VarLookup;
 /// `transport.rest.auth.oauth2` in a sidecar.
 ///
 /// Secrets are never inlined: `client_id`/`client_secret` are referenced by env
-/// name (`*_env`) or by file path (`*_file`), and the long-lived refresh token
-/// lives in `refresh_token_file` (which the user's bootstrap helper writes with
-/// mode 0600). `scopes` is informational only (the refresh grant does not send
-/// scopes; they document what the refresh token was consented for).
+/// name (`*_env`), file path (`*_file`) or OS-keychain entry (`*_keychain`),
+/// and the long-lived refresh token lives in `refresh_token_file` (which the
+/// user's bootstrap helper writes with mode 0600). `scopes` is informational
+/// only (the refresh grant does not send scopes; they document what the refresh
+/// token was consented for).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RestOAuth2Config {
@@ -60,19 +62,26 @@ pub struct RestOAuth2Config {
     /// `https://oauth2.googleapis.com/token`). POSTed to for the refresh grant.
     pub token_url: String,
     /// Env var holding the OAuth client id. Exactly one of `client_id_env` /
-    /// `client_id_file` must be set.
+    /// `client_id_file` / `client_id_keychain` must be set.
     #[serde(default)]
     pub client_id_env: Option<String>,
     /// File holding the OAuth client id (contents trimmed).
     #[serde(default)]
     pub client_id_file: Option<String>,
+    /// OS-keychain entry holding the OAuth client id.
+    #[serde(default)]
+    pub client_id_keychain: Option<KeychainRef>,
     /// Env var holding the OAuth client secret. Exactly one of
-    /// `client_secret_env` / `client_secret_file` must be set.
+    /// `client_secret_env` / `client_secret_file` / `client_secret_keychain`
+    /// must be set.
     #[serde(default)]
     pub client_secret_env: Option<String>,
     /// File holding the OAuth client secret. Enforced to be mode 0600.
     #[serde(default)]
     pub client_secret_file: Option<String>,
+    /// OS-keychain entry holding the OAuth client secret.
+    #[serde(default)]
+    pub client_secret_keychain: Option<KeychainRef>,
     /// Path to the long-lived refresh token. Written by the user's one-time
     /// bootstrap helper (never by Holon), enforced to be mode 0600. A leading
     /// `~/` is expanded to the user's home directory.
@@ -81,6 +90,14 @@ pub struct RestOAuth2Config {
     /// on the refresh grant; documents intent and aids the setup docs.
     #[serde(default)]
     pub scopes: Vec<String>,
+}
+
+/// Where a credential sits in the OS keychain.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeychainRef {
+    pub service: String,
+    pub account: String,
 }
 
 /// The parsed subset of an OAuth2 token-endpoint response we rely on.
@@ -143,27 +160,35 @@ impl OAuth2TokenProvider {
     /// first request.
     ///
     /// Returns [`UnresolvedVar`] (a disclosed skip) when the integration is
-    /// simply *not configured yet* (an env ref is unset, or the refresh-token
-    /// file does not exist). Every other problem — an ambiguous/absent
-    /// env-vs-file choice, a group/world-readable credential file, an
-    /// unreadable or empty file — is a hard error with an actionable
-    /// message.
+    /// simply *not configured yet* (an env ref is unset, a keychain entry is
+    /// absent, or the refresh-token file does not exist). Every other problem —
+    /// an ambiguous/absent source choice, a group/world-readable credential
+    /// file, an unusable keychain, an unreadable or empty credential — is a
+    /// hard error with an actionable message.
     pub fn from_config(cfg: &RestOAuth2Config, lookup: &VarLookup<'_>) -> anyhow::Result<Self> {
         if cfg.token_url.trim().is_empty() {
             anyhow::bail!("oauth2.token_url must not be empty");
         }
         let client_id = resolve_secret(
             "client_id",
-            cfg.client_id_env.as_deref(),
-            cfg.client_id_file.as_deref(),
+            SecretSources {
+                env: cfg.client_id_env.as_deref(),
+                file: cfg.client_id_file.as_deref(),
+                keychain: cfg.client_id_keychain.as_ref(),
+            },
             lookup,
+            &holon_secrets::platform_keychain,
             /* enforce_private_file */ false,
         )?;
         let client_secret = resolve_secret(
             "client_secret",
-            cfg.client_secret_env.as_deref(),
-            cfg.client_secret_file.as_deref(),
+            SecretSources {
+                env: cfg.client_secret_env.as_deref(),
+                file: cfg.client_secret_file.as_deref(),
+                keychain: cfg.client_secret_keychain.as_ref(),
+            },
             lookup,
+            &holon_secrets::platform_keychain,
             /* enforce_private_file */ true,
         )?;
         let refresh_token = read_refresh_token(&cfg.refresh_token_file)?;
@@ -309,7 +334,17 @@ pub fn build_provider(
 // Credential resolution helpers
 // ---------------------------------------------------------------------------
 
-/// Resolve a credential from exactly one of an env reference or a file path.
+/// The three places one credential may be declared. Exactly one may be set.
+struct SecretSources<'a> {
+    env: Option<&'a str>,
+    file: Option<&'a str>,
+    keychain: Option<&'a KeychainRef>,
+}
+
+/// Opens the OS keychain for a given service.
+type KeychainOpener<'a> = dyn Fn(&str) -> Box<dyn holon_secrets::KeychainStore> + 'a;
+
+/// Resolve a credential from exactly one of its declared sources.
 ///
 /// - env set, value present   → value
 /// - env set, value absent    → `UnresolvedVar` (disclosed skip: not
@@ -318,26 +353,72 @@ pub fn build_provider(
 ///   provisioned)
 /// - file set, present        → contents (trimmed); 0600-enforced when
 ///   `enforce_private_file`
-/// - neither / both set       → hard error (structural config mistake)
+/// - keychain set, no entry   → `UnresolvedVar` (disclosed skip: not
+///   provisioned)
+/// - keychain set, entry      → the secret (trimmed)
+/// - none / more than one set → hard error (structural config mistake)
 fn resolve_secret(
     field: &str,
-    env_name: Option<&str>,
-    file_path: Option<&str>,
+    sources: SecretSources<'_>,
     lookup: &VarLookup<'_>,
+    keychain: &KeychainOpener<'_>,
     enforce_private_file: bool,
 ) -> anyhow::Result<String> {
-    match (env_name, file_path) {
-        (Some(_), Some(_)) => {
-            anyhow::bail!("oauth2: set only one of `{field}_env` or `{field}_file`, not both")
-        }
-        (None, None) => anyhow::bail!("oauth2: one of `{field}_env` or `{field}_file` must be set"),
-        (Some(env), None) => lookup(env).ok_or_else(|| {
+    match (sources.env, sources.file, sources.keychain) {
+        (Some(env), None, None) => lookup(env).ok_or_else(|| {
             anyhow::Error::new(UnresolvedVar {
                 var: env.to_string(),
             })
         }),
-        (None, Some(path)) => read_credential_file(path, enforce_private_file),
+        (None, Some(path), None) => read_credential_file(path, enforce_private_file),
+        (None, None, Some(entry)) => read_keychain_entry(entry, keychain),
+        (None, None, None) => anyhow::bail!(
+            "oauth2: one of `{field}_env`, `{field}_file` or `{field}_keychain` must be set"
+        ),
+        _ => anyhow::bail!(
+            "oauth2: set only one of `{field}_env`, `{field}_file` or `{field}_keychain`"
+        ),
     }
+}
+
+/// Read a credential out of the OS keychain.
+///
+/// No entry → [`UnresolvedVar`] (a disclosed skip; the integration is simply
+/// not provisioned yet). An unusable keychain, or an entry holding non-UTF-8 or
+/// blank material, is a hard error.
+fn read_keychain_entry(
+    entry: &KeychainRef,
+    keychain: &KeychainOpener<'_>,
+) -> anyhow::Result<String> {
+    let store = keychain(&entry.service);
+    let Some(bytes) = store.load(&entry.account).map_err(|e| {
+        anyhow::anyhow!(
+            "oauth2: failed to read keychain entry {}/{}: {e}",
+            entry.service,
+            entry.account
+        )
+    })?
+    else {
+        return Err(anyhow::Error::new(UnresolvedVar {
+            var: format!("keychain entry {}/{}", entry.service, entry.account),
+        }));
+    };
+    let secret = String::from_utf8(bytes).map_err(|_| {
+        anyhow::anyhow!(
+            "oauth2: keychain entry {}/{} is not valid UTF-8",
+            entry.service,
+            entry.account
+        )
+    })?;
+    let trimmed = secret.trim().to_string();
+    if trimmed.is_empty() {
+        anyhow::bail!(
+            "oauth2: keychain entry {}/{} is empty",
+            entry.service,
+            entry.account
+        );
+    }
+    Ok(trimmed)
 }
 
 /// Read the long-lived refresh token from its file. Absent file → not
@@ -463,6 +544,8 @@ fn redact_token_error_body(body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use holon_secrets::KeychainStore;
+
     use super::*;
 
     #[test]
@@ -504,13 +587,28 @@ mod tests {
         assert!(!dbg.contains("my-refresh-token"), "{dbg}");
     }
 
+    fn no_sources<'a>() -> SecretSources<'a> {
+        SecretSources {
+            env: None,
+            file: None,
+            keychain: None,
+        }
+    }
+
+    fn no_keychain(_: &str) -> Box<dyn holon_secrets::KeychainStore> {
+        Box::new(holon_secrets::InMemoryKeychainStore::new())
+    }
+
     #[test]
     fn resolve_secret_missing_env_is_unresolved_var() {
         let err = resolve_secret(
             "client_id",
-            Some("HOLON_TEST_UNSET_OAUTH_CLIENT_ID"),
-            None,
+            SecretSources {
+                env: Some("HOLON_TEST_UNSET_OAUTH_CLIENT_ID"),
+                ..no_sources()
+            },
             &|_| None,
+            &no_keychain,
             false,
         )
         .unwrap_err();
@@ -521,16 +619,141 @@ mod tests {
     }
 
     #[test]
+    fn resolve_secret_reads_the_keychain_entry() {
+        let services = std::sync::Mutex::new(Vec::new());
+        let opener = |service: &str| -> Box<dyn holon_secrets::KeychainStore> {
+            services.lock().unwrap().push(service.to_string());
+            let store = holon_secrets::InMemoryKeychainStore::new();
+            store.store("gcal", b"kc-client-secret\n").unwrap();
+            Box::new(store)
+        };
+
+        let kc = KeychainRef {
+            service: "space.holon.test".into(),
+            account: "gcal".into(),
+        };
+        let secret = resolve_secret(
+            "client_secret",
+            SecretSources {
+                keychain: Some(&kc),
+                ..no_sources()
+            },
+            &|_| None,
+            &opener,
+            true,
+        )
+        .unwrap();
+        assert_eq!(secret, "kc-client-secret");
+        assert_eq!(services.into_inner().unwrap(), ["space.holon.test"]);
+    }
+
+    #[test]
+    fn resolve_secret_absent_keychain_entry_is_disclosed_skip() {
+        let kc = KeychainRef {
+            service: "space.holon.test".into(),
+            account: "never-provisioned".into(),
+        };
+        let err = resolve_secret(
+            "client_secret",
+            SecretSources {
+                keychain: Some(&kc),
+                ..no_sources()
+            },
+            &|_| None,
+            &no_keychain,
+            true,
+        )
+        .unwrap_err();
+        let uv = err
+            .downcast_ref::<UnresolvedVar>()
+            .expect("absent keychain entry must surface as UnresolvedVar (disclosed skip)");
+        assert!(uv.var.contains("never-provisioned"), "{}", uv.var);
+    }
+
+    #[test]
+    fn resolve_secret_keychain_backend_failure_is_a_hard_error() {
+        let kc = KeychainRef {
+            service: "space.holon.test".into(),
+            account: "gcal".into(),
+        };
+        let err = resolve_secret(
+            "client_secret",
+            SecretSources {
+                keychain: Some(&kc),
+                ..no_sources()
+            },
+            &|_| None,
+            &|_| -> Box<dyn holon_secrets::KeychainStore> {
+                Box::new(holon_secrets::UnavailableKeychainStore::new())
+            },
+            true,
+        )
+        .unwrap_err();
+        assert!(
+            err.downcast_ref::<UnresolvedVar>().is_none(),
+            "an unusable keychain must NOT be mistaken for an unprovisioned one"
+        );
+    }
+
+    #[test]
+    fn resolve_secret_keychain_plus_env_is_a_hard_error() {
+        let kc = KeychainRef {
+            service: "space.holon.test".into(),
+            account: "gcal".into(),
+        };
+        let err = resolve_secret(
+            "client_secret",
+            SecretSources {
+                env: Some("X"),
+                keychain: Some(&kc),
+                file: None,
+            },
+            &|_| Some("from-env".into()),
+            &no_keychain,
+            true,
+        )
+        .unwrap_err();
+        assert!(err.downcast_ref::<UnresolvedVar>().is_none());
+        assert!(err.to_string().contains("only one of"));
+    }
+
+    #[test]
+    fn keychain_is_a_recognized_secret_source_in_config() {
+        let cfg: RestOAuth2Config = serde_yaml::from_str(
+            "token_url: https://example.test/token\n\
+             client_id_env: HOLON_TEST_CLIENT_ID\n\
+             client_secret_keychain:\n  \
+             service: space.holon.test\n  \
+             account: gcal\n\
+             refresh_token_file: /nonexistent\n",
+        )
+        .expect("client_secret_keychain must be a recognized oauth2 secret source");
+        assert!(cfg.client_secret_env.is_none());
+        assert!(cfg.client_secret_file.is_none());
+    }
+
+    #[test]
     fn resolve_secret_both_sources_is_hard_error() {
-        let err =
-            resolve_secret("client_id", Some("X"), Some("/tmp/y"), &|_| None, false).unwrap_err();
+        let err = resolve_secret(
+            "client_id",
+            SecretSources {
+                env: Some("X"),
+                file: Some("/tmp/y"),
+                keychain: None,
+            },
+            &|_| None,
+            &no_keychain,
+            false,
+        )
+        .unwrap_err();
         assert!(err.downcast_ref::<UnresolvedVar>().is_none());
         assert!(err.to_string().contains("only one of"));
     }
 
     #[test]
     fn resolve_secret_neither_source_is_hard_error() {
-        let err = resolve_secret("client_id", None, None, &|_| None, false).unwrap_err();
+        let err =
+            resolve_secret("client_id", no_sources(), &|_| None, &no_keychain, false).unwrap_err();
         assert!(err.downcast_ref::<UnresolvedVar>().is_none());
         assert!(err.to_string().contains("must be set"));
     }
@@ -590,8 +813,17 @@ mod tests {
     #[test]
     fn client_secret_file_variant_enforces_0600() {
         let (_dir, path) = write_file(0o644, b"GOCSPX-secret");
-        let err = resolve_secret("client_secret", None, Some(&path), &|_| None, true)
-            .expect_err("world-readable client_secret file must be refused");
+        let err = resolve_secret(
+            "client_secret",
+            SecretSources {
+                file: Some(&path),
+                ..no_sources()
+            },
+            &|_| None,
+            &no_keychain,
+            true,
+        )
+        .expect_err("world-readable client_secret file must be refused");
         assert!(
             err.downcast_ref::<UnresolvedVar>().is_none(),
             "must be a hard error"
@@ -599,7 +831,17 @@ mod tests {
         assert!(err.to_string().contains("group/world-accessible"), "{err}");
 
         let (_dir, path) = write_file(0o600, b"GOCSPX-secret\n");
-        let got = resolve_secret("client_secret", None, Some(&path), &|_| None, true).unwrap();
+        let got = resolve_secret(
+            "client_secret",
+            SecretSources {
+                file: Some(&path),
+                ..no_sources()
+            },
+            &|_| None,
+            &no_keychain,
+            true,
+        )
+        .unwrap();
         assert_eq!(got, "GOCSPX-secret");
     }
 
@@ -610,8 +852,17 @@ mod tests {
     #[test]
     fn client_id_file_variant_does_not_enforce_0600() {
         let (_dir, path) = write_file(0o644, b"1234.apps.googleusercontent.com\n");
-        let got = resolve_secret("client_id", None, Some(&path), &|_| None, false)
-            .expect("client_id file need not be 0600");
+        let got = resolve_secret(
+            "client_id",
+            SecretSources {
+                file: Some(&path),
+                ..no_sources()
+            },
+            &|_| None,
+            &no_keychain,
+            false,
+        )
+        .expect("client_id file need not be 0600");
         assert_eq!(got, "1234.apps.googleusercontent.com");
     }
 

@@ -103,6 +103,8 @@ transport:
         # Alternative (env / app-settings): drop the *_file keys and use
         #   client_id_env: GCAL_CLIENT_ID
         #   client_secret_env: GCAL_CLIENT_SECRET
+        # Alternative (OS keychain — macOS, Windows, Linux Secret Service):
+        #   client_secret_keychain: { service: space.holon.gcal, account: client-secret }
         client_id_file: ~/.config/holon/gcal-client-id
         client_secret_file: ~/.config/holon/gcal-client-secret
         # Written by scripts/google-oauth-bootstrap.sh (mode 0600, never by Holon).

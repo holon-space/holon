@@ -33,6 +33,7 @@ holon-api.workspace = true
 holon-core.workspace = true
 holon-filesystem.workspace = true
 holon-macros.workspace = true
+holon-secrets.workspace = true
 iroh = { workspace = true, features = ["default"], optional = true }
 loro.workspace = true
 parking_lot.workspace = true
@@ -52,13 +53,6 @@ proptest.workspace = true
 proptest-state-machine.workspace = true
 serial_test.workspace = true
 tempfile.workspace = true
-
-# Owner-identity secret storage (ADR 0028 C1/D1): macOS Keychain Services.
-# Already resolved (=3.7.0) elsewhere in the graph, so no lock churn. Other
-# platforms fall back to the fail-loud `UnavailableKeychainStore` — no keychain
-# crate is pulled in for them.
-[target.'cfg(target_os = "macos")'.dependencies]
-security-framework = "3.7"
 
 # Disable iroh for Android - it pulls in OpenSSL which is complex to build for Android
 [target.'cfg(target_os = "android")'.dependencies]

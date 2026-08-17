@@ -28,6 +28,7 @@ chrono.workspace = true
 holon-api.workspace = true
 holon-core.workspace = true
 holon-profiles.workspace = true
+holon-secrets.workspace = true
 holon-turso.workspace = true
 holon-macros.workspace = true
 turso_core.workspace = true
