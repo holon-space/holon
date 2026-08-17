@@ -1,6 +1,6 @@
 //! E2E coverage of the `send_message` WRITE tool declared in the SHIPPED
-//! sidecar `docs/integrations/claude-history.yaml`, driven against the mock MCP
-//! server (`MOCK_MCP_SCENARIO=live_fleet_send`) — NEVER the real provider
+//! sidecar `assets/integrations/claude-history.yaml`, driven against the mock
+//! MCP server (`MOCK_MCP_SCENARIO=live_fleet_send`) — NEVER the real provider
 //! binary: a real dispatch would message a live human-owned agent session.
 //!
 //! Sending is irreversible and has no natural dedup key, so the declaration is
@@ -65,7 +65,7 @@ async fn connect_shipped_sidecar(db: &DbHandle) -> McpIntegration {
 async fn connect_scenario(db: &DbHandle, scenario: &str) -> McpIntegration {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../docs/integrations/claude-history.yaml"
+        "/../../assets/integrations/claude-history.yaml"
     );
     let yaml = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     let mut cfg: IntegrationFileConfig =

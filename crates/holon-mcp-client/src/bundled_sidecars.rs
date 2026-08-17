@@ -31,8 +31,8 @@ macro_rules! bundled {
     ($provider:literal) => {
         BundledSidecar {
             provider: $provider,
-            source_path: concat!("docs/integrations/", $provider, ".yaml"),
-            yaml: include_str!(concat!("../../../docs/integrations/", $provider, ".yaml")),
+            source_path: concat!("assets/integrations/", $provider, ".yaml"),
+            yaml: include_str!(concat!("../../../assets/integrations/", $provider, ".yaml")),
         }
     };
 }

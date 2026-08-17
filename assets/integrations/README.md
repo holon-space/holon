@@ -23,6 +23,15 @@ silently outrank the sidecar the engine was built against. Bump
 `SIDECAR_SCHEMA_VERSION` (and every file here) whenever a requirement lands that
 an older sidecar does not satisfy.
 
+**Three independent axes.** *Presence* — whether a build ships the sidecar at
+all — is settled here, at compile time. *Enablement* (the user turned it on) and
+*configuration* (credentials exist) are user state, stored per provider in
+`~/.config/holon/integrations/<provider>.state.toml` beside the sidecar and read
+through `holon_mcp_client::IntegrationConfigStore`, which hands consumers a
+signal rather than the file. The `.toml` extension keeps state out of the
+`*.yaml` sidecar scan. A state file records where credentials LIVE — an env var,
+a 0600 file, a keychain entry — never a secret value.
+
 > Scope note: connectors today are **read-into-the-graph** replicas plus
 > **explicitly-declared write tools** for MCP transports. General bidirectional
 > sync with **leases / lease-governed external effects** (ADR 0024 Phase 4

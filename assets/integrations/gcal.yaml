@@ -53,7 +53,7 @@ schema_version: 1
 #
 #  4. Activate the sidecar (Holon auto-scans this directory at startup — no
 #     registry entry needed):
-#       cp docs/integrations/gcal.yaml ~/.config/holon/integrations/gcal.yaml
+#       cp assets/integrations/gcal.yaml ~/.config/holon/integrations/gcal.yaml
 #
 #  5. Restart Holon. On boot the poll runner warms `gcal_calendar` and
 #     `gcal_event` (primary calendar, rolling now-1d .. now+14d window), feeding

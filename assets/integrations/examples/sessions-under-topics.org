@@ -1,7 +1,7 @@
 #+TITLE: Sessions under topics — example queries over the sidecar-declared views
 
 # Example consumers of the generic `views:` mechanism demonstrated in
-# docs/integrations/claude-history.yaml (cc_session_last_message +
+# assets/integrations/claude-history.yaml (cc_session_last_message +
 # cc_session_status). Drop these source blocks onto any vault page.
 #
 # NOTE: live queries are materialized by the engine too, so they must stay in

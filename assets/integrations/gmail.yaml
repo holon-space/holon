@@ -58,7 +58,7 @@ schema_version: 1
 #
 #  4. Activate the sidecar (Holon auto-scans this directory at startup — no
 #     registry entry needed):
-#       cp docs/integrations/gmail.yaml ~/.config/holon/integrations/gmail.yaml
+#       cp assets/integrations/gmail.yaml ~/.config/holon/integrations/gmail.yaml
 #
 #  5. Restart Holon. On boot the poll runner warms `gmail_label`, `gmail_thread`
 #     and `gmail_message`, feeding the `gmail_unread_by_thread` matview. Access

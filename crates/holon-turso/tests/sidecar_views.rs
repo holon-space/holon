@@ -9,7 +9,7 @@ use holon_turso::matview_manager::reconcile_named_view;
 use holon_turso::turso::DbHandle;
 use holon_turso::turso::TursoBackend;
 
-/// The exact SELECTs shipped in docs/integrations/claude-history.yaml
+/// The exact SELECTs shipped in assets/integrations/claude-history.yaml
 /// (`views:` entries `session_last_message` + `session_status`).
 /// Keep in sync with the YAML. Two chained views because Turso IVM rejects a
 /// CASE over aggregate expressions at CREATE; the CASE lives in the second,
@@ -134,7 +134,7 @@ async fn session_status_view_creates_and_tracks_writes() {
 // Google Calendar `gcal_upcoming` chained views
 // ---------------------------------------------------------------------------
 
-/// The exact chained SELECTs shipped in docs/integrations/gcal.yaml (`views:`
+/// The exact chained SELECTs shipped in assets/integrations/gcal.yaml (`views:`
 /// entries `upcoming_flagged` + `upcoming`). Keep in sync with the YAML. Two
 /// chained views because Turso IVM drops every row when strftime('now') sits in
 /// a WHERE — but strftime IN THE SELECT projection works. The column is

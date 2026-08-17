@@ -1,8 +1,8 @@
 //! E2E coverage of the `pending_question` entity and the `answer_question`
 //! WRITE tool declared in the SHIPPED sidecar
-//! `docs/integrations/claude-history.yaml`, driven against the mock MCP server
-//! (`MOCK_MCP_SCENARIO=live_fleet_answer`) — NEVER the real provider binary: a
-//! real dispatch would answer a live human-owned agent session.
+//! `assets/integrations/claude-history.yaml`, driven against the mock MCP
+//! server (`MOCK_MCP_SCENARIO=live_fleet_answer`) — NEVER the real provider
+//! binary: a real dispatch would answer a live human-owned agent session.
 //!
 //! Answering is irreversible and the provider exposes no idempotency
 //! parameter, so the declaration is `effect: once_only` under
@@ -66,7 +66,7 @@ async fn setup_db() -> DbHandle {
 async fn connect_shipped_sidecar(db: &DbHandle) -> McpIntegration {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../docs/integrations/claude-history.yaml"
+        "/../../assets/integrations/claude-history.yaml"
     );
     let yaml = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     let mut cfg: IntegrationFileConfig =

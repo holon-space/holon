@@ -3,8 +3,8 @@
 //! The shipped `cc_session` / `cc_agent` profiles nest a `live_query` inside
 //! `expand_toggle`'s `content:`, which only reaches the screen if `content` is
 //! deferred as a template and materialised through the lazy slot. This test
-//! reads the profile out of `docs/integrations/claude-history.yaml` rather than
-//! restating it, so a drifting sidecar cannot pass a stale hand-copy.
+//! reads the profile out of `assets/integrations/claude-history.yaml` rather
+//! than restating it, so a drifting sidecar cannot pass a stale hand-copy.
 
 use std::sync::Arc;
 
@@ -122,7 +122,7 @@ impl BuilderServices for ChatViewServices {
 fn shipped_profile(entity: &str) -> String {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../docs/integrations/claude-history.yaml"
+        "/../../assets/integrations/claude-history.yaml"
     );
     let raw = std::fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("read claude-history.yaml at {path}: {e}"));

@@ -5,7 +5,7 @@
 //!
 //! Usage:
 //!   TODOIST_API_KEY=... cargo run -p holon-mcp-client --example
-//! todoist_sync_probe -- \     docs/integrations/todoist.yaml
+//! todoist_sync_probe -- \     assets/integrations/todoist.yaml
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -49,7 +49,7 @@ impl SyncTokenStore for MemTokenStore {
 async fn main() -> Result<()> {
     let yaml_path: PathBuf = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "docs/integrations/todoist.yaml".to_string())
+        .unwrap_or_else(|| "assets/integrations/todoist.yaml".to_string())
         .into();
 
     let yaml = std::fs::read_to_string(&yaml_path)

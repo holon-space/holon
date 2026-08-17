@@ -1,5 +1,5 @@
 //! Row identity of the SHIPPED `claude-history` sidecar
-//! (`docs/integrations/claude-history.yaml`), on two levels:
+//! (`assets/integrations/claude-history.yaml`), on two levels:
 //!
 //!   1. Declaration — what each entity's schema says its identity is, and what
 //!      `McpForeignDataWrapper` resolves that to. A row identity is the switch
@@ -47,7 +47,7 @@ use turso_core::foreign::ForeignDataWrapper;
 
 const SIDECAR_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../docs/integrations/claude-history.yaml"
+    "/../../assets/integrations/claude-history.yaml"
 );
 const FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),

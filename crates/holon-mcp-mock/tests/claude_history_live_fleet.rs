@@ -1,6 +1,7 @@
 //! E2E coverage of the `live_session` entity declared in the SHIPPED sidecar
-//! `docs/integrations/claude-history.yaml`, driven against the mock MCP server
-//! (`MOCK_MCP_SCENARIO=live_fleet`) rather than the real provider binary.
+//! `assets/integrations/claude-history.yaml`, driven against the mock MCP
+//! server (`MOCK_MCP_SCENARIO=live_fleet`) rather than the real provider
+//! binary.
 //!
 //! The sidecar is loaded from the repo, so these tests fail if the declaration
 //! is missing or its columns drift away from the provider's `LiveSession`.
@@ -46,7 +47,7 @@ impl SyncTokenStore for InMemorySyncTokenStore {
 async fn connect_shipped_sidecar(db: &DbHandle) -> McpIntegration {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../docs/integrations/claude-history.yaml"
+        "/../../assets/integrations/claude-history.yaml"
     );
     let yaml = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     let mut cfg: IntegrationFileConfig =

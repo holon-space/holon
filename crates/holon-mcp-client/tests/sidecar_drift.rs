@@ -101,7 +101,7 @@ fn superseding_a_stale_installed_sidecar_is_disclosed_with_both_paths() {
     assert_eq!(notice.installed_path, installed);
     assert_eq!(
         notice.bundled_source,
-        "docs/integrations/claude-history.yaml"
+        "assets/integrations/claude-history.yaml"
     );
     assert!(
         notice.incompatibility.contains("schema_version"),

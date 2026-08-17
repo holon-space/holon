@@ -1285,16 +1285,16 @@ filter_mapping:
 // claude-history multi-project enumeration (Increment A2)
 // ---------------------------------------------------------------------------
 
-/// The shipped `docs/integrations/claude-history.yaml` parses and declares the
-/// multi-project shape: a sync-only `project` root, session/task fanning out
-/// over it via `enumerate_from`, an enabled `message` fan-out, and NO entity
-/// declaring both a `sync` strategy and a write-through vtable (the
+/// The shipped `assets/integrations/claude-history.yaml` parses and declares
+/// the multi-project shape: a sync-only `project` root, session/task fanning
+/// out over it via `enumerate_from`, an enabled `message` fan-out, and NO
+/// entity declaring both a `sync` strategy and a write-through vtable (the
 /// finish_integration clash invariant, locked in config).
 #[test]
 fn claude_history_yaml_multi_project_shape() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../docs/integrations/claude-history.yaml"
+        "/../../assets/integrations/claude-history.yaml"
     );
     let body = std::fs::read_to_string(path).expect("read claude-history.yaml");
     let cfg: IntegrationFileConfig =

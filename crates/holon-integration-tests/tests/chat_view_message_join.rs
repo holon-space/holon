@@ -53,7 +53,7 @@ fn shipped_chat_sql(entity: &str) -> String {
 fn sidecar() -> serde_yaml::Value {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../docs/integrations/claude-history.yaml"
+        "/../../assets/integrations/claude-history.yaml"
     );
     let raw = std::fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("read claude-history.yaml at {path}: {e}"));

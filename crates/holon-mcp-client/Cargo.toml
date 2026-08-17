@@ -13,7 +13,9 @@ ignored = ["workspace-hack"]
 anyhow.workspace = true
 async-trait.workspace = true
 futures.workspace = true
+futures-signals.workspace = true
 serde.workspace = true
+toml.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 rhai.workspace = true
@@ -38,3 +40,4 @@ workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util"] }
 tempfile.workspace = true
+proptest.workspace = true

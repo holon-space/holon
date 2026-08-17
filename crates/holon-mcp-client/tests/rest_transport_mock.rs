@@ -470,7 +470,7 @@ fn shipped_jsonplaceholder_sidecar_parses_as_rest() {
     // The committed example file is a valid rest-transport sidecar.
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../docs/integrations/jsonplaceholder.yaml"
+        "/../../assets/integrations/jsonplaceholder.yaml"
     );
     let yaml = std::fs::read_to_string(path).expect("read jsonplaceholder.yaml");
     let cfg: IntegrationFileConfig = serde_yaml::from_str(&yaml).expect("example parses");

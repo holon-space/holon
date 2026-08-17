@@ -2116,7 +2116,7 @@ mod tests {
             reason: ShareDegradedReason::IntegrationSidecarSuperseded {
                 integration: "claude-history".into(),
                 installed_path: "/home/u/.config/holon/integrations/claude-history.yaml".into(),
-                bundled_source: "docs/integrations/claude-history.yaml".into(),
+                bundled_source: "assets/integrations/claude-history.yaml".into(),
                 incompatibility: "it declares schema_version none but this build's sidecar format \
                                   is schema_version 1"
                     .into(),
@@ -2135,7 +2135,7 @@ mod tests {
             "incompatibility: {detail}"
         );
         assert!(
-            detail.contains("docs/integrations/claude-history.yaml"),
+            detail.contains("assets/integrations/claude-history.yaml"),
             "bundled source: {detail}"
         );
         assert!(s.quarantines.is_empty());

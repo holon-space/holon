@@ -288,6 +288,6 @@ See also [wiki/overview.md](../wiki/overview.md) for the navigational layer and 
 | `crates/holon-mcp-client/src/mcp_sync_engine.rs` | McpSyncEngine: bulk + incremental cache sync, resource-notification re-sync |
 | `crates/holon-mcp-client/src/integration_config.rs` | IntegrationFileConfig: top-level YAML schema, ${VAR} expansion |
 | `crates/holon-app/src/mcp_integrations.rs` | McpIntegrationsModule + McpIntegrationRegistry + RegistryOperationProxy |
-| `docs/integrations/todoist.yaml` | Todoist integration config (transport, auth, entities, tools, sync, undo) |
+| `assets/integrations/todoist.yaml` | Todoist integration config (transport, auth, entities, tools, sync, undo) |
 | `frontends/gpui/src/` | GPUI frontend (primary) |
 | `frontends/mcp/src/tools.rs` | MCP tool implementations (unified `execute_query` for PRQL/GQL/SQL) |

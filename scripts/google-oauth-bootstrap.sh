@@ -13,7 +13,7 @@
 #     chmod 600.
 #   * The client secret is read from the environment, never echoed.
 #
-# PREREQUISITES (see the docs/integrations/<provider>.yaml header for the full
+# PREREQUISITES (see the assets/integrations/<provider>.yaml header for the full
 # walkthrough):
 #   * A Google Cloud OAuth client of type "Desktop app", with the API the scope
 #     belongs to enabled on the project.
@@ -175,4 +175,4 @@ unset TOKEN_RESPONSE CODE HOLON_OAUTH_CLIENT_SECRET
 echo "Success. Refresh token written to: $TOKEN_FILE" >&2
 echo "Permissions:" >&2
 ls -l "$TOKEN_FILE" >&2
-echo "Now: cp docs/integrations/${PROVIDER}.yaml ~/.config/holon/integrations/ and restart Holon." >&2
+echo "Now: cp assets/integrations/${PROVIDER}.yaml ~/.config/holon/integrations/ and restart Holon." >&2

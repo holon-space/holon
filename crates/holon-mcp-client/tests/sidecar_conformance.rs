@@ -1,10 +1,10 @@
 //! Generic conformance suite for EVERY shipped integration sidecar.
 //!
-//! These tests are provider-agnostic: they enumerate `docs/integrations/*.yaml`
-//! and assert the invariants that must hold for ANY sidecar, so a NEW sidecar
-//! (drop a `*.yaml` in that directory) is automatically validated with no new
-//! test code. Each assertion names the offending file + entity/view, so a
-//! failure points straight at the culprit.
+//! These tests are provider-agnostic: they enumerate
+//! `assets/integrations/*.yaml` and assert the invariants that must hold for
+//! ANY sidecar, so a NEW sidecar (drop a `*.yaml` in that directory) is
+//! automatically validated with no new test code. Each assertion names the
+//! offending file + entity/view, so a failure points straight at the culprit.
 //!
 //! Invariants checked:
 //!   1. parses strictly as `IntegrationFileConfig` (`deny_unknown_fields`
@@ -35,7 +35,7 @@ use holon_turso::turso::TursoBackend;
 fn sidecar_paths() -> Vec<PathBuf> {
     let dir = PathBuf::from(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../docs/integrations"
+        "/../../assets/integrations"
     ));
     let mut out: Vec<PathBuf> = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
