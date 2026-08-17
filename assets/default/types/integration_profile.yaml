@@ -1,0 +1,13 @@
+# The `integration` entity's row: what one integration looks like wherever a
+# layout lists them. Placement is the layout's business; this is the row.
+#
+# `state_toggle` binds `field: "enabled"`, and its click reaches
+# `IntegrationsOperationProvider` because `render_entity()` resolved this
+# profile and attached the entity's operations. `current` is the state WORD the
+# query projects, not the stored integer — the widget's vocabulary is its
+# `states` list.
+entity_name: integration
+
+variants:
+  - name: default
+    render: 'row(#{gap: 8, align: "center"}, text(col("provider_name")), text(col("config_status"), #{muted: true}), text(col("status"), #{muted: true}), state_toggle(#{field: "enabled", current: col("enabled"), states: "off,on", appearance: "switch"}))'

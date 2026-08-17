@@ -861,6 +861,19 @@ impl ReactiveViewModel {
     }
 
     /// Get a string property (owned — reads through Mutable lock).
+    /// The parsed `appearance` of a `state_toggle` leaf.
+    ///
+    /// The builder already refused an unknown word, so an unparseable value
+    /// here is this crate's own bug rather than a layout author's — it panics
+    /// with the same message instead of quietly painting the task glyph.
+    pub fn state_toggle_appearance(&self) -> crate::view_model::StateToggleAppearance {
+        match self.prop_str("appearance") {
+            Some(raw) => crate::view_model::StateToggleAppearance::parse(&raw)
+                .unwrap_or_else(|e| panic!("{e}")),
+            None => crate::view_model::StateToggleAppearance::default(),
+        }
+    }
+
     pub fn prop_str(&self, key: &str) -> Option<String> {
         self.props
             .lock_ref()
@@ -1126,6 +1139,7 @@ impl ReactiveViewModel {
                 current: self.prop_str("current").unwrap_or_default(),
                 label: self.prop_str("label").unwrap_or_default(),
                 states: self.prop_str("states").unwrap_or_default(),
+                appearance: self.state_toggle_appearance(),
             },
             "expand_toggle" => {
                 let target_id = self.prop_str("target_id").unwrap_or_default();

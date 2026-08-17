@@ -1,14 +1,17 @@
-//! The Settings → Integrations list: one row per bundled integration, with a
-//! switch and its configuration status.
+//! What is LEFT of the Settings → Integrations section after D5.b.
 //!
-//! End users never run the enabling script, so this is the only surface on
-//! which the enablement axis is reachable. The rows come from
-//! [`IntegrationsSettingsVm`] rather than from anything GPUI owns, so the list
-//! and its writes are the same on any frontend that grows one.
+//! The list itself — one row per bundled integration, with its statuses and its
+//! enablement switch — is layout data now
+//! (`holon_app::integrations_section`), rendered through the same pipeline as
+//! every other panel and writing through `integration.set_field`. None of it
+//! lives here any more.
 //!
-//! Scope: this increment moves the STORED decision. Starting and stopping the
-//! running MCP client fleet is not wired, so the section says so in place
-//! rather than implying an effect the process does not perform.
+//! What remains is the one affordance that is NOT a field write: the OAuth
+//! consent flow. `configure` opens a browser, waits minutes for a human, and
+//! reports through its own progress cells — a long-running side effect with no
+//! `set_field` shape. It stays a native strip beneath the layout-data list
+//! until it has an operation of its own (design §6: the `integration` provider
+//! gains a `begin_oauth` descriptor, and the strip becomes an `op_button`).
 
 use std::sync::Arc;
 
@@ -39,22 +42,6 @@ pub struct IntegrationsSettingsGlobal(pub Arc<IntegrationsSettingsVm>);
 
 impl gpui::Global for IntegrationsSettingsGlobal {}
 
-/// Tracked element id of `provider`'s switch — the handle a windowed test
-/// clicks and the driver locates.
-pub fn integration_toggle_id(provider: &str) -> String {
-    format!("integration-toggle-{provider}")
-}
-
-/// Tracked element id of `provider`'s row label.
-pub fn integration_row_id(provider: &str) -> String {
-    format!("integration-row-{provider}")
-}
-
-/// Tracked element id of `provider`'s configuration status.
-pub fn integration_status_id(provider: &str) -> String {
-    format!("integration-status-{provider}")
-}
-
 /// Tracked element id of `provider`'s Configure button.
 pub fn integration_configure_id(provider: &str) -> String {
     format!("integration-configure-{provider}")
@@ -68,22 +55,14 @@ pub fn integration_progress_id(provider: &str) -> String {
 /// The words on the button that starts the one-time consent flow.
 pub const CONFIGURE_LABEL: &str = "Configure…";
 
-/// Tracked element id of the next-launch disclosure under the section heading.
-pub const NEXT_LAUNCH_NOTICE_ID: &str = "integrations-next-launch-notice";
-
 /// Tracked element id of the disclosure [`render_unavailable`] paints.
 pub const UNAVAILABLE_NOTICE_ID: &str = "integrations-unavailable-notice";
 
-/// The words under the section heading. The switch stores a decision and does
-/// not act on the running fleet, so the section has to say so; a silent
-/// next-launch effect is the "silently degrades to look fine" case.
-pub const NEXT_LAUNCH_NOTICE: &str = "Switching an integration on or off is saved immediately and takes effect at the next launch \
-     — this does not start or stop a running integration.";
-
-/// The words [`render_unavailable`] paints. A wiring bug must not read as an
-/// empty list.
-pub const UNAVAILABLE_NOTICE: &str = "Unavailable: this window has no integrations settings service. That is a wiring bug, not an \
-     empty list — the switches below would be missing even for integrations that are switched on.";
+/// The words [`render_unavailable`] paints. A wiring bug must not read as
+/// "nothing needs configuring".
+pub const UNAVAILABLE_NOTICE: &str = "Unavailable: this window has no integrations settings service. That is a wiring bug, not a \
+     fully-configured vault — the setup buttons below would be missing even for integrations \
+     that still need credentials.";
 
 /// Spawn the store-signal → window-refresh pump (mirrors
 /// [`crate::oracles_ui::spawn_oracle_bridge`]).
@@ -163,57 +142,79 @@ pub struct SectionTheme {
     pub danger: Hsla,
 }
 
-/// Render the Integrations section for the Settings modal.
-pub fn render_section(
+/// The Settings modal's residual native strip: the consent flows that are still
+/// waiting for a human, plus whatever the last one had to say.
+///
+/// One row per integration that has something to offer — an unconfigured
+/// provider whose sidecar declares an OAuth2 arm, or any provider with a
+/// progress message. A provider with neither draws nothing: its whole row is
+/// already in the layout-data list above, and repeating it here would give the
+/// modal two rows per integration.
+pub fn render_configure_strip(
     vm: Arc<IntegrationsSettingsVm>,
     theme: SectionTheme,
     bounds: BoundsRegistry,
 ) -> AnyElement {
-    let mut section = div()
-        .flex()
-        .flex_col()
-        .gap(px(6.0))
-        .pt(px(12.0))
-        .mt(px(12.0))
-        .border_t_1()
-        .border_color(theme.border)
-        .child(
-            div()
-                .text_size(px(13.0))
-                .text_color(theme.fg)
-                .child("Integrations"),
-        )
-        .child(
-            TransparentTracker::new(
-                NEXT_LAUNCH_NOTICE_ID.to_string(),
-                "integration_notice",
-                bounds.clone(),
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme.muted_fg)
-                    .child(NEXT_LAUNCH_NOTICE)
-                    .into_any_element(),
-            )
-            .with_displayed_text(NEXT_LAUNCH_NOTICE.to_string()),
-        );
+    let mut strip = div().flex().flex_col().gap(px(6.0));
+    let mut drew_any = false;
 
     for row in vm.rows() {
-        section = section.child(render_row(
-            &vm,
-            row.provider,
-            row.enabled,
-            row.status,
-            row.configurable,
-            theme,
-            &bounds,
-        ));
+        let progress = vm.configure_progress(row.provider).get_cloned();
+        let message = progress.message();
+        // Only an unconfigured integration that HAS a consent flow gets the
+        // button: re-running consent for a configured one would replace a
+        // working refresh token that some providers will not mint twice without
+        // a manual revoke, and an integration with no OAuth2 arm has nothing to
+        // configure at all.
+        //
+        // It also goes away while a flow is running. The view model refuses a
+        // second flow anyway, but a button that stays clickable and silently
+        // does nothing reads as broken — withdrawing it is how the refusal
+        // becomes visible.
+        let in_flight = progress == ConfigureProgress::AwaitingConsent;
+        let offers_setup =
+            row.status == ConfigStatus::Unconfigured && row.configurable && !in_flight;
+        if !offers_setup && message.is_none() {
+            continue;
+        }
+        drew_any = true;
+
+        let mut line = div().flex().flex_row().items_center().gap(px(8.0)).child(
+            div()
+                .text_size(px(12.0))
+                .text_color(theme.fg)
+                .child(SharedString::from(row.provider)),
+        );
+        if let Some(message) = message {
+            line = line.child(
+                TransparentTracker::new(
+                    integration_progress_id(row.provider),
+                    "integration_progress",
+                    bounds.clone(),
+                    div()
+                        .flex_1()
+                        .text_size(px(11.0))
+                        .text_color(theme.muted_fg)
+                        .child(message.clone())
+                        .into_any_element(),
+                )
+                .with_displayed_text(message),
+            );
+        }
+        if offers_setup {
+            line = line.child(render_configure_button(&vm, row.provider, theme, &bounds));
+        }
+        strip = strip.child(line);
     }
 
-    section.into_any_element()
+    if !drew_any {
+        return div().into_any_element();
+    }
+    strip.pt(px(8.0)).into_any_element()
 }
 
-/// The Integrations section for the Settings modal, over whatever the window
-/// holds. `None` means the view model never reached this window.
+/// The Settings modal's Configure strip, over whatever the window holds.
+/// `None` means the view model never reached this window.
 ///
 /// The branch lives here, not at the call site in `lib.rs`, so both arms are
 /// reachable from a test: the fail-loud arm is the one nobody exercises by
@@ -225,31 +226,22 @@ pub fn render_settings_integrations(
     bounds: BoundsRegistry,
 ) -> AnyElement {
     match settings {
-        Some(g) => render_section(g.0.clone(), theme, bounds),
+        Some(g) => render_configure_strip(g.0.clone(), theme, bounds),
         None => render_unavailable(theme, bounds),
     }
 }
 
-/// The section as it renders when the view model never reached the window.
+/// The strip as it renders when the view model never reached the window.
 ///
 /// A wiring bug here would otherwise leave the Settings modal looking like a
-/// build that ships no integrations at all — indistinguishable, from the user's
-/// side, from the empty list.
+/// vault whose integrations are all set up — indistinguishable, from the
+/// user's side, from having nothing left to configure.
 pub fn render_unavailable(theme: SectionTheme, bounds: BoundsRegistry) -> AnyElement {
     div()
         .flex()
         .flex_col()
         .gap(px(6.0))
-        .pt(px(12.0))
-        .mt(px(12.0))
-        .border_t_1()
-        .border_color(theme.border)
-        .child(
-            div()
-                .text_size(px(13.0))
-                .text_color(theme.fg)
-                .child("Integrations"),
-        )
+        .pt(px(8.0))
         .child(
             TransparentTracker::new(
                 UNAVAILABLE_NOTICE_ID.to_string(),
@@ -263,88 +255,6 @@ pub fn render_unavailable(theme: SectionTheme, bounds: BoundsRegistry) -> AnyEle
             )
             .with_displayed_text(UNAVAILABLE_NOTICE.to_string()),
         )
-        .into_any_element()
-}
-
-fn render_row(
-    vm: &Arc<IntegrationsSettingsVm>,
-    provider: &'static str,
-    enabled: bool,
-    status: ConfigStatus,
-    configurable: bool,
-    theme: SectionTheme,
-    bounds: &BoundsRegistry,
-) -> AnyElement {
-    let label = TransparentTracker::new(
-        integration_row_id(provider),
-        "integration_row",
-        bounds.clone(),
-        div()
-            .text_size(px(12.0))
-            .text_color(theme.fg)
-            .child(provider)
-            .into_any_element(),
-    )
-    .with_displayed_text(provider.to_string());
-
-    let status_el = TransparentTracker::new(
-        integration_status_id(provider),
-        "integration_status",
-        bounds.clone(),
-        div()
-            .text_size(px(11.0))
-            .text_color(theme.muted_fg)
-            .child(status.label())
-            .into_any_element(),
-    )
-    .with_displayed_text(status.label().to_string());
-
-    let mut details = div()
-        .flex()
-        .flex_col()
-        .flex_1()
-        .child(label)
-        .child(status_el);
-
-    let progress = vm.configure_progress(provider).get_cloned();
-    if let Some(message) = progress.message() {
-        details = details.child(
-            TransparentTracker::new(
-                integration_progress_id(provider),
-                "integration_progress",
-                bounds.clone(),
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme.muted_fg)
-                    .child(message.clone())
-                    .into_any_element(),
-            )
-            .with_displayed_text(message),
-        );
-    }
-
-    let mut row = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .py(px(4.0))
-        .child(details);
-
-    // Only an unconfigured integration that HAS a consent flow gets the button:
-    // re-running consent for a configured one would replace a working refresh
-    // token that some providers will not mint twice without a manual revoke,
-    // and an integration with no OAuth2 arm has nothing to configure at all.
-    //
-    // It also goes away while a flow is running. The view model refuses a second
-    // flow anyway, but a button that stays clickable and silently does nothing
-    // reads as broken — withdrawing it is how the refusal becomes visible.
-    let in_flight = progress == ConfigureProgress::AwaitingConsent;
-    if status == ConfigStatus::Unconfigured && configurable && !in_flight {
-        row = row.child(render_configure_button(vm, provider, theme, bounds));
-    }
-
-    row.child(render_switch(vm, provider, enabled, theme, bounds))
         .into_any_element()
 }
 
@@ -422,69 +332,5 @@ fn render_configure_button(
         clickable.into_any_element(),
     )
     .with_displayed_text(CONFIGURE_LABEL.to_string())
-    .into_any_element()
-}
-
-fn render_switch(
-    vm: &Arc<IntegrationsSettingsVm>,
-    provider: &'static str,
-    enabled: bool,
-    theme: SectionTheme,
-    bounds: &BoundsRegistry,
-) -> AnyElement {
-    // Same track/knob geometry as the preferences toggle (`pref_field.rs`), so
-    // the two switch kinds in one Settings modal read as one control.
-    let (track_bg, knob_offset) = if enabled {
-        (theme.success, px(18.0))
-    } else {
-        (gpui::hsla(0.0, 0.0, 1.0, 0.2), px(2.0))
-    };
-    let track = div()
-        .w(px(36.0))
-        .h(px(20.0))
-        .rounded(px(10.0))
-        .bg(track_bg)
-        .relative()
-        .child(
-            div()
-                .absolute()
-                .top(px(2.0))
-                .left(knob_offset)
-                .w(px(16.0))
-                .h(px(16.0))
-                .rounded(px(8.0))
-                .bg(gpui::rgba(0xffffffee)),
-        );
-
-    let el_id = integration_toggle_id(provider);
-    let vm = vm.clone();
-    let clickable = div()
-        .id(SharedString::from(el_id.clone()))
-        .cursor_pointer()
-        .child(track)
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            if let Err(e) = vm.set_enabled(provider, !enabled) {
-                DegradedToastSink::push(
-                    DegradedToast {
-                        kind: DegradedKind::CommandFailed,
-                        shared_tree_id: provider.to_string(),
-                        detail: format!("Could not switch '{provider}': {e:#}"),
-                        condition: None,
-                    },
-                    cx,
-                );
-            }
-            window.refresh();
-        });
-
-    TransparentTracker::new(
-        el_id,
-        "integration_toggle",
-        bounds.clone(),
-        clickable.into_any_element(),
-    )
-    // Bounds alone cannot tell an on switch from an off one, so the state
-    // travels with the element.
-    .with_displayed_text(if enabled { "on" } else { "off" }.to_string())
     .into_any_element()
 }

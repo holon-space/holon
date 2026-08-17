@@ -29,14 +29,12 @@ use std::sync::Arc;
 use fluxdi::Module;
 use fluxdi::Provider;
 use holon_api::render_types::RenderExpr;
+use holon_app::integrations_section::SECTION_SQL;
 use holon_frontend::view_model::ViewKind;
 use holon_frontend::view_model::ViewModel;
 use holon_mcp::describe_ui_expand::DeferredPolicy;
 use holon_mcp::describe_ui_expand::EngineResolver;
 use holon_mcp::describe_ui_expand::resolve_deferred;
-
-const PROVIDER_QUERY: &str = "SELECT provider_name, status FROM integration_state WHERE enabled = 1 ORDER BY \
-     provider_name ASC";
 
 /// Mirrors `crates/holon-app/tests/integrations_section_seed.rs` —
 /// `integration_state` is an eager schema root of the `BackendEngine` factory,
@@ -80,9 +78,9 @@ async fn seed_providers(engine: &holon::api::BackendEngine) {
         db.execute_values(
             &format!(
                 "INSERT INTO integration_state \
-                 (id, provider_name, enabled, status, config_status, updated_at) \
-                 VALUES ('integration:{provider}', '{provider}', 1, '{status}', 'unconfigured', \
-                 '2026-08-18 00:00:00')"
+                 (id, provider_name, enabled, enabled_state, status, config_status, updated_at) \
+                 VALUES ('integration:{provider}', '{provider}', 1, 'on', '{status}', \
+                 'unconfigured', '2026-08-18 00:00:00')"
             ),
             vec![],
         )
@@ -145,7 +143,7 @@ fn expanded_live_query_renders_the_querys_real_rows() {
         // CONTROL: the fixture really is queryable through the engine.
         let control = engine
             .db_handle()
-            .query(PROVIDER_QUERY, HashMap::new())
+            .query(SECTION_SQL, HashMap::new())
             .await
             .expect("control query");
         assert_eq!(
@@ -155,7 +153,7 @@ fn expanded_live_query_renders_the_querys_real_rows() {
         );
 
         let services = services_for(engine);
-        let mut vm = deferred_live_query_node(&services, PROVIDER_QUERY);
+        let mut vm = deferred_live_query_node(&services, SECTION_SQL);
         let resolver = EngineResolver {
             services: services.clone(),
         };
@@ -180,7 +178,7 @@ fn unexpanded_live_query_is_marked_unevaluated() {
         seed_providers(&engine).await;
 
         let services = services_for(engine);
-        let mut vm = deferred_live_query_node(&services, PROVIDER_QUERY);
+        let mut vm = deferred_live_query_node(&services, SECTION_SQL);
         resolve_deferred(&mut vm, DeferredPolicy::MarkOnly).await;
 
         let rendered = vm.pretty_print(0);

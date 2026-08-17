@@ -29,7 +29,19 @@ holon_macros::widget_builder! {
 
         let mt = ba.args.get_f64("mt").unwrap_or(0.0);
 
+        // Parsed here, at the DSL boundary, so an unknown word is one refusal
+        // rather than a mis-painted control every frontend re-derives.
+        let appearance = match ba.args.get_string("appearance") {
+            Some(raw) => crate::view_model::StateToggleAppearance::parse(raw)
+                .unwrap_or_else(|e| panic!("{e}")),
+            None => crate::view_model::StateToggleAppearance::default(),
+        };
+
         let mut __props = std::collections::HashMap::new();
+        __props.insert(
+            "appearance".to_string(),
+            Value::String(appearance.as_str().to_string()),
+        );
         __props.insert("field".to_string(), Value::String(field.clone()));
         __props.insert("current".to_string(), Value::String(current));
         __props.insert("label".to_string(), Value::String(label));

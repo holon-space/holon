@@ -149,6 +149,21 @@ pub mod clock {
     pub const UPDATED_AT: &str = "updated_at";
 }
 
+/// The `integration` relation's field names — the settings entity whose rows
+/// are `integration:<provider>` and whose mirror is the `integration_state`
+/// table. Declared in-tree because its DDL is
+/// (`crates/holon-turso/sql/schema/integration_state.sql`); it is not a
+/// runtime-created entity type.
+pub mod integration {
+    pub const RELATION: &str = "integration";
+    pub const ID: &str = "id";
+    pub const PROVIDER_NAME: &str = "provider_name";
+    pub const ENABLED: &str = "enabled";
+    pub const STATUS: &str = "status";
+    pub const CONFIG_STATUS: &str = "config_status";
+    pub const UPDATED_AT: &str = "updated_at";
+}
+
 const fn column(name: &'static str, intent: FieldIntent, arc_place: bool) -> SchemaField {
     SchemaField {
         name,
@@ -241,10 +256,25 @@ pub const CLOCK: EntitySchema = EntitySchema {
     ],
 };
 
+/// The `integration` entity. Its authority is the filesystem enablement store,
+/// so only `enabled` is intent-writable: `status` is the boot registry's, and
+/// the rest is the projector's bookkeeping.
+pub const INTEGRATION: EntitySchema = EntitySchema {
+    relation: integration::RELATION,
+    fields: &[
+        column(integration::ID, FieldIntent::StorageInternal, true),
+        column(integration::PROVIDER_NAME, FieldIntent::Unnamed, true),
+        column(integration::ENABLED, FieldIntent::Writable, true),
+        column(integration::STATUS, FieldIntent::StorageInternal, true),
+        column(integration::CONFIG_STATUS, FieldIntent::Unnamed, true),
+        column(integration::UPDATED_AT, FieldIntent::StorageInternal, true),
+    ],
+};
+
 /// Every entity whose schema is declared in-tree. A relation outside this list
 /// exists only at runtime and answers through a [`SchemaSource`] built from its
 /// `TypeDefinition`.
-pub const BUILTIN_SCHEMAS: &[&EntitySchema] = &[&BLOCK, &CLOCK];
+pub const BUILTIN_SCHEMAS: &[&EntitySchema] = &[&BLOCK, &CLOCK, &INTEGRATION];
 
 /// Answers "does this relation exist, and does it have this field" for one
 /// population of entities.
@@ -338,7 +368,11 @@ mod tests {
     fn the_builtin_source_answers_for_the_declared_relations_only() {
         assert_eq!(
             BuiltinSchemas.relations(),
-            vec!["block".to_string(), "clock".to_string()]
+            vec![
+                "block".to_string(),
+                "clock".to_string(),
+                "integration".to_string()
+            ]
         );
         assert!(BuiltinSchemas.arc_places("block").is_some());
         assert!(BuiltinSchemas.arc_places("todoist_task").is_none());

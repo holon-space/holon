@@ -31,18 +31,16 @@ use std::time::Instant;
 use holon::di::DbHandleProvider;
 use holon_api::QueryLanguage;
 use holon_api::Value;
+use holon_app::integrations_section::SECTION_SQL;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive::ReactiveEngine;
 use holon_frontend::reactive::table_expr;
 use holon_integration_tests::TestEnvironment;
 
-/// The seeded section's own query (`assets/default/index.org`).
-const SECTION_QUERY: &str = "SELECT provider_name, status FROM integration_state WHERE enabled = 1 \
-                             ORDER BY provider_name ASC";
-
 fn insert_sql() -> &'static str {
-    "INSERT INTO integration_state (id, provider_name, enabled, status, config_status, updated_at) \
-     VALUES (?, ?, 1, 'Pending', 'unconfigured', '2026-08-18 00:00:00')"
+    "INSERT INTO integration_state \
+     (id, provider_name, enabled, enabled_state, status, config_status, updated_at) \
+     VALUES (?, ?, 1, 'on', 'Pending', 'unconfigured', '2026-08-18 00:00:00')"
 }
 
 #[test]
@@ -98,7 +96,7 @@ async fn run(runtime: Arc<tokio::runtime::Runtime>) {
     .expect("insert the first provider");
 
     let (key, live) = reactive.watch_query_live(
-        SECTION_QUERY.to_string(),
+        SECTION_SQL.to_string(),
         QueryLanguage::HolonSql,
         table_expr(),
         None,
@@ -200,7 +198,7 @@ async fn run_from_empty(runtime: Arc<tokio::runtime::Runtime>) {
     let services: Arc<dyn BuilderServices> = reactive.clone();
 
     let (key, live) = reactive.watch_query_live(
-        SECTION_QUERY.to_string(),
+        SECTION_SQL.to_string(),
         QueryLanguage::HolonSql,
         table_expr(),
         None,

@@ -1021,10 +1021,12 @@ impl Render for HolonApp {
                     " · ",
                     env!("HOLON_BUILD_SHA")
                 ));
-            // Integrations live in the SAME modal as the preferences, but not
-            // in the same render pipeline: their switch writes to
-            // `IntegrationConfigStore`, not to the preference file, and
-            // `pref_field` has no seam for a second destination.
+            // Integrations are layout data now, and this modal renders the SAME
+            // section the seeded left sidebar does — one query, one item
+            // template, one entity profile
+            // (`holon_app::integrations_section`). The only thing still native
+            // here is the consent-flow strip beneath it, which has no
+            // `set_field` shape (see `integrations_ui`).
             let section_theme = integrations_ui::SectionTheme {
                 fg: text,
                 muted_fg: theme.muted_foreground,
@@ -1032,15 +1034,40 @@ impl Render for HolonApp {
                 success: theme.success,
                 danger: theme.danger,
             };
-            let integrations = integrations_ui::render_settings_integrations(
+            let integrations = match holon_api::render_dsl::parse_render_dsl(
+                &holon_app::integrations_section::section_src(),
+            ) {
+                Ok(expr) => interpret_and_render(&expr, vec![], &gpui_ctx).into_any_element(),
+                // The section source is a compile-time constant in this
+                // workspace, so a parse failure is our own bug — say which, in
+                // the modal, rather than dropping the whole surface.
+                Err(e) => div()
+                    .text_size(px(11.0))
+                    .text_color(theme.danger)
+                    .child(format!(
+                        "Integrations section could not be built — this is a build defect, not an \
+                         empty list: {e}"
+                    ))
+                    .into_any_element(),
+            };
+            let configure_strip = integrations_ui::render_settings_integrations(
                 cx.try_global::<integrations_ui::IntegrationsSettingsGlobal>(),
                 section_theme,
                 self.bounds_registry.clone(),
             );
+            let integrations_block = div()
+                .flex()
+                .flex_col()
+                .pt(px(12.0))
+                .mt(px(12.0))
+                .border_t_1()
+                .border_color(border_color)
+                .child(integrations)
+                .child(configure_strip);
             let content = div()
                 .flex_col()
                 .child(content)
-                .child(integrations)
+                .child(integrations_block)
                 .child(build_stamp);
             Some(modal_overlay(
                 "settings",

@@ -328,6 +328,8 @@ const BLOCK_PROFILE_YAML: &str = include_str!("../../../assets/default/types/blo
 const PERSON_PROFILE_YAML: &str = include_str!("../../../assets/default/types/person_profile.yaml");
 const COLLECTION_PROFILE_YAML: &str =
     include_str!("../../../assets/default/types/collection_profile.yaml");
+const INTEGRATION_PROFILE_YAML: &str =
+    include_str!("../../../assets/default/types/integration_profile.yaml");
 
 /// Bundled YAML type definitions from `assets/default/types/`.
 const BUNDLED_TYPES: &[(&str, &str)] = &[
@@ -363,9 +365,10 @@ pub fn create_default_registry() -> Result<Arc<TypeRegistry>> {
     // Each augments an existing TypeDefinition with computed fields + render
     // variants.
     for (yaml, create_type) in [
-        (BLOCK_PROFILE_YAML, false),     // Block already registered above
-        (PERSON_PROFILE_YAML, false),    // Person already registered above
-        (COLLECTION_PROFILE_YAML, true), // standalone, needs its own TypeDefinition
+        (BLOCK_PROFILE_YAML, false),      // Block already registered above
+        (PERSON_PROFILE_YAML, false),     // Person already registered above
+        (COLLECTION_PROFILE_YAML, true),  // standalone, needs its own TypeDefinition
+        (INTEGRATION_PROFILE_YAML, true), // standalone: its rows live in `integration_state`
     ] {
         let profile = parse_profile_yaml(yaml)
             .with_context(|| "Failed to parse bundled profile YAML".to_string())?;

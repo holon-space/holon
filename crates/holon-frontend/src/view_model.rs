@@ -309,6 +309,8 @@ pub enum ViewKind {
         #[serde(default)]
         label: String,
         states: String,
+        #[serde(default)]
+        appearance: StateToggleAppearance,
     },
     ExpandToggle {
         target_id: String,
@@ -579,6 +581,45 @@ fn default_language() -> String {
 }
 fn default_task_state_field() -> String {
     "task_state".to_string()
+}
+
+/// How a `state_toggle` paints itself. A CLOSED two-value vocabulary, not a
+/// theming escape hatch: the glyph arm reads the task-state vocabulary
+/// (`state_icon`/`state_display`), which renders every non-task word as the
+/// same `○` — so a two-state field needs its own control, and anything beyond
+/// these two wants a widget of its own rather than a third string here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateToggleAppearance {
+    /// The task-state glyph. Unchanged default, so every existing
+    /// `state_toggle(col("task_state"))` paints exactly as before.
+    #[default]
+    Task,
+    /// A track-and-knob switch, the control an on/off field wants.
+    Switch,
+}
+
+impl StateToggleAppearance {
+    /// The DSL spelling — the same token [`Self::parse`] accepts.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StateToggleAppearance::Task => "task",
+            StateToggleAppearance::Switch => "switch",
+        }
+    }
+
+    /// Parse the `appearance:` prop. An unknown word is a refusal carrying the
+    /// admissible set, never a silent fall back to the task glyph — that would
+    /// paint a typo'd switch as an indistinguishable `○`.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw {
+            "task" => Ok(StateToggleAppearance::Task),
+            "switch" => Ok(StateToggleAppearance::Switch),
+            other => Err(format!(
+                "state_toggle: unknown appearance {other:?}; expected \"task\" or \"switch\""
+            )),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -934,6 +975,12 @@ impl ViewModel {
                     .and_then(|v| v.as_string())
                     .unwrap_or("")
                     .to_string(),
+                appearance: match data.get("appearance").and_then(|v| v.as_string()) {
+                    Some(raw) => {
+                        StateToggleAppearance::parse(raw).unwrap_or_else(|e| panic!("{e}"))
+                    }
+                    None => StateToggleAppearance::default(),
+                },
             },
             ElementWidget::ExpandToggle => ViewKind::ExpandToggle {
                 target_id: data

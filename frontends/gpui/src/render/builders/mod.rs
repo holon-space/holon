@@ -21,8 +21,13 @@ pub(crate) use tree_item::collapse_state as tree_item_collapse_state;
 pub use tree_item::{DISCLOSURE_WEIGHT, LEAF_BULLET_WEIGHT};
 pub(crate) use view_mode_switcher::render_accordion_split_slot;
 
+// The shared switch geometry — a painted control, not a widget of its own, so
+// it is skipped by the registry below and used by name.
+pub(crate) mod switch_track;
+pub(crate) use switch_track::switch_track;
+
 holon_macros::builder_registry!("src/render/builders",
-    skip: [prelude, columns, style],
+    skip: [prelude, columns, style, switch_track],
     node_dispatch: AnyElement,
     context: GpuiRenderContext,
     transform: crate::render::builders::tag_node(ctx, __name, node, __inner),

@@ -2,8 +2,10 @@ use holon_api::render_eval::state_display;
 use holon_api::render_eval::state_icon;
 use holon_frontend::ReactiveViewModel;
 use holon_frontend::operations::state_toggle_intent;
+use holon_frontend::view_model::StateToggleAppearance;
 
 use super::prelude::*;
+use super::switch_track;
 
 fn semantic_color(ctx: &GpuiRenderContext, name: &str) -> Hsla {
     match name {
@@ -22,6 +24,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     let current = node.prop_str("current").unwrap_or_default();
     let states = node.prop_str("states").unwrap_or_default();
     let mt = node.prop_f64("mt").unwrap_or(0.0) as f32;
+    let appearance = node.state_toggle_appearance();
 
     // Non-task block: no task_state, so there is no checkbox to show. Collapse
     // the placeholder to zero width instead of reserving a full icon box —
@@ -45,14 +48,60 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
         row_id.as_deref(),
     );
     let Some(intent) = intent else {
-        // Disclose the degraded (display-only) glyph: without op wiring or a
-        // row id a click cannot dispatch.
+        // Disclose the degraded (display-only) control: without op wiring or a
+        // row id a click cannot dispatch. A switch degrades to a switch —
+        // falling back to the task glyph here would make an unwired
+        // integration row unreadable as well as inert.
         tracing::warn!(
             block_id = row_id.as_deref().unwrap_or("<none>"),
             "state_toggle: no set_field op wiring or row id for field '{field}' — rendering \
              display-only"
         );
-        return div()
+        return match appearance {
+            StateToggleAppearance::Switch => div()
+                .flex_shrink_0()
+                .mt(px(mt))
+                .w(px(super::switch_track::TRACK_WIDTH))
+                .h(px(super::switch_track::TRACK_HEIGHT))
+                .opacity(0.4)
+                .child(switch_track(ctx, current == "on")),
+            StateToggleAppearance::Task => div()
+                .flex_shrink_0()
+                .mt(px(mt))
+                .w(px(ctx.style().icon_size + ctx.style().icon_box_padding))
+                .h(px(ctx.style().icon_size))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(ctx.style().icon_size))
+                .line_height(px(ctx.style().icon_size))
+                .text_color(color)
+                .child(icon),
+        };
+    };
+
+    let el_id = format!("state-toggle-{}", row_id.as_deref().unwrap_or("unknown"));
+    let services = ctx.services.clone();
+    let click = move |_: &gpui::MouseDownEvent, _: &mut gpui::Window, _: &mut gpui::App| {
+        services.dispatch_intent(intent.clone());
+    };
+
+    match appearance {
+        StateToggleAppearance::Switch => div()
+            .flex_shrink_0()
+            .mt(px(mt))
+            .w(px(super::switch_track::TRACK_WIDTH))
+            .h(px(super::switch_track::TRACK_HEIGHT))
+            .child(
+                div()
+                    .id(hashed_id(&el_id))
+                    .cursor_pointer()
+                    .child(switch_track(ctx, current == "on"))
+                    .on_mouse_down(gpui::MouseButton::Left, click),
+            ),
+        // The outer div is sized exactly like icon::render (20×16) so the task
+        // checkbox lines up with the orgmode bullet's box.
+        StateToggleAppearance::Task => div()
             .flex_shrink_0()
             .mt(px(mt))
             .w(px(ctx.style().icon_size + ctx.style().icon_box_padding))
@@ -60,35 +109,15 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
             .flex()
             .items_center()
             .justify_center()
-            .text_size(px(ctx.style().icon_size))
-            .line_height(px(ctx.style().icon_size))
-            .text_color(color)
-            .child(icon);
-    };
-
-    let el_id = format!("state-toggle-{}", row_id.as_deref().unwrap_or("unknown"));
-    let services = ctx.services.clone();
-
-    // The outer div is sized exactly like icon::render (20×16) so the task
-    // checkbox lines up with the orgmode bullet's box.
-    div()
-        .flex_shrink_0()
-        .mt(px(mt))
-        .w(px(ctx.style().icon_size + ctx.style().icon_box_padding))
-        .h(px(ctx.style().icon_size))
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(
-            div()
-                .id(hashed_id(&el_id))
-                .cursor_pointer()
-                .text_size(px(ctx.style().icon_size))
-                .line_height(px(ctx.style().icon_size))
-                .text_color(color)
-                .child(icon)
-                .on_mouse_down(gpui::MouseButton::Left, move |_, _, _| {
-                    services.dispatch_intent(intent.clone());
-                }),
-        )
+            .child(
+                div()
+                    .id(hashed_id(&el_id))
+                    .cursor_pointer()
+                    .text_size(px(ctx.style().icon_size))
+                    .line_height(px(ctx.style().icon_size))
+                    .text_color(color)
+                    .child(icon)
+                    .on_mouse_down(gpui::MouseButton::Left, click),
+            ),
+    }
 }

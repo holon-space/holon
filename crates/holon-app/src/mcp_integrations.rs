@@ -260,6 +260,19 @@ impl Module for McpIntegrationsModule {
         let settings_vm = Arc::new(IntegrationsSettingsVm::new(store.clone()));
         injector.provide::<IntegrationsSettingsVm>(Provider::root(move |_| settings_vm.clone()));
 
+        // The `integration` entity's own operation provider, registered beside
+        // the store for the same reason: a vault with every integration off
+        // still needs the op, because dispatching it is how one gets switched
+        // on.
+        let ops_store = store.clone();
+        injector.provide_into_set::<dyn OperationProvider>(Provider::root(move |_| {
+            Arc::new(
+                crate::integrations_operations::IntegrationsOperationProvider::new(
+                    ops_store.clone(),
+                ),
+            ) as Arc<dyn OperationProvider>
+        }));
+
         let configs = &loaded.configs;
         let superseded = Arc::new(loaded.superseded.clone());
         let ignored = Arc::new(loaded.ignored.clone());

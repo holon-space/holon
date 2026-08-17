@@ -170,7 +170,9 @@ fn seeded_sidebar_live_query_paints_nonzero_height(cx: &mut TestAppContext) {
     // ... and its ROWS must be laid out with real height (the assertion the
     // whole widget exists for: a builder that resolves rows and paints them at
     // zero height must not pass).
-    let rows = rows_with_entity_prefix(&snap, "sync-");
+    // `support::TestServices` ids the canned integration rows `integration-<n>`
+    // (its `watch_query_live` picks the prefix off the query's table name).
+    let rows = rows_with_entity_prefix(&snap, "integration-");
     assert!(
         rows.len() >= 3,
         "the Integrations section must render its `integration_state` rows; found {} \

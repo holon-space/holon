@@ -38,6 +38,7 @@ pub const TABLE_COLUMNS: &[&str] = &[
     "id",
     "provider_name",
     "enabled",
+    "enabled_state",
     "status",
     "config_status",
     "updated_at",
@@ -83,6 +84,15 @@ impl IntegrationStatus {
 /// The row id for `provider` — the `integration:` entity scheme.
 pub fn integration_row_id(provider: &str) -> String {
     format!("integration:{provider}")
+}
+
+/// The stored decision as the toggle's state word.
+///
+/// `state_toggle` cycles a WORD, so the mirror carries the word: a section that
+/// derived it with a `CASE` would put a view CREATE inside every interaction
+/// window. The vocabulary is the widget's, and this is its ONE spelling.
+fn enabled_state_word(enabled: bool) -> &'static str {
+    if enabled { "on" } else { "off" }
 }
 
 /// The stored form of the configuration axis: the display enum, lowercased.
@@ -133,16 +143,19 @@ impl IntegrationStateProjector {
                     // toggled would make the column lie. The registry owns that
                     // column after the row exists.
                     "INSERT INTO integration_state \
-                     (id, provider_name, enabled, status, config_status, updated_at) \
-                     VALUES (?, ?, ?, ?, ?, ?) \
+                     (id, provider_name, enabled, enabled_state, status, config_status, \
+                     updated_at) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?) \
                      ON CONFLICT(id) DO UPDATE SET \
                      enabled = excluded.enabled, \
+                     enabled_state = excluded.enabled_state, \
                      config_status = excluded.config_status, \
                      updated_at = excluded.updated_at",
                     vec![
                         Value::String(integration_row_id(row.provider)),
                         Value::String(row.provider.to_string()),
                         Value::Integer(i64::from(row.enabled)),
+                        Value::String(enabled_state_word(row.enabled).to_string()),
                         Value::String(IntegrationStatus::Pending.label().to_string()),
                         Value::String(config_status_value(row.status).to_string()),
                         Value::String(updated_at.clone()),

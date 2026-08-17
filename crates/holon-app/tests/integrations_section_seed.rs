@@ -172,6 +172,35 @@ fn fresh_seed_places_integrations_section_below_hierarchy() {
     });
 }
 
+/// The seeded sidebar and the Settings modal render the SAME list.
+///
+/// Both embed `integrations_section::live_query_src()`; the seed carries it as
+/// org text, which nothing but this assertion keeps in step. Without it the two
+/// surfaces drift into two lists that merely resemble each other — and the
+/// modal's would be the one nobody noticed had gone stale.
+#[test]
+fn the_seeded_section_embeds_the_shared_list_source_verbatim() {
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (engine, ordering) = fresh_engine(dir.path().join("fresh.db")).await;
+        holon_app::seed_default_layout(&engine, ordering, false, false)
+            .await
+            .expect("seed_default_layout must complete on a fresh file DB");
+
+        let (_, content) = left_sidebar_render_content(engine.db_handle())
+            .await
+            .expect("left sidebar must have a seeded render block after fresh seed");
+
+        let shared = holon_app::integrations_section::live_query_src();
+        assert!(
+            content.contains(&shared),
+            "the seeded Integrations section must embed the shared list source verbatim.\n  \
+             expected: {shared}\n  in: {content}"
+        );
+    });
+}
+
 /// A user who deletes the Integrations-bearing render block must have that
 /// stick: the layout is seeded ONLY on a fresh boot (root layout absent), so
 /// re-running the seed on an already-seeded DB (the every-boot path) never

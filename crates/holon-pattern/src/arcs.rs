@@ -395,7 +395,7 @@ mod tests {
         );
         assert_eq!(
             msg("document.title"),
-            "unknown arc relation \"document\"; known relations are [\"block\", \"clock\"]"
+            "unknown arc relation \"document\"; known relations are [\"block\", \"clock\", \"integration\"]"
         );
         assert_eq!(
             msg("block."),

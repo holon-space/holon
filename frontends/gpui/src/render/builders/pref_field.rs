@@ -321,28 +321,7 @@ fn prompt_text_input(key: &str, default: &str, hidden: bool) -> Option<String> {
 fn build_toggle(ctx: &GpuiRenderContext, value: &Value, key: &str) -> Div {
     let checked = matches!(value, Value::Boolean(true));
 
-    let (track_bg, knob_offset) = if checked {
-        (tc(ctx, |t| t.success), px(18.0))
-    } else {
-        (gpui::hsla(0.0, 0.0, 1.0, 0.2), px(2.0))
-    };
-
-    let track = div()
-        .w(px(36.0))
-        .h(px(20.0))
-        .rounded(px(10.0))
-        .bg(track_bg)
-        .relative()
-        .child(
-            div()
-                .absolute()
-                .top(px(2.0))
-                .left(knob_offset)
-                .w(px(16.0))
-                .h(px(16.0))
-                .rounded(px(8.0))
-                .bg(gpui::rgba(0xffffffee)),
-        );
+    let track = super::switch_track(ctx, checked);
 
     let services = ctx.services.clone();
     let key_owned = key.to_string();

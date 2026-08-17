@@ -201,7 +201,7 @@ simulator**.
 |---|---|
 | Net / transition / rule definition | vault blocks (program-marked, P6; `holon_rule` source language) |
 | Place | implicit per token type (attribute-marking, default) — or a parent block where position is the semantics (boards) |
-| Token (= Digital Twin) | the entity block itself; reference-token blocks for multi-net participation |
+| Token (= Digital Twin) | the entity ROW — a block, or a row of any registered entity (see the 2026-08-18 amendment); reference-token blocks for multi-net participation |
 | Marking | derived from block existence + attributes (`in-transition` for mid-flight timed transitions); never a private store |
 | Guard / enabledness | `Pattern` AST (below), dual-evaluated (P1b) |
 | Firing (reactive) | matview `Change::Created` → effect via `execute_operation` |
@@ -210,6 +210,32 @@ simulator**.
 | At-most-once (external) | lease token + TTL + reconciliation + user override (P4) |
 | History | block history + `fired-by` provenance; journal = a query (P8) |
 | Deliberation | simulator forks in-memory worlds from serialized blocks |
+
+### Amendment 2026-08-18 — a token is an entity row, not only a block
+
+Ratified by Martin at the D5.b ratification: the "the entity block itself"
+reading above is **not a hard constraint**. A token is the entity ROW, and a
+block is the case where that row lives in `block`.
+
+The occasion was integration enablement (D5.b,
+`docs/Proposals/state-toggle-layout-settings-2026-08-18.md`). Its state is a
+non-block entity — `integration:<provider>` rows mirrored into
+`integration_state` — reached through the ordinary `set_field` operation by the
+ordinary render pipeline, with `navigation` as the standing precedent. Holding
+"token = block" would have forced either a second action language for machine
+state or a fake block per integration, and both cost more than the reading
+does.
+
+What does NOT change: an action is still declared as a marking delta, still
+routed through the intent boundary, and still has exactly one authority store
+per birth (ADR 0030 D1). What changes is only the population of things a
+transition may bind: any entity with a registered `OperationProvider` and a
+URI scheme, not blocks alone.
+
+Consequence, stated plainly rather than left implicit: a non-block token is
+OPERABLE but not yet PN-MARKABLE — the marking model above still derives from
+block existence and attributes. Widening the marking model to non-block
+relations is open (design §10 Q1) and is not decided here.
 
 ### Effects are token operations
 
