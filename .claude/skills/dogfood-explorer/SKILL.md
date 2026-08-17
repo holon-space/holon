@@ -1,6 +1,6 @@
 ---
 name: dogfood-explorer
-description: Exploratory test-drive the running Holon GPUI desktop app through its embedded `holon` MCP server to hunt platform/wiring/visual/latency defects the headless keystone PBT structurally cannot see. Use when asked to dogfood, exploratory-test, or manually drive Holon, or to reproduce a UI/platform bug against a live instance. Every finding is triaged with the `bug-gap-triage` skill and appended to docs/Testing/BugFunnel.md.
+description: Exploratory test-drive the running Holon GPUI desktop app through its embedded `holon` MCP server to hunt platform/wiring/visual/latency defects the headless keystone PBT structurally cannot see. Use when asked to dogfood, exploratory-test, or manually drive Holon, or to reproduce a UI/platform bug against a live instance. Every finding is triaged with the `bug-gap-triage` skill and recorded under docs/Testing/bugfunnel/entries/.
 ---
 
 # Dogfood Explorer
@@ -12,7 +12,7 @@ regressions. The 2026-07 escape audit was **ENVIRONMENT 12 · COVERAGE 7 · PERC
 embedded MCP server and cross-check rendered state against internal state.
 
 Pairs with `bug-gap-triage` (`.claude/skills/bug-gap-triage/SKILL.md`): every finding gets
-classified and written to `docs/Testing/BugFunnel.md`.
+classified and written as one file under `docs/Testing/bugfunnel/entries/`.
 
 **Gate role (Martin's rule 5, 2026-07-22).** For a new feature this pass is the LAST quality gate
 before Martin sees it, and it should discover ~90% of the bugs before he does. A bug found here
@@ -126,10 +126,10 @@ piping to a JSON parser, or read stdout only with `2>/dev/null`.
 - **Vault safety — ABSOLUTE.** Martin's real vaults are `~/Workspaces/pkm/holon-pkm`,
   `obsidian-pkm`, `logseq-pkm`. NEVER point the app at them, NEVER write to them. Before
   launching, `cp -R` each needed vault to a `/tmp/dogfood-<date>-…` copy and run ONLY against
-  the copies. Vault content is personal: never quote it in reports or BugFunnel — synthesize
+  the copies. Vault content is personal: never quote it in reports or bug-funnel entries — synthesize
   anonymized reproductions.
 - **VCS:** never run jj/git write commands from a dogfood session; leave all file changes
-  (skill edits, BugFunnel rows) uncommitted — the orchestrator owns VCS.
+  (skill edits, bug-funnel entries) uncommitted — the orchestrator owns VCS.
 - **Builds** run as BLOCKING/foreground-style commands with long timeouts (or background with
   completion notification); never `cargo update`. `tee` build and app logs under a per-session
   `/tmp/dogfood-<date>-logs/` dir.
@@ -323,7 +323,7 @@ Reusable checks (not session-specific):
    written? LogSeq compat: `LATER`/`NOW` states, lowercase `:id:`, `((uuid))` block refs must ingest.
 6. **Nested pages collapsed by default.** Confirm nested pages render collapsed on first paint.
 7. **Drag & drop**, including dropping INTO an expanded nested page. If the MCP surface exposes no
-   drag primitive, that is a PERCEPTION-gap finding for BugFunnel — check `describe_ui`/available
+   drag primitive, that is a PERCEPTION-gap finding for the bug funnel — check `describe_ui`/available
    tools first, never silently skip.
 8. **Clickable wiki-links in read mode.** Click a `[[link]]`; verify `navigation.focus` moves to
    the target.
@@ -426,7 +426,7 @@ otherwise delete the scenario as worthless.
 
 When you genuinely cannot express the assertion that would have caught the bug
 you just found, that is the finding — record it as a vocabulary gap AND, if the
-underlying invariant does not exist either, as an ORACLE row in BugFunnel.
+underlying invariant does not exist either, as an ORACLE entry in the bug funnel.
 
 ### Deliverable
 
@@ -437,17 +437,15 @@ as unreplayed — never as passing.
 
 ## 4. Bug handling — triage every finding
 
-Run `bug-gap-triage` per finding; produce rows ready for `docs/Testing/BugFunnel.md`:
-
-```
-| YYYY-MM-DD | <one-line bug> | <COVERAGE|ORACLE|ENVIRONMENT|PERCEPTION> | <secondary|—> | <missing piece> | <status> |
-```
+Run `bug-gap-triage` per finding; it owns the entry format. One finding = one new file under
+`docs/Testing/bugfunnel/entries/`, never an append to a shared file.
 
 Litmus: COVERAGE = keystone can't generate the interaction · ORACLE = generatable but no invariant
 flags it · ENVIRONMENT = failing path/wiring/timing/platform absent from the test env ·
 PERCEPTION = visual/UX, no formal invariant possible. Latency-over-budget is ORACLE or
 ENVIRONMENT, never PERCEPTION. Then attempt keystone repro (CLAUDE.md rule) or name the parity
-work, and update the distribution line at the top of BugFunnel.md.
+work, and run `python3 scripts/bugfunnel.py check`. There is no distribution line to update —
+the totals are derived from the entries.
 
 **Report deliverables:** what you tried (seed + call sequence), what you observed (rendered vs
 internal vs disk, screenshots, latency table), triaged rows, DISCLOSED CASUALTIES (unverifiable

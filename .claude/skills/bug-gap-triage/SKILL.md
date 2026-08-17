@@ -35,11 +35,41 @@ not vault scale).
    ENVIRONMENT: COVERAGE = the *interaction* is ungeneratable; ENVIRONMENT =
    the interaction is generatable but the *failing code path/wiring/timing*
    doesn't exist in the test environment.
-2. **Append one row** to the ledger at
-   [docs/Testing/BugFunnel.md](../../../docs/Testing/BugFunnel.md):
-   date, one-line bug description, primary gap, (secondary), the concrete
-   missing piece (e.g. "no page-delete transition", "iOS Focus/Blur never
-   fire"), and remedy status.
+2. **Write one file** under
+   [docs/Testing/bugfunnel/entries/](../../../docs/Testing/bugfunnel/), named
+   `YYYY-MM-DD-short-slug.md`. One escape, one file — never append to a shared
+   file, so two lanes recording an escape from the same base cannot conflict.
+
+   ```markdown
+   ---
+   id: 2026-08-16-page-switch-rendered-accordion-must-direct   # = the filename stem
+   date: 2026-08-16
+   gap: PERCEPTION              # ENVIRONMENT | COVERAGE | PERCEPTION | ORACLE
+   secondary: ENVIRONMENT       # null when the bug is not genuinely dual
+   status: FIXED                # FIXED | PARTIAL | MITIGATED | OPEN | NOTED
+   summary: >-
+     One sentence naming the observable defect.
+   ---
+
+   ## Bug
+   What was seen, and how it was found (dogfooding, agent exploration, user
+   report, verifier, code audit) — plus the task/lane it came from.
+
+   ## Root cause
+   The mechanism, with `file.rs:line` citations and the evidence (log paths,
+   test names, measured numbers).
+
+   ## Missing piece
+   The concrete thing whose absence let it escape — "no page-delete
+   transition", "iOS Focus/Blur never fire", "no gate executes windowed tests".
+
+   ## Remedy
+   What was done, or what remains open.
+   ```
+
+   Cite the entry by its `id` from code and docs. Do NOT cite it by position:
+   pre-2026-08-17 comments saying "BugFunnel row 144" refer to an ordinal in a
+   table that was reordered as it grew, and those numbers are not recoverable.
 3. **Attempt keystone repro** (existing CLAUDE.md rule): check whether
    `crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs` can
    reproduce it. For COVERAGE/ORACLE gaps the fix INCLUDES closing the gap
@@ -47,8 +77,20 @@ not vault scale).
    lands. For ENVIRONMENT gaps, note what prod/test parity work would be
    needed. For PERCEPTION, pin with a windowed/layout test or a gherkin
    `.feature` replay (`src/pbt/fixtures/gherkin.rs`).
-4. **Update the distribution line** at the top of BugFunnel.md (running
-   counts per gap).
+4. **Validate — there is no counter to update.** The gap distribution is
+   derived from the entry files, never stored, so a hand-maintained total
+   cannot drift or merge wrongly:
+
+   ```
+   python3 scripts/bugfunnel.py check     # schema: gap, status, id vs filename
+   python3 scripts/bugfunnel.py counts    # the distribution
+   python3 scripts/bugfunnel.py list --gap ORACLE --status OPEN --since 2026-08-01
+   python3 scripts/bugfunnel.py index     # regenerate INDEX.md (gitignored)
+   ```
+
+   `check` must pass before you land. Read `INDEX.md` or a filtered `list` to
+   scan the funnel — never read all of `entries/` to answer a question about
+   it.
 
 ## Why this matters
 

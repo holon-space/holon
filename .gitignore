@@ -72,3 +72,8 @@ frontends/gpui/android/build-release-aab/
 # crates/holon-integration-tests/hand-authored-regressions/keystone.jsonl instead
 *.proptest-regressions
 **/proptest-regressions/*.txt
+
+# Bug-funnel index: derived from docs/Testing/bugfunnel/entries/ by
+# `scripts/bugfunnel.py index`. Committing it would restore the single
+# insertion point that per-entry files exist to remove.
+docs/Testing/bugfunnel/INDEX.md
