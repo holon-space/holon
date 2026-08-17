@@ -29,6 +29,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use holon_app::integrations_settings::ConfigStatus;
+use holon_app::integrations_settings::ConfigureProgress;
 use holon_app::integrations_settings::IntegrationsSettingsVm;
 use holon_mcp_client::IntegrationConfigStore;
 use holon_mcp_client::integration_state::Configuration;
@@ -248,5 +249,162 @@ fn an_unreadable_state_file_fails_the_module_wiring_loud() {
         injector.try_resolve::<IntegrationsSettingsVm>().is_err(),
         "a failed configure must leave NO settings list behind — a half-wired \
          container would render switches over a store that never loaded"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Round 2 — the consent flow's view-model contract.
+// ---------------------------------------------------------------------------
+
+/// Install a sandboxed `gcal` sidecar whose credential paths sit inside `dir`,
+/// so no test ever reads the developer's `~/.config/holon/*`.
+fn install_sandboxed_gcal(dir: &Path) {
+    let bundled =
+        holon_mcp_client::bundled_sidecars::bundled_sidecar("gcal").expect("gcal is bundled");
+    let sandboxed = bundled.yaml.replace(
+        "~/.config/holon/",
+        &format!("{}/", dir.join("creds").display()),
+    );
+    std::fs::write(dir.join("gcal.yaml"), sandboxed).expect("install sandboxed sidecar");
+}
+
+/// Provision the client id/secret the sandboxed sidecar points at, so a flow
+/// gets past credential resolution and parks in the loopback wait.
+fn provision_sandboxed_client_credentials(dir: &Path) {
+    let creds = dir.join("creds");
+    std::fs::create_dir_all(&creds).expect("creds dir");
+    for (name, value) in [
+        ("gcal-client-id", "sandbox-client-id.apps.example.com"),
+        ("gcal-client-secret", "sandbox-client-secret"),
+    ] {
+        let path = creds.join(name);
+        std::fs::write(&path, value).expect("write credential");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+}
+
+struct NoBrowser;
+
+impl holon_mcp_client::oauth_bootstrap::BrowserOpener for NoBrowser {
+    fn open(&self, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+/// D6. A second consent flow for the same provider, while one is already
+/// waiting on the browser, must be refused rather than started.
+///
+/// Two concurrent flows race one refresh-token file and share one progress
+/// cell, so whichever finishes last decides what the user is told — including a
+/// late failure overwriting an earlier success.
+#[test]
+fn a_second_consent_flow_for_the_same_provider_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    install_sandboxed_gcal(dir.path());
+    provision_sandboxed_client_credentials(dir.path());
+    let vm = Arc::new(IntegrationsSettingsVm::over_dir(dir.path()).expect("vm"));
+
+    // Park a REAL first flow in its loopback wait, through the public API.
+    //
+    // On its own thread and runtime, mirroring production: the flow's future
+    // borrows a `VarLookup` (`dyn Fn`, not `Send`), so it cannot be
+    // `tokio::spawn`ed — the GPUI button blocks on it in a dedicated thread for
+    // the same reason.
+    let parked = vm.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime for the parked flow");
+        let _ =
+            rt.block_on(parked.configure("gcal", &NoBrowser, std::time::Duration::from_secs(120)));
+    });
+
+    let progress = vm.configure_progress("gcal");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while progress.get_cloned() != ConfigureProgress::AwaitingConsent {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the first flow never reached AwaitingConsent; it is {:?}",
+            progress.get_cloned()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime for the second attempt");
+    let err = rt
+        .block_on(vm.configure("gcal", &NoBrowser, std::time::Duration::from_millis(50)))
+        .expect_err("a second flow must be refused while one is in flight");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("already"),
+        "the refusal must say a setup is already running, got: {msg}"
+    );
+
+    // The refusal must not clobber the running flow's own status line.
+    assert_eq!(
+        progress.get_cloned(),
+        ConfigureProgress::AwaitingConsent,
+        "a refused second click must leave the FIRST flow's progress intact"
+    );
+}
+
+/// A different provider is a different flow, and must not be blocked by one
+/// already running elsewhere in the list.
+#[test]
+fn an_in_flight_flow_does_not_block_a_different_provider() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    install_sandboxed_gcal(dir.path());
+    let vm = Arc::new(IntegrationsSettingsVm::over_dir(dir.path()).expect("vm"));
+
+    // `gmail` has no provisioned credentials, so it refuses on its own merits —
+    // what matters is that the refusal is about credentials, not about `gcal`.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let err = rt
+        .block_on(vm.configure("gmail", &NoBrowser, std::time::Duration::from_millis(50)))
+        .expect_err("gmail is unprovisioned in this rig");
+    let msg = format!("{err:#}");
+    assert!(
+        !msg.contains("already"),
+        "another provider's flow must not block this one, got: {msg}"
+    );
+}
+
+/// D7. An installed sidecar this build cannot use is passed over for the
+/// bundled copy. The consent path must not drop that fact: a user who edited
+/// that file is likely configuring BECAUSE of the edit, and would otherwise see
+/// the flow use different endpoints with nothing to explain it.
+#[test]
+fn a_superseded_installed_sidecar_is_disclosed_to_the_consent_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // An installed sidecar that declares no schema_version: structurally valid
+    // YAML, but not this build's generation.
+    std::fs::write(
+        dir.path().join("gcal.yaml"),
+        "transport:\n  rest:\n    base_url: https://example.invalid\n    calls: {}\n",
+    )
+    .expect("install a stale sidecar");
+
+    let content = holon_mcp_client::integration_config::provider_content(dir.path(), "gcal")
+        .expect("the bundled copy still governs");
+    let reason = content.superseded.unwrap_or_else(|| {
+        panic!(
+            "a passed-over installed sidecar must be disclosed on the consent path — silently \
+             using the bundled copy makes the user's edit look ineffective"
+        )
+    });
+    assert!(
+        reason.contains("schema_version"),
+        "the disclosure must say WHY it was passed over, got: {reason}"
     );
 }

@@ -130,6 +130,9 @@ rhai = { version = "1", features = ["sync"] }
 sqlparser = "0.61"
 
 # === Network ===
+# Already in the tree via reqwest; declared so the OAuth endpoint check can match
+# on the parsed `Host` enum instead of a host string (bracketed IPv6 literals).
+url = "2"
 reqwest = { version = "0.13", default-features = false, features = [
   "json",
   "rustls-no-provider",
@@ -161,6 +164,7 @@ ignore = "0.4"
 blake3 = "1"
 sha2 = "0.10"
 hex = "0.4"
+base64 = "0.22"
 
 # === TUI ===
 unicode-segmentation = "1.11"

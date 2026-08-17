@@ -25,6 +25,7 @@ pub mod mcp_sidecar;
 pub mod mcp_sync_engine;
 pub mod mcp_sync_strategy;
 pub mod mcp_vtable;
+pub mod oauth_bootstrap;
 pub mod rest_oauth2;
 pub mod rest_transport;
 pub mod sync_freshness;

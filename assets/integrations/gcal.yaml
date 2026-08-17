@@ -97,6 +97,16 @@ transport:
       # Generic OAuth2 refresh-token grant. Secrets are referenced by name only.
       oauth2:
         token_url: https://oauth2.googleapis.com/token
+        # Where Settings → Integrations → Configure… sends the system browser.
+        # Without it the in-app consent flow refuses (it has nowhere to go) and
+        # only the scripted bootstrap remains.
+        auth_url: https://accounts.google.com/o/oauth2/v2/auth
+        # Google issues a refresh token only for an offline-access request, and
+        # only re-issues one when consent is forced. Both live here rather than
+        # in the flow engine, which knows nothing about any one provider.
+        auth_params:
+          access_type: offline
+          prompt: consent
         # Credentials are sourced from files here, because Holon is a GUI app and
         # environment variables do not reach it cleanly. `client_secret_file` is
         # 0600-enforced (refused loudly if group/world-readable), exactly like

@@ -23,6 +23,7 @@ use gpui::Styled;
 use gpui::div;
 use gpui::px;
 use holon_app::integrations_settings::ConfigStatus;
+use holon_app::integrations_settings::ConfigureProgress;
 use holon_app::integrations_settings::IntegrationsSettingsVm;
 
 use crate::geometry::BoundsRegistry;
@@ -53,6 +54,19 @@ pub fn integration_row_id(provider: &str) -> String {
 pub fn integration_status_id(provider: &str) -> String {
     format!("integration-status-{provider}")
 }
+
+/// Tracked element id of `provider`'s Configure button.
+pub fn integration_configure_id(provider: &str) -> String {
+    format!("integration-configure-{provider}")
+}
+
+/// Tracked element id of `provider`'s consent-flow progress line.
+pub fn integration_progress_id(provider: &str) -> String {
+    format!("integration-progress-{provider}")
+}
+
+/// The words on the button that starts the one-time consent flow.
+pub const CONFIGURE_LABEL: &str = "Configure…";
 
 /// Tracked element id of the next-launch disclosure under the section heading.
 pub const NEXT_LAUNCH_NOTICE_ID: &str = "integrations-next-launch-notice";
@@ -99,6 +113,22 @@ pub fn spawn_integrations_bridge(
             while stream.next().await.is_some() {
                 if tx.unbounded_send(()).is_err() {
                     return; // pump gone
+                }
+            }
+        });
+    }
+    // The consent flow runs off this window's thread and reports through its own
+    // cells, so its progress needs a frame the same way a stored decision does.
+    // Without this the status line would sit at "Waiting…" until something
+    // unrelated repainted — including after the flow had already failed.
+    for provider in vm.rows().into_iter().map(|r| r.provider) {
+        let signal = vm.configure_progress(provider);
+        let tx = tx.clone();
+        rt_handle.spawn(async move {
+            let mut stream = signal.signal_cloned().to_stream();
+            while stream.next().await.is_some() {
+                if tx.unbounded_send(()).is_err() {
+                    return;
                 }
             }
         });
@@ -173,6 +203,7 @@ pub fn render_section(
             row.provider,
             row.enabled,
             row.status,
+            row.configurable,
             theme,
             &bounds,
         ));
@@ -240,6 +271,7 @@ fn render_row(
     provider: &'static str,
     enabled: bool,
     status: ConfigStatus,
+    configurable: bool,
     theme: SectionTheme,
     bounds: &BoundsRegistry,
 ) -> AnyElement {
@@ -267,22 +299,130 @@ fn render_row(
     )
     .with_displayed_text(status.label().to_string());
 
-    div()
+    let mut details = div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .child(label)
+        .child(status_el);
+
+    let progress = vm.configure_progress(provider).get_cloned();
+    if let Some(message) = progress.message() {
+        details = details.child(
+            TransparentTracker::new(
+                integration_progress_id(provider),
+                "integration_progress",
+                bounds.clone(),
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme.muted_fg)
+                    .child(message.clone())
+                    .into_any_element(),
+            )
+            .with_displayed_text(message),
+        );
+    }
+
+    let mut row = div()
         .flex()
         .flex_row()
         .items_center()
         .gap(px(8.0))
         .py(px(4.0))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .child(label)
-                .child(status_el),
-        )
-        .child(render_switch(vm, provider, enabled, theme, bounds))
+        .child(details);
+
+    // Only an unconfigured integration that HAS a consent flow gets the button:
+    // re-running consent for a configured one would replace a working refresh
+    // token that some providers will not mint twice without a manual revoke,
+    // and an integration with no OAuth2 arm has nothing to configure at all.
+    //
+    // It also goes away while a flow is running. The view model refuses a second
+    // flow anyway, but a button that stays clickable and silently does nothing
+    // reads as broken — withdrawing it is how the refusal becomes visible.
+    let in_flight = progress == ConfigureProgress::AwaitingConsent;
+    if status == ConfigStatus::Unconfigured && configurable && !in_flight {
+        row = row.child(render_configure_button(vm, provider, theme, bounds));
+    }
+
+    row.child(render_switch(vm, provider, enabled, theme, bounds))
         .into_any_element()
+}
+
+/// The button that starts `provider`'s one-time consent flow.
+///
+/// The flow is minutes long (it waits for a human in a browser) and needs a
+/// tokio reactor for its loopback listener and its HTTPS exchange, so it runs
+/// on a thread and a runtime of its own rather than occupying the app's. A
+/// one-shot, user-initiated flow is exactly the case where that isolation is
+/// worth more than sharing the executor.
+fn render_configure_button(
+    vm: &Arc<IntegrationsSettingsVm>,
+    provider: &'static str,
+    theme: SectionTheme,
+    bounds: &BoundsRegistry,
+) -> AnyElement {
+    let el_id = integration_configure_id(provider);
+    let vm = vm.clone();
+
+    let clickable = div()
+        .id(SharedString::from(el_id.clone()))
+        .cursor_pointer()
+        .px(px(8.0))
+        .py(px(3.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(theme.border)
+        .text_size(px(11.0))
+        .text_color(theme.fg)
+        .child(CONFIGURE_LABEL)
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            let vm = vm.clone();
+            let started = std::thread::Builder::new()
+                .name(format!("holon-oauth-{provider}"))
+                .spawn(move || {
+                    let runtime = match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(rt) => rt,
+                        Err(e) => {
+                            // The VM's progress cell is the user-visible channel
+                            // and it is unreachable without a runtime, so this
+                            // one failure has to speak for itself in the log.
+                            tracing::error!(
+                                provider,
+                                "could not start a runtime for the OAuth consent flow: {e}"
+                            );
+                            return;
+                        }
+                    };
+                    // The result also lands in the progress cell the row renders;
+                    // it is dropped here rather than swallowed.
+                    let _ = runtime.block_on(vm.configure_with_system_browser(provider));
+                });
+
+            if let Err(e) = started {
+                DegradedToastSink::push(
+                    DegradedToast {
+                        kind: DegradedKind::CommandFailed,
+                        shared_tree_id: provider.to_string(),
+                        detail: format!("Could not start the consent flow for '{provider}': {e}"),
+                        condition: None,
+                    },
+                    cx,
+                );
+            }
+            window.refresh();
+        });
+
+    TransparentTracker::new(
+        el_id,
+        "integration_configure",
+        bounds.clone(),
+        clickable.into_any_element(),
+    )
+    .with_displayed_text(CONFIGURE_LABEL.to_string())
+    .into_any_element()
 }
 
 fn render_switch(

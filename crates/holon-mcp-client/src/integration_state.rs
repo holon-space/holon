@@ -203,6 +203,11 @@ impl IntegrationConfigStore {
         })
     }
 
+    /// The directory the state files and sidecars share.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// The providers this build ships — the presence axis, in full.
     pub fn providers(&self) -> Vec<&'static str> {
         BUNDLED_SIDECARS.iter().map(|s| s.provider).collect()

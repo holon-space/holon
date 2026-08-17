@@ -454,6 +454,87 @@ pub struct LoadedIntegrations {
 /// [`LoadedIntegrations::ignored`] so the caller discloses it. A missing
 /// integrations directory just means no installed files; the store still
 /// decides.
+/// The CONTENT rule for one provider, in one place: the installed file when it
+/// declares this build's [`SIDECAR_SCHEMA_VERSION`], the bundled copy
+/// otherwise.
+///
+/// Returns the config plus, when an installed file was passed over, the reason
+/// — which the caller turns into a [`SupersededSidecar`] disclosure. Enablement
+/// is a separate axis and is deliberately not consulted here, so a surface that
+/// must read a switched-OFF provider's sidecar (the consent flow) gets the same
+/// answer the loader would give once it is switched on.
+fn choose_content(
+    bundled: &'static BundledSidecar,
+    file: Option<&(PathBuf, String)>,
+) -> anyhow::Result<(IntegrationFileConfig, Option<String>)> {
+    let provider = bundled.provider;
+    let Some((path, content)) = file else {
+        return Ok((parse_bundled(bundled)?, None));
+    };
+
+    // Byte-identical to what we ship: the same file, not an override. Nothing
+    // drifted, so nothing to log and nothing to disclose.
+    if content == bundled.yaml {
+        return Ok((parse_bundled(bundled)?, None));
+    }
+
+    let incompatibility = match serde_yaml::from_str::<IntegrationFileConfig>(content) {
+        Ok(config) if config.schema_version == Some(SIDECAR_SCHEMA_VERSION) => {
+            tracing::info!(
+                "[load_integration_configs] Provider '{provider}' is OVERRIDDEN by '{}' \
+                 (schema_version {SIDECAR_SCHEMA_VERSION}); the sidecar bundled at '{}' is not used",
+                path.display(),
+                bundled.source_path
+            );
+            return Ok((config, None));
+        }
+        Ok(config) => format!(
+            "it declares schema_version {} but this build's sidecar format is schema_version \
+             {SIDECAR_SCHEMA_VERSION}",
+            match config.schema_version {
+                Some(v) => v.to_string(),
+                None => "none".to_string(),
+            }
+        ),
+        Err(e) => format!(
+            "it does not parse against this build's sidecar format, so no schema_version could be \
+             established: {e}"
+        ),
+    };
+    Ok((parse_bundled(bundled)?, Some(incompatibility)))
+}
+
+/// One provider's governing content, plus whatever the caller must disclose
+/// about how it was chosen.
+#[derive(Debug)]
+pub struct ProviderContent {
+    pub config: IntegrationFileConfig,
+    /// Set when an installed sidecar was passed over for the bundled copy, and
+    /// why. Dropping this on the consent path would let a user edit an
+    /// installed sidecar, watch the flow ignore it, and get no hint that it
+    /// did — the startup loader discloses the same fact, but a user
+    /// configuring an integration is not reading startup logs.
+    pub superseded: Option<String>,
+}
+
+/// The sidecar content that governs one provider, whether or not it is switched
+/// on — what the in-app consent flow reads to learn the provider's OAuth
+/// endpoints and where its credentials belong.
+pub fn provider_content(dir: &Path, provider: &str) -> anyhow::Result<ProviderContent> {
+    let bundled = bundled_sidecar(provider)
+        .ok_or_else(|| anyhow::anyhow!("this build ships no integration named '{provider}'"))?;
+    let installed = scan_installed_sidecars(dir)?;
+    let files = installed.get(provider).map(Vec::as_slice).unwrap_or(&[]);
+    anyhow::ensure!(
+        files.len() <= 1,
+        "Integration '{provider}' has {} installed sidecars — delete all but one, there is no rule \
+         that picks between them",
+        files.len()
+    );
+    let (config, superseded) = choose_content(bundled, files.first())?;
+    Ok(ProviderContent { config, superseded })
+}
+
 pub fn load_integration_configs(
     dir: &Path,
     store: &IntegrationConfigStore,
@@ -498,51 +579,17 @@ pub fn load_integration_configs(
             continue;
         }
 
-        let Some((path, content)) = file else {
-            configs.push((provider.to_string(), parse_bundled(bundled)?));
-            continue;
-        };
-
-        // Byte-identical to what we ship: the same file, not an override.
-        // Nothing drifted, so nothing to log and nothing to disclose.
-        if content == bundled.yaml {
-            configs.push((provider.to_string(), parse_bundled(bundled)?));
-            continue;
+        let (config, incompatibility) = choose_content(bundled, file)?;
+        if let Some(incompatibility) = incompatibility {
+            let (path, _) = file.expect("only an installed file can be incompatible");
+            superseded.push(SupersededSidecar {
+                provider: provider.to_string(),
+                installed_path: path.clone(),
+                bundled_source: bundled.source_path,
+                incompatibility,
+            });
         }
-
-        let incompatibility = match serde_yaml::from_str::<IntegrationFileConfig>(content) {
-            Ok(config) if config.schema_version == Some(SIDECAR_SCHEMA_VERSION) => {
-                tracing::info!(
-                    "[load_integration_configs] Provider '{provider}' is OVERRIDDEN by '{}' \
-                     (schema_version {SIDECAR_SCHEMA_VERSION}); the sidecar bundled at '{}' is \
-                     not used",
-                    path.display(),
-                    bundled.source_path
-                );
-                configs.push((provider.to_string(), config));
-                continue;
-            }
-            Ok(config) => format!(
-                "it declares schema_version {} but this build's sidecar format is schema_version \
-                 {SIDECAR_SCHEMA_VERSION}",
-                match config.schema_version {
-                    Some(v) => v.to_string(),
-                    None => "none".to_string(),
-                }
-            ),
-            Err(e) => format!(
-                "it does not parse against this build's sidecar format, so no schema_version \
-                 could be established: {e}"
-            ),
-        };
-
-        superseded.push(SupersededSidecar {
-            provider: provider.to_string(),
-            installed_path: path.clone(),
-            bundled_source: bundled.source_path,
-            incompatibility,
-        });
-        configs.push((provider.to_string(), parse_bundled(bundled)?));
+        configs.push((provider.to_string(), config));
     }
 
     for (provider, files) in installed.iter() {

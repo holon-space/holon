@@ -61,6 +61,19 @@ pub struct RestOAuth2Config {
     /// The provider's OAuth2 token endpoint (e.g.
     /// `https://oauth2.googleapis.com/token`). POSTed to for the refresh grant.
     pub token_url: String,
+    /// The provider's OAuth2 *authorization* endpoint — where the in-app
+    /// consent flow sends the system browser
+    /// ([`crate::oauth_bootstrap`]). Absent means this sidecar can refresh a
+    /// refresh token it already has but cannot obtain one, so the Configure
+    /// affordance refuses rather than dead-ending in the browser.
+    #[serde(default)]
+    pub auth_url: Option<String>,
+    /// Extra query parameters appended to the authorization request, for the
+    /// provider-specific knobs that govern whether a refresh token is issued at
+    /// all (Google needs `access_type=offline` and `prompt=consent`). Keeping
+    /// them in the sidecar is what lets the flow engine stay provider-generic.
+    #[serde(default)]
+    pub auth_params: std::collections::HashMap<String, String>,
     /// Env var holding the OAuth client id. Exactly one of `client_id_env` /
     /// `client_id_file` / `client_id_keychain` must be set.
     #[serde(default)]
@@ -86,8 +99,10 @@ pub struct RestOAuth2Config {
     /// bootstrap helper (never by Holon), enforced to be mode 0600. A leading
     /// `~/` is expanded to the user's home directory.
     pub refresh_token_file: String,
-    /// Informational: the scopes the refresh token was consented for. Not sent
-    /// on the refresh grant; documents intent and aids the setup docs.
+    /// The scopes the refresh token is consented for. Not sent on the refresh
+    /// grant (RFC 6749 §6 reuses the original grant's scopes), but load-bearing
+    /// for the in-app consent flow, which puts them on the authorization
+    /// request.
     #[serde(default)]
     pub scopes: Vec<String>,
 }
@@ -322,6 +337,42 @@ impl OAuth2TokenProvider {
     }
 }
 
+/// Resolve the OAuth *client* credentials (id + secret) through the sidecar's
+/// declared arms — the same resolution the transport performs at startup.
+///
+/// The consent flow needs these before it can build an authorization request,
+/// and it must read them from exactly where the transport will: resolving them
+/// differently is how a flow ends up reporting success over a configuration the
+/// next launch cannot use.
+pub(crate) fn resolve_client_credentials(
+    cfg: &RestOAuth2Config,
+    lookup: &VarLookup<'_>,
+) -> anyhow::Result<(String, String)> {
+    let client_id = resolve_secret(
+        "client_id",
+        SecretSources {
+            env: cfg.client_id_env.as_deref(),
+            file: cfg.client_id_file.as_deref(),
+            keychain: cfg.client_id_keychain.as_ref(),
+        },
+        lookup,
+        &holon_secrets::platform_keychain,
+        /* enforce_private_file */ false,
+    )?;
+    let client_secret = resolve_secret(
+        "client_secret",
+        SecretSources {
+            env: cfg.client_secret_env.as_deref(),
+            file: cfg.client_secret_file.as_deref(),
+            keychain: cfg.client_secret_keychain.as_ref(),
+        },
+        lookup,
+        &holon_secrets::platform_keychain,
+        /* enforce_private_file */ true,
+    )?;
+    Ok((client_id, client_secret))
+}
+
 /// Build a shared provider (`Arc`) from config — the shape the transport holds.
 pub fn build_provider(
     cfg: &RestOAuth2Config,
@@ -527,7 +578,7 @@ pub(crate) fn redact_url(url: &str) -> String {
 /// Surface only the safe, standard OAuth error fields from a non-2xx token
 /// response; never echo the raw body (which may not conform and could contain
 /// unexpected material).
-fn redact_token_error_body(body: &str) -> String {
+pub(crate) fn redact_token_error_body(body: &str) -> String {
     match serde_json::from_str::<serde_json::Value>(body) {
         Ok(v) => {
             let err = v.get("error").and_then(|e| e.as_str());
