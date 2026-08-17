@@ -28,6 +28,7 @@ setup:
         cargo-deny \
         cargo-machete \
         cargo-mutants \
+        cargo-ndk \
         cargo-nextest \
         cargo-watch \
         samply
@@ -599,6 +600,26 @@ check-dioxus-web-wasm:
     cargo check --manifest-path frontends/dioxus-web/Cargo.toml \
         --target wasm32-unknown-unknown \
         2>&1 | tee /tmp/holon-dioxus-web-wasm-check.log
+
+# Rot guard for the ANDROID target, via holon-turso — the crate whose graph
+# actually drives the NDK C toolchain (ring + turso compile .S/.c through
+# cc-rs). `cargo ndk` rather than bare `cargo`: cc-rs defaults to the
+# UNVERSIONED tool name `aarch64-linux-android-clang`, which no NDK ships, so
+# a bare cross-build fails in ring's build script before the linker is ever
+# reached. cargo-ndk puts the toolchain on PATH and exports the versioned
+# CC_/AR_/LINKER vars for the -P API level, and discovers the NDK itself
+# (ANDROID_NDK_HOME, else the highest $ANDROID_HOME/ndk/*), so no version is
+# pinned here.
+check-android:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Install only when missing — see check-worker-wasm: `rustup target add` is a
+    # network touch even when the target is already there.
+    if ! rustup target list --installed | grep -qx aarch64-linux-android; then
+        rustup target add aarch64-linux-android
+    fi
+    cargo ndk -t arm64-v8a -P 33 check -p holon-turso \
+        2>&1 | tee /tmp/holon-android-check.log
 
 # --- Code Quality -----------------------------------------------------------
 

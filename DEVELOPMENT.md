@@ -602,3 +602,30 @@ rendered → `click_entity` returns "no bounds recorded" and the 10s budget
 expires. To reach green the live driver must navigate the target block's page
 into `main` (or focus it) before geometry-driving it. Re-run the script to
 reproduce and to re-check once that harness gap closes.
+
+## Android cross-compilation
+
+Always cross-compile for Android through **`cargo ndk`**, never bare
+`cargo --target aarch64-linux-android`. Bare cargo fails inside `ring`'s build
+script, long before the linker runs: cc-rs defaults to the unversioned tool name
+`aarch64-linux-android-clang`, and the NDK ships only API-versioned binaries
+(`aarch64-linux-android33-clang`). `cargo ndk` puts the NDK toolchain on `PATH`
+and exports the versioned `CC_*` / `AR_*` / `CARGO_TARGET_*_LINKER` for the API
+level given by `-P`.
+
+`cargo ndk` is installed by `just setup`. It locates the NDK itself — from
+`ANDROID_NDK_HOME`, else the highest `$ANDROID_HOME/ndk/*` (on macOS
+`~/Library/Android/sdk/ndk/*`) — so no NDK version is pinned in this repo. Set
+`ANDROID_NDK_HOME` to override, e.g. to point at a Homebrew cask install.
+
+```sh
+# Typecheck rot guard: the crate graph that actually drives the NDK C toolchain.
+just check-android
+
+# Build the Android .so and package it (see frontends/gpui/justfile).
+just -f frontends/gpui/justfile build
+just -f frontends/gpui/justfile apk
+```
+
+The `[target.*-linux-android] linker = …` entries in `.cargo/config.toml` are
+inert under `cargo ndk`, which overrides them via env.
