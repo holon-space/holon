@@ -19,6 +19,7 @@ use holon_api::types::EntityName;
 
 use crate::operation_matcher::MatchedOperation;
 use crate::operation_matcher::{self};
+use crate::popup_menu::HideSpan;
 use crate::popup_menu::PopupItem;
 use crate::popup_menu::PopupProvider;
 use crate::popup_menu::PopupResult;
@@ -64,9 +65,11 @@ struct ParamCollectionState {
     operation: MatchedOperation,
     param: OperationParam,
     /// The command-list filter the user had typed when they picked the
-    /// operation (`"enti"` for `/enti` → Embed Entity). The editor keeps that
-    /// text, so the popup's filter stays prefixed by it; the search term for
-    /// this phase is whatever the user types AFTER it.
+    /// operation (`"enti"` for `/enti` → Embed Entity), for callers whose
+    /// editor keeps that text: the popup's filter stays prefixed by it, so the
+    /// search term for this phase is whatever the user types AFTER it. EMPTY
+    /// for callers that hide the command text for the duration of the phase —
+    /// their filter is the search term already.
     command_filter: String,
 }
 
@@ -100,6 +103,10 @@ pub struct CommandProvider {
     /// the typed command text from the editor when the op fires. `None`
     /// for callers that manage editor text themselves (headless mirror).
     prefix_start: Option<usize>,
+    /// Byte length of the trigger prefix that opened this menu. With the
+    /// current filter it gives the exact span of typed command text, which is
+    /// what a picker phase hides.
+    trigger_len: usize,
 }
 
 impl CommandProvider {
@@ -112,11 +119,15 @@ impl CommandProvider {
             services: None,
             param_state: Arc::new(Mutex::new(None)),
             prefix_start: None,
+            trigger_len: 0,
         }
     }
 
-    pub fn with_prefix_start(mut self, prefix_start: usize) -> Self {
+    /// Where the trigger that opened this menu sits on its line, and how long
+    /// the trigger char(s) are.
+    pub fn with_trigger_span(mut self, prefix_start: usize, trigger_len: usize) -> Self {
         self.prefix_start = Some(prefix_start);
+        self.trigger_len = trigger_len;
         self
     }
 
@@ -465,12 +476,28 @@ impl PopupProvider for CommandProvider {
         let entity_params = matched.entity_params_needed();
         if !entity_params.is_empty() {
             let first_missing = matched.missing_params[0].clone();
+            // When the frontend owns the editor text (`prefix_start` is Some)
+            // it HIDES the typed command for this phase (ruling D1.b), so the
+            // filter it reports from here on is already only the search term —
+            // there is no command prefix left to strip.
+            let command_filter = match self.prefix_start {
+                Some(_) => String::new(),
+                None => filter.to_string(),
+            };
             *state = Some(ParamCollectionState {
                 operation: matched,
                 param: first_missing,
-                command_filter: filter.to_string(),
+                command_filter,
             });
-            return PopupResult::Updated;
+            return PopupResult::PhaseAdvanced {
+                hide: self.prefix_start.map(|prefix_start| HideSpan {
+                    prefix_start,
+                    // The span the MENU matched on. Deriving it from the caret
+                    // instead would under-hide whenever the caret had been
+                    // moved back into the command before picking.
+                    len: self.trigger_len + filter.len(),
+                }),
+            };
         }
 
         // Nothing can complete this operation. Returning `NotActive` here would
@@ -634,7 +661,7 @@ mod tests {
             icon: None,
         };
         let result = provider.on_select(&item, "emb");
-        assert!(matches!(result, PopupResult::Updated));
+        assert!(matches!(result, PopupResult::PhaseAdvanced { .. }));
         assert!(is_collecting_params(&provider));
         assert_eq!(param_search_entity(&provider), Some("block".to_string()));
     }
@@ -806,7 +833,7 @@ mod tests {
         // the block empty → in-place. (RED before path-B fix: the "/journal"
         // made it look non-empty → AsChildren, never InPlace.)
         let provider = CommandProvider::new(vec![], live_ctx("block:child"))
-            .with_prefix_start(0)
+            .with_trigger_span(0, 1)
             .with_templates(templates())
             .with_resolver(resolver(&[(
                 "block:child",
@@ -843,7 +870,7 @@ mod tests {
         // end. Stripping the command leaves non-empty content → children (never
         // bail "empty page root", never split).
         let provider = CommandProvider::new(vec![], live_ctx("block:meeting"))
-            .with_prefix_start(11)
+            .with_trigger_span(11, 1)
             .with_templates(templates())
             .with_resolver(resolver(&[(
                 "block:meeting",
@@ -876,7 +903,7 @@ mod tests {
         // No resolver wired → the pick must FAIL (visible), NOT return NotActive
         // (which the editor maps to None → split_block fall-through).
         let provider = CommandProvider::new(vec![], live_ctx("block:x"))
-            .with_prefix_start(3)
+            .with_trigger_span(3, 1)
             .with_templates(templates());
         let item = PopupItem {
             id: "__template__:block:tpl".into(),

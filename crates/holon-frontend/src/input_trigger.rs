@@ -46,6 +46,10 @@ pub(crate) enum ViewEvent {
         filter_text: String,
         /// Column where the prefix starts.
         prefix_start: usize,
+        /// Byte length of the trigger prefix itself (`/` is 1, `[[` is 2).
+        /// With `filter_text` this reconstructs the whole matched command span
+        /// without consulting the caret, which may since have moved.
+        prefix_len: usize,
     },
 
     /// Trigger dismissed (text no longer matches the trigger pattern).
@@ -84,6 +88,7 @@ pub(crate) fn check_triggers(
                             action: action.clone(),
                             filter_text: current_line[prefix.len()..].to_string(),
                             prefix_start: 0,
+                            prefix_len: prefix.len(),
                         });
                     }
                 } else {
@@ -110,6 +115,7 @@ pub(crate) fn check_triggers(
                             action: action.clone(),
                             filter_text: between.to_string(),
                             prefix_start: pos,
+                            prefix_len: prefix.len(),
                         });
                     }
                 }

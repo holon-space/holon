@@ -379,7 +379,26 @@ impl EditorView {
                             .lock()
                             .unwrap()
                             .on_text_changed(current_line, cursor_byte);
-                        execute_action(action, &services_clone, this.input.entity_id(), cx);
+                        // Route through the SAME applier the key handlers use:
+                        // a keystroke can end a picker phase, and that carries
+                        // text surgery `execute_action`'s no-window arm cannot
+                        // do. Nothing here consumes a key — the change event
+                        // has already happened.
+                        let editor_id = this.input.entity_id();
+                        let handle = window.window_handle();
+                        let action = match apply_popup_action(
+                            action,
+                            &ctrl,
+                            &entity.clone(),
+                            &services_clone,
+                            handle,
+                            editor_id,
+                            cx,
+                        ) {
+                            PopupActionOutcome::Handled => EditorAction::None,
+                            PopupActionOutcome::NotPopup(action) => action,
+                        };
+                        execute_action(action, &services_clone, editor_id, cx);
 
                         // Local edit routes through the VM buffer — the write
                         // authority (buffer-ownership inversion). `apply_local_edit`
@@ -1240,6 +1259,14 @@ impl EditorView {
     pub fn has_cell(&self) -> bool {
         self.controller.lock().unwrap().has_cell()
     }
+
+    /// Whether a popup overlay is open right now. Read from the controller, not
+    /// from painted bounds: the bounds registry holds the LAST frame that
+    /// recorded rows, so a closed menu still reads as open until something
+    /// forces a repaint.
+    pub fn is_popup_active(&self) -> bool {
+        self.controller.lock().unwrap().is_popup_active()
+    }
 }
 
 impl Render for EditorView {
@@ -1251,6 +1278,16 @@ impl Render for EditorView {
     )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let editor_entity_id = self.input.entity_id();
+        let window_handle = window.window_handle();
+        // Everything a popup row's mouse handler needs to run its command
+        // through the same path the Enter key uses.
+        let click_target = PopupClickTarget {
+            controller: self.controller.clone(),
+            input: self.input.clone(),
+            services: self.services.clone(),
+            window_handle,
+            editor_entity_id,
+        };
         let popup_overlay = {
             let ctrl = self.controller.lock().unwrap();
             let max_h = popup_max_height_px(window.viewport_size().height.into());
@@ -1271,6 +1308,7 @@ impl Render for EditorView {
                         &self.popup_scroll,
                         max_h,
                         scroll_to_selection,
+                        &click_target,
                         cx,
                     ))
                 }
@@ -1283,7 +1321,6 @@ impl Render for EditorView {
             }
         };
 
-        let window_handle = window.window_handle();
         let editor_entity = cx.entity();
 
         div()
@@ -1354,175 +1391,22 @@ impl Render for EditorView {
                         return;
                     }
                     let action = ctrl.lock().unwrap().on_key(EditorKey::Enter);
+                    let action = match apply_popup_action(
+                        action,
+                        &ctrl,
+                        &input,
+                        &services,
+                        window_handle,
+                        editor_entity_id,
+                        cx,
+                    ) {
+                        PopupActionOutcome::Handled => {
+                            cx.stop_propagation();
+                            return;
+                        }
+                        PopupActionOutcome::NotPopup(action) => action,
+                    };
                     match action {
-                        EditorAction::InsertText {
-                            replacement,
-                            prefix_start,
-                        } => {
-                            let text = input.read(cx).value().to_string();
-                            let cursor = input.read(cx).cursor();
-                            let cursor_pos = input.read(cx).cursor_position();
-                            let line_start = cursor - cursor_pos.character as usize;
-                            let abs_start = line_start + prefix_start;
-
-                            let mut new_text =
-                                String::with_capacity(text.len() + replacement.len());
-                            new_text.push_str(&text[..abs_start]);
-                            new_text.push_str(&replacement);
-                            new_text.push_str(&text[cursor..]);
-                            let new_cursor_offset = abs_start + replacement.len();
-
-                            let input = input.clone();
-                            cx.spawn(async move |cx| {
-                                let _ = cx.update_window(window_handle, |_, window, cx| {
-                                    input.update(cx, |state, cx| {
-                                        state.set_value(&new_text, window, cx);
-                                        let pos =
-                                            state.text().offset_to_position(new_cursor_offset);
-                                        state.set_cursor_position(pos, window, cx);
-                                    });
-                                });
-                            })
-                            .detach();
-                            cx.stop_propagation();
-                            cx.notify(editor_entity_id);
-                        }
-                        EditorAction::Execute(intent) => {
-                            services.dispatch_intent(intent);
-                            cx.stop_propagation();
-                            cx.notify(editor_entity_id);
-                        }
-                        EditorAction::ExecuteAndStripCommand {
-                            intent,
-                            strip_prefix_start,
-                        } => {
-                            // Remove the typed slash-command text ("/delete")
-                            // before dispatching — same span arithmetic as the
-                            // InsertText arm, with an empty replacement.
-                            // Without this the command text stays in the
-                            // editor and is committed to the block at the
-                            // next commit point (Loro-twin PBT face,
-                            // 2026-06-11: ref "😀" vs SUT "😀/delete").
-                            let text = input.read(cx).value().to_string();
-                            let cursor = input.read(cx).cursor();
-                            // BYTE offset of line start (cursor_position().
-                            // character is a CHAR column — subtracting it from
-                            // the byte cursor breaks on multibyte content).
-                            let line_start = text[..cursor].rfind('\n').map(|p| p + 1).unwrap_or(0);
-                            let abs_start = line_start + strip_prefix_start;
-                            if caret_probe() {
-                                eprintln!(
-                                    "[slash-strip] windowed arm: text={text:?} cursor={cursor} \
-                                     abs_start={abs_start}"
-                                );
-                            }
-                            let mut new_text = String::with_capacity(text.len());
-                            new_text.push_str(&text[..abs_start]);
-                            new_text.push_str(&text[cursor..]);
-
-                            let input = input.clone();
-                            let services_for_dispatch = services.clone();
-                            let rt = services.runtime_handle();
-                            // ONE ordered spawn: (B) strip the typed "/command"
-                            // from the editor FIRST, THEN dispatch. Previously
-                            // the strip ran in a SEPARATE detached spawn that
-                            // raced the synchronous `dispatch_intent`, so the
-                            // menu-trigger `/` was still in the origin's content
-                            // when `convert_block_to_page` read it (GPUI dogfood
-                            // 2026-07-20, bug a2). Sequencing strip→dispatch in
-                            // one future removes that race.
-                            //
-                            // (D) EVERY menu-dispatched op now goes through the
-                            // awaitable path so a backend failure surfaces as a
-                            // visible toast — fail-loud, not a lone
-                            // `tracing::error!`. Before, only
-                            // `instantiate_template` got the toast; convert (and
-                            // every other slash op) failed silently (bug a3).
-                            cx.spawn(async move |cx| {
-                                let _ = cx.update_window(window_handle, |_, window, cx| {
-                                    input.update(cx, |state, cx| {
-                                        state.set_value(&new_text, window, cx);
-                                        let pos = state.text().offset_to_position(abs_start);
-                                        state.set_cursor_position(pos, window, cx);
-                                    });
-                                });
-                                let (tx, rx) = tokio::sync::oneshot::channel::<Option<String>>();
-                                rt.spawn(async move {
-                                    let outcome = services_for_dispatch
-                                        .dispatch_intent_awaitable(intent)
-                                        .await
-                                        .err()
-                                        .map(|e| format!("{e:#}"));
-                                    let _ = tx.send(outcome);
-                                });
-                                if let Ok(Some(detail)) = rx.await {
-                                    let _ = cx.update_window(window_handle, |_, _window, cx| {
-                                        crate::share_ui::DegradedToastSink::push(
-                                            crate::share_ui::DegradedToast {
-                                                kind: crate::share_ui::DegradedKind::CommandFailed,
-                                                shared_tree_id: "command".into(),
-                                                detail,
-                                                condition: None,
-                                            },
-                                            cx,
-                                        );
-                                    });
-                                }
-                            })
-                            .detach();
-                            cx.stop_propagation();
-                            cx.notify(editor_entity_id);
-                        }
-                        EditorAction::CommandFailed {
-                            message,
-                            strip_prefix_start,
-                        } => {
-                            // A menu selection was handled but failed. Fail-loud:
-                            // (1) strip the typed "/command" text (same span
-                            // arithmetic as ExecuteAndStripCommand), (2) surface a
-                            // visible toast, (3) consume the Enter so it does NOT
-                            // fall through to split_block (the selection already
-                            // consumed the key — a stray split would be silent
-                            // corruption). This is the fix for the live-drive
-                            // regression where a failed template insert split the
-                            // block instead of reporting the failure.
-                            if let Some(strip_prefix_start) = strip_prefix_start {
-                                let text = input.read(cx).value().to_string();
-                                let cursor = input.read(cx).cursor();
-                                let line_start =
-                                    text[..cursor].rfind('\n').map(|p| p + 1).unwrap_or(0);
-                                let abs_start = line_start + strip_prefix_start;
-                                let mut new_text = String::with_capacity(text.len());
-                                new_text.push_str(&text[..abs_start]);
-                                new_text.push_str(&text[cursor..]);
-                                let input = input.clone();
-                                cx.spawn(async move |cx| {
-                                    let _ = cx.update_window(window_handle, |_, window, cx| {
-                                        input.update(cx, |state, cx| {
-                                            state.set_value(&new_text, window, cx);
-                                            let pos = state.text().offset_to_position(abs_start);
-                                            state.set_cursor_position(pos, window, cx);
-                                        });
-                                    });
-                                })
-                                .detach();
-                            }
-                            crate::share_ui::DegradedToastSink::push(
-                                crate::share_ui::DegradedToast {
-                                    kind: crate::share_ui::DegradedKind::CommandFailed,
-                                    shared_tree_id: "command".into(),
-                                    detail: message,
-                                    condition: None,
-                                },
-                                cx,
-                            );
-                            cx.stop_propagation();
-                            cx.notify(editor_entity_id);
-                        }
-                        EditorAction::PopupDismissed | EditorAction::UpdatePopup => {
-                            cx.stop_propagation();
-                            cx.notify(editor_entity_id);
-                        }
                         EditorAction::None => {
                             // No popup active → split the block at the cursor.
                             // We can't rely on Enter bubbling to lib.rs's chord
@@ -1553,21 +1437,37 @@ impl Render for EditorView {
                         EditorAction::Propagate => {
                             cx.propagate();
                         }
-                        EditorAction::PopupActivated { .. } => {
-                            // Enter shouldn't activate a popup, but handle gracefully
-                            cx.stop_propagation();
-                            cx.notify(editor_entity_id);
-                        }
+                        // `apply_popup_action` hands back only `None` and
+                        // `Propagate`; every popup outcome was applied there.
+                        _ => cx.propagate(),
                     }
                 }
             })
             .capture_action({
                 let ctrl = self.controller.clone();
+                let input = self.input.clone();
+                let services = self.services.clone();
                 move |_: &Escape, _window, cx: &mut App| {
                     let action = ctrl.lock().unwrap().on_key(EditorKey::Escape);
-                    if !matches!(action, EditorAction::Propagate | EditorAction::None) {
+                    // Escape out of a picker phase carries the command text
+                    // back into the block, so it needs the same text surgery
+                    // the other popup outcomes do.
+                    if let PopupActionOutcome::NotPopup(action) = apply_popup_action(
+                        action,
+                        &ctrl,
+                        &input,
+                        &services,
+                        window_handle,
+                        editor_entity_id,
+                        cx,
+                    ) {
+                        if !matches!(action, EditorAction::Propagate | EditorAction::None) {
+                            cx.stop_propagation();
+                            cx.notify(editor_entity_id);
+                        }
+                    } else {
+                        // The Escape cancelled a picker phase; it is spent.
                         cx.stop_propagation();
-                        cx.notify(editor_entity_id);
                     }
                 }
             })
@@ -1584,6 +1484,30 @@ impl Render for EditorView {
                 let ctrl = self.controller.clone();
                 move |_: &Backspace, _window, cx: &mut App| {
                     let cursor_byte = input.read(cx).cursor();
+                    // A picker phase whose command text is hidden owns the
+                    // backspace at its anchor: it cancels the phase and puts the
+                    // text back. Letting the delete run first would eat into the
+                    // very region the anchor addresses, which is how a hide-time
+                    // offset ends up indexing past the end of the buffer.
+                    let text = input.read(cx).value().to_string();
+                    let (line_start, line_end) = line_bounds(&text, cursor_byte);
+                    let cancel = ctrl.lock().unwrap().cancel_hidden_phase_at_anchor(
+                        &text[line_start..line_end],
+                        cursor_byte - line_start,
+                    );
+                    if let Some(action) = cancel {
+                        apply_popup_action(
+                            action,
+                            &ctrl,
+                            &input,
+                            &services,
+                            window_handle,
+                            editor_entity_id,
+                            cx,
+                        );
+                        cx.stop_propagation();
+                        return;
+                    }
                     if cursor_byte != 0 {
                         // Not at start — let InputState handle char delete.
                         return;
@@ -1914,12 +1838,336 @@ fn popup_should_scroll_to_selection(prev: Option<usize>, selected: usize) -> boo
     prev != Some(selected)
 }
 
+/// Byte range of the line `cursor` sits on, as `(start, end)` — end exclusive
+/// of the newline. Slash-command spans are line-relative, so every arm that
+/// edits one needs both edges to stay inside the line it was typed on.
+fn line_bounds(text: &str, cursor: usize) -> (usize, usize) {
+    let start = text[..cursor].rfind('\n').map(|p| p + 1).unwrap_or(0);
+    let end = text[start..]
+        .find('\n')
+        .map(|p| start + p)
+        .unwrap_or(text.len());
+    (start, end)
+}
+
+/// What [`apply_popup_action`] did with an `EditorAction`.
+enum PopupActionOutcome {
+    /// The action was a popup outcome and has been fully applied.
+    Handled,
+    /// Not applied here (`None`, `Propagate`, `PopupActivated`). Only the
+    /// caller knows what the gesture means with no menu open, and only the
+    /// change handler can spawn a popup's item-signal watcher.
+    NotPopup(EditorAction),
+}
+
+/// Apply a popup-originated `EditorAction` to the live editor: the text
+/// surgery, the dispatch, and the toast.
+///
+/// Shared by the Enter key handler, the popup row click handler, the Escape
+/// handler and the per-keystroke change handler so all four do byte-identical
+/// work (task #45). Forking a second dispatch path here is what left every
+/// command mouse-dead in the first place.
+///
+/// Applies editor state only — CONSUMING the gesture is the caller's call,
+/// since the change handler has no key to consume.
+fn apply_popup_action(
+    action: EditorAction,
+    controller: &Arc<Mutex<EditorViewModel>>,
+    input: &Entity<InputState>,
+    services: &Arc<dyn BuilderServices>,
+    window_handle: gpui::AnyWindowHandle,
+    editor_entity_id: gpui::EntityId,
+    cx: &mut App,
+) -> PopupActionOutcome {
+    match action {
+        EditorAction::InsertText {
+            replacement,
+            prefix_start,
+        } => {
+            let text = input.read(cx).value().to_string();
+            let cursor = input.read(cx).cursor();
+            let cursor_pos = input.read(cx).cursor_position();
+            let line_start = cursor - cursor_pos.character as usize;
+            let abs_start = line_start + prefix_start;
+
+            let mut new_text = String::with_capacity(text.len() + replacement.len());
+            new_text.push_str(&text[..abs_start]);
+            new_text.push_str(&replacement);
+            new_text.push_str(&text[cursor..]);
+            let new_cursor_offset = abs_start + replacement.len();
+
+            let input = input.clone();
+            cx.spawn(async move |cx| {
+                let _ = cx.update_window(window_handle, |_, window, cx| {
+                    input.update(cx, |state, cx| {
+                        state.set_value(&new_text, window, cx);
+                        let pos = state.text().offset_to_position(new_cursor_offset);
+                        state.set_cursor_position(pos, window, cx);
+                    });
+                });
+            })
+            .detach();
+            cx.notify(editor_entity_id);
+        }
+        EditorAction::Execute(intent) => {
+            services.dispatch_intent(intent);
+            cx.notify(editor_entity_id);
+        }
+        EditorAction::ExecuteAndStripCommand {
+            intent,
+            strip_prefix_start,
+        } => {
+            // Remove the typed slash-command text ("/delete")
+            // before dispatching — same span arithmetic as the
+            // InsertText arm, with an empty replacement.
+            // Without this the command text stays in the
+            // editor and is committed to the block at the
+            // next commit point (Loro-twin PBT face,
+            // 2026-06-11: ref "😀" vs SUT "😀/delete").
+            let text = input.read(cx).value().to_string();
+            let cursor = input.read(cx).cursor();
+            // BYTE offset of line start (cursor_position().
+            // character is a CHAR column — subtracting it from
+            // the byte cursor breaks on multibyte content).
+            let line_start = text[..cursor].rfind('\n').map(|p| p + 1).unwrap_or(0);
+            let abs_start = line_start + strip_prefix_start;
+            if caret_probe() {
+                eprintln!(
+                    "[slash-strip] windowed arm: text={text:?} cursor={cursor} \
+                     abs_start={abs_start}"
+                );
+            }
+            let mut new_text = String::with_capacity(text.len());
+            new_text.push_str(&text[..abs_start]);
+            new_text.push_str(&text[cursor..]);
+
+            let input = input.clone();
+            let services_for_dispatch = services.clone();
+            let rt = services.runtime_handle();
+            // ONE ordered spawn: (B) strip the typed "/command"
+            // from the editor FIRST, THEN dispatch. Previously
+            // the strip ran in a SEPARATE detached spawn that
+            // raced the synchronous `dispatch_intent`, so the
+            // menu-trigger `/` was still in the origin's content
+            // when `convert_block_to_page` read it (GPUI dogfood
+            // 2026-07-20, bug a2). Sequencing strip→dispatch in
+            // one future removes that race.
+            //
+            // (D) EVERY menu-dispatched op now goes through the
+            // awaitable path so a backend failure surfaces as a
+            // visible toast — fail-loud, not a lone
+            // `tracing::error!`. Before, only
+            // `instantiate_template` got the toast; convert (and
+            // every other slash op) failed silently (bug a3).
+            cx.spawn(async move |cx| {
+                let _ = cx.update_window(window_handle, |_, window, cx| {
+                    input.update(cx, |state, cx| {
+                        state.set_value(&new_text, window, cx);
+                        let pos = state.text().offset_to_position(abs_start);
+                        state.set_cursor_position(pos, window, cx);
+                    });
+                });
+                let (tx, rx) = tokio::sync::oneshot::channel::<Option<String>>();
+                rt.spawn(async move {
+                    let outcome = services_for_dispatch
+                        .dispatch_intent_awaitable(intent)
+                        .await
+                        .err()
+                        .map(|e| format!("{e:#}"));
+                    let _ = tx.send(outcome);
+                });
+                if let Ok(Some(detail)) = rx.await {
+                    let _ = cx.update_window(window_handle, |_, _window, cx| {
+                        crate::share_ui::DegradedToastSink::push(
+                            crate::share_ui::DegradedToast {
+                                kind: crate::share_ui::DegradedKind::CommandFailed,
+                                shared_tree_id: "command".into(),
+                                detail,
+                                condition: None,
+                            },
+                            cx,
+                        );
+                    });
+                }
+            })
+            .detach();
+            cx.notify(editor_entity_id);
+        }
+        EditorAction::CommandFailed {
+            message,
+            strip_prefix_start,
+        } => {
+            // A menu selection was handled but failed. Fail-loud:
+            // (1) strip the typed "/command" text (same span
+            // arithmetic as ExecuteAndStripCommand), (2) surface a
+            // visible toast, (3) consume the Enter so it does NOT
+            // fall through to split_block (the selection already
+            // consumed the key — a stray split would be silent
+            // corruption). This is the fix for the live-drive
+            // regression where a failed template insert split the
+            // block instead of reporting the failure.
+            if let Some(strip_prefix_start) = strip_prefix_start {
+                let text = input.read(cx).value().to_string();
+                let cursor = input.read(cx).cursor();
+                let line_start = text[..cursor].rfind('\n').map(|p| p + 1).unwrap_or(0);
+                let abs_start = line_start + strip_prefix_start;
+                let mut new_text = String::with_capacity(text.len());
+                new_text.push_str(&text[..abs_start]);
+                new_text.push_str(&text[cursor..]);
+                let input = input.clone();
+                cx.spawn(async move |cx| {
+                    let _ = cx.update_window(window_handle, |_, window, cx| {
+                        input.update(cx, |state, cx| {
+                            state.set_value(&new_text, window, cx);
+                            let pos = state.text().offset_to_position(abs_start);
+                            state.set_cursor_position(pos, window, cx);
+                        });
+                    });
+                })
+                .detach();
+            }
+            crate::share_ui::DegradedToastSink::push(
+                crate::share_ui::DegradedToast {
+                    kind: crate::share_ui::DegradedKind::CommandFailed,
+                    shared_tree_id: "command".into(),
+                    detail: message,
+                    condition: None,
+                },
+                cx,
+            );
+            cx.notify(editor_entity_id);
+        }
+        EditorAction::HideCommandText { prefix_start, len } => {
+            // Lift the typed command out of the visible block for as long as
+            // the picker phase lasts (ruling D1.b) and hand it, plus the text
+            // that stood before it, to the controller — which owns putting it
+            // back on a cancel.
+            let text = input.read(cx).value().to_string();
+            let cursor = input.read(cx).cursor();
+            let (line_start, line_end) = line_bounds(&text, cursor);
+            let abs_start = line_start + prefix_start;
+            let abs_end = abs_start + len;
+            if abs_end > line_end
+                || !text.is_char_boundary(abs_start)
+                || !text.is_char_boundary(abs_end)
+            {
+                // The menu's idea of the command no longer fits the line it was
+                // typed on. Leave the text visible rather than cutting a span
+                // that means nothing — degraded, but disclosed and not corrupt.
+                tracing::error!(
+                    abs_start,
+                    abs_end,
+                    line_end,
+                    "slash-command hide span does not fit its line; leaving the command text visible"
+                );
+                cx.notify(editor_entity_id);
+                return PopupActionOutcome::Handled;
+            }
+            let hidden = text[abs_start..abs_end].to_string();
+            let line_prefix = text[line_start..abs_start].to_string();
+            let mut new_text = String::with_capacity(text.len());
+            new_text.push_str(&text[..abs_start]);
+            new_text.push_str(&text[abs_end..]);
+            controller
+                .lock()
+                .unwrap()
+                .command_text_hidden(line_prefix, hidden);
+
+            let input = input.clone();
+            cx.spawn(async move |cx| {
+                let _ = cx.update_window(window_handle, |_, window, cx| {
+                    input.update(cx, |state, cx| {
+                        state.set_value(&new_text, window, cx);
+                        let pos = state.text().offset_to_position(abs_start);
+                        state.set_cursor_position(pos, window, cx);
+                    });
+                });
+            })
+            .detach();
+            cx.notify(editor_entity_id);
+        }
+        EditorAction::RestoreCommandText {
+            line_prefix,
+            text: restored,
+        } => {
+            // The picker was cancelled: put the command text back verbatim, in
+            // front of whatever search term the user had typed.
+            //
+            // The anchor is RE-DERIVED from the live line rather than taken as
+            // a hide-time offset. An offset captured when the text was hidden
+            // stops addressing the same place the moment the line changes under
+            // it, and slicing with it either panics or reinserts the command
+            // somewhere the user never typed it.
+            let text = input.read(cx).value().to_string();
+            let cursor = input.read(cx).cursor();
+            let (line_start, line_end) = line_bounds(&text, cursor);
+            if !text[line_start..line_end].starts_with(line_prefix.as_str()) {
+                tracing::warn!(
+                    line_prefix = %line_prefix,
+                    restored = %restored,
+                    "the line no longer starts with the hidden command's prefix; not restoring it"
+                );
+                cx.notify(editor_entity_id);
+                return PopupActionOutcome::Handled;
+            }
+            let abs_start = line_start + line_prefix.len();
+            let mut new_text = String::with_capacity(text.len() + restored.len());
+            new_text.push_str(&text[..abs_start]);
+            new_text.push_str(&restored);
+            new_text.push_str(&text[abs_start..]);
+            let new_cursor = cursor.max(abs_start) + restored.len();
+            let restored_line = new_text[line_start..line_end + restored.len()].to_string();
+            controller
+                .lock()
+                .unwrap()
+                .command_text_restored(restored_line);
+
+            let input = input.clone();
+            cx.spawn(async move |cx| {
+                let _ = cx.update_window(window_handle, |_, window, cx| {
+                    input.update(cx, |state, cx| {
+                        state.set_value(&new_text, window, cx);
+                        let pos = state.text().offset_to_position(new_cursor);
+                        state.set_cursor_position(pos, window, cx);
+                    });
+                });
+            })
+            .detach();
+            cx.notify(editor_entity_id);
+        }
+        EditorAction::PopupDismissed | EditorAction::UpdatePopup => {
+            cx.notify(editor_entity_id);
+        }
+        // `PopupActivated` is a SUBSCRIPTION to set up, not editor text to
+        // edit, and only the change handler's context can spawn the item-signal
+        // watcher. Swallowing it here left the menu permanently empty.
+        action @ (EditorAction::None
+        | EditorAction::Propagate
+        | EditorAction::PopupActivated { .. }) => {
+            return PopupActionOutcome::NotPopup(action);
+        }
+    }
+    PopupActionOutcome::Handled
+}
+
+/// Everything a popup row's mouse handler needs to run the picked command.
+/// Cloned per render pass and moved into each row's `on_mouse_down`.
+#[derive(Clone)]
+struct PopupClickTarget {
+    controller: Arc<Mutex<EditorViewModel>>,
+    input: Entity<InputState>,
+    services: Arc<dyn BuilderServices>,
+    window_handle: gpui::AnyWindowHandle,
+    editor_entity_id: gpui::EntityId,
+}
+
 fn render_popup(
     state: &PopupState,
     bounds_registry: &BoundsRegistry,
     scroll: &ScrollHandle,
     max_height_px: f32,
     scroll_to_selection: bool,
+    click_target: &PopupClickTarget,
     cx: &App,
 ) -> Deferred {
     use gpui::div;
@@ -1966,7 +2214,39 @@ fn render_popup(
                 .px_2()
                 .py_1()
                 .rounded(px(4.0))
-                .when(is_selected, |d| d.bg(selected_bg).text_color(selected_text));
+                .when(is_selected, |d| d.bg(selected_bg).text_color(selected_text))
+                // A pointer pick runs the SAME `select_current` an Enter on
+                // this row would (task #45: the rows carried no handler at
+                // all, so every slash command was mouse-dead). Mouse-DOWN,
+                // not click: the press must beat the editor's own focus
+                // handling, and the menu is gone by the time the button
+                // comes back up.
+                .on_mouse_down(gpui::MouseButton::Left, {
+                    let target = click_target.clone();
+                    // The id this row PAINTED. Items refill asynchronously, so
+                    // the index alone can address a different command by the
+                    // time the click lands; the controller runs the row only
+                    // while the index still holds this id.
+                    let clicked_id = item.id.clone();
+                    move |_event, _window, cx: &mut App| {
+                        let action = target
+                            .controller
+                            .lock()
+                            .unwrap()
+                            .on_popup_item_clicked(i, &clicked_id);
+                        apply_popup_action(
+                            action,
+                            &target.controller,
+                            &target.input,
+                            &target.services,
+                            target.window_handle,
+                            target.editor_entity_id,
+                            cx,
+                        );
+                        cx.stop_propagation();
+                        cx.notify(target.editor_entity_id);
+                    }
+                });
 
             if let Some(icon) = &item.icon {
                 row = row.child(

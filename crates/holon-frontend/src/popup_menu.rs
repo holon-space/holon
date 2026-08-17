@@ -33,6 +33,16 @@ pub enum PopupResult {
     NotActive,
     /// Popup state updated, frontend should re-render.
     Updated,
+    /// The pick was consumed and the provider moved to a FOLLOW-UP PHASE of the
+    /// same command (e.g. `embed_entity`'s target picker). The menu stays open
+    /// on the new phase.
+    ///
+    /// `hide` is the span of typed command text the frontend must take out of
+    /// the visible block for as long as this phase lasts, bringing it back
+    /// verbatim if the phase is cancelled (ruling D1.b). `None` for callers
+    /// that manage their own editor text (the headless mirror), which keep the
+    /// command text where it is.
+    PhaseAdvanced { hide: Option<HideSpan> },
     /// Popup dismissed.
     Dismissed,
     /// Dispatch an operation (slash commands).
@@ -62,6 +72,19 @@ pub enum PopupResult {
         message: String,
         strip_prefix_start: Option<usize>,
     },
+}
+
+/// The span of typed command text a picker phase hides, in bytes relative to
+/// the start of its line.
+///
+/// `len` is what the MENU matched on — the trigger char plus the filter the
+/// provider searched with — NOT a span derived from where the caret happens to
+/// sit. A caret moved back into the middle of `/emb` before picking would
+/// otherwise leave the tail of the command visible in the block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HideSpan {
+    pub prefix_start: usize,
+    pub len: usize,
 }
 
 /// Keyboard keys the popup menu handles.
@@ -226,6 +249,35 @@ impl PopupMenu {
         }
     }
 
+    /// Select the item at `index` — the pointer equivalent of pressing Enter
+    /// on it. Moves the highlight there first so the selection the provider
+    /// sees, and the one the user saw highlighted, are the same row.
+    ///
+    /// `expected_id` is the id of the row the user actually clicked, and the
+    /// index is only honoured while it still holds that row. Items refill
+    /// asynchronously — the entity and link pickers query SQL — so between
+    /// paint and click a row can vanish OR be replaced by a different command
+    /// at the same index. Trusting the index alone would run a command the
+    /// user never saw. Either way it is a stale gesture, not a program error,
+    /// so it returns `NotActive` exactly like an Enter on an emptied menu.
+    pub fn select_index(&mut self, index: usize, expected_id: &str) -> PopupResult {
+        if !self.is_active() {
+            return PopupResult::NotActive;
+        }
+        let still_that_row = self
+            .items
+            .lock()
+            .unwrap()
+            .get(index)
+            .is_some_and(|item| item.id == expected_id);
+        if !still_that_row {
+            tracing::debug!(index, expected_id, "stale popup click ignored");
+            return PopupResult::NotActive;
+        }
+        self.selected_index = index;
+        self.select_current()
+    }
+
     fn select_current(&mut self) -> PopupResult {
         let provider = match &self.provider {
             Some(p) => p.clone(),
@@ -242,11 +294,11 @@ impl PopupMenu {
         drop(items);
 
         let result = provider.on_select(&item, &filter);
-        // `Updated` means the provider consumed the pick and moved to a next
-        // phase (e.g. embed_entity's target picker) — dismissing there would
-        // drop the provider holding that phase's state. Every other result is
-        // terminal for this menu.
-        if !matches!(result, PopupResult::Updated) {
+        // `PhaseAdvanced` means the provider consumed the pick and moved to a
+        // next phase (e.g. embed_entity's target picker) — dismissing there
+        // would drop the provider holding that phase's state. Every other
+        // result is terminal for this menu.
+        if !matches!(result, PopupResult::PhaseAdvanced { .. }) {
             self.dismiss();
         }
         result
@@ -390,6 +442,59 @@ mod tests {
         let result = menu.on_key(MenuKey::Enter);
         assert!(matches!(result, PopupResult::Execute { op_name, .. } if op_name == "delete"));
         assert!(!menu.is_active());
+    }
+
+    /// A pointer pick runs the row the user SAW, identified by its id — not
+    /// whatever now sits at that render-pass index.
+    #[test]
+    fn click_runs_the_clicked_row() {
+        let mut menu = PopupMenu::new();
+        let provider = Arc::new(MockProvider::new(test_items()));
+        let _signal = menu.activate(provider, "");
+        *menu.items.lock().unwrap() = test_items();
+
+        let result = menu.select_index(1, "embed");
+        assert!(
+            matches!(result, PopupResult::Execute { ref op_name, .. } if op_name == "embed"),
+            "clicking row 1 must run row 1's command, got {result:?}"
+        );
+    }
+
+    /// VERIFIER DEFECT 3. Items refill asynchronously — the entity and link
+    /// pickers query SQL — so between paint and click a different command can
+    /// occupy the same index. Dispatching on the index alone would silently run
+    /// a command the user never saw. The stale click is dropped instead.
+    #[test]
+    fn click_on_a_row_the_list_replaced_is_ignored() {
+        let mut menu = PopupMenu::new();
+        let provider = Arc::new(MockProvider::new(test_items()));
+        let _signal = menu.activate(provider, "");
+        *menu.items.lock().unwrap() = test_items();
+
+        // The user clicked the row painted as `embed`, but by the time the
+        // click lands the list has been refilled and index 1 holds `set_field`.
+        *menu.items.lock().unwrap() = vec![
+            PopupItem {
+                id: "delete".into(),
+                label: "Delete".into(),
+                icon: None,
+            },
+            PopupItem {
+                id: "set_field".into(),
+                label: "Set Field".into(),
+                icon: None,
+            },
+        ];
+
+        let result = menu.select_index(1, "embed");
+        assert!(
+            matches!(result, PopupResult::NotActive),
+            "a click against a row the list has replaced must run NOTHING, got {result:?}"
+        );
+        assert!(
+            menu.is_active(),
+            "a stale click must not tear down the still-open menu"
+        );
     }
 
     #[test]

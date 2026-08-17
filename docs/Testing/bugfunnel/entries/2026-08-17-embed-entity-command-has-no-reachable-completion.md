@@ -3,7 +3,7 @@ id: 2026-08-17-embed-entity-command-has-no-reachable-completion
 date: 2026-08-17
 gap: ORACLE
 secondary: ENVIRONMENT
-status: PARTIAL
+status: FIXED
 summary: >-
   Selecting the "Embed Entity" slash command split the block and left the
   literal "/enti" behind instead of running the command.
@@ -98,14 +98,38 @@ Oracle added — `crates/holon-app/tests/slashmenu_correspondence.rs`:
   `[("embed_entity", "NotActive")]`.
 - `embed_entity_opens_the_target_picker` pins the specific dogfood witness.
 
-Open:
+Fixed (click path, lane `lane-popup-ux`, task #45):
 
-- **The double-click is still dead** (defect 2), for all slash commands.
-  Wiring it needs the GPUI Enter arm's result handling factored out so a click
-  can share it; that work is GPUI-side and unverifiable in this lane (the
-  workspace cannot build `holon-gpui` — the Metal toolchain is absent), and no
-  gate executes windowed tests (see the open item about
-  `seeded_accordion_panel_smoke`). Tracked separately.
-- The editor keeps the typed `/enti` visible while the target picker is open;
-  the provider re-bases the search term by stripping that prefix, and the text
-  is removed when the operation executes.
+- `crates/holon-frontend/src/popup_menu.rs` — `PopupMenu::select_index` moves
+  the highlight to the clicked row and then runs the SAME `select_current` the
+  Enter key runs, so a pointer pick cannot drift from a keyboard pick.
+- `crates/holon-frontend/src/editor_view_model.rs` —
+  `EditorViewModel::on_popup_item_clicked` maps that through the existing
+  `popup_result_to_action`.
+- `frontends/gpui/src/views/editor_view.rs` — the Enter arm's result handling
+  is factored out into `apply_popup_action`, and each popup row now carries an
+  `on_mouse_down` that calls it. Escape routes through it too, since cancelling
+  a picker phase now edits the editor text.
+
+Oracle added — `frontends/gpui/tests/popup_row_click_windowed.rs`:
+`clicking_a_popup_row_runs_the_command_just_like_enter` runs `delete` from the
+slash menu twice in one window, by keyboard then by mouse, and requires the two
+to leave the same buffer. Red before the fix with the keyboard leg at `""` and
+the mouse leg still holding `/del`.
+
+Fixed (visible command text, lane `lane-popup-ux`, task #47, ruling D1.b):
+
+- `PopupResult::PhaseAdvanced { hide_prefix_start }` replaces the bare
+  `Updated` a provider returned when moving to a follow-up phase, carrying the
+  instruction to hide the typed command.
+- `EditorAction::HideCommandText` / `RestoreCommandText` — the frontend lifts
+  the command text out of the visible block and hands it to the controller,
+  which puts it back verbatim if the phase is cancelled. `on_text_changed`
+  routes keystrokes straight to the picker's filter while the text is hidden,
+  because with the `/` gone there is no trigger left to re-match.
+- `CommandProvider` no longer prefix-strips the command out of the filter when
+  the frontend hides it — the filter IS the search term then.
+
+Oracle added — `frontends/gpui/tests/slash_command_text_hidden_windowed.rs`:
+the phase hides `/emb`, Escape restores it verbatim, and typing a search term
+leaves only the term visible while a later Escape restores `/embproj`.

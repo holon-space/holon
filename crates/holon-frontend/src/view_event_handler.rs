@@ -125,6 +125,7 @@ impl ViewEventHandler {
                 action,
                 filter_text,
                 prefix_start,
+                prefix_len,
             } => match action.as_str() {
                 "command_menu" => {
                     if !self.popup.is_active() {
@@ -139,7 +140,7 @@ impl ViewEventHandler {
                             self.operations.clone(),
                             self.context_params.clone(),
                         )
-                        .with_prefix_start(prefix_start)
+                        .with_trigger_span(prefix_start, prefix_len)
                         .with_templates(templates);
                         // Resolve the picked block's REAL content/parent at
                         // execute time (not from the id-only context_params),
@@ -252,6 +253,15 @@ impl ViewEventHandler {
         PopupResult::NotActive
     }
 
+    /// Forward a pointer selection of the row at `index`, which the frontend
+    /// painted showing `expected_id`, to the active popup.
+    pub fn on_item_clicked(&mut self, index: usize, expected_id: &str) -> PopupResult {
+        if self.popup.is_active() {
+            return self.popup.select_index(index, expected_id);
+        }
+        PopupResult::NotActive
+    }
+
     /// Whether any overlay (popup menu, autocomplete, etc.) is currently
     /// active.
     pub fn is_overlay_active(&self) -> bool {
@@ -306,6 +316,7 @@ mod tests {
             action: "doc_link".into(),
             filter_text: "foo".into(),
             prefix_start: 0,
+            prefix_len: 2,
         });
         assert!(
             matches!(result, HandleResult::PopupResult(PopupResult::NotActive)),
@@ -323,6 +334,7 @@ mod tests {
             action: "doc_link".into(),
             filter_text: "foo".into(),
             prefix_start: 0,
+            prefix_len: 2,
         });
         assert!(
             matches!(result, HandleResult::Activated { .. }),

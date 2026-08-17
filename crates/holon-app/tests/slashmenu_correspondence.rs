@@ -336,7 +336,7 @@ async fn every_listed_command_has_a_reachable_completion() {
         let provider = CommandProvider::new(wirings.clone(), id_ctx.clone());
         match provider.on_select(item, "") {
             // Executes now, or opens the param picker — both are reachable.
-            PopupResult::Execute { .. } | PopupResult::Updated => {}
+            PopupResult::Execute { .. } | PopupResult::PhaseAdvanced { .. } => {}
             other => dead_ends.push((item.id.clone(), format!("{other:?}"))),
         }
     }
@@ -378,7 +378,7 @@ async fn embed_entity_opens_the_target_picker() {
     let result = provider.on_select(&item, "enti");
 
     assert!(
-        matches!(result, PopupResult::Updated),
+        matches!(result, PopupResult::PhaseAdvanced { .. }),
         "selecting Embed Entity must keep the popup open to collect \
          `target_uri`; got {result:?}"
     );

@@ -99,6 +99,29 @@ pub enum EditorAction {
         message: String,
         strip_prefix_start: Option<usize>,
     },
+
+    /// A picker phase of a slash command opened. The frontend must remove
+    /// `line_start + prefix_start .. line_start + prefix_start + len` from the
+    /// visible editor and report what it removed back through
+    /// [`EditorViewModel::command_text_hidden`], which holds it until the phase
+    /// ends (ruling D1.b — the typed command must not sit in the block while
+    /// its picker is open).
+    ///
+    /// `len` is the span the MENU matched on, not one derived from the caret:
+    /// a caret moved back into the middle of `/emb` would otherwise leave the
+    /// tail visible.
+    HideCommandText { prefix_start: usize, len: usize },
+
+    /// A picker phase whose command text was hidden was CANCELLED. The frontend
+    /// must put `text` back verbatim, directly after `line_prefix`, and leave
+    /// the caret after it — the user's typing must survive the cancel exactly
+    /// as they left it.
+    ///
+    /// The anchor travels as the PREFIX BYTES rather than an offset so the
+    /// frontend re-derives it from the live line. An offset captured at hide
+    /// time silently stops addressing the same place the moment anything on
+    /// the line changes.
+    RestoreCommandText { line_prefix: String, text: String },
 }
 
 impl std::fmt::Debug for EditorAction {
@@ -136,7 +159,45 @@ impl std::fmt::Debug for EditorAction {
                 "CommandFailed {{ message: {:?}, strip_prefix_start: {:?} }}",
                 message, strip_prefix_start
             ),
+            Self::HideCommandText { prefix_start, len } => {
+                write!(
+                    f,
+                    "HideCommandText {{ prefix_start: {prefix_start}, len: {len} }}"
+                )
+            }
+            Self::RestoreCommandText { line_prefix, text } => write!(
+                f,
+                "RestoreCommandText {{ line_prefix: {line_prefix:?}, text: {text:?} }}"
+            ),
         }
+    }
+}
+
+/// Slash-command text held out of the visible editor while a picker phase of
+/// that command is open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HiddenCommandText {
+    /// The text that stood BEFORE the hidden command on its line at hide time.
+    ///
+    /// The restore anchor is this string's length, but it can only be used
+    /// after proving the live line still starts with exactly these bytes —
+    /// which is what [`Self::anchor_in`] does. Holding the bytes instead of the
+    /// offset is what makes a stale anchor unrepresentable: an offset captured
+    /// at hide time keeps looking valid after the line under it has changed,
+    /// and slicing with it panics or reinserts the command in the wrong place.
+    pub line_prefix: String,
+    /// The removed text, including the trigger char.
+    pub text: String,
+}
+
+impl HiddenCommandText {
+    /// Byte offset within `current_line` where the hidden text belongs, or
+    /// `None` when the line no longer starts with the recorded prefix — the
+    /// user edited across the anchor and there is no such place any more.
+    pub fn anchor_in(&self, current_line: &str) -> Option<usize> {
+        current_line
+            .starts_with(self.line_prefix.as_str())
+            .then_some(self.line_prefix.len())
     }
 }
 
@@ -197,6 +258,21 @@ pub struct EditorViewModel {
     /// frontend that births blocks from creation affordances. `None` for
     /// headless/unit editors, which have no reaper to race.
     ephemeral_newborns: Option<Arc<crate::creation_slot::EphemeralNewborns>>,
+    /// The typed slash-command text the frontend removed from the visible
+    /// editor for the duration of a picker phase (ruling D1.b), with the
+    /// line-relative offset it was removed from. `Some` exactly while a phase
+    /// is hiding it; the text goes back verbatim when the phase is cancelled.
+    hidden_command: Option<HiddenCommandText>,
+    /// The exact line a [`EditorAction::RestoreCommandText`] is about to
+    /// produce. Re-inserting the command text is a programmatic edit that fires
+    /// the same change event a keystroke does, and the re-inserted `/` would
+    /// instantly re-open the menu the user just escaped out of.
+    ///
+    /// Matching on the CONTENT rather than arming a bare one-shot keeps this
+    /// self-limiting: if the programmatic change event never arrives, the next
+    /// real keystroke produces a different line and is handled normally instead
+    /// of being swallowed.
+    restoring_to: Option<String>,
     /// The owning document's `#+TODO:` vocabulary, read once per focus. It
     /// governs what the editable surface SHOWS (the source projection and its
     /// refusals) and, through [`Self::surface`], which channel its commits
@@ -237,6 +313,8 @@ impl EditorViewModel {
             last_local_seq: holon_api::write_seq::WriteSeq::ZERO.get(),
             pending_directive: None,
             ephemeral_newborns: None,
+            hidden_command: None,
+            restoring_to: None,
             vocabulary: None,
             surface: crate::editor_source::Surface::Pending,
             surface_prefix: 0,
@@ -711,6 +789,48 @@ impl EditorViewModel {
     /// `cursor_byte` is the cursor BYTE offset within that line (GPUI callers
     /// convert their character column first — see `check_triggers`).
     pub fn on_text_changed(&mut self, current_line: &str, cursor_byte: usize) -> EditorAction {
+        if let Some(expected) = &self.restoring_to {
+            let is_the_restore = expected == current_line;
+            self.restoring_to = None;
+            if is_the_restore {
+                // Our own re-insertion coming back as a change event. Letting it
+                // reach `check_triggers` would re-open the menu on the `/` we
+                // just put back, undoing the user's Escape.
+                return EditorAction::None;
+            }
+        }
+        if let Some(hidden) = &self.hidden_command {
+            // While a picker phase hides its command text there is no trigger
+            // char left on the line, so `check_triggers` would find nothing and
+            // read the phase as dismissed on the very next keystroke. The phase
+            // owns the input instead: what the user has typed since it opened
+            // IS the search term.
+            match hidden.anchor_in(current_line) {
+                Some(anchor) if cursor_byte >= anchor => {
+                    let term = current_line[anchor..cursor_byte].to_string();
+                    self.handler.popup.on_text_changed(&term);
+                    return EditorAction::UpdatePopup;
+                }
+                _ => {
+                    // The edit crossed the anchor, so there is no longer a place
+                    // on this line where the command text belongs. End the phase
+                    // and say so, rather than reinserting it somewhere the user
+                    // never typed it. Backspace at the anchor does NOT land here
+                    // — the frontend intercepts that and cancels the phase with
+                    // a proper restore (`cancel_hidden_phase_at_anchor`).
+                    tracing::warn!(
+                        hidden = %hidden.text,
+                        line = %current_line,
+                        "an edit crossed the hidden slash-command anchor; ending the picker \
+                         phase and dropping the command text"
+                    );
+                    self.handler.popup.dismiss();
+                    self.hidden_command = None;
+                    return EditorAction::PopupDismissed;
+                }
+            }
+        }
+
         let view_event = input_trigger::check_triggers(&self.triggers, current_line, cursor_byte);
 
         let result = if let Some(event) = view_event {
@@ -853,6 +973,64 @@ impl EditorViewModel {
         self.popup_result_to_action(result)
     }
 
+    /// Called when the user clicks the popup row at `index`.
+    ///
+    /// Deliberately shares `PopupMenu::select_current` with the Enter key
+    /// rather than dispatching itself: a pointer pick and a keyboard pick must
+    /// produce the same `PopupResult` for the same row, and a second dispatch
+    /// path would drift (task #45 — the rows had no handler at all, so every
+    /// command was mouse-dead).
+    pub fn on_popup_item_clicked(&mut self, index: usize, expected_id: &str) -> EditorAction {
+        let result = self.handler.on_item_clicked(index, expected_id);
+        self.popup_result_to_action(result)
+    }
+
+    /// Report what the frontend removed from the visible editor in response to
+    /// [`EditorAction::HideCommandText`]: the command `text` and the
+    /// `line_prefix` that stood before it. The controller holds both until the
+    /// picker phase ends, so a cancel can put the text back verbatim.
+    pub fn command_text_hidden(&mut self, line_prefix: String, text: String) {
+        self.hidden_command = Some(HiddenCommandText { line_prefix, text });
+    }
+
+    /// Report the line a [`EditorAction::RestoreCommandText`] just produced, so
+    /// the change event that re-insertion fires is not mistaken for the user
+    /// typing the trigger again.
+    pub fn command_text_restored(&mut self, restored_line: String) {
+        self.restoring_to = Some(restored_line);
+    }
+
+    /// The slash-command text currently held out of the visible editor.
+    pub fn hidden_command_text(&self) -> Option<&HiddenCommandText> {
+        self.hidden_command.as_ref()
+    }
+
+    /// Backspace pressed exactly at an open picker phase's hide anchor: cancel
+    /// the phase and put its command text back, consuming the keystroke.
+    ///
+    /// Without this, the delete runs first and eats into the very region the
+    /// anchor addresses — which is how a hide-time offset ends up indexing past
+    /// the end of the buffer. Intercepting keeps the only reachable way out of
+    /// a phase on the restoring path.
+    ///
+    /// `None` when no phase is hiding text or the caret is elsewhere, so the
+    /// frontend's normal delete runs.
+    pub fn cancel_hidden_phase_at_anchor(
+        &mut self,
+        current_line: &str,
+        cursor_byte: usize,
+    ) -> Option<EditorAction> {
+        if self.hidden_command.as_ref()?.anchor_in(current_line)? != cursor_byte {
+            return None;
+        }
+        let hidden = self.hidden_command.take().expect("checked just above");
+        self.handler.popup.dismiss();
+        Some(EditorAction::RestoreCommandText {
+            line_prefix: hidden.line_prefix,
+            text: hidden.text,
+        })
+    }
+
     /// Whether the popup overlay is currently visible.
     pub fn is_popup_active(&self) -> bool {
         self.handler.is_overlay_active()
@@ -913,18 +1091,42 @@ impl EditorViewModel {
         ))
     }
 
-    fn handle_result_to_action(&self, result: HandleResult) -> EditorAction {
+    fn handle_result_to_action(&mut self, result: HandleResult) -> EditorAction {
         match result {
             HandleResult::Activated { signal } => EditorAction::PopupActivated { signal },
             HandleResult::PopupResult(pr) => self.popup_result_to_action(pr),
         }
     }
 
-    fn popup_result_to_action(&self, result: PopupResult) -> EditorAction {
+    fn popup_result_to_action(&mut self, result: PopupResult) -> EditorAction {
+        // Every terminal result consumes the command: the frontend's own
+        // `strip_prefix_start` handling removes what is left on the line, so
+        // the hidden text must NOT come back on top of it.
+        if matches!(
+            result,
+            PopupResult::Execute { .. }
+                | PopupResult::InsertText { .. }
+                | PopupResult::Failed { .. }
+        ) {
+            self.hidden_command = None;
+        }
         match result {
             PopupResult::NotActive => EditorAction::None,
             PopupResult::Updated => EditorAction::UpdatePopup,
-            PopupResult::Dismissed => EditorAction::PopupDismissed,
+            PopupResult::PhaseAdvanced { hide: Some(span) } => EditorAction::HideCommandText {
+                prefix_start: span.prefix_start,
+                len: span.len,
+            },
+            // A caller that manages its own editor text (the headless mirror)
+            // has nothing to hide — the phase change is just a re-render.
+            PopupResult::PhaseAdvanced { hide: None } => EditorAction::UpdatePopup,
+            PopupResult::Dismissed => match self.hidden_command.take() {
+                Some(hidden) => EditorAction::RestoreCommandText {
+                    line_prefix: hidden.line_prefix,
+                    text: hidden.text,
+                },
+                None => EditorAction::PopupDismissed,
+            },
             PopupResult::Execute {
                 entity_name,
                 op_name,
