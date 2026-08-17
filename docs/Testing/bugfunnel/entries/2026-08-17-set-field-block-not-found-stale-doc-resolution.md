@@ -2,10 +2,10 @@
 id: 2026-08-17-set-field-block-not-found-stale-doc-resolution
 date: 2026-08-17
 gap: COVERAGE
-status: OPEN
+status: FIXED
 summary: >-
-  set_field failed twice with "Block not found" against ids that
-  find_doc_for_block had just resolved successfully.
+  The focus-leave commit funnel re-dispatched text the keystroke sink had
+  already persisted, landing on the block join_block had just consumed.
 ---
 
 ## Bug
@@ -18,42 +18,62 @@ found: block:c76e5c74-a47a-4653-a0b3-327d5b96018d` and line 8997 (id
 
 ## Root cause
 
-`LoroBlockOperations::set_field` (`crates/holon-loro/src/
-loro_block_operations.rs:428-447`) first resolves the block's owning doc via
-`find_doc_for_block(id)` — which succeeded (a doc path + backend were
-returned) — then immediately calls `backend.get_block(id)` on that SAME
-backend to capture prior state before writing, and THAT lookup reports the
-block missing. Between doc-resolution and get_block, the id stopped
-existing in the backend: either the block was deleted (or moved/merged into
-another doc) between an earlier client read and this write dispatching, or
-`find_doc_for_block`'s own resolution is itself relying on stale state
-(a routing table that still lists the doc for an id no longer inside it).
-Not investigated further — distinguishing "genuine delete race" from
-"stale routing" needs reproducing with the operation's full context (which
-op enqueued this set_field, and whether a delete/move op for the same id
-landed just before it), which the log alone doesn't carry.
+Not a race, and nothing to do with doc resolution: `find_doc_for_block`
+(`crates/holon-loro/src/loro_block_operations.rs:106`) ignores its id
+argument and returns the global backend, so its "success" carries no claim
+that the block exists. The only real signal is `get_block` — the block was
+already gone.
+
+The log shows why. Both failures follow the same deterministic sequence
+~15ms apart:
+
+1. `join_block(id)` — Backspace at caret 0 — merges the block into its
+   previous sibling and DELETES it. Succeeds.
+2. Focus moves to the survivor, so the departing editor runs GPUI's
+   focus-leave commit funnel (`spawn_focus_binding` →
+   `EditorViewModel::pending_commit_intent`, `editor_view.rs`).
+3. That funnel dispatches `set_field(id, content=…)` against the deleted id.
+
+The funnel fires at all because the SqlOnly keystroke sink
+(`EditorViewModel::apply_local_edit`) wrote the typed text and advanced its
+own `buffer`, but never re-baselined `ViewEventHandler::original_value` —
+the baseline the funnel diffs against. So every focused SqlOnly editor had a
+permanently-dirty commit funnel, and every focus leave re-dispatched text
+that was already stored, as a second `set_field` carrying no `write_seq`.
+The observed failures are that duplicate write arriving after the block that
+owned it was joined away. The signature in the log is exactly this: the
+successful keystroke write at 10:00:01.352 carries `write_seq: Integer(39)`,
+the failing one at 10:00:02.122 carries none.
 
 ## Missing piece
 
-COVERAGE: no keystone transition or invariant references
-`find_doc_for_block` or this "Block not found" message
-(`rg -l "find_doc_for_block|Block not found" crates/holon-integration-tests/
-src/pbt/` returns nothing) — a set_field racing a delete/move of the SAME
-block id is structurally ungeneratable by the composed keystone today.
-Thematically related to the sibling entry
-`2026-08-17-editor-drops-external-write-with-no-write-seq` (both are "a
-client operates on locally-held state that the backend has since moved past
-underneath it"), but the failure mechanism differs — this is a whole-block
-existence race, that one is a content-ordering race on an existing block —
-so filed separately rather than merged.
+COVERAGE, as filed, but one layer up from where the entry guessed. The
+composed keystone drives keystrokes through the same `EditorViewModel`
+(`HeadlessEditorMirror`), but the mirror modelled only the keystroke sink and
+the data-sync echo — it had no focus-leave commit funnel at all, so the
+second writer prod dispatches on every focus move was structurally
+ungeneratable.
 
 ## Remedy
 
-NOT FIXED. Needs the missing keystone rung (a transition that dispatches
-`set_field` against a block id concurrently deleted/moved by another
-transition) before a fix can be verified red-for-the-right-reason. Until
-then this is a disclosed, non-crashing operation failure (the caller gets a
-clean `Err`, not a panic) — severity is "an edit silently fails and the user
-sees no feedback for it" rather than data corruption, but that user-facing
-silence itself is unverified from the log (whether GPUI surfaces this Err
-as a toast is a separate question this entry doesn't answer).
+Two changes, both in `crates/holon-frontend`:
+
+* `EditorViewModel::apply_local_edit` re-baselines the commit funnel to the
+  text it just persisted. Text the sink has written is no longer pending, so
+  the focus-leave funnel emits nothing for it. Pinned red-first by
+  `the_focus_leave_funnel_does_not_recommit_what_the_keystroke_sink_wrote`
+  (`editor_view_model.rs`); without the fix it fails on
+  `pending_commit_intent` returning an intent.
+* `HeadlessEditorMirror::note_focus_settled` / `commit_departing_editor` give
+  the headless keystone the focus-leave funnel, driven from
+  `ReactiveEngineDriver::converge_editors`. Under correct behaviour it
+  dispatches nothing, so it is silent across all 62 hand-authored cases; it
+  exists so a regression of this class reaches the keystone instead of only
+  the unit test.
+
+Authoring a hand-authored case for the full gesture (split, type, backspace
+across the boundary) surfaced a SEPARATE pre-existing divergence — the
+tracked caret does not follow the join when the block was typed into first —
+which reds independently of this fix. Filed as
+`2026-08-17-join-after-typing-loses-the-merge-boundary-caret`; the case is
+held there rather than in `keystone.jsonl`.

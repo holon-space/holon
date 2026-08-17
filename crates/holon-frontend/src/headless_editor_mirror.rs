@@ -73,6 +73,10 @@ pub struct HeadlessEditorMirror {
     /// echo composition (`evaluate_data_sync_echo`) is the live headless typing
     /// path — the composition the keystone was structurally blind to before.
     editors: Mutex<HashMap<String, EditorViewModel>>,
+    /// Block the focus authority last settled on, so a move away from it can be
+    /// detected as an edge — GPUI gets the same edge from its deduped focus
+    /// signal ([`commit_departing_editor`](Self::commit_departing_editor)).
+    last_focused: Mutex<Option<String>>,
 }
 
 impl Default for HeadlessEditorMirror {
@@ -86,6 +90,7 @@ impl HeadlessEditorMirror {
         Self {
             cursors: Mutex::new(HashMap::new()),
             editors: Mutex::new(HashMap::new()),
+            last_focused: Mutex::new(None),
         }
     }
 
@@ -240,6 +245,54 @@ impl HeadlessEditorMirror {
             // fire-and-forget door production GPUI types through
             // (`editor_view.rs:1070`), which is what lets two keystrokes of one
             // `TypeChars` be in flight together.
+            crate::reactive::dispatch_intent_through_armed_door(engine, intent).await?;
+        }
+        Ok(())
+    }
+
+    /// Flush the departing editor's pending text when the focus authority
+    /// leaves `block_id` — the headless twin of GPUI's focus-binding commit
+    /// (`editor_view.rs`, `spawn_focus_binding`). No-op when no VM is open.
+    ///
+    /// The funnel fires AFTER whatever op moved the focus, and its `set_field`
+    /// carries no `write_seq`, so anything it emits for text the keystroke sink
+    /// already wrote is an unordered duplicate — and lands on nothing at all
+    /// when the mover was the `join_block` that consumed this block.
+    /// Record where the focus authority has settled and, when that is a move
+    /// off another block, run the departed editor's focus-leave commit funnel.
+    pub async fn note_focus_settled(
+        &self,
+        engine: &Arc<ReactiveEngine>,
+        focused: Option<&str>,
+    ) -> Result<()> {
+        let departed = {
+            let mut last = self.last_focused.lock().unwrap();
+            let departed = last.take().filter(|prev| Some(prev.as_str()) != focused);
+            *last = focused.map(str::to_string);
+            departed
+        };
+        match departed {
+            Some(block_id) => self.commit_departing_editor(engine, &block_id).await,
+            None => Ok(()),
+        }
+    }
+
+    pub async fn commit_departing_editor(
+        &self,
+        engine: &Arc<ReactiveEngine>,
+        block_id: &str,
+    ) -> Result<()> {
+        let intent = {
+            let mut eds = self.editors.lock().unwrap();
+            match eds.get_mut(block_id) {
+                Some(vm) => {
+                    let live = vm.buffer().to_string();
+                    vm.pending_commit_intent(&live)
+                }
+                None => None,
+            }
+        };
+        if let Some(intent) = intent {
             crate::reactive::dispatch_intent_through_armed_door(engine, intent).await?;
         }
         Ok(())

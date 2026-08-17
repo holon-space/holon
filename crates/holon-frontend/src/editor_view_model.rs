@@ -511,6 +511,11 @@ impl EditorViewModel {
         // cannot race a not-yet-recorded seq.
         let seq = holon_api::write_seq::next();
         self.last_local_seq = seq.get();
+        // This text is now persisted, so it is no longer pending: re-baseline
+        // the commit funnels ([`Self::pending_commit_intent`]) off it. Without
+        // this they re-dispatch it at every focus leave as a second, unordered
+        // `set_field` with no `write_seq`.
+        self.handler.set_baseline(new_text.to_string());
         let field = if source_channel {
             holon_api::SOURCE_TEXT_FIELD
         } else {
@@ -1577,6 +1582,34 @@ mod tests {
             matches!(vm.on_blur("Some Page"), EditorAction::None),
             "blur of a re-seeded, unmodified editor must NOT commit (spurious identical-content \
              set_field wipes marks / poisons undo)"
+        );
+    }
+
+    /// Text the keystroke sink has already persisted is not pending: the
+    /// focus-leave funnel must see nothing to commit. A second, unordered
+    /// `set_field` of the same text carries no `write_seq` (so its own echo is
+    /// dropped) and lands AFTER whatever structural op moved the focus — when
+    /// that op was the `join_block` that consumed this very block, the write
+    /// hits a block that no longer exists.
+    #[test]
+    fn the_focus_leave_funnel_does_not_recommit_what_the_keystroke_sink_wrote() {
+        let mut vm = test_controller();
+        let typed = vm
+            .apply_local_edit("")
+            .expect("keystroke")
+            .expect("SqlOnly keystroke sink writes content");
+        assert!(
+            typed.params.contains_key("write_seq"),
+            "the keystroke sink stamps an ordering token"
+        );
+
+        assert!(
+            vm.chord_commit_intent("").is_none(),
+            "the structural commit point has nothing left to flush"
+        );
+        assert!(
+            vm.pending_commit_intent("").is_none(),
+            "focus leave re-committed already-persisted text"
         );
     }
 

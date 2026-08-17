@@ -527,7 +527,11 @@ impl ReactiveEngineDriver {
     /// focused or no VM is open. Called from the composed harness settle after
     /// the projection fixed point so the buffer reflects the settled echo.
     pub async fn converge_editors(&self) -> Result<()> {
-        if let Some(block) = self.engine.focused_block() {
+        let focused = self.engine.focused_block();
+        self.editor_mirror
+            .note_focus_settled(&self.engine, focused.as_ref().map(EntityUri::as_str))
+            .await?;
+        if let Some(block) = focused {
             // A structural op may have armed a caret seed for an editor that
             // is already open (a position-0 split keeps the caret on the
             // ORIGINAL id), in which case nothing mounts to apply it. GPUI
