@@ -1,0 +1,4 @@
+# Directories treated as pure, regenerable build output by stacked-workstreams
+# (sw.sh): CoW-cloned into new lane workspaces from _sw_integ's warm build, and
+# purged from a stream's workspace once its work is confirmed landed on main.
+SW_EPHEMERAL_DIRS="target"
