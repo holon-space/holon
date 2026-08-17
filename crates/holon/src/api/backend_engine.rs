@@ -1183,6 +1183,83 @@ mod tests {
     }
 
     /// End-to-end check that `from children` only returns the parent's direct
+    /// A focused editor decides whether an external row change is newer than
+    /// its own last keystroke from the `write_seq` its row carries
+    /// (`holon_frontend::echo::evaluate_data_sync_echo`). A stdlib source whose
+    /// `select` drops the column hands that decision a `None` and the change is
+    /// discarded — so every block-shaped virtual table must project it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn every_stdlib_block_source_projects_the_editors_ordering_token() {
+        let engine = create_test_engine().await.unwrap();
+        engine
+            .db_handle()
+            .execute(
+                &format!(
+                    "INSERT INTO {table} (id, parent_id, content, content_type) VALUES \
+                     ('block:p', 'sentinel:no_parent', 'Parent', 'text'), ('block:p::child::0', \
+                     'block:p', 'Child A', 'text')",
+                    table = crate::storage::BLOCK_WRITE_TABLE,
+                ),
+                vec![],
+            )
+            .await
+            .unwrap();
+        // `focused_children` reaches its rows through the main region's open
+        // navigation cursor.
+        engine
+            .db_handle()
+            .execute(
+                "INSERT OR REPLACE INTO navigation_history (id, region, block_id) VALUES (1, \
+                 'main', 'block:p')",
+                vec![],
+            )
+            .await
+            .unwrap();
+        engine
+            .db_handle()
+            .execute(
+                "INSERT OR REPLACE INTO navigation_cursor (region, history_id) VALUES ('main', 1)",
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        let context = QueryContext {
+            current_block_id: Some(EntityUri::block("p")),
+            context_parent_id: Some(EntityUri::block("p")),
+            path_context: holon_api::PathContext::Unfiltered,
+        };
+
+        for source in [
+            "children",
+            "siblings",
+            "descendants",
+            "block_children",
+            "focused_children",
+        ] {
+            let sql = engine
+                .compile_to_sql(&format!("from {source}"), QueryLanguage::HolonPrql)
+                .expect("PRQL compile");
+            let rows = engine
+                .execute_query(sql, HashMap::new(), Some(context.clone()))
+                .await
+                .unwrap_or_else(|e| panic!("`from {source}` query failed: {e}"));
+            assert!(
+                !rows.is_empty(),
+                "`from {source}` returned no rows, so the projection assertion below would be \
+                 vacuous"
+            );
+            for row in &rows {
+                assert!(
+                    row.get(holon_api::schema::block::WRITE_SEQ).is_some(),
+                    "`from {source}` dropped the {} column; the focused editor reads it as None \
+                     and discards the external change. Row: {row:?}",
+                    holon_api::schema::block::WRITE_SEQ,
+                );
+            }
+        }
+    }
+
     /// (non-source) children — exercises compile → bind → matview create →
     /// query_view, the same path `render_entity` runs for query blocks.
     /// Regression for HANDOFF_DATA_CDC_SCOPE_LEAK.md.

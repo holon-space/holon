@@ -10,6 +10,7 @@ WITH RECURSIVE paths AS (
         properties,
         created_at,
         updated_at,
+        write_seq,
         '/' || id as path,
         id as root_id
     FROM block
@@ -28,6 +29,7 @@ WITH RECURSIVE paths AS (
         b.properties,
         b.created_at,
         b.updated_at,
+        b.write_seq,
         p.path || '/' || b.id as path,
         p.root_id
     FROM block b

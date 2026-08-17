@@ -4,7 +4,7 @@ let descendants = (
   from block_with_path
   filter (path | text.starts_with $context_path_prefix)
   filter content_type != 'source'
-  select {id, parent_id, content, content_type, source_language, source_name, properties, created_at, updated_at, path}
+  select {id, parent_id, content, content_type, source_language, source_name, properties, created_at, updated_at, write_seq, path}
 )
 let block_children = (
   from b = block
@@ -17,5 +17,5 @@ let focused_children = (
   join side:inner nc = navigation_cursor (nh.id == nc.history_id)
   filter nc.region == "main"
   filter b.content_type != 'source'
-  select {b.id, b.parent_id, b.content, b.content_type, b.source_language, b.source_name, b.properties, b.created_at, b.updated_at}
+  select {b.id, b.parent_id, b.content, b.content_type, b.source_language, b.source_name, b.properties, b.created_at, b.updated_at, b.write_seq}
 )

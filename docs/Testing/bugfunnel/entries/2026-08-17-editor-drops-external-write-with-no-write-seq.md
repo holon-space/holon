@@ -1,9 +1,9 @@
 ---
 id: 2026-08-17-editor-drops-external-write-with-no-write-seq
 date: 2026-08-17
-gap: COVERAGE
-secondary: ORACLE
-status: OPEN
+gap: ENVIRONMENT
+secondary: COVERAGE
+status: FIXED
 summary: >-
   A focused editor silently drops any external content change whose row
   carries no write_seq token, 29 times in one real-vault session.
@@ -21,47 +21,66 @@ on the pre-change content.
 
 ## Root cause
 
-`EditorViewModel::converge_from_data_sync`
-(`crates/holon-frontend/src/editor_view_model.rs:539-563`) runs
-`evaluate_data_sync_echo` (`crates/holon-frontend/src/echo.rs:53-90`) against
-every SqlOnly data-sync row for the focused block. When the row's content
-differs from the buffer AND carries no `write_seq` (`echo_seq: None`), the
-function returns `EchoDecision::DropNoSeq` — by design (its own doc comment:
-"never converge blindly: that is the stale-echo data loss we are
-preventing"), because ordering can't be proven. `echo.rs:73` documents that
-non-editor writers (split/join/org, and evidently task-state-cycle writes)
-"do NOT bump write_seq" — so ANY external structural change landing while a
-block is focused hits this branch and is dropped, not merely a malformed
-edge case.
+Two block-shaped projections dropped the `write_seq` column, so the row the
+GPUI editor subscribes to never carried it:
+
+* `crates/holon/sql/prql_stdlib.prql` — `descendants` and `focused_children`
+  each end in an explicit `select {...}` that listed every block column
+  EXCEPT `write_seq`. `children`, `siblings` and `block_children` have no
+  `select` and were unaffected.
+* `crates/holon-turso/sql/schema/blocks_with_paths.sql` — the recursive CTE
+  behind the `block_with_path` matview (which `descendants` reads) enumerates
+  its columns and omitted `write_seq` in both the base and recursive arm.
+
+`frontends/gpui/src/views/editor_view.rs:477` reads `row.get("write_seq")`
+off that row, so the token arrived as `None` for every editor mounted on a
+`descendants` / `focused_children` panel — the journals feed among them.
+`EchoDecision::DropNoSeq` (`crates/holon-frontend/src/echo.rs:63`) then
+discarded the change, and `EditorViewModel::converge_from_data_sync`
+(`crates/holon-frontend/src/editor_view_model.rs:553`) logged it and left the
+buffer alone. The base table itself was never at fault: `block_raw.write_seq`
+is `INTEGER NOT NULL DEFAULT 0`.
+
+The drop is not merely cosmetic. A blur alone loses nothing (the change
+tracker's baseline is stale too, so no commit fires), but the next keystroke
+commits the whole stale buffer with a fresh `write_seq` — overwriting the
+external change in the store. A task-state toggle from MCP or an org
+re-ingest was silently revertible by typing.
 
 ## Missing piece
 
-COVERAGE: the pure decision function IS unit-tested (`echo.rs:276` pins
-`DropNoSeq` for a synthetic no-seq input), so the LOGIC is covered. But the
-INTEGRATION scenario — a real non-editor writer producing a genuinely
-seq-less row while the keystone's driver holds a block focused — is not:
-the one keystone transition that models this shape,
-`external_write_same_block_focused.rs`, states in its own header comment
-that non-editor writers don't bump `write_seq` but reaches the
-`Converge`/`AdoptBaseline` arms, meaning its generated external write still
-carries SOME `echo_seq` value (not a true `None`). No transition drives a
-genuinely-null-`write_seq` external write against a focused block, so this
-exact failure mode — real content silently lost from the editor's view — is
-structurally ungeneratable by the composed keystone today. ORACLE secondary,
-weaker: even if generated, no invariant currently asserts "a focused
-editor's buffer eventually reflects an external structural write" (only the
-narrower `DropStale`/`AdoptBaseline` correctness is pinned at the unit
-level).
+ENVIRONMENT: the failing path does not exist in the keystone's wiring at all.
+The headless SUT converges through
+`HeadlessEditorMirror::converge_editor`
+(`crates/holon-frontend/src/headless_editor_mirror.rs:271`), which reads
+`block_raw` directly via `block_editor_source_by_id` and passes
+`Some(vm.last_local_seq())` — a FABRICATED token, never the row's column. No
+headless run can therefore observe a projection that lost the column,
+whichever transition it draws.
+
+COVERAGE secondary: even with faithful wiring, no transition drives a
+genuinely-null-`write_seq` external write against a focused block —
+`external_write_same_block_focused.rs` reaches only the
+`Converge`/`AdoptBaseline` arms.
 
 ## Remedy
 
-NOT FIXED. Two independent gaps, either closes half: (1) extend
-`external_write_same_block_focused.rs`'s generator to occasionally produce a
-write through a path that leaves `write_seq` genuinely NULL (matching
-task-state-cycle / org-ingest writes), so the keystone can reach
-`DropNoSeq` end-to-end; (2) decide the actual product remedy — is silently
-dropping the external change and leaving the editor stale the INTENDED
-behavior (safer than corrupting an in-flight edit), or should there be a
-visible "this block changed externally, reload?" affordance instead of a
-log-only signal the user never sees? That's a product decision, not
-something to guess at here.
+FIXED. `write_seq` added to the `descendants` and `focused_children` select
+lists and to both arms of the `block_with_path` CTE.
+
+Pinned red-first by
+`backend_engine::tests::every_stdlib_block_source_projects_the_editors_ordering_token`,
+which runs each stdlib block source through compile → bind → execute and
+asserts the delivered row carries the column. Red before the fix (`from
+descendants` dropped it, `children`/`siblings` passed), green after; the
+whole class of future projection narrowings goes red with it.
+
+Two follow-ups, neither done here:
+
+* The headless mirror still fabricates its echo seq. Making it read the real
+  column changes the keystone's echo decisions on any block whose stored
+  `write_seq` outranks a freshly-mounted editor's zero high-water, so it is a
+  keystone-semantics change, not a mechanical one.
+* A future regression of this kind is still invisible to the user — the drop
+  is loud in the log and silent on screen. Whether a stale-content affordance
+  belongs in the UI is a product decision.
