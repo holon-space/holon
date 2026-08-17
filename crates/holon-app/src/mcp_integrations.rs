@@ -28,6 +28,8 @@ use holon_profiles::TypeRegistry;
 use tracing::info;
 use tracing::warn;
 
+use crate::integrations_settings::IntegrationsSettingsVm;
+
 /// Normalize a variable/setting name for fuzzy matching: lowercase, with `.`
 /// and `_` treated as the same separator. So the env var `TODOIST_API_KEY` and
 /// the setting key `todoist.api_key` both normalize to `todoist_api_key`.
@@ -168,11 +170,12 @@ impl McpIntegrationRegistry {
 /// implementation so the `OperationDispatcher` can discover and route
 /// operations to MCP servers.
 pub struct McpIntegrationsModule {
-    /// The scan of the integrations directory, or the enriched load error (e.g.
-    /// malformed YAML for a provider this build does not ship). The error is
-    /// surfaced in `configure()` so it propagates through the
-    /// module-registration `Result` instead of being swallowed here.
-    loaded: Result<LoadedIntegrations, String>,
+    /// The enablement authority plus the scan of the integrations directory, or
+    /// the enriched load error (e.g. malformed YAML for a provider this build
+    /// does not ship). The error is surfaced in `configure()` so it propagates
+    /// through the module-registration `Result` instead of being swallowed
+    /// here.
+    loaded: Result<(Arc<IntegrationConfigStore>, LoadedIntegrations), String>,
 }
 
 impl McpIntegrationsModule {
@@ -185,9 +188,10 @@ impl McpIntegrationsModule {
     /// never boot on a half-read integrations directory).
     pub fn from_dir(dir: &Path) -> Self {
         let loaded = IntegrationConfigStore::load(dir)
-            .and_then(|store| load_integration_configs(dir, &store))
+            .map(Arc::new)
+            .and_then(|store| load_integration_configs(dir, &store).map(|l| (store, l)))
             .map_err(|e| format!("{e:#}"));
-        if let Ok(loaded) = &loaded {
+        if let Ok((_, loaded)) = &loaded {
             // Logged here, not at disclosure time: the registry singleton is
             // resolved lazily, so the bus signal may never fire in a container
             // that never touches an integration — the log must not depend on it.
@@ -221,9 +225,20 @@ impl McpIntegrationsModule {
 
 impl Module for McpIntegrationsModule {
     fn configure(&self, injector: &Injector) -> std::result::Result<(), fluxdi::Error> {
-        let loaded = self.loaded.as_ref().map_err(|msg| {
+        let (store, loaded) = self.loaded.as_ref().map_err(|msg| {
             fluxdi::Error::module_lifecycle_failed("McpIntegrationsModule", "configure", msg)
         })?;
+
+        // The enablement authority and the settings list it backs are
+        // registered BEFORE the nothing-to-run early return below: a vault with
+        // every integration switched off produces no config and no ignored
+        // sidecar, and that is exactly the container in which the settings
+        // surface is the user's only way to switch one on.
+        let store_di = store.clone();
+        injector.provide::<IntegrationConfigStore>(Provider::root(move |_| store_di.clone()));
+        let settings_vm = Arc::new(IntegrationsSettingsVm::new(store.clone()));
+        injector.provide::<IntegrationsSettingsVm>(Provider::root(move |_| settings_vm.clone()));
+
         let configs = &loaded.configs;
         let superseded = Arc::new(loaded.superseded.clone());
         let ignored = Arc::new(loaded.ignored.clone());

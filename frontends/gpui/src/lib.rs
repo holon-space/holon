@@ -14,6 +14,7 @@ pub mod entity_view_registry;
 pub mod geometry;
 #[cfg(debug_assertions)]
 pub mod inspector;
+pub mod integrations_ui;
 #[cfg(feature = "mobile")]
 pub mod mobile;
 pub mod navigation_state;
@@ -1020,7 +1021,27 @@ impl Render for HolonApp {
                     " · ",
                     env!("HOLON_BUILD_SHA")
                 ));
-            let content = div().flex_col().child(content).child(build_stamp);
+            // Integrations live in the SAME modal as the preferences, but not
+            // in the same render pipeline: their switch writes to
+            // `IntegrationConfigStore`, not to the preference file, and
+            // `pref_field` has no seam for a second destination.
+            let section_theme = integrations_ui::SectionTheme {
+                fg: text,
+                muted_fg: theme.muted_foreground,
+                border: border_color,
+                success: theme.success,
+                danger: theme.danger,
+            };
+            let integrations = integrations_ui::render_settings_integrations(
+                cx.try_global::<integrations_ui::IntegrationsSettingsGlobal>(),
+                section_theme,
+                self.bounds_registry.clone(),
+            );
+            let content = div()
+                .flex_col()
+                .child(content)
+                .child(integrations)
+                .child(build_stamp);
             Some(modal_overlay(
                 "settings",
                 "Settings",
@@ -2591,6 +2612,21 @@ fn launch_holon_window_impl(
             pending.0.clone(),
             rt_handle.clone(),
             pending_ui_entity,
+            window_handle.into(),
+            &async_cx,
+        );
+    }
+
+    // Keep the Settings → Integrations switches following the store, including
+    // decisions this window did not make.
+    if let Some(settings) = cx
+        .try_global::<integrations_ui::IntegrationsSettingsGlobal>()
+        .cloned()
+    {
+        let async_cx = cx.to_async();
+        integrations_ui::spawn_integrations_bridge(
+            &settings.0,
+            &rt_handle,
             window_handle.into(),
             &async_cx,
         );

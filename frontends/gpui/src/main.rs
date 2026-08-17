@@ -175,6 +175,24 @@ fn main() -> Result<()> {
             }
         };
 
+    // The Settings → Integrations list. Registered by `McpIntegrationsModule`
+    // whenever an integrations directory is configured (always, on native), so
+    // an absence here means the module never ran — logged loud, and the
+    // Settings modal says so in place instead of showing an empty list.
+    let integrations_settings: Option<
+        std::sync::Arc<holon_app::integrations_settings::IntegrationsSettingsVm>,
+    > = match injector.try_resolve::<holon_app::integrations_settings::IntegrationsSettingsVm>() {
+        Ok(vm) => Some(vm),
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "[integrations] no settings view model in DI — Settings shows no integration \
+                 switches, so an integration cannot be switched on from the app at all"
+            );
+            None
+        }
+    };
+
     // TEST MODE seam (single flag check): `HOLON_MCP_ALLOW_RESET` — the same
     // env that un-gates the MCP `reset_vault` tool — additionally routes the
     // desktop launch through the REBINDABLE window and installs the gpui-side
@@ -244,6 +262,9 @@ fn main() -> Result<()> {
             // approve panel (mirrors the DegradedToastSink/ShareTrigger globals).
             if let Some(store) = pending_writes {
                 cx.set_global(holon_gpui::share_ui::PendingWritesGlobal(store));
+            }
+            if let Some(vm) = integrations_settings {
+                cx.set_global(holon_gpui::integrations_ui::IntegrationsSettingsGlobal(vm));
             }
             if mcp_reset_test_mode {
                 // Disclosed degraded/test mode — unmissable by design.
