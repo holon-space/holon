@@ -192,6 +192,21 @@ impl EntityUri {
     /// When the scheme is known statically prefer `EntityUri::block(..)` /
     /// `EntityUri::parse(..)`.
     pub fn from_raw(s: &str) -> Self {
+        Self::already_schemed(s).unwrap_or_else(|| Self::block(s))
+    }
+
+    /// Fallible [`from_raw`], for boundaries that ingest text authored outside
+    /// the system (org drawers, MCP params). There, a string that forms no URI
+    /// is a content error belonging to one file — not the internal
+    /// double-scheme bug that `from_raw`'s panic asserts against.
+    pub fn try_from_raw(s: &str) -> anyhow::Result<Self> {
+        match Self::already_schemed(s) {
+            Some(uri) => Ok(uri),
+            None => Self::parse(&format!("block:{s}")),
+        }
+    }
+
+    fn already_schemed(s: &str) -> Option<Self> {
         if let Ok(uri) = Self::parse(s) {
             // A bare synthetic id containing `::` separators (e.g.
             // `root-layout::src::0`, `default-main-panel::render::0`) is a
@@ -210,11 +225,10 @@ impl EntityUri {
             // child ids), so accept the block scheme even with a `:`-leading
             // id. Bare layout ids keep their non-entity scheme and stay bare.
             if !uri.id().starts_with(':') || uri.scheme() == "block" {
-                return uri;
+                return Some(uri);
             }
         }
-        // Bare string without scheme — treat as block ID
-        Self::block(s)
+        None
     }
 
     /// FRB helper: create from string (for Dart FFI boundary).

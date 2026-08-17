@@ -408,3 +408,59 @@ mod keyword_set_round_trip_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod authored_edge_drawer_tests {
+    use super::*;
+
+    /// Characters an org author can type into a drawer that no `block:` URI can
+    /// carry. `#` is excluded because it parses as a fragment delimiter; `"`
+    /// and `\` because the src-block header-arg lexer consumes them before
+    /// the drawer value reaches the edge-typed keys.
+    const URI_HOSTILE: &[char] = &['{', '}', '[', ']', '<', '>', '^', '`', '|'];
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config {
+            failure_persistence: None,
+            ..proptest::test_runner::Config::default()
+        })]
+
+        /// A vault file may hold an edge-typed drawer value the renderer would
+        /// never emit — an unfilled `{{template}}` placeholder, a `[[link]]`.
+        /// Ingesting one must fail that file, not the process: `EntityUri`'s
+        /// constructors panic on a string that forms no URI, and every one of
+        /// these values is such a string.
+        #[test]
+        fn an_edge_drawer_value_that_is_no_block_id_fails_the_file_not_the_process(
+            key in proptest::sample::select(&["REQUIRES", "BLOCKED-BY", "contributes-to"][..]),
+            headline_surface in any::<bool>(),
+            open in proptest::sample::select(URI_HOSTILE),
+            close in proptest::sample::select(URI_HOSTILE),
+            stem in "[a-z]{1,8}",
+        ) {
+            let value = format!("{open}{open}{stem}{close}{close}");
+            let content = if headline_surface {
+                format!("* Goal\n:PROPERTIES:\n:ID: blk-a\n:{key}: {value}\n:END:\n")
+            } else {
+                format!("#+begin_src prql :id blk-a :{key} {value}\nfrom x\n#+end_src\n")
+            };
+
+            let result = holon_orgmode::parse_org_file(
+                std::path::Path::new("/vault/doc.org"),
+                &content,
+                &EntityUri::block(GEN_PLACEHOLDER),
+                std::path::Path::new("/vault"),
+            );
+
+            let Err(err) = result else {
+                prop_assert!(false, "{value:?} in :{key}: must be refused: {content:?}");
+                unreachable!()
+            };
+            let err = format!("{err:#}");
+            prop_assert!(
+                err.contains("takes bare block IDs") && err.contains(&value),
+                "the refusal must name the drawer and the offending value: {err}"
+            );
+        }
+    }
+}

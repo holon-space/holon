@@ -681,9 +681,7 @@ fn emit_section_children(
                             .split(|c: char| c == ',' || c.is_whitespace())
                             .filter(|s| !s.is_empty())
                         {
-                            // ALLOW(entity_uri_from_raw): org src-block REQUIRES/BLOCKED-BY
-                            // header arg bare slug at parse boundary
-                            let uri = EntityUri::from_raw(slug);
+                            let uri = parse_edge_slug(slug, &k, src_block.id.as_str())?;
                             if !src_block.requires.contains(&uri) {
                                 src_block.requires.push(uri);
                             }
@@ -915,9 +913,7 @@ fn process_headlines(
                     .split(|c: char| c == ',' || c.is_whitespace())
                     .filter(|s| !s.is_empty())
                 {
-                    // ALLOW(entity_uri_from_raw): org drawer REQUIRES/BLOCKED-BY bare slug at parse
-                    // boundary
-                    let uri = EntityUri::from_raw(slug);
+                    let uri = parse_edge_slug(slug, key, id.as_str())?;
                     if !block.requires.contains(&uri) {
                         block.requires.push(uri);
                     }
@@ -1355,29 +1351,33 @@ fn extract_name_from_block_text(text: &str) -> Option<String> {
     None
 }
 
+/// Promote one authored slug of an edge-typed drawer key (`:REQUIRES:`,
+/// `:BLOCKED-BY:`, `:contributes-to:`) to its `block:` URI. `key` and `owner`
+/// label the offending drawer and block in the error.
+///
+/// Org file content is authored outside the system — an unfilled template
+/// placeholder or a `[[…]]` link names no block id, so this rejects rather than
+/// calling the panicking `EntityUri::from_raw`.
+fn parse_edge_slug(slug: &str, key: &str, owner: &str) -> anyhow::Result<EntityUri> {
+    EntityUri::try_from_raw(slug).map_err(|e| {
+        anyhow::anyhow!(
+            "block {owner}: :{key}: takes bare block IDs, got {slug:?} \
+             (docs/Reference/CompassConventions.md): {e}"
+        )
+    })
+}
+
 /// Parse a `contributes-to` value into edge targets. Bare block IDs, separated
 /// by whitespace or commas; the legacy `none` sentinel means the empty set.
 ///
-/// The `[[…]]` link form names no block id and so cannot become an edge — it is
-/// refused by name rather than handed to `EntityUri`, which would panic on it
-/// (docs/Reference/CompassConventions.md). `owner` labels the offending block
-/// in the error.
+/// `owner` labels the offending block in the error.
 fn parse_contributes_to(value: &str, owner: &str) -> anyhow::Result<Vec<EntityUri>> {
     let mut targets = Vec::new();
     for slug in value
         .split(|c: char| c == ',' || c.is_whitespace())
         .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("none"))
     {
-        if slug.contains(['[', ']']) {
-            anyhow::bail!(
-                "block {owner}: :contributes-to: takes bare block IDs, got {slug:?} — the \
-                 `[[…]]` link form names no block id and cannot become an edge \
-                 (docs/Reference/CompassConventions.md)"
-            );
-        }
-        // ALLOW(entity_uri_from_raw): contributes-to bare slug at the org parse
-        // boundary
-        targets.push(EntityUri::from_raw(slug));
+        targets.push(parse_edge_slug(slug, "contributes-to", owner)?);
     }
     Ok(targets)
 }
@@ -1495,6 +1495,36 @@ mod tests {
             let err = err.to_string();
             assert!(
                 err.contains("takes bare block IDs") && err.contains("[[Some"),
+                "the refusal must name the offending value: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn edge_typed_drawer_keys_refuse_a_value_that_is_not_a_usable_block_id() {
+        // A vault template shipped with `{{mission}}` still unfilled is ordinary
+        // file content: ingest of that one file must fail, not the process.
+        let sources = [
+            "* Goal\n:PROPERTIES:\n:ID: p0\n:contributes-to: {{mission}}\n:END:\n",
+            "* Task\n:PROPERTIES:\n:ID: p1\n:REQUIRES: {{mission}}\n:END:\n",
+            "* Task\n:PROPERTIES:\n:ID: p2\n:BLOCKED-BY: {{mission}}\n:END:\n",
+            "#+begin_src prql :id s0 :contributes-to {{mission}}\nfrom x\n#+end_src\n",
+            "#+begin_src prql :id s1 :REQUIRES {{mission}}\nfrom x\n#+end_src\n",
+            "#+begin_src prql :id s2 :BLOCKED-BY {{mission}}\nfrom x\n#+end_src\n",
+        ];
+
+        for source in sources {
+            let Err(err) = parse_org_file(
+                std::path::Path::new("/vault/doc.org"),
+                source,
+                &EntityUri::no_parent(),
+                std::path::Path::new("/vault"),
+            ) else {
+                panic!("{{{{mission}}}} must be refused, not parsed: {source:?}");
+            };
+            let err = format!("{err:#}");
+            assert!(
+                err.contains("takes bare block IDs") && err.contains("{{mission}}"),
                 "the refusal must name the offending value: {err}"
             );
         }
