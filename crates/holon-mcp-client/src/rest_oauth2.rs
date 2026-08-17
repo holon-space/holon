@@ -350,7 +350,7 @@ fn read_refresh_token(path: &str) -> anyhow::Result<String> {
         if e.downcast_ref::<UnresolvedVar>().is_some() {
             anyhow::Error::new(UnresolvedVar {
                 var: format!(
-                    "refresh token file {} (run scripts/gcal-oauth-bootstrap.sh to create it)",
+                    "refresh token file {} (run scripts/google-oauth-bootstrap.sh to create it)",
                     expand_tilde(path).display()
                 ),
             })

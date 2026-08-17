@@ -41,9 +41,10 @@ schema_version: 1
 #     127.0.0.1, exchanges the code, and writes ONLY the refresh token to
 #     ~/.config/holon/gcal-refresh-token with mode 0600. It NEVER prints the
 #     token to the terminal, and Holon NEVER writes this file itself:
-#       GCAL_CLIENT_ID=$(cat ~/.config/holon/gcal-client-id) \
-#       GCAL_CLIENT_SECRET=$(cat ~/.config/holon/gcal-client-secret) \
-#         scripts/gcal-oauth-bootstrap.sh
+#       HOLON_OAUTH_CLIENT_ID=$(cat ~/.config/holon/gcal-client-id) \
+#       HOLON_OAUTH_CLIENT_SECRET=$(cat ~/.config/holon/gcal-client-secret) \
+#         scripts/google-oauth-bootstrap.sh gcal \
+#           https://www.googleapis.com/auth/calendar.readonly
 #     Verify the file is private (must print `-rw-------`):
 #       ls -l ~/.config/holon/gcal-refresh-token
 #     (If a credential file is group/world-readable, Holon REFUSES to start this
@@ -104,7 +105,7 @@ transport:
         #   client_secret_env: GCAL_CLIENT_SECRET
         client_id_file: ~/.config/holon/gcal-client-id
         client_secret_file: ~/.config/holon/gcal-client-secret
-        # Written by scripts/gcal-oauth-bootstrap.sh (mode 0600, never by Holon).
+        # Written by scripts/google-oauth-bootstrap.sh (mode 0600, never by Holon).
         # A leading ~/ expands to $HOME.
         refresh_token_file: ~/.config/holon/gcal-refresh-token
         # Informational only (documents what the refresh token was consented

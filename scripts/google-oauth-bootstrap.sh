@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# gcal-oauth-bootstrap.sh — one-time Google Calendar consent flow for Holon.
+# google-oauth-bootstrap.sh — one-time Google consent flow for a Holon sidecar.
 #
 # Runs the OAuth2 "installed app" loopback flow: opens Google's consent page,
 # captures the redirect on 127.0.0.1, exchanges the authorization code for a
 # long-lived REFRESH token, and writes ONLY that refresh token to
-# ~/.config/holon/gcal-refresh-token with mode 0600.
+# ~/.config/holon/<provider>-refresh-token with mode 0600.
 #
 # SECURITY:
 #   * The refresh token is NEVER printed to the terminal, a log, or argv — it is
@@ -13,33 +13,43 @@
 #     chmod 600.
 #   * The client secret is read from the environment, never echoed.
 #
-# PREREQUISITES (see docs/integrations/gcal.yaml header for the full walkthrough):
-#   * A Google Cloud OAuth client of type "Desktop app" (Calendar API enabled).
+# PREREQUISITES (see the docs/integrations/<provider>.yaml header for the full
+# walkthrough):
+#   * A Google Cloud OAuth client of type "Desktop app", with the API the scope
+#     belongs to enabled on the project.
 #   * Environment:
-#       export GCAL_CLIENT_ID='xxxx.apps.googleusercontent.com'
-#       export GCAL_CLIENT_SECRET='GOCSPX-...'
+#       export HOLON_OAUTH_CLIENT_ID='xxxx.apps.googleusercontent.com'
+#       export HOLON_OAUTH_CLIENT_SECRET='GOCSPX-...'
 #   * python3 and curl on PATH.
 #
 # Usage:
-#   GCAL_CLIENT_ID=... GCAL_CLIENT_SECRET=... scripts/gcal-oauth-bootstrap.sh
+#   HOLON_OAUTH_CLIENT_ID=... HOLON_OAUTH_CLIENT_SECRET=... \
+#     scripts/google-oauth-bootstrap.sh <provider> <scope-url>
+#
+# e.g.
+#   scripts/google-oauth-bootstrap.sh gcal  https://www.googleapis.com/auth/calendar.readonly
+#   scripts/google-oauth-bootstrap.sh gmail https://www.googleapis.com/auth/gmail.readonly
 
 set -euo pipefail
 umask 077
-
-SCOPE="https://www.googleapis.com/auth/calendar.readonly"
-TOKEN_FILE="${HOLON_GCAL_REFRESH_TOKEN_FILE:-$HOME/.config/holon/gcal-refresh-token}"
-PORT="${GCAL_OAUTH_PORT:-8765}"
-REDIRECT_URI="http://127.0.0.1:${PORT}"
-AUTH_ENDPOINT="https://accounts.google.com/o/oauth2/v2/auth"
-TOKEN_ENDPOINT="https://oauth2.googleapis.com/token"
 
 die() {
   echo "error: $*" >&2
   exit 1
 }
 
-: "${GCAL_CLIENT_ID:?set GCAL_CLIENT_ID (Desktop OAuth client id)}"
-: "${GCAL_CLIENT_SECRET:?set GCAL_CLIENT_SECRET (Desktop OAuth client secret)}"
+[ $# -eq 2 ] || die "usage: $0 <provider> <scope-url>"
+PROVIDER="$1"
+SCOPE="$2"
+
+TOKEN_FILE="${HOLON_REFRESH_TOKEN_FILE:-$HOME/.config/holon/${PROVIDER}-refresh-token}"
+PORT="${HOLON_OAUTH_PORT:-8765}"
+REDIRECT_URI="http://127.0.0.1:${PORT}"
+AUTH_ENDPOINT="https://accounts.google.com/o/oauth2/v2/auth"
+TOKEN_ENDPOINT="https://oauth2.googleapis.com/token"
+
+: "${HOLON_OAUTH_CLIENT_ID:?set HOLON_OAUTH_CLIENT_ID (Desktop OAuth client id)}"
+: "${HOLON_OAUTH_CLIENT_SECRET:?set HOLON_OAUTH_CLIENT_SECRET (Desktop OAuth client secret)}"
 command -v python3 >/dev/null 2>&1 || die "python3 is required"
 command -v curl >/dev/null 2>&1 || die "curl is required"
 
@@ -48,7 +58,7 @@ urlencode() {
 }
 
 STATE="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
-AUTH_URL="${AUTH_ENDPOINT}?response_type=code&client_id=$(urlencode "$GCAL_CLIENT_ID")&redirect_uri=$(urlencode "$REDIRECT_URI")&scope=$(urlencode "$SCOPE")&access_type=offline&prompt=consent&state=$(urlencode "$STATE")"
+AUTH_URL="${AUTH_ENDPOINT}?response_type=code&client_id=$(urlencode "$HOLON_OAUTH_CLIENT_ID")&redirect_uri=$(urlencode "$REDIRECT_URI")&scope=$(urlencode "$SCOPE")&access_type=offline&prompt=consent&state=$(urlencode "$STATE")"
 
 echo "Opening the Google consent page in your browser..." >&2
 echo "If it does not open, paste this URL manually:" >&2
@@ -114,8 +124,8 @@ echo "Exchanging the authorization code for a refresh token..." >&2
 TOKEN_RESPONSE="$(
   curl -sS -X POST "$TOKEN_ENDPOINT" \
     --data-urlencode "code=${CODE}" \
-    --data-urlencode "client_id=${GCAL_CLIENT_ID}" \
-    --data-urlencode "client_secret=${GCAL_CLIENT_SECRET}" \
+    --data-urlencode "client_id=${HOLON_OAUTH_CLIENT_ID}" \
+    --data-urlencode "client_secret=${HOLON_OAUTH_CLIENT_SECRET}" \
     --data-urlencode "redirect_uri=${REDIRECT_URI}" \
     --data-urlencode "grant_type=authorization_code"
 )"
@@ -160,9 +170,9 @@ printf '%s' "$TOKEN_RESPONSE" | HOLON_TOKEN_FILE="$TOKEN_FILE" python3 -c "$EXTR
 chmod 600 "$TOKEN_FILE"
 
 # Scrub the secrets from this shell's memory.
-unset TOKEN_RESPONSE CODE GCAL_CLIENT_SECRET
+unset TOKEN_RESPONSE CODE HOLON_OAUTH_CLIENT_SECRET
 
 echo "Success. Refresh token written to: $TOKEN_FILE" >&2
 echo "Permissions:" >&2
 ls -l "$TOKEN_FILE" >&2
-echo "Now: cp docs/integrations/gcal.yaml ~/.config/holon/integrations/ and restart Holon." >&2
+echo "Now: cp docs/integrations/${PROVIDER}.yaml ~/.config/holon/integrations/ and restart Holon." >&2

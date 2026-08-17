@@ -239,8 +239,9 @@ loudly** at startup; no token or secret is ever logged (error messages redact
 token-request query strings and never echo request/response bodies). A missing
 env var / absent refresh-token file is a disclosed skip ("not configured yet");
 a misconfigured one (bad perms, unreadable, empty) is a hard error. Nothing
-Google-specific lives in the engine — `gcal.yaml` (+ `scripts/gcal-oauth-bootstrap.sh`)
-is the first consumer.
+Google-specific lives in the engine — `gcal.yaml` and `gmail.yaml` are its
+consumers, sharing one provider-parameterized
+`scripts/google-oauth-bootstrap.sh`.
 
 #### Query enrichment: now-tokens, pagination, field projection
 

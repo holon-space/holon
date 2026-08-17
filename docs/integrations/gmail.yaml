@@ -1,0 +1,276 @@
+# Sidecar-format generation. The app runs its own bundled copy of this file
+# unless an INSTALLED copy declares the generation the running build understands
+# (crates/holon-mcp-client/src/bundled_sidecars.rs).
+schema_version: 1
+
+# Gmail — direct REST API (`transport: rest`) + generic OAuth2.
+#
+# WHY REST (not an MCP server): the `rest` transport is pure in-app HTTP with no
+# subprocess, so this exact sidecar runs unchanged on desktop AND on Android/iOS
+# (Martin's ruling). Gmail is a plain JSON API, reached directly via the
+# UTCP-style manual below and authenticated with the transport's generic
+# `oauth2` arm (refresh-token grant — nothing Google-named in the engine).
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# ONE-TIME SETUP
+# ─────────────────────────────────────────────────────────────────────────────
+#
+#  1. Create (or reuse) an OAuth client in Google Cloud:
+#       a. https://console.cloud.google.com → create/pick a project. The SAME
+#          project as the Calendar integration is fine.
+#       b. APIs & Services → Enable APIs → enable "Gmail API". Enabling the
+#          Calendar API does NOT enable Gmail — each API has its own switch.
+#       c. APIs & Services → OAuth consent screen → External (or Internal for a
+#          Workspace) → add yourself as a Test user, and add the scope
+#          ".../auth/gmail.readonly".
+#       d. APIs & Services → Credentials → an OAuth client ID of type
+#          **Desktop app**. The gcal Desktop client works here too — one client
+#          may hold many scopes. "Download JSON" → ~/.config/holon/gmail-client.json
+#          (chmod 600) if you are creating a new one.
+#
+#  2. Put the client id/secret in the 0600 files this sidecar reads (they stay
+#     OUT of this file — it references paths only). From a fresh download:
+#       umask 077
+#       jq -r '.installed.client_id'     ~/.config/holon/gmail-client.json > ~/.config/holon/gmail-client-id
+#       jq -r '.installed.client_secret' ~/.config/holon/gmail-client.json > ~/.config/holon/gmail-client-secret
+#       chmod 600 ~/.config/holon/gmail-client-id ~/.config/holon/gmail-client-secret
+#     Reusing the gcal client instead: copy the values across.
+#       cp ~/.config/holon/gcal-client-id     ~/.config/holon/gmail-client-id
+#       cp ~/.config/holon/gcal-client-secret ~/.config/holon/gmail-client-secret
+#     The REFRESH TOKEN is never shared: a token is bound to the scopes it was
+#     consented for, so a calendar.readonly token grants no Gmail access. Each
+#     integration also stays independently revocable, and a missing token skips
+#     only its own integration.
+#
+#  3. Mint the Gmail refresh token. The helper opens the Google consent page,
+#     captures the redirect on 127.0.0.1, exchanges the code, and writes ONLY
+#     the refresh token to ~/.config/holon/gmail-refresh-token with mode 0600.
+#     It NEVER prints the token, and Holon NEVER writes this file itself:
+#       HOLON_OAUTH_CLIENT_ID=$(cat ~/.config/holon/gmail-client-id) \
+#       HOLON_OAUTH_CLIENT_SECRET=$(cat ~/.config/holon/gmail-client-secret) \
+#         scripts/google-oauth-bootstrap.sh gmail \
+#           https://www.googleapis.com/auth/gmail.readonly
+#     Verify the file is private (must print `-rw-------`):
+#       ls -l ~/.config/holon/gmail-refresh-token
+#     (If a credential file is group/world-readable, Holon REFUSES to start this
+#     integration and tells you to `chmod 600` it — a readable secret is a
+#     compromised one.)
+#
+#  4. Activate the sidecar (Holon auto-scans this directory at startup — no
+#     registry entry needed):
+#       cp docs/integrations/gmail.yaml ~/.config/holon/integrations/gmail.yaml
+#
+#  5. Restart Holon. On boot the poll runner warms `gmail_label`, `gmail_thread`
+#     and `gmail_message`, feeding the `gmail_unread_by_thread` matview. Access
+#     tokens live only in memory; only the refresh token is on disk.
+#
+#  6. Verify via the `holon` MCP after restart:
+#       execute_query: SELECT name, type FROM gmail_label ORDER BY name
+#       execute_query: SELECT snippet FROM gmail_thread LIMIT 10
+#       execute_query: SELECT count(*) FROM gmail_message
+#       execute_query: SELECT thread_id, unread_messages FROM gmail_unread_by_thread
+#
+# TROUBLESHOOTING
+#  - Nothing synced, no error: the refresh-token file is absent → the
+#    integration is disclosed-skipped (see the boot log warning). Re-run step 3.
+#  - "invalid_grant" on refresh: the refresh token was revoked/expired (e.g. the
+#    Google project is still in "Testing" and the 7-day test-token window
+#    lapsed). Re-run step 3. Publish the consent screen to stop expiry.
+#  - HTTP 403 "Gmail API has not been used in project …": step 1b was skipped.
+#  - HTTP 403 "Request had insufficient authentication scopes": the refresh
+#    token predates the gmail.readonly consent. Re-run step 3.
+#  - A poll fails with "max_pages exceeded": more unread inbox mail than the
+#    page bound below. Narrow `q` (e.g. add `newer_than:30d`) or raise
+#    `max_pages`.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# SCOPE OF THIS v1 (documented TODOs)
+# ─────────────────────────────────────────────────────────────────────────────
+# * **Subject, sender, date and per-message labels are NOT synced.** Gmail's
+#   list endpoints return message stubs — `messages.list` yields `{id,
+#   threadId}` and nothing else; every header, label set and internalDate needs
+#   a `messages.get` PER MESSAGE. The sync path issues ONE list call per entity
+#   and has no per-record fan-out (`enumerate_from` exists only on the
+#   write-through `vtable` path, which the read-only `rest` transport rejects) —
+#   the same missing mechanism that pins gcal to the primary calendar. TODO:
+#   sync-side `enumerate_from` (bounded, fail-loud max_fan_out) driving
+#   `messages.get?format=metadata` from `gmail_message.id`, which would add
+#   subject/from/date/label_ids without any change to this file's shape. Until
+#   then the readable text of the inbox glance comes from `gmail_thread.snippet`.
+# * **Time windows live in the Gmail query, not in SQL.** Gmail returns no
+#   timestamp on list responses, so there is nothing to filter a matview on;
+#   `q` operators (`newer_than:`, `after:`) are evaluated server-side per poll
+#   instead. This sidecar therefore needs none of gcal's two-view chained
+#   `strftime('now')` workaround.
+# * The synced set is **unread inbox mail** (`q` below). Archived, read, spam
+#   and trash mail is out of scope; widen `q` to change that.
+# * Threads carry only their id/snippet/historyId. Message bodies, MIME parts
+#   and attachments are out of scope — they need `messages.get` (see the
+#   fan-out TODO) and a blob store this sidecar has no way to address.
+# * Read-only. `writes` stays at its `disabled` default; nothing here marks
+#   mail read, labels it, or sends.
+
+transport:
+  rest:
+    base_url: https://gmail.googleapis.com/gmail/v1
+    # REST has no push freshness; poll every 5 minutes (per-entity sync.interval
+    # would override this). Bounds staleness without hammering the API.
+    poll_interval: 5m
+    auth:
+      # Generic OAuth2 refresh-token grant. Secrets are referenced by name only.
+      oauth2:
+        token_url: https://oauth2.googleapis.com/token
+        # Credentials are sourced from files here, because Holon is a GUI app and
+        # environment variables do not reach it cleanly. `client_secret_file` is
+        # 0600-enforced (refused loudly if group/world-readable), exactly like
+        # `refresh_token_file`; `client_id_file` is not perm-checked (the OAuth
+        # client id is not secret). See the extraction one-liner in the setup doc.
+        #
+        # Alternative (env / app-settings): drop the *_file keys and use
+        #   client_id_env: GMAIL_CLIENT_ID
+        #   client_secret_env: GMAIL_CLIENT_SECRET
+        client_id_file: ~/.config/holon/gmail-client-id
+        client_secret_file: ~/.config/holon/gmail-client-secret
+        # Written by scripts/google-oauth-bootstrap.sh (mode 0600, never by Holon).
+        # A leading ~/ expands to $HOME.
+        refresh_token_file: ~/.config/holon/gmail-refresh-token
+        # Informational only (documents what the refresh token was consented
+        # for; not sent on the refresh grant).
+        #
+        # gmail.readonly, not the narrower gmail.metadata: `q` search is
+        # rejected under gmail.metadata, and `snippet` is body-derived text
+        # that scope withholds. Both are load-bearing below.
+        scopes:
+          - https://www.googleapis.com/auth/gmail.readonly
+    calls:
+      # Label vocabulary. Response: { "labels": [ {id, name, type,
+      # messageListVisibility, labelListVisibility} ] }. Unpaginated, and the
+      # per-label counts (messagesUnread, …) come only from labels.get.
+      list-labels:
+        method: GET
+        path: /users/me/labels
+      # Unread inbox threads. Response: { "threads": [ {id, snippet,
+      # historyId} ], "nextPageToken"?, "resultSizeEstimate" }.
+      list-unread-threads:
+        method: GET
+        path: /users/me/threads
+        query:
+          q: "in:inbox is:unread"
+          maxResults: "100"
+        pagination:
+          items_path: threads
+          next_token_path: nextPageToken
+          token_param: pageToken
+          max_pages: 20
+      # Unread inbox messages, same `q` so the two entities describe one set at
+      # two granularities. Response items are stubs: { id, threadId }.
+      list-unread-messages:
+        method: GET
+        path: /users/me/messages
+        query:
+          q: "in:inbox is:unread"
+          maxResults: "100"
+        pagination:
+          items_path: messages
+          next_token_path: nextPageToken
+          token_param: pageToken
+          max_pages: 20
+
+entity_prefix: "gmail_"
+
+entities:
+  # Label vocabulary — what a message's future label_ids will name, and the
+  # user's own folder taxonomy. `type` is "system" or "user".
+  label:
+    profile_variants:
+      - name: default
+        render: 'row(text(col("name")))'
+    schema:
+      - name: id
+        sql_type: TEXT
+        primary_key: true
+      - name: name
+        sql_type: TEXT
+        nullable: true
+      - name: label_type
+        sql_type: TEXT
+        nullable: true
+      - name: message_list_visibility
+        sql_type: TEXT
+        nullable: true
+      - name: label_list_visibility
+        sql_type: TEXT
+        nullable: true
+    sync:
+      list_tool: list-labels
+      extract_path: labels
+      # Gmail spells these in camelCase; `type` is additionally renamed because
+      # the cache-table DDL builder does not quote column identifiers.
+      project:
+        label_type:
+          path: ["type"]
+        message_list_visibility:
+          path: ["messageListVisibility"]
+        label_list_visibility:
+          path: ["labelListVisibility"]
+
+  # Unread inbox threads. `snippet` is the only human-readable text Gmail hands
+  # out without a per-message get, so it carries the inbox glance.
+  thread:
+    profile_variants:
+      - name: default
+        render: 'row(text(col("snippet")))'
+    schema:
+      - name: id
+        sql_type: TEXT
+        primary_key: true
+      - name: snippet
+        sql_type: TEXT
+        nullable: true
+      - name: history_id
+        sql_type: TEXT
+        nullable: true
+    sync:
+      list_tool: list-unread-threads
+      extract_path: threads
+      project:
+        history_id:
+          path: ["historyId"]
+
+  # Unread inbox messages. Gmail's list response is a stub pair, so these two
+  # columns are the whole entity — see the fan-out TODO in the header for what
+  # would populate subject/from/date/labels.
+  message:
+    profile_variants:
+      - name: default
+        render: 'row(text(col("id")))'
+    schema:
+      - name: id
+        sql_type: TEXT
+        primary_key: true
+      - name: thread_id
+        sql_type: TEXT
+        nullable: true
+        indexed: true
+    sync:
+      list_tool: list-unread-messages
+      extract_path: messages
+      project:
+        thread_id:
+          path: ["threadId"]
+
+tools: {}
+
+# Derived views (generic `views:` mechanism). Each becomes
+# `CREATE MATERIALIZED VIEW {entity_prefix}{name} AS {sql}` at startup.
+#
+# Single-level GROUP BY aggregate — inside the Turso-IVM-supported dialect, and
+# maintained in O(delta) as mail is read or arrives. Verified by
+# crates/holon-mcp-client/tests/sidecar_conformance.rs, which reconciles every
+# shipped view against a real Turso.
+views:
+  - name: unread_by_thread
+    sql: >-
+      SELECT thread_id, count(*) AS unread_messages
+      FROM gmail_message
+      GROUP BY thread_id
