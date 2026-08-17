@@ -27,6 +27,7 @@ use holon_turso::schema_modules::BlockSchemaModule;
 use holon_turso::schema_modules::CoreSchemaModule;
 use holon_turso::schema_modules::HistorySchemaModule;
 use holon_turso::schema_modules::IdentitySchemaModule;
+use holon_turso::schema_modules::IntegrationStateSchemaModule;
 use holon_turso::schema_modules::JournalDayPagesSchemaModule;
 use holon_turso::schema_modules::JournalFeedSchemaModule;
 use holon_turso::schema_modules::LinkSchemaModule;
@@ -87,6 +88,11 @@ impl DbResource for NavigationTables {}
 /// `sync_states` table.
 pub struct SyncStateTables;
 impl DbResource for SyncStateTables {}
+
+/// `integration_state` table — the queryable mirror of the integration
+/// enablement store.
+pub struct IntegrationStateTables;
+impl DbResource for IntegrationStateTables {}
 
 /// `operation` table for undo/redo.
 pub struct OperationTables;
@@ -251,6 +257,15 @@ pub fn register_schema_providers(injector: &Injector) {
             .await
             .expect("SyncStateTables schema init failed");
         Shared::new(DbReady::<SyncStateTables>::new())
+    }));
+
+    // -- IntegrationStateTables (no deps) --
+    injector.provide::<DbReady<IntegrationStateTables>>(Provider::root_async(|inj| async move {
+        let db = inj.resolve::<dyn DbHandleProvider>();
+        run_schema_module(&IntegrationStateSchemaModule, &db.handle())
+            .await
+            .expect("IntegrationStateTables schema init failed");
+        Shared::new(DbReady::<IntegrationStateTables>::new())
     }));
 
     // -- OperationTables (no deps) --
@@ -421,6 +436,7 @@ pub fn all_schema_roots() -> Vec<std::any::TypeId> {
         TypeId::of::<DbReady<BlockRequirementEdgesView>>(),
         TypeId::of::<DbReady<NavigationTables>>(),
         TypeId::of::<DbReady<SyncStateTables>>(),
+        TypeId::of::<DbReady<IntegrationStateTables>>(),
         TypeId::of::<DbReady<OperationTables>>(),
         TypeId::of::<DbReady<LinkTables>>(),
         TypeId::of::<DbReady<GraphEavSchema>>(),

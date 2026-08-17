@@ -52,7 +52,9 @@ impl DatabaseSyncTokenStore {
     }
 }
 
-fn now_utc() -> String {
+/// The wall-clock format every `updated_at` column in this schema uses.
+/// Shared so a second table cannot drift into a different one.
+pub fn now_utc() -> String {
     chrono::DateTime::from_timestamp_millis(holon_api::clock::now_millis())
         .expect("now within range")
         .format("%Y-%m-%d %H:%M:%S")

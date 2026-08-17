@@ -565,6 +565,37 @@ impl FrontendInjectorExt for Injector {
                 ))
                 .await;
 
+                // Mirror the enablement store into `integration_state`, which
+                // the seeded left-sidebar Integrations section queries. Runs
+                // here rather than in the (lazily resolved) integration
+                // registry: a container that never touches an integration would
+                // otherwise render the section empty with everything switched
+                // on. Absent store = no integrations directory configured, and
+                // an empty section is then the truth.
+                #[cfg(not(target_arch = "wasm32"))]
+                async {
+                    if let Ok(store) =
+                        resolver.try_resolve::<holon_mcp_client::IntegrationConfigStore>()
+                    {
+                        std::sync::Arc::new(
+                            crate::integration_projection::IntegrationStateProjector::new(
+                                engine.db_handle().clone(),
+                                store,
+                            ),
+                        )
+                        .start()
+                        .await
+                        .expect(
+                            "boot [component=session stage=session-resolve]: \
+                             IntegrationStateProjector::start failed",
+                        );
+                    }
+                }
+                .instrument(tracing::info_span!(
+                    "di.factory.FrontendSession.project_integration_state"
+                ))
+                .await;
+
                 // Start action watchers — streaming discovery picks up action blocks
                 // as FileSyncController inserts them. Must be after seed_default_layout
                 // so the block table and seed data (block:journals) exist.

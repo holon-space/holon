@@ -35,12 +35,12 @@ use holon_mcp::describe_ui_expand::DeferredPolicy;
 use holon_mcp::describe_ui_expand::EngineResolver;
 use holon_mcp::describe_ui_expand::resolve_deferred;
 
-const PROVIDER_QUERY: &str =
-    "SELECT provider_name, updated_at FROM sync_states ORDER BY provider_name ASC";
+const PROVIDER_QUERY: &str = "SELECT provider_name, status FROM integration_state WHERE enabled = 1 ORDER BY \
+     provider_name ASC";
 
 /// Mirrors `crates/holon-app/tests/integrations_section_seed.rs` —
-/// `sync_states` is an eager schema root of the `BackendEngine` factory, so the
-/// query below has a real table to read.
+/// `integration_state` is an eager schema root of the `BackendEngine` factory,
+/// so the query below has a real table to read.
 async fn fresh_engine(db_path: std::path::PathBuf) -> Arc<holon::api::BackendEngine> {
     holon::di::create_backend_engine_with_extras(
         db_path,
@@ -76,19 +76,18 @@ async fn fresh_engine(db_path: std::path::PathBuf) -> Arc<holon::api::BackendEng
 
 async fn seed_providers(engine: &holon::api::BackendEngine) {
     let db = engine.db_handle();
-    for (provider, token, ts) in [
-        ("todoist", "tok-b", "2026-07-18 09:00:00"),
-        ("claude-history", "tok-a", "2026-07-18 08:00:00"),
-    ] {
+    for (provider, status) in [("todoist", "Connected"), ("claude-history", "Pending")] {
         db.execute_values(
             &format!(
-                "INSERT INTO sync_states (provider_name, sync_token, updated_at) \
-                 VALUES ('{provider}', '{token}', '{ts}')"
+                "INSERT INTO integration_state \
+                 (id, provider_name, enabled, status, config_status, updated_at) \
+                 VALUES ('integration:{provider}', '{provider}', 1, '{status}', 'unconfigured', \
+                 '2026-08-18 00:00:00')"
             ),
             vec![],
         )
         .await
-        .expect("insert sync_states fixture row");
+        .expect("insert integration_state fixture row");
     }
 }
 

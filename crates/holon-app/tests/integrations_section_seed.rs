@@ -8,17 +8,20 @@
 //! seeded left-sidebar render block (`assets/default/index.org`): the
 //! page-hierarchy `tree(...)` is wrapped in a `column(...)` followed by
 //! `divider()`, an "Integrations" header, and a `live_query` over the
-//! `sync_states` table (the Turso surface that records which providers have
-//! synced and when).
+//! `integration_state` table (the queryable mirror of the enablement store).
 //!
 //! Two guards:
 //!  1. `fresh_seed_places_integrations_section_below_hierarchy` — after a fresh
 //!     seed the left-sidebar render carries the page hierarchy, THEN a divider,
-//!     THEN the Integrations section (header + sync_states query), in that
-//!     order.
+//!     THEN the Integrations section (header + integration_state query), in
+//!     that order.
 //!  2. `deleted_integrations_section_does_not_resurrect_on_reseed` — deleting
 //!     the render block and re-seeding (the non-fresh boot path) does NOT bring
 //!     it back: layout is seeded fresh-only, so a user deletion sticks.
+//!
+//! WHAT the section resolves to — that its rows are exactly the enabled
+//! integrations, each with its boot status — is pinned separately, by
+//! `integrations_enablement_projection.rs`.
 //!
 //! @pbt kind harness
 //! @pbt covers integrations-section-seed — left-sidebar Integrations discovery
@@ -48,8 +51,8 @@ fn runtime() -> Arc<tokio::runtime::Runtime> {
 
 /// Build a fresh file-backed SqlOnly engine + `BlockOrdering` through the same
 /// lazy-DI entry the gpui frontend uses. Mirrors
-/// `fresh_db_boot_seed_smoke.rs`; `sync_states` is materialized as an eager
-/// schema root by the `BackendEngine` factory, so the seeded Integrations
+/// `fresh_db_boot_seed_smoke.rs`; `integration_state` is materialized as an
+/// eager schema root by the `BackendEngine` factory, so the seeded Integrations
 /// `live_query` has a real table to read.
 async fn fresh_engine(
     db_path: std::path::PathBuf,
@@ -119,7 +122,7 @@ async fn left_sidebar_render_content(db: &holon::storage::DbHandle) -> Option<(S
 
 /// After a fresh seed the left-sidebar render composes, IN ORDER: the
 /// page-hierarchy tree, a divider, then the Integrations discovery section
-/// (header + a `sync_states` query). This is the ruling made concrete —
+/// (header + an `integration_state` query). This is the ruling made concrete —
 /// discovery section BELOW the hierarchy, separated by a divider.
 #[test]
 fn fresh_seed_places_integrations_section_below_hierarchy() {
@@ -145,93 +148,26 @@ fn fresh_seed_places_integrations_section_below_hierarchy() {
         let divider_at = content
             .find("divider(")
             .expect("render must contain a divider() separating hierarchy from integrations");
-        // The Integrations discovery section: header + a query over sync_states
-        // (the Turso surface listing which providers synced, and when).
+        // The Integrations discovery section: header + a query over
+        // `integration_state`, the queryable mirror of the enablement store.
         let header_at = content
             .find("Integrations")
             .expect("render must contain the Integrations section header");
-        let sync_states_at = content
-            .find("sync_states")
-            .expect("integrations section must query the sync_states table");
+        let mirror_at = content
+            .find("integration_state")
+            .expect("integrations section must query the integration_state mirror");
 
         assert!(
-            tree_at < divider_at && divider_at < header_at && header_at < sync_states_at,
-            "order must be: page hierarchy, divider, Integrations header, sync_states query — got \
-             tree@{tree_at} divider@{divider_at} header@{header_at} sync_states@{sync_states_at} \
-             in: {content}"
+            tree_at < divider_at && divider_at < header_at && header_at < mirror_at,
+            "order must be: page hierarchy, divider, Integrations header, integration_state \
+             query — got tree@{tree_at} divider@{divider_at} header@{header_at} \
+             integration_state@{mirror_at} in: {content}"
         );
-        // Seeded as a live, reactive query surface (not a static snapshot).
+        // Seeded as a live, reactive query surface (not a static snapshot), so
+        // toggling an integration re-renders the section without a restart.
         assert!(
             content.contains("live_query"),
-            "integrations section must be a live_query so new syncs surface: {content}"
-        );
-    });
-}
-
-/// View-level surface check: the section's query (`SELECT provider_name,
-/// updated_at FROM sync_states ORDER BY provider_name ASC`) returns exactly the
-/// integrations that have synced, in provider order, given fixture rows written
-/// the way a real sync writes them (into `sync_states`). This proves the seeded
-/// section will list real synced integrations rather than pretend data.
-#[test]
-fn integrations_query_lists_synced_providers_in_order() {
-    let rt = runtime();
-    rt.clone().block_on(async {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (engine, _ordering) = fresh_engine(dir.path().join("fresh.db")).await;
-        let db = engine.db_handle();
-
-        // Empty state: no integrations synced yet → the discovery query returns
-        // nothing (the section renders empty, never fabricated rows).
-        let empty = db
-            .query(
-                "SELECT provider_name, updated_at FROM sync_states ORDER BY provider_name ASC",
-                HashMap::new(),
-            )
-            .await
-            .expect("query sync_states (empty)");
-        assert!(
-            empty.is_empty(),
-            "no integrations synced yet → empty discovery list, got {empty:?}"
-        );
-
-        // Two integrations record sync state (out of alphabetical order to prove
-        // the ORDER BY). This is the same table `save_token` upserts into.
-        for (provider, token, ts) in [
-            ("todoist", "tok-b", "2026-07-18 09:00:00"),
-            ("claude-history", "tok-a", "2026-07-18 08:00:00"),
-        ] {
-            db.execute_values(
-                &format!(
-                    "INSERT INTO sync_states (provider_name, sync_token, updated_at) \
-                     VALUES ('{provider}', '{token}', '{ts}')"
-                ),
-                vec![],
-            )
-            .await
-            .expect("insert sync_states fixture row");
-        }
-
-        let rows = db
-            .query(
-                "SELECT provider_name, updated_at FROM sync_states ORDER BY provider_name ASC",
-                HashMap::new(),
-            )
-            .await
-            .expect("query sync_states (populated)");
-        let providers: Vec<String> = rows
-            .iter()
-            .map(|r| {
-                r.get("provider_name")
-                    .and_then(|v| v.as_string())
-                    .expect("provider_name column")
-                    .to_string()
-            })
-            .collect();
-        assert_eq!(
-            providers,
-            vec!["claude-history".to_string(), "todoist".to_string()],
-            "discovery list must be the synced providers, alphabetical"
+            "integrations section must be a live_query so enablement changes surface: {content}"
         );
     });
 }
@@ -257,7 +193,7 @@ fn deleted_integrations_section_does_not_resurrect_on_reseed() {
             .await
             .expect("render present after first seed");
         assert!(
-            first.contains("sync_states"),
+            first.contains("integration_state"),
             "sanity: first seed carries the integrations section"
         );
 

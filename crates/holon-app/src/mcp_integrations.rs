@@ -40,6 +40,27 @@ fn normalize_var_name(s: &str) -> String {
 /// Disclose that `name` could not be connected at boot. Without this the
 /// failure is log-only and every page backed by the integration's `cc_*`
 /// tables renders blank as if the remote had no data.
+/// Record `name`'s boot outcome in the `integration_state` mirror, so the
+/// left-sidebar Integrations section shows an enabled-but-broken integration as
+/// broken rather than as healthy.
+///
+/// A failure here is logged, not fatal: the status column going stale must
+/// never take down a boot that otherwise succeeded. The row itself is written
+/// by `IntegrationStateProjector`, so a miss leaves `Pending` — visibly
+/// unresolved rather than a wrong claim.
+async fn record_status(
+    db: &holon::storage::DbHandle,
+    name: &str,
+    status: crate::integration_projection::IntegrationStatus,
+) {
+    if let Err(e) = crate::integration_projection::set_integration_status(db, name, status).await {
+        warn!(
+            "[McpIntegrationsModule] Could not record boot status for '{name}' — the \
+             Integrations section will show it as Pending: {e:#}"
+        );
+    }
+}
+
 fn disclose_connect_failure(name: &str, error: &anyhow::Error, bus: &DegradedSignalBus) {
     bus.emit(ShareDegraded {
         shared_tree_id: name.to_string(),
@@ -365,6 +386,12 @@ impl Module for McpIntegrationsModule {
                                 name
                             );
                             disclose_connect_failure(name, &e, &degraded_bus);
+                            record_status(
+                                &db_handle,
+                                name,
+                                crate::integration_projection::IntegrationStatus::Unavailable,
+                            )
+                            .await;
                             continue;
                         }
                         Err(e) => {
@@ -413,6 +440,13 @@ impl Module for McpIntegrationsModule {
                                 );
                             }
 
+                            record_status(
+                                &db_handle,
+                                name,
+                                crate::integration_projection::IntegrationStatus::Connected,
+                            )
+                            .await;
+
                             names.push(name.clone());
                             integrations.push(integration);
                         }
@@ -425,6 +459,12 @@ impl Module for McpIntegrationsModule {
                                 provider_name, auth_url
                             );
                             disclose_needs_auth(&provider_name, &auth_url, &degraded_bus);
+                            record_status(
+                                &db_handle,
+                                &provider_name,
+                                crate::integration_projection::IntegrationStatus::NeedsAuth,
+                            )
+                            .await;
                         }
                         Err(e) => {
                             warn!(
@@ -432,6 +472,12 @@ impl Module for McpIntegrationsModule {
                                 name
                             );
                             disclose_connect_failure(name, &e, &degraded_bus);
+                            record_status(
+                                &db_handle,
+                                name,
+                                crate::integration_projection::IntegrationStatus::Unavailable,
+                            )
+                            .await;
                         }
                     }
                 }

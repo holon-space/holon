@@ -3,25 +3,25 @@
 //!
 //! Drives the REAL render expression authored in `assets/default/index.org` for
 //! `block:default-left-sidebar` (`column(tree(...), divider(), row(...
-//! "Integrations" ...), live_query(#{sql: "... FROM sync_states ..."}))`),
-//! parsed by the production DSL parser, composed the way production composes it
-//! (registered block tree + `live_block` inside `columns`, so the shell is
-//! `ShellPlacement::Panel`).
+//! "Integrations" ...), live_query(#{sql: "... FROM integration_state
+//! ..."}))`), parsed by the production DSL parser, composed the way production
+//! composes it (registered block tree + `live_block` inside `columns`, so the
+//! shell is `ShellPlacement::Panel`).
 //!
 //! BUG (BugFunnel 2026-08-02): `live_query`'s GPUI builder forces
 //! `height: relative(1.0)` whenever `placement == Panel`. A percentage height
 //! needs a DEFINITE parent; the sidebar's `column` is content-sized
 //! (`div().flex().flex_col()`, no height), so the shell resolved to 0 px and
 //! the whole Integrations section vanished — header visible, rows gone — even
-//! with a real `sync_states` row present. The accordion path was already fixed
-//! (`accordion::render_bounded` pins its region at a definite height); the
-//! bare- `column` path was not.
+//! with a real `integration_state` row present. The accordion path was already
+//! fixed (`accordion::render_bounded` pins its region at a definite height);
+//! the bare- `column` path was not.
 //!
-//! The `sync_states` rows come from `TestServices`' canned `watch_query_live`
-//! (`support/mod.rs`), which recognises the seeded SQL and yields data-bound
-//! `text` rows keyed `sync-{ix}` — so this asserts RENDERED ROWS, not just the
-//! region box, which is exactly the assertion the BugFunnel COVERAGE row says
-//! nothing in the suite made.
+//! The `integration_state` rows come from `TestServices`' canned
+//! `watch_query_live` (`support/mod.rs`), which recognises the seeded SQL and
+//! yields data-bound `text` rows keyed `sync-{ix}` — so this asserts RENDERED
+//! ROWS, not just the region box, which is exactly the assertion the BugFunnel
+//! COVERAGE row says nothing in the suite made.
 //!
 //! Run: `cargo test -p holon-gpui --test seeded_sidebar_live_query_height`
 
@@ -89,8 +89,8 @@ fn seeded_sidebar_live_query_paints_nonzero_height(cx: &mut TestAppContext) {
     // 1. The REAL seeded expression, parsed by the production DSL parser.
     let src = extract_sidebar_render();
     assert!(
-        src.contains("sync_states"),
-        "the seeded left sidebar must still carry the `sync_states` live_query \
+        src.contains("integration_state"),
+        "the seeded left sidebar must still carry the `integration_state` live_query \
          (the Integrations section under test); got:\n{src}"
     );
     let column_expr = parse_render_dsl(&src).expect("seeded left-sidebar render must parse");
@@ -173,7 +173,7 @@ fn seeded_sidebar_live_query_paints_nonzero_height(cx: &mut TestAppContext) {
     let rows = rows_with_entity_prefix(&snap, "sync-");
     assert!(
         rows.len() >= 3,
-        "the Integrations section must render its `sync_states` rows; found {} \
+        "the Integrations section must render its `integration_state` rows; found {} \
          (canned watcher yields {}).\n{}",
         rows.len(),
         support::CANNED_LIVE_QUERY_ROWS,
@@ -185,7 +185,7 @@ fn seeded_sidebar_live_query_paints_nonzero_height(cx: &mut TestAppContext) {
     let onscreen: Vec<&&ElementInfo> = rows.iter().filter(|r| r.y < WINDOW_H).collect();
     assert!(
         onscreen.iter().all(|r| r.height > 0.0),
-        "every on-screen `sync_states` row must have nonzero height; zero-height rows: {:?}\n{}",
+        "every on-screen `integration_state` row must have nonzero height; zero-height rows: {:?}\n{}",
         onscreen
             .iter()
             .filter(|r| r.height <= 0.0)

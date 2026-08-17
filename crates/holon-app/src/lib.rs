@@ -29,6 +29,7 @@
 pub mod boot_error;
 pub mod consolidator_epoch;
 pub mod headless_builder_services;
+pub mod integration_projection;
 pub mod integrations_settings;
 pub mod loro_seams;
 pub mod mcp_integrations;

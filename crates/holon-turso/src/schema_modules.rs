@@ -850,6 +850,35 @@ impl SchemaModule for SyncStateSchemaModule {
     }
 }
 
+/// Schema module for `integration_state` — the queryable mirror of the
+/// integration enablement store, which the left-sidebar Integrations section
+/// reads (D5.b §4.1a).
+pub struct IntegrationStateSchemaModule;
+
+#[async_trait]
+impl SchemaModule for IntegrationStateSchemaModule {
+    fn name(&self) -> &str {
+        "integration_state"
+    }
+
+    fn provides(&self) -> Vec<Resource> {
+        vec![Resource::schema("integration_state")]
+    }
+
+    fn requires(&self) -> Vec<Resource> {
+        vec![]
+    }
+
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+        tracing::info!("[IntegrationStateSchemaModule] Creating integration_state table");
+        for stmt in sql_statements(include_str!("../sql/schema/integration_state.sql")) {
+            db_handle.execute_ddl(stmt).await?;
+        }
+        tracing::info!("[IntegrationStateSchemaModule] integration_state table created");
+        Ok(())
+    }
+}
+
 /// Operations schema module for undo/redo persistence.
 /// NOTE: This schema MUST match the OperationLogEntry entity in
 /// holon-core/src/operation_log.rs
