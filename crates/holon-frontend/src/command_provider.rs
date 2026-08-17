@@ -53,12 +53,21 @@ impl BlockResolver for ServicesBlockResolver {
 /// operation). The suffix is the template's block id.
 const TEMPLATE_ITEM_PREFIX: &str = "__template__:";
 
+/// `PopupItem::id` of the disclosed failure row shown when the param-collection
+/// search errors. Selecting it surfaces the failure instead of embedding a
+/// block whose id is an error message.
+const SEARCH_ERROR_ID: &str = "__search_error__";
+
 /// Internal state for param collection sub-phase.
 #[derive(Debug, Clone)]
 struct ParamCollectionState {
     operation: MatchedOperation,
     param: OperationParam,
-    search_results: Vec<PopupItem>,
+    /// The command-list filter the user had typed when they picked the
+    /// operation (`"enti"` for `/enti` → Embed Entity). The editor keeps that
+    /// text, so the popup's filter stays prefixed by it; the search term for
+    /// this phase is whatever the user types AFTER it.
+    command_filter: String,
 }
 
 /// Slash command provider.
@@ -78,6 +87,11 @@ pub struct CommandProvider {
     /// `None` for callers without a backend (headless mirror) — a template pick
     /// then fails loud rather than guessing placement from the id-only context.
     resolver: Option<Arc<dyn BlockResolver>>,
+    /// Backs the entity search that fills an operation's missing `EntityId`
+    /// param (`embed_entity`'s `target_uri`). `None` for callers without a
+    /// backend — such an operation then has no reachable completion, so it
+    /// fails loud on selection instead of picking a target out of thin air.
+    services: Option<Arc<dyn BuilderServices>>,
     /// If Some, we're in param collection mode.
     param_state: Arc<Mutex<Option<ParamCollectionState>>>,
     /// Line-relative offset of the "/" trigger char (from
@@ -95,6 +109,7 @@ impl CommandProvider {
             context_params,
             templates: Vec::new(),
             resolver: None,
+            services: None,
             param_state: Arc::new(Mutex::new(None)),
             prefix_start: None,
         }
@@ -112,9 +127,19 @@ impl CommandProvider {
     }
 
     /// Supply the block resolver used to read the picked block's real
-    /// content/parent at execute time.
+    /// content/parent at execute time. Narrow seam for callers that have no
+    /// `BuilderServices` to hand (unit tests); production uses
+    /// [`Self::with_services`].
     pub fn with_resolver(mut self, resolver: Arc<dyn BlockResolver>) -> Self {
         self.resolver = Some(resolver);
+        self
+    }
+
+    /// Supply the backend capabilities: block resolution for template
+    /// placement, and entity search for param collection.
+    pub fn with_services(mut self, services: Arc<dyn BuilderServices>) -> Self {
+        self.resolver = Some(Arc::new(ServicesBlockResolver::new(services.clone())));
+        self.services = Some(services);
         self
     }
 
@@ -298,24 +323,82 @@ impl PopupProvider for CommandProvider {
         let context_params = self.context_params.clone();
         let templates = self.templates.clone();
         let param_state = self.param_state.clone();
+        let services = self.services.clone();
 
-        let signal = filter.map(move |f| {
-            let state = param_state.lock().unwrap();
-            if let Some(ps) = state.as_ref() {
-                // In param collection: show search results filtered by current text
-                let f_lower = f.to_lowercase();
-                ps.search_results
-                    .iter()
-                    .filter(|item| f.is_empty() || item.label.to_lowercase().contains(&f_lower))
-                    .cloned()
-                    .collect()
-            } else {
-                let mut items = Self::build_command_items(&operations, &context_params, &f);
-                items.extend(Self::build_template_items(&templates, &f));
-                items
+        let signal = filter.map_future(move |f| {
+            let operations = operations.clone();
+            let context_params = context_params.clone();
+            let templates = templates.clone();
+            let param_state = param_state.clone();
+            let services = services.clone();
+            async move {
+                // Snapshot the phase, then release the lock — the search below
+                // awaits, and this Mutex is also taken by `on_select`.
+                let collecting = param_state
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|ps| ps.command_filter.clone());
+
+                let Some(command_filter) = collecting else {
+                    let mut items = Self::build_command_items(&operations, &context_params, &f);
+                    items.extend(Self::build_template_items(&templates, &f));
+                    return items;
+                };
+
+                // The editor still holds the text that opened this phase, so
+                // the search term is what the user typed after it.
+                let term = f.strip_prefix(&command_filter).unwrap_or(&f).trim();
+                if term.is_empty() {
+                    return Vec::new();
+                }
+
+                let Some(services) = services else {
+                    return vec![PopupItem {
+                        id: SEARCH_ERROR_ID.to_string(),
+                        label: "Search unavailable (no backend)".to_string(),
+                        icon: None,
+                    }];
+                };
+                let handle = services.runtime_handle();
+                let term = term.to_string();
+                let search = handle.spawn({
+                    let services = services.clone();
+                    let term = term.clone();
+                    async move { services.search_link_candidates(&term).await }
+                });
+
+                match search.await {
+                    Ok(Ok(candidates)) => candidates
+                        .iter()
+                        .map(|c| PopupItem {
+                            id: c.id.to_string(),
+                            label: c.label.clone(),
+                            icon: None,
+                        })
+                        .collect(),
+                    Ok(Err(e)) => {
+                        tracing::warn!("[CommandProvider] target search failed ({term:?}): {e}");
+                        vec![PopupItem {
+                            id: SEARCH_ERROR_ID.to_string(),
+                            label: format!("Search failed: {e}"),
+                            icon: None,
+                        }]
+                    }
+                    Err(e) => {
+                        tracing::warn!("[CommandProvider] target search task panicked: {e}");
+                        vec![PopupItem {
+                            id: SEARCH_ERROR_ID.to_string(),
+                            label: "Search failed".to_string(),
+                            icon: None,
+                        }]
+                    }
+                }
             }
         });
 
+        // `map_future` yields None while the future is pending.
+        let signal = signal.map(|opt| opt.unwrap_or_default());
         Box::pin(signal.to_signal_vec())
     }
 
@@ -324,6 +407,12 @@ impl PopupProvider for CommandProvider {
 
         if let Some(ps) = state.take() {
             // We're in param collection — the selected item is an entity
+            if item.id == SEARCH_ERROR_ID {
+                return PopupResult::Failed {
+                    message: format!("Cannot pick a {} — the search failed", ps.param.name),
+                    strip_prefix_start: self.prefix_start,
+                };
+            }
             let selected_id = item.id.clone();
             let mut params = ps.operation.resolved_params.clone();
             params.insert(ps.param.name.clone(), Value::String(selected_id));
@@ -371,53 +460,41 @@ impl PopupProvider for CommandProvider {
             };
         }
 
-        // Has missing entity params — transition to param collection
+        // Has missing entity params — transition to param collection, where
+        // `candidates` searches for a target on every further keystroke.
         let entity_params = matched.entity_params_needed();
-        if let Some(&(_, _entity_name)) = entity_params.first() {
+        if !entity_params.is_empty() {
             let first_missing = matched.missing_params[0].clone();
             *state = Some(ParamCollectionState {
                 operation: matched,
                 param: first_missing,
-                search_results: vec![],
+                command_filter: filter.to_string(),
             });
-            // PopupMenu will re-render with empty items; the frontend
-            // should detect this state and issue a search query.
-            // For now, return Updated to keep the menu open.
             return PopupResult::Updated;
         }
 
-        PopupResult::NotActive
-    }
-}
-
-/// Feed entity search results to the command provider for param collection.
-///
-/// Call this when the frontend has executed a search query and received
-/// results. Converts raw row data to PopupItems and stores them in the param
-/// state.
-pub fn set_search_results(provider: &CommandProvider, results: Vec<HashMap<String, Value>>) {
-    let mut state = provider.param_state.lock().unwrap();
-    if let Some(ps) = state.as_mut() {
-        ps.search_results = results
+        // Nothing can complete this operation. Returning `NotActive` here would
+        // read to the frontends as "no popup was open" and let the Enter fall
+        // through to `split_block` — a mangled block masquerading as a command
+        // (Martin, GPUI dogfooding 2026-08-17). Fail visibly instead.
+        let missing: Vec<&str> = matched
+            .missing_params
             .iter()
-            .map(|row| {
-                let id = row
-                    .get("id")
-                    .and_then(|v| v.as_string())
-                    .unwrap_or("")
-                    .to_string();
-                let label = row
-                    .get("content")
-                    .and_then(|v| v.as_string())
-                    .unwrap_or("(untitled)")
-                    .to_string();
-                PopupItem {
-                    id,
-                    label,
-                    icon: None,
-                }
-            })
+            .map(|p| p.name.as_str())
             .collect();
+        tracing::error!(
+            "slash command {:?} has no reachable completion; missing {missing:?}",
+            matched.operation_name()
+        );
+        PopupResult::Failed {
+            message: format!(
+                "\"{}\" needs {} and there is no way to supply {} here",
+                matched.descriptor.display_name,
+                missing.join(", "),
+                if missing.len() == 1 { "it" } else { "them" }
+            ),
+            strip_prefix_start: self.prefix_start,
+        }
     }
 }
 
@@ -574,16 +651,7 @@ mod tests {
         };
         provider.on_select(&item, "emb");
 
-        // Feed search results
-        set_search_results(
-            &provider,
-            vec![HashMap::from([(
-                "id".into(),
-                Value::String("target-block".into()),
-            )])],
-        );
-
-        // Select the search result
+        // Select a search result
         let entity_item = PopupItem {
             id: "target-block".into(),
             label: "(untitled)".into(),

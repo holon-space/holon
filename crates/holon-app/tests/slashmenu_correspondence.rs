@@ -299,3 +299,92 @@ async fn slash_menu_entries_are_unique_by_label_and_op_id() {
         );
     }
 }
+
+/// Inc3: every LISTED op must have a REACHABLE completion from the id-only
+/// editor context — presence in the menu is not the same as being invocable.
+///
+/// The two locks above assert what the menu SHOWS. This one asserts what
+/// happens when the user picks a row. An op whose remaining params the popup
+/// cannot collect returns `PopupResult::NotActive`, which the frontends map to
+/// `EditorAction::None` — indistinguishable from "no popup was open", so Enter
+/// falls through to `split_block` and silently mangles the block instead of
+/// running the command (Martin, GPUI dogfooding 2026-08-17: `/enti` + Enter
+/// split the block and left the literal "/enti" behind).
+///
+/// Runs over the whole Listed set, not just `embed_entity`, so the next op
+/// that grows an uncollectable param is caught at the descriptor.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_listed_command_has_a_reachable_completion() {
+    use holon_frontend::popup_menu::PopupProvider;
+    use holon_frontend::popup_menu::PopupResult;
+
+    let engine = block_engine().await;
+    let catalog = engine.available_operations(BLOCK).await;
+    let wirings: Vec<OperationWiring> = catalog
+        .iter()
+        .cloned()
+        .map(|d| d.to_default_wiring())
+        .collect();
+    let id_ctx: HashMap<String, Value> =
+        [("id".into(), Value::String("block:probe".into()))].into();
+
+    let menu = CommandProvider::build_command_items(&wirings, &id_ctx, "");
+    assert!(!menu.is_empty(), "non-vacuity: the menu must not be empty");
+
+    let mut dead_ends = Vec::new();
+    for item in &menu {
+        let provider = CommandProvider::new(wirings.clone(), id_ctx.clone());
+        match provider.on_select(item, "") {
+            // Executes now, or opens the param picker — both are reachable.
+            PopupResult::Execute { .. } | PopupResult::Updated => {}
+            other => dead_ends.push((item.id.clone(), format!("{other:?}"))),
+        }
+    }
+
+    assert!(
+        dead_ends.is_empty(),
+        "these Listed commands are shown but cannot be completed — selecting \
+         them falls through to split_block instead of running: {dead_ends:?}"
+    );
+}
+
+/// The specific dogfood witness: picking "Embed Entity" must open the target
+/// picker (param collection), keyed on the descriptor declaring `target_uri`
+/// as an entity reference rather than a bare string.
+#[tokio::test(flavor = "multi_thread")]
+async fn embed_entity_opens_the_target_picker() {
+    use holon_frontend::command_provider::is_collecting_params;
+    use holon_frontend::command_provider::param_search_entity;
+    use holon_frontend::popup_menu::PopupItem;
+    use holon_frontend::popup_menu::PopupProvider;
+    use holon_frontend::popup_menu::PopupResult;
+
+    let engine = block_engine().await;
+    let catalog = engine.available_operations(BLOCK).await;
+    let wirings: Vec<OperationWiring> = catalog
+        .iter()
+        .cloned()
+        .map(|d| d.to_default_wiring())
+        .collect();
+    let id_ctx: HashMap<String, Value> =
+        [("id".into(), Value::String("block:probe".into()))].into();
+
+    let provider = CommandProvider::new(wirings, id_ctx);
+    let item = PopupItem {
+        id: "embed_entity".into(),
+        label: "Embed Entity".into(),
+        icon: None,
+    };
+    let result = provider.on_select(&item, "enti");
+
+    assert!(
+        matches!(result, PopupResult::Updated),
+        "selecting Embed Entity must keep the popup open to collect \
+         `target_uri`; got {result:?}"
+    );
+    assert!(
+        is_collecting_params(&provider),
+        "the provider must be in param collection after the pick"
+    );
+    assert_eq!(param_search_entity(&provider), Some(BLOCK.to_string()));
+}

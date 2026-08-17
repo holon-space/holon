@@ -2084,7 +2084,7 @@ where
     async fn embed_entity(
         &self,
         id: &EntityUri,
-        target_uri: &EntityUri,
+        #[entity_ref("block")] target_uri: &EntityUri,
     ) -> Result<OperationResult> {
         let id_str = id.as_str();
         let block = self

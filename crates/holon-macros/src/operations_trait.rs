@@ -947,8 +947,24 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
         }
     };
 
+    // `#[entity_ref(..)]` / `#[not_entity]` are descriptor metadata read by
+    // `parse_param_type_hint`. Rust has no inert-attribute registration for
+    // function params, so they must not survive into the emitted trait.
+    let mut trait_def = trait_def.clone();
+    for item in &mut trait_def.items {
+        if let syn::TraitItem::Fn(method) = item {
+            for arg in &mut method.sig.inputs {
+                if let syn::FnArg::Typed(pat_type) = arg {
+                    pat_type.attrs.retain(|a| {
+                        !a.path().is_ident("entity_ref") && !a.path().is_ident("not_entity")
+                    });
+                }
+            }
+        }
+    }
+
     let expanded = quote! {
-        // Original trait (unchanged)
+        // Original trait, minus the param-level descriptor attributes
         #trait_def
 
         // Generated operations module

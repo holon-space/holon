@@ -242,7 +242,13 @@ impl PopupMenu {
         drop(items);
 
         let result = provider.on_select(&item, &filter);
-        self.dismiss();
+        // `Updated` means the provider consumed the pick and moved to a next
+        // phase (e.g. embed_entity's target picker) — dismissing there would
+        // drop the provider holding that phase's state. Every other result is
+        // terminal for this menu.
+        if !matches!(result, PopupResult::Updated) {
+            self.dismiss();
+        }
         result
     }
 }

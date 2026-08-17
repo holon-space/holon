@@ -142,13 +142,10 @@ impl ViewEventHandler {
                         .with_prefix_start(prefix_start)
                         .with_templates(templates);
                         // Resolve the picked block's REAL content/parent at
-                        // execute time (not from the id-only context_params).
+                        // execute time (not from the id-only context_params),
+                        // and back the target search for ops that need one.
                         if let Some(services) = self.services.as_ref() {
-                            provider = provider.with_resolver(Arc::new(
-                                crate::command_provider::ServicesBlockResolver::new(
-                                    services.clone(),
-                                ),
-                            ));
+                            provider = provider.with_services(services.clone());
                         }
                         let signal = self.popup.activate(Arc::new(provider), &filter_text);
                         HandleResult::Activated { signal }
