@@ -280,14 +280,19 @@ fn state_files_are_invisible_to_the_sidecar_scan() {
             .expect("set");
     }
 
-    let loaded =
-        holon_mcp_client::load_integration_configs(dir.path()).expect("scan must not choke");
-    assert!(
-        loaded.configs.is_empty(),
-        "state files must not enable providers: {:?}",
-        loaded.configs.iter().map(|(n, _)| n).collect::<Vec<_>>()
+    let loaded = holon_mcp_client::load_integration_configs(dir.path(), &store)
+        .expect("scan must not choke");
+    let mut loaded_names: Vec<&str> = loaded.configs.iter().map(|(n, _)| n.as_str()).collect();
+    loaded_names.sort_unstable();
+    let mut expected = store.providers();
+    expected.sort_unstable();
+    assert_eq!(
+        loaded_names, expected,
+        "a `gcal.state.toml` enables `gcal`, and is never itself read as a \
+         provider named `gcal.state`"
     );
     assert!(loaded.superseded.is_empty());
+    assert!(loaded.ignored.is_empty());
 }
 
 /// The store writes state beside the sidecars, under the name the loader skips.

@@ -43,6 +43,8 @@ PROVIDER="$1"
 SCOPE="$2"
 
 TOKEN_FILE="${HOLON_REFRESH_TOKEN_FILE:-$HOME/.config/holon/${PROVIDER}-refresh-token}"
+CLIENT_ID_FILE="${HOLON_CLIENT_ID_FILE:-$HOME/.config/holon/${PROVIDER}-client-id}"
+CLIENT_SECRET_FILE="${HOLON_CLIENT_SECRET_FILE:-$HOME/.config/holon/${PROVIDER}-client-secret}"
 PORT="${HOLON_OAUTH_PORT:-8765}"
 REDIRECT_URI="http://127.0.0.1:${PORT}"
 AUTH_ENDPOINT="https://accounts.google.com/o/oauth2/v2/auth"
@@ -175,4 +177,14 @@ unset TOKEN_RESPONSE CODE HOLON_OAUTH_CLIENT_SECRET
 echo "Success. Refresh token written to: $TOKEN_FILE" >&2
 echo "Permissions:" >&2
 ls -l "$TOKEN_FILE" >&2
-echo "Now: cp assets/integrations/${PROVIDER}.yaml ~/.config/holon/integrations/ and restart Holon." >&2
+
+# Switch the integration on. Enablement lives in the state file, NOT in the
+# presence of a sidecar YAML — copying the YAML anywhere enables nothing.
+if [ -r "$CLIENT_ID_FILE" ] && [ -r "$CLIENT_SECRET_FILE" ]; then
+  "$(dirname "$0")/holon-integration-enable.sh" \
+    "$PROVIDER" "$CLIENT_ID_FILE" "$CLIENT_SECRET_FILE" "$TOKEN_FILE"
+else
+  echo "note: $CLIENT_ID_FILE / $CLIENT_SECRET_FILE not readable — recording the" >&2
+  echo "      integration as enabled but unconfigured." >&2
+  "$(dirname "$0")/holon-integration-enable.sh" "$PROVIDER"
+fi

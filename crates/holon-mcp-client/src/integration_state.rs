@@ -112,6 +112,25 @@ fn state_path_in(dir: &Path, provider: &str) -> PathBuf {
     dir.join(format!("{provider}.state.toml"))
 }
 
+/// The command that writes a complete enabling state file. Every disclosure
+/// names it rather than quoting a TOML fragment: the state parser rejects a
+/// partial file, so "write `enabled = true`" is advice that produces a broken
+/// integration.
+pub const ENABLE_COMMAND: &str = "scripts/holon-integration-enable.sh";
+
+/// The smallest complete state file that switches an integration ON, rendered
+/// from the types so a disclosure quoting it can never drift from what the
+/// loader accepts. Credentials stay on their own axis: this leaves the
+/// integration `Unconfigured`.
+pub fn enabling_state_file() -> String {
+    let state = IntegrationState {
+        enabled: true,
+        configuration: Configuration::Unconfigured,
+    };
+    toml::to_string_pretty(&StateFile::of(&state))
+        .expect("the enabling state file is built from the types and always serializes")
+}
+
 /// Write `text` to `path` via a temporary sibling, so a reader either sees the
 /// previous content or the new content and never a partial file. The temporary
 /// lands in the same directory to keep the rename on one filesystem, and its

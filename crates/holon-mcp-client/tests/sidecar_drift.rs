@@ -1,14 +1,33 @@
 //! An INSTALLED sidecar under `{config_dir}/integrations/` must never decide,
 //! by itself, what a bundled provider's schema is. The app ships its own copy
-//! of every provider it knows; an installed file only ENABLES that provider,
-//! and supplies content only when it declares this build's schema version.
+//! of every provider it knows; an installed file supplies content only when it
+//! declares this build's schema version (and enables nothing — that is the
+//! store's job, see `enablement_cutover.rs`).
 //!
 //! Without that split the installed file silently outranks the shipped one, so
 //! a copy taken before a schema requirement landed keeps the provider
 //! permanently unavailable and the error blames the file's content without
 //! saying it is stale or where the current one lives.
 
-use holon_mcp_client::load_integration_configs;
+use holon_mcp_client::IntegrationConfigStore;
+use holon_mcp_client::LoadedIntegrations;
+use holon_mcp_client::integration_state::Configuration;
+use holon_mcp_client::integration_state::IntegrationState;
+
+/// Every case here is about the CONTENT axis, so each one first switches the
+/// provider on through the store — the sole enablement authority since the
+/// installed file stopped being the switch.
+fn load_with_enabled(dir: &std::path::Path, provider: &str) -> anyhow::Result<LoadedIntegrations> {
+    let store = IntegrationConfigStore::load(dir)?;
+    store.set(
+        provider,
+        IntegrationState {
+            enabled: true,
+            configuration: Configuration::Unconfigured,
+        },
+    )?;
+    holon_mcp_client::load_integration_configs(dir, &store)
+}
 
 /// A faithfully-shaped pre-`fetch_contract` `claude-history.yaml`: the
 /// `session` render reads the `cc_message_fdw` foreign table while the
@@ -58,7 +77,7 @@ fn a_stale_installed_claude_history_does_not_shadow_the_shipped_sidecar() {
     let installed = dir.path().join("claude-history.yaml");
     std::fs::write(&installed, STALE_INSTALLED_CLAUDE_HISTORY).unwrap();
 
-    let loaded = load_integration_configs(dir.path()).expect("load");
+    let loaded = load_with_enabled(dir.path(), "claude-history").expect("load");
     let cfg = loaded
         .configs
         .iter()
@@ -91,7 +110,7 @@ fn superseding_a_stale_installed_sidecar_is_disclosed_with_both_paths() {
     let installed = dir.path().join("claude-history.yaml");
     std::fs::write(&installed, STALE_INSTALLED_CLAUDE_HISTORY).unwrap();
 
-    let loaded = load_integration_configs(dir.path()).expect("load");
+    let loaded = load_with_enabled(dir.path(), "claude-history").expect("load");
     let notice = loaded
         .superseded
         .iter()
@@ -123,7 +142,7 @@ fn a_current_schema_version_override_is_honored() {
     );
     std::fs::write(dir.path().join("claude-history.yaml"), yaml).unwrap();
 
-    let loaded = load_integration_configs(dir.path()).expect("load");
+    let loaded = load_with_enabled(dir.path(), "claude-history").expect("load");
     let cfg = loaded
         .configs
         .iter()
@@ -156,7 +175,7 @@ fn an_unparseable_installed_sidecar_is_superseded_not_fatal() {
     let installed = dir.path().join("claude-history.yaml");
     std::fs::write(&installed, "not: [valid: yaml: config").unwrap();
 
-    let loaded = load_integration_configs(dir.path())
+    let loaded = load_with_enabled(dir.path(), "claude-history")
         .expect("an unreadable override falls back to the bundled sidecar, it does not abort boot");
 
     let cfg = loaded
@@ -198,7 +217,8 @@ fn an_empty_installed_sidecar_is_superseded_not_fatal() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("claude-history.yaml"), "").unwrap();
 
-    let loaded = load_integration_configs(dir.path()).expect("empty override is not fatal");
+    let loaded =
+        load_with_enabled(dir.path(), "claude-history").expect("empty override is not fatal");
     assert!(
         loaded.configs.iter().any(|(n, _)| n == "claude-history"),
         "provider stays enabled on the bundled content"
@@ -210,34 +230,6 @@ fn an_empty_installed_sidecar_is_superseded_not_fatal() {
     );
 }
 
-/// A provider the build does not ship is loaded from disk exactly as before —
-/// bundling must not confiscate user-authored integrations.
-#[test]
-fn an_unbundled_provider_still_loads_from_disk() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        dir.path().join("my-own-thing.yaml"),
-        "transport:\n  child_process:\n    command: echo\nentities: {}\n",
-    )
-    .unwrap();
-
-    let loaded = load_integration_configs(dir.path()).expect("load");
-    assert_eq!(loaded.configs.len(), 1);
-    assert_eq!(loaded.configs[0].0, "my-own-thing");
-    assert!(loaded.superseded.is_empty());
-}
-
-/// A bundled provider with no installed file stays OFF: the installed file is
-/// the enablement signal, so bundling must not switch on every provider the
-/// build happens to know.
-#[test]
-fn bundled_providers_are_not_enabled_without_an_installed_file() {
-    let dir = tempfile::tempdir().unwrap();
-    let loaded = load_integration_configs(dir.path()).expect("load");
-    assert!(loaded.configs.is_empty());
-    assert!(loaded.superseded.is_empty());
-}
-
 /// An installed copy byte-identical to the bundled one is not an override and
 /// not a supersede — it is the same file, and must produce no disclosure noise.
 #[test]
@@ -246,7 +238,8 @@ fn a_byte_identical_installed_copy_discloses_nothing() {
     let bundled = holon_mcp_client::bundled_sidecar("claude-history").expect("bundled");
     std::fs::write(dir.path().join("claude-history.yaml"), bundled.yaml).unwrap();
 
-    let loaded = load_integration_configs(dir.path()).expect("load");
+    let loaded = load_with_enabled(dir.path(), "claude-history").expect("load");
     assert_eq!(loaded.configs.len(), 1);
     assert!(loaded.superseded.is_empty());
+    assert!(loaded.ignored.is_empty());
 }

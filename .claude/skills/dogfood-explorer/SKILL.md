@@ -143,16 +143,19 @@ piping to a JSON parser, or read stdout only with `2>/dev/null`.
 
 ## 1b. MCP client integrations — paths & wiring (verified 2026-07-16)
 
-- Integrations are declared as **yaml sidecars in the repo at `docs/integrations/*.yaml`**
-  (currently: `claude-history.yaml`, `todoist.yaml`, `jsonplaceholder.yaml`; README.md has the
-  model). There is NO GitHub integration sidecar (only the `assets/themes/github.yaml` theme and
-  `crates/holon-mcp-client/examples/github_probe.rs`).
-- **Runtime loader reads `{config_dir}/integrations/*.yaml`** — NOT the repo path:
+- Integrations are declared as **yaml sidecars in the repo at `assets/integrations/*.yaml`**,
+  all **compiled into the binary** (`crates/holon-mcp-client/src/bundled_sidecars.rs`;
+  README.md has the model). There is NO GitHub integration sidecar (only the
+  `assets/themes/github.yaml` theme and `crates/holon-mcp-client/examples/github_probe.rs`).
+- **Copying a sidecar into the config dir enables NOTHING.** Enablement lives in
+  `{config_dir}/integrations/<provider>.state.toml` (`IntegrationConfigStore`). So in a
+  sandbox launch, switch each provider on with
+  `HOLON_MCP_INTEGRATIONS_DIR=$SANDBOX/config/integrations scripts/holon-integration-enable.sh <provider>`
+  or the app runs none. The directory itself:
   `crates/holon-app/src/wiring.rs` → `resolve_mcp_integrations_dir` →
-  `config_dir.join("integrations")` (`crates/holon-frontend/src/config.rs`), loaded by
-  `crates/holon-mcp-client/src/integration_config.rs::load_integration_configs`.
-  So in a sandbox launch you MUST `mkdir -p $SANDBOX/config/integrations && cp
-  <ws>/docs/integrations/*.yaml $SANDBOX/config/integrations/` or the app loads none.
+  `config_dir.join("integrations")` (`crates/holon-frontend/src/config.rs`).
+  A stray `*.yaml` that enables nothing must produce a WARN + toast naming the state
+  file — a silent ignore is a finding.
 - `claude-history.yaml` = the Claude Code integration: stdio child-process to
   `/Users/martin/Workspaces/ai/claude-code-history-mcp/target/debug/claude-code-history-mcp`
   (env `CLAUDE_DATA_DIR`); entities session/task/message. Verify the binary exists before

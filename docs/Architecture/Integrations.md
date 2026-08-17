@@ -127,11 +127,14 @@ This aligns with Holon's [privacy-first design](../Vision/AI.md#3-privacy-first-
 
 ### Integration Pattern
 
-External MCP-based integrations are configured entirely via YAML files; no
-per-integration Rust code is required.  `McpIntegrationsModule` in
-`crates/holon-app/src/mcp_integrations.rs` scans a directory (default
-`{config_dir}/integrations/`, overridable via `HOLON_MCP_INTEGRATIONS_DIR`) and
-for each `*.yaml` file:
+External MCP-based integrations are declared entirely in YAML sidecars; no
+per-integration Rust code is required. Every sidecar this build knows is
+compiled in (`crates/holon-mcp-client/src/bundled_sidecars.rs`) — presence is a
+compile-time fact, so a file on disk can neither introduce a provider nor switch
+one on. `McpIntegrationsModule` in `crates/holon-app/src/mcp_integrations.rs`
+loads the `IntegrationConfigStore` from the integrations directory (default
+`{config_dir}/integrations/`, overridable via `HOLON_MCP_INTEGRATIONS_DIR`) and,
+for each bundled provider whose state says `enabled = true`:
 
 1. Parses an `IntegrationFileConfig` — transport, auth, entities, tools.
 2. Expands `${VAR}` references, layered: environment variable first, then an
@@ -162,11 +165,15 @@ plain cache-table names, and only for entities whose vtable has
 `write_through: true`.
 
 ```
-YAML file (e.g. ~/.config/holon/integrations/todoist.yaml)
-  │  parsed by load_integration_configs()
+~/.config/holon/integrations/todoist.state.toml   (enabled = true)
+  │  read by IntegrationConfigStore — the sole enablement authority
+  ▼
+load_integration_configs(dir, store)
+  │  content: the bundled sidecar, or an installed *.yaml declaring
+  │  this build's SIDECAR_SCHEMA_VERSION
   ▼
 McpIntegrationsModule::from_dir()
-  │  calls build_mcp_integration() per file
+  │  calls build_mcp_integration() per enabled provider
   ▼
 McpIntegration { operation_provider, sync_engine, fdw_backed_tables, … }
   │  stored in McpIntegrationRegistry (DI singleton)
@@ -178,11 +185,18 @@ QueryableCache<DynamicEntity>  →  Turso cache tables (queryable via SQL/PRQL)
 
 ### Adding a New External System
 
-1. Drop a `*.yaml` file in `{config_dir}/integrations/` (see YAML Sidecar below
-   for the full schema).
-2. Set any `${VAR}` secrets in the environment or in Holon's Settings UI
+1. Add a `*.yaml` sidecar to `assets/integrations/` and to `BUNDLED_SIDECARS`
+   (see YAML Sidecar below for the full schema), then rebuild — sidecars are
+   compiled in.
+2. Switch it on: `scripts/holon-integration-enable.sh <provider>`, which writes
+   `{config_dir}/integrations/<provider>.state.toml`.
+3. Set any `${VAR}` secrets in the environment or in Holon's Settings UI
    (the key `todoist.api_key` maps to `${TODOIST_API_KEY}` automatically).
-3. Restart the app — `McpIntegrationsModule` picks up the file automatically.
+4. Restart the app.
+
+An installed `*.yaml` that enables nothing — because the provider is off, or
+because the build does not ship it — is disclosed at boot on the degraded bus
+(WARN + toast) naming the state file to write. It is never silently ignored.
 
 No Rust code is needed for an MCP-backed integration unless the MCP server
 requires special connection handling (OAuth flows are already supported

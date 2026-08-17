@@ -56,9 +56,12 @@ schema_version: 1
 #     integration and tells you to `chmod 600` it — a readable secret is a
 #     compromised one.)
 #
-#  4. Activate the sidecar (Holon auto-scans this directory at startup — no
-#     registry entry needed):
-#       cp assets/integrations/gmail.yaml ~/.config/holon/integrations/gmail.yaml
+#  4. Switch the integration on. Step 3 already did this — it calls
+#     scripts/holon-integration-enable.sh, which writes
+#     ~/.config/holon/integrations/gmail.state.toml with `enabled = true`.
+#     Copying this YAML anywhere enables NOTHING: the sidecar this build runs
+#     is compiled in, and the state file is the switch. To toggle by hand:
+#       scripts/holon-integration-enable.sh gmail
 #
 #  5. Restart Holon. On boot the poll runner warms `gmail_label`, `gmail_thread`
 #     and `gmail_message`, feeding the `gmail_unread_by_thread` matview. Access

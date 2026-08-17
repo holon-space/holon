@@ -179,6 +179,12 @@ pub enum DegradedKind {
     /// this build was used instead. The integration works; the file the user
     /// installed does not, so the detail names both paths and the mismatch.
     IntegrationSidecarSuperseded,
+    /// Yellow — a sidecar file is installed for an integration that is not
+    /// switched on, so it runs nothing. Names the state file to write.
+    IntegrationNotEnabled,
+    /// Yellow — a sidecar file names an integration this build does not ship.
+    /// Nothing on disk can introduce one, so the file does nothing.
+    IntegrationSidecarNotBundled,
     /// A plain info-style toast (used for "ticket copied").
     Info,
 }
@@ -356,6 +362,38 @@ impl ShareUiState {
                     detail: format!(
                         "{integration}: {installed_path} was ignored ({incompatibility}); running \
                          the bundled {bundled_source}"
+                    ),
+                    condition: Some(condition.clone()),
+                });
+            }
+            ShareDegradedReason::IntegrationNotEnabled {
+                integration,
+                installed_path,
+                state_path,
+                remedy,
+            } => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::IntegrationNotEnabled,
+                    shared_tree_id: event.shared_tree_id,
+                    // Remedy first: it is the only clause the user acts on, so
+                    // it must survive both the cap and a hurried read.
+                    detail: format!(
+                        "{integration}: run `{remedy}` to write {state_path} — until then \
+                         {installed_path} runs nothing"
+                    ),
+                    condition: Some(condition.clone()),
+                });
+            }
+            ShareDegradedReason::IntegrationSidecarNotBundled {
+                provider,
+                installed_path,
+            } => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::IntegrationSidecarNotBundled,
+                    shared_tree_id: event.shared_tree_id,
+                    detail: format!(
+                        "{provider}: {installed_path} names an integration this build does not \
+                         ship — it runs nothing"
                     ),
                     condition: Some(condition.clone()),
                 });
@@ -1621,6 +1659,108 @@ fn render_quarantine_modal(
         .into_any_element()
 }
 
+/// The single line a toast renders — what the user actually reads.
+///
+/// `detail` is capped so one degradation cannot fill the window, but the cap
+/// counts CHARACTERS, not bytes: `detail` carries paths and error text, and
+/// cutting those mid-character panics the render. The budget is wide enough to
+/// hold a disclosure's two absolute paths plus its remedy, because a toast that
+/// truncates away the one actionable clause reads as complete while telling the
+/// user nothing they can act on.
+fn toast_message(toast: &DegradedToast) -> String {
+    const MAX_DETAIL_CHARS: usize = 320;
+    let (_, icon, label) = toast_style(toast.kind);
+    let detail = match toast.detail.char_indices().nth(MAX_DETAIL_CHARS) {
+        Some((cut, _)) => format!("{}…", &toast.detail[..cut]),
+        None => toast.detail.clone(),
+    };
+    format!("{icon}  {label} — {detail}")
+}
+
+/// Background, icon and headline for a toast kind. Split from the render so
+/// [`toast_message`] — the string the user actually reads — is testable.
+fn toast_style(kind: DegradedKind) -> (gpui::Rgba, &'static str, &'static str) {
+    match kind {
+        DegradedKind::SnapshotSaveFailed => (gpui::rgba(0xfbbf24ff), "⚠", "Snapshot save failed"),
+        DegradedKind::RehydrationFailed => (gpui::rgba(0xfbbf24ff), "↻", "Rehydration failed"),
+        DegradedKind::SqlProjectionFailed => (gpui::rgba(0xfbbf24ff), "⚠", "Shared edit not shown"),
+        DegradedKind::ForeignIdCollision => (
+            gpui::rgba(0xef4444ff),
+            crate::icon("⛔"),
+            "Blocked shared write (id collision)",
+        ),
+        DegradedKind::OrgIngestFailed => (
+            gpui::rgba(0xef4444ff),
+            "⚠",
+            "File sync degraded (bad org file)",
+        ),
+        DegradedKind::UndoFailed => (
+            gpui::rgba(0xef4444ff),
+            crate::icon("⛔"),
+            "Undo/redo failed",
+        ),
+        DegradedKind::UndoStepDropped => (
+            gpui::rgba(0xef4444ff),
+            crate::icon("⛔"),
+            "History step dropped — that edit can no longer be undone",
+        ),
+        DegradedKind::CommandFailed => {
+            (gpui::rgba(0xef4444ff), crate::icon("⛔"), "Command failed")
+        }
+        DegradedKind::PreferenceSaveFailed => (
+            gpui::rgba(0xef4444ff),
+            crate::icon("⛔"),
+            "Preference not saved",
+        ),
+        DegradedKind::ConnectorWritePending => (
+            gpui::rgba(0xfbbf24ff),
+            "⚠",
+            "Connector write needs approval",
+        ),
+        DegradedKind::ConnectorWriteOutcomeUnknown => (
+            gpui::rgba(0xef4444ff),
+            crate::icon("⛔"),
+            "Connector write outcome unknown",
+        ),
+        DegradedKind::SharedSubtreeNotMaterialized => (
+            gpui::rgba(0xfbbf24ff),
+            "⚠",
+            "Shared edit saved — org file pending",
+        ),
+        DegradedKind::WritebackDegraded => (
+            gpui::rgba(0xef4444ff),
+            crate::icon("⛔"),
+            "Edits are not reaching disk",
+        ),
+        DegradedKind::IntegrationConnectFailed => (
+            gpui::rgba(0xef4444ff),
+            crate::icon("⛔"),
+            "Integration unavailable",
+        ),
+        DegradedKind::IntegrationNeedsAuth => (
+            gpui::rgba(0xef4444ff),
+            crate::icon("⛔"),
+            "Integration needs authorization",
+        ),
+        DegradedKind::IntegrationSidecarSuperseded => (
+            gpui::rgba(0xfbbf24ff),
+            "⚠",
+            "Installed integration file ignored — using the bundled one",
+        ),
+        DegradedKind::IntegrationNotEnabled => (
+            gpui::rgba(0xfbbf24ff),
+            "⚠",
+            "Integration is not switched on",
+        ),
+        DegradedKind::IntegrationSidecarNotBundled => (
+            gpui::rgba(0xfbbf24ff),
+            "⚠",
+            "Integration file for a provider this build does not ship",
+        ),
+        DegradedKind::Info => (gpui::rgba(0x60a5faff), "i", "Info"),
+    }
+}
+
 fn render_toast_stack(
     toasts: &[DegradedToast],
     share_state: Entity<ShareUiState>,
@@ -1635,88 +1775,9 @@ fn render_toast_stack(
         .gap_2();
 
     for (idx, toast) in toasts.iter().enumerate() {
-        let (bg_color, icon, label) = match toast.kind {
-            DegradedKind::SnapshotSaveFailed => {
-                (gpui::rgba(0xfbbf24ff), "⚠", "Snapshot save failed")
-            }
-            DegradedKind::RehydrationFailed => (gpui::rgba(0xfbbf24ff), "↻", "Rehydration failed"),
-            DegradedKind::SqlProjectionFailed => {
-                (gpui::rgba(0xfbbf24ff), "⚠", "Shared edit not shown")
-            }
-            DegradedKind::ForeignIdCollision => (
-                gpui::rgba(0xef4444ff),
-                crate::icon("⛔"),
-                "Blocked shared write (id collision)",
-            ),
-            DegradedKind::OrgIngestFailed => (
-                gpui::rgba(0xef4444ff),
-                "⚠",
-                "File sync degraded (bad org file)",
-            ),
-            DegradedKind::UndoFailed => (
-                gpui::rgba(0xef4444ff),
-                crate::icon("⛔"),
-                "Undo/redo failed",
-            ),
-            DegradedKind::UndoStepDropped => (
-                gpui::rgba(0xef4444ff),
-                crate::icon("⛔"),
-                "History step dropped — that edit can no longer be undone",
-            ),
-            DegradedKind::CommandFailed => {
-                (gpui::rgba(0xef4444ff), crate::icon("⛔"), "Command failed")
-            }
-            DegradedKind::PreferenceSaveFailed => (
-                gpui::rgba(0xef4444ff),
-                crate::icon("⛔"),
-                "Preference not saved",
-            ),
-            DegradedKind::ConnectorWritePending => (
-                gpui::rgba(0xfbbf24ff),
-                "⚠",
-                "Connector write needs approval",
-            ),
-            DegradedKind::ConnectorWriteOutcomeUnknown => (
-                gpui::rgba(0xef4444ff),
-                crate::icon("⛔"),
-                "Connector write outcome unknown",
-            ),
-            DegradedKind::SharedSubtreeNotMaterialized => (
-                gpui::rgba(0xfbbf24ff),
-                "⚠",
-                "Shared edit saved — org file pending",
-            ),
-            DegradedKind::WritebackDegraded => (
-                gpui::rgba(0xef4444ff),
-                crate::icon("⛔"),
-                "Edits are not reaching disk",
-            ),
-            DegradedKind::IntegrationConnectFailed => (
-                gpui::rgba(0xef4444ff),
-                crate::icon("⛔"),
-                "Integration unavailable",
-            ),
-            DegradedKind::IntegrationNeedsAuth => (
-                gpui::rgba(0xef4444ff),
-                crate::icon("⛔"),
-                "Integration needs authorization",
-            ),
-            DegradedKind::IntegrationSidecarSuperseded => (
-                gpui::rgba(0xfbbf24ff),
-                "⚠",
-                "Installed integration file ignored — using the bundled one",
-            ),
-            DegradedKind::Info => (gpui::rgba(0x60a5faff), "i", "Info"),
-        };
+        let (bg_color, _, _) = toast_style(toast.kind);
+        let msg = toast_message(toast);
         let close_state = share_state.clone();
-        let msg = format!(
-            "{icon}  {label} — {}",
-            if toast.detail.len() > 80 {
-                format!("{}…", &toast.detail[..80])
-            } else {
-                toast.detail.clone()
-            }
-        );
         stack = stack.child(
             div()
                 .id(SharedString::from(format!("toast-{idx}")))
@@ -2139,6 +2200,135 @@ mod tests {
             "bundled source: {detail}"
         );
         assert!(s.quarantines.is_empty());
+    }
+
+    /// A pre-cutover setup — sidecar copied into the integrations directory, no
+    /// state file — is the case where the user is most certain the integration
+    /// is on. The toast is the only thing that says otherwise, so it must name
+    /// the file to write, not just report that something is off.
+    #[test]
+    fn apply_degraded_routes_integration_not_enabled_to_toast() {
+        let mut s = ShareUiState::new();
+        s.apply_degraded(ShareDegraded {
+            shared_tree_id: "gcal".into(),
+            reason: ShareDegradedReason::IntegrationNotEnabled {
+                integration: "gcal".into(),
+                installed_path: "/home/u/.config/holon/integrations/gcal.yaml".into(),
+                state_path: "/home/u/.config/holon/integrations/gcal.state.toml".into(),
+                remedy: "scripts/holon-integration-enable.sh gcal".into(),
+            },
+        });
+        assert_eq!(s.toasts.len(), 1);
+        assert_eq!(s.toasts[0].kind, DegradedKind::IntegrationNotEnabled);
+        let detail = &s.toasts[0].detail;
+        assert!(detail.contains("gcal"), "provider: {detail}");
+        assert!(
+            detail.contains("/home/u/.config/holon/integrations/gcal.state.toml"),
+            "the file to write: {detail}"
+        );
+        assert!(
+            detail.contains("scripts/holon-integration-enable.sh gcal"),
+            "the remedy: {detail}"
+        );
+    }
+
+    /// D1. The toast the user SEES is the truncated one. Martin's own paths are
+    /// long enough that a cap applied to the whole detail eats the remedy,
+    /// which is the only part he has to act on.
+    #[test]
+    fn the_rendered_not_enabled_toast_still_carries_the_remedy() {
+        let mut s = ShareUiState::new();
+        s.apply_degraded(ShareDegraded {
+            shared_tree_id: "gcal".into(),
+            reason: ShareDegradedReason::IntegrationNotEnabled {
+                integration: "gcal".into(),
+                installed_path: "/Users/martin/.config/holon/integrations/gcal.yaml".into(),
+                state_path: "/Users/martin/.config/holon/integrations/gcal.state.toml".into(),
+                remedy: "scripts/holon-integration-enable.sh gcal".into(),
+            },
+        });
+        let rendered = toast_message(&s.toasts[0]);
+        assert!(
+            rendered.contains("/Users/martin/.config/holon/integrations/gcal.state.toml"),
+            "the rendered toast must name the file to write: {rendered}"
+        );
+    }
+
+    /// D2. A remedy that does not work is worse than none: it reads as
+    /// complete. The state file needs `schema_version` and `configuration`
+    /// too, so the toast must point at the command that writes a whole one.
+    #[test]
+    fn the_rendered_remedy_is_one_that_actually_works() {
+        let mut s = ShareUiState::new();
+        s.apply_degraded(ShareDegraded {
+            shared_tree_id: "gcal".into(),
+            reason: ShareDegradedReason::IntegrationNotEnabled {
+                integration: "gcal".into(),
+                installed_path: "/Users/martin/.config/holon/integrations/gcal.yaml".into(),
+                state_path: "/Users/martin/.config/holon/integrations/gcal.state.toml".into(),
+                remedy: "scripts/holon-integration-enable.sh gcal".into(),
+            },
+        });
+        let rendered = toast_message(&s.toasts[0]);
+        assert!(
+            !rendered.contains("write `enabled = true`"),
+            "a bare `enabled = true` file is REJECTED by the state parser, so this \
+             advice produces a broken integration: {rendered}"
+        );
+        assert!(
+            rendered.contains("scripts/holon-integration-enable.sh gcal"),
+            "the remedy the bus carries must reach the user verbatim: {rendered}"
+        );
+    }
+
+    /// D6. `detail` is user data — paths, error text, an em dash. Truncating it
+    /// by BYTES splits a multi-byte character and panics the render.
+    #[test]
+    fn no_detail_length_can_panic_the_render() {
+        // The sweep has to move the cut ACROSS a multi-byte character, which
+        // means varying a field the format places BEFORE one — varying a
+        // trailing field slides only ASCII past the boundary and the sweep
+        // proves nothing. Two shapes: a multi-byte char the format itself
+        // contributes (the em dash after `state_path`), and multi-byte content
+        // inside the varied field, which is the general case since these fields
+        // are user data. The range spans the cap from both sides.
+        for len in 1..400 {
+            for state_path in [&"s".repeat(len), &"é".repeat(len)] {
+                let mut s = ShareUiState::new();
+                s.apply_degraded(ShareDegraded {
+                    shared_tree_id: "gcal".into(),
+                    reason: ShareDegradedReason::IntegrationNotEnabled {
+                        integration: "gcal".into(),
+                        installed_path: "/p/gcal.yaml".into(),
+                        state_path: state_path.clone(),
+                        remedy: "scripts/holon-integration-enable.sh gcal".into(),
+                    },
+                });
+                let rendered = toast_message(&s.toasts[0]);
+                assert!(!rendered.is_empty(), "empty render at state length {len}");
+            }
+        }
+    }
+
+    /// A sidecar for a provider the build does not ship must not look like a
+    /// broken integration — it is not an integration at all.
+    #[test]
+    fn apply_degraded_routes_sidecar_not_bundled_to_toast() {
+        let mut s = ShareUiState::new();
+        s.apply_degraded(ShareDegraded {
+            shared_tree_id: "my-own-thing".into(),
+            reason: ShareDegradedReason::IntegrationSidecarNotBundled {
+                provider: "my-own-thing".into(),
+                installed_path: "/home/u/.config/holon/integrations/my-own-thing.yaml".into(),
+            },
+        });
+        assert_eq!(s.toasts.len(), 1);
+        assert_eq!(s.toasts[0].kind, DegradedKind::IntegrationSidecarNotBundled);
+        let detail = &s.toasts[0].detail;
+        assert!(
+            detail.contains("/home/u/.config/holon/integrations/my-own-thing.yaml"),
+            "the file that does nothing: {detail}"
+        );
     }
 
     #[test]

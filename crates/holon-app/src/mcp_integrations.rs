@@ -13,6 +13,9 @@ use holon_api::EntityName;
 use holon_core::OperationProvider;
 use holon_core::SyncGate;
 use holon_core::SyncTokenStore;
+use holon_mcp_client::IgnoredReason;
+use holon_mcp_client::IgnoredSidecar;
+use holon_mcp_client::IntegrationConfigStore;
 use holon_mcp_client::LoadedIntegrations;
 use holon_mcp_client::McpIntegration;
 use holon_mcp_client::PendingOAuthFlows;
@@ -72,6 +75,59 @@ fn disclose_superseded_sidecar(s: &SupersededSidecar, bus: &DegradedSignalBus) {
     });
 }
 
+/// Disclose that an installed sidecar produced no provider at all. Its pages
+/// render blank exactly like a failed connect, but nothing else in the boot
+/// path would say why — the file is present, so from the user's side it looks
+/// like the integration should be running.
+fn disclose_ignored_sidecar(s: &IgnoredSidecar, bus: &DegradedSignalBus) {
+    let reason = match &s.reason {
+        IgnoredReason::NotEnabled {
+            state_path, remedy, ..
+        } => ShareDegradedReason::IntegrationNotEnabled {
+            integration: s.provider.clone(),
+            installed_path: s.installed_path.display().to_string(),
+            state_path: state_path.display().to_string(),
+            remedy: remedy.clone(),
+        },
+        IgnoredReason::NotBundled => ShareDegradedReason::IntegrationSidecarNotBundled {
+            provider: s.provider.clone(),
+            installed_path: s.installed_path.display().to_string(),
+        },
+    };
+    bus.emit(ShareDegraded {
+        shared_tree_id: s.provider.clone(),
+        reason,
+    });
+}
+
+/// The boot log line for an installed sidecar that enabled nothing. The bus
+/// carries the paths; the remedy is spelled out here, where a multi-line state
+/// file fits.
+fn log_ignored_sidecar(s: &IgnoredSidecar) {
+    match &s.reason {
+        IgnoredReason::NotEnabled {
+            state_path,
+            remedy,
+            enabling_state_file,
+        } => warn!(
+            "[McpIntegrationsModule] Provider '{}' is NOT enabled, so '{}' does nothing — a \
+             sidecar file is no longer the switch. To switch it on, run `{remedy}`, or write \
+             '{}' yourself — ALL of it, a partial file is rejected:\n{}",
+            s.provider,
+            s.installed_path.display(),
+            state_path.display(),
+            enabling_state_file
+        ),
+        IgnoredReason::NotBundled => warn!(
+            "[McpIntegrationsModule] '{}' names provider '{}', which this build does not ship — \
+             it does nothing. Integrations are compiled in (crates/holon-mcp-client/src/\
+             bundled_sidecars.rs); add it there and rebuild, or delete the file.",
+            s.installed_path.display(),
+            s.provider
+        ),
+    }
+}
+
 /// Holds all running MCP integrations so their services stay alive.
 ///
 /// Integrations are keyed by provider name (`names[i]` belongs to
@@ -120,13 +176,17 @@ pub struct McpIntegrationsModule {
 }
 
 impl McpIntegrationsModule {
-    /// Create a module by loading configs from the given directory.
+    /// Create a module for the integrations in `dir`.
     ///
-    /// A missing directory means no integrations. A YAML file that fails to
-    /// read or parse is a hard error — it is captured here and returned from
-    /// `configure()` (fail loud, never skip a malformed integration config).
+    /// Which ones run is the state store's call — `dir` supplies the store's
+    /// files and any content overrides, never the enablement. A directory that
+    /// cannot be read, or that holds two files for one provider, is a hard
+    /// error: it is captured here and returned from `configure()` (fail loud,
+    /// never boot on a half-read integrations directory).
     pub fn from_dir(dir: &Path) -> Self {
-        let loaded = load_integration_configs(dir).map_err(|e| format!("{e:#}"));
+        let loaded = IntegrationConfigStore::load(dir)
+            .and_then(|store| load_integration_configs(dir, &store))
+            .map_err(|e| format!("{e:#}"));
         if let Ok(loaded) = &loaded {
             // Logged here, not at disclosure time: the registry singleton is
             // resolved lazily, so the bus signal may never fire in a container
@@ -143,12 +203,16 @@ impl McpIntegrationsModule {
                     s.bundled_source
                 );
             }
+            for s in &loaded.ignored {
+                log_ignored_sidecar(s);
+            }
             info!(
-                "[McpIntegrationsModule] Loaded {} integration configs from '{}' ({} installed \
-                 sidecar(s) superseded by the bundled copy)",
+                "[McpIntegrationsModule] {} integration(s) enabled from '{}' ({} installed \
+                 sidecar(s) superseded by the bundled copy, {} enabling nothing)",
                 loaded.configs.len(),
                 dir.display(),
-                loaded.superseded.len()
+                loaded.superseded.len(),
+                loaded.ignored.len()
             );
         }
         Self { loaded }
@@ -162,7 +226,13 @@ impl Module for McpIntegrationsModule {
         })?;
         let configs = &loaded.configs;
         let superseded = Arc::new(loaded.superseded.clone());
-        if configs.is_empty() {
+        let ignored = Arc::new(loaded.ignored.clone());
+        // Nothing to run AND nothing to say: leave the container untouched, so a
+        // build with no integrations directory keeps resolving no MCP services
+        // at all. Files that enabled nothing are the opposite case — the
+        // registry factory is where the disclosure reaches the bus, so it must
+        // be registered even when no integration runs.
+        if configs.is_empty() && ignored.is_empty() {
             return Ok(());
         }
 
@@ -194,23 +264,8 @@ impl Module for McpIntegrationsModule {
             let pending_flows = pending_flows.clone();
             let pending_writes = pending_writes_for_registry.clone();
             let superseded = superseded.clone();
+            let ignored = ignored.clone();
             async move {
-                let db_handle = resolver
-                    .resolve_async::<dyn holon::di::DbHandleProvider>()
-                    .await
-                    .handle();
-                let cache_factory = resolver
-                    .resolve_async::<dyn holon_core::CacheFactory>()
-                    .await;
-                let token_store: Arc<dyn SyncTokenStore> =
-                    resolver.resolve_async::<dyn SyncTokenStore>().await;
-                let type_registry = resolver.resolve::<TypeRegistry>();
-                // Boot-ordering gate: provider syncs (initial + notification-
-                // driven) wait for the org initial scan to finish before
-                // touching the serialized DatabaseActor. Registered in
-                // `add_frontend`, opened by the `post_ready` scan barrier.
-                let sync_gate: SyncGate = (*resolver.resolve::<SyncGate>()).clone();
-
                 // Every non-connected integration is disclosed on this bus so
                 // the resulting blank pages are attributable. A container that
                 // registers integrations but no bus can never tell the user
@@ -232,6 +287,25 @@ impl Module for McpIntegrationsModule {
                 for s in superseded.iter() {
                     disclose_superseded_sidecar(s, &degraded_bus);
                 }
+                for s in ignored.iter() {
+                    disclose_ignored_sidecar(s, &degraded_bus);
+                }
+
+                let db_handle = resolver
+                    .resolve_async::<dyn holon::di::DbHandleProvider>()
+                    .await
+                    .handle();
+                let cache_factory = resolver
+                    .resolve_async::<dyn holon_core::CacheFactory>()
+                    .await;
+                let token_store: Arc<dyn SyncTokenStore> =
+                    resolver.resolve_async::<dyn SyncTokenStore>().await;
+                let type_registry = resolver.resolve::<TypeRegistry>();
+                // Boot-ordering gate: provider syncs (initial + notification-
+                // driven) wait for the org initial scan to finish before
+                // touching the serialized DatabaseActor. Registered in
+                // `add_frontend`, opened by the `post_ready` scan barrier.
+                let sync_gate: SyncGate = (*resolver.resolve::<SyncGate>()).clone();
 
                 // Layered `${VAR}` resolver: environment variable wins, then a
                 // settings value whose key matches case-insensitively with `.`/`_`

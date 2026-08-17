@@ -6,9 +6,13 @@ use anyhow::Context;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::bundled_sidecars::BUNDLED_SIDECARS;
 use crate::bundled_sidecars::BundledSidecar;
 use crate::bundled_sidecars::SIDECAR_SCHEMA_VERSION;
 use crate::bundled_sidecars::bundled_sidecar;
+use crate::integration_state::ENABLE_COMMAND;
+use crate::integration_state::IntegrationConfigStore;
+use crate::integration_state::enabling_state_file;
 use crate::mcp_integration::AuthMode;
 use crate::mcp_integration::McpIntegrationConfig;
 use crate::mcp_integration::McpTransport;
@@ -394,42 +398,221 @@ pub struct SupersededSidecar {
     pub incompatibility: String,
 }
 
+/// An installed `*.yaml` that enabled nothing, and why. Carried out of the
+/// loader as data for the same reason as [`SupersededSidecar`]: a file the user
+/// put there deliberately, silently doing nothing, is exactly the failure this
+/// crate refuses to ship.
+#[derive(Debug, Clone)]
+pub struct IgnoredSidecar {
+    /// File stem — the provider the file was meant to be.
+    pub provider: String,
+    pub installed_path: PathBuf,
+    pub reason: IgnoredReason,
+}
+
+/// Why an installed sidecar produced no provider. Both arms are user-visible;
+/// adding a third one will not compile until every disclosure site names it.
+#[derive(Debug, Clone)]
+pub enum IgnoredReason {
+    /// The build ships this provider, but the store does not have it switched
+    /// on. Carries the state file to write and the content that switches it on.
+    NotEnabled {
+        state_path: PathBuf,
+        /// The command that writes that file. Composed here so every disclosure
+        /// site quotes one instruction that is known to work, rather than each
+        /// inventing its own fragment of TOML.
+        remedy: String,
+        /// The file's content, for a disclosure with room for five lines.
+        enabling_state_file: String,
+    },
+    /// The build ships no sidecar for this name, and presence is settled at
+    /// compile time — so nothing on disk can introduce a provider.
+    NotBundled,
+}
+
 /// What a scan of the integrations directory yielded.
 #[derive(Debug)]
 pub struct LoadedIntegrations {
     pub configs: Vec<(String, IntegrationFileConfig)>,
     pub superseded: Vec<SupersededSidecar>,
+    pub ignored: Vec<IgnoredSidecar>,
 }
 
-/// Scan a directory for `*.yaml` provider config files.
+/// Resolve which integrations run, and with what content.
 ///
-/// The provider name is the file stem (e.g., `claude-history.yaml` ->
-/// `"claude-history"`), and the file's PRESENCE is what enables that provider.
+/// The three axes stay separate. PRESENCE is settled at compile time by
+/// [`crate::bundled_sidecars`], so this iterates the bundled list — a file on
+/// disk cannot introduce a provider. ENABLEMENT comes from `store` and nowhere
+/// else: an integration runs iff it is bundled AND its state says `enabled`.
+/// CONTENT is the bundled sidecar, unless an installed file for that provider
+/// declares this build's [`SIDECAR_SCHEMA_VERSION`], which is the deliberate
+/// override; an installed file that does not is reported in
+/// [`LoadedIntegrations::superseded`] and the bundled copy runs.
 ///
-/// For a provider this build ships (see [`crate::bundled_sidecars`]) the
-/// installed file supplies content only when it declares this build's
-/// [`SIDECAR_SCHEMA_VERSION`]; otherwise the bundled sidecar is used and the
-/// installed one is reported in [`LoadedIntegrations::superseded`]. That is
-/// what keeps a copy taken before a format requirement landed from silently
-/// outranking the sidecar the engine was built against.
+/// Every installed `*.yaml` that ends up producing no provider — for a disabled
+/// provider, or for a name this build does not ship — is reported in
+/// [`LoadedIntegrations::ignored`] so the caller discloses it. A missing
+/// integrations directory just means no installed files; the store still
+/// decides.
+pub fn load_integration_configs(
+    dir: &Path,
+    store: &IntegrationConfigStore,
+) -> anyhow::Result<LoadedIntegrations> {
+    let installed = scan_installed_sidecars(dir)?;
+    let mut configs = Vec::new();
+    let mut superseded = Vec::new();
+    let mut ignored = Vec::new();
+
+    for bundled in BUNDLED_SIDECARS {
+        let provider = bundled.provider;
+        let files = installed.get(provider).map(Vec::as_slice).unwrap_or(&[]);
+        // Two files for a provider that RUNS disagree about what is running, and
+        // there is no rule that picks between them. Two for a provider that
+        // cannot run are handled below, where they are merely ignored.
+        if files.len() > 1 {
+            anyhow::bail!(
+                "Integration '{provider}' has {} installed sidecars ({}) — delete all but one, \
+                 there is no rule that picks between them",
+                files.len(),
+                files
+                    .iter()
+                    .map(|(p, _)| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        let file = files.first();
+
+        if !store.get(provider)?.enabled {
+            if let Some((path, _)) = file {
+                ignored.push(IgnoredSidecar {
+                    provider: provider.to_string(),
+                    installed_path: path.clone(),
+                    reason: IgnoredReason::NotEnabled {
+                        state_path: store.state_path(provider)?,
+                        remedy: enable_remedy(dir, provider),
+                        enabling_state_file: enabling_state_file(),
+                    },
+                });
+            }
+            continue;
+        }
+
+        let Some((path, content)) = file else {
+            configs.push((provider.to_string(), parse_bundled(bundled)?));
+            continue;
+        };
+
+        // Byte-identical to what we ship: the same file, not an override.
+        // Nothing drifted, so nothing to log and nothing to disclose.
+        if content == bundled.yaml {
+            configs.push((provider.to_string(), parse_bundled(bundled)?));
+            continue;
+        }
+
+        let incompatibility = match serde_yaml::from_str::<IntegrationFileConfig>(content) {
+            Ok(config) if config.schema_version == Some(SIDECAR_SCHEMA_VERSION) => {
+                tracing::info!(
+                    "[load_integration_configs] Provider '{provider}' is OVERRIDDEN by '{}' \
+                     (schema_version {SIDECAR_SCHEMA_VERSION}); the sidecar bundled at '{}' is \
+                     not used",
+                    path.display(),
+                    bundled.source_path
+                );
+                configs.push((provider.to_string(), config));
+                continue;
+            }
+            Ok(config) => format!(
+                "it declares schema_version {} but this build's sidecar format is schema_version \
+                 {SIDECAR_SCHEMA_VERSION}",
+                match config.schema_version {
+                    Some(v) => v.to_string(),
+                    None => "none".to_string(),
+                }
+            ),
+            Err(e) => format!(
+                "it does not parse against this build's sidecar format, so no schema_version \
+                 could be established: {e}"
+            ),
+        };
+
+        superseded.push(SupersededSidecar {
+            provider: provider.to_string(),
+            installed_path: path.clone(),
+            bundled_source: bundled.source_path,
+            incompatibility,
+        });
+        configs.push((provider.to_string(), parse_bundled(bundled)?));
+    }
+
+    for (provider, files) in installed.iter() {
+        if bundled_sidecar(provider).is_none() {
+            // One entry per FILE: an unbundled name can enable nothing, so two
+            // of them are two useless files, not an ambiguity to refuse over.
+            for (path, _) in files {
+                ignored.push(IgnoredSidecar {
+                    provider: provider.clone(),
+                    installed_path: path.clone(),
+                    reason: IgnoredReason::NotBundled,
+                });
+            }
+        }
+    }
+
+    // A state file for a name this build does not ship is read by nothing. It
+    // is the shape a typo takes, so it is disclosed rather than left inert.
+    for path in orphan_state_files(dir)? {
+        let provider = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(".state.toml"))
+            .expect("orphan_state_files only yields '<provider>.state.toml' paths")
+            .to_string();
+        ignored.push(IgnoredSidecar {
+            provider,
+            installed_path: path,
+            reason: IgnoredReason::NotBundled,
+        });
+    }
+    // The bundled arm above walks a fixed list, but the unbundled one walks a
+    // map, so sort to keep a boot's disclosures in a stable order.
+    ignored.sort_by(|a, b| a.installed_path.cmp(&b.installed_path));
+
+    Ok(LoadedIntegrations {
+        configs,
+        superseded,
+        ignored,
+    })
+}
+
+/// The exact command that writes `provider`'s state file INTO `dir`.
 ///
-/// A missing integrations directory means "no integrations configured".
-/// Files without a `.yaml`/`.yml` extension are skipped. A YAML file for a
-/// provider this build does NOT ship is a hard error when it cannot be read or
-/// parsed — there is nothing to fall back to, so it must never be skipped.
-pub fn load_integration_configs(dir: &Path) -> anyhow::Result<LoadedIntegrations> {
+/// The directory is always named, even when it is the default one: this crate
+/// cannot tell a default from an override (the default is composed from the
+/// config dir, which lives a layer up), and a remedy that quietly writes
+/// somewhere other than the path the same disclosure names is worse than no
+/// remedy — it looks like it worked.
+fn enable_remedy(dir: &Path, provider: &str) -> String {
+    format!(
+        "HOLON_MCP_INTEGRATIONS_DIR='{}' {ENABLE_COMMAND} {provider}",
+        dir.display()
+    )
+}
+
+/// The installed `*.yaml`/`*.yml` files in `dir`, grouped by file stem, with
+/// their content. A missing directory yields nothing. Grouping rather than
+/// overwriting keeps the "two files, one provider" case visible to the caller,
+/// which is the only place that knows whether it matters.
+fn scan_installed_sidecars(dir: &Path) -> anyhow::Result<HashMap<String, Vec<(PathBuf, String)>>> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             tracing::debug!(
                 "[load_integration_configs] Integrations directory '{}' does not exist — no \
-                 integrations configured",
+                 installed sidecars",
                 dir.display()
             );
-            return Ok(LoadedIntegrations {
-                configs: Vec::new(),
-                superseded: Vec::new(),
-            });
+            return Ok(HashMap::new());
         }
         Err(e) => {
             return Err(anyhow::Error::new(e).context(format!(
@@ -439,8 +622,7 @@ pub fn load_integration_configs(dir: &Path) -> anyhow::Result<LoadedIntegrations
         }
     };
 
-    let mut configs = Vec::new();
-    let mut superseded = Vec::new();
+    let mut installed: HashMap<String, Vec<(PathBuf, String)>> = HashMap::new();
     for entry in entries {
         let entry = entry
             .with_context(|| format!("Failed to read directory entry in '{}'", dir.display()))?;
@@ -464,67 +646,47 @@ pub fn load_integration_configs(dir: &Path) -> anyhow::Result<LoadedIntegrations
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("Failed to read integration config '{}'", path.display()))?;
 
-        let Some(bundled) = bundled_sidecar(&name) else {
-            let config =
-                serde_yaml::from_str::<IntegrationFileConfig>(&content).with_context(|| {
-                    format!("Failed to parse integration config '{}'", path.display())
-                })?;
-            tracing::info!(
-                "[load_integration_configs] Loaded provider '{}' from '{}'",
-                name,
-                path.display()
-            );
-            configs.push((name, config));
-            continue;
-        };
-
-        // Byte-identical to what we ship: the same file, not an override.
-        // Nothing drifted, so nothing to log and nothing to disclose.
-        if content == bundled.yaml {
-            configs.push((name, parse_bundled(bundled)?));
-            continue;
-        }
-
-        let incompatibility = match serde_yaml::from_str::<IntegrationFileConfig>(&content) {
-            Ok(config) if config.schema_version == Some(SIDECAR_SCHEMA_VERSION) => {
-                tracing::info!(
-                    "[load_integration_configs] Provider '{}' is OVERRIDDEN by '{}' \
-                     (schema_version {SIDECAR_SCHEMA_VERSION}); the sidecar bundled at '{}' is \
-                     not used",
-                    name,
-                    path.display(),
-                    bundled.source_path
-                );
-                configs.push((name, config));
-                continue;
-            }
-            Ok(config) => format!(
-                "it declares schema_version {} but this build's sidecar format is schema_version \
-                 {SIDECAR_SCHEMA_VERSION}",
-                match config.schema_version {
-                    Some(v) => v.to_string(),
-                    None => "none".to_string(),
-                }
-            ),
-            Err(e) => format!(
-                "it does not parse against this build's sidecar format, so no schema_version \
-                 could be established: {e}"
-            ),
-        };
-
-        superseded.push(SupersededSidecar {
-            provider: name.clone(),
-            installed_path: path,
-            bundled_source: bundled.source_path,
-            incompatibility,
-        });
-        configs.push((name, parse_bundled(bundled)?));
+        installed.entry(name).or_default().push((path, content));
     }
+    for files in installed.values_mut() {
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+    Ok(installed)
+}
 
-    Ok(LoadedIntegrations {
-        configs,
-        superseded,
-    })
+/// The `*.state.toml` files in `dir` whose provider this build does not ship.
+/// The store only ever looks up the providers it knows, so these are invisible
+/// to it — this scan is what makes them findable.
+fn orphan_state_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context(format!(
+                "Failed to read integrations directory '{}'",
+                dir.display()
+            )));
+        }
+    };
+
+    let mut orphans = Vec::new();
+    for entry in entries {
+        let entry = entry
+            .with_context(|| format!("Failed to read directory entry in '{}'", dir.display()))?;
+        let path = entry.path();
+        let Some(provider) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(".state.toml"))
+        else {
+            continue;
+        };
+        if bundled_sidecar(provider).is_none() {
+            orphans.push(path);
+        }
+    }
+    orphans.sort();
+    Ok(orphans)
 }
 
 fn parse_bundled(bundled: &'static BundledSidecar) -> anyhow::Result<IntegrationFileConfig> {
@@ -684,12 +846,11 @@ entities: {}
     }
 
     #[test]
-    fn load_configs_from_directory() {
+    fn load_configs_ignores_an_unbundled_yaml_and_skips_non_yaml() {
         let dir = tempfile::tempdir().unwrap();
-
-        // Valid config
+        let installed = dir.path().join("test-provider.yaml");
         std::fs::write(
-            dir.path().join("test-provider.yaml"),
+            &installed,
             r#"
 transport:
   child_process:
@@ -699,34 +860,51 @@ entities: {}
 "#,
         )
         .unwrap();
-
-        // Non-yaml file (should be skipped)
         std::fs::write(dir.path().join("readme.txt"), "ignore me").unwrap();
 
-        let loaded = load_integration_configs(dir.path()).unwrap();
-        assert_eq!(loaded.configs.len(), 1);
-        assert_eq!(loaded.configs[0].0, "test-provider");
+        let store = IntegrationConfigStore::load(dir.path()).unwrap();
+        let loaded = load_integration_configs(dir.path(), &store).unwrap();
+        assert!(loaded.configs.is_empty());
+        assert_eq!(loaded.ignored.len(), 1, "the .txt is not a sidecar at all");
+        assert_eq!(loaded.ignored[0].installed_path, installed);
+        assert!(matches!(
+            loaded.ignored[0].reason,
+            IgnoredReason::NotBundled
+        ));
     }
 
     #[test]
-    fn load_configs_malformed_yaml_fails_loud() {
+    fn load_configs_malformed_unbundled_yaml_is_ignored_not_fatal() {
         let dir = tempfile::tempdir().unwrap();
         let bad_path = dir.path().join("bad.yaml");
         std::fs::write(&bad_path, "not: [valid: yaml: config").unwrap();
 
-        let err = load_integration_configs(dir.path())
-            .expect_err("malformed YAML must be a hard error, not a silent skip");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains(bad_path.display().to_string().as_str()),
-            "error must name the offending file: {msg}"
-        );
+        let store = IntegrationConfigStore::load(dir.path()).unwrap();
+        let loaded = load_integration_configs(dir.path(), &store)
+            .expect("a file that can enable nothing cannot break the boot either");
+        assert!(loaded.configs.is_empty());
+        assert_eq!(loaded.ignored[0].installed_path, bad_path);
     }
 
     #[test]
     fn load_configs_missing_directory() {
-        let loaded = load_integration_configs(Path::new("/nonexistent/path")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = IntegrationConfigStore::load(dir.path()).unwrap();
+        let loaded = load_integration_configs(Path::new("/nonexistent/path"), &store).unwrap();
         assert!(loaded.configs.is_empty());
+        assert!(loaded.ignored.is_empty());
+    }
+
+    #[test]
+    fn two_installed_files_for_one_provider_fail_loud() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("gcal.yaml"), "entities: {}\n").unwrap();
+        std::fs::write(dir.path().join("gcal.yml"), "entities: {}\n").unwrap();
+
+        let store = IntegrationConfigStore::load(dir.path()).unwrap();
+        let err = load_integration_configs(dir.path(), &store)
+            .expect_err("two files claiming one provider has no winner");
+        assert!(format!("{err:#}").contains("installed sidecars"));
     }
 
     #[test]

@@ -133,6 +133,35 @@ pub enum ShareDegradedReason {
         bundled_source: String,
         incompatibility: String,
     },
+    /// An installed sidecar for a provider this build ships enabled NOTHING,
+    /// because enablement is the integration state's decision and that state
+    /// does not say `enabled`. Before the state store existed the file itself
+    /// was the switch, so this is the shape a pre-cutover setup arrives in: the
+    /// user believes the integration is on and every page it feeds is blank.
+    /// Carries the state file to write; the full content to put in it goes to
+    /// the log, which has room for it. `shared_tree_id` carries the integration
+    /// name.
+    ///
+    /// All-clear: none within a session — enablement is read once at boot. The
+    /// condition ends when the state file is written and the app restarts.
+    IntegrationNotEnabled {
+        integration: String,
+        installed_path: String,
+        state_path: String,
+        /// The command that switches it on, composed by the loader so the UI
+        /// renders one instruction that works instead of inventing its own.
+        remedy: String,
+    },
+    /// An installed sidecar names a provider this build does not ship. Presence
+    /// is settled at compile time, so nothing on disk can introduce a provider
+    /// and the file does nothing at all. `shared_tree_id` carries the file
+    /// stem.
+    ///
+    /// All-clear: none — the build would have to ship the provider.
+    IntegrationSidecarNotBundled {
+        provider: String,
+        installed_path: String,
+    },
 }
 
 impl ShareDegradedReason {
@@ -141,6 +170,8 @@ impl ShareDegradedReason {
     pub const FOREIGN_ID_COLLISION: &'static str = "foreign-id-collision";
     pub const INTEGRATION_CONNECT_FAILED: &'static str = "integration-connect-failed";
     pub const INTEGRATION_NEEDS_AUTH: &'static str = "integration-needs-auth";
+    pub const INTEGRATION_NOT_ENABLED: &'static str = "integration-not-enabled";
+    pub const INTEGRATION_SIDECAR_NOT_BUNDLED: &'static str = "integration-sidecar-not-bundled";
     pub const INTEGRATION_SIDECAR_SUPERSEDED: &'static str = "integration-sidecar-superseded";
     pub const ORG_INGEST_FAILED: &'static str = "org-ingest-failed";
     pub const REHYDRATION_FAILED: &'static str = "rehydration-failed";
@@ -160,6 +191,8 @@ impl ShareDegradedReason {
             Self::IntegrationConnectFailed { .. } => Self::INTEGRATION_CONNECT_FAILED,
             Self::IntegrationNeedsAuth { .. } => Self::INTEGRATION_NEEDS_AUTH,
             Self::IntegrationSidecarSuperseded { .. } => Self::INTEGRATION_SIDECAR_SUPERSEDED,
+            Self::IntegrationNotEnabled { .. } => Self::INTEGRATION_NOT_ENABLED,
+            Self::IntegrationSidecarNotBundled { .. } => Self::INTEGRATION_SIDECAR_NOT_BUNDLED,
             Self::SnapshotSaveFailed(_) => Self::SNAPSHOT_SAVE_FAILED,
             Self::SnapshotLoadFailed(_) => Self::SNAPSHOT_LOAD_FAILED,
             Self::RehydrationFailed(_) => Self::REHYDRATION_FAILED,

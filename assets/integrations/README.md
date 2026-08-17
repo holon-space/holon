@@ -12,25 +12,52 @@ This is the concrete realization of **Model.md Layer 1** ("the outside world as
 replicas") and the `mcp-yaml-sidecars` directive: *MCP clients = declarative
 YAML sidecars only.*
 
-**Installed file = the switch, not the schema.** Every sidecar in this directory
-is compiled into the binary (`crates/holon-mcp-client/src/bundled_sidecars.rs`)
-and declares `schema_version`. A file in `~/.config/holon/integrations/` turns
-its provider ON; for a provider the build ships, the file supplies CONTENT only
-when its `schema_version` matches the running build's `SIDECAR_SCHEMA_VERSION`.
-Otherwise the bundled copy runs and the app discloses which installed file was
-ignored and why — a copy taken before a format requirement landed can no longer
-silently outrank the sidecar the engine was built against. Bump
-`SIDECAR_SCHEMA_VERSION` (and every file here) whenever a requirement lands that
-an older sidecar does not satisfy.
-
 **Three independent axes.** *Presence* — whether a build ships the sidecar at
-all — is settled here, at compile time. *Enablement* (the user turned it on) and
-*configuration* (credentials exist) are user state, stored per provider in
-`~/.config/holon/integrations/<provider>.state.toml` beside the sidecar and read
-through `holon_mcp_client::IntegrationConfigStore`, which hands consumers a
-signal rather than the file. The `.toml` extension keeps state out of the
-`*.yaml` sidecar scan. A state file records where credentials LIVE — an env var,
-a 0600 file, a keychain entry — never a secret value.
+all — is settled here, at compile time: every sidecar in this directory is
+compiled into the binary (`crates/holon-mcp-client/src/bundled_sidecars.rs`), and
+nothing on disk can introduce a provider the build does not ship. *Enablement*
+(the user turned it on) and *configuration* (credentials exist) are user state,
+stored per provider in `~/.config/holon/integrations/<provider>.state.toml`
+beside the sidecar and read through `holon_mcp_client::IntegrationConfigStore`,
+which hands consumers a signal rather than the file. A state file records where
+credentials LIVE — an env var, a 0600 file, a keychain entry — never a secret
+value.
+
+**The state file is the switch.** An integration runs iff it is bundled AND its
+state says `enabled = true`. Copying a `*.yaml` into
+`~/.config/holon/integrations/` enables nothing. To switch one on:
+
+```sh
+scripts/holon-integration-enable.sh todoist
+```
+
+(the script refuses a name this build does not ship, and honours
+`HOLON_MCP_INTEGRATIONS_DIR`) — or write the file by hand, ALL of it, since a
+partial file is rejected:
+
+```toml
+# ~/.config/holon/integrations/todoist.state.toml
+schema_version = 1
+enabled = true
+
+[configuration]
+status = "unconfigured"
+```
+
+Every file in that directory that ends up enabling nothing — a `*.yaml` for a
+provider that is off or for a name this build does not ship, or a
+`*.state.toml` for a name it does not ship — is disclosed at boot with a WARN
+and a toast naming the command that would switch it on. The `.toml` extension keeps state
+out of the `*.yaml` scan.
+
+**An installed file supplies content, not the schema.** For a provider the build
+ships, an installed `*.yaml` overrides the bundled content only when its
+`schema_version` matches the running build's `SIDECAR_SCHEMA_VERSION`. Otherwise
+the bundled copy runs and the app discloses which installed file was ignored and
+why — a copy taken before a format requirement landed can no longer silently
+outrank the sidecar the engine was built against. Bump `SIDECAR_SCHEMA_VERSION`
+(and every file here) whenever a requirement lands that an older sidecar does
+not satisfy.
 
 > Scope note: connectors today are **read-into-the-graph** replicas plus
 > **explicitly-declared write tools** for MCP transports. General bidirectional
@@ -146,7 +173,8 @@ the file.
 
 ## 3. What the engine does with a sidecar
 
-At startup `load_integration_configs(dir)` reads every `*.yaml`, and for each:
+At startup `load_integration_configs(dir, store)` walks the BUNDLED providers,
+keeps the ones the store has enabled, and for each:
 
 1. `IntegrationFileConfig::into_mcp_config` parses + type-checks it (serde
    `deny_unknown_fields` — a typo'd key fails loud), expanding `${VAR}`.
