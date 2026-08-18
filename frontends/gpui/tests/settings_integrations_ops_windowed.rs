@@ -267,6 +267,22 @@ fn the_settings_modal_paints_the_integration_rows_operations() {
     }
     let withdrew = bounds.element_info(GCAL_CONFIGURE).is_none();
 
+    // Close and reopen the modal, which re-interprets the section from scratch.
+    // If the button is gone THEN, the row data and the guard were right all
+    // along and only the repaint was missing — the difference between "stale
+    // data" and "stale pixels".
+    let gear = bounds
+        .element_info(SETTINGS_GEAR)
+        .expect("the gear is still painted");
+    click_at(&mut app, window, center_of(&gear), "gear (close)");
+    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(5));
+    let gear = bounds
+        .element_info(SETTINGS_GEAR)
+        .expect("the gear is still painted");
+    click_at(&mut app, window, center_of(&gear), "gear (reopen)");
+    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(5));
+    let withdrew_on_reopen = bounds.element_info(GCAL_CONFIGURE).is_none();
+
     // Teardown BEFORE the assertions so a red does not also trip the gpui leak
     // detector, which would bury the real failure.
     drop(rebind);
@@ -282,9 +298,10 @@ fn the_settings_modal_paints_the_integration_rows_operations() {
     );
     assert!(
         withdrew,
-        "the guard reads `configure_progress`, so once it is {progress:?} the row must stop \
-         offering {GCAL_CONFIGURE}. The mirror updated and the button is still painted: the row \
-         did not re-render when a projected column changed"
+        "the guard reads `configure_progress`, and it is now {progress:?} — so the row must stop \
+         offering {GCAL_CONFIGURE} while the user is looking at it. Reopening the modal withdraws \
+         it: {withdrew_on_reopen}. If that is true, the row data and the guard are both correct \
+         and the open modal simply never repaints."
     );
 }
 
