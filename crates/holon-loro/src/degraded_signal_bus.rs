@@ -90,15 +90,10 @@ pub enum ShareDegradedReason {
     /// all-clear and the condition holds for the session — accurately, since
     /// the disk projection stays stale for exactly that long.
     ///
-    /// `owning_page` is the page the shared content sits under — the thing a
-    /// user can actually find. Typed rather than pre-formatted so the frontend
-    /// decides how to name the share. It is `None` only when the walk reached
-    /// no page at all, and the frontend then shows `block_id`, which names the
-    /// condition honestly rather than inventing a page name.
-    SharedSubtreeNotMaterialized {
-        block_id: String,
-        owning_page: Option<String>,
-    },
+    /// `file` is the document the shared content was inlined into — the thing
+    /// a user can open. Typed rather than pre-formatted so the frontend
+    /// decides how to present it.
+    SharedSubtreeNotMaterialized { file: String },
     /// The org write-back stream died and its supervisor could not keep it
     /// alive — edits reach Loro + SQL but stop reaching disk. String carries
     /// the supervisor's escalation summary (what died, how often).
@@ -460,8 +455,7 @@ mod tests {
             ShareDegradedReason::SqlProjectionFailed("table locked".into()),
             ShareDegradedReason::ForeignIdCollision("block:journals".into()),
             ShareDegradedReason::SharedSubtreeNotMaterialized {
-                block_id: "block:abc".into(),
-                owning_page: None,
+                file: "/vault/Projects/Shared.org".into(),
             },
             ShareDegradedReason::WritebackDegraded("stream died 3x".into()),
         ];

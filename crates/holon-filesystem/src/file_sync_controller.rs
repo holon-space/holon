@@ -57,6 +57,7 @@ use crate::sync_ports::MatchContext;
 use crate::sync_ports::MatchSituation;
 use crate::sync_ports::MatchVerdict;
 use crate::sync_ports::MountRegistry;
+use crate::sync_ports::ShareWritebackDisclosure;
 use crate::sync_ports::ThreeWayTextMerge;
 use crate::sync_ports::WritebackDisclosure;
 use crate::vault_path::VaultPath;
@@ -644,6 +645,16 @@ pub struct FileSyncController {
     /// like a mount, so a hand-authored `:share-role: mount:` file is not
     /// silently skipped (data loss). `None` (SqlOnly / tests) ⇒ never skip.
     mount_registry: Option<Arc<dyn MountRegistry>>,
+
+    /// Discloses a shared subtree that reached a write attempt without a file
+    /// of its own. Lives HERE, on the write-back path, because only a real
+    /// write proves an edit needed to reach disk — the block feed cannot tell
+    /// an edit from a re-projection of content it just ingested.
+    share_disclosure: Option<Arc<dyn ShareWritebackDisclosure>>,
+
+    /// Shares already disclosed this session, so one wiring gap is one banner
+    /// however many times its file is written.
+    share_disclosed: HashSet<String>,
     /// C2b history port (R3b): records ONE `block_history` op_group for a
     /// genuinely-new doc/day PAGE created by RUNTIME org-ingest. `None` when no
     /// Turso history store is wired. Never records during the initial cold-boot
@@ -815,6 +826,8 @@ impl FileSyncController {
             text_merge: None,
             block_matcher: Arc::new(TieredMatcher),
             mount_registry: None,
+            share_disclosure: None,
+            share_disclosed: HashSet::new(),
             history: None,
             clock: Arc::new(holon_api::SystemClock),
             scan_feed_ids: None,
@@ -1049,6 +1062,12 @@ impl FileSyncController {
     /// parsed content looks like a shared-subtree projection is NOT treated as
     /// one (ingested normally) — the guard only skips ids the registry
     /// confirms.
+    /// Wire the shared-subtree write-back disclosure (see `share_disclosure`).
+    pub fn with_share_disclosure(mut self, disclosure: Arc<dyn ShareWritebackDisclosure>) -> Self {
+        self.share_disclosure = Some(disclosure);
+        self
+    }
+
     pub fn with_mount_registry(mut self, registry: Arc<dyn MountRegistry>) -> Self {
         self.mount_registry = Some(registry);
         self
@@ -6175,6 +6194,8 @@ impl FileSyncController {
         match self.fs.write(path, rendered).await {
             Ok(()) => {
                 self.note_doc_home(doc_id, path);
+                self.disclose_share_inlined_into(doc_id, path, rendered)
+                    .await;
                 Ok(true)
             }
             Err(e) if is_read_only_fs(&e) => {
@@ -6183,6 +6204,80 @@ impl FileSyncController {
             }
             Err(e) => {
                 Err(e).with_context(|| format!("org write-back to {} failed", path.display()))
+            }
+        }
+    }
+
+    /// Disclose a shared subtree whose content just reached disk inside
+    /// SOMEONE ELSE'S file.
+    ///
+    /// A share is materialized when its mount owns a dedicated page-file. Until
+    /// then its blocks project into whatever global document contains them, so
+    /// the edit is safe in Loro + SQL and syncs to peers while the share's own
+    /// on-disk file never appears. That is disclosed here, at the write that
+    /// proves an edit needed disk — never inferred from feed traffic, which
+    /// cannot tell an edit from a re-projection of freshly ingested content
+    /// (BugFunnel 2026-08-18-cold-boot-discloses-shared-edit-for-every-share).
+    ///
+    /// Deduped per `shared_tree_id`: one wiring gap is one banner however often
+    /// its file is written.
+    async fn disclose_share_inlined_into(
+        &mut self,
+        doc_id: &EntityUri,
+        path: &Path,
+        rendered: &[u8],
+    ) {
+        let Some(disclosure) = self.share_disclosure.clone() else {
+            return;
+        };
+        // Cheap substring pre-filter keeps ordinary files off the parse path,
+        // mirroring `probe_share_file`. Descendants of a share always carry
+        // `shared-tree-id`, so this never misses a materialization gap.
+        let Ok(text) = std::str::from_utf8(rendered) else {
+            return;
+        };
+        if !text.to_ascii_lowercase().contains("shared-tree-id") {
+            return;
+        }
+        // A registered mount IS the share's own file — the gap does not exist.
+        if let Some(reg) = &self.mount_registry {
+            match reg.is_registered_mount(doc_id).await {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        doc_id = %doc_id,
+                        "[FileSyncController] mount registry lookup failed while checking a \
+                         shared-subtree write-back: {e:#} — disclosing rather than assuming \
+                         the share is materialized",
+                    );
+                }
+            }
+        }
+        let parsed = match self
+            .format
+            .parse(path, text, &EntityUri::no_parent(), &self.root_dir)
+        {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    "[FileSyncController] could not re-parse our own render while checking a \
+                     shared-subtree write-back: {e:#}",
+                );
+                return;
+            }
+        };
+        let mut shares: Vec<String> = parsed
+            .blocks
+            .iter()
+            .filter_map(|b| b.shared_tree_id())
+            .collect();
+        shares.sort();
+        shares.dedup();
+        for stid in shares {
+            if self.share_disclosed.insert(stid.clone()) {
+                disclosure.shared_subtree_not_materialized(&stid, path);
             }
         }
     }

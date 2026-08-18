@@ -321,16 +321,13 @@ impl ShareUiState {
                     condition: Some(condition.clone()),
                 });
             }
-            ShareDegradedReason::SharedSubtreeNotMaterialized {
-                block_id,
-                owning_page,
-            } => {
+            ShareDegradedReason::SharedSubtreeNotMaterialized { file } => {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::SharedSubtreeNotMaterialized,
                     shared_tree_id: event.shared_tree_id,
-                    // Name the page the user can open. With no page in the
-                    // walk there is nothing better to show than the block id.
-                    detail: owning_page.unwrap_or(block_id),
+                    // The file the shared content was inlined into — what the
+                    // user opens to see the stale projection.
+                    detail: file,
                     condition: Some(condition.clone()),
                 });
             }

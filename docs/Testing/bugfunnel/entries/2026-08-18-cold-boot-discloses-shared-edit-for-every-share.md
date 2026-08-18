@@ -3,7 +3,7 @@ id: 2026-08-18-cold-boot-discloses-shared-edit-for-every-share
 date: 2026-08-18
 gap: COVERAGE
 secondary: ENVIRONMENT
-status: OPEN
+status: FIXED
 summary: >-
   On a cold boot the "Shared edit saved — org file pending" banner is raised
   once for EVERY shared subtree in the vault although no edit occurred — the
@@ -111,27 +111,14 @@ a WARN log rather than to an assertable banner in the headless harness.
 
 ## Remedy
 
-OPEN — root-caused and reproduced, no code change landed. The ruled fix was
-BUILT AND MEASURED IN THIS LANE, and it does not hold; the code was reverted
-rather than landed half-working.
+FIXED (Martin's ruling D5B-10.a plus the accepted refutation of the id-set
+approach, 2026-08-18). The disclosure MOVED out of the block-feed projection
+and onto the WRITE-BACK path.
 
-What was built: the scan publishes the ids it creates into a set shared with
-the projection (`FileSyncController::with_scan_created_ids`), recorded at
-parse time — before any write that could make a block visible to the feed —
-and consulted where the `seeding` guard is evaluated
-(`crates/holon-orgmode/src/di.rs:654-681`). A reproducer rung
-(preserved at
-`scratchpad/bug-orgerr-artifacts/cold_boot_share_disclosure.rs`, synthesized
-fixture, no vault content) goes RED for the right reason without it:
-
-```
-a cold boot disclosed a shared subtree it only READ from disk:
-["11111111-2222-3333-4444-555555555555"] — the scan-created ids are not
-reaching the projection's suppression set
-```
-
-Why it does not hold: **boot re-projects the same block more than once.**
-Instrumented run, one block, two upserts:
+An id-set fix was built and measured first, and it does NOT hold: boot
+re-projects the same block more than once, so a suppression set with a bounded
+lifetime always loses the race. Instrumented, one block, two upserts in one
+boot:
 
 ```
 PROBE-DI key=block:share-child-two inset=true
@@ -139,20 +126,53 @@ PROBE-DI key=block:share-child-two inset=false
 PROBE-DISCLOSE block=block:share-child-two stid=1111...
 ```
 
-Taking the id on first use lets the second upsert disclose; peeking instead
-and clearing the set at `finish_initial_scan` moves the race rather than
-removing it, because the last boot re-projection is not bounded by the scan's
-end. Both variants were flaky across five repeat runs. The id set is therefore
-NOT race-free — it has the same time-bounded-lifetime flaw as the
-`AtomicBool` variant it was chosen over, one level down.
+Taking the id let the second upsert disclose; peeking and clearing at
+`finish_initial_scan` only moved the race. Both variants were flaky across
+five repeat runs. That whole family — `AtomicBool` scan flag, scan-id set,
+generation counter — infers edit-ness from diff traffic and cannot win.
 
-The remaining fix is architectural and needs a ruling (see
-`lane-report-bug-orgerr.md`, DECISION NEEDED B): derive the disclosure from a
-FACT rather than an inference — either the write-back path reporting that it
-tried to materialize the subtree and could not resolve a path, or a
-content-vs-disk comparison in the spirit of `gate_virtual_seed_write` /
-`seed_pristine` (`file_sync_controller.rs`), since "an edit that has not
-reached disk" is exactly "store content differs from disk content". Any
-predicate living in the feed projection is inferring edit-ness from diff
-traffic and will keep losing to re-projection. The banner copy and the
-block-id-vs-file detail remain separate user-facing decisions.
+The disclosure now lives at `FileSyncController::disclose_share_inlined_into`
+(`crates/holon-filesystem/src/file_sync_controller.rs`), called from
+`write_back_or_skip_readonly` — the single funnel through which every
+projection write reaches the filesystem. It fires only after a real write, and
+asks the authoritative `MountRegistry` whether the document is the share's own
+mount file. Cold-boot ingest makes no write attempt (reading a file produces
+no write, and an unchanged render is echo-suppressed), so a cold boot is
+silent by construction rather than by suppression. Deduped per
+`shared_tree_id`: one wiring gap, one banner.
+
+The old feed-path `disclose_unmaterialized_share` and its unit tests are
+DELETED, not left beside the new path.
+
+B2 falls out of the move: the write-back layer knows the path, so the banner
+reads `Shared subtree not materialized — <file>`, carrying a typed
+`SharedSubtreeNotMaterialized { file }` rather than a pre-formatted string
+(`crates/holon-loro/src/degraded_signal_bus.rs`,
+`frontends/gpui/src/share_ui.rs`).
+
+Rung: `crates/holon-integration-tests/tests/cold_boot_share_disclosure.rs` —
+cold boot over a vault holding a shared subtree discloses NOTHING, and a
+genuine STORE-side edit inside that share still discloses. The teeth test had
+to be re-authored: the original drove the edit by writing the org file, which
+under write-back semantics is already ON disk and correctly produces no gap.
+Red for the right reason with the disclosure disabled:
+
+```
+a genuine store-side edit to a share with no page-mount MUST still disclose
+  left: []
+ right: ["11111111-2222-3333-4444-555555555555"]
+```
+
+Green, and 5/5 stable across repeat runs — the flakiness that condemned the
+id-set approach is gone.
+
+RESIDUAL, unchanged by this fix: the underlying condition is still TRUE for
+Martin's vault. The mount walk accepts only `is_page()` mounts while his only
+authored mount is a HEADLINE carrying `:share-role: mount`, so those subtrees
+genuinely own no file. Inc 2 (tagging the mount a page) is what clears it;
+this fix corrects WHEN and HOW the condition is announced, not the condition.
+
+Still deferred: the per-block `OrgRerender::Block` cold-boot routing
+(`di.rs`) is a latency-lane candidate. `seeding` drives both that routing and
+(formerly) the disclosure, so whoever fixes the routing touches the same
+predicate — the disclosure no longer depends on it.

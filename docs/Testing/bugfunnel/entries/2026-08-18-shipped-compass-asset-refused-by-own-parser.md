@@ -108,6 +108,12 @@ than validates: `EdgeTarget::{Block, None, Slot}`
   through the store and `template_instantiation.rs:365-371` still has
   `{{mission}}` to substitute.
 
+End to end, `instantiating_the_shipped_compass_problem_yields_a_real_contributes_to_edge`
+parses the SHIPPED asset, instantiates its problem template through
+`plan_instantiation`, and asserts the instance's `contributes-to` is the bound
+mission id and re-parses to a real `contributes_to` EDGE — the claim the whole
+fix protects.
+
 The missing piece is closed by
 `every_shipped_default_asset_ingests_with_the_production_parser`
 (`crates/holon-org-format/tests/template_slot_edges.rs`), which parses every

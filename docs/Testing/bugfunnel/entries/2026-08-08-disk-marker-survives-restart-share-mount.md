@@ -15,7 +15,7 @@ SUPERSEDED for the 4×-toast signature by
 `2026-08-18-cold-boot-discloses-shared-edit-for-every-share`: the same banner
 on a 2026-08-18 cold boot carried ZERO of the `share-role drawer property was
 found…` WARNs this row's root cause rests on, and fired once per shared tree
-in the vault rather than per lost registration.
+in the vault rather than per lost registration. The disclosure has since moved to the write-back path, so it fires on a real write attempt rather than on feed traffic.
 
 ## Bug
 

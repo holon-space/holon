@@ -230,3 +230,99 @@ fn a_real_id_inside_a_template_still_becomes_a_typed_edge() {
         "a bare id inside a template is an ordinary contribution edge"
     );
 }
+
+/// END TO END. Instantiating the SHIPPED Compass problem template turns its
+/// `{{mission}}` slot into a real block id, and the instance re-parses to a
+/// real `contributes_to` EDGE.
+///
+/// This is the claim the whole fix exists to protect: the parser stops
+/// refusing the template, and instantiation still produces the contribution
+/// edge the Compass convention is built on (the agenda query is a reverse
+/// closure over `block_contributes_to.target_id`).
+#[test]
+fn instantiating_the_shipped_compass_problem_yields_a_real_contributes_to_edge() {
+    use holon_api::template_instantiation::InstantiateRequest;
+    use holon_api::template_instantiation::TemplateNode;
+    use holon_api::template_instantiation::plan_instantiation;
+
+    let asset = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/default/Compass.org");
+    let asset = asset
+        .canonicalize()
+        .expect("shipped Compass.org must exist");
+    let source = std::fs::read_to_string(&asset).expect("read Compass.org");
+    let root_dir = asset.parent().expect("assets dir");
+
+    let parsed = parse_org_file(&asset, &source, &EntityUri::no_parent(), root_dir)
+        .expect("the shipped Compass template must ingest");
+
+    // The problem template's root — the block whose slot Martin's banner named.
+    let root = parsed
+        .blocks
+        .iter()
+        .find(|b| b.id.id() == "compass-problem-tpl-0")
+        .expect("compass-problem-tpl-0 present in the shipped asset");
+    assert_eq!(
+        root.get_property_str("contributes-to").as_deref(),
+        Some("{{mission}}"),
+        "the slot must reach the store as authored, else instantiation has nothing to substitute"
+    );
+
+    let node = TemplateNode {
+        id: root.id.id().to_string(),
+        parent_id: String::new(),
+        content: root.content.clone(),
+        properties: Some(
+            serde_json::to_string(&root.properties_map()).expect("properties serialize"),
+        ),
+        ..TemplateNode::default()
+    };
+
+    let request = InstantiateRequest {
+        template_id: node.id.clone(),
+        target_parent: "block:target-page".to_string(),
+        context_key: "test-instantiation".to_string(),
+        bindings: [
+            ("title".to_string(), "Onboarding is slow".to_string()),
+            ("mission".to_string(), "the-mission-block".to_string()),
+            ("reviewed".to_string(), "2026-08-18".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+        replace_block: None,
+    };
+
+    let plan = plan_instantiation(std::slice::from_ref(&node), &request)
+        .expect("instantiating the shipped compass-problem template must succeed");
+
+    let created = plan.creates.first().expect("one create for the root");
+    let props: serde_json::Value = serde_json::from_str(
+        created
+            .get("properties")
+            // ALLOW(jsonb_as_string): not a CDC row — this is the planner's
+            // create-op param map, where `properties` is written as
+            // `Value::String` (template_instantiation.rs:407).
+            .and_then(|v| v.as_string())
+            .expect("instance carries properties"),
+    )
+    .expect("instance properties are JSON");
+    assert_eq!(
+        props["contributes-to"], "the-mission-block",
+        "instantiation must substitute the slot with the bound mission id: {props}"
+    );
+
+    // The instance is an ORDINARY block — no `:TEMPLATE:` marker — so the same
+    // drawer value now parses as a real typed edge rather than a slot.
+    let instance_org = "* Onboarding is slow\n:PROPERTIES:\n:ID: \
+                        instance-0\n:contributes-to: the-mission-block\n:END:\n";
+    let reparsed = parse(instance_org).expect("the instance must parse");
+    let instance = reparsed
+        .blocks
+        .iter()
+        .find(|b| b.id.id() == "instance-0")
+        .expect("instance block present");
+    assert_eq!(
+        instance.contributes_to,
+        vec![EntityUri::parse("block:the-mission-block").unwrap()],
+        "the instantiated Compass problem must carry a REAL contributes-to edge"
+    );
+}

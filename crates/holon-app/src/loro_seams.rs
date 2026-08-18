@@ -643,17 +643,11 @@ pub struct ShareDegradedDisclosure {
 }
 
 impl holon_filesystem::ShareWritebackDisclosure for ShareDegradedDisclosure {
-    fn shared_subtree_not_materialized(
-        &self,
-        block_id: &EntityUri,
-        owning_page: Option<&str>,
-        shared_tree_id: &str,
-    ) {
+    fn shared_subtree_not_materialized(&self, shared_tree_id: &str, file: &Path) {
         self.bus.emit(holon::sync::ShareDegraded {
             shared_tree_id: shared_tree_id.to_string(),
             reason: holon::sync::ShareDegradedReason::SharedSubtreeNotMaterialized {
-                block_id: block_id.to_string(),
-                owning_page: owning_page.map(str::to_string),
+                file: file.display().to_string(),
             },
         });
     }
