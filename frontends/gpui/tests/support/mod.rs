@@ -209,6 +209,11 @@ pub struct TestServices {
     /// fixture builds a CELL-ATTACHED (Loro/Full-arm) `EditorView` instead of
     /// the no-cell SqlOnly one. `None` keeps the historical behaviour.
     editable_cell: Option<holon_core::cell::Cell<String>>,
+    /// Rows the canned `watch_query_live` yields, when the default
+    /// [`CANNED_LIVE_QUERY_ROWS`] is the wrong shape for the fixture. The
+    /// shipped left sidebar has ONE integration row, and a section that is
+    /// several viewports tall hides defects that only a short section exposes.
+    live_query_rows: std::sync::Mutex<Option<usize>>,
 }
 
 impl TestServices {
@@ -225,6 +230,7 @@ impl TestServices {
             focused: std::sync::Mutex::new(None),
             dispatched_intents: std::sync::Mutex::new(Vec::new()),
             editable_cell: None,
+            live_query_rows: std::sync::Mutex::new(None),
         })
     }
 
@@ -255,6 +261,7 @@ impl TestServices {
             focused: std::sync::Mutex::new(None),
             dispatched_intents: std::sync::Mutex::new(Vec::new()),
             editable_cell: Some(cell),
+            live_query_rows: std::sync::Mutex::new(None),
         })
     }
 
@@ -282,6 +289,7 @@ impl TestServices {
             focused: std::sync::Mutex::new(None),
             dispatched_intents: std::sync::Mutex::new(Vec::new()),
             editable_cell: None,
+            live_query_rows: std::sync::Mutex::new(None),
         })
     }
 
@@ -301,10 +309,19 @@ impl TestServices {
             focused: std::sync::Mutex::new(None),
             dispatched_intents: std::sync::Mutex::new(Vec::new()),
             editable_cell: None,
+            live_query_rows: std::sync::Mutex::new(None),
         })
     }
 
     /// Toggle the open/closed state of a drawer. Returns the new state.
+    /// Yield `n` rows from the canned `watch_query_live` instead of
+    /// [`CANNED_LIVE_QUERY_ROWS`]. Production's Integrations section has one
+    /// row; a 40-row section is taller than the viewport and scrolls
+    /// internally, which masks a short scroll extent in the panel above it.
+    pub fn set_live_query_rows(&self, n: usize) {
+        *self.live_query_rows.lock().unwrap() = Some(n);
+    }
+
     pub fn toggle_drawer(&self, block_id: &str) -> bool {
         let mut states = self.drawer_states.lock().unwrap();
         let current = states.get(block_id).copied().unwrap_or(true); // default open
@@ -504,7 +521,12 @@ impl BuilderServices for TestServices {
         // greedy `live_query` `ReactiveShell` a content-height inner, so it
         // reports real height (and the bounded accordion body caps it). A plain
         // `column` would collapse the `relative(1.0)` shell to 0.
-        let rows: Vec<ReactiveViewModel> = (0..CANNED_LIVE_QUERY_ROWS)
+        let row_count = self
+            .live_query_rows
+            .lock()
+            .unwrap()
+            .unwrap_or(CANNED_LIVE_QUERY_ROWS);
+        let rows: Vec<ReactiveViewModel> = (0..row_count)
             .map(|i| canned_live_query_row(prefix, i))
             .collect();
         let view = std::sync::Arc::new(
@@ -666,6 +688,11 @@ pub struct ReactiveFixtureView {
     bounds: BoundsRegistry,
     entity_cache: holon_gpui::entity_view_registry::EntityCache,
     fixture_size: Size<Pixels>,
+    /// Height of the window chrome production stacks ABOVE the content
+    /// wrapper (title bar, tab strip, breadcrumb bar). `0.0` mounts the
+    /// content wrapper as the whole window — the historical fixture shape.
+    /// See [`Self::with_page_chrome`].
+    chrome_height: f32,
 }
 
 impl ReactiveFixtureView {
@@ -705,6 +732,7 @@ impl ReactiveFixtureView {
             bounds,
             entity_cache: Default::default(),
             fixture_size,
+            chrome_height: 0.0,
         }
     }
 
@@ -724,7 +752,19 @@ impl ReactiveFixtureView {
             bounds,
             entity_cache: Default::default(),
             fixture_size,
+            chrome_height: 0.0,
         }
+    }
+
+    /// Stack `height` px of window chrome ABOVE the content wrapper, inside
+    /// production's `page` div (`lib.rs` `HolonApp::render`: `size_full
+    /// flex_col`, children `title_bar` → optional tab strip → optional
+    /// breadcrumb bar → content). Without this the fixture mounts the content
+    /// wrapper as the whole window, so any geometry defect that only appears
+    /// when the wrapper has a preceding sibling is invisible to it.
+    pub fn with_page_chrome(mut self, height: f32) -> Self {
+        self.chrome_height = height;
+        self
     }
 
     /// Fish out the `ReactiveShell` entity the real render pipeline created
@@ -762,13 +802,26 @@ impl Render for ReactiveFixtureView {
         // collection inside this specific flex-col overflow-hidden chain,
         // so percentage sizing that resolves differently here vs. a
         // plain `size_full` root would silently mask real regressions.
-        div()
+        let content = div()
             .size_full()
             .flex_1()
             .flex()
             .flex_col()
             .overflow_hidden()
-            .child(builders::render(&self.vm, &gctx))
+            .child(builders::render(&self.vm, &gctx));
+        if self.chrome_height <= 0.0 {
+            return content.into_any_element();
+        }
+        // Production's `page` (`lib.rs` `HolonApp::render`): `size_full
+        // flex_col` stacking the title bar (plus optional tab strip and
+        // breadcrumb bar) ABOVE the content wrapper.
+        // Production's OWN page container (`lib.rs`), not a copy of it: the
+        // layout defect this fixture exists to catch lives in that chain, so
+        // modelling it here would only ever assert the model.
+        holon_gpui::page_container()
+            .child(div().w_full().flex_shrink_0().h(px(self.chrome_height)))
+            .child(content)
+            .into_any_element()
     }
 }
 

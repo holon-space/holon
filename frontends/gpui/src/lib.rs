@@ -639,6 +639,25 @@ fn collect_root_live_blocks(node: &ReactiveViewModel, ids: &mut std::collections
     }
 }
 
+/// The window's page container: the flex column that stacks the chrome bars
+/// (title bar, then the optional tab strip and breadcrumb bar) above the
+/// content wrapper.
+///
+/// `.flex()` is load-bearing. gpui defaults `display` to `Block` and
+/// `flex_col()` sets only the direction, so without it the bars and the
+/// content wrapper stack as block boxes: the wrapper's `flex_1` goes inert
+/// while its `size_full` still claims the FULL window height, starting below
+/// the chrome. Every panel's scroll viewport is then taller than the space it
+/// occupies and its last rows sit permanently below the window edge —
+/// bugfunnel `2026-08-18-left-sidebar-tail-unreachable-at-scroll-max`.
+///
+/// Windowed fixtures build their page through this same function
+/// (`ReactiveFixtureView::with_page_chrome`), so a regression here is visible
+/// to them instead of being modelled — and re-modelled wrongly — per test.
+pub fn page_container() -> gpui::Div {
+    div().size_full().flex().flex_col()
+}
+
 // ── Modal overlay helpers ──────────────────────────────────────────────────
 
 fn interpret_and_render(
@@ -1497,11 +1516,9 @@ impl Render for HolonApp {
             16.0,
         );
 
-        let mut page = div()
-            .size_full()
+        let mut page = page_container()
             .bg(page_background)
             .text_color(text)
-            .flex_col()
             .pt(px(self.safe_area_top))
             .pb(px(self.safe_area_bottom))
             .child(title_bar);

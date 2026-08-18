@@ -19,9 +19,9 @@
 //!
 //! The `integration_state` rows come from `TestServices`' canned
 //! `watch_query_live` (`support/mod.rs`), which recognises the seeded SQL and
-//! yields data-bound `text` rows keyed `sync-{ix}` — so this asserts RENDERED
-//! ROWS, not just the region box, which is exactly the assertion the BugFunnel
-//! COVERAGE row says nothing in the suite made.
+//! yields data-bound `text` rows keyed `integration-{ix}` — so this asserts
+//! RENDERED ROWS, not just the region box, which is exactly the assertion the
+//! BugFunnel COVERAGE row says nothing in the suite made.
 //!
 //! Run: `cargo test -p holon-gpui --test seeded_sidebar_live_query_height`
 
