@@ -378,6 +378,10 @@ fn publish_window_key_bindings(
 /// (block- and query-backed ReactiveShells) each have their own independent
 /// streams. `rebuild()` is only called for the root — sub-blocks update
 /// independently.
+/// The toolbar gear's bounds id — the Settings modal's only entry point, so a
+/// windowed test locates it by this name.
+pub const SETTINGS_GEAR_ID: &str = "settings-gear";
+
 struct AppModel {
     session: Arc<FrontendSession>,
     engine: Arc<ReactiveEngine>,
@@ -1193,22 +1197,32 @@ impl Render for HolonApp {
                                 });
                             }),
                     )
+                    // Bounds-tracked: the Settings modal has no command and no
+                    // keybinding, so this rect is the only way a window test
+                    // reaches anything the modal paints.
                     .child(
-                        div()
-                            .id("settings-gear")
-                            .cursor_pointer()
-                            .text_size(px(15.0))
-                            .px(px(6.0))
-                            .py(px(4.0))
-                            .rounded(px(4.0))
-                            .hover(|s| s.bg(gpui::rgba(0x00000010)))
-                            .child("⚙")
-                            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                                settings_model.update(cx, |m, cx| {
-                                    m.show_settings = !m.show_settings;
-                                    cx.notify();
-                                });
-                            }),
+                        crate::geometry::TransparentTracker::new(
+                            SETTINGS_GEAR_ID.to_string(),
+                            "settings_gear",
+                            self.bounds_registry.clone(),
+                            div()
+                                .id("settings-gear")
+                                .cursor_pointer()
+                                .text_size(px(15.0))
+                                .px(px(6.0))
+                                .py(px(4.0))
+                                .rounded(px(4.0))
+                                .hover(|s| s.bg(gpui::rgba(0x00000010)))
+                                .child("⚙")
+                                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                    settings_model.update(cx, |m, cx| {
+                                        m.show_settings = !m.show_settings;
+                                        cx.notify();
+                                    });
+                                })
+                                .into_any_element(),
+                        )
+                        .with_displayed_text("⚙"),
                     )
                     // Widget Gallery is a dev tool — demoted off the toolbar
                     // outside debug builds (matches the Inspector's gating).
