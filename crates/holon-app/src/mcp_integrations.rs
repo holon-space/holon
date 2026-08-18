@@ -292,11 +292,13 @@ impl Module for McpIntegrationsModule {
         let pending_writes_for_registry = pending_writes.clone();
 
         let configs_for_registry = configs.clone();
+        let store_for_registry = store.clone();
 
         // Register the registry as an async singleton — resolved in parallel with other
         // DI services.
         injector.provide::<McpIntegrationRegistry>(Provider::root_async(move |resolver| {
             let configs_for_registry = configs_for_registry.clone();
+            let store_for_registry = store_for_registry.clone();
             let pending_flows = pending_flows.clone();
             let pending_writes = pending_writes_for_registry.clone();
             let superseded = superseded.clone();
@@ -331,6 +333,36 @@ impl Module for McpIntegrationsModule {
                     .resolve_async::<dyn holon::di::DbHandleProvider>()
                     .await
                     .handle();
+                // Populate the `integration_state` mirror BEFORE connecting.
+                //
+                // The connect loop below records each provider's outcome, and
+                // that write is refused for a provider with no enabled row —
+                // correctly, since a status for someone the store never enabled
+                // is a wiring bug. But the rows are created by
+                // `IntegrationStateProjector`, which the session factory runs
+                // AFTER this one (`wiring.rs`, past `seed_default_layout`), so
+                // every status was refused and lost with nothing to retry it:
+                // entry 2026-08-18-integrations-section-shows-one-stale-row.
+                //
+                // Projecting here makes the ordering structural rather than
+                // incidental — the code that needs the rows creates them first,
+                // in the same sequence. The session-factory call remains: it
+                // installs the change watchers, and it covers a container that
+                // never resolves this registry at all.
+                crate::integration_projection::IntegrationStateProjector::new(
+                    db_handle.clone(),
+                    store_for_registry.clone(),
+                )
+                .project()
+                .await
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "[McpIntegrationsModule] Could not populate the integration_state mirror \
+                         before connecting ({e:#}) — every provider's boot status would be \
+                         refused and the Integrations section would read Pending forever."
+                    )
+                });
+
                 let cache_factory = resolver
                     .resolve_async::<dyn holon_core::CacheFactory>()
                     .await;

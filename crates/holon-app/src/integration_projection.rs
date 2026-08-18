@@ -172,6 +172,15 @@ impl IntegrationStateProjector {
                 anyhow::anyhow!("pruning unbundled providers from integration_state: {e}")
             })?;
 
+        // The boot log carried NOT ONE line from this projector while the
+        // Integrations section was visibly wrong, so the only way to tell
+        // whether it had run was to infer it from the rows. One line, naming
+        // what landed, is what makes the next occurrence readable.
+        tracing::info!(
+            providers = rows.len(),
+            enabled = rows.iter().filter(|r| r.enabled).count(),
+            "[IntegrationStateProjector] projected the enablement store into integration_state"
+        );
         Ok(())
     }
 
