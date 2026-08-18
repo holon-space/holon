@@ -89,7 +89,16 @@ pub enum ShareDegradedReason {
     /// mount. Materialization is not built yet, so nothing can raise the
     /// all-clear and the condition holds for the session — accurately, since
     /// the disk projection stays stale for exactly that long.
-    SharedSubtreeNotMaterialized(String),
+    ///
+    /// `owning_page` is the page the shared content sits under — the thing a
+    /// user can actually find. Typed rather than pre-formatted so the frontend
+    /// decides how to name the share. It is `None` only when the walk reached
+    /// no page at all, and the frontend then shows `block_id`, which names the
+    /// condition honestly rather than inventing a page name.
+    SharedSubtreeNotMaterialized {
+        block_id: String,
+        owning_page: Option<String>,
+    },
     /// The org write-back stream died and its supervisor could not keep it
     /// alive — edits reach Loro + SQL but stop reaching disk. String carries
     /// the supervisor's escalation summary (what died, how often).
@@ -199,7 +208,7 @@ impl ShareDegradedReason {
             Self::SqlProjectionFailed(_) => Self::SQL_PROJECTION_FAILED,
             Self::ForeignIdCollision(_) => Self::FOREIGN_ID_COLLISION,
             Self::OrgIngestFailed(_) => Self::ORG_INGEST_FAILED,
-            Self::SharedSubtreeNotMaterialized(_) => Self::SHARED_SUBTREE_NOT_MATERIALIZED,
+            Self::SharedSubtreeNotMaterialized { .. } => Self::SHARED_SUBTREE_NOT_MATERIALIZED,
             Self::WritebackDegraded(_) => Self::WRITEBACK_DEGRADED,
         }
     }
@@ -450,7 +459,10 @@ mod tests {
             ShareDegradedReason::RehydrationFailed("advertiser: port in use".into()),
             ShareDegradedReason::SqlProjectionFailed("table locked".into()),
             ShareDegradedReason::ForeignIdCollision("block:journals".into()),
-            ShareDegradedReason::SharedSubtreeNotMaterialized("block:abc".into()),
+            ShareDegradedReason::SharedSubtreeNotMaterialized {
+                block_id: "block:abc".into(),
+                owning_page: None,
+            },
             ShareDegradedReason::WritebackDegraded("stream died 3x".into()),
         ];
 

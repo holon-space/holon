@@ -321,11 +321,16 @@ impl ShareUiState {
                     condition: Some(condition.clone()),
                 });
             }
-            ShareDegradedReason::SharedSubtreeNotMaterialized(detail) => {
+            ShareDegradedReason::SharedSubtreeNotMaterialized {
+                block_id,
+                owning_page,
+            } => {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::SharedSubtreeNotMaterialized,
                     shared_tree_id: event.shared_tree_id,
-                    detail,
+                    // Name the page the user can open. With no page in the
+                    // walk there is nothing better to show than the block id.
+                    detail: owning_page.unwrap_or(block_id),
                     condition: Some(condition.clone()),
                 });
             }
@@ -1725,7 +1730,7 @@ fn toast_style(kind: DegradedKind) -> (gpui::Rgba, &'static str, &'static str) {
         DegradedKind::SharedSubtreeNotMaterialized => (
             gpui::rgba(0xfbbf24ff),
             "⚠",
-            "Shared edit saved — org file pending",
+            "Shared subtree not materialized",
         ),
         DegradedKind::WritebackDegraded => (
             gpui::rgba(0xef4444ff),

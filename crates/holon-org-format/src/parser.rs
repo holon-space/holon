@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use anyhow::Context;
 use anyhow::Result;
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
+use holon_api::template_instantiation::TemplateVars;
 use holon_api::types::ContentType;
 use holon_api::types::SourceLanguage;
 use holon_api::types::Tags;
@@ -457,6 +459,7 @@ pub fn parse_org_file_with(
         file_id.id(),
         &mut sequence_counter,
         &mut blocks,
+        None,
     )?;
 
     process_headlines(
@@ -468,6 +471,7 @@ pub fn parse_org_file_with(
         &mut headlines_needing_ids,
         &done_kws,
         classifier,
+        None,
     )?;
 
     // Parse boundary (F8, dogfood 2026-07-21): a single file must project to a
@@ -604,6 +608,7 @@ fn emit_section_children(
     parent_bare: &str,
     sequence_counter: &mut i64,
     output: &mut Vec<Block>,
+    template: Option<&TemplateVars>,
 ) -> anyhow::Result<()> {
     let now = holon_api::clock::now_millis();
     // Create child Block entities for each source block
@@ -681,15 +686,25 @@ fn emit_section_children(
                             .split(|c: char| c == ',' || c.is_whitespace())
                             .filter(|s| !s.is_empty())
                         {
-                            let uri = parse_edge_slug(slug, &k, src_block.id.as_str())?;
-                            if !src_block.requires.contains(&uri) {
-                                src_block.requires.push(uri);
+                            match parse_edge_target(slug, &k, src_block.id.as_str(), template)? {
+                                EdgeTarget::Block(uri) => {
+                                    if !src_block.requires.contains(&uri) {
+                                        src_block.requires.push(uri);
+                                    }
+                                }
+                                // A slot or `none` names no block; the header
+                                // arg itself is preserved by the standard-args
+                                // fallthrough below.
+                                EdgeTarget::None | EdgeTarget::Slot(_) => {}
                             }
                         }
                     }
                 } else if k.eq_ignore_ascii_case("contributes-to") {
                     if let Some(s) = v.as_string() {
-                        src_block.contributes_to = parse_contributes_to(s, src_block.id.as_str())?;
+                        let targets = parse_edge_targets(s, &k, src_block.id.as_str(), template)?;
+                        if let Some(ids) = edge_ids(&targets) {
+                            src_block.contributes_to = ids;
+                        }
                     }
                 } else if k.eq_ignore_ascii_case("ADVICE_SUPPRESSED") {
                     if let Some(s) = v.as_string() {
@@ -756,6 +771,7 @@ fn process_headlines(
     needs_id: &mut Vec<String>,
     done_keywords: &[String],
     classifier: &holon_api::link_parser::LinkTargetClassifier,
+    template: Option<&TemplateVars>,
 ) -> Result<()> {
     for headline in headlines {
         // Extract headline level (number of stars)
@@ -847,6 +863,10 @@ fn process_headlines(
 
         // Extract properties as JSON
         let string_properties = extract_properties(&headline);
+        // A `:TEMPLATE:` headline opens a template scope for itself and its
+        // whole subtree; everything else inherits the enclosing one.
+        let scope = template_scope(&string_properties, template, id.as_str())?;
+        let scope = scope.as_deref();
 
         // Create Block entity - content is title + body combined
         let raw_content = if let Some(ref b) = body {
@@ -913,9 +933,15 @@ fn process_headlines(
                     .split(|c: char| c == ',' || c.is_whitespace())
                     .filter(|s| !s.is_empty())
                 {
-                    let uri = parse_edge_slug(slug, key, id.as_str())?;
-                    if !block.requires.contains(&uri) {
-                        block.requires.push(uri);
+                    match parse_edge_target(slug, key, id.as_str(), scope)? {
+                        EdgeTarget::Block(uri) => {
+                            if !block.requires.contains(&uri) {
+                                block.requires.push(uri);
+                            }
+                        }
+                        // Neither names a block. A slot-bearing value is kept
+                        // verbatim by the raw-property carrier below.
+                        EdgeTarget::None | EdgeTarget::Slot(_) => {}
                     }
                 }
             } else if key.eq_ignore_ascii_case("contributes-to") {
@@ -924,7 +950,14 @@ fn process_headlines(
                 // `block_contributes_to` junction. `none` is the authored
                 // sentinel for "advances nothing"; it names no block, so it
                 // parses to the empty set and the renderer omits the key.
-                block.contributes_to = parse_contributes_to(value, id.as_str())?;
+                let targets = parse_edge_targets(value, key, id.as_str(), scope)?;
+                match edge_ids(&targets) {
+                    Some(ids) => block.contributes_to = ids,
+                    // Slot-bearing: carry the authored text through as a plain
+                    // drawer property so it reaches disk and the store intact,
+                    // and `template_instantiation` still sees `{{var}}`.
+                    None => block.set_property(key, holon_api::Value::String(value.to_string())),
+                }
             } else if key.eq_ignore_ascii_case("ADVICE_SUPPRESSED") {
                 // `:ADVICE_SUPPRESSED:` is the authored advice-suppression
                 // exclusion set (ADR 0021): identical bare-ID grammar to
@@ -1011,6 +1044,7 @@ fn process_headlines(
             &id,
             sequence_counter,
             output,
+            scope,
         )?;
 
         // Recursively process children
@@ -1023,6 +1057,7 @@ fn process_headlines(
             needs_id,
             done_keywords,
             classifier,
+            scope,
         )?;
     }
 
@@ -1351,35 +1386,147 @@ fn extract_name_from_block_text(text: &str) -> Option<String> {
     None
 }
 
-/// Promote one authored slug of an edge-typed drawer key (`:REQUIRES:`,
-/// `:BLOCKED-BY:`, `:contributes-to:`) to its `block:` URI. `key` and `owner`
-/// label the offending drawer and block in the error.
+/// What one authored slug of an edge-typed drawer key
+/// (`:REQUIRES:`, `:BLOCKED-BY:`, `:contributes-to:`) denotes.
 ///
-/// Org file content is authored outside the system — an unfilled template
-/// placeholder or a `[[…]]` link names no block id, so this rejects rather than
-/// calling the panicking `EntityUri::from_raw`.
-fn parse_edge_slug(slug: &str, key: &str, owner: &str) -> anyhow::Result<EntityUri> {
-    EntityUri::try_from_raw(slug).map_err(|e| {
-        anyhow::anyhow!(
-            "block {owner}: :{key}: takes bare block IDs, got {slug:?} \
-             (docs/Reference/CompassConventions.md): {e}"
-        )
-    })
+/// The three cases are genuinely different kinds of thing, so the parser names
+/// them instead of forcing every slug through `EntityUri` and rejecting what
+/// does not fit: a block id is an edge, `none` is the authored empty set, and
+/// `{{var}}` inside a template is a SLOT that only becomes an id when
+/// `template_instantiation` substitutes it.
+#[derive(Debug, PartialEq, Eq)]
+enum EdgeTarget {
+    /// A real block: the only case that becomes a row in an edge junction.
+    Block(EntityUri),
+    /// The authored `none` sentinel — names no block, contributes no edge.
+    None,
+    /// An unsubstituted template variable. Carries the declared variable name.
+    Slot(String),
 }
 
-/// Parse a `contributes-to` value into edge targets. Bare block IDs, separated
-/// by whitespace or commas; the legacy `none` sentinel means the empty set.
+/// The `{{name}}` slot form, if `slug` is one.
+fn template_slot_name(slug: &str) -> Option<&str> {
+    slug.strip_prefix("{{")?.strip_suffix("}}").map(str::trim)
+}
+
+/// Classify one authored slug of an edge-typed drawer key. `key` and `owner`
+/// label the offending drawer and block in the error.
 ///
-/// `owner` labels the offending block in the error.
-fn parse_contributes_to(value: &str, owner: &str) -> anyhow::Result<Vec<EntityUri>> {
-    let mut targets = Vec::new();
-    for slug in value
-        .split(|c: char| c == ',' || c.is_whitespace())
-        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("none"))
-    {
-        targets.push(parse_edge_slug(slug, "contributes-to", owner)?);
+/// Org file content is authored outside the system, so a slug that names no
+/// block is rejected here rather than reaching the panicking
+/// `EntityUri::from_raw`. `template` is the variable set declared by the
+/// enclosing template subtree, and is `None` outside one — which is what makes
+/// `{{…}}` legal in a template and a hard error everywhere else.
+fn parse_edge_target(
+    slug: &str,
+    key: &str,
+    owner: &str,
+    template: Option<&TemplateVars>,
+) -> anyhow::Result<EdgeTarget> {
+    if slug.eq_ignore_ascii_case("none") {
+        return Ok(EdgeTarget::None);
     }
-    Ok(targets)
+    if let Some(name) = template_slot_name(slug) {
+        // A slot outside a template subtree names nothing and never will —
+        // nothing would ever substitute it, so it stays the error it was.
+        let Some(vars) = template else {
+            return Err(edge_slug_error(slug, key, owner));
+        };
+        if !vars.declares(name) {
+            anyhow::bail!(
+                "block {owner}: :{key}: uses template variable {name:?} that the enclosing \
+                 template does not declare — add it to ':TEMPLATE_VARS:' \
+                 (docs/Proposals/Templating-2026-07-12.md)"
+            );
+        }
+        return Ok(EdgeTarget::Slot(name.to_string()));
+    }
+    EntityUri::try_from_raw(slug)
+        .map(EdgeTarget::Block)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "block {owner}: :{key}: takes bare block IDs, got {slug:?} \
+                 (docs/Reference/CompassConventions.md): {e}"
+            )
+        })
+}
+
+fn edge_slug_error(slug: &str, key: &str, owner: &str) -> anyhow::Error {
+    let detail = EntityUri::try_from_raw(slug)
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    anyhow::anyhow!(
+        "block {owner}: :{key}: takes bare block IDs, got {slug:?} \
+         (docs/Reference/CompassConventions.md): {detail}"
+    )
+}
+
+/// Parse an edge-typed drawer value into its targets. Slugs are separated by
+/// whitespace or commas.
+fn parse_edge_targets(
+    value: &str,
+    key: &str,
+    owner: &str,
+    template: Option<&TemplateVars>,
+) -> anyhow::Result<Vec<EdgeTarget>> {
+    value
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|s| !s.is_empty())
+        .map(|slug| parse_edge_target(slug, key, owner, template))
+        .collect()
+}
+
+/// The block ids among `targets`, or `None` when any target is a template slot.
+///
+/// A value holding a slot is carried VERBATIM as a plain drawer property
+/// instead of being lifted into a typed edge field: the slot must survive to
+/// disk and into the store so `template_instantiation` still sees `{{var}}` at
+/// instantiation. A slot-bearing value contributes no junction rows at all —
+/// including any real ids beside the slot, so the rendered drawer stays exactly
+/// what the author wrote rather than being split across two mechanisms.
+fn edge_ids(targets: &[EdgeTarget]) -> Option<Vec<EntityUri>> {
+    if targets.iter().any(|t| matches!(t, EdgeTarget::Slot(_))) {
+        return None;
+    }
+    Some(
+        targets
+            .iter()
+            .filter_map(|t| match t {
+                EdgeTarget::Block(uri) => Some(uri.clone()),
+                EdgeTarget::None | EdgeTarget::Slot(_) => None,
+            })
+            .collect(),
+    )
+}
+
+/// The template variables declared by `properties` when it marks a template
+/// root, else the inherited `enclosing` set — the value threaded down a
+/// subtree so every descendant of a `:TEMPLATE:` block knows its slots.
+fn template_scope<'a>(
+    properties: &[(String, String)],
+    enclosing: Option<&'a TemplateVars>,
+    owner: &str,
+) -> anyhow::Result<Option<std::borrow::Cow<'a, TemplateVars>>> {
+    let keys: Vec<&str> = properties.iter().map(|(k, _)| k.as_str()).collect();
+    if holon_api::template::find_template_marker_key(
+        keys.iter().copied(),
+        holon_api::TEMPLATE_MARKER_PROPERTY,
+    )
+    .is_none()
+    {
+        return Ok(enclosing.map(std::borrow::Cow::Borrowed));
+    }
+    let declared = holon_api::template::find_template_marker_key(
+        keys.iter().copied(),
+        holon_api::TEMPLATE_VARS_PROPERTY,
+    )
+    .and_then(|k| properties.iter().find(|(pk, _)| pk == k))
+    .map(|(_, v)| v.as_str())
+    .unwrap_or("");
+    let vars = TemplateVars::parse(declared)
+        .with_context(|| format!("block {owner}: invalid ':TEMPLATE_VARS:'"))?;
+    Ok(Some(std::borrow::Cow::Owned(vars)))
 }
 
 #[cfg(test)]

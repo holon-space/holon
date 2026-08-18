@@ -453,7 +453,15 @@ pub trait ShareWritebackDisclosure: Send + Sync {
     /// Signal that `block_id` (belonging to share `shared_tree_id`) was edited
     /// but could not be materialized to a dedicated on-disk org file. Emit a
     /// user-visible degraded banner; the edit itself is safe in Loro + SQL.
-    fn shared_subtree_not_materialized(&self, block_id: &EntityUri, shared_tree_id: &str);
+    /// `owning_page` is the page the shared content sits under, when the walk
+    /// found one — the name a user can act on. The block id alone names
+    /// nothing they can look up.
+    fn shared_subtree_not_materialized(
+        &self,
+        block_id: &EntityUri,
+        owning_page: Option<&str>,
+        shared_tree_id: &str,
+    );
 }
 
 /// Disclosure seam for the write-back stream giving up entirely.

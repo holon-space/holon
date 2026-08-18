@@ -925,13 +925,17 @@ fn disclose_unmaterialized_share(
         return;
     };
     // Walk to the owning page; materialized iff that page is the mount page.
-    let owning_is_mount = {
+    // The page is also what the banner NAMES: a bare block id names nothing a
+    // user can look up.
+    let (owning_is_mount, owning_page) = {
         let map = feed.read();
         let mut current = block.clone();
         let mut found = false;
+        let mut page = None;
         for _ in 0..50 {
             if current.is_page() {
                 found = current.is_share_mount();
+                page = Some(current.content.clone());
                 break;
             }
             match map.get(current.parent_id.as_str()) {
@@ -939,7 +943,7 @@ fn disclose_unmaterialized_share(
                 None => break,
             }
         }
-        found
+        (found, page)
     };
     if owning_is_mount {
         return;
@@ -952,7 +956,7 @@ fn disclose_unmaterialized_share(
         }
     }
     match disclosure {
-        Some(d) => d.shared_subtree_not_materialized(&block.id, &stid),
+        Some(d) => d.shared_subtree_not_materialized(&block.id, owning_page.as_deref(), &stid),
         None => tracing::warn!(
             block_id = %block.id,
             shared_tree_id = %stid,
@@ -1390,14 +1394,20 @@ mod share_disclosure_tests {
 
     #[derive(Default)]
     struct RecordingDisclosure {
-        calls: Mutex<Vec<(String, String)>>,
+        calls: Mutex<Vec<(String, Option<String>, String)>>,
     }
     impl holon_filesystem::ShareWritebackDisclosure for RecordingDisclosure {
-        fn shared_subtree_not_materialized(&self, block_id: &EntityUri, shared_tree_id: &str) {
-            self.calls
-                .lock()
-                .unwrap()
-                .push((block_id.to_string(), shared_tree_id.to_string()));
+        fn shared_subtree_not_materialized(
+            &self,
+            block_id: &EntityUri,
+            owning_page: Option<&str>,
+            shared_tree_id: &str,
+        ) {
+            self.calls.lock().unwrap().push((
+                block_id.to_string(),
+                owning_page.map(str::to_string),
+                shared_tree_id.to_string(),
+            ));
         }
     }
 
@@ -1451,7 +1461,12 @@ mod share_disclosure_tests {
             "one disclosure per share, deduped: {calls:?}"
         );
         assert_eq!(calls[0].0, "block:d1");
-        assert_eq!(calls[0].1, "stid-1");
+        assert_eq!(
+            calls[0].1.as_deref(),
+            Some("P"),
+            "the banner must name the owning page, not just the block id"
+        );
+        assert_eq!(calls[0].2, "stid-1");
     }
 
     // A non-shared block never discloses.
