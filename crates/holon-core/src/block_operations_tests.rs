@@ -58,13 +58,28 @@ mod tests {
     /// In-memory block store for testing
     struct MemStore {
         blocks: Mutex<Vec<TestBlock>>,
+        /// Child lists the POSITIONAL AUTHORITY reports, overriding the
+        /// `parent_id`-derived ones. Production reads order from
+        /// `BlockOrdering` (the Loro tree) and `collapsed`/`Page` from
+        /// the block row — two authorities that can disagree, which is
+        /// the only way a child CYCLE becomes reachable. Empty by
+        /// default, so every other test is unaffected.
+        forced_children: Mutex<HashMap<String, Vec<EntityUri>>>,
     }
 
     impl MemStore {
         fn new() -> Self {
             Self {
                 blocks: Mutex::new(Vec::new()),
+                forced_children: Mutex::new(HashMap::new()),
             }
+        }
+
+        fn force_children(&self, parent_id: &str, children: Vec<EntityUri>) {
+            self.forced_children
+                .lock()
+                .unwrap()
+                .insert(canon(parent_id), children);
         }
 
         fn insert(&self, block: TestBlock) {
@@ -355,6 +370,14 @@ mod tests {
         }
 
         async fn children(&self, parent_id: &EntityUri) -> Result<Vec<EntityUri>> {
+            if let Some(forced) = self
+                .forced_children
+                .lock()
+                .unwrap()
+                .get(&canon(parent_id.as_str()))
+            {
+                return Ok(forced.clone());
+            }
             Ok(self
                 .sorted_children(parent_id.as_str())
                 .into_iter()
@@ -1194,6 +1217,40 @@ mod tests {
             store.get("W").unwrap().content,
             "Content W",
             "the hidden child is not a merge target"
+        );
+    }
+
+    /// The descent reads order from `BlockOrdering` and `collapsed`/`Page` from
+    /// the block row. When those two authorities disagree the child graph can
+    /// carry a cycle, and an unbounded walk hangs the op. It must fail loud
+    /// instead, naming the start block and the tail of the walk.
+    #[tokio::test]
+    async fn join_block_descent_into_a_child_cycle_fails_loud() {
+        let store = MemStore::new();
+        insert_block(&store, "P", None, None);
+        insert_block(&store, "A", Some("P"), None);
+        let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
+        insert_block(&store, "B", Some("P"), Some(&key_a));
+        // The positional authority claims A is its own last child.
+        store.force_children("A", vec![EntityUri::block("A")]);
+
+        let err = store
+            .join_block(&EntityUri::block("B"), 0)
+            .await
+            .expect_err("a cyclic outline must fail loud, not hang");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("descent exceeded 4096 steps from block:B"),
+            "error must name the limit and the start block; got: {msg}"
+        );
+        assert!(
+            msg.contains("block:A"),
+            "error must show the visited ids; got: {msg}"
+        );
+        assert_eq!(
+            store.get("B").unwrap().content,
+            "Content B",
+            "the refused join must not have mutated anything"
         );
     }
 

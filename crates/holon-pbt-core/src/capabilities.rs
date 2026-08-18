@@ -239,6 +239,11 @@ pub trait RefBlockTree {
     fn all_non_seed_block_ids(&self) -> BTreeSet<EntityUri>;
 }
 
+/// Steps the visible-outline descent may take before it is treated as a cycle.
+/// Far above any real outline depth (`main_panel_renders` truncates at 100), so
+/// hitting it means the child graph is not a tree.
+pub const OUTLINE_DESCENT_LIMIT: usize = 4096;
+
 /// The block Backspace-at-0 merges `id` into: the block directly ABOVE it in
 /// the visible outline (pre-order), not its previous sibling.
 ///
@@ -255,11 +260,19 @@ pub fn join_merge_target<R: RefBlockTree + ?Sized>(id: &EntityUri, state: &R) ->
         return state.parent_of(id);
     };
     let mut target = prev;
+    let mut visited: Vec<EntityUri> = vec![target.clone()];
     while !state.is_collapsed(&target) && !state.is_page_block(&target) {
-        match state.sorted_children(&target).pop() {
-            Some(last) => target = last,
-            None => break,
-        }
+        let Some(last) = state.sorted_children(&target).pop() else {
+            break;
+        };
+        target = last;
+        visited.push(target.clone());
+        assert!(
+            visited.len() <= OUTLINE_DESCENT_LIMIT,
+            "join_merge_target: descent exceeded {OUTLINE_DESCENT_LIMIT} steps from {id} — cycle \
+             in the outline? last visited: {:?}",
+            &visited[visited.len().saturating_sub(16)..]
+        );
     }
     Some(target)
 }

@@ -1019,6 +1019,13 @@ pub struct MovePrefetch {
     pub new_parent: Option<bool>,
 }
 
+/// Steps `join_block`'s visible-outline descent may take before it is treated
+/// as a cycle. Far above any real outline depth (the main-panel traversal
+/// truncates at 100), so hitting it means the child graph is not a tree. The
+/// reference model mirrors it as `holon_pbt_core::capabilities::
+/// OUTLINE_DESCENT_LIMIT`.
+pub const OUTLINE_DESCENT_LIMIT: usize = 4096;
+
 /// Children of `id` IN ORDER, from the positional authority (`BlockOrdering`)
 /// when one is wired. `get_children` is an UNORDERED `get_all` filter, so it
 /// serves only synthetic in-memory substrates, which have no positional
@@ -1680,6 +1687,7 @@ where
         let prev_uri: Option<EntityUri> = prev_opt.as_ref().map(|p| p.id().clone());
         let target: T = if let Some(prev) = prev_opt {
             let mut cursor = prev;
+            let mut visited: Vec<EntityUri> = vec![cursor.id().clone()];
             loop {
                 if cursor.collapsed() || cursor.is_page() {
                     break cursor;
@@ -1693,6 +1701,15 @@ where
                         "join_block: ordered child {last_child} of {cursor_uri} not found"
                     )
                 })?;
+                visited.push(last_child);
+                if visited.len() > OUTLINE_DESCENT_LIMIT {
+                    return Err(anyhow::anyhow!(
+                        "join_block: descent exceeded {OUTLINE_DESCENT_LIMIT} steps from {id} — \
+                         cycle in the outline? last visited: {:?}",
+                        &visited[visited.len().saturating_sub(16)..]
+                    )
+                    .into());
+                }
             }
         } else {
             let parent_id = block.parent_id().ok_or_else(|| {
