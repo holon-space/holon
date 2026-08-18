@@ -29,7 +29,7 @@ use std::sync::Arc;
 use fluxdi::Module;
 use fluxdi::Provider;
 use holon_api::render_types::RenderExpr;
-use holon_app::integrations_section::SECTION_SQL;
+use holon_app::integrations_section::SIDEBAR_SQL;
 use holon_frontend::view_model::ViewKind;
 use holon_frontend::view_model::ViewModel;
 use holon_mcp::describe_ui_expand::DeferredPolicy;
@@ -143,7 +143,7 @@ fn expanded_live_query_renders_the_querys_real_rows() {
         // CONTROL: the fixture really is queryable through the engine.
         let control = engine
             .db_handle()
-            .query(SECTION_SQL, HashMap::new())
+            .query(SIDEBAR_SQL, HashMap::new())
             .await
             .expect("control query");
         assert_eq!(
@@ -153,7 +153,7 @@ fn expanded_live_query_renders_the_querys_real_rows() {
         );
 
         let services = services_for(engine);
-        let mut vm = deferred_live_query_node(&services, SECTION_SQL);
+        let mut vm = deferred_live_query_node(&services, SIDEBAR_SQL);
         let resolver = EngineResolver {
             services: services.clone(),
         };
@@ -178,7 +178,7 @@ fn unexpanded_live_query_is_marked_unevaluated() {
         seed_providers(&engine).await;
 
         let services = services_for(engine);
-        let mut vm = deferred_live_query_node(&services, SECTION_SQL);
+        let mut vm = deferred_live_query_node(&services, SIDEBAR_SQL);
         resolve_deferred(&mut vm, DeferredPolicy::MarkOnly).await;
 
         let rendered = vm.pretty_print(0);

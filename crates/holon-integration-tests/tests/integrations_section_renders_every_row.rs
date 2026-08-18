@@ -133,12 +133,13 @@ async fn run(runtime: Arc<tokio::runtime::Runtime>) {
     // The section's OWN item_template, parsed from the shared source the seed
     // embeds. Restating it here would let the seed drift into the defect while
     // this rung stayed green.
-    let item_template =
-        holon_api::render_dsl::parse_render_dsl(holon_app::integrations_section::ITEM_TEMPLATE)
-            .expect("the section's item_template must parse");
+    let item_template = holon_api::render_dsl::parse_render_dsl(
+        holon_app::integrations_section::SIDEBAR_ITEM_TEMPLATE,
+    )
+    .expect("the section's item_template must parse");
 
     let (key, live) = reactive.watch_query_live(
-        holon_app::integrations_section::SECTION_SQL.to_string(),
+        holon_app::integrations_section::SIDEBAR_SQL.to_string(),
         holon_api::QueryLanguage::HolonSql,
         item_template,
         None,

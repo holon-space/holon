@@ -137,6 +137,21 @@ fn integrations_section_sql(render: &str) -> String {
     render[lq..end].to_string()
 }
 
+/// Run `sql` and return its `provider_name` column, in row order.
+async fn providers_of(db: &holon::storage::DbHandle, sql: &str) -> Vec<String> {
+    db.query(sql, HashMap::new())
+        .await
+        .unwrap_or_else(|e| panic!("the seeded Integrations query must run: {sql}\n{e}"))
+        .iter()
+        .map(|r| {
+            r.get("provider_name")
+                .and_then(|v| v.as_string())
+                .expect("Integrations query must project provider_name")
+                .to_string()
+        })
+        .collect()
+}
+
 /// Run `sql` and return its `(provider_name, status)` pairs, in row order.
 async fn providers_and_statuses(db: &holon::storage::DbHandle, sql: &str) -> Vec<(String, String)> {
     db.query(sql, HashMap::new())
@@ -220,11 +235,9 @@ fn store_with(dir: &std::path::Path, enabled: &[&str]) -> Arc<IntegrationConfigS
     Arc::new(IntegrationConfigStore::load(dir).expect("store reloads"))
 }
 
-/// The section is the PRESENCE axis in full: every bundled provider, each
-/// carrying its own switch state, so a disabled integration has a switch to
-/// turn it on.
+/// The sidebar is the DISCOVERY surface: the integrations that are on.
 #[test]
-fn seeded_section_lists_every_provider_with_its_switch_state() {
+fn seeded_section_lists_exactly_the_enabled_integrations() {
     let rt = runtime();
     rt.clone().block_on(async {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -245,22 +258,24 @@ fn seeded_section_lists_every_provider_with_its_switch_state() {
 
         let sql = integrations_section_sql(&left_sidebar_render(db).await);
         assert_eq!(
-            providers_and_switches(db, &sql).await,
-            all_switches(&["todoist", "claude-history", "gcal", "gmail"]),
-            "the seeded Integrations section must list every bundled provider alphabetically, \
-             each with its own switch state — query was: {sql}"
+            providers_of(db, &sql).await,
+            vec![
+                "claude-history".to_string(),
+                "gcal".to_string(),
+                "gmail".to_string(),
+                "todoist".to_string(),
+            ],
+            "the seeded Integrations section must list exactly the enabled integrations, \
+             alphabetically — query was: {sql}"
         );
     });
 }
 
-/// The other half: switching one OFF flips its switch and KEEPS its row.
-///
-/// A disabled integration that vanished would be unreachable — there would be
-/// no switch left to turn it back on. Re-projection is a full mirror rebuild,
-/// so what must be pinned is that the rebuild carries the new state rather than
-/// a stale one.
+/// The other half: switching one OFF removes it from the sidebar. Re-projection
+/// is a full mirror rebuild, so a provider that was listed and is no longer
+/// enabled must not linger as a stale row.
 #[test]
-fn disabling_an_integration_flips_its_switch_and_keeps_its_row() {
+fn disabling_an_integration_removes_it_from_the_section() {
     let rt = runtime();
     rt.clone().block_on(async {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -278,9 +293,9 @@ fn disabling_an_integration_flips_its_switch_and_keeps_its_row() {
 
         let sql = integrations_section_sql(&left_sidebar_render(db).await);
         assert_eq!(
-            providers_and_switches(db, &sql).await,
-            all_switches(&["gcal", "todoist"]),
-            "sanity: both enabled integrations read as on"
+            providers_of(db, &sql).await,
+            vec!["gcal".to_string(), "todoist".to_string()],
+            "sanity: both enabled integrations listed"
         );
 
         store
@@ -295,19 +310,46 @@ fn disabling_an_integration_flips_its_switch_and_keeps_its_row() {
         projector.project().await.expect("re-projection");
 
         assert_eq!(
-            providers_and_switches(db, &sql).await,
-            all_switches(&["todoist"]),
-            "a disabled integration must stay in the section with its switch off — a row that \
-             vanished would leave no way to switch it back on"
+            providers_of(db, &sql).await,
+            vec!["todoist".to_string()],
+            "a disabled integration must leave the sidebar — re-projection rebuilds the mirror"
         );
     });
 }
 
-/// A clean vault — nothing enabled — still lists every provider, all switched
-/// off. This is the state in which the section matters most: it is the only
-/// surface from which a first integration can be switched on.
+/// The Settings modal is the CONTROL surface: every bundled provider with its
+/// switch word, enabled or not. Filtered to the enabled ones it would offer no
+/// way to switch a first integration on — which is exactly the state a clean
+/// vault is in.
 #[test]
-fn nothing_enabled_still_lists_every_provider_switched_off() {
+fn the_settings_query_lists_every_provider_with_its_switch_state() {
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (engine, _ordering) = fresh_engine(dir.path().join("fresh.db")).await;
+        let db = engine.db_handle();
+
+        let state_dir = dir.path().join("integrations");
+        std::fs::create_dir_all(&state_dir).expect("state dir");
+        let store = store_with(&state_dir, &["todoist", "gcal"]);
+        IntegrationStateProjector::new(db.clone(), store)
+            .project()
+            .await
+            .expect("projection");
+
+        assert_eq!(
+            providers_and_switches(db, holon_app::integrations_section::SETTINGS_SQL).await,
+            all_switches(&["todoist", "gcal"]),
+            "the Settings list must carry every bundled provider, each with its own switch state"
+        );
+    });
+}
+
+/// Nothing enabled ⇒ an empty sidebar section. The list is never fabricated,
+/// and a vault with every integration off renders no rows rather than all of
+/// them. Switching a first one on is the Settings modal's job.
+#[test]
+fn nothing_enabled_lists_nothing() {
     let rt = runtime();
     rt.clone().block_on(async {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -326,10 +368,9 @@ fn nothing_enabled_still_lists_every_provider_switched_off() {
             .expect("projection");
 
         let sql = integrations_section_sql(&left_sidebar_render(db).await);
-        assert_eq!(
-            providers_and_switches(db, &sql).await,
-            all_switches(&[]),
-            "a vault with nothing enabled must still show every provider, each switched off"
+        assert!(
+            providers_of(db, &sql).await.is_empty(),
+            "no integration enabled ⇒ the sidebar section lists nothing"
         );
     });
 }
@@ -435,10 +476,11 @@ fn the_section_carries_each_integrations_boot_status() {
         let sql = integrations_section_sql(&left_sidebar_render(db).await);
         assert_eq!(
             providers_and_statuses(db, &sql).await,
-            BUNDLED
-                .iter()
-                .map(|p| (p.to_string(), "Pending".to_string()))
-                .collect::<Vec<_>>(),
+            vec![
+                ("gcal".to_string(), "Pending".to_string()),
+                ("gmail".to_string(), "Pending".to_string()),
+                ("todoist".to_string(), "Pending".to_string()),
+            ],
             "a freshly projected, not-yet-connected integration reads as Pending"
         );
 
@@ -453,24 +495,14 @@ fn the_section_carries_each_integrations_boot_status() {
             .await
             .expect("record unavailable");
 
-        let resolved: std::collections::HashMap<String, String> =
-            providers_and_statuses(db, &sql).await.into_iter().collect();
-        for (provider, expected) in [
-            ("gcal", "Needs auth"),
-            ("gmail", "Unavailable"),
-            ("todoist", "Connected"),
-        ] {
-            assert_eq!(
-                resolved.get(provider).map(String::as_str),
-                Some(expected),
-                "each enabled integration must show the status its boot connect reached"
-            );
-        }
         assert_eq!(
-            resolved.get("jsonplaceholder").map(String::as_str),
-            Some("Pending"),
-            "a provider the registry never resolved must keep its Pending status, not inherit a \
-             neighbour's"
+            providers_and_statuses(db, &sql).await,
+            vec![
+                ("gcal".to_string(), "Needs auth".to_string()),
+                ("gmail".to_string(), "Unavailable".to_string()),
+                ("todoist".to_string(), "Connected".to_string()),
+            ],
+            "each enabled integration shows the status its boot connect reached"
         );
     });
 }
@@ -674,11 +706,10 @@ fn a_drifted_mirror_reconverges_on_the_next_projection() {
         .expect("insert a ghost row");
 
         let sql = integrations_section_sql(&left_sidebar_render(db).await);
-        let drifted = providers_and_switches(db, &sql).await;
-        assert!(
-            drifted.contains(&("ghost".to_string(), "on".to_string()))
-                && drifted.contains(&("todoist".to_string(), "off".to_string())),
-            "sanity: the mirror really is wrong before the repair — got {drifted:?}"
+        assert_eq!(
+            providers_of(db, &sql).await,
+            vec!["ghost".to_string()],
+            "sanity: the mirror really is wrong before the repair"
         );
 
         // A fresh store over the same files — the every-boot path — re-derives.
@@ -689,8 +720,8 @@ fn a_drifted_mirror_reconverges_on_the_next_projection() {
             .expect("re-projection repairs the mirror");
 
         assert_eq!(
-            providers_and_switches(db, &sql).await,
-            all_switches(&["todoist"]),
+            providers_of(db, &sql).await,
+            vec!["todoist".to_string()],
             "re-projection must restore the store's truth and drop the unbundled ghost row"
         );
     });

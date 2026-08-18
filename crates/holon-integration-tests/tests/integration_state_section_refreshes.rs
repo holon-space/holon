@@ -31,7 +31,7 @@ use std::time::Instant;
 use holon::di::DbHandleProvider;
 use holon_api::QueryLanguage;
 use holon_api::Value;
-use holon_app::integrations_section::SECTION_SQL;
+use holon_app::integrations_section::SIDEBAR_SQL;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive::ReactiveEngine;
 use holon_frontend::reactive::table_expr;
@@ -96,7 +96,7 @@ async fn run(runtime: Arc<tokio::runtime::Runtime>) {
     .expect("insert the first provider");
 
     let (key, live) = reactive.watch_query_live(
-        SECTION_SQL.to_string(),
+        SIDEBAR_SQL.to_string(),
         QueryLanguage::HolonSql,
         table_expr(),
         None,
@@ -198,7 +198,7 @@ async fn run_from_empty(runtime: Arc<tokio::runtime::Runtime>) {
     let services: Arc<dyn BuilderServices> = reactive.clone();
 
     let (key, live) = reactive.watch_query_live(
-        SECTION_SQL.to_string(),
+        SIDEBAR_SQL.to_string(),
         QueryLanguage::HolonSql,
         table_expr(),
         None,

@@ -6,7 +6,7 @@
 //!                        →  the store's Mutable fires
 //!                        →  IntegrationStateProjector       [PROJECTION]
 //!                        →  integration_state
-//!                        →  the seeded section's own query
+//!                        →  the Settings list's own query
 //! ```
 //!
 //! Every neighbouring rung covers one arrow: `integration_set_field_op` the
@@ -17,12 +17,13 @@
 //! module's own store, the module's own provider, and the projector's own
 //! signal watchers, with nothing re-projected by hand.
 //!
-//! The query is extracted from the SEEDED render rather than restated, so the
-//! assertion is about what the app runs.
+//! The query is the Settings modal's own `SETTINGS_SQL` rather than a restated
+//! copy — the switch lives on that surface, so that is where the round trip
+//! has to land.
 //!
 //! @pbt kind harness
 //! @pbt covers integration-toggle-round-trip — dispatching
-//! `integration.set_field` reaches the seeded section's rows without any
+//! `integration.set_field` reaches the Settings list's rows without any
 //! manual re-projection
 //! @pbt slips-if-removed the file and the table agree, the widget and the
 //! operation agree, and the section still shows the previous switch state
@@ -41,8 +42,6 @@ use holon_app::integration_projection::IntegrationStateProjector;
 use holon_core::storage::types::StorageEntity;
 use holon_mcp_client::IntegrationConfigStore;
 
-const LEFT_SIDEBAR_ID: &str = "block:default-left-sidebar";
-
 fn runtime() -> Arc<tokio::runtime::Runtime> {
     Arc::new(
         tokio::runtime::Builder::new_multi_thread()
@@ -50,42 +49,6 @@ fn runtime() -> Arc<tokio::runtime::Runtime> {
             .build()
             .expect("Failed to create runtime"),
     )
-}
-
-/// The sql the seeded Integrations section actually carries — the LAST
-/// `live_query` in the left-sidebar render (the page-hierarchy `tree(...)`
-/// above it is not one), with its sql as a plain double-quoted literal.
-async fn seeded_section_sql(db: &holon::storage::DbHandle) -> String {
-    let rows = db
-        .query(
-            &format!(
-                "SELECT content FROM {} WHERE parent_id = '{LEFT_SIDEBAR_ID}' AND source_language \
-                 = 'render'",
-                holon::storage::BLOCK_READ_TABLE
-            ),
-            HashMap::new(),
-        )
-        .await
-        .expect("query left-sidebar render block");
-    let render = rows
-        .first()
-        .and_then(|r| r.get("content"))
-        .and_then(|v| v.as_string())
-        .expect("left sidebar must have a seeded render block")
-        .to_string();
-
-    let header = render
-        .find("Integrations")
-        .expect("render must contain the Integrations section header");
-    let start = render[header..]
-        .find("live_query(#{sql: \"")
-        .map(|i| header + i + "live_query(#{sql: \"".len())
-        .expect("Integrations section must be a live_query");
-    let end = render[start..]
-        .find('"')
-        .map(|i| start + i)
-        .expect("live_query sql literal must be terminated");
-    render[start..end].to_string()
 }
 
 /// `provider`'s switch word as the section would render it.
@@ -185,9 +148,9 @@ fn a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection(
             .await
             .expect("the projector must build the mirror and start watching");
 
-        let sql = seeded_section_sql(db).await;
+        let sql = holon_app::integrations_section::SETTINGS_SQL;
         assert_eq!(
-            section_switch(db, &sql, "todoist").await,
+            section_switch(db, sql, "todoist").await,
             "off",
             "precondition: a clean vault shows todoist switched off"
         );
@@ -208,7 +171,7 @@ fn a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection(
             .await
             .expect("dispatching the toggle's intent must succeed");
 
-        await_switch(db, &sql, "todoist", "on").await;
+        await_switch(db, sql, "todoist", "on").await;
 
         // The authority moved too — the mirror is not the only thing that
         // changed, which is what makes the decision survive a restart.
@@ -237,6 +200,6 @@ fn a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection(
             .await
             .expect("dispatching the off direction must succeed");
 
-        await_switch(db, &sql, "todoist", "off").await;
+        await_switch(db, sql, "todoist", "off").await;
     });
 }

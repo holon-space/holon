@@ -174,10 +174,10 @@ fn fresh_seed_places_integrations_section_below_hierarchy() {
 
 /// The seeded sidebar and the Settings modal render the SAME list.
 ///
-/// Both embed `integrations_section::live_query_src()`; the seed carries it as
-/// org text, which nothing but this assertion keeps in step. Without it the two
-/// surfaces drift into two lists that merely resemble each other — and the
-/// modal's would be the one nobody noticed had gone stale.
+/// Both embed `integrations_section::sidebar_live_query_src()`; the seed
+/// carries it as org text, which nothing but this assertion keeps in step.
+/// Without it the two surfaces drift into two lists that merely resemble each
+/// other — and the modal's would be the one nobody noticed had gone stale.
 #[test]
 fn the_seeded_section_embeds_the_shared_list_source_verbatim() {
     let rt = runtime();
@@ -192,7 +192,7 @@ fn the_seeded_section_embeds_the_shared_list_source_verbatim() {
             .await
             .expect("left sidebar must have a seeded render block after fresh seed");
 
-        let shared = holon_app::integrations_section::live_query_src();
+        let shared = holon_app::integrations_section::sidebar_live_query_src();
         assert!(
             content.contains(&shared),
             "the seeded Integrations section must embed the shared list source verbatim.\n  \

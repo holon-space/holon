@@ -1021,9 +1021,9 @@ impl Render for HolonApp {
                     " · ",
                     env!("HOLON_BUILD_SHA")
                 ));
-            // Integrations are layout data now, and this modal renders the SAME
-            // section the seeded left sidebar does — one query, one item
-            // template, one entity profile
+            // Integrations are layout data. This modal is the CONTROL surface —
+            // every bundled provider with a switch — while the seeded sidebar
+            // lists the enabled ones; both render the same entity profile
             // (`holon_app::integrations_section`). The only thing still native
             // here is the consent-flow strip beneath it, which has no
             // `set_field` shape (see `integrations_ui`).
@@ -1035,7 +1035,7 @@ impl Render for HolonApp {
                 danger: theme.danger,
             };
             let integrations = match holon_api::render_dsl::parse_render_dsl(
-                &holon_app::integrations_section::section_src(),
+                &holon_app::integrations_section::settings_section_src(),
             ) {
                 Ok(expr) => interpret_and_render(&expr, vec![], &gpui_ctx).into_any_element(),
                 // The section source is a compile-time constant in this

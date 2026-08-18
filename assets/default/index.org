@@ -9,7 +9,7 @@
 :WIDGET_ONLY: t
 :END:
 #+BEGIN_SRC render :id left_sidebar::render::0
-column(tree(#{parent_id: col("parent_id"), sortkey: col("content"), item_template: selectable(row(icon("notebook"), spacer(6), text(col("content"), #{empty: "(untitled)"})), #{action: navigation_focus(#{region: "main", block_id: col("id")}), cmd_action: navigation_open_tab(#{region: "main", block_id: col("id")}), ctrl_action: navigation_open_tab(#{region: "main", block_id: col("id")})})}), divider(), row(icon("sync"), spacer(6), text("Integrations", #{bold: true})), live_query(#{sql: "SELECT id, provider_name, enabled_state AS enabled, config_status, status FROM integration_state ORDER BY provider_name ASC", item_template: list(#{item_template: render_entity()})}))
+column(tree(#{parent_id: col("parent_id"), sortkey: col("content"), item_template: selectable(row(icon("notebook"), spacer(6), text(col("content"), #{empty: "(untitled)"})), #{action: navigation_focus(#{region: "main", block_id: col("id")}), cmd_action: navigation_open_tab(#{region: "main", block_id: col("id")}), ctrl_action: navigation_open_tab(#{region: "main", block_id: col("id")})})}), divider(), row(icon("sync"), spacer(6), text("Integrations", #{bold: true})), live_query(#{sql: "SELECT id, provider_name, status FROM integration_state WHERE enabled = 1 ORDER BY provider_name ASC", item_template: list(#{item_template: row(#{gap: 8, align: "center"}, text(col("provider_name")), text(col("status"), #{muted: true}))})}))
 #+END_SRC
 #+BEGIN_SRC holon_sql :id left_sidebar::src::0
 SELECT b.* FROM block b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = 'Page' AND b.id != 'block:__default__' ORDER BY b.content ASC

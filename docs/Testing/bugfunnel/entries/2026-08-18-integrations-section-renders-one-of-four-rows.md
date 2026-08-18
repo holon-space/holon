@@ -90,8 +90,9 @@ section is healthy or not.
 
 ## Remedy
 
-**FIXED.** `crates/holon-app/src/integrations_section.rs` — `ITEM_TEMPLATE` is
-`list(#{item_template: render_entity()})`, embedded verbatim in both seeded
+**FIXED.** `crates/holon-app/src/integrations_section.rs` — both surfaces' item
+templates are `list(...)` collections (`SIDEBAR_ITEM_TEMPLATE`,
+`SETTINGS_ITEM_TEMPLATE`). The sidebar's is embedded verbatim in both seeded
 `index.org` copies and pinned by `integrations_section_seed.rs`.
 
 Red-for-the-right-reason (item_template forced back to `render_entity()`), then

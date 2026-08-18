@@ -1,5 +1,7 @@
 # The `integration` entity's row: what one integration looks like wherever a
-# layout lists them. Placement is the layout's business; this is the row.
+# layout renders the entity itself. That is the Settings modal's control row;
+# the sidebar's discovery list is a plain layout template and never reaches
+# here (`crates/holon-app/src/integrations_section.rs`).
 #
 # `state_toggle` binds `field: "enabled"`, and its click reaches
 # `IntegrationsOperationProvider` because `render_entity()` resolved this
