@@ -352,6 +352,66 @@ fn the_settings_query_lists_every_provider_with_its_switch_state() {
     });
 }
 
+/// The Settings row carries the SETUP axis too: whether the provider has a
+/// consent flow at all, and what a flow currently has to say. `gcal`
+/// authenticates with OAuth2 and `todoist` does not, so the flag separates
+/// them.
+#[test]
+fn the_settings_query_carries_the_setup_columns() {
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (engine, _ordering) = fresh_engine(dir.path().join("fresh.db")).await;
+        let db = engine.db_handle();
+
+        let state_dir = dir.path().join("integrations");
+        std::fs::create_dir_all(&state_dir).expect("state dir");
+        let store = store_with(&state_dir, &["gcal"]);
+        projector_over(db.clone(), store)
+            .project()
+            .await
+            .expect("projection");
+
+        let sql = holon_app::integrations_section::SETTINGS_SQL;
+        let rows = db
+            .query(sql, HashMap::new())
+            .await
+            .unwrap_or_else(|e| panic!("the Settings query must run: {sql}\n{e}"));
+
+        let setup: Vec<(String, bool, String)> = rows
+            .iter()
+            .map(|r| {
+                let provider = r
+                    .get("provider_name")
+                    .and_then(|v| v.as_string())
+                    .expect("the Settings query must project provider_name")
+                    .to_string();
+                let configurable = holon_frontend::view_model::bool_from_row_value(
+                    "configurable",
+                    r.get("configurable"),
+                )
+                .unwrap_or_else(|e| panic!("{e}"));
+                let progress = r
+                    .get("configure_progress")
+                    .and_then(|v| v.as_string())
+                    .expect("the Settings query must project configure_progress")
+                    .to_string();
+                (provider, configurable, progress)
+            })
+            .collect();
+
+        assert!(
+            setup.contains(&("gcal".to_string(), true, String::new())),
+            "gcal has an OAuth2 consent flow, so its Settings row must say so: {setup:?}"
+        );
+        assert!(
+            setup.contains(&("todoist".to_string(), false, String::new())),
+            "todoist authenticates without a consent flow, so its Settings row must NOT offer \
+             one: {setup:?}"
+        );
+    });
+}
+
 /// Nothing enabled ⇒ an empty sidebar section. The list is never fabricated,
 /// and a vault with every integration off renders no rows rather than all of
 /// them. Switching a first one on is the Settings modal's job.

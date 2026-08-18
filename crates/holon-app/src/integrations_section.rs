@@ -28,8 +28,12 @@ pub const SIDEBAR_SQL: &str = "SELECT id, provider_name, status FROM integration
 /// Control: every bundled provider, enabled or not — the presence axis in
 /// full, because a list filtered to the enabled ones would offer no way to
 /// switch a disabled integration ON.
-pub const SETTINGS_SQL: &str = "SELECT id, provider_name, enabled, config_status, status FROM \
-                                integration_state ORDER BY provider_name ASC";
+///
+/// `configurable` and `configure_progress` are the SETUP axis: whether the
+/// provider has a consent flow, and what the flow running now has to say.
+pub const SETTINGS_SQL: &str = "SELECT id, provider_name, enabled, config_status, status, \
+                                configurable, configure_progress FROM integration_state ORDER BY \
+                                provider_name ASC";
 
 /// A read-only line: the provider and its live status, and nothing to click.
 ///
