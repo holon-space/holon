@@ -610,3 +610,26 @@
 # first (`join_merge_target`) turns this RED on `inv-blocks-match-ref` (ref: gamma =
 # "gammadelta"; SUT: alpha = "alphadelta"), which is the red-for-the-right-reason.
 {"name": "join-merges-into-visible-outline-predecessor", "description": "Dogfood 2026-08-18 lock: Backspace at offset 0 in `delta` (last top-level block) merges into `gamma`, the deepest last visible descendant of the previous sibling `alpha` -- NOT into `alpha` itself. Caret lands at gamma's join boundary.", "transitions": [{"CreateBlockUnderFocus": {"content": "alpha", "id": "block:bs-alpha"}}, {"CreateBlockUnderFocus": {"content": "beta", "id": "block:bs-beta"}}, {"Indent": {"block_id": "block:bs-beta"}}, {"CreateBlockUnderFocus": {"content": "gamma", "id": "block:bs-gamma"}}, {"Indent": {"block_id": "block:bs-gamma"}}, {"CreateBlockUnderFocus": {"content": "delta", "id": "block:bs-delta"}}, {"FocusEditableText": {"block_id": "block:bs-delta"}}, {"JoinBlock": {"block_id": "block:bs-delta"}}]}
+
+# --- Backspace at offset 0 in a document's FIRST block is a NO-OP (ruling BS-1(a), 2026-08-18) ---
+# `block:parent` is the first child of the seed page `block:structural-page`. With no previous
+# sibling, `join_block`'s into_parent arm merged the block into that PAGE — the page's content IS
+# its title, so a routine keystroke silently rewrote the document's identity and deleted the block.
+# Martin ruled (a): no-op when the parent is a page; into_parent stays for non-page parents.
+# Model fixed first (`join_merge_target` returns None for a page parent), so this goes RED on the
+# unfixed SUT: ref keeps `parent` and the page title, SUT shows the title with "parent" appended
+# and the block gone (inv-blocks-match-ref, inv-block-content).
+{"name": "backspace-at-document-start-is-a-noop", "description": "Ruling BS-1(a) lock: Backspace at offset 0 in the FIRST block of a page does nothing — the block survives, the page title is untouched. Pins the into_parent arm's page refusal.", "transitions": [{"FocusEditableText": {"block_id": "block:parent"}}, {"MoveCursor": {"byte_position": 0}}, {"DeleteBackward": {"count": 1}}]}
+
+# --- The keystroke AFTER a refused Backspace-at-0 keeps the caret at 0 (BS-1(a) follow-up) ---
+# The headless editor mirror used to `forget` the caret after EVERY Backspace-at-0 join, which was
+# harmless while the join always consumed the block. With the page-parent refusal the block survives,
+# and a forgotten caret re-seeds at END-OF-TEXT on the next keystroke, where prod GPUI (InputState
+# untouched by a refused join) and the model keep it at 0. Red on the pristine mirror: a second
+# Backspace DELETED a character (SUT "paren", ref "parent", caret 5 vs 0); Enter split BELOW `parent`
+# (SUT order [parent, new, c1, c2], ref [new, parent, c1, c2]). Locks the mirror to prod: forget the
+# caret only when the join moved focus off the block. (A `TypeChars` follow-up would pin the same
+# thing but hits the pre-existing inv-sql-budget red for typing into a SEEDED block — 16 dedup reads
+# vs 7+5 on main too — so Enter carries the caret-position pin instead.)
+{"name": "backspace-at-document-start-twice-stays-a-noop", "description": "After a refused Backspace-at-0 in the FIRST block of a page, a second Backspace is still a no-op — the caret stays at 0, no character is deleted.", "transitions": [{"FocusEditableText": {"block_id": "block:parent"}}, {"MoveCursor": {"byte_position": 0}}, {"DeleteBackward": {"count": 2}}]}
+{"name": "backspace-at-document-start-then-enter-splits-above", "description": "After a refused Backspace-at-0 in the FIRST block of a page the caret is still at 0, so Enter inserts the fresh block ABOVE `parent` (caret-0 split), not below it.", "transitions": [{"FocusEditableText": {"block_id": "block:parent"}}, {"MoveCursor": {"byte_position": 0}}, {"DeleteBackward": {"count": 1}}, {"PressKey": {"chord": ["enter"]}}]}

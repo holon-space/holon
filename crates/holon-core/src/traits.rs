@@ -1638,7 +1638,9 @@ where
     ///          existing children of the target
     ///        - deletes `id`
     ///   2. **No previous sibling** (block is the first child) — child→parent
-    ///      join, the natural extension when there's no prev to merge into:
+    ///      join, the natural extension when there's no prev to merge into,
+    ///      REFUSED as a no-op when that parent is a page (ruling BS-1(a): a
+    ///      page's content is its title):
     ///        - appends `id`'s content to the end of the **parent**
     ///        - re-parents `id`'s children under the parent, placed at `id`'s
     ///          old slot (i.e. before any of `id`'s former siblings)
@@ -1715,6 +1717,16 @@ where
             let parent_id = block.parent_id().ok_or_else(|| {
                 anyhow::anyhow!("Cannot join: block has no previous sibling and no parent")
             })?;
+            // Ruling BS-1(a), 2026-08-18: a page's content is its TITLE — the
+            // name of its org file and the target of every `[[link]]`. Merging
+            // into it renames the page and re-homes the document, so Backspace
+            // at the start of a document's first block does nothing at all.
+            // Authoritative read, like every page-boundary guard: a `Page` tag
+            // committed to the store but not yet in the matview would otherwise
+            // read as a non-page and let the merge through.
+            if self.is_page_authoritative(parent_id).await? {
+                return Ok(OperationResult::irreversible(vec![]));
+            }
             self.get_by_id(parent_id.as_str())
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("Cannot join: parent {parent_id} not found"))?

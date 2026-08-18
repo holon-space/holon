@@ -3,7 +3,7 @@ id: 2026-08-18-backspace-at-document-start-merges-block-into-page-title
 date: 2026-08-18
 gap: ORACLE
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   Backspace at offset 0 in a document's first block appends that block's text to
   the PAGE block, silently rewriting the page title, and deletes the block.
@@ -55,14 +55,57 @@ only through a rename — nothing in the catalog would go red when a keystroke
 edits a page title.
 
 ## Remedy
-OPEN — deliberately NOT fixed in the `bug-backspace` lane. The correct behaviour
-needs a ruling, posted to Martin's decision inbox as **BS-1**:
+FIXED. Martin ruled **BS-1 = (a)**: when the merge would go `into_parent` and
+that parent is a PAGE block, Backspace-at-0 is a NO-OP — no join, no delete,
+caret unmoved. The child→parent join stays for non-page parents.
 
-- (a) no-op when the parent is a page block, keeping the child→parent join for
-  non-page parents — matches LogSeq, no title corruption;
-- (b) refuse loudly with an `Err`, surfacing a banner on a routine keystroke;
-- (c) keep merging into the page title.
+Model first, so the keystone went red for the right reason. Red-first evidence
+(`/tmp/bug-backspace-bs1red-*.log`, model fixed, SUT unfixed) — merging into the
+title RENAMED the page, which re-homed its org file out from under the render:
 
-Whichever is ruled, the fix follows the same order as the sibling entry: teach
-the reference model the rule FIRST so the keystone goes red, add the
-page-title-immutability invariant, then change the SUT.
+```
+Applying transition 3/3: DeleteBackward(DeleteBackward { count: 1 })
+[FileSyncController] write-back SKIPPED: … doc=block:structural-page
+    difference=block:parent@block:structural-page held=3 authority=2
+panicked at crates/holon-integration-tests/src/pbt/frontend_slice/components.rs:2120:18:
+SutOrgRender: read org file: Custom { kind: NotFound,
+  error: "No such file or directory (in-memory): …/structural-page.org" }
+test result: FAILED. 8 passed; 1 failed
+```
+
+That IS the defect: the page's content is the name of its file, so the keystroke
+did not merely edit a title — it moved the whole document.
+
+Changes:
+- `holon_pbt_core::capabilities::join_merge_target` returns `None` when there is
+  no previous sibling and the parent is a page — the one shared model rule.
+- `transitions/delete_backward.rs` and `transitions/press_key.rs` add the page
+  check to their child→parent arms; `transitions/join_block.rs`'s `parent_ok`
+  precondition excludes page parents, so the structural transition no longer
+  generates a join prod refuses.
+- `crates/holon-core/src/traits.rs` `join_block` returns
+  `OperationResult::irreversible(vec![])` when the parent is a page, read
+  through `is_page_authoritative` (the page-boundary-guard rule: a `Page` tag
+  committed but not yet in the matview would otherwise read as a non-page).
+
+- `crates/holon-frontend/src/headless_editor_mirror.rs` (Backspace-at-0 arm)
+  retires the tracked caret only when the join moved focus off the block. It
+  used to `forget` unconditionally, so after a REFUSED join the next keystroke
+  re-seeded at end-of-text — the SUT driver diverging from prod GPUI, whose
+  `InputState` a refused join never touches. Red on the pristine mirror
+  (`/tmp/bug-backspace-bs1mred-31564.log`, `/tmp/bug-backspace-bs1probe6-3580.log`):
+  `DeleteBackward(2)` → SUT `"paren"` vs ref `"parent"`, caret 5 vs 0;
+  `PressKey(enter)` → SUT sibling order `[parent, new, c1, c2]` vs ref
+  `[new, parent, c1, c2]`.
+
+Pinned by the hand-authored keystone cases
+`backspace-at-document-start-is-a-noop` (`FocusEditableText(block:parent)` ·
+`MoveCursor(0)` · `DeleteBackward(1)`),
+`backspace-at-document-start-twice-stays-a-noop` (`… DeleteBackward(2)`) and
+`backspace-at-document-start-then-enter-splits-above` (`… DeleteBackward(1)` ·
+`PressKey(enter)`), all GREEN, and the unit test
+`block_operations_tests::join_block_into_a_page_parent_is_a_noop`.
+
+Still open, deliberately: no invariant asserts that a page's content changes
+only through a rename. This entry's defect is now pinned by a case, but the
+CLASS — any op silently rewriting a page title — remains unguarded.

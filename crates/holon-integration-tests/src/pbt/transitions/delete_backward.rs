@@ -119,8 +119,11 @@ where
         let prev = state.previous_sibling(&block_id);
         let target = match (&prev, state.parent_of(&block_id)) {
             (Some(_), _) => holon_pbt_core::capabilities::join_merge_target(&block_id, state),
+            // Ruling BS-1(a): a page parent is the document's title, not a
+            // merge target — Backspace in its first block does nothing.
             (None, Some(parent)) => (state.is_text_block(&parent)
                 && !state.is_layout_block(&parent)
+                && !state.is_page_block(&parent)
                 && !parent.is_no_parent()
                 && !parent.is_sentinel())
             .then_some(parent),

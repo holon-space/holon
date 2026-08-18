@@ -100,10 +100,16 @@ pub fn join_block_preconditions<R: RefBlockTree + RefFocus + RefLifecycle>(
         && holon_pbt_core::capabilities::join_merge_target(block_id, state)
             .is_some_and(|target| state.is_text_block(&target));
 
-    // Case 2: no previous sibling AND parent is a non-layout text block.
+    // Case 2: no previous sibling AND parent is a non-layout, non-PAGE text
+    // block. Ruling BS-1(a): the page above a document's first block is its
+    // title, so prod refuses the join and the transition must not generate one.
     let parent_ok = if !prev_text && state.previous_sibling(block_id).is_none() {
         match state.parent_of(block_id) {
-            Some(parent) => state.is_text_block(&parent) && !state.is_layout_block(&parent),
+            Some(parent) => {
+                state.is_text_block(&parent)
+                    && !state.is_layout_block(&parent)
+                    && !state.is_page_block(&parent)
+            }
             None => false,
         }
     } else {

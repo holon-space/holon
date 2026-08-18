@@ -547,7 +547,14 @@ impl HeadlessEditorMirror {
                 let intent = structural_block_action(EditorKey::Backspace, &block_id, 0)
                     .expect("Backspace at caret 0 is the structural join_block");
                 engine.dispatch_intent_sync(intent).await?;
-                self.forget(&block_id, occ);
+                // A join that consumed the block moved focus to the merge
+                // target (`apply_structural_focus`); a REFUSED join (page
+                // parent) leaves focus — and, in prod, the GPUI `InputState`
+                // and its caret — untouched. Mirror that: retire the caret only
+                // when focus actually left this block.
+                if engine.focused_block().as_ref() != Some(&block_uri) {
+                    self.forget(&block_id, occ);
+                }
             }
             "backspace" if cursor_byte > 0 && !has_ctrl_alt_cmd && !has_shift => {
                 // `cursor_byte > 0` guarantees a preceding char, so `move_left`

@@ -257,7 +257,10 @@ pub const OUTLINE_DESCENT_LIMIT: usize = 4096;
 /// `None` when `id` is the first child of a virtual root — nothing precedes it.
 pub fn join_merge_target<R: RefBlockTree + ?Sized>(id: &EntityUri, state: &R) -> Option<EntityUri> {
     let Some(prev) = state.previous_sibling(id) else {
-        return state.parent_of(id);
+        // Ruling BS-1(a), 2026-08-18: above a document's FIRST block sits its
+        // page, whose content is the title — identity, not text. Backspace
+        // there is a no-op; the child→parent join stays for non-page parents.
+        return state.parent_of(id).filter(|p| !state.is_page_block(p));
     };
     let mut target = prev;
     let mut visited: Vec<EntityUri> = vec![target.clone()];

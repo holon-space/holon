@@ -1220,6 +1220,30 @@ mod tests {
         );
     }
 
+    /// Ruling BS-1(a): a page's content is its TITLE, so the child→parent join
+    /// refuses when the parent is a page — Backspace at the start of a
+    /// document's first block does nothing at all.
+    #[tokio::test]
+    async fn join_block_into_a_page_parent_is_a_noop() {
+        let store = MemStore::new();
+        insert_page(&store, "PG", None);
+        insert_block(&store, "B", Some("PG"), None);
+
+        let result = store.join_block(&EntityUri::block("B"), 0).await.unwrap();
+
+        assert!(result.changes.is_empty(), "a refused join writes nothing");
+        assert_eq!(
+            store.get("PG").unwrap().content,
+            "Page PG",
+            "the page title must be untouched"
+        );
+        assert_eq!(
+            store.get("B").unwrap().content,
+            "Content B",
+            "the block must survive"
+        );
+    }
+
     /// The descent reads order from `BlockOrdering` and `collapsed`/`Page` from
     /// the block row. When those two authorities disagree the child graph can
     /// carry a cycle, and an unbounded walk hangs the op. It must fail loud

@@ -214,9 +214,12 @@ impl<
             let joinable = match (&prev, &parent) {
                 (Some(_), _) => true,
                 (None, Some(p)) => {
-                    // Only join into parent if parent is a non-layout text block.
+                    // Only join into parent if parent is a non-layout text
+                    // block, and never into a page — ruling BS-1(a): that
+                    // parent is the document's title.
                     state.is_text_block(p)
                         && !state.is_layout_block(p)
+                        && !state.is_page_block(p)
                         && !p.is_no_parent()
                         && !p.is_sentinel()
                 }
