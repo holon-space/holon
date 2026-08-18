@@ -653,7 +653,11 @@ fn interpret_and_render(
             ctx,
             gpui_ctx.services.clone(),
             gpui_ctx.bounds_registry.clone(),
-            LocalEntityScope::new(),
+            // The CALLER's scope, not a fresh one: a `live_query` inside this
+            // expression caches its `ReactiveShell` here, and a scope built per
+            // render would rebuild that shell — and its watch — every frame, so
+            // nothing it later learns could ever reach the screen.
+            gpui_ctx.local.clone(),
             gpui_ctx.nav.clone(),
             window,
             cx,

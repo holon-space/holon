@@ -104,6 +104,15 @@ fn center_of(info: &holon_frontend::geometry::ElementInfo) -> Point<Pixels> {
     }
 }
 
+/// How many elements of `tag` the window painted.
+fn painted_count(bounds: &BoundsRegistry, tag: &str) -> usize {
+    bounds
+        .all_elements()
+        .into_iter()
+        .filter(|(_, info)| info.vm_node.as_ref().is_some_and(|n| n.tag.as_ref() == tag))
+        .count()
+}
+
 fn painted_op_buttons(bounds: &BoundsRegistry) -> Vec<String> {
     bounds
         .all_elements()
@@ -205,6 +214,9 @@ fn the_settings_modal_paints_the_integration_rows_operations() {
 
     let painted = painted_op_buttons(&bounds);
     let census = painted_widget_census(&bounds);
+    // The modal hosts the preferences half too, and it renders through the same
+    // `interpret_and_render` path as the integrations section.
+    let prefs = painted_count(&bounds, "pref_field");
     let gcal = bounds.element_info(GCAL_CONFIGURE);
     let todoist = bounds.element_info(TODOIST_CONFIGURE);
 
@@ -212,6 +224,11 @@ fn the_settings_modal_paints_the_integration_rows_operations() {
         !painted.is_empty(),
         "the open Settings modal must paint the integration rows' operations. The modal IS open \
          and the rows ARE rendered — what the window painted: {census}"
+    );
+    assert!(
+        prefs > 0,
+        "the modal's preferences half must still render alongside the integrations section: \
+         {census}"
     );
     let gcal = gcal.unwrap_or_else(|| {
         panic!("gcal has an unrun consent flow, so its row must paint {GCAL_CONFIGURE}: {census}")
@@ -299,9 +316,13 @@ fn the_settings_modal_paints_the_integration_rows_operations() {
     assert!(
         withdrew,
         "the guard reads `configure_progress`, and it is now {progress:?} — so the row must stop \
-         offering {GCAL_CONFIGURE} while the user is looking at it. Reopening the modal withdraws \
-         it: {withdrew_on_reopen}. If that is true, the row data and the guard are both correct \
-         and the open modal simply never repaints."
+         offering {GCAL_CONFIGURE} while the user is looking at it, with no reopen. (Reopening \
+         withdraws it: {withdrew_on_reopen}.)"
+    );
+    assert!(
+        withdrew_on_reopen,
+        "closing and reopening the modal must not resurrect {GCAL_CONFIGURE} — a reopened modal \
+         reuses the cached shell, and a stale one would offer an operation the guard refuses"
     );
 }
 

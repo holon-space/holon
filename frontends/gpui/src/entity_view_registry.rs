@@ -91,6 +91,10 @@ pub type EntityCache = Arc<RwLock<HashMap<CacheKey, AnyEntity>>>;
 ///
 /// When `parent_cache` is `None`, all lookups use `entity_cache` — that is
 /// the shell-level scope itself, the root of the chain.
+///
+/// Cloning shares the caches (both are `Arc`s), which is what lets a nested
+/// render keep the caller's entities alive instead of building its own.
+#[derive(Clone)]
 pub struct LocalEntityScope {
     pub(crate) entity_cache: EntityCache,
     pub(crate) parent_cache: Option<EntityCache>,
