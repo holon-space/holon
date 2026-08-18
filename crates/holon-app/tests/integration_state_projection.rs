@@ -28,6 +28,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
 use fluxdi::Module;
 use fluxdi::Provider;
@@ -38,6 +40,7 @@ use holon_app::integration_projection::IntegrationStatus;
 use holon_app::integration_projection::TABLE_COLUMNS;
 use holon_app::integration_projection::integration_row_id;
 use holon_app::integration_projection::set_integration_status;
+use holon_app::integrations_settings::IntegrationsSettingsVm;
 use holon_mcp_client::IntegrationConfigStore;
 use holon_mcp_client::integration_state::Configuration;
 use holon_mcp_client::integration_state::CredentialRef;
@@ -213,6 +216,15 @@ fn all_switches(on: &[&str]) -> Vec<(String, bool)> {
         .collect()
 }
 
+/// The projector over `store`, through a view model of its own — these rungs
+/// drive the store, not a consent flow.
+fn projector_over(
+    db: holon::storage::DbHandle,
+    store: Arc<IntegrationConfigStore>,
+) -> IntegrationStateProjector {
+    IntegrationStateProjector::new(db, Arc::new(IntegrationsSettingsVm::new(store)))
+}
+
 /// A store over `dir` with exactly `enabled` switched on.
 fn store_with(dir: &std::path::Path, enabled: &[&str]) -> Arc<IntegrationConfigStore> {
     let store = IntegrationConfigStore::load(dir).expect("store loads");
@@ -246,7 +258,7 @@ fn seeded_section_lists_exactly_the_enabled_integrations() {
         std::fs::create_dir_all(&state_dir).expect("state dir");
         let store = store_with(&state_dir, &["todoist", "claude-history", "gcal", "gmail"]);
 
-        IntegrationStateProjector::new(db.clone(), store)
+        projector_over(db.clone(), store)
             .project()
             .await
             .expect("projecting the enablement store must succeed");
@@ -283,7 +295,7 @@ fn disabling_an_integration_removes_it_from_the_section() {
         let state_dir = dir.path().join("integrations");
         std::fs::create_dir_all(&state_dir).expect("state dir");
         let store = store_with(&state_dir, &["todoist", "gcal"]);
-        let projector = IntegrationStateProjector::new(db.clone(), store.clone());
+        let projector = projector_over(db.clone(), store.clone());
         projector.project().await.expect("first projection");
 
         let sql = integrations_section_sql(&left_sidebar_render(db).await);
@@ -327,7 +339,7 @@ fn the_settings_query_lists_every_provider_with_its_switch_state() {
         let state_dir = dir.path().join("integrations");
         std::fs::create_dir_all(&state_dir).expect("state dir");
         let store = store_with(&state_dir, &["todoist", "gcal"]);
-        IntegrationStateProjector::new(db.clone(), store)
+        projector_over(db.clone(), store)
             .project()
             .await
             .expect("projection");
@@ -357,7 +369,7 @@ fn nothing_enabled_lists_nothing() {
         let state_dir = dir.path().join("integrations");
         std::fs::create_dir_all(&state_dir).expect("state dir");
         let store = store_with(&state_dir, &[]);
-        IntegrationStateProjector::new(db.clone(), store)
+        projector_over(db.clone(), store)
             .project()
             .await
             .expect("projection");
@@ -463,7 +475,7 @@ fn the_section_carries_each_integrations_boot_status() {
         let state_dir = dir.path().join("integrations");
         std::fs::create_dir_all(&state_dir).expect("state dir");
         let store = store_with(&state_dir, &["todoist", "gcal", "gmail"]);
-        IntegrationStateProjector::new(db.clone(), store)
+        projector_over(db.clone(), store)
             .project()
             .await
             .expect("projection");
@@ -519,7 +531,7 @@ fn a_status_for_a_disabled_integration_is_refused() {
         let state_dir = dir.path().join("integrations");
         std::fs::create_dir_all(&state_dir).expect("state dir");
         let store = store_with(&state_dir, &["todoist"]);
-        IntegrationStateProjector::new(db.clone(), store)
+        projector_over(db.clone(), store)
             .project()
             .await
             .expect("projection");
@@ -552,7 +564,7 @@ fn config_status_tracks_the_stores_configuration_axis() {
         let state_dir = dir.path().join("integrations");
         std::fs::create_dir_all(&state_dir).expect("state dir");
         let store = store_with(&state_dir, &["todoist", "gcal"]);
-        let projector = IntegrationStateProjector::new(db.clone(), store.clone());
+        let projector = projector_over(db.clone(), store.clone());
         projector.project().await.expect("projection");
 
         let read = |db: &holon::storage::DbHandle| {
@@ -658,6 +670,93 @@ fn the_mirror_exposes_exactly_the_designed_columns() {
     });
 }
 
+struct NoBrowser;
+
+impl holon_mcp_client::oauth_bootstrap::BrowserOpener for NoBrowser {
+    fn open(&self, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+/// Install a `gcal` sidecar whose credential paths sit inside `dir`, so the
+/// consent flow reads no developer's `~/.config/holon/*` and fails on this
+/// rig's own missing credentials rather than on the machine it runs on.
+fn install_sandboxed_gcal(dir: &std::path::Path) {
+    let bundled =
+        holon_mcp_client::bundled_sidecars::bundled_sidecar("gcal").expect("gcal is bundled");
+    let sandboxed = bundled.yaml.replace(
+        "~/.config/holon/",
+        &format!("{}/", dir.join("creds").display()),
+    );
+    std::fs::write(dir.join("gcal.yaml"), sandboxed).expect("install sandboxed sidecar");
+}
+
+/// Read one column of `provider`'s mirror row.
+async fn row_column(db: &holon::storage::DbHandle, provider: &str, column: &str) -> String {
+    let rows = db
+        .query(
+            &format!("SELECT provider_name, {column} FROM integration_state"),
+            HashMap::new(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("reading {column} from the mirror: {e}"));
+    rows.iter()
+        .find(|r| r.get("provider_name").and_then(|v| v.as_string()) == Some(provider))
+        .and_then(|r| r.get(column))
+        .and_then(|v| v.as_string())
+        .unwrap_or_else(|| panic!("the mirror must carry {column} for '{provider}'"))
+        .to_string()
+}
+
+/// A consent flow that fails must say so ON THE ROW. The flow's progress lives
+/// in the settings view model's cells, and the row is the only place a
+/// `live_query` surface can read it from.
+#[test]
+fn an_in_flight_consent_flow_reaches_the_projected_row() {
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (engine, ordering) = fresh_engine(dir.path().join("fresh.db")).await;
+        holon_app::seed_default_layout(&engine, ordering, false, false)
+            .await
+            .expect("seed");
+        let db = engine.db_handle();
+
+        let state_dir = dir.path().join("integrations");
+        std::fs::create_dir_all(&state_dir).expect("state dir");
+        install_sandboxed_gcal(&state_dir);
+        let store = store_with(&state_dir, &["gcal"]);
+        let vm = Arc::new(IntegrationsSettingsVm::new(store));
+        Arc::new(IntegrationStateProjector::new(db.clone(), vm.clone()))
+            .start()
+            .await
+            .expect("the projector must start");
+
+        assert_eq!(
+            row_column(db, "gcal", "configure_progress").await,
+            "",
+            "precondition: no flow has run, so the row says nothing about one"
+        );
+
+        // No credentials were provisioned for the sandboxed sidecar, so the
+        // flow fails before it ever opens a browser.
+        vm.configure("gcal", &NoBrowser, Duration::from_millis(200))
+            .await
+            .expect_err("an unprovisioned gcal must fail its consent flow");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut last = String::new();
+        while Instant::now() < deadline {
+            last = row_column(db, "gcal", "configure_progress").await;
+            if last.starts_with("Configuration failed:") {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the failed consent flow never reached the mirror; configure_progress was {last:?}");
+    });
+}
+
 /// §8 R4 — the convergence contract. A state file edited outside the app (or a
 /// mirror that drifted for any other reason) must re-converge on the next
 /// projection, because the projector re-derives from the store rather than
@@ -677,7 +776,7 @@ fn a_drifted_mirror_reconverges_on_the_next_projection() {
         let state_dir = dir.path().join("integrations");
         std::fs::create_dir_all(&state_dir).expect("state dir");
         let store = store_with(&state_dir, &["todoist"]);
-        IntegrationStateProjector::new(db.clone(), store)
+        projector_over(db.clone(), store)
             .project()
             .await
             .expect("first projection");
@@ -692,8 +791,9 @@ fn a_drifted_mirror_reconverges_on_the_next_projection() {
         .expect("corrupt the enabled bit");
         db.execute_values(
             "INSERT INTO integration_state \
-             (id, provider_name, enabled, status, config_status, updated_at) \
-             VALUES ('integration:ghost', 'ghost', 1, 'Connected', 'configured', \
+             (id, provider_name, enabled, status, config_status, configurable, \
+             configure_progress, updated_at) \
+             VALUES ('integration:ghost', 'ghost', 1, 'Connected', 'configured', 0, '', \
              '2026-01-01 00:00:00')",
             vec![],
         )
@@ -709,7 +809,7 @@ fn a_drifted_mirror_reconverges_on_the_next_projection() {
 
         // A fresh store over the same files — the every-boot path — re-derives.
         let reloaded = store_with(&state_dir, &[]);
-        IntegrationStateProjector::new(db.clone(), reloaded)
+        projector_over(db.clone(), reloaded)
             .project()
             .await
             .expect("re-projection repairs the mirror");

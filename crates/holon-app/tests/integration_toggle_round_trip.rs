@@ -145,10 +145,13 @@ fn a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection(
 
         // The projector's own watchers — the leg that carries a store change
         // into the mirror with nobody asking it to.
-        Arc::new(IntegrationStateProjector::new(db.clone(), store))
-            .start()
-            .await
-            .expect("the projector must build the mirror and start watching");
+        Arc::new(IntegrationStateProjector::new(
+            db.clone(),
+            Arc::new(holon_app::integrations_settings::IntegrationsSettingsVm::new(store)),
+        ))
+        .start()
+        .await
+        .expect("the projector must build the mirror and start watching");
 
         let sql = holon_app::integrations_section::SETTINGS_SQL;
         assert_eq!(

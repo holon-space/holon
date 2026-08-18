@@ -39,8 +39,9 @@ use holon_integration_tests::TestEnvironment;
 
 fn insert_sql() -> &'static str {
     "INSERT INTO integration_state \
-     (id, provider_name, enabled, status, config_status, updated_at) \
-     VALUES (?, ?, 1, 'Pending', 'unconfigured', '2026-08-18 00:00:00')"
+     (id, provider_name, enabled, status, config_status, configurable, configure_progress, \
+     updated_at) \
+     VALUES (?, ?, 1, 'Pending', 'unconfigured', 0, '', '2026-08-18 00:00:00')"
 }
 
 #[test]

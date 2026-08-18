@@ -319,17 +319,18 @@ impl IntegrationsSettingsVm {
         .await
     }
 
-    /// The signal behind every row, for a frontend that wants to re-render when
-    /// a state changes outside its own toggle (another window, an OAuth
-    /// bootstrap, a hand-edited state file).
-    pub fn signals(&self) -> Vec<ReadOnlyMutable<IntegrationState>> {
+    /// Each bundled provider with the signal behind its row, for a caller that
+    /// wants to react when a state changes outside its own toggle (another
+    /// window, an OAuth bootstrap, a hand-edited state file).
+    pub fn signals(&self) -> Vec<(&'static str, ReadOnlyMutable<IntegrationState>)> {
         self.store
             .providers()
             .into_iter()
             .map(|provider| {
-                self.store.state(provider).unwrap_or_else(|e| {
+                let state = self.store.state(provider).unwrap_or_else(|e| {
                     panic!("Bundled provider '{provider}' has no state cell: {e:#}")
-                })
+                });
+                (provider, state)
             })
             .collect()
     }

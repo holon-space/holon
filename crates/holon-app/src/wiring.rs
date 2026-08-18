@@ -570,17 +570,17 @@ impl FrontendInjectorExt for Injector {
                 // here rather than in the (lazily resolved) integration
                 // registry: a container that never touches an integration would
                 // otherwise render the section empty with everything switched
-                // on. Absent store = no integrations directory configured, and
-                // an empty section is then the truth.
+                // on. Absent view model = no integrations directory configured,
+                // and an empty section is then the truth.
                 #[cfg(not(target_arch = "wasm32"))]
                 async {
-                    if let Ok(store) =
-                        resolver.try_resolve::<holon_mcp_client::IntegrationConfigStore>()
+                    if let Ok(vm) = resolver
+                        .try_resolve::<crate::integrations_settings::IntegrationsSettingsVm>()
                     {
                         std::sync::Arc::new(
                             crate::integration_projection::IntegrationStateProjector::new(
                                 engine.db_handle().clone(),
-                                store,
+                                vm,
                             ),
                         )
                         .start()

@@ -24,7 +24,6 @@ use futures_signals::signal::SignalExt;
 use holon::storage::DbHandle;
 use holon::storage::now_utc;
 use holon_api::Value;
-use holon_mcp_client::IntegrationConfigStore;
 
 use crate::integrations_settings::ConfigStatus;
 use crate::integrations_settings::IntegrationsSettingsVm;
@@ -40,6 +39,8 @@ pub const TABLE_COLUMNS: &[&str] = &[
     "enabled",
     "status",
     "config_status",
+    "configurable",
+    "configure_progress",
     "updated_at",
     "_change_origin",
 ];
@@ -93,24 +94,33 @@ fn config_status_value(status: ConfigStatus) -> &'static str {
     }
 }
 
-/// Mirrors [`IntegrationConfigStore`] into `integration_state`.
+/// Mirrors the enablement store into `integration_state`.
 ///
-/// The projector holds the view model rather than the store directly: `rows()`
+/// The projector reads the view model rather than the store directly: `rows()`
 /// is already the projection that drops credential locations, so the leak in
 /// §8 R1 is prevented by construction instead of by remembering to map here.
+///
+/// Consent-flow progress lives in the view model's own cells rather than the
+/// store's files, so this must be the SAME view model the settings surface
+/// drives.
 pub struct IntegrationStateProjector {
     db: DbHandle,
-    vm: IntegrationsSettingsVm,
-    store: Arc<IntegrationConfigStore>,
+    vm: Arc<IntegrationsSettingsVm>,
 }
 
 impl IntegrationStateProjector {
-    pub fn new(db: DbHandle, store: Arc<IntegrationConfigStore>) -> Self {
-        Self {
-            db,
-            vm: IntegrationsSettingsVm::new(store.clone()),
-            store,
-        }
+    pub fn new(db: DbHandle, vm: Arc<IntegrationsSettingsVm>) -> Self {
+        Self { db, vm }
+    }
+
+    /// What `provider`'s consent flow has to say, or `""` while it has
+    /// nothing.
+    fn configure_progress(&self, provider: &str) -> String {
+        self.vm
+            .configure_progress(provider)
+            .get_cloned()
+            .message()
+            .unwrap_or_default()
     }
 
     /// Re-derive every row from the store.
@@ -133,11 +143,14 @@ impl IntegrationStateProjector {
                     // toggled would make the column lie. The registry owns that
                     // column after the row exists.
                     "INSERT INTO integration_state \
-                     (id, provider_name, enabled, status, config_status, updated_at) \
-                     VALUES (?, ?, ?, ?, ?, ?) \
+                     (id, provider_name, enabled, status, config_status, configurable, \
+                     configure_progress, updated_at) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
                      ON CONFLICT(id) DO UPDATE SET \
                      enabled = excluded.enabled, \
                      config_status = excluded.config_status, \
+                     configurable = excluded.configurable, \
+                     configure_progress = excluded.configure_progress, \
                      updated_at = excluded.updated_at",
                     vec![
                         Value::String(integration_row_id(row.provider)),
@@ -145,6 +158,8 @@ impl IntegrationStateProjector {
                         Value::Integer(i64::from(row.enabled)),
                         Value::String(IntegrationStatus::Pending.label().to_string()),
                         Value::String(config_status_value(row.status).to_string()),
+                        Value::Integer(i64::from(row.configurable)),
+                        Value::String(self.configure_progress(row.provider)),
                         Value::String(updated_at.clone()),
                     ],
                 )
@@ -198,25 +213,31 @@ impl IntegrationStateProjector {
     pub async fn start(self: Arc<Self>) -> anyhow::Result<()> {
         self.project().await?;
 
-        for provider in self.store.providers() {
-            let signal = self.store.state(provider).map_err(|e| {
-                anyhow::anyhow!("watching integration '{provider}': no state cell: {e:#}")
-            })?;
-            let projector = self.clone();
-            tokio::spawn(signal.signal_cloned().for_each(move |_| {
-                let projector = projector.clone();
-                async move {
-                    if let Err(e) = projector.project().await {
-                        tracing::warn!(
-                            "[IntegrationStateProjector] re-projection after a state change \
-                             failed; the Integrations section is stale until the next change: \
-                             {e:#}"
-                        );
-                    }
-                }
-            }));
+        for (provider, signal) in self.vm.signals() {
+            self.clone().reproject_on(signal.signal_cloned());
+            self.clone()
+                .reproject_on(self.vm.configure_progress(provider).signal_cloned());
         }
         Ok(())
+    }
+
+    /// Re-project whenever `signal` fires.
+    fn reproject_on<S>(self: Arc<Self>, signal: S)
+    where
+        S: futures_signals::signal::Signal + Send + 'static,
+        S::Item: Send,
+    {
+        tokio::spawn(signal.for_each(move |_| {
+            let projector = self.clone();
+            async move {
+                if let Err(e) = projector.project().await {
+                    tracing::warn!(
+                        "[IntegrationStateProjector] re-projection after a state change failed; \
+                         the Integrations section is stale until the next change: {e:#}"
+                    );
+                }
+            }
+        }));
     }
 }
 

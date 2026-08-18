@@ -83,7 +83,7 @@ pub fn spawn_integrations_bridge(
     use gpui::AppContext;
 
     let (tx, mut rx) = futures::channel::mpsc::unbounded::<()>();
-    for signal in vm.signals() {
+    for (_provider, signal) in vm.signals() {
         let tx = tx.clone();
         rt_handle.spawn(async move {
             // `to_stream` replays the current value first; that initial item is

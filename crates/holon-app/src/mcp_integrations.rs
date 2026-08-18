@@ -258,7 +258,8 @@ impl Module for McpIntegrationsModule {
         let store_di = store.clone();
         injector.provide::<IntegrationConfigStore>(Provider::root(move |_| store_di.clone()));
         let settings_vm = Arc::new(IntegrationsSettingsVm::new(store.clone()));
-        injector.provide::<IntegrationsSettingsVm>(Provider::root(move |_| settings_vm.clone()));
+        let settings_vm_di = settings_vm.clone();
+        injector.provide::<IntegrationsSettingsVm>(Provider::root(move |_| settings_vm_di.clone()));
 
         // The `integration` entity's own operation provider, registered beside
         // the store for the same reason: a vault with every integration off
@@ -305,13 +306,13 @@ impl Module for McpIntegrationsModule {
         let pending_writes_for_registry = pending_writes.clone();
 
         let configs_for_registry = configs.clone();
-        let store_for_registry = store.clone();
+        let settings_vm_for_registry = settings_vm.clone();
 
         // Register the registry as an async singleton — resolved in parallel with other
         // DI services.
         injector.provide::<McpIntegrationRegistry>(Provider::root_async(move |resolver| {
             let configs_for_registry = configs_for_registry.clone();
-            let store_for_registry = store_for_registry.clone();
+            let settings_vm = settings_vm_for_registry.clone();
             let pending_flows = pending_flows.clone();
             let pending_writes = pending_writes_for_registry.clone();
             let superseded = superseded.clone();
@@ -364,7 +365,7 @@ impl Module for McpIntegrationsModule {
                 // never resolves this registry at all.
                 crate::integration_projection::IntegrationStateProjector::new(
                     db_handle.clone(),
-                    store_for_registry.clone(),
+                    settings_vm.clone(),
                 )
                 .project()
                 .await

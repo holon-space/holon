@@ -16,6 +16,11 @@
 --   `status`        — how far the boot connect got (integration registry)
 -- Only the projector writes the first two; only the registry writes the third.
 --
+-- `configurable` and `configure_progress` describe the one-time SETUP the
+-- `begin_oauth` operation runs: whether the provider has a consent flow at all,
+-- and what the flow running right now has to say. `configure_progress` is a
+-- session fact, not a stored one — an empty string means no flow has run.
+--
 -- `enabled` is read by a bool-bound `state_toggle`, which parses the INTEGER
 -- directly (`StateToggleBinding::Bool`) — the decision is stored once, in the
 -- type the column already has.
@@ -31,6 +36,8 @@ CREATE TABLE IF NOT EXISTS integration_state (
     enabled INTEGER NOT NULL,
     status TEXT NOT NULL,
     config_status TEXT NOT NULL,
+    configurable INTEGER NOT NULL,
+    configure_progress TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     _change_origin TEXT
 );
