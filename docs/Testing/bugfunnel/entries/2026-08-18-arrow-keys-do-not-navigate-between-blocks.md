@@ -148,3 +148,48 @@ Until then the shipped behavior is: the first arrow press from mid-line moves
 the caret to the line edge, the second leaves the block. The rung's
 `bare_arrow_keys_move_focus_between_sibling_blocks` arm pins the desired
 behavior and stays RED against Defect A.
+
+## COVERAGE gap closed — a generative windowed rung (lane `keystone-arrows`)
+
+Defect B first shipped with only the fixed example rung above, which the
+project rule (every dogfood bug reproduced by the keystone PBT or the smallest
+windowed GPUI PBT rung) does not accept on its own. The gap is now closed by a
+**generative** windowed property rung:
+`frontends/gpui/tests/arrow_nav_windowed_pbt.rs` ::
+`arrow_walk_keeps_focus_on_the_reference_outline_neighbour`.
+
+It reuses the keystone window-slice seed (`graft_undo_blur_pair`) and the
+production `SimUserDriver`, boots a fresh window per generated case
+(`PROPTEST_CASES`, default 4, mirroring `gpui_composed_windowed_loop.rs`), and
+walks a generated-length alternating run of bare boundary arrows from a
+generated start row — asserting after every press that BOTH `engine.focused_block()`
+AND the painted window caret sit on the outline neighbour the reference model
+resolves (`up` → previous sibling, `down` → next). `home` precedes each arrow so
+the caret is at column 0, keeping Defect A out of the picture (a red is then
+unambiguously the router).
+
+- **RED** on the reverted (pre-fix) `live_block.rs` (sha
+  `fb95cc6317d55466335726a5a55a1f1d8fe28972d011a7516852fb3a3691fa4b`), shrunk to
+  the minimal input `(start=0, steps=1)`:
+  `step 0: bare `down` from row 0 (undo-edit-target-arrowpbt) must move engine
+  focus to the outline neighbour row 1 (undo-blur-sibling-arrowpbt); engine has
+  Some(EntityUri("block:undo-edit-target-arrowpbt"))` — focus stuck on the start
+  row because `bubble_input -> None`.
+- **GREEN** on the fixed `live_block.rs` (sha
+  `a1ebfe92cf698465b180ebdf5a91e07bfdb4b6347631ec00d2e4c098d1d59508`): 4/4 cases.
+
+### Why the headless keystone structurally cannot see it (empirically confirmed)
+
+The composed keystone (`general_e2e_composed_pbt`) runs `ArrowNavigate` against a
+SqlOnly SUT with NO frontend engine, so `inv-focus-matches-ref` discloses
+`EngineFocus::NoEngine` and SKIPS, and `live_block` / `ReactiveShell` /
+`InputRouter` are never instantiated. With the fix reverted, `just keystone-smoke`
+stayed GREEN across three runs (`4 passed; 0 failed` each), confirming the
+headless keystone driver bypasses the entire GPUI render/route layer where the
+defect lives. The WINDOWED composed loop cannot see it either: its wide fixture
+focuses a block without seating an editor caret (arrow nav there is not
+editor-boundary nav — `editor_caret_byte(c2) = Ok(None)`), and the reference
+model's `apply_arrow_navigate` does not model the editor/caret following focus, so
+neither `inv-focus-matches-ref` (skips while an editor is open) nor the editor
+mirrors can adjudicate the crossing. The gesture is only observable over a real
+window, which is what the new rung drives.
