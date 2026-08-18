@@ -7,8 +7,15 @@
 # INTEGER column and dispatches a boolean. Its click reaches
 # `IntegrationsOperationProvider` because `render_entity()` resolved this
 # profile and attached the entity's operations.
+#
+# `ops_of` lists the entity's operations and drops the ones whose declared
+# guard the row refuses, so `Configure…` appears only where its consent flow
+# could run. It is a `list` because `ops_of` delivers rows as a stream, which
+# only a collection widget consumes. `configure_progress` is that flow talking: empty while none is
+# running, otherwise the line the user has to act on. The two sit in one
+# nested row because they are one thing: the setup affordance and what it says.
 entity_name: integration
 
 variants:
   - name: default
-    render: 'row(#{gap: 8, align: "center"}, text(col("provider_name")), text(col("config_status"), #{muted: true}), text(col("status"), #{muted: true}), state_toggle(#{field: "enabled", binding: "bool", appearance: "switch"}))'
+    render: 'row(#{gap: 8, align: "center"}, text(col("provider_name")), text(col("config_status"), #{muted: true}), text(col("status"), #{muted: true}), state_toggle(#{field: "enabled", binding: "bool", appearance: "switch"}), row(#{gap: 6, align: "center"}, list(#{collection: ops_of(col("id")), item_template: op_button(col("name"))}), text(col("configure_progress"), #{muted: true})))'

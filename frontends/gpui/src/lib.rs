@@ -14,7 +14,6 @@ pub mod entity_view_registry;
 pub mod geometry;
 #[cfg(debug_assertions)]
 pub mod inspector;
-pub mod integrations_ui;
 #[cfg(feature = "mobile")]
 pub mod mobile;
 pub mod navigation_state;
@@ -1024,16 +1023,7 @@ impl Render for HolonApp {
             // Integrations are layout data. This modal is the CONTROL surface —
             // every bundled provider with a switch — while the seeded sidebar
             // lists the enabled ones; both render the same entity profile
-            // (`holon_app::integrations_section`). The only thing still native
-            // here is the consent-flow strip beneath it, which has no
-            // `set_field` shape (see `integrations_ui`).
-            let section_theme = integrations_ui::SectionTheme {
-                fg: text,
-                muted_fg: theme.muted_foreground,
-                border: border_color,
-                success: theme.success,
-                danger: theme.danger,
-            };
+            // (`holon_app::integrations_section`).
             let integrations = match holon_api::render_dsl::parse_render_dsl(
                 &holon_app::integrations_section::settings_section_src(),
             ) {
@@ -1050,11 +1040,6 @@ impl Render for HolonApp {
                     ))
                     .into_any_element(),
             };
-            let configure_strip = integrations_ui::render_settings_integrations(
-                cx.try_global::<integrations_ui::IntegrationsSettingsGlobal>(),
-                section_theme,
-                self.bounds_registry.clone(),
-            );
             let integrations_block = div()
                 .flex()
                 .flex_col()
@@ -1062,8 +1047,7 @@ impl Render for HolonApp {
                 .mt(px(12.0))
                 .border_t_1()
                 .border_color(border_color)
-                .child(integrations)
-                .child(configure_strip);
+                .child(integrations);
             let content = div()
                 .flex_col()
                 .child(content)
@@ -2639,21 +2623,6 @@ fn launch_holon_window_impl(
             pending.0.clone(),
             rt_handle.clone(),
             pending_ui_entity,
-            window_handle.into(),
-            &async_cx,
-        );
-    }
-
-    // Keep the Settings → Integrations switches following the store, including
-    // decisions this window did not make.
-    if let Some(settings) = cx
-        .try_global::<integrations_ui::IntegrationsSettingsGlobal>()
-        .cloned()
-    {
-        let async_cx = cx.to_async();
-        integrations_ui::spawn_integrations_bridge(
-            &settings.0,
-            &rt_handle,
             window_handle.into(),
             &async_cx,
         );

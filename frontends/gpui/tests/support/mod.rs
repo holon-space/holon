@@ -194,6 +194,10 @@ pub struct TestServices {
     /// click tests can assert where a click placed the caret. `None` = no seed
     /// armed (a plain `set_focus`, i.e. caret defaults to end-of-text on
     /// mount).
+    /// The profile every row resolves to, when a fixture opts in. Absent
+    /// leaves `resolve_profile` on the stub's None, which is what almost every
+    /// fixture wants.
+    entity_profile: std::sync::Mutex<Option<RowProfile>>,
     caret_seed: std::sync::Mutex<Option<(EntityUri, usize)>>,
     /// Last block handed to `set_focus` / `set_focus_with_caret`.
     focused: std::sync::Mutex<Option<EntityUri>>,
@@ -221,6 +225,7 @@ impl TestServices {
             drawer_states: std::sync::Mutex::new(std::collections::HashMap::new()),
 
             quiescent_runtime: false,
+            entity_profile: std::sync::Mutex::new(None),
             caret_seed: std::sync::Mutex::new(None),
             focused: std::sync::Mutex::new(None),
             dispatched_intents: std::sync::Mutex::new(Vec::new()),
@@ -251,6 +256,7 @@ impl TestServices {
             drawer_states: std::sync::Mutex::new(std::collections::HashMap::new()),
 
             quiescent_runtime: false,
+            entity_profile: std::sync::Mutex::new(None),
             caret_seed: std::sync::Mutex::new(None),
             focused: std::sync::Mutex::new(None),
             dispatched_intents: std::sync::Mutex::new(Vec::new()),
@@ -261,6 +267,12 @@ impl TestServices {
     /// Every intent this fixture's click handlers dispatched, in order.
     pub fn recorded_intents(&self) -> Vec<OperationIntent> {
         self.dispatched_intents.lock().unwrap().clone()
+    }
+
+    /// Resolve every row to `profile`. Opt-in: a fixture that does not call
+    /// this keeps the stub's None.
+    pub fn set_entity_profile(&self, profile: RowProfile) {
+        *self.entity_profile.lock().unwrap() = Some(profile);
     }
 
     /// Construct with a shared `BlockTreeRegistry` and a quiescent
@@ -278,6 +290,7 @@ impl TestServices {
             drawer_states: std::sync::Mutex::new(std::collections::HashMap::new()),
 
             quiescent_runtime: true,
+            entity_profile: std::sync::Mutex::new(None),
             caret_seed: std::sync::Mutex::new(None),
             focused: std::sync::Mutex::new(None),
             dispatched_intents: std::sync::Mutex::new(Vec::new()),
@@ -297,6 +310,7 @@ impl TestServices {
             drawer_states: std::sync::Mutex::new(std::collections::HashMap::new()),
 
             quiescent_runtime: false,
+            entity_profile: std::sync::Mutex::new(None),
             caret_seed: std::sync::Mutex::new(None),
             focused: std::sync::Mutex::new(None),
             dispatched_intents: std::sync::Mutex::new(Vec::new()),
@@ -384,7 +398,10 @@ impl BuilderServices for TestServices {
         self.inner.link_classifier()
     }
     fn resolve_profile(&self, row: &DataRow) -> Option<RowProfile> {
-        self.inner.resolve_profile(row)
+        match self.entity_profile.lock().unwrap().clone() {
+            Some(profile) => Some(profile),
+            None => self.inner.resolve_profile(row),
+        }
     }
     fn watch_query(
         &self,
