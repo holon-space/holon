@@ -85,6 +85,29 @@ pub fn state_toggle_intent(
     ))
 }
 
+/// The bool-bound counterpart of [`state_toggle_intent`]: flip `current` and
+/// dispatch the decision at its own type.
+///
+/// `None` means the toggle is not wired for writing — the caller discloses
+/// that, it is not an error here.
+pub fn state_toggle_intent_bool(
+    field: &str,
+    current: bool,
+    ops: &[OperationWiring],
+    entity_name: Option<&EntityName>,
+    row_id: Option<&str>,
+) -> Option<OperationIntent> {
+    let op = find_set_field_op(field, ops)?;
+    let entity_name = entity_name.unwrap_or(&op.entity_name);
+    Some(OperationIntent::set_field(
+        entity_name,
+        &op.name,
+        row_id?,
+        field,
+        Value::Boolean(!current),
+    ))
+}
+
 pub fn dispatch_operation(
     spawner: &Arc<dyn Spawner>,
     session: &Arc<FrontendSession>,
@@ -351,6 +374,49 @@ mod tests {
             "block:a",
             "sort_key",
             Value::String("A5".to_string()),
+        );
+    }
+
+    /// A bool-bound toggle carries a typed decision on the wire. The word
+    /// vocabulary is the other binding's; sending `"on"` here would make the
+    /// provider parse a string back into the bool it already had.
+    #[test]
+    fn a_bool_bound_toggle_dispatches_a_boolean() {
+        let ops = [OperationDescriptor {
+            entity_name: EntityName::Named("integration".to_string()),
+            entity_short_name: "integration".to_string(),
+            id_column: "id".to_string(),
+            name: "set_field".to_string(),
+            display_name: String::new(),
+            description: String::new(),
+            required_params: vec![],
+            affected_fields: vec!["enabled".to_string()],
+            param_mappings: vec![],
+            target_scope: holon_api::TargetScope::Global,
+            boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+            menu_exposure: holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::Test,
+            },
+            trigger: None,
+            bound_params: HashMap::new(),
+            guard: holon_api::pattern::OpGuard::None,
+            arcs: holon_api::arcs::TransitionArcs::Undeclared,
+        }
+        .to_default_wiring()];
+
+        let intent = state_toggle_intent_bool(
+            "enabled",
+            false,
+            &ops,
+            Some(&EntityName::Named("integration".to_string())),
+            Some("integration:gmail"),
+        )
+        .expect("a wired bool toggle must produce an intent");
+
+        assert_eq!(
+            intent.params.get("value"),
+            Some(&Value::Boolean(true)),
+            "toggling a stored `false` must dispatch Value::Boolean(true), not a state word"
         );
     }
 

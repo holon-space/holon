@@ -311,6 +311,9 @@ pub enum ViewKind {
         states: String,
         #[serde(default)]
         appearance: StateToggleAppearance,
+        /// How to read `current`: a word from `states`, or `"true"`/`"false"`.
+        #[serde(default)]
+        binding: StateToggleBinding,
     },
     ExpandToggle {
         target_id: String,
@@ -619,6 +622,73 @@ impl StateToggleAppearance {
                 "state_toggle: unknown appearance {other:?}; expected \"task\" or \"switch\""
             )),
         }
+    }
+}
+
+/// What a `state_toggle`'s bound column HOLDS, decided at DSL parse time rather
+/// than by sniffing the value that turns up at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateToggleBinding {
+    /// A word cycled through the `states` list. The task-state vocabulary and
+    /// every other string ring.
+    #[default]
+    Words,
+    /// A two-valued column: the toggle reads a bool and dispatches a bool.
+    Bool,
+}
+
+impl StateToggleBinding {
+    /// The DSL spelling — the same token [`Self::parse`] accepts.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StateToggleBinding::Words => "words",
+            StateToggleBinding::Bool => "bool",
+        }
+    }
+
+    /// Parse the `binding:` prop. An unknown word is a refusal carrying the
+    /// admissible set: falling back to `Words` would read a bool column with
+    /// the string vocabulary and paint every row off.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw {
+            "words" => Ok(StateToggleBinding::Words),
+            "bool" => Ok(StateToggleBinding::Bool),
+            other => Err(format!(
+                "state_toggle: unknown binding {other:?}; expected \"words\" or \"bool\""
+            )),
+        }
+    }
+}
+
+/// The bound value of a `binding: "bool"` toggle.
+///
+/// SQLite has no boolean type, so a bool column arrives as `Integer(0|1)` and
+/// `Value::as_bool` — which matches `Boolean` alone — is unusable here. The
+/// admissible set is spelled out instead of widened to `as_i64`, which also
+/// parses strings and maps every non-zero integer to `true`.
+pub fn bool_from_row_value(field: &str, value: Option<&Value>) -> Result<bool, String> {
+    match value {
+        Some(Value::Integer(0)) => Ok(false),
+        Some(Value::Integer(1)) => Ok(true),
+        Some(Value::Boolean(b)) => Ok(*b),
+        other => Err(format!(
+            "state_toggle: field {field:?} is bound as a bool but holds {other:?}; expected \
+             Integer(0), Integer(1) or Boolean"
+        )),
+    }
+}
+
+/// A bool-bound toggle's `current` as the snapshot spells it.
+///
+/// `true`/`false` rather than a state word: the word vocabulary belongs to the
+/// other binding, and a reader has [`StateToggleBinding`] beside this to say
+/// which one is in force.
+fn state_toggle_current_display(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::Boolean(b)) => b.to_string(),
+        Some(other) => other.as_string().unwrap_or("").to_string(),
+        None => String::new(),
     }
 }
 
@@ -960,11 +1030,7 @@ impl ViewModel {
                     .and_then(|v| v.as_string())
                     .unwrap_or("task_state")
                     .to_string(),
-                current: data
-                    .get("current")
-                    .and_then(|v| v.as_string())
-                    .unwrap_or("")
-                    .to_string(),
+                current: state_toggle_current_display(data.get("current")),
                 label: data
                     .get("label")
                     .and_then(|v| v.as_string())
@@ -980,6 +1046,10 @@ impl ViewModel {
                         StateToggleAppearance::parse(raw).unwrap_or_else(|e| panic!("{e}"))
                     }
                     None => StateToggleAppearance::default(),
+                },
+                binding: match data.get("binding").and_then(|v| v.as_string()) {
+                    Some(raw) => StateToggleBinding::parse(raw).unwrap_or_else(|e| panic!("{e}")),
+                    None => StateToggleBinding::default(),
                 },
             },
             ElementWidget::ExpandToggle => ViewKind::ExpandToggle {

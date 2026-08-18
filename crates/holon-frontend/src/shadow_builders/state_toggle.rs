@@ -17,33 +17,56 @@ holon_macros::widget_builder! {
             .unwrap_or_else(|| "task_state".to_string());
 
         let row_arc = ba.ctx.row_arc();
-        let current = row_arc
-            .get(&field)
-            .and_then(|v| v.as_string())
-            .unwrap_or("")
-            .to_string();
 
-        let states = resolve_states(ba.args, ba.ctx.row()).join(",");
-        let (label, _semantic) = state_display(&current);
-        let label = label.to_string();
-
-        let mt = ba.args.get_f64("mt").unwrap_or(0.0);
-
-        // Parsed here, at the DSL boundary, so an unknown word is one refusal
-        // rather than a mis-painted control every frontend re-derives.
+        // Both parsed here, at the DSL boundary, so an unknown word is one
+        // refusal rather than a mis-painted control every frontend re-derives.
         let appearance = match ba.args.get_string("appearance") {
             Some(raw) => crate::view_model::StateToggleAppearance::parse(raw)
                 .unwrap_or_else(|e| panic!("{e}")),
             None => crate::view_model::StateToggleAppearance::default(),
         };
+        let binding = match ba.args.get_string("binding") {
+            Some(raw) => {
+                crate::view_model::StateToggleBinding::parse(raw).unwrap_or_else(|e| panic!("{e}"))
+            }
+            None => crate::view_model::StateToggleBinding::default(),
+        };
+
+        // `current` carries the bound value at its own type: a state WORD, or a
+        // bool. `state_display` speaks only the word vocabulary, so the bool
+        // arm has no label to show — its control is the switch itself.
+        let bound = field.clone();
+        let read_current = move |row: &holon_api::widget_spec::DataRow| -> (Value, String) {
+            match binding {
+                crate::view_model::StateToggleBinding::Bool => {
+                    let on = crate::view_model::bool_from_row_value(&bound, row.get(&bound))
+                        .unwrap_or_else(|e| panic!("{e}"));
+                    (Value::Boolean(on), String::new())
+                }
+                crate::view_model::StateToggleBinding::Words => {
+                    let word = row.get(&bound).and_then(|v| v.as_string()).unwrap_or("");
+                    let (label, _semantic) = state_display(word);
+                    (Value::String(word.to_string()), label.to_string())
+                }
+            }
+        };
+        let (current, label) = read_current(&row_arc);
+
+        let states = resolve_states(ba.args, ba.ctx.row()).join(",");
+
+        let mt = ba.args.get_f64("mt").unwrap_or(0.0);
 
         let mut __props = std::collections::HashMap::new();
         __props.insert(
             "appearance".to_string(),
             Value::String(appearance.as_str().to_string()),
         );
+        __props.insert(
+            "binding".to_string(),
+            Value::String(binding.as_str().to_string()),
+        );
         __props.insert("field".to_string(), Value::String(field.clone()));
-        __props.insert("current".to_string(), Value::String(current));
+        __props.insert("current".to_string(), current);
         __props.insert("label".to_string(), Value::String(label));
         __props.insert("states".to_string(), Value::String(states));
         __props.insert("mt".to_string(), Value::Float(mt));
@@ -69,15 +92,9 @@ holon_macros::widget_builder! {
         if let Some(runtime) = ba.services.try_runtime_handle() {
             let props_handle = vm.props.clone();
             let derive = move |row: Arc<holon_api::widget_spec::DataRow>| {
-                let new_state = row
-                    .get(&field)
-                    .and_then(|v| v.as_string())
-                    .unwrap_or("")
-                    .to_string();
-                let (label, _) = state_display(&new_state);
-                let label = label.to_string();
+                let (current, label) = read_current(&row);
                 let mut p = props_handle.lock_mut();
-                p.insert("current".to_string(), Value::String(new_state));
+                p.insert("current".to_string(), current);
                 p.insert("label".to_string(), Value::String(label));
             };
             // The initial signal emission re-sets the same values we

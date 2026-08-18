@@ -41,6 +41,7 @@ use holon_api::render_types::Trigger;
 use holon_api::widget_spec::DataRow;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 use holon_frontend::view_model::StateToggleAppearance;
+use holon_frontend::view_model::StateToggleBinding;
 use support::BoundsSnapshot;
 use support::render_fixture_sized;
 
@@ -108,6 +109,26 @@ fn toggle_vm(
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
+    .collect();
+
+    let mut vm = ReactiveViewModel::from_widget("state_toggle", props)
+        .with_entity(integration_row(provider));
+    vm.operations.push(set_field_wiring());
+    vm
+}
+
+/// A bool-bound `state_toggle` leaf: `current` is a typed bool, not a word.
+fn bool_toggle_vm(provider: &str, enabled: bool) -> ReactiveViewModel {
+    let props: HashMap<String, Value> = [
+        ("field".to_string(), Value::String("enabled".to_string())),
+        ("binding".to_string(), Value::String("bool".to_string())),
+        (
+            "appearance".to_string(),
+            Value::String(StateToggleAppearance::Switch.as_str().to_string()),
+        ),
+        ("current".to_string(), Value::Boolean(enabled)),
+    ]
+    .into_iter()
     .collect();
 
     let mut vm = ReactiveViewModel::from_widget("state_toggle", props)
@@ -215,6 +236,41 @@ fn the_snapshot_carries_the_requested_appearance() {
             appearance,
             StateToggleAppearance::Switch,
             "the view-model snapshot must carry the appearance the layout asked for"
+        ),
+        other => panic!("expected a StateToggle snapshot, got {other:?}"),
+    }
+}
+
+/// A bool-bound toggle whose value is `false` must still paint the track.
+///
+/// The word-bound arm collapses an empty `current` to zero width, which is
+/// right for a non-task block and wrong for a switch: `false` is a state the
+/// user has to be able to see and click, not an absence.
+#[gpui::test]
+fn a_bool_bound_switch_paints_the_track_when_off(cx: &mut TestAppContext) {
+    let snap = render(cx, bool_toggle_vm("gmail", false));
+    let rect = toggle_rect(&snap);
+
+    assert!(
+        (rect.width - TRACK_W).abs() < EPS && (rect.height - TRACK_H).abs() < EPS,
+        "a bool-bound switch reading `false` must paint the {TRACK_W}×{TRACK_H} track, got \
+         {:.1}×{:.1}\n{}",
+        rect.width,
+        rect.height,
+        snap.dump()
+    );
+}
+
+/// The headless shadow of the same contract: a snapshot consumer can see which
+/// binding a layout asked for, and therefore how to read `current`.
+#[test]
+fn the_snapshot_carries_the_requested_binding() {
+    let vm = bool_toggle_vm("gmail", true);
+    match vm.snapshot().kind {
+        holon_frontend::view_model::ViewKind::StateToggle { binding, .. } => assert_eq!(
+            binding,
+            StateToggleBinding::Bool,
+            "the view-model snapshot must carry the binding the layout asked for"
         ),
         other => panic!("expected a StateToggle snapshot, got {other:?}"),
     }

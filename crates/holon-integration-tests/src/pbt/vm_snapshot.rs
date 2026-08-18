@@ -53,11 +53,13 @@ pub(crate) fn view_model_to_snapshot(
             label,
             states,
             appearance,
+            binding,
         } => {
             props.insert("field".into(), field.clone());
             props.insert("current".into(), current.clone());
             props.insert("label".into(), label.clone());
             props.insert("states".into(), states.clone());
+            props.insert("binding".into(), binding.as_str().to_string());
             // The headless tier cannot see the painted control, but it CAN see
             // which one was asked for — the half of the switch appearance a
             // snapshot oracle is able to hold.

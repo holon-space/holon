@@ -874,6 +874,23 @@ impl ReactiveViewModel {
         }
     }
 
+    /// The parsed `binding` of a `state_toggle` leaf. Refuses for the same
+    /// reason [`Self::state_toggle_appearance`] does.
+    pub fn state_toggle_binding(&self) -> crate::view_model::StateToggleBinding {
+        match self.prop_str("binding") {
+            Some(raw) => {
+                crate::view_model::StateToggleBinding::parse(&raw).unwrap_or_else(|e| panic!("{e}"))
+            }
+            None => crate::view_model::StateToggleBinding::default(),
+        }
+    }
+
+    /// The bound value of a bool-bound `state_toggle` leaf.
+    pub fn state_toggle_bool(&self, field: &str) -> bool {
+        crate::view_model::bool_from_row_value(field, self.props.lock_ref().get("current"))
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
     pub fn prop_str(&self, key: &str) -> Option<String> {
         self.props
             .lock_ref()
@@ -1132,15 +1149,27 @@ impl ReactiveViewModel {
             "block_operations" => ViewKind::BlockOperations {
                 operations: self.prop_str("operations").unwrap_or_default(),
             },
-            "state_toggle" => ViewKind::StateToggle {
-                field: self
+            "state_toggle" => {
+                let field = self
                     .prop_str("field")
-                    .unwrap_or_else(|| "task_state".to_string()),
-                current: self.prop_str("current").unwrap_or_default(),
-                label: self.prop_str("label").unwrap_or_default(),
-                states: self.prop_str("states").unwrap_or_default(),
-                appearance: self.state_toggle_appearance(),
-            },
+                    .unwrap_or_else(|| "task_state".to_string());
+                let binding = self.state_toggle_binding();
+                ViewKind::StateToggle {
+                    current: match binding {
+                        crate::view_model::StateToggleBinding::Bool => {
+                            self.state_toggle_bool(&field).to_string()
+                        }
+                        crate::view_model::StateToggleBinding::Words => {
+                            self.prop_str("current").unwrap_or_default()
+                        }
+                    },
+                    field,
+                    label: self.prop_str("label").unwrap_or_default(),
+                    states: self.prop_str("states").unwrap_or_default(),
+                    appearance: self.state_toggle_appearance(),
+                    binding,
+                }
+            }
             "expand_toggle" => {
                 let target_id = self.prop_str("target_id").unwrap_or_default();
                 let is_expanded = self.expanded.as_ref().is_some_and(|m| m.get());
