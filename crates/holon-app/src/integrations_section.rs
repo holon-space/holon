@@ -28,13 +28,8 @@ pub const SIDEBAR_SQL: &str = "SELECT id, provider_name, status FROM integration
 /// Control: every bundled provider, enabled or not — the presence axis in
 /// full, because a list filtered to the enabled ones would offer no way to
 /// switch a disabled integration ON.
-///
-/// `enabled` is the toggle's STATE WORD, projected from the mirror's
-/// `enabled_state` column rather than derived here: a `CASE` in this query put
-/// a view CREATE inside every interaction window.
-pub const SETTINGS_SQL: &str = "SELECT id, provider_name, enabled_state AS enabled, \
-                                config_status, status FROM integration_state ORDER BY \
-                                provider_name ASC";
+pub const SETTINGS_SQL: &str = "SELECT id, provider_name, enabled, config_status, status FROM \
+                                integration_state ORDER BY provider_name ASC";
 
 /// A read-only line: the provider and its live status, and nothing to click.
 ///

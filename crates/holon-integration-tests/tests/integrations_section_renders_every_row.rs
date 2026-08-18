@@ -93,12 +93,9 @@ async fn run(runtime: Arc<tokio::runtime::Runtime>) {
     // The boot projector has already mirrored every bundled provider, which is
     // the state the dogfooding session was in. Switch them all ON so the rows
     // are alike and the only thing that can differ is how many got rendered.
-    db.execute_values(
-        "UPDATE integration_state SET enabled = 1, enabled_state = 'on'",
-        vec![],
-    )
-    .await
-    .expect("switch every mirrored integration on");
+    db.execute_values("UPDATE integration_state SET enabled = 1", vec![])
+        .await
+        .expect("switch every mirrored integration on");
 
     // The ORACLE is the table itself, not a hardcoded list: the property is
     // "one rendered row per matching table row", and reading the table keeps it

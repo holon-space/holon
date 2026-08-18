@@ -201,6 +201,20 @@ fn the_seeded_section_embeds_the_shared_list_source_verbatim() {
     });
 }
 
+/// `navigation.focus` refuses a target whose scheme is not `block`, so a
+/// clickable sidebar row would paint a refusal banner instead of navigating.
+#[test]
+fn the_sidebar_row_carries_no_navigation_action() {
+    let template = holon_app::integrations_section::SIDEBAR_ITEM_TEMPLATE;
+    for forbidden in ["selectable", "navigation_focus", "navigation_open_tab"] {
+        assert!(
+            !template.contains(forbidden),
+            "the sidebar integration row must carry no {forbidden}: an `integration:` id is not a \
+             focusable target.\n  template: {template}"
+        );
+    }
+}
+
 /// A user who deletes the Integrations-bearing render block must have that
 /// stick: the layout is seeded ONLY on a fresh boot (root layout absent), so
 /// re-running the seed on an already-seeded DB (the every-boot path) never

@@ -51,16 +51,18 @@ fn runtime() -> Arc<tokio::runtime::Runtime> {
     )
 }
 
-/// `provider`'s switch word as the section would render it.
-async fn section_switch(db: &holon::storage::DbHandle, sql: &str, provider: &str) -> String {
-    db.query(sql, HashMap::new())
+/// `provider`'s switch, read the way the bool-bound toggle reads it.
+async fn section_switch(db: &holon::storage::DbHandle, sql: &str, provider: &str) -> bool {
+    let row = db
+        .query(sql, HashMap::new())
         .await
         .unwrap_or_else(|e| panic!("the seeded Integrations query must run: {sql}\n{e}"))
         .iter()
         .find(|r| r.get("provider_name").and_then(|v| v.as_string()) == Some(provider))
-        .and_then(|r| r.get("enabled").and_then(|v| v.as_string()))
-        .unwrap_or_else(|| panic!("the section must carry a row for '{provider}'"))
-        .to_string()
+        .cloned()
+        .unwrap_or_else(|| panic!("the section must carry a row for '{provider}'"));
+    holon_frontend::view_model::bool_from_row_value("enabled", row.get("enabled"))
+        .unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// Wait for the section to show `want`, or fail naming what it showed instead.
@@ -68,9 +70,9 @@ async fn section_switch(db: &holon::storage::DbHandle, sql: &str, provider: &str
 /// The projector re-projects on a signal, so the mirror converges a moment
 /// after the operation returns. Polling to a deadline is what makes this a test
 /// of the JOIN rather than of a sleep long enough to hide a missing one.
-async fn await_switch(db: &holon::storage::DbHandle, sql: &str, provider: &str, want: &str) {
+async fn await_switch(db: &holon::storage::DbHandle, sql: &str, provider: &str, want: bool) {
     let deadline = Instant::now() + Duration::from_secs(5);
-    let mut last = String::new();
+    let mut last = !want;
     while Instant::now() < deadline {
         last = section_switch(db, sql, provider).await;
         if last == want {
@@ -151,16 +153,16 @@ fn a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection(
         let sql = holon_app::integrations_section::SETTINGS_SQL;
         assert_eq!(
             section_switch(db, sql, "todoist").await,
-            "off",
+            false,
             "precondition: a clean vault shows todoist switched off"
         );
 
-        // The click, as `state_toggle` sends it: a state WORD at the row's
+        // The click, as `state_toggle` sends it: a typed decision at the row's
         // `integration:` id, through the ordinary operation door.
         let mut params: StorageEntity = HashMap::new();
         params.insert("id".into(), Value::String("integration:todoist".into()));
         params.insert("field".into(), Value::String("enabled".into()));
-        params.insert("value".into(), Value::String("on".into()));
+        params.insert("value".into(), Value::Boolean(true));
         engine
             .execute_operation(
                 &EntityName::new("integration"),
@@ -171,7 +173,7 @@ fn a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection(
             .await
             .expect("dispatching the toggle's intent must succeed");
 
-        await_switch(db, sql, "todoist", "on").await;
+        await_switch(db, sql, "todoist", true).await;
 
         // The authority moved too — the mirror is not the only thing that
         // changed, which is what makes the decision survive a restart.
@@ -189,7 +191,7 @@ fn a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection(
         let mut params: StorageEntity = HashMap::new();
         params.insert("id".into(), Value::String("integration:todoist".into()));
         params.insert("field".into(), Value::String("enabled".into()));
-        params.insert("value".into(), Value::String("off".into()));
+        params.insert("value".into(), Value::Boolean(false));
         engine
             .execute_operation(
                 &EntityName::new("integration"),
@@ -200,6 +202,6 @@ fn a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection(
             .await
             .expect("dispatching the off direction must succeed");
 
-        await_switch(db, sql, "todoist", "off").await;
+        await_switch(db, sql, "todoist", false).await;
     });
 }

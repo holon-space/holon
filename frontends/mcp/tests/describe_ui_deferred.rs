@@ -78,8 +78,8 @@ async fn seed_providers(engine: &holon::api::BackendEngine) {
         db.execute_values(
             &format!(
                 "INSERT INTO integration_state \
-                 (id, provider_name, enabled, enabled_state, status, config_status, updated_at) \
-                 VALUES ('integration:{provider}', '{provider}', 1, 'on', '{status}', \
+                 (id, provider_name, enabled, status, config_status, updated_at) \
+                 VALUES ('integration:{provider}', '{provider}', 1, '{status}', \
                  'unconfigured', '2026-08-18 00:00:00')"
             ),
             vec![],

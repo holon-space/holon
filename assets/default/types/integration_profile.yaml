@@ -3,13 +3,12 @@
 # the sidebar's discovery list is a plain layout template and never reaches
 # here (`crates/holon-app/src/integrations_section.rs`).
 #
-# `state_toggle` binds `field: "enabled"`, and its click reaches
+# `state_toggle` binds `field: "enabled"` as a bool, so it reads the mirror's
+# INTEGER column and dispatches a boolean. Its click reaches
 # `IntegrationsOperationProvider` because `render_entity()` resolved this
-# profile and attached the entity's operations. `current` is the state WORD the
-# query projects, not the stored integer — the widget's vocabulary is its
-# `states` list.
+# profile and attached the entity's operations.
 entity_name: integration
 
 variants:
   - name: default
-    render: 'row(#{gap: 8, align: "center"}, text(col("provider_name")), text(col("config_status"), #{muted: true}), text(col("status"), #{muted: true}), state_toggle(#{field: "enabled", current: col("enabled"), states: "off,on", appearance: "switch"}))'
+    render: 'row(#{gap: 8, align: "center"}, text(col("provider_name")), text(col("config_status"), #{muted: true}), text(col("status"), #{muted: true}), state_toggle(#{field: "enabled", binding: "bool", appearance: "switch"}))'

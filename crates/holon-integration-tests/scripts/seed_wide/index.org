@@ -7,6 +7,7 @@
 :PROPERTIES:
 :ID: default-left-sidebar
 :collapse_to: drawer
+:WIDGET_ONLY: t
 :END:
 #+BEGIN_SRC render :id left_sidebar::render::0
 column(tree(#{parent_id: col("parent_id"), sortkey: col("content"), item_template: selectable(row(icon("notebook"), spacer(6), text(col("content"), #{empty: "(untitled)"})), #{action: navigation_focus(#{region: "main", block_id: col("id")}), cmd_action: navigation_open_tab(#{region: "main", block_id: col("id")}), ctrl_action: navigation_open_tab(#{region: "main", block_id: col("id")})})}), divider(), row(icon("sync"), spacer(6), text("Integrations", #{bold: true})), live_query(#{sql: "SELECT id, provider_name, status FROM integration_state WHERE enabled = 1 ORDER BY provider_name ASC", item_template: list(#{item_template: row(#{gap: 8, align: "center"}, text(col("provider_name")), text(col("status"), #{muted: true}))})}))
@@ -17,6 +18,7 @@ SELECT b.* FROM block b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = 
 ** Main Panel
 :PROPERTIES:
 :ID: default-main-panel
+:WIDGET_ONLY: t
 :END:
 #+BEGIN_SRC render :id default-main-panel::render::0
 column(columns(#{item_template: live_block()}), divider(), accordion(#{title: "Linked references", icon: "link", max_height_fraction: 0.33}, live_query(#{sql: "SELECT bl.* FROM backlinks bl JOIN focus_roots fr ON bl.target_id = fr.root_id JOIN navigation_cursor nc ON nc.region = fr.region AND nc.history_id = fr.history_id WHERE fr.region = 'main' ORDER BY bl.content ASC", item_template: selectable(row(icon("orgmode"), spacer(6), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})})))
@@ -32,6 +34,7 @@ WHERE fr.region = 'main'
 :PROPERTIES:
 :ID: default-right-sidebar
 :collapse_to: drawer
+:WIDGET_ONLY: t
 :END:
 #+BEGIN_SRC render :id default-right-sidebar::render::0
 tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: render_entity(), rules: [#{when: eq("level", 0), override: #{role: "page_title", show_bullet: false, show_chevron: false, sortkey: "-added_ts"}}, #{when: always(), override: #{show_bullet: false}}]})

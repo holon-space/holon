@@ -62,12 +62,13 @@ async fn engine_over(
     (engine, store)
 }
 
-/// `field`/`value` as the toggle sends them: a state WORD, never a bool.
-fn params(id: &str, field: &str, value: &str) -> StorageEntity {
+/// `field`/`value` as the toggle sends them. `value` is typed by the caller so
+/// the refusal cases can send something that is not a bool.
+fn params(id: &str, field: &str, value: Value) -> StorageEntity {
     let mut p: StorageEntity = HashMap::new();
     p.insert("id".into(), Value::String(id.to_string()));
     p.insert("field".into(), Value::String(field.to_string()));
-    p.insert("value".into(), Value::String(value.to_string()));
+    p.insert("value".into(), value);
     p
 }
 
@@ -75,7 +76,7 @@ async fn dispatch(
     engine: &holon::api::BackendEngine,
     id: &str,
     field: &str,
-    value: &str,
+    value: Value,
 ) -> anyhow::Result<()> {
     engine
         .execute_operation(
@@ -120,17 +121,27 @@ fn dispatching_set_field_flips_the_state_file() {
             "fixture must start with todoist switched off"
         );
 
-        dispatch(&engine, "integration:todoist", "enabled", "on")
-            .await
-            .expect("dispatching integration.set_field must succeed");
+        dispatch(
+            &engine,
+            "integration:todoist",
+            "enabled",
+            Value::Boolean(true),
+        )
+        .await
+        .expect("dispatching integration.set_field must succeed");
         assert!(
             stored_enabled(&state_dir, "todoist"),
             "the operation must write the AUTHORITY — the .state.toml file"
         );
 
-        dispatch(&engine, "integration:todoist", "enabled", "off")
-            .await
-            .expect("dispatching the off direction must succeed");
+        dispatch(
+            &engine,
+            "integration:todoist",
+            "enabled",
+            Value::Boolean(false),
+        )
+        .await
+        .expect("dispatching the off direction must succeed");
         assert!(
             !stored_enabled(&state_dir, "todoist"),
             "the operation must switch back off, not only on"
@@ -166,9 +177,14 @@ fn switching_leaves_the_configuration_axis_untouched() {
             .set("gmail", configured.clone())
             .expect("seed a configured-but-off gmail");
 
-        dispatch(&engine, "integration:gmail", "enabled", "on")
-            .await
-            .expect("switching a configured integration on must succeed");
+        dispatch(
+            &engine,
+            "integration:gmail",
+            "enabled",
+            Value::Boolean(true),
+        )
+        .await
+        .expect("switching a configured integration on must succeed");
 
         let after = IntegrationConfigStore::load(&state_dir)
             .expect("store reloads")
@@ -193,25 +209,36 @@ fn every_malformed_dispatch_is_refused_by_name() {
 
         // (id, field, value, the substring the refusal must carry)
         let cases = [
-            ("block:abc123", "enabled", "on", "block"),
+            ("block:abc123", "enabled", Value::Boolean(true), "block"),
             (
                 "integration:not-a-provider",
                 "enabled",
-                "on",
+                Value::Boolean(true),
                 "not-a-provider",
             ),
-            ("todoist", "enabled", "on", "todoist"),
+            ("todoist", "enabled", Value::Boolean(true), "todoist"),
             (
                 "integration:todoist",
                 "configuration",
-                "on",
+                Value::Boolean(true),
                 "configuration",
             ),
-            ("integration:todoist", "enabled", "yes", "yes"),
+            (
+                "integration:todoist",
+                "enabled",
+                Value::String("yes".into()),
+                "yes",
+            ),
+            (
+                "integration:todoist",
+                "enabled",
+                Value::String("on".into()),
+                "on",
+            ),
         ];
 
         for (id, field, value, expected) in cases {
-            let err = dispatch(&engine, id, field, value)
+            let err = dispatch(&engine, id, field, value.clone())
                 .await
                 .expect_err(&format!(
                     "dispatch({id:?}, {field:?}, {value:?}) must be refused, not accepted"
@@ -249,9 +276,14 @@ fn an_unwritable_state_directory_is_refused() {
         }
         std::fs::set_permissions(&state_dir, perms).expect("make the state dir read-only");
 
-        let err = dispatch(&engine, "integration:todoist", "enabled", "on")
-            .await
-            .expect_err("a write into a read-only directory must be refused");
+        let err = dispatch(
+            &engine,
+            "integration:todoist",
+            "enabled",
+            Value::Boolean(true),
+        )
+        .await
+        .expect_err("a write into a read-only directory must be refused");
         let text = format!("{err:#}");
         assert!(
             text.contains("todoist"),

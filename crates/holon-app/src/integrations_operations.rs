@@ -8,11 +8,9 @@
 //! `.state.toml` file); `IntegrationStateProjector` follows into
 //! `integration_state` on the store's own signal.
 //!
-//! The value on the wire is a STATE WORD, not a bool: `state_toggle` cycles
-//! through its `states` list and dispatches `Value::String(next)`
-//! (`holon_frontend::operations::state_toggle_intent`). Parsing `"on"`/`"off"`
-//! into a bool is therefore this provider's boundary job, and anything else is
-//! refused rather than coerced.
+//! The value on the wire is a BOOL: the row's toggle is bool-bound, so
+//! `state_toggle_intent_bool` dispatches `Value::Boolean`. A state word is not
+//! a spelling of it.
 
 use std::sync::Arc;
 
@@ -43,10 +41,6 @@ pub const SHORT_NAME: &str = "integration";
 /// a consent the user cannot always grant twice.
 pub const ENABLED_FIELD: &str = "enabled";
 
-/// The two words the toggle cycles between, in `states` order.
-pub const STATE_OFF: &str = "off";
-pub const STATE_ON: &str = "on";
-
 /// The descriptor set `create_profile_resolver` buckets by entity, and thence
 /// what `find_set_field_op` finds on an `integration:` row.
 pub fn integration_operation_descriptors() -> Vec<OperationDescriptor> {
@@ -74,13 +68,8 @@ pub fn integration_operation_descriptors() -> Vec<OperationDescriptor> {
             },
             OperationParam {
                 name: "value".to_string(),
-                type_hint: TypeHint::OneOf {
-                    values: vec![
-                        Value::String(STATE_OFF.to_string()),
-                        Value::String(STATE_ON.to_string()),
-                    ],
-                },
-                description: "The state word to store: 'on' or 'off'".to_string(),
+                type_hint: TypeHint::Bool,
+                description: "The decision to store".to_string(),
             },
         ],
         affected_fields: vec![ENABLED_FIELD.to_string()],
@@ -169,17 +158,15 @@ impl IntegrationsOperationProvider {
     }
 }
 
-/// The state word as a stored decision.
+/// The decision on the wire.
 ///
-/// Parse, don't validate: the wire carries one of two words and everything
-/// else is a refusal here, so no downstream caller re-checks it.
-fn parse_state_word(value: Option<&Value>) -> Result<bool> {
+/// Parse, don't validate: the wire carries a bool and everything else is a
+/// refusal here, so no downstream caller re-checks it.
+fn parse_decision(value: Option<&Value>) -> Result<bool> {
     match value {
-        Some(Value::String(s)) if s == STATE_ON => Ok(true),
-        Some(Value::String(s)) if s == STATE_OFF => Ok(false),
+        Some(Value::Boolean(b)) => Ok(*b),
         other => Err(format!(
-            "IntegrationsOperationProvider: 'value' must be {STATE_ON:?} or {STATE_OFF:?}, got \
-             {other:?}"
+            "IntegrationsOperationProvider: 'value' must be a boolean, got {other:?}"
         )
         .into()),
     }
@@ -231,7 +218,7 @@ impl OperationProvider for IntegrationsOperationProvider {
             .into());
         }
 
-        let enabled = parse_state_word(params.get("value"))?;
+        let enabled = parse_decision(params.get("value"))?;
         let was = self
             .store
             .get(provider)
@@ -244,13 +231,12 @@ impl OperationProvider for IntegrationsOperationProvider {
             )
         })?;
 
-        let word = |on: bool| Value::String(if on { STATE_ON } else { STATE_OFF }.to_string());
         Ok(OperationResult::declared_irreversible(
             vec![holon_core::FieldDelta::new(
                 integration_row_id(provider),
                 ENABLED_FIELD,
-                word(was),
-                word(enabled),
+                Value::Boolean(was),
+                Value::Boolean(enabled),
             )],
             "an integration switch is a settings decision, outside the content undo stack",
         ))

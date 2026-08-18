@@ -12,20 +12,13 @@
 --
 -- THREE axes, deliberately separate:
 --   `enabled`       — the stored decision (store)
---   `enabled_state` — the SAME decision as the toggle's state word ('on'/'off')
 --   `config_status` — has the one-time credential setup run (store)
 --   `status`        — how far the boot connect got (integration registry)
--- The design defers the third (§8 R9) and notes the table takes the extra
--- column without disturbing anything else; the discovery surface wants it, so
--- it is here. Only the projector writes the first two; only the registry writes
--- the third.
+-- Only the projector writes the first two; only the registry writes the third.
 --
--- `enabled_state` is the one fact twice, deliberately: `state_toggle` cycles a
--- WORD, the section is a `live_query`, and SQL is the only language between the
--- mirror and the row. Deriving it with a `CASE` in the section instead put a
--- view CREATE inside every interaction window (+1 ddl, +2 reads on PinBlock,
--- measured 2026-08-18) — the projector, which is the sole writer of both, is
--- the cheaper and more honest place for it. Same reasoning as `status`.
+-- `enabled` is read by a bool-bound `state_toggle`, which parses the INTEGER
+-- directly (`StateToggleBinding::Bool`) — the decision is stored once, in the
+-- type the column already has.
 --
 -- Deliberately ABSENT: no sync_token, no cursor, no credential reference.
 -- `sync_states` keeps its own job; conflating the two is the defect this table
@@ -36,7 +29,6 @@ CREATE TABLE IF NOT EXISTS integration_state (
     id TEXT PRIMARY KEY NOT NULL,
     provider_name TEXT NOT NULL,
     enabled INTEGER NOT NULL,
-    enabled_state TEXT NOT NULL,
     status TEXT NOT NULL,
     config_status TEXT NOT NULL,
     updated_at TEXT NOT NULL,

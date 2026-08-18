@@ -175,8 +175,8 @@ async fn providers_and_statuses(db: &holon::storage::DbHandle, sql: &str) -> Vec
 }
 
 /// Run `sql` and return its `(provider_name, enabled)` pairs, in row order.
-/// `enabled` is the toggle's STATE WORD, which is what the section projects.
-async fn providers_and_switches(db: &holon::storage::DbHandle, sql: &str) -> Vec<(String, String)> {
+/// `enabled` is parsed through the widget's own strict read.
+async fn providers_and_switches(db: &holon::storage::DbHandle, sql: &str) -> Vec<(String, bool)> {
     db.query(sql, HashMap::new())
         .await
         .unwrap_or_else(|e| panic!("the seeded Integrations query must run: {sql}\n{e}"))
@@ -187,11 +187,9 @@ async fn providers_and_switches(db: &holon::storage::DbHandle, sql: &str) -> Vec
                 .and_then(|v| v.as_string())
                 .expect("Integrations query must project provider_name")
                 .to_string();
-            let enabled = r
-                .get("enabled")
-                .and_then(|v| v.as_string())
-                .expect("the section must project `enabled` as the toggle's state word")
-                .to_string();
+            let enabled =
+                holon_frontend::view_model::bool_from_row_value("enabled", r.get("enabled"))
+                    .unwrap_or_else(|e| panic!("{e}"));
             (provider, enabled)
         })
         .collect()
@@ -207,14 +205,11 @@ const BUNDLED: &[&str] = &[
     "todoist",
 ];
 
-/// Every bundled provider paired with its expected switch word.
-fn all_switches(on: &[&str]) -> Vec<(String, String)> {
+/// Every bundled provider paired with its expected switch position.
+fn all_switches(on: &[&str]) -> Vec<(String, bool)> {
     BUNDLED
         .iter()
-        .map(|p| {
-            let word = if on.contains(p) { "on" } else { "off" };
-            (p.to_string(), word.to_string())
-        })
+        .map(|p| (p.to_string(), on.contains(p)))
         .collect()
 }
 
@@ -690,15 +685,15 @@ fn a_drifted_mirror_reconverges_on_the_next_projection() {
         // Corrupt the mirror behind the projector's back: flip todoist off and
         // invent a row for a provider nobody enabled.
         db.execute_values(
-            "UPDATE integration_state SET enabled = 0, enabled_state = 'off' WHERE id = ?",
+            "UPDATE integration_state SET enabled = 0 WHERE id = ?",
             vec![holon_api::Value::String(integration_row_id("todoist"))],
         )
         .await
         .expect("corrupt the enabled bit");
         db.execute_values(
             "INSERT INTO integration_state \
-             (id, provider_name, enabled, enabled_state, status, config_status, updated_at) \
-             VALUES ('integration:ghost', 'ghost', 1, 'on', 'Connected', 'configured', \
+             (id, provider_name, enabled, status, config_status, updated_at) \
+             VALUES ('integration:ghost', 'ghost', 1, 'Connected', 'configured', \
              '2026-01-01 00:00:00')",
             vec![],
         )
