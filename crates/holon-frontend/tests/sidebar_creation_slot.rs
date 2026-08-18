@@ -339,3 +339,68 @@ fn the_creation_affordance_is_selectable_so_focus_can_reach_it() {
         "the affordance must be selectable so a click can reach it; got {affordance_widgets:?}"
     );
 }
+
+/// Every text a row paints, paired with the row id in force at that node.
+fn texts_by_row(vm: &Arc<ReactiveViewModel>) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut stack: Vec<(Arc<ReactiveViewModel>, String)> = vec![(vm.clone(), String::new())];
+    while let Some((node, inherited)) = stack.pop() {
+        let row = node.row_id().unwrap_or(inherited);
+        if let Some(text) = node.prop_str("content") {
+            out.push((row.clone(), text));
+        }
+        for child in node.children.iter() {
+            stack.push((child.clone(), row.clone()));
+        }
+        if let Some(view) = node.collection.as_ref() {
+            for item in view.children_snapshot() {
+                stack.push((item, row.clone()));
+            }
+        }
+        if let Some(slot) = node.slot.as_ref() {
+            stack.push((slot.content.get_cloned(), row.clone()));
+        }
+    }
+    out
+}
+
+/// Ruling D5B-8.a (Martin, 2026-08-18): the creation affordance paints NO text.
+/// The row itself — a faint trailing bullet the caret can reach — is the whole
+/// affordance; the sentence it used to carry only narrated the gesture the row
+/// already invites.
+///
+/// The affordance must still EXIST and stay selectable (the two tests above),
+/// so this judges the painted string alone, not birth-on-focus.
+#[test]
+fn the_creation_affordance_paints_no_text() {
+    let vm = render(
+        EDITABLE_MAIN_PANEL_TREE,
+        vec![
+            page("block:page", "block:root-layout", "Page"),
+            page("block:child", "block:page", "Child"),
+        ],
+    );
+    let painted_on_the_affordance: Vec<(String, String)> = texts_by_row(&vm)
+        .into_iter()
+        .filter(|(row, text)| {
+            !text.is_empty() && holon_frontend::RowOrigin::from_id(row).is_creation_placeholder()
+        })
+        .collect();
+    assert!(
+        painted_on_the_affordance.is_empty(),
+        "the creation affordance must paint no text — the row is the affordance; got \
+         {painted_on_the_affordance:?}"
+    );
+
+    // ... while the real rows still paint their content, so the assertion above
+    // is not vacuously true of a tree that renders no text at all.
+    let painted_on_real_rows: Vec<String> = texts_by_row(&vm)
+        .into_iter()
+        .filter(|(row, _)| !holon_frontend::RowOrigin::from_id(row).is_creation_placeholder())
+        .map(|(_, text)| text)
+        .collect();
+    assert!(
+        painted_on_real_rows.iter().any(|t| t == "Child"),
+        "the real rows must still paint their content; got {painted_on_real_rows:?}"
+    );
+}

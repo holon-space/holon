@@ -469,8 +469,12 @@ pub(crate) fn advice_readonly_template() -> holon_api::render_types::RenderExpr 
     call("selectable", vec![pos(inner), named("action", action)])
 }
 
-/// The creation affordance's template: a selectable hint, deliberately with NO
-/// `editable_text`.
+/// The creation affordance's template: a selectable empty row, deliberately
+/// with NO `editable_text`.
+///
+/// It paints no text (ruling D5B-8.a): the trailing row IS the affordance, and
+/// a sentence inside it only narrated the click it already invites. The empty
+/// `text` node is what gives the row a body to click.
 ///
 /// The affordance is a rendered row, not a block — it mounts no editor, holds
 /// no caret and carries no content, so none of the gestures that need a real
@@ -483,12 +487,12 @@ pub(crate) fn creation_affordance_template() -> holon_api::render_types::RenderE
     use holon_api::render_types::Arg;
     use holon_api::render_types::RenderExpr;
 
-    let hint = RenderExpr::FunctionCall {
+    let body = RenderExpr::FunctionCall {
         name: "text".to_string(),
         args: vec![Arg {
             name: None,
             value: RenderExpr::Literal {
-                value: Value::String(CREATION_AFFORDANCE_HINT.to_string()),
+                value: Value::String(String::new()),
             },
         }],
     };
@@ -506,7 +510,7 @@ pub(crate) fn creation_affordance_template() -> holon_api::render_types::RenderE
         args: vec![
             Arg {
                 name: None,
-                value: hint,
+                value: body,
             },
             Arg {
                 name: Some("action".to_string()),
@@ -515,9 +519,6 @@ pub(crate) fn creation_affordance_template() -> holon_api::render_types::RenderE
         ],
     }
 }
-
-/// The affordance's visible prompt.
-pub const CREATION_AFFORDANCE_HINT: &str = "type here to add a new block";
 
 /// Configuration for creating a collection ReactiveView.
 pub struct CollectionConfig {

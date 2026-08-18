@@ -52,21 +52,11 @@ fn RenderedTextNode(content: String, row_id: Option<String>) -> Element {
     // EntityContext covers nodes whose interpretation dropped it.
     let entity_id = row_id.or_else(|| try_consume_context::<EntityContext>().map(|c| c.0));
 
-    let empty = content.is_empty();
-    // Mirror `editable_text`'s empty-placeholder hint so unfocused empty
-    // blocks still read as clickable instead of "nothing here".
-    let display = if empty {
-        "Type here".to_string()
-    } else {
-        content.clone()
-    };
-    let style = if empty {
-        "white-space: pre-wrap; word-break: break-word; min-height: 1.4em; padding: 1px 2px; \
-         cursor: text; color: rgba(128,128,128,0.5);"
-    } else {
-        "white-space: pre-wrap; word-break: break-word; min-height: 1.4em; padding: 1px 2px; \
-         cursor: text;"
-    };
+    // An empty block paints nothing (ruling D5B-8.a); `min-height` is what
+    // keeps its row clickable.
+    let display = content.clone();
+    let style = "white-space: pre-wrap; word-break: break-word; min-height: 1.4em; padding: 1px \
+                 2px; cursor: text;";
 
     let dom_entity_id = entity_id.clone().unwrap_or_default();
     rsx! {

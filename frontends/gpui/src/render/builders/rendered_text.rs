@@ -253,25 +253,18 @@ fn styled_run_render(
 /// the swap from `rendered_text` → `editable_text` doesn't shift x/y or
 /// resize the glyphs.
 fn static_inner(content: &str, _: &GpuiRenderContext) -> Div {
-    let display: String = if content.is_empty() {
-        "Type here".to_string()
-    } else {
-        content.to_string()
-    };
     let mut el = div()
         .w_full()
         .px(px(12.0))
         .py(px(8.0))
         .text_sm()
         .line_height(gpui::Rems(1.25))
-        .child(display);
+        .child(content.to_string());
     if content.is_empty() {
-        el = el.text_color(gpui::Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.5,
-            a: 0.5,
-        });
+        // An empty block paints no glyph, so nothing gives the row a line box:
+        // reserve one explicitly, or the click target collapses to the padding
+        // and the outline jumps when the row gains focus.
+        el = el.min_h(gpui::Rems(1.25));
     }
     el
 }

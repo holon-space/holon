@@ -195,44 +195,7 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
             let displayed = input.read(cx).value().to_string();
             (std::sync::Arc::from(displayed.as_str()), is_focused)
         });
-    let inner = entity.into_any_element();
-
-    // Grey placeholder hint for empty editors — helps users discover that
-    // typing into an empty block creates content. Rendered as an
-    // absolutely-positioned BEHIND the real Input so it doesn't intercept
-    // clicks or typing (GPUI hit-tests children in reverse paint order).
-    //
-    // Visibility keys off the LIVE editor text (`displayed_text`), NOT the
-    // committed `content` prop: the first keystroke into an empty block updates
-    // the `InputState` immediately but does not commit to the projection until
-    // later, so `has_content` (derived from `content`) would still be false and
-    // the grey "Type here" hint would draw UNDER the freshly-typed glyph until
-    // commit (dogfood 2026-07-19 PERCEPTION bug). `displayed_text` reflects the
-    // keystroke this same frame, so the hint disappears the instant text lands.
-    let show_placeholder = displayed_text.is_empty();
-    let element = if show_placeholder {
-        div()
-            .relative()
-            .child(
-                div()
-                    .absolute()
-                    .top(px(4.0))
-                    .left(px(0.0))
-                    .text_color(gpui::Hsla {
-                        h: 0.0,
-                        s: 0.0,
-                        l: 0.5,
-                        a: 0.5,
-                    })
-                    .text_size(px(15.0))
-                    .line_height(px(22.0))
-                    .child("Type here"),
-            )
-            .child(inner)
-            .into_any_element()
-    } else {
-        inner
-    };
+    let element = entity.into_any_element();
 
     // The editor spans its row. Under the tracked-widget contract (see
     // `crate::geometry`) that is the widget's own job, not the tracker's —
