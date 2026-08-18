@@ -1,10 +1,5 @@
 //! Integration enablement is reachable through the ONE action language.
 //!
-//! Before `IntegrationsOperationProvider`, the only door onto the enablement
-//! store was the GPUI switch's own mouse handler calling
-//! `IntegrationsSettingsVm::set_enabled` — an ADR-0024 violation that also made
-//! the surface unreachable from MCP, from a test driver, and from an agent.
-//!
 //! These tests drive the REAL dispatch path: `McpIntegrationsModule` registers
 //! the provider exactly as it does in the app, and every write goes through
 //! `BackendEngine::execute_operation`. A test that constructed the provider by

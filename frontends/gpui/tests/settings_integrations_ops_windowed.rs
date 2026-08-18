@@ -1,16 +1,14 @@
 //! The Settings modal's integration rows paint their operations, in a REAL
 //! window over a REAL booted engine.
 //!
-//! The integration row's `Configure…` affordance is layout data now
+//! The integration row's `Configure…` affordance is layout data
 //! (`assets/default/types/integration_profile.yaml`: an `ops_of` collection
 //! feeding `op_button`), and `ops_of` hands it over as a STREAMING collection.
-//! Nothing in a VM snapshot or a `ReactiveFixtureView` mounts one — only the
-//! production shell does. So this is the only tier that can answer "does the
-//! user see the button at all", and until this rung existed nothing did.
+//! Only the production shell mounts one — neither a VM snapshot nor a
+//! `ReactiveFixtureView` does — so this is the tier that answers "does the user
+//! see the button at all".
 //!
-//! It also proves the toolbar gear is reachable: the modal has exactly one way
-//! in, and a window test that cannot open it cannot see anything the modal
-//! paints.
+//! The modal's one way in is the toolbar gear, so the rung clicks it.
 //!
 //! Run: `cargo test -p holon-gpui --features pbt --test
 //! settings_integrations_ops_windowed -- --test-threads=1`

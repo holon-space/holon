@@ -1,11 +1,8 @@
 //! The ADR-0024 doors onto an integration: `set_field` and `begin_oauth`.
 //!
-//! Before this, the GPUI switch's mouse handler called
-//! [`IntegrationsSettingsVm::set_enabled`] directly, so the frontend owned an
-//! entity value and no other caller — MCP, a test driver, an agent — could
-//! reach enablement at all. The operation makes the store's decision reachable
-//! through the one action language, and it writes the AUTHORITY (the
-//! `.state.toml` file); `IntegrationStateProjector` follows into
+//! Enablement is reachable only through this door, so MCP, a test driver and an
+//! agent all take the path the switch takes. `set_field` writes the AUTHORITY
+//! (the `.state.toml` file); `IntegrationStateProjector` follows into
 //! `integration_state` on the store's own signal.
 //!
 //! The value on the wire is a BOOL: the row's toggle is bool-bound, so

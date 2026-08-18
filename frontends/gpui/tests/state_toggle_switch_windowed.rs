@@ -1,12 +1,10 @@
 //! Windowed rung for `state_toggle(#{appearance: "switch"})`.
 //!
-//! `state_toggle`'s two-state CYCLING already worked before this appearance
-//! existed — `cycle_state` falls through to the `states` list for any non-task
-//! vocabulary. What did not work is the PAINT: `state_icon` and `state_display`
-//! are hard-wired to the task keywords, so both `"off"` and `"on"` render as
-//! the same `○` in the same colour. A control whose two states are
-//! indistinguishable is the "silently degrades to look fine" case, and it is
-//! invisible to every headless tier — the view-model snapshot carries the same
+//! The switch appearance is what makes the two states LOOK different.
+//! `state_icon` and `state_display` speak only the task keywords, so a
+//! two-state vocabulary like `"off"`/`"on"` reaches them as the same `○` in the
+//! same colour — the "silently degrades to look fine" case, and one every
+//! headless tier is blind to, because the view-model snapshot carries the same
 //! `current` either way.
 //!
 //! So this rung asserts what only a window can see: that the switch appearance
