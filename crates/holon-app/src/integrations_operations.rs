@@ -1,4 +1,4 @@
-//! The ADR-0024 door onto integration enablement: `integration.set_field`.
+//! The ADR-0024 doors onto an integration: `set_field` and `begin_oauth`.
 //!
 //! Before this, the GPUI switch's mouse handler called
 //! [`IntegrationsSettingsVm::set_enabled`] directly, so the frontend owned an
@@ -20,11 +20,14 @@ use holon_api::OperationDescriptor;
 use holon_api::OperationParam;
 use holon_api::TypeHint;
 use holon_api::Value;
+use holon_api::spawner::Spawner;
 use holon_core::OperationProvider;
 use holon_core::OperationResult;
 use holon_core::Result;
 use holon_core::storage::types::StorageEntity;
 use holon_mcp_client::IntegrationConfigStore;
+use holon_mcp_client::oauth_bootstrap::BrowserOpener;
+use holon_mcp_client::oauth_bootstrap::DEFAULT_CONSENT_TIMEOUT;
 
 use crate::integration_projection::integration_row_id;
 use crate::integrations_settings::IntegrationsSettingsVm;
@@ -41,10 +44,17 @@ pub const SHORT_NAME: &str = "integration";
 /// a consent the user cannot always grant twice.
 pub const ENABLED_FIELD: &str = "enabled";
 
+/// The one-time consent flow, as an operation.
+pub const BEGIN_OAUTH: &str = "begin_oauth";
+
 /// The descriptor set `create_profile_resolver` buckets by entity, and thence
 /// what `find_set_field_op` finds on an `integration:` row.
 pub fn integration_operation_descriptors() -> Vec<OperationDescriptor> {
-    vec![OperationDescriptor {
+    vec![set_field_descriptor(), begin_oauth_descriptor()]
+}
+
+fn set_field_descriptor() -> OperationDescriptor {
+    OperationDescriptor {
         entity_name: ENTITY_NAME.into(),
         entity_short_name: SHORT_NAME.to_string(),
         id_column: "id".to_string(),
@@ -106,21 +116,102 @@ pub fn integration_operation_descriptors() -> Vec<OperationDescriptor> {
                 },
             ],
         },
-    }]
+    }
 }
 
-/// Writes enablement through the store that owns it.
+/// `begin_oauth` takes ONE param on purpose: `present_op` dispatches an
+/// op_button immediately when nothing is missing and panics otherwise, so a
+/// second required param would turn a click into a crash.
+fn begin_oauth_descriptor() -> OperationDescriptor {
+    OperationDescriptor {
+        entity_name: ENTITY_NAME.into(),
+        entity_short_name: SHORT_NAME.to_string(),
+        id_column: "id".to_string(),
+        name: BEGIN_OAUTH.to_string(),
+        display_name: "Configure…".to_string(),
+        description: "Run the one-time consent flow: open the provider's authorization page and \
+                      wait for the redirect"
+            .to_string(),
+        required_params: vec![OperationParam {
+            name: "id".to_string(),
+            type_hint: TypeHint::String,
+            description: "Integration row id, 'integration:<provider>'".to_string(),
+        }],
+        affected_fields: vec![],
+        param_mappings: vec![],
+        target_scope: holon_api::TargetScope::Global,
+        boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+        menu_exposure: holon_api::MenuExposure::NotListed {
+            surface: holon_api::NonMenuSurface::PointerGesture,
+        },
+        trigger: None,
+        bound_params: Default::default(),
+        // INTERIM, until the relation-scoped guard lands (Inc 4'): the rule —
+        // offer the flow only where it can run — belongs here as a declared
+        // guard, and today's guard language cannot state it. It names the
+        // `block` relation and the clock, and its predicates are `has_tag` /
+        // `block_exists` / `parent`, none of which compares a column of
+        // `integration_state`. Nothing renders the op until the guard is real.
+        guard: holon_api::pattern::OpGuard::None,
+        arcs: holon_api::arcs::TransitionArcs::Declared {
+            reads: vec![
+                holon_api::arcs::ArcPlace::new(ENTITY_NAME, "config_status"),
+                holon_api::arcs::ArcPlace::new(ENTITY_NAME, "configurable"),
+            ],
+            emits: vec![holon_api::arcs::ArcEmit::Excluded {
+                place: holon_api::arcs::ArcPlace::new(ENTITY_NAME, "config_status"),
+                reason: "the consent flow writes it asynchronously; this op only starts the flow"
+                    .to_string(),
+            }],
+        },
+    }
+}
+
+/// Writes enablement through the store that owns it, and starts consent flows
+/// on the view model whose progress cells the mirror projects.
 pub struct IntegrationsOperationProvider {
-    vm: IntegrationsSettingsVm,
+    vm: Arc<IntegrationsSettingsVm>,
     store: Arc<IntegrationConfigStore>,
+    browser: Arc<dyn BrowserOpener>,
+    spawner: Arc<dyn Spawner>,
 }
 
 impl IntegrationsOperationProvider {
-    pub fn new(store: Arc<IntegrationConfigStore>) -> Self {
+    pub fn new(
+        store: Arc<IntegrationConfigStore>,
+        vm: Arc<IntegrationsSettingsVm>,
+        browser: Arc<dyn BrowserOpener>,
+        spawner: Arc<dyn Spawner>,
+    ) -> Self {
         Self {
-            vm: IntegrationsSettingsVm::new(store.clone()),
+            vm,
             store,
+            browser,
+            spawner,
         }
+    }
+
+    /// Start `provider`'s consent flow and return.
+    ///
+    /// The flow waits on a human in a browser for up to
+    /// [`DEFAULT_CONSENT_TIMEOUT`], so awaiting it here would hold the
+    /// dispatcher for minutes. Its outcome is observable on the row through the
+    /// view model's progress cell, which the mirror projects.
+    fn start_consent_flow(&self, provider: &'static str) {
+        let vm = self.vm.clone();
+        let browser = self.browser.clone();
+        self.spawner.spawn(Box::pin(async move {
+            if let Err(e) = vm
+                .configure(provider, browser.as_ref(), DEFAULT_CONSENT_TIMEOUT)
+                .await
+            {
+                tracing::warn!(
+                    provider,
+                    "the consent flow for '{provider}' failed: {e:#} (the row's \
+                     configure_progress carries the same reason)"
+                );
+            }
+        }));
     }
 
     /// The provider `raw` addresses, or why it addresses none.
@@ -191,19 +282,26 @@ impl OperationProvider for IntegrationsOperationProvider {
             )
             .into());
         }
-        if op_name != "set_field" {
-            return Err(format!(
-                "IntegrationsOperationProvider: '{ENTITY_NAME}' exposes only 'set_field', got \
-                 '{op_name}'"
-            )
-            .into());
-        }
-
         let raw_id = params
             .get("id")
             .and_then(|v| v.as_string())
             .ok_or_else(|| "IntegrationsOperationProvider: missing required parameter 'id'")?;
         let provider = self.provider_of(raw_id)?;
+
+        if op_name == BEGIN_OAUTH {
+            self.start_consent_flow(provider);
+            return Ok(OperationResult::declared_irreversible(
+                vec![],
+                "a consent grant lives with the provider, not in the content undo stack",
+            ));
+        }
+        if op_name != "set_field" {
+            return Err(format!(
+                "IntegrationsOperationProvider: '{ENTITY_NAME}' exposes 'set_field' and \
+                 '{BEGIN_OAUTH}', got '{op_name}'"
+            )
+            .into());
+        }
 
         let field = params
             .get("field")

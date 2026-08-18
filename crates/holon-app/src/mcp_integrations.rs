@@ -24,6 +24,7 @@ use holon_mcp_client::SupersededSidecar;
 use holon_mcp_client::build_mcp_integration;
 use holon_mcp_client::integration_config::UnresolvedVar;
 use holon_mcp_client::load_integration_configs;
+use holon_mcp_client::oauth_bootstrap::BrowserOpener;
 use holon_profiles::TypeRegistry;
 use tracing::info;
 use tracing::warn;
@@ -197,6 +198,10 @@ pub struct McpIntegrationsModule {
     /// through the module-registration `Result` instead of being swallowed
     /// here.
     loaded: Result<(Arc<IntegrationConfigStore>, LoadedIntegrations), String>,
+    /// Where `integration.begin_oauth` sends the user to consent. The default
+    /// is the desktop's own URL handler; a test supplies one that opens
+    /// nothing.
+    browser: Arc<dyn BrowserOpener>,
 }
 
 impl McpIntegrationsModule {
@@ -240,7 +245,16 @@ impl McpIntegrationsModule {
                 loaded.ignored.len()
             );
         }
-        Self { loaded }
+        Self {
+            loaded,
+            browser: Arc::new(holon_mcp_client::oauth_bootstrap::SystemBrowser),
+        }
+    }
+
+    /// Run consent flows through `browser` instead of the desktop's handler.
+    pub fn with_browser(mut self, browser: Arc<dyn BrowserOpener>) -> Self {
+        self.browser = browser;
+        self
     }
 }
 
@@ -266,10 +280,21 @@ impl Module for McpIntegrationsModule {
         // still needs the op, because dispatching it is how one gets switched
         // on.
         let ops_store = store.clone();
+        let ops_vm = settings_vm.clone();
+        let ops_browser = self.browser.clone();
         injector.provide_into_set::<dyn OperationProvider>(Provider::root(move |_| {
             Arc::new(
                 crate::integrations_operations::IntegrationsOperationProvider::new(
                     ops_store.clone(),
+                    ops_vm.clone(),
+                    ops_browser.clone(),
+                    Arc::new(holon_api::spawner::TokioSpawner::new(
+                        tokio::runtime::Handle::try_current().expect(
+                            "[McpIntegrationsModule] the operation provider is resolved off a \
+                             tokio runtime, so `integration.begin_oauth` would have nowhere to \
+                             run its consent flow",
+                        ),
+                    )),
                 ),
             ) as Arc<dyn OperationProvider>
         }));

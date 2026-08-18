@@ -161,6 +161,8 @@ pub mod integration {
     pub const ENABLED: &str = "enabled";
     pub const STATUS: &str = "status";
     pub const CONFIG_STATUS: &str = "config_status";
+    pub const CONFIGURABLE: &str = "configurable";
+    pub const CONFIGURE_PROGRESS: &str = "configure_progress";
     pub const UPDATED_AT: &str = "updated_at";
 }
 
@@ -267,6 +269,8 @@ pub const INTEGRATION: EntitySchema = EntitySchema {
         column(integration::ENABLED, FieldIntent::Writable, true),
         column(integration::STATUS, FieldIntent::StorageInternal, true),
         column(integration::CONFIG_STATUS, FieldIntent::Unnamed, true),
+        column(integration::CONFIGURABLE, FieldIntent::Unnamed, true),
+        column(integration::CONFIGURE_PROGRESS, FieldIntent::Unnamed, true),
         column(integration::UPDATED_AT, FieldIntent::StorageInternal, true),
     ],
 };

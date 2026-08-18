@@ -181,7 +181,7 @@ impl SyncTokenStore for NoopTokenStore {
 fn surface_from(
     yaml: &str,
     entity: &str,
-    lookup: &dyn Fn(&str) -> Option<String>,
+    lookup: &holon_mcp_client::integration_config::VarLookup<'_>,
 ) -> RestCallSurface {
     let cfg: IntegrationFileConfig = serde_yaml::from_str(yaml).expect("sidecar parses");
     let mcp_cfg = cfg

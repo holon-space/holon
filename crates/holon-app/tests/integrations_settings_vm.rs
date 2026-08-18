@@ -310,10 +310,8 @@ fn a_second_consent_flow_for_the_same_provider_is_refused() {
 
     // Park a REAL first flow in its loopback wait, through the public API.
     //
-    // On its own thread and runtime, mirroring production: the flow's future
-    // borrows a `VarLookup` (`dyn Fn`, not `Send`), so it cannot be
-    // `tokio::spawn`ed — the GPUI button blocks on it in a dedicated thread for
-    // the same reason.
+    // On its own thread and runtime: this test's own runtime is the one that
+    // must stay free to drive the second attempt below.
     let parked = vm.clone();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()

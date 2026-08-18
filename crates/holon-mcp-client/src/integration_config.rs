@@ -225,7 +225,10 @@ pub struct IntegrationFileConfig {
 /// Returns the value for a variable name, or `None` if it is not set in this
 /// source. Implementors layer sources (env vars, app settings, …); see
 /// [`env_var_lookup`] for the default environment-only resolver.
-pub type VarLookup<'a> = dyn Fn(&str) -> Option<String> + 'a;
+///
+/// `Send + Sync` because the consent flow borrows one across an await and is
+/// spawned as a background task.
+pub type VarLookup<'a> = dyn Fn(&str) -> Option<String> + Send + Sync + 'a;
 
 /// The default resolver: process environment variables only. An env var set to
 /// the empty string is treated as unset, so it falls through to other layers.

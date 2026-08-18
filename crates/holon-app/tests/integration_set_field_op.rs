@@ -48,18 +48,47 @@ async fn engine_over(
     db_path: std::path::PathBuf,
     state_dir: std::path::PathBuf,
 ) -> (Arc<holon::api::BackendEngine>, Arc<IntegrationConfigStore>) {
-    let (engine, store) = holon::di::create_backend_engine_with_extras(
+    let (engine, store, _vm) =
+        engine_over_with_browser(db_path, state_dir, Arc::new(NoBrowser)).await;
+    (engine, store)
+}
+
+struct NoBrowser;
+
+impl holon_mcp_client::oauth_bootstrap::BrowserOpener for NoBrowser {
+    fn open(&self, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+async fn engine_over_with_browser(
+    db_path: std::path::PathBuf,
+    state_dir: std::path::PathBuf,
+    browser: Arc<dyn holon_mcp_client::oauth_bootstrap::BrowserOpener>,
+) -> (
+    Arc<holon::api::BackendEngine>,
+    Arc<IntegrationConfigStore>,
+    Arc<holon_app::integrations_settings::IntegrationsSettingsVm>,
+) {
+    let (engine, (store, vm)) = holon::di::create_backend_engine_with_extras(
         db_path,
         move |injector| {
             holon_app::mcp_integrations::McpIntegrationsModule::from_dir(&state_dir)
+                .with_browser(browser.clone())
                 .configure(injector)
                 .map_err(|e| anyhow::anyhow!("configure McpIntegrationsModule for op test: {e}"))
         },
-        |injector| async move { injector.resolve_async::<IntegrationConfigStore>().await },
+        |injector| async move {
+            let store = injector.resolve_async::<IntegrationConfigStore>().await;
+            let vm = injector
+                .resolve_async::<holon_app::integrations_settings::IntegrationsSettingsVm>()
+                .await;
+            (store, vm)
+        },
     )
     .await
     .expect("fresh-db lazy DI graph must build");
-    (engine, store)
+    (engine, store, vm)
 }
 
 /// `field`/`value` as the toggle sends them. `value` is typed by the caller so
@@ -297,5 +326,95 @@ fn an_unwritable_state_directory_is_refused() {
             std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o755))
                 .expect("restore permissions");
         }
+    });
+}
+
+/// Install a `gcal` sidecar whose credential paths sit inside `dir`, plus the
+/// client credentials it points at, so a consent flow gets past credential
+/// resolution and parks at the loopback instead of failing early.
+fn install_provisioned_gcal(dir: &std::path::Path) {
+    let bundled =
+        holon_mcp_client::bundled_sidecars::bundled_sidecar("gcal").expect("gcal is bundled");
+    let sandboxed = bundled.yaml.replace(
+        "~/.config/holon/",
+        &format!("{}/", dir.join("creds").display()),
+    );
+    std::fs::write(dir.join("gcal.yaml"), sandboxed).expect("install sandboxed sidecar");
+
+    let creds = dir.join("creds");
+    std::fs::create_dir_all(&creds).expect("creds dir");
+    for (name, value) in [
+        ("gcal-client-id", "sandbox-client-id.apps.example.com"),
+        ("gcal-client-secret", "sandbox-client-secret"),
+    ] {
+        let path = creds.join(name);
+        std::fs::write(&path, value).expect("write credential");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .expect("lock the credential down");
+        }
+    }
+}
+
+/// The consent flow waits on a human for up to five minutes. Dispatching it
+/// must START it and return, so the dispatcher is free and the row can say what
+/// the flow is doing.
+#[test]
+fn dispatching_begin_oauth_returns_before_the_flow_finishes() {
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_dir = dir.path().join("integrations");
+        std::fs::create_dir_all(&state_dir).expect("state dir");
+        install_provisioned_gcal(&state_dir);
+
+        // The view model comes from the CONTAINER: the flow's progress lives in
+        // its cells, so a second one over the same files would observe nothing.
+        let (engine, _store, vm) = engine_over_with_browser(
+            dir.path().join("ops.db"),
+            state_dir.clone(),
+            Arc::new(NoBrowser),
+        )
+        .await;
+
+        let mut params: StorageEntity = HashMap::new();
+        params.insert("id".into(), Value::String("integration:gcal".into()));
+
+        let started = std::time::Instant::now();
+        engine
+            .execute_operation(
+                &EntityName::new("integration"),
+                "begin_oauth",
+                params,
+                OpOrigin::User,
+            )
+            .await
+            .expect("dispatching integration.begin_oauth must succeed");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "begin_oauth must return once the flow is STARTED, not once it finishes; it took \
+             {elapsed:?}"
+        );
+
+        // The flow it started is the one the mirror observes: the DI-registered
+        // view model, not a second one built over the same files.
+        let progress = vm.configure_progress("gcal");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if progress.get_cloned()
+                == holon_app::integrations_settings::ConfigureProgress::AwaitingConsent
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!(
+            "the started flow never reached AwaitingConsent; progress is {:?}",
+            progress.get_cloned()
+        );
     });
 }
